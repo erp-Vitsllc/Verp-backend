@@ -37,6 +37,17 @@ const employeeBasicSchema = new mongoose.Schema(
             enum: ["active", "inactive"],
             default: "inactive"
         },
+        // SNAPSHOT: Manager who received the profile submission
+        profileSubmittedTo: { type: mongoose.Schema.Types.ObjectId, ref: "EmployeeBasic", default: null },
+
+        // NEW: Profile Workflow Array
+        profileWorkflow: [{
+            role: { type: String, required: true }, // e.g. 'Manager'
+            assignedTo: { type: mongoose.Schema.Types.ObjectId, ref: 'EmployeeBasic' },
+            status: { type: String, enum: ['submitted', 'active'], default: 'submitted' },
+            assignedAt: { type: Date, default: Date.now },
+            actionedAt: { type: Date }
+        }],
 
         // LOGIN & ACCESS
         email: { type: String, required: true, unique: true },
@@ -49,7 +60,7 @@ const employeeBasicSchema = new mongoose.Schema(
         contractJoiningDate: { type: Date }, // Mandatory field tracked by frontend
 
         // PROFILE PICTURE
-        profilePicture: { type: String }, // Cloudinary URL
+        profilePicture: { type: String }, // Storage URL
 
         // DOCUMENTS
         documents: [
@@ -59,7 +70,7 @@ const employeeBasicSchema = new mongoose.Schema(
                 expiryDate: { type: Date },
                 createdAt: { type: Date, default: Date.now },
                 document: {
-                    url: { type: String }, // Cloudinary URL (preferred)
+                    url: { type: String }, // Storage URL (preferred)
                     data: { type: String }, // Base64 data (legacy/fallback)
                     name: { type: String },
                     mimeType: { type: String }
@@ -80,9 +91,20 @@ const employeeBasicSchema = new mongoose.Schema(
             status: { type: String, enum: ["Pending", "Approved", "Rejected"], default: "Pending" },
             originalStatus: { type: String }, // To revert if rejected
             requestedBy: { type: mongoose.Schema.Types.ObjectId, ref: "EmployeeBasic" },
+            // SNAPSHOT: Manager who received the request
+            submittedTo: { type: mongoose.Schema.Types.ObjectId, ref: "EmployeeBasic" },
             requestedAt: { type: Date, default: Date.now },
             actionedAt: { type: Date },
-            actionedBy: { type: mongoose.Schema.Types.ObjectId, ref: "EmployeeBasic" }
+            actionedBy: { type: mongoose.Schema.Types.ObjectId, ref: "EmployeeBasic" },
+
+            // NEW: Notice Workflow Array
+            workflow: [{
+                role: { type: String, required: true },
+                assignedTo: { type: mongoose.Schema.Types.ObjectId, ref: 'EmployeeBasic' },
+                status: { type: String, enum: ['Pending', 'Approved', 'Rejected'], default: 'Pending' },
+                assignedAt: { type: Date, default: Date.now },
+                actionedAt: { type: Date }
+            }]
         },
 
         // TRAINING DETAILS

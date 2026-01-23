@@ -30,7 +30,7 @@ const rewardSchema = new mongoose.Schema(
         rewardStatus: {
             type: String,
             required: true,
-            enum: ['Pending', 'Pending Authorization', 'Approved', 'Rejected', 'Cancelled', 'Active'],
+            enum: ['Pending', 'Pending HR', 'Pending Accounts', 'Pending Authorization', 'Approved', 'Rejected'],
             default: 'Pending'
         },
         amount: {
@@ -46,6 +46,12 @@ const rewardSchema = new mongoose.Schema(
             default: Date.now
         },
         approvedBy: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: "User",
+            default: null
+        },
+        // SNAPSHOT: User who received the request
+        submittedTo: {
             type: mongoose.Schema.Types.ObjectId,
             ref: "User",
             default: null
@@ -89,7 +95,30 @@ const rewardSchema = new mongoose.Schema(
         certSigner2Title: {
             type: String,
             default: 'CEO'
-        }
+        },
+        createdBy: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: "User",
+            default: null
+        },
+        hrApprovedBy: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: "User",
+            default: null
+        },
+        accountsApprovedBy: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: "User",
+            default: null
+        },
+        // NEW: Workflow Array for detailed tracking
+        workflow: [{
+            role: { type: String, required: true },
+            assignedTo: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+            status: { type: String, enum: ['Pending', 'Approved', 'Rejected'], default: 'Pending' },
+            assignedAt: { type: Date, default: Date.now },
+            actionedAt: { type: Date }
+        }]
     },
     { timestamps: true }
 );

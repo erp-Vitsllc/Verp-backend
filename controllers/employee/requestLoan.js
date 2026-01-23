@@ -1,37 +1,93 @@
 import nodemailer from "nodemailer";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import Loan from "../../models/Loan.js";
+import EmployeeSalary from "../../models/EmployeeSalary.js";
 import { getCompleteEmployee } from "../../services/employeeService.js";
 
 export const requestLoan = async (req, res) => {
     const { employeeId, type, amount, duration, reason, employeeObjectId } = req.body;
 
     try {
-        // 1. Create Loan Record
+        // 1. Fetch Employee Info FIRST to identify Manager
+        const employeeBasic = await getCompleteEmployee(employeeObjectId);
+
+        if (!employeeBasic) {
+            return res.status(404).json({ message: "Employee details not found." });
+        }
+
+        const reportee = employeeBasic.primaryReportee;
+        if (!reportee) {
+            return res.status(400).json({ message: "Primary reportee not assigned. Cannot submit loan." });
+        }
+
+        // --- VALIDATION: Probation & Salary Checks ---
+        const salaryRecord = await EmployeeSalary.findOne({ employeeId: employeeBasic.employeeId });
+
+        if (type === 'Loan' && employeeBasic.status === 'Probation') {
+            return res.status(400).json({ message: "Employees on probation cannot apply for personal loans." });
+        }
+
+        if (type === 'Advance') {
+            // Rule: Advance Amount <= Monthly Salary
+            if (salaryRecord && Number(amount) > salaryRecord.totalSalary) {
+                return res.status(400).json({
+                    message: `Advance amount cannot exceed your monthly salary (AED ${salaryRecord.totalSalary}).`
+                });
+            }
+
+            // Rule: Probation -> Max 1 Month Duration
+            if (employeeBasic.status === 'Probation' && parseInt(duration) > 1) {
+                return res.status(400).json({ message: "Employees on probation can only apply for a 1-month salary advance." });
+            }
+        }
+        // ---------------------------------------------
+
+        // 2. Create Loan Record with Sticky Assignment
         const newLoan = new Loan({
             employeeId, // String ID
             employeeObjectId, // MongoDB ObjectId
             type,
             amount,
             duration,
-            reason
+            reason,
+            submittedTo: reportee._id, // SNAPSHOT: Lock to current manager
+            // WORKFLOW: Initial Pending Step
+            workflow: [{
+                role: 'Manager',
+                assignedTo: reportee._id,
+                status: 'Pending',
+                assignedAt: new Date()
+            }]
         });
+        console.log(`[RequestLoan] Dashboard Request Pushed for Manager: ${reportee.employeeId}`);
+
+        // SNAPSHOT: Log Dashboard State
+        const currentPendingLoans = await Loan.countDocuments({
+            workflow: { $elemMatch: { assignedTo: reportee._id, status: 'Pending' } },
+            status: { $nin: ['Approved', 'Rejected', 'Withdrawn'] }
+        });
+
+        console.log(`
+===================================================
+[DASHBOARD PREVIEW - LOAN]
+---------------------------------------------------
+Target Manager    : ${reportee.firstName} ${reportee.lastName}
+Target Emp Object : ${reportee._id}
+Target Emp ID     : ${reportee.employeeId}
+Target Email      : ${reportee.companyEmail || reportee.email}
+---------------------------------------------------
+Pending Loans (Pre-Save)   : ${currentPendingLoans}
+New Item Pushed            : +1
+---------------------------------------------------
+TOTAL PENDING ON DASHBOARD : ${currentPendingLoans + 1}
+===================================================`);
 
         const savedLoan = await newLoan.save();
 
         // 2. Fetch Employee & Reportee Info for Email
-        // Assuming employeeObjectId is passed or we look it up. 
-        // Ideally receiving reportee email from frontend or looking it up again.
-        // Let's look up to be safe and get fresh reportee info.
+        // Already fetched above (employeeBasic, reportee)
 
-        const employeeBasic = await getCompleteEmployee(employeeObjectId);
-
-        if (!employeeBasic) {
-            // Loan saved but email failed context
-            return res.status(201).json({ message: "Loan application submitted, but employee details not found for email notification.", loan: savedLoan });
-        }
-
-        const reportee = employeeBasic.primaryReportee;
+        // Safety check just in case reportee is somehow missing (though checked above)
         if (!reportee) {
             return res.status(201).json({ message: "Loan saved, but primary reportee not assigned for email notification.", loan: savedLoan });
         }

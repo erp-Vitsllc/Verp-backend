@@ -96,7 +96,7 @@ const fineSchema = new mongoose.Schema(
         fineStatus: {
             type: String,
             required: true,
-            enum: ['Pending', 'Pending Authorization', 'Approved', 'Active', 'Completed', 'Cancelled'],
+            enum: ['Pending', 'Pending HR', 'Pending Accounts', 'Pending Authorization', 'Approved', 'Active', 'Completed', 'Cancelled', 'Rejected'],
             default: 'Pending'
         },
         fineAmount: {
@@ -116,6 +116,12 @@ const fineSchema = new mongoose.Schema(
             ref: "User",
             default: null
         },
+        // SNAPSHOT: User who received the request
+        submittedTo: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: "User",
+            default: null
+        },
         approvedDate: {
             type: Date,
             default: null
@@ -130,7 +136,48 @@ const fineSchema = new mongoose.Schema(
             data: { type: String },
             name: { type: String },
             mimeType: { type: String }
-        }
+        },
+        createdBy: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: "User",
+            required: true
+        },
+        managerApprovedBy: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: "User",
+            default: null
+        },
+        hrApprovedBy: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: "User",
+            default: null
+        },
+        accountsApprovedBy: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: "User",
+            default: null
+        },
+        rejectedBy: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: "User",
+            default: null
+        },
+        rejectedDate: {
+            type: Date,
+            default: null
+        },
+        rejectionReason: {
+            type: String,
+            default: ''
+        },
+        // NEW: Workflow Array for detailed tracking
+        workflow: [{
+            role: { type: String, required: true }, // e.g., 'Manager', 'HR', 'Accounts'
+            assignedTo: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+            status: { type: String, enum: ['Pending', 'Approved', 'Rejected'], default: 'Pending' },
+            assignedAt: { type: Date, default: Date.now },
+            actionedAt: { type: Date }
+        }]
     },
     { timestamps: true }
 );

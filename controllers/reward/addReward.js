@@ -1,5 +1,6 @@
 import Reward from "../../models/Reward.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
+import User from "../../models/User.js";
 import { uploadDocumentToS3 } from "../../utils/s3Upload.js";
 import nodemailer from "nodemailer";
 
@@ -150,8 +151,106 @@ export const addReward = async (req, res) => {
             rewardStatus: rewardStatus || 'Pending',
             awardedDate: awardedDate ? new Date(awardedDate) : new Date(),
             remarks: remarks || '',
-            title
+            remarks: remarks || '',
+            title,
+            createdBy: req.user ? req.user._id : null
         };
+
+        // SNAPSHOT LOGIC: Find Reportee's USER Object for "submittedTo"
+        // Rewards schema refs "User", not "EmployeeBasic" for approvedBy/submittedTo.
+
+        // 1. Get the EmployeeBasic of the Requester to find their Primary Reportee ID (ObjectId)
+        const employeeForSnapshot = await EmployeeBasic.findOne({ employeeId })
+            .select('primaryReportee')
+            .lean();
+
+        if (employeeForSnapshot && employeeForSnapshot.primaryReportee) {
+            // 2. The primaryReportee in EmployeeBasic is an ObjectId ref to another EmployeeBasic
+            // We need to fetch THAT Manager's EmployeeBasic to get their string 'employeeId' (e.g. "VITS005")
+            // Because the User model links via the string 'employeeId', not the ObjectId.
+            const managerBasic = await EmployeeBasic.findById(employeeForSnapshot.primaryReportee)
+                .select('employeeId companyEmail email workEmail firstName lastName')
+                .lean();
+
+            if (managerBasic) {
+                // 3. Now find the User associated with that Manager
+                // Try by employeeId first
+                let reporteeUser = null;
+
+                if (managerBasic.employeeId) {
+                    // Fix: Prefer the logged-in user if they are the manager, to avoid picking up duplicate/stale User accounts
+                    if (req.user && req.user.employeeId === managerBasic.employeeId) {
+                        reporteeUser = req.user;
+                        console.log(`[AddReward] Manager is the requesting user. Using req.user (Preferred): ${req.user._id}`);
+                    } else {
+                        reporteeUser = await User.findOne({ employeeId: managerBasic.employeeId });
+                    }
+                }
+
+                // If not found by ID, try email (fallback)
+                if (!reporteeUser) {
+                    const managerEmail = managerBasic.companyEmail || managerBasic.workEmail || managerBasic.email;
+                    if (managerEmail) {
+                        console.log(`[AddReward] Manager User not found by ID. Trying email: ${managerEmail}`);
+                        reporteeUser = await User.findOne({
+                            $or: [
+                                { email: managerEmail },
+                                { username: managerEmail }
+                            ]
+                        });
+                    }
+                }
+
+                if (reporteeUser) {
+                    console.log(`[AddReward] Found Manager User: ${reporteeUser.username} (${reporteeUser._id}) for Reportee: ${managerBasic.employeeId}`);
+                    rewardData.submittedTo = reporteeUser._id;
+
+                    // WORKFLOW: Initial Pending Step (Pushed to Dashboard)
+                    rewardData.workflow = [{
+                        role: 'Manager',
+                        assignedTo: reporteeUser._id,
+                        status: 'Pending',
+                        assignedAt: new Date()
+                    }];
+                    console.log(`[AddReward] Dashboard Request Pushed for Manager: ${reporteeUser.username}`);
+
+                    // SNAPSHOT: Log Dashboard State
+                    const currentPending = await Reward.countDocuments({
+                        workflow: { $elemMatch: { assignedTo: reporteeUser._id, status: 'Pending' } },
+                        rewardStatus: { $nin: ['Approved', 'Rejected', 'Withdrawn'] }
+                    });
+
+                    console.log("Stats Debug:", {
+                        mode: 'Workflow Assignment',
+                        currentUserId: req.user ? req.user._id : 'N/A',
+                        requestTargetId: null,
+                        managerId: managerBasic._id,
+                        managerEmpId: managerBasic.employeeId,
+                        targetUserFound: !!reporteeUser,
+                        targetUserId: reporteeUser._id
+                    });
+
+                    console.log(`
+===================================================
+[DASHBOARD PREVIEW - REWARD]
+---------------------------------------------------
+Target Manager    : ${reporteeUser.username}
+Target User ID    : ${reporteeUser._id}
+Target Emp ID     : ${managerBasic.employeeId}
+Target Email      : ${reporteeUser.email || reporteeUser.companyEmail}
+---------------------------------------------------
+Pending Rewards (Pre-Save) : ${currentPending}
+New Item Pushed            : +1
+---------------------------------------------------
+TOTAL PENDING ON DASHBOARD : ${currentPending + 1}
+===================================================`);
+                } else {
+                    console.warn(`[AddReward] Manager (ID: ${managerBasic.employeeId}) has no User account linked. Dashboard request cannot be created.`);
+                }
+            } else {
+                console.warn(`[AddReward] Primary Reportee (ID: ${employeeForSnapshot.primaryReportee}) not found in EmployeeBasic.`);
+            }
+        }
 
         // Add amount based on reward type
         if (rewardType === 'Cash Reward' || rewardType === 'Gift Reward') {

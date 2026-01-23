@@ -54,6 +54,9 @@ export const getLoanPdf = async (req, res) => {
 
     } catch (error) {
         console.error("Error in getLoanPdf:", error);
+        if (error.name === 'CastError') {
+            return res.status(400).json({ message: "Invalid loan ID format" });
+        }
         res.status(500).json({ message: "Internal server error" });
     }
 };

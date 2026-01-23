@@ -1,7 +1,7 @@
 import dotenv from "dotenv";
 import mongoose from "mongoose";
 import { connectDB } from "../config/db.js";
-import Employee from "../models/Employee.js";
+import EmployeeBasic from "../models/EmployeeBasic.js";
 
 dotenv.config({ path: ".env" });
 
@@ -26,13 +26,25 @@ const updateStatuses = async () => {
     try {
         await connectDB();
 
-        const employees = await Employee.find({});
+        const employees = await EmployeeBasic.find({});
         let updatedCount = 0;
+        const sixMonthsAgo = new Date();
+        sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
 
         for (const emp of employees) {
-            const normalized = normalizeStatus(emp.status);
+            let normalized = normalizeStatus(emp.status);
+
+            // Check 6-month rule
+            if (emp.dateOfJoining) {
+                const joinDate = new Date(emp.dateOfJoining);
+                if (joinDate <= sixMonthsAgo) {
+                    normalized = "Permanent";
+                }
+            }
+
             if (emp.status !== normalized) {
                 emp.status = normalized;
+                if (normalized === "Permanent") emp.probationPeriod = null;
                 await emp.save();
                 updatedCount++;
             }

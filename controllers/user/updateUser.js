@@ -67,7 +67,7 @@ export const updateUser = async (req, res) => {
             }
 
             // Check if new password is different from current .env password
-            const currentAdminPassword = process.env.ADMIN_PASSWORD || 'IT20!!@Erp';
+            const currentAdminPassword = process.env.ADMIN_PASSWORD;
             if (password === currentAdminPassword) {
                 return res.status(400).json({
                     message: "New password must be different from the current password"

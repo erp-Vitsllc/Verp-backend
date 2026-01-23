@@ -21,7 +21,17 @@ export const submitApproval = async (req, res) => {
         // Update EmployeeBasic
         const updated = await EmployeeBasic.findOneAndUpdate(
             { employeeId },
-            { profileApprovalStatus: "submitted" },
+            {
+                profileApprovalStatus: "submitted",
+                profileSubmittedTo: employeeBasic.primaryReportee, // SNAPSHOT: Lock to current manager
+                // WORKFLOW: Initial Submitted Step
+                profileWorkflow: [{
+                    role: 'Manager',
+                    assignedTo: employeeBasic.primaryReportee,
+                    status: 'submitted',
+                    assignedAt: new Date()
+                }]
+            },
             { new: true }
         ).populate("primaryReportee", "firstName lastName email workEmail")
             .populate("reportingAuthority", "firstName lastName email workEmail");

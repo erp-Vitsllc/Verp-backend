@@ -59,12 +59,16 @@ router.get("/loan-eligible", checkPermission('hrm_loan', 'view'), getLoanEligibl
 import { getDashboardStats } from "../controllers/stats/getDashboardStats.js";
 import { getUserActivityStats } from "../controllers/stats/getUserActivityStats.js";
 import { getHierarchy } from "../controllers/employee/getHierarchy.js";
+import { getTeamStats } from "../controllers/stats/getTeamStats.js";
 
 // Employee list - requires view permission
 router.get("/", checkPermission('hrm_employees_list', 'view'), getEmployees);
 
 // Dashboard Hierarchy - basic access for anyone logged in
 router.get("/dashboard/hierarchy", getHierarchy);
+
+// Team Stats - basic access
+router.get("/dashboard/team-stats", getTeamStats);
 
 // Dashboard Stats - requires view permission (General HR view)
 router.get("/dashboard/stats", checkPermission('hrm_employees_list', 'view'), getDashboardStats);

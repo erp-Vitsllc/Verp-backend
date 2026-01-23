@@ -4,6 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
+    "snyk-test": "snyk test",
     "start": "node index.js",
     "dev": "nodemon index.js",
     "prod": "node index.js",
@@ -18,7 +19,6 @@
     "@aws-sdk/s3-request-presigner": "^3.958.0",
     "axios": "^1.7.6",
     "bcryptjs": "^3.0.3",
-    "cloudinary": "^2.8.0",
     "compression": "^1.8.1",
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",

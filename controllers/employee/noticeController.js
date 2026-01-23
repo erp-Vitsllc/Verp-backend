@@ -46,6 +46,11 @@ export const requestNotice = async (req, res) => {
 
         if (!employee) return res.status(404).json({ message: "Employee not found" });
 
+        // Pre-fetch reportee for Snapshot Logic
+        // We can use getCompleteEmployee here or populate
+        const fullEmployeeInit = await getCompleteEmployee(employee._id);
+        const reporteeInit = fullEmployeeInit?.primaryReportee;
+
         // Save request
         employee.noticeRequest = {
             duration,
@@ -53,7 +58,16 @@ export const requestNotice = async (req, res) => {
             attachment,
             status: "Pending",
             originalStatus: employee.status,
-            requestedAt: new Date()
+            requestedAt: new Date(),
+            // SNAPSHOT: Manager who received the request
+            submittedTo: reporteeInit ? reporteeInit._id : null,
+            // WORKFLOW: Initial Pending Step
+            workflow: reporteeInit ? [{
+                role: 'Manager',
+                assignedTo: reporteeInit._id,
+                status: 'Pending',
+                assignedAt: new Date()
+            }] : []
         };
         await employee.save();
 
@@ -135,6 +149,24 @@ export const updateNoticeStatus = async (req, res) => {
 
         employee.noticeRequest.status = status;
         employee.noticeRequest.actionedAt = new Date();
+
+        // WORKFLOW: Update Pending Step
+        if (employee.noticeRequest.workflow) {
+            const pendingStep = employee.noticeRequest.workflow.find(w => w.status === 'Pending');
+            if (pendingStep) {
+                pendingStep.status = status;
+                pendingStep.actionedAt = new Date();
+            } else {
+                // Fallback if missing
+                employee.noticeRequest.workflow.push({
+                    role: 'Manager',
+                    assignedTo: actionedBy || employee.primaryReportee, // Best effort
+                    status: status,
+                    assignedAt: new Date(),
+                    actionedAt: new Date()
+                });
+            }
+        }
 
         // Resolve actionedBy to a valid EmployeeBasic ObjectId
         let resolvedApproverId = actionedBy;

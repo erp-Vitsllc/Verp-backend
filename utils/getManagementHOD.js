@@ -7,24 +7,32 @@ import EmployeeBasic from "../models/EmployeeBasic.js";
  */
 export const getManagementHOD = async () => {
     try {
-        // Strict Priority: CEO or equivalent Management HOD
+        // Flexible Priority: CEO or equivalent Management HOD
         const designations = [
-            'CEO', 'C.E.O', 'C.E.O.',
+            'CEO', 'C.E.O', 'C.E.O.', 'Chief Executive Officer',
             'Director', 'Managing Director',
-            'General Manager'
+            'General Manager', 'GM', 'G.M', 'G.M.'
         ];
 
-        // Find match in Management department
-        const hod = await EmployeeBasic.findOne({
-            department: { $regex: /^management$/i },
-            designation: { $in: designations.map(d => new RegExp(`^${d}$`, 'i')) },
-            profileStatus: 'active' // Ensure active employee
-        }).select('employeeId firstName lastName companyEmail personalEmail designation');
+        // Find match: prioritize those in Management department, but allow any department if designation matches perfectly
+        // We look for ANY match first, and we'll check status after
+        let hod = await EmployeeBasic.findOne({
+            $or: [
+                { department: { $regex: /management/i }, designation: { $in: designations.map(d => new RegExp(`^${d}$`, 'i')) } },
+                { designation: { $in: ['CEO', 'Chief Executive Officer', 'Managing Director'].map(d => new RegExp(`^${d}$`, 'i')) } }
+            ]
+        })
+            .sort({ profileStatus: 1 }) // 'active' comes before 'inactive' alphabetically
+            .select('employeeId firstName lastName companyEmail email designation profileStatus');
+
+        if (hod && hod.profileStatus !== 'active') {
+            console.warn(`[getManagementHOD] Found CEO (${hod.firstName}) but their profile is INACTIVE. Emails might not be sent if the system requires active status.`);
+        }
 
         console.log('[getManagementHOD] Search Result:', hod ? {
             id: hod.employeeId,
             name: `${hod.firstName} ${hod.lastName}`,
-            email: hod.companyEmail || hod.personalEmail,
+            email: hod.companyEmail || hod.email,
             designation: hod.designation
         } : 'NOT FOUND');
 

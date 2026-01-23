@@ -45,15 +45,23 @@ export const updateReward = async (req, res) => {
         // Update fields
         if (rewardType) reward.rewardType = rewardType;
         if (rewardType) reward.rewardType = rewardType;
+
+        // Handle explicit approver fields from frontend
+        if (req.body.hrApprovedBy) reward.hrApprovedBy = req.body.hrApprovedBy;
+        if (req.body.accountsApprovedBy) reward.accountsApprovedBy = req.body.accountsApprovedBy;
+        if (req.body.approvedBy) reward.approvedBy = req.body.approvedBy;
+
         if (rewardStatus !== undefined) {
             // === NEW APPROVAL LOGIC ===
             let finalStatus = rewardStatus;
             let approverDetails = null;
 
-            if (rewardStatus === 'Approved') {
+            if (rewardStatus === 'Approved' || rewardStatus === 'Pending Authorization' || rewardStatus === 'Pending HR' || rewardStatus === 'Pending Accounts') {
                 // Identify Approver
                 let approverBasic = null;
                 const approverUserId = req.user?.id;
+
+                console.log("[UpdateReward] Approver Logic Start. UserID:", approverUserId, "Status:", rewardStatus);
 
                 // Get Approver Employee Profile
                 if (approverUserId) {
@@ -63,6 +71,7 @@ export const updateReward = async (req, res) => {
 
                     if (isAdmin) {
                         approverDetails = { name: 'Admin', designation: 'Administrator', isAdmin: true };
+                        console.log("[UpdateReward] Approver is Admin");
                     } else {
                         // Find Employee
                         approverBasic = await EmployeeBasic.findOne({
@@ -72,6 +81,8 @@ export const updateReward = async (req, res) => {
                         if (!approverBasic && userObj?.employeeId) {
                             approverBasic = await EmployeeBasic.findOne({ employeeId: userObj.employeeId });
                         }
+
+                        console.log("[UpdateReward] Approver Employee Found:", approverBasic ? approverBasic.employeeId : 'No');
                     }
                 }
 
@@ -88,6 +99,11 @@ export const updateReward = async (req, res) => {
                     const isCEO = approverBasic.department && approverBasic.department.toLowerCase() === 'management' &&
                         ['ceo', 'c.e.o', 'c.e.o.', 'director', 'managing director', 'general manager'].includes(approverBasic.designation?.toLowerCase());
 
+                    // Check HR Validity
+                    const isHR = approverBasic.department && (approverBasic.department.toLowerCase() === 'hr' || approverBasic.department.toLowerCase() === 'human resource' || approverBasic.department.toLowerCase() === 'human resources');
+
+                    // Check Accounts Validity
+                    const isAccounts = approverBasic.department && (approverBasic.department.toLowerCase() === 'accounts' || approverBasic.department.toLowerCase() === 'finance' || approverBasic.department.toLowerCase() === 'account');
 
                     // Check Reportee Status (of the reward receiver)
                     const rewardReceiver = await EmployeeBasic.findOne({ employeeId: reward.employeeId }).populate('primaryReportee');
@@ -100,32 +116,193 @@ export const updateReward = async (req, res) => {
                         }
                     }
 
-                    // LOGIC: Strict 2-Stage Flow
-                    if (isCEO) {
-                        // Stage 2: CEO can approve "Pending Authorization" items
-                        if (reward.rewardStatus === 'Pending Authorization') {
-                            finalStatus = 'Approved';
-                        } else if (reward.rewardStatus === 'Pending' && isReporteeManager) {
-                            // CEO as Reportee -> Instant Approve
-                            finalStatus = 'Approved';
-                        }
-                    } else if (isReporteeManager) {
-                        // Stage 1: Reportee moves to Pending Authorization
-                        if (reward.rewardStatus === 'Pending') {
-                            finalStatus = 'Pending Authorization';
-                        }
+                    console.log("[UpdateReward] Roles - CEO:", isCEO, "HR:", isHR, "Accounts:", isAccounts, "Reportee:", isReporteeManager);
+
+                    // LOGIC: Strict 4-Stage Flow
+                    // 1. Pending -> Reportee -> Pending HR
+                    // 2. Pending HR -> HR -> Pending Accounts
+                    // 3. Pending Accounts -> Accounts -> Pending Authorization
+                    // 4. Pending Authorization -> CEO -> Approved
+
+                    if (reward.rewardStatus === 'Pending' && isReporteeManager) {
+                        finalStatus = 'Pending HR';
+                    }
+                    else if (reward.rewardStatus === 'Pending HR' && isHR) {
+                        finalStatus = 'Pending Accounts';
+                    }
+                    else if (reward.rewardStatus === 'Pending Accounts' && isAccounts) {
+                        finalStatus = 'Pending Authorization';
+                    }
+                    else if (reward.rewardStatus === 'Pending Authorization' && isCEO) {
+                        finalStatus = 'Approved';
+                    }
+                    else if (isCEO && reward.rewardStatus !== 'Rejected') {
+                        // CEO Override (Optional - keep strictly sequential based on request, but usually CEO can approve anytime)
+                        // For now, sticking to user request: pure sequence.
+                        // Actually, user said "then it goes to..." implying sequence.
+                        // However, if CEO is acting on 'Pending Authorization', handled above.
                     }
                 }
+
+                if (!approverDetails) {
+                    console.warn("[UpdateReward] Approver Details missing. Using fallback.");
+                    approverDetails = {
+                        name: 'System User',
+                        designation: 'Staff',
+                        email: '',
+                        department: 'General'
+                    };
+                }
+
+                console.log("[UpdateReward] Final ApproverDetails:", approverDetails ? "Set" : "NULL");
             }
 
             // Update Status
             reward.rewardStatus = finalStatus;
 
-            // Handle HOD Email if Pending Authorization (New State)
-            if (finalStatus === 'Pending Authorization') {
-                const hod = await getManagementHOD();
-                if (hod && approverDetails) {
-                    await sendHODAuthorizationEmail('Reward', reward, hod, approverDetails);
+            // Handle Email Notifications for Pending States (HR, Accounts, CEO)
+            if (['Pending HR', 'Pending Accounts', 'Pending Authorization'].includes(finalStatus)) {
+                console.log(`[UpdateReward] Triggering Email logic for ${finalStatus}`);
+
+                let targetHOD = null;
+
+                if (finalStatus === 'Pending HR') {
+                    // Find HR Manager
+                    targetHOD = await EmployeeBasic.findOne({
+                        department: { $regex: /hr|human resource/i },
+                        designation: { $regex: /manager|head|director/i }
+                    }).sort({ profileStatus: 1 });
+
+                    // Fallback: Any HR
+                    if (!targetHOD) {
+                        targetHOD = await EmployeeBasic.findOne({ department: { $regex: /hr|human resource/i } });
+                    }
+                }
+                else if (finalStatus === 'Pending Accounts') {
+                    // Find Finance Manager
+                    targetHOD = await EmployeeBasic.findOne({
+                        department: { $regex: /account|finance/i },
+                        designation: { $regex: /manager|head|director|cfo/i }
+                    }).sort({ profileStatus: 1 });
+
+                    // Fallback: Any Accounts
+                    if (!targetHOD) {
+                        targetHOD = await EmployeeBasic.findOne({ department: { $regex: /account|finance/i } });
+                    }
+                }
+                else if (finalStatus === 'Pending Authorization') {
+                    targetHOD = await getManagementHOD();
+                }
+
+                console.log(`[UpdateReward] Target HOD for ${finalStatus}:`, targetHOD ? targetHOD.email : 'None');
+
+                // PUSH TO DASHBOARD: Update workflow & submittedTo
+                if (targetHOD && approverDetails) {
+                    // Update submittedTo snapshot if needed (though usually for direct reports)
+                    // We can skip setting submittedTo for intermediate steps or set it effectively
+                    const hodUser = await import("../../models/User.js").then(m => m.default.findOne({ employeeId: targetHOD.employeeId }));
+                    if (hodUser) {
+                        console.log(`[UpdateReward] Found HOD User: ${hodUser.username} (${hodUser._id}). Assigning ticket.`);
+                        console.log(`[UpdateReward] VISIBILITY CHECK: Ticket is being assigned EXCLUSIVELY to UserID: ${hodUser._id}`);
+                        console.log(`[UpdateReward] This item will ONLY appear on the dashboard of: ${targetHOD.firstName} ${targetHOD.lastName}`);
+
+                        reward.submittedTo = hodUser._id;
+
+                        // WORKFLOW UPDATES
+                        if (finalStatus === 'Pending HR') {
+                            // 1. Mark Current (Reportee Manager) as Approved
+                            // Check if we need to insert initial state if not exists
+                            if (!reward.workflow || reward.workflow.length === 0) {
+                                reward.workflow = [];
+                            }
+
+                            const managerEntry = reward.workflow.find(w =>
+                                w.status === 'Pending' &&
+                                (w.role === 'Manager' || w.assignedTo?.toString() === (req.user?._id || approverDetails.id)?.toString())
+                            );
+
+                            if (managerEntry) {
+                                managerEntry.status = 'Approved';
+                                managerEntry.actionedAt = new Date();
+                            } else {
+                                reward.workflow.push({
+                                    role: 'Manager',
+                                    assignedTo: req.user?._id || approverDetails.id, // Best effort
+                                    status: 'Approved',
+                                    assignedAt: reward.createdAt,
+                                    actionedAt: new Date()
+                                });
+                            }
+
+                            // 2. Push HR
+                            reward.workflow.push({
+                                role: 'HR',
+                                assignedTo: hodUser._id,
+                                status: 'Pending',
+                                assignedAt: new Date()
+                            });
+                        }
+                        else if (finalStatus === 'Pending Accounts') {
+                            // 1. Mark HR Approved
+                            const hrEntry = reward.workflow.find(w => w.role === 'HR' && w.status === 'Pending');
+                            if (hrEntry) {
+                                hrEntry.status = 'Approved';
+                                hrEntry.actionedAt = new Date();
+                            } else {
+                                // Fallback
+                                reward.workflow.push({
+                                    role: 'HR',
+                                    assignedTo: req.user?._id, // The HR person acting now
+                                    status: 'Approved',
+                                    assignedAt: new Date(),
+                                    actionedAt: new Date()
+                                });
+                            }
+
+                            // 2. Push Accounts
+                            reward.workflow.push({
+                                role: 'Accounts',
+                                assignedTo: hodUser._id,
+                                status: 'Pending',
+                                assignedAt: new Date()
+                            });
+                        }
+                        else if (finalStatus === 'Pending Authorization') {
+                            // 1. Mark Accounts Approved
+                            const accEntry = reward.workflow.find(w => w.role === 'Accounts' && w.status === 'Pending');
+                            if (accEntry) {
+                                accEntry.status = 'Approved';
+                                accEntry.actionedAt = new Date();
+                            } else {
+                                reward.workflow.push({
+                                    role: 'Accounts',
+                                    assignedTo: req.user?._id,
+                                    status: 'Approved',
+                                    assignedAt: new Date(),
+                                    actionedAt: new Date()
+                                });
+                            }
+
+                            // 2. Push CEO
+                            reward.workflow.push({
+                                role: 'CEO',
+                                assignedTo: hodUser._id,
+                                status: 'Pending',
+                                assignedAt: new Date()
+                            });
+                        }
+
+                    } else {
+                        console.error(`[UpdateReward] CRITICAL: Found HOD Employee (${targetHOD.firstName}) but NO LINKED USER ACCOUNT found for ID ${targetHOD.employeeId}. Request will be unassigned!`);
+                    }
+
+                    // Send Email
+                    // Reuse sendHODAuthorizationEmail but maybe customize subject internally if needed
+                    // For now, it sends "Authorization Required", which fits.
+                    await sendHODAuthorizationEmail('Reward', reward, targetHOD, approverDetails);
+                } else {
+                    console.warn(`[UpdateReward] Skipping Email for ${finalStatus}. Reason: HOD found=${!!targetHOD}, ApproverDetails=${!!approverDetails}`);
+                    if (!targetHOD) console.warn("[UpdateReward] Failed to find HOD for", finalStatus);
                 }
             }
 
@@ -133,6 +310,24 @@ export const updateReward = async (req, res) => {
             if (finalStatus === 'Approved' && !reward.approvedBy) {
                 reward.approvedBy = req.user?.id || null;
                 reward.approvedDate = new Date();
+
+                // Update CEO Workflow to Approved
+                if (reward.workflow) {
+                    const ceoEntry = reward.workflow.find(w => w.role === 'CEO' && w.status === 'Pending');
+                    if (ceoEntry) {
+                        ceoEntry.status = 'Approved';
+                        ceoEntry.actionedAt = new Date();
+                    } else {
+                        // Fallback logic for direct approval or admin override
+                        reward.workflow.push({
+                            role: 'CEO',
+                            assignedTo: req.user?._id,
+                            status: 'Approved',
+                            assignedAt: new Date(),
+                            actionedAt: new Date()
+                        });
+                    }
+                }
 
                 // === EMAIL NOTIFICATION LOGIC (Existing for Employee) ===
                 try {
@@ -297,6 +492,7 @@ export const updateReward = async (req, res) => {
         });
     }
 };
+
 
 
 

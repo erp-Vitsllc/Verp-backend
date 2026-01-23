@@ -87,6 +87,9 @@ export const updateLoanDetails = async (req, res) => {
 
     } catch (error) {
         console.error("Error updating loan details:", error);
+        if (error.name === 'CastError') {
+            return res.status(400).json({ message: "Invalid loan ID format" });
+        }
         res.status(500).json({ message: "Failed to update loan details" });
     }
 };

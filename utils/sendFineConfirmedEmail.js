@@ -50,7 +50,7 @@ export const sendFineConfirmedEmail = async (fine, assignedEmployees) => {
                     throw new Error(`Invalid attachment URL hostname: ${urlObj.hostname}`);
                 }
 
-                // Fetch the file stream from the URL (Cloudinary/S3)
+                // Fetch the file stream from the URL (S3)
                 const response = await axios.get(fine.attachment.url, { responseType: 'arraybuffer' });
                 attachments.push({
                     filename: fine.attachment.name || `fine_${fine.fineId}_doc.pdf`,

@@ -2,20 +2,25 @@ import Loan from "../../models/Loan.js";
 
 export const getLoans = async (req, res) => {
     try {
-        const { type } = req.query; // Optional filter by type
+        const { type, employeeId } = req.query; // Optional filter by type and employeeId
         const query = {};
         if (type && ['Loan', 'Advance'].includes(type)) {
             query.type = type;
         }
+        if (employeeId) {
+            query.employeeId = employeeId;
+        }
 
         const loans = await Loan.find(query)
             .sort({ createdAt: -1 })
+            .populate('employeeObjectId', 'firstName lastName')
             .lean();
 
         // Transform data if needed
         const formattedLoans = loans.map(loan => ({
             id: loan._id,
             employeeId: loan.employeeId,
+            employeeName: loan.employeeObjectId ? `${loan.employeeObjectId.firstName} ${loan.employeeObjectId.lastName}` : 'N/A',
             type: loan.type,
             amount: loan.amount,
             status: loan.status, // Using 'status' field from model but user distincts 'advance Status' vs 'Application Status'.

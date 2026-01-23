@@ -48,6 +48,8 @@ export const getUserById = async (req, res) => {
             employee: employee,
             designation: designation,
             permissions: permissions,
+            // Prioritize employee profile picture if linked
+            profilePicture: employee?.profilePicture || user.profilePicture || null,
             // For system admin, show "System Users" instead of employeeId
             employeeId: isSystemAdmin ? 'System Users' : (user.employeeId || null),
             isSystemAdmin: isSystemAdmin

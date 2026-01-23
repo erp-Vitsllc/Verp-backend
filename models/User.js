@@ -43,6 +43,9 @@ const userSchema = new mongoose.Schema(
         lastLogin: { type: Date, default: null },
         passwordExpiryDate: { type: Date, default: null }, // Password expires in 180 days
 
+        // Profile Picture
+        profilePicture: { type: String, default: null },
+
         // Metadata
         createdBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
         updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },

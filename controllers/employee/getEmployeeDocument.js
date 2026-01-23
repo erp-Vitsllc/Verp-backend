@@ -206,7 +206,7 @@ export const getEmployeeDocument = async (req, res) => {
             name: documentName,
             mimeType: mimeType,
             data: documentData,
-            isCloudinaryUrl: isCloudinaryUrl // Flag to indicate if it's a Cloudinary URL
+            isCloudinaryUrl: isCloudinaryUrl // Flag to indicate if it's a Remote URL (legacy name)
         });
 
     } catch (error) {

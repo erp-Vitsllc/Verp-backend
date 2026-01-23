@@ -1,6 +1,7 @@
 import { getCompleteEmployee, saveEmployeeData } from "../../services/employeeService.js";
 import Fine from "../../models/Fine.js";
 import Reward from "../../models/Reward.js";
+import Loan from "../../models/Loan.js";
 
 // Get single employee by ID
 export const getEmployeeById = async (req, res) => {
@@ -66,9 +67,15 @@ export const getEmployeeById = async (req, res) => {
                 employeeId: employee.employeeId
             }).sort({ createdAt: -1 }).lean();
 
+            const loans = await Loan.find({
+                employeeId: employee.employeeId,
+                status: "Approved"
+            }).sort({ createdAt: -1 }).lean();
+
             employee.fines = fines || [];
             employee.rewards = rewards || [];
-            employee.loanAmount = 0; // Placeholder for future Loan module
+            employee.loans = loans || [];
+            employee.loanAmount = 0; // Placeholder for future Loan module logic if needed
         } catch (err) {
             console.error('[getEmployeeById] Error fetching fines/rewards:', err);
             employee.fines = [];

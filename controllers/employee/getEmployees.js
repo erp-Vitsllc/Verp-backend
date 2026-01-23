@@ -130,6 +130,33 @@ export const getEmployees = async (req, res) => {
             EmployeeBasic.countDocuments(filters, queryOptions),
         ]);
 
+        // AUTOMATION: Lazy update status for employees > 6 months (Self-Healing)
+        const sixMonthsAgo = new Date();
+        sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
+        const idsToUpdate = [];
+
+        employees.forEach(emp => {
+            if (emp.dateOfJoining && emp.status !== 'Permanent') {
+                const joinDate = new Date(emp.dateOfJoining);
+                if (joinDate <= sixMonthsAgo) {
+                    // Update in-memory for immediate UI reflection
+                    emp.status = 'Permanent';
+                    emp.probationPeriod = null;
+                    idsToUpdate.push(emp._id);
+                }
+            }
+        });
+
+        if (idsToUpdate.length > 0) {
+            // Run update in background (fire and forget for speed, or await if critical)
+            // Awaiting here to ensure consistency if they immediately click edit
+            await EmployeeBasic.updateMany(
+                { _id: { $in: idsToUpdate } },
+                { $set: { status: 'Permanent', probationPeriod: null } }
+            );
+            console.log(`[GetEmployees] Auto-updated ${idsToUpdate.length} employees to Permanent status.`);
+        }
+
         // Populate visa details for each employee (only if we have employees)
         // Optimize: Exclude document fields from visa data for list view
         let employeesWithVisas = employees;

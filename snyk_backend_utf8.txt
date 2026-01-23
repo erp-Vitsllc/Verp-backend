@@ -1,0 +1,324 @@
+﻿
+Testing C:\Users\Vega\Desktop\ERP_Project\VERP_backend ...
+
+Open Issues
+
+ Γ£ù [LOW] Improper Type Validation
+   Finding ID: 926db3ec-c737-4353-bea3-2a5ace23341e
+   Path: controllers/employee/updateLabourCardDetails.js, line 11
+   Info: The type of this object, coming from body and the value of its trim property can be controlled by the user. An attacker may craft the properties of the object to crash the application or bypass its logic. Consider checking the type of the object.
+
+ Γ£ù [LOW] Improper Type Validation
+   Finding ID: c9694c75-d6c5-415f-a046-3ad6d21c9f60
+   Path: controllers/employee/addEmployee.js, line 280
+   Info: The type of this object, coming from body and the value of its toLowerCase property can be controlled by the user. An attacker may craft the properties of the object to crash the application or bypass its logic. Consider checking the type of the object.
+
+ Γ£ù [LOW] Improper Type Validation
+   Finding ID: 2376f7f0-c3c2-4be5-a501-57fbd5df22f9
+   Path: controllers/user/uploadUserProfilePicture.js, line 25
+   Info: The type of this object, coming from body and the value of its replace property can be controlled by the user. An attacker may craft the properties of the object to crash the application or bypass its logic. Consider checking the type of the object.
+
+ Γ£ù [LOW] Improper Type Validation
+   Finding ID: a8890f41-3c07-4187-ad97-b0feab4ed09f
+   Path: controllers/employee/addEmployee.js, line 238
+   Info: The type of this object, coming from body and the value of its toLowerCase property can be controlled by the user. An attacker may craft the properties of the object to crash the application or bypass its logic. Consider checking the type of the object.
+
+ Γ£ù [LOW] Improper Type Validation
+   Finding ID: a2b241e7-c1ef-4283-aef3-d34bea9463a8
+   Path: controllers/employee/uploadProfilePicture.js, line 30
+   Info: The type of this object, coming from body and the value of its replace property can be controlled by the user. An attacker may craft the properties of the object to crash the application or bypass its logic. Consider checking the type of the object.
+
+ Γ£ù [LOW] Improper Type Validation
+   Finding ID: b7613402-519b-42ad-ae30-b47cdc5713ed
+   Path: controllers/employee/approveLoan.js, line 333
+   Info: The type of this object, coming from body and the value of its toLowerCase property can be controlled by the user. An attacker may craft the properties of the object to crash the application or bypass its logic. Consider checking the type of the object.
+
+ Γ£ù [LOW] Improper Type Validation
+   Finding ID: a3b1fbad-df28-4dd3-83b4-141881ecd24c
+   Path: controllers/employee/updateEmergencyContact.js, line 13
+   Info: The type of this object, coming from body and the value of its toString property can be controlled by the user. An attacker may craft the properties of the object to crash the application or bypass its logic. Consider checking the type of the object.
+
+ Γ£ù [LOW] Improper Type Validation
+   Finding ID: 2d5e9791-422f-4214-90fa-7dbf5b0ca16a
+   Path: controllers/employee/uploadProfilePicture.js, line 34
+   Info: The type of this object, coming from body and the value of its match property can be controlled by the user. An attacker may craft the properties of the object to crash the application or bypass its logic. Consider checking the type of the object.
+
+ Γ£ù [LOW] Improper Type Validation
+   Finding ID: bb7ff205-755d-44aa-a2cd-cd48b6766b6a
+   Path: controllers/user/uploadUserProfilePicture.js, line 27
+   Info: The type of this object, coming from body and the value of its match property can be controlled by the user. An attacker may craft the properties of the object to crash the application or bypass its logic. Consider checking the type of the object.
+
+ Γ£ù [LOW] Improper Type Validation
+   Finding ID: 071a33d1-3e60-48a4-a25b-50e0577b5652
+   Path: controllers/fine/addFine.js, line 278
+   Info: The type of this object, coming from body and the value of its length property can be controlled by the user. An attacker may craft the properties of the object to crash the application or bypass its logic. Consider checking the type of the object.
+
+ Γ£ù [LOW] Improper Type Validation
+   Finding ID: 3aa1c4b2-4611-4611-861f-6e11463e7404
+   Path: controllers/fine/addFine.js, line 294
+   Info: The type of this object, coming from body and the value of its length property can be controlled by the user. An attacker may craft the properties of the object to crash the application or bypass its logic. Consider checking the type of the object.
+
+ Γ£ù [LOW] Improper Type Validation
+   Finding ID: 1ac14c46-5c67-4089-bf27-f1517316c2c6
+   Path: controllers/user/updateUser.js, line 48
+   Info: The type of this object, coming from body and the value of its length property can be controlled by the user. An attacker may craft the properties of the object to crash the application or bypass its logic. Consider checking the type of the object.
+
+ Γ£ù [LOW] Improper Type Validation
+   Finding ID: 69263226-d9ad-491e-a6ec-aa1cfd9deaae
+   Path: controllers/user/validatePassword.js, line 17
+   Info: The type of this object, coming from body and the value of its length property can be controlled by the user. An attacker may craft the properties of the object to crash the application or bypass its logic. Consider checking the type of the object.
+
+ Γ£ù [LOW] Use of Hardcoded Credentials
+   Finding ID: 032e1108-8e64-4894-b496-8507801e3a5d
+   Path: controllers/loginController.js, line 66
+   Info: Do not hardcode credentials in code. Found hardcoded credential used in save.
+
+ Γ£ù [LOW] Improper Type Validation
+   Finding ID: 3ce44be6-6c6b-421f-b955-f77c9eb61021
+   Path: controllers/employee/requestLoan.js, line 119
+   Info: The type of this object, coming from body and the value of its replace property can be controlled by the user. An attacker may craft the properties of the object to crash the application or bypass its logic. Consider checking the type of the object.
+
+ Γ£ù [LOW] Improper Type Validation
+   Finding ID: 2edc677b-e81b-44c1-90ef-0d217f659752
+   Path: controllers/employee/addTraining.js, line 34
+   Info: The type of this object, coming from body and the value of its trim property can be controlled by the user. An attacker may craft the properties of the object to crash the application or bypass its logic. Consider checking the type of the object.
+
+ Γ£ù [LOW] Improper Type Validation
+   Finding ID: b1274329-6c65-42a8-8ef1-6584f045b38c
+   Path: controllers/employee/updateDrivingLicenseDetails.js, line 11
+   Info: The type of this object, coming from body and the value of its trim property can be controlled by the user. An attacker may craft the properties of the object to crash the application or bypass its logic. Consider checking the type of the object.
+
+ Γ£ù [LOW] Improper Type Validation
+   Finding ID: 5c44dc2e-c2e0-4300-a0c0-53b787a6ef67
+   Path: controllers/employee/updateDrivingLicenseDetails.js, line 67
+   Info: The type of this object, coming from body and the value of its trim property can be controlled by the user. An attacker may craft the properties of the object to crash the application or bypass its logic. Consider checking the type of the object.
+
+ Γ£ù [LOW] Improper Type Validation
+   Finding ID: cf3dced2-4111-4a7d-88b9-cce627940c0f
+   Path: controllers/employee/updateDrivingLicenseDetails.js, line 104
+   Info: The type of this object, coming from body and the value of its trim property can be controlled by the user. An attacker may craft the properties of the object to crash the application or bypass its logic. Consider checking the type of the object.
+
+ Γ£ù [LOW] Improper Type Validation
+   Finding ID: 96e3e5d5-f7df-471e-84a4-79f0c5c4ec26
+   Path: controllers/employee/updateEducation.js, line 37
+   Info: The type of this object, coming from body and the value of its trim property can be controlled by the user. An attacker may craft the properties of the object to crash the application or bypass its logic. Consider checking the type of the object.
+
+ Γ£ù [LOW] Improper Type Validation
+   Finding ID: 2f732606-1c3e-44e1-94dc-18fe853d5f43
+   Path: controllers/employee/updateEducation.js, line 38
+   Info: The type of this object, coming from body and the value of its trim property can be controlled by the user. An attacker may craft the properties of the object to crash the application or bypass its logic. Consider checking the type of the object.
+
+ Γ£ù [LOW] Improper Type Validation
+   Finding ID: 157134df-d366-492d-865f-9b415b8d961a
+   Path: controllers/employee/updateEducation.js, line 39
+   Info: The type of this object, coming from body and the value of its trim property can be controlled by the user. An attacker may craft the properties of the object to crash the application or bypass its logic. Consider checking the type of the object.
+
+ Γ£ù [LOW] Improper Type Validation
+   Finding ID: 5af22a33-a6b2-4927-92ff-7bd69312d476
+   Path: controllers/employee/updateEducation.js, line 40
+   Info: The type of this object, coming from body and the value of its trim property can be controlled by the user. An attacker may craft the properties of the object to crash the application or bypass its logic. Consider checking the type of the object.
+
+ Γ£ù [LOW] Improper Type Validation
+   Finding ID: 71cd7b13-0316-4735-bbf6-8cd034680533
+   Path: controllers/employee/updateEducation.js, line 41
+   Info: The type of this object, coming from body and the value of its trim property can be controlled by the user. An attacker may craft the properties of the object to crash the application or bypass its logic. Consider checking the type of the object.
+
+ Γ£ù [LOW] Improper Type Validation
+   Finding ID: 651375ea-b84c-4ff8-9248-92f966c85114
+   Path: controllers/employee/updateEmergencyContact.js, line 12
+   Info: The type of this object, coming from body and the value of its trim property can be controlled by the user. An attacker may craft the properties of the object to crash the application or bypass its logic. Consider checking the type of the object.
+
+ Γ£ù [LOW] Improper Type Validation
+   Finding ID: 5e58031f-0634-428a-aa59-13e949328c86
+   Path: controllers/employee/updateEmiratesIdDetails.js, line 11
+   Info: The type of this object, coming from body and the value of its trim property can be controlled by the user. An attacker may craft the properties of the object to crash the application or bypass its logic. Consider checking the type of the object.
+
+ Γ£ù [LOW] Improper Type Validation
+   Finding ID: c76e25b1-fcdf-490a-a0aa-b040f6eecb30
+   Path: controllers/employee/updateEmiratesIdDetails.js, line 67
+   Info: The type of this object, coming from body and the value of its trim property can be controlled by the user. An attacker may craft the properties of the object to crash the application or bypass its logic. Consider checking the type of the object.
+
+ Γ£ù [LOW] Improper Type Validation
+   Finding ID: 2b0e2e7c-1992-46a9-afac-5310f9b26bcf
+   Path: controllers/employee/updateEmiratesIdDetails.js, line 104
+   Info: The type of this object, coming from body and the value of its trim property can be controlled by the user. An attacker may craft the properties of the object to crash the application or bypass its logic. Consider checking the type of the object.
+
+ Γ£ù [LOW] Improper Type Validation
+   Finding ID: c0fdc45f-e798-45c7-b39f-015ac4ff7ee9
+   Path: controllers/user/getUsers.js, line 14
+   Info: The type of this object, coming from query and the value of its search property can be controlled by the user. An attacker may craft the properties of the object to crash the application or bypass its logic. Consider checking the type of the object.
+
+ Γ£ù [LOW] Improper Type Validation
+   Finding ID: d7dfe6c9-0a2c-4598-b19d-fa3863d33a59
+   Path: controllers/employee/updateVisaDetails.js, line 84
+   Info: The type of this object, coming from body and the value of its trim property can be controlled by the user. An attacker may craft the properties of the object to crash the application or bypass its logic. Consider checking the type of the object.
+
+ Γ£ù [LOW] Improper Type Validation
+   Finding ID: dd223826-6cdc-4b92-8da3-53c19430da40
+   Path: controllers/employee/updateExperience.js, line 44
+   Info: The type of this object, coming from body and the value of its trim property can be controlled by the user. An attacker may craft the properties of the object to crash the application or bypass its logic. Consider checking the type of the object.
+
+ Γ£ù [LOW] Improper Type Validation
+   Finding ID: b0007285-3028-4397-9375-08ecfd77294b
+   Path: controllers/employee/updateLabourCardDetails.js, line 69
+   Info: The type of this object, coming from body and the value of its trim property can be controlled by the user. An attacker may craft the properties of the object to crash the application or bypass its logic. Consider checking the type of the object.
+
+ Γ£ù [LOW] Improper Type Validation
+   Finding ID: 1faa8308-4137-4f83-8389-07d08cece9d6
+   Path: controllers/employee/updateMedicalInsuranceDetails.js, line 11
+   Info: The type of this object, coming from body and the value of its trim property can be controlled by the user. An attacker may craft the properties of the object to crash the application or bypass its logic. Consider checking the type of the object.
+
+ Γ£ù [LOW] Improper Type Validation
+   Finding ID: e45baeff-f9c0-4b33-ad79-c1d2ab8e067e
+   Path: controllers/employee/updateMedicalInsuranceDetails.js, line 68
+   Info: The type of this object, coming from body and the value of its trim property can be controlled by the user. An attacker may craft the properties of the object to crash the application or bypass its logic. Consider checking the type of the object.
+
+ Γ£ù [LOW] Improper Type Validation
+   Finding ID: d7807a50-c1b2-4b67-8b46-416b0a69cd12
+   Path: controllers/employee/updateMedicalInsuranceDetails.js, line 105
+   Info: The type of this object, coming from body and the value of its trim property can be controlled by the user. An attacker may craft the properties of the object to crash the application or bypass its logic. Consider checking the type of the object.
+
+ Γ£ù [LOW] Improper Type Validation
+   Finding ID: ca631310-0b96-4ecb-ad6e-be3cd6200163
+   Path: controllers/employee/updateTraining.js, line 43
+   Info: The type of this object, coming from body and the value of its trim property can be controlled by the user. An attacker may craft the properties of the object to crash the application or bypass its logic. Consider checking the type of the object.
+
+ Γ£ù [LOW] Improper Type Validation
+   Finding ID: 447bcd5f-eccf-4fa3-b970-ef9e2ccbe6a4
+   Path: controllers/employee/updateTraining.js, line 44
+   Info: The type of this object, coming from body and the value of its trim property can be controlled by the user. An attacker may craft the properties of the object to crash the application or bypass its logic. Consider checking the type of the object.
+
+ Γ£ù [LOW] Improper Type Validation
+   Finding ID: 55cc4b89-f62f-4143-ae1b-761c5798312f
+   Path: controllers/employee/updateTraining.js, line 45
+   Info: The type of this object, coming from body and the value of its trim property can be controlled by the user. An attacker may craft the properties of the object to crash the application or bypass its logic. Consider checking the type of the object.
+
+ Γ£ù [LOW] Improper Type Validation
+   Finding ID: 3c96a279-f9b2-4dae-a8aa-96bca7762c67
+   Path: controllers/employee/updateVisaDetails.js, line 19
+   Info: The type of this object, coming from body and the value of its trim property can be controlled by the user. An attacker may craft the properties of the object to crash the application or bypass its logic. Consider checking the type of the object.
+
+ Γ£ù [LOW] Improper Type Validation
+   Finding ID: e14f7351-a47b-419b-bd14-45ac2e00b5f0
+   Path: controllers/employee/updateExperience.js, line 45
+   Info: The type of this object, coming from body and the value of its trim property can be controlled by the user. An attacker may craft the properties of the object to crash the application or bypass its logic. Consider checking the type of the object.
+
+ Γ£ù [LOW] Improper Type Validation
+   Finding ID: d5c44cca-7677-4646-86a7-e16bd7a77256
+   Path: controllers/group/createGroup.js, line 12
+   Info: The type of this object, coming from body and the value of its trim property can be controlled by the user. An attacker may craft the properties of the object to crash the application or bypass its logic. Consider checking the type of the object.
+
+ Γ£ù [LOW] Improper Type Validation
+   Finding ID: cee48a5f-7dfd-4e33-92ad-91db28779857
+   Path: controllers/group/createGroup.js, line 19
+   Info: The type of this object, coming from body and the value of its trim property can be controlled by the user. An attacker may craft the properties of the object to crash the application or bypass its logic. Consider checking the type of the object.
+
+ Γ£ù [LOW] Improper Type Validation
+   Finding ID: cee887fd-4487-4f32-ae67-2b2a54d94268
+   Path: controllers/group/createGroup.js, line 83
+   Info: The type of this object, coming from body and the value of its trim property can be controlled by the user. An attacker may craft the properties of the object to crash the application or bypass its logic. Consider checking the type of the object.
+
+ Γ£ù [LOW] Improper Type Validation
+   Finding ID: 6244343c-4f64-47d1-b6ed-260eff186e53
+   Path: controllers/reward/addReward.js, line 121
+   Info: The type of this object, coming from body and the value of its trim property can be controlled by the user. An attacker may craft the properties of the object to crash the application or bypass its logic. Consider checking the type of the object.
+
+ Γ£ù [LOW] Improper Type Validation
+   Finding ID: e8387684-8b35-40a1-9634-a1f52d51b005
+   Path: controllers/user/updateUser.js, line 121
+   Info: The type of this object, coming from body and the value of its trim property can be controlled by the user. An attacker may craft the properties of the object to crash the application or bypass its logic. Consider checking the type of the object.
+
+ Γ£ù [LOW] Improper Type Validation
+   Finding ID: d4b80573-1846-42e5-8180-2aff94efb4d3
+   Path: controllers/user/updateUser.js, line 131
+   Info: The type of this object, coming from body and the value of its trim property can be controlled by the user. An attacker may craft the properties of the object to crash the application or bypass its logic. Consider checking the type of the object.
+
+ Γ£ù [LOW] Improper Type Validation
+   Finding ID: 6d696f43-3a3d-46ff-808a-ebb9bc762b7c
+   Path: controllers/user/updateUser.js, line 133
+   Info: The type of this object, coming from body and the value of its trim property can be controlled by the user. An attacker may craft the properties of the object to crash the application or bypass its logic. Consider checking the type of the object.
+
+ Γ£ù [LOW] Improper Type Validation
+   Finding ID: 8efc173d-6901-4ed7-8572-b404db3596bb
+   Path: controllers/employee/extractPdfText.js, line 20
+   Info: The type of this object, coming from body and the value of its includes property can be controlled by the user. An attacker may craft the properties of the object to crash the application or bypass its logic. Consider checking the type of the object.
+
+ Γ£ù [LOW] Improper Type Validation
+   Finding ID: b9fced1d-03b1-472d-b93b-aa3be7a5e4ef
+   Path: controllers/reward/addReward.js, line 121
+   Info: The type of this object, coming from body and the value of its includes property can be controlled by the user. An attacker may craft the properties of the object to crash the application or bypass its logic. Consider checking the type of the object.
+
+ Γ£ù [LOW] Improper Type Validation
+   Finding ID: 7a712a1f-9593-4efe-b81a-f533e64cf8be
+   Path: controllers/employee/extractPdfText.js, line 21
+   Info: The type of this object, coming from body and the value of its split property can be controlled by the user. An attacker may craft the properties of the object to crash the application or bypass its logic. Consider checking the type of the object.
+
+ Γ£ù [LOW] Improper Type Validation
+   Finding ID: a040db46-b09e-4b5d-88df-c8d708138e4c
+   Path: controllers/employee/getEmployeeDocument.js, line 52
+   Info: The type of this object, coming from query and the value of its includes property can be controlled by the user. An attacker may craft the properties of the object to crash the application or bypass its logic. Consider checking the type of the object.
+
+ Γ£ù [LOW] Improper Type Validation
+   Finding ID: d56a87bd-da79-4498-8de5-84f85fa44652
+   Path: controllers/employee/getEmployeeDocument.js, line 52
+   Info: The type of this object, coming from query and the value of its split property can be controlled by the user. An attacker may craft the properties of the object to crash the application or bypass its logic. Consider checking the type of the object.
+
+ Γ£ù [LOW] Improper Type Validation
+   Finding ID: 3549c6cf-6a93-4135-b64f-72c27bc0cebb
+   Path: controllers/employee/getEmployeeDocument.js, line 173
+   Info: The type of this object, coming from query and the value of its toString property can be controlled by the user. An attacker may craft the properties of the object to crash the application or bypass its logic. Consider checking the type of the object.
+
+ Γ£ù [LOW] Improper Type Validation
+   Finding ID: a1673e39-2ba8-4f2e-a64f-efc574bd40f5
+   Path: controllers/employee/getEmployees.js, line 33
+   Info: The type of this object, coming from query and the value of its search property can be controlled by the user. An attacker may craft the properties of the object to crash the application or bypass its logic. Consider checking the type of the object.
+
+ Γ£ù [LOW] Improper Type Validation
+   Finding ID: 3d3a057a-41d1-428c-a15d-bfe5fde4c249
+   Path: controllers/group/getGroups.js, line 7
+   Info: The type of this object, coming from query and the value of its search property can be controlled by the user. An attacker may craft the properties of the object to crash the application or bypass its logic. Consider checking the type of the object.
+
+ Γ£ù [LOW] Improper Type Validation
+   Finding ID: 01274212-6246-4f75-9a3c-0bfd7077739a
+   Path: controllers/reward/getRewards.js, line 23
+   Info: The type of this object, coming from query and the value of its search property can be controlled by the user. An attacker may craft the properties of the object to crash the application or bypass its logic. Consider checking the type of the object.
+
+ Γ£ù [MEDIUM] Use of Externally-Controlled Format String
+   Finding ID: 437c7673-8ff6-48d8-aa66-d124bb444e93
+   Path: controllers/employee/approveLoan.js, line 95
+   Info: Unsanitized user input from an HTTP parameter flows into log, where it is used as a format string. This may allow a user to inject unexpected content into an application log.
+
+ Γ£ù [MEDIUM] Allocation of Resources Without Limits or Throttling
+   Finding ID: e1d2f835-be9f-47fe-bcc9-e97ce559b3c8
+   Path: controllers/user/updateUser.js, line 14
+   Info: Expensive operation (a file system operation) is performed by an endpoint handler which does not use a rate-limiting mechanism. It may enable the attackers to perform Denial-of-service attacks. Consider using a rate-limiting middleware such as express-limit.
+
+ Γ£ù [MEDIUM] Use of Externally-Controlled Format String
+   Finding ID: 0e5e4f12-5b94-4d4f-9b84-6b2d443e783f
+   Path: controllers/employee/approveLoan.js, line 81
+   Info: Unsanitized user input from an HTTP parameter flows into log, where it is used as a format string. This may allow a user to inject unexpected content into an application log.
+
+ Γ£ù [MEDIUM] Use of Externally-Controlled Format String
+   Finding ID: b98616dc-4cfa-42b5-9454-291910403c87
+   Path: controllers/employee/approveLoan.js, line 109
+   Info: Unsanitized user input from an HTTP parameter flows into log, where it is used as a format string. This may allow a user to inject unexpected content into an application log.
+
+
+
+Γò¡ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓò«
+Γöé Test Summary                                                           Γöé
+Γöé                                                                        Γöé
+Γöé   Organization:      razan69214                                        Γöé
+Γöé   Test type:         Static code analysis                              Γöé
+Γöé   Project path:      C:\Users\Vega\Desktop\ERP_Project\VERP_backend    Γöé
+Γöé                                                                        Γöé
+Γöé   Total issues:   60                                                   Γöé
+Γöé   Ignored issues: 0 [ 0 HIGH  0 MEDIUM  0 LOW ]                        Γöé
+Γöé   Open issues:    60 [ 0 HIGH  4 MEDIUM  56 LOW ]                      Γöé
+Γò░ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓò»
+    
+≡ƒÆí Tip
+
+   To view ignored issues, use the --include-ignores option.
+                                                            
+

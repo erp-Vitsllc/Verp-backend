@@ -8,6 +8,8 @@ import { approveFine } from "../controllers/fine/approveFine.js";
 import { protect } from "../middleware/authMiddleware.js";
 import { checkPermission } from "../middleware/permissionMiddleware.js";
 
+import { downloadFinePdf } from "../controllers/fine/downloadFinePdf.js";
+
 const router = express.Router();
 
 // All fine routes require authentication
@@ -18,6 +20,9 @@ router.get("/", checkPermission('hrm_fine', 'view'), getFines);
 
 // Get fine by ID - requires view permission
 router.get("/:id", checkPermission('hrm_fine', 'view'), getFineById);
+
+// Download Fine PDF - Requires View Permission
+router.get("/:id/pdf", checkPermission('hrm_fine', 'view'), downloadFinePdf); // NEW ROUTE
 
 // Add fine - requires create permission
 router.post("/", checkPermission('hrm_fine', 'create'), addFine);

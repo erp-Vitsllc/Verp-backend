@@ -1,6 +1,6 @@
 import puppeteer from 'puppeteer';
 
-export const generatePdf = async (url, token, user, permissions = {}) => {
+export const generatePdf = async (url, token, user, permissions = {}, selector = '#loan-form-container') => {
     let browser = null;
     let page = null;
     try {
@@ -32,18 +32,21 @@ export const generatePdf = async (url, token, user, permissions = {}) => {
             }, token, user, permissions);
         }
 
+        // Bridge console logs to backend
+        page.on('console', msg => console.log('PAGE LOG:', msg.text()));
+
         // Navigate to the page
         await page.goto(url, {
-            waitUntil: 'domcontentloaded',
+            waitUntil: 'networkidle0',
             timeout: 60000
         });
 
         // Wait for the form container to be visible
-        await page.waitForSelector('#loan-form-container', { timeout: 15000 });
+        await page.waitForSelector(selector, { timeout: 30000 });
 
         // Isolate the form container: Remove everything else from the body
-        await page.evaluate(() => {
-            const form = document.querySelector('#loan-form-container');
+        await page.evaluate((sel) => {
+            const form = document.querySelector(sel);
             if (form) {
                 document.body.innerHTML = '';
                 document.body.appendChild(form);
@@ -60,7 +63,7 @@ export const generatePdf = async (url, token, user, permissions = {}) => {
                 // Force background to visible if needed
                 document.documentElement.style.backgroundColor = 'white';
             }
-        });
+        }, selector);
 
         // Hide elements that shouldn't be printed (like buttons) if they aren't already hidden by print styles
         await page.emulateMediaType('screen');

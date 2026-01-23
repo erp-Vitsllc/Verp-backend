@@ -105,7 +105,19 @@ export const addEmployee = async (req, res) => {
 
         // Normalize status to allowed values; default to Probation if invalid/absent
         const allowedStatuses = ['Probation', 'Permanent', 'Temporary', 'Notice'];
-        const normalizedStatus = allowedStatuses.includes(status) ? status : 'Probation';
+        let normalizedStatus = allowedStatuses.includes(status) ? status : 'Probation';
+
+        // AUTOMATION: If Date of Joining is > 6 months ago, force Permanent
+        if (dateOfJoining) {
+            const joiningDateObj = new Date(dateOfJoining);
+            const sixMonthsAgo = new Date();
+            sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
+
+            if (joiningDateObj <= sixMonthsAgo) {
+                normalizedStatus = 'Permanent';
+                console.log(`[AddEmployee] Auto-setting status to Permanent for ${firstName} ${lastName} (Joined: ${dateOfJoining})`);
+            }
+        }
 
         // Use designation as role if role is not provided
         const employeeRole = role || designation || '';

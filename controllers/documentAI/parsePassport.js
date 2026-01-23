@@ -48,11 +48,16 @@ const formatDate = (dateStr = "") => {
 
 // --- Core Function: Passport Detail Extraction ---
 const extractPassportDetails = (text = "") => {
-    console.log("\n🔍 Starting extraction with text length:", text.length);
+    // --- Safety Limit for Regex Processing ---
+    // Prevent ReDoS by limiting the text length passed to complex regexes
+    const MAX_TEXT_LENGTH = 15000;
+    const safeText = text.length > MAX_TEXT_LENGTH ? text.substring(0, MAX_TEXT_LENGTH) : text;
 
-    const cleanedText = text.replace(/\s+/g, " ").trim();
-    const mrzReadyText = text.replace(/\r/g, "").trim();
-    const originalText = text; // Keep original for better matching
+    console.log("\n🔍 Starting extraction with text length:", text.length, text.length > MAX_TEXT_LENGTH ? `(Truncated to ${MAX_TEXT_LENGTH} for safety)` : "");
+
+    const cleanedText = safeText.replace(/\s+/g, " ").trim();
+    const mrzReadyText = safeText.replace(/\r/g, "").trim();
+    const originalText = safeText; // Keep original for better matching
 
     const result = {
         number: "",
@@ -504,4 +509,3 @@ export const parsePassport = async (req, res) => {
         });
     }
 };
-

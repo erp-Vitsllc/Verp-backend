@@ -5,6 +5,7 @@ import EmployeeBasic from "../../models/EmployeeBasic.js";
 import nodemailer from "nodemailer";
 import { getManagementHOD } from "../../utils/getManagementHOD.js";
 import { sendHODAuthorizationEmail } from "../../utils/sendHODAuthorizationEmail.js";
+import { getDepartmentHOD } from "../../utils/getDepartmentHOD.js";
 
 export const approveLoan = async (req, res) => {
     try {
@@ -55,36 +56,73 @@ export const approveLoan = async (req, res) => {
             };
         }
 
-        // Determine Status
+        // Determine Next Status and Notifications
         let finalStatus = status;
+        let nextApprover = null;
+        let emailSubject = "";
+        let emailType = "";
 
         if (status === 'Approved') {
             if (isAdmin) {
                 finalStatus = 'Approved';
             } else if (approverBasic) {
-                // Check CEO Validity (Strict)
-                const isCEO = approverBasic.department && approverBasic.department.toLowerCase() === 'management' &&
-                    ['ceo', 'c.e.o', 'c.e.o.', 'director', 'managing director', 'general manager'].includes(approverBasic.designation?.toLowerCase());
+                const currentStatus = loan.status;
 
-                // Check Reportee Status (of the loan applicant)
-                const applicant = await EmployeeBasic.findOne({ employeeId: loan.employeeId }).populate('primaryReportee');
-                let isReporteeManager = false;
+                // 1. MANAGER STAGE (Pending -> Pending HR)
+                if (currentStatus === 'Pending') {
+                    // Check if approver is the manager
+                    const applicant = await EmployeeBasic.findOne({ employeeId: loan.employeeId }).populate('primaryReportee');
+                    const isReporteeManager = applicant?.primaryReportee?._id?.toString() === approverBasic._id.toString();
 
-                if (applicant && applicant.primaryReportee) {
-                    const pRep = applicant.primaryReportee;
-                    const pRepId = pRep._id ? pRep._id.toString() : pRep.toString();
-                    if (pRepId === approverBasic._id.toString()) {
-                        isReporteeManager = true;
+                    if (isReporteeManager) {
+                        finalStatus = 'Pending HR';
+                        loan.managerApprovedBy = approverBasic._id; // Set persistent manager approver
+                        nextApprover = await getDepartmentHOD('hr'); // Broader search
+                        console.log('[Loan]', loan.loanId, 'Manager Approved. Next HR Approver:', nextApprover ? `${nextApprover.firstName} ${nextApprover.lastName}` : 'NOT FOUND');
+                        emailSubject = "Loan Pending HR Approval";
+                        emailType = "HR";
+                    } else {
+                        return res.status(403).json({ message: "Only the reporting manager can approve at this stage" });
                     }
                 }
+                // 2. HR STAGE (Pending HR -> Pending Accounts)
+                else if (currentStatus === 'Pending HR') {
+                    const isHR = /human resource|hr/i.test(approverBasic.department);
+                    if (isHR) {
+                        finalStatus = 'Pending Accounts';
+                        loan.hrApprovedBy = approverBasic._id; // Set persistent HR approver
+                        nextApprover = await getDepartmentHOD('finance'); // Broader search
+                        console.log('[Loan]', loan.loanId, 'HR Approved. Next Finance Approver:', nextApprover ? `${nextApprover.firstName} ${nextApprover.lastName}` : 'NOT FOUND');
+                        emailSubject = "Loan Pending Finance Approval";
+                        emailType = "Accounts";
+                    } else {
+                        return res.status(403).json({ message: "Only HR can approve at this stage" });
+                    }
+                }
+                // 3. ACCOUNTS STAGE (Pending Accounts -> Pending Authorization)
+                else if (currentStatus === 'Pending Accounts') {
+                    const isFinance = /finance|accounts/i.test(approverBasic.department);
+                    if (isFinance) {
+                        finalStatus = 'Pending Authorization';
+                        loan.accountsApprovedBy = approverBasic._id; // Set persistent Finance approver
+                        nextApprover = await getManagementHOD();
+                        console.log('[Loan]', loan.loanId, 'Finance Approved. Next CEO:', nextApprover ? `${nextApprover.firstName} ${nextApprover.lastName}` : 'NOT FOUND');
+                        emailSubject = "Loan Pending Final Authorization";
+                        emailType = "CEO";
+                    } else {
+                        return res.status(403).json({ message: "Only Finance/Accounts can approve at this stage" });
+                    }
+                }
+                // 4. CEO STAGE (Pending Authorization -> Approved)
+                else if (currentStatus === 'Pending Authorization') {
+                    const isCEO = approverBasic.department && /management/i.test(approverBasic.department) &&
+                        ['ceo', 'c.e.o', 'c.e.o.', 'chief executive officer', 'director', 'managing director', 'general manager', 'gm', 'g.m', 'g.m.'].includes(approverBasic.designation?.toLowerCase());
 
-                // LOGIC: Strict 2-Stage Flow
-                if (isCEO) {
-                    finalStatus = 'Approved';
-                } else if (isReporteeManager) {
-                    finalStatus = 'Pending Authorization';
-                } else {
-                    finalStatus = 'Pending Authorization';
+                    if (isCEO) {
+                        finalStatus = 'Approved';
+                    } else {
+                        return res.status(403).json({ message: "Only the CEO can Authorize this loan" });
+                    }
                 }
             }
         }
@@ -92,147 +130,203 @@ export const approveLoan = async (req, res) => {
         // Update Loan
         loan.status = finalStatus;
         loan.approvalStatus = finalStatus;
-        // Set actioner details for both Approved and Rejected
-        if (finalStatus === 'Approved' || finalStatus === 'Rejected') {
+
+        if (finalStatus === 'Approved') {
             loan.approvedBy = approverBasic ? approverBasic._id : requestingUserId;
             loan.approvedDate = new Date();
+        } else if (finalStatus === 'Rejected') {
+            loan.rejectedBy = approverBasic ? approverBasic._id : requestingUserId;
+            loan.rejectedDate = new Date();
+        }
+
+        if (nextApprover) {
+            loan.submittedTo = nextApprover._id;
+
+            // WORKFLOW UPDATES (Using EmployeeBasic IDs as per Loan Logic)
+            if (loan.status === 'Pending HR') {
+                // 1. Manager Step (Approved)
+                if (!loan.workflow) loan.workflow = [];
+                const managerEntry = loan.workflow.find(w =>
+                    w.status === 'Pending' &&
+                    (w.role === 'Manager' || w.assignedTo?.toString() === approverBasic._id.toString())
+                );
+
+                if (managerEntry) {
+                    managerEntry.status = 'Approved';
+                    managerEntry.actionedAt = new Date();
+                    // Update role if needed for clarity
+                    if (!managerEntry.role) managerEntry.role = 'Manager';
+                } else {
+                    // Fallback: Push new if not found
+                    loan.workflow.push({
+                        role: 'Manager',
+                        assignedTo: approverBasic._id,
+                        status: 'Approved',
+                        assignedAt: loan.createdAt, // Backdate
+                        actionedAt: new Date()
+                    });
+                }
+
+                // 2. HR Step (Pending)
+                loan.workflow.push({
+                    role: 'HR',
+                    assignedTo: nextApprover._id,
+                    status: 'Pending',
+                    assignedAt: new Date()
+                });
+            }
+            else if (loan.status === 'Pending Accounts') {
+                // 1. Mark HR Approved
+                const hrEntry = loan.workflow ? loan.workflow.find(w => w.role === 'HR' && w.status === 'Pending') : null;
+                if (hrEntry) {
+                    hrEntry.status = 'Approved';
+                    hrEntry.actionedAt = new Date();
+                } else {
+                    // Fallback
+                    if (!loan.workflow) loan.workflow = [];
+                    loan.workflow.push({
+                        role: 'HR',
+                        assignedTo: approverBasic._id,
+                        status: 'Approved',
+                        assignedAt: new Date(),
+                        actionedAt: new Date()
+                    });
+                }
+
+                // 2. Push Accounts (Pending)
+                loan.workflow.push({
+                    role: 'Accounts',
+                    assignedTo: nextApprover._id,
+                    status: 'Pending',
+                    assignedAt: new Date()
+                });
+            }
+            else if (loan.status === 'Pending Authorization') {
+                // 1. Mark Accounts Approved
+                const accEntry = loan.workflow ? loan.workflow.find(w => w.role === 'Accounts' && w.status === 'Pending') : null;
+                if (accEntry) {
+                    accEntry.status = 'Approved';
+                    accEntry.actionedAt = new Date();
+                } else {
+                    if (!loan.workflow) loan.workflow = [];
+                    loan.workflow.push({
+                        role: 'Accounts',
+                        assignedTo: approverBasic._id,
+                        status: 'Approved',
+                        assignedAt: new Date(),
+                        actionedAt: new Date()
+                    });
+                }
+
+                // 2. Push CEO (Pending)
+                loan.workflow.push({
+                    role: 'CEO',
+                    assignedTo: nextApprover._id,
+                    status: 'Pending',
+                    assignedAt: new Date()
+                });
+            }
+        }
+
+        // Final Approval (CEO) Update
+        if (finalStatus === 'Approved') {
+            if (loan.workflow) {
+                const ceoEntry = loan.workflow.find(w => w.role === 'CEO' && w.status === 'Pending');
+                if (ceoEntry) {
+                    ceoEntry.status = 'Approved';
+                    ceoEntry.actionedAt = new Date();
+                } else {
+                    // Fallback
+                    loan.workflow.push({
+                        role: 'CEO',
+                        assignedTo: approverBasic ? approverBasic._id : requestingUserId,
+                        status: 'Approved',
+                        assignedAt: new Date(),
+                        actionedAt: new Date()
+                    });
+                }
+            }
         }
 
         await loan.save();
 
-        // Emails
-        if (finalStatus === 'Pending Authorization') {
-            const managementHod = await getManagementHOD();
+        // Handle Notifications
+        const emailUser = process.env.EMAIL_USER?.trim();
+        const emailPass = process.env.EMAIL_PASS?.trim();
 
-            if (managementHod && managementHod.companyEmail) {
-                const emailUser = process.env.EMAIL_USER;
-                const emailPass = process.env.EMAIL_PASS;
+        if (emailUser && emailPass) {
+            const transporter = nodemailer.createTransport({
+                host: "smtp.office365.com",
+                port: 587,
+                secure: false,
+                auth: { user: emailUser, pass: emailPass },
+            });
 
-                if (emailUser && emailPass) {
-                    try {
-                        const transporter = nodemailer.createTransport({
-                            host: "smtp.office365.com",
-                            port: 587,
-                            secure: false, // true for 465, false for other ports
-                            auth: {
-                                user: emailUser,
-                                pass: emailPass,
-                            },
-                        });
+            const origin = req.headers.origin || (req.headers.referer ? new URL(req.headers.referer).origin : null);
+            const baseUrl = origin || process.env.FRONTEND_URL || "http://localhost:3000";
+            const actionUrl = `${baseUrl}/HRM/LoanAndAdvance/${loan._id}`;
 
-                        const origin = req.headers.origin || (req.headers.referer ? new URL(req.headers.referer).origin : null);
-                        const baseUrl = origin || process.env.FRONTEND_URL || "http://localhost:3000";
-                        const actionUrl = `${baseUrl}/HRM/LoanAndAdvance/${loan._id}`;
+            // 1. Notify Next Approver
+            if (nextApprover && (nextApprover.companyEmail || nextApprover.email)) {
+                try {
+                    const mailOptions = {
+                        from: `"VeRP Notification" <${emailUser}>`,
+                        to: nextApprover.companyEmail || nextApprover.email,
+                        subject: emailSubject,
+                        html: `
+                            <div style="font-family: Arial, sans-serif; color: #333; max-width: 600px; margin: 0 auto; border: 1px solid #eee; border-radius: 10px; overflow: hidden;">
+                                <div style="background-color: #f59e0b; color: white; padding: 20px; text-align: center;">
+                                    <h2 style="margin: 0;">Action Required: ${emailSubject}</h2>
+                                </div>
+                                <div style="padding: 30px;">
+                                    <p>Dear ${nextApprover.firstName},</p>
+                                    <p>A loan application requires your review at the <strong>${emailType}</strong> stage.</p>
+                                    <p><strong>Applicant:</strong> ${loan.applicantName}</p>
+                                    <p><strong>Amount:</strong> AED ${Number(loan.amount).toLocaleString()}</p>
+                                    <div style="text-align: center; margin: 30px 0;">
+                                        <a href="${actionUrl}" style="background-color: #f59e0b; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; font-weight: bold;">Review Application</a>
+                                    </div>
+                                </div>
+                            </div>
+                        `
+                    };
+                    await transporter.sendMail(mailOptions);
+                } catch (emailErr) {
+                    console.error("Next Approver Email Error:", emailErr);
+                }
+            }
+
+            // 2. Notify Employee on Approval
+            if (finalStatus === 'Approved') {
+                try {
+                    const applicant = await EmployeeBasic.findOne({ employeeId: loan.employeeId });
+                    if (applicant && (applicant.companyEmail || applicant.email)) {
+                        const permissions = { hrm_loan: { isView: true, isActive: true } };
+                        const pdfBuffer = await generatePdf(actionUrl, req.headers.authorization?.split(' ')[1], { id: requestingUserId, isAdmin: isAdmin, role: userObj.role, employeeId: userObj.employeeId }, permissions);
 
                         const mailOptions = {
                             from: `"VeRP Notification" <${emailUser}>`,
-                            to: managementHod.companyEmail,
-                            subject: "Loan Authorization Required",
+                            to: applicant.companyEmail || applicant.email,
+                            subject: "Loan Application Approved",
                             html: `
                                 <div style="font-family: Arial, sans-serif; color: #333; max-width: 600px; margin: 0 auto; border: 1px solid #eee; border-radius: 10px; overflow: hidden;">
-                                    <div style="background-color: #f59e0b; color: white; padding: 20px; text-align: center;">
-                                        <h2 style="margin: 0;">Loan Pending Authorization</h2>
+                                    <div style="background-color: #22c55e; color: white; padding: 20px; text-align: center;">
+                                        <h2 style="margin: 0;">Congratulations!</h2>
                                     </div>
                                     <div style="padding: 30px;">
-                                        <p>Dear ${managementHod.firstName},</p>
-                                        <p>A loan application from <strong>${approverDetails?.name || 'an employee'}</strong> (Applicant ID: ${loan.employeeId}) has been approved by their reportee and requires your final authorization.</p>
-                                        <p><strong>Amount:</strong> AED ${Number(loan.amount).toLocaleString()}</p>
-                                        
-                                        <div style="text-align: center; margin: 30px 0;">
-                                            <a href="${actionUrl}" style="background-color: #f59e0b; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; font-weight: bold;">Review Application</a>
-                                        </div>
+                                        <p>Dear ${applicant.firstName},</p>
+                                        <p>Your loan application for <strong>AED ${Number(loan.amount).toLocaleString()}</strong> has been fully approved by all departments including HR, Finance, and CEO.</p>
+                                        <p>Please find the approved document attached.</p>
                                     </div>
                                 </div>
-                            `
+                            `,
+                            attachments: [{ filename: `Approved_Loan_${loan.loanId || loan._id}.pdf`, content: pdfBuffer, contentType: 'application/pdf' }]
                         };
-
                         await transporter.sendMail(mailOptions);
-                        console.log(`Authorization email sent to CEO: ${managementHod.companyEmail}`);
-                    } catch (emailError) {
-                        console.error("Failed to send authorization email:", emailError);
                     }
+                } catch (emailErr) {
+                    console.error("Employee Approval Email Error:", emailErr);
                 }
-            } else {
-                console.warn("Management HOD (CEO) not found or has no email.");
-            }
-        } else if (finalStatus === 'Approved') {
-            try {
-                const applicant = await EmployeeBasic.findOne({ employeeId: loan.employeeId }).select('companyEmail email firstName lastName');
-                if (applicant) {
-                    const empEmail = applicant.companyEmail || applicant.email;
-                    if (empEmail) {
-                        const emailUser = process.env.EMAIL_USER;
-                        const emailPass = process.env.EMAIL_PASS;
-                        if (emailUser && emailPass) {
-                            const transporter = nodemailer.createTransport({
-                                host: "smtp.office365.com",
-                                port: 587,
-                                secure: false,
-                                auth: { user: emailUser, pass: emailPass }
-                            });
-
-                            const origin = req.headers.origin || (req.headers.referer ? new URL(req.headers.referer).origin : null);
-                            const baseUrl = origin || process.env.FRONTEND_URL || "http://localhost:3000";
-                            const actionUrl = `${baseUrl}/HRM/LoanAndAdvance/${loan._id}`;
-
-                            const mailOptions = {
-                                from: `"VeRP Notification" <${emailUser}>`,
-                                to: empEmail,
-                                subject: "Loan Application Approved",
-                                html: `
-                                    <div style="font-family: Arial, sans-serif; color: #333; max-width: 600px; margin: 0 auto; border: 1px solid #eee; border-radius: 10px; overflow: hidden;">
-                                        <div style="background-color: #22c55e; color: white; padding: 20px; text-align: center;">
-                                            <h2 style="margin: 0;">Loan Approved</h2>
-                                        </div>
-                                        <div style="padding: 30px;">
-                                            <p>Dear ${applicant.firstName},</p>
-                                            <p>Your loan application for <strong>AED ${Number(loan.amount).toLocaleString()}</strong> has been approved. Please find the approved loan document attached.</p>
-                                        </div>
-                                    </div>
-                                `
-                            };
-
-                            // Generate PDF Server-Side
-                            try {
-                                const origin = req.headers.origin || (req.headers.referer ? new URL(req.headers.referer).origin : null);
-                                const baseUrl = origin || process.env.FRONTEND_URL || "http://localhost:3000";
-                                const loanUrl = `${baseUrl}/HRM/LoanAndAdvance/${loan._id}`;
-                                const token = req.headers.authorization ? req.headers.authorization.split(' ')[1] : null;
-
-                                // We need to pass the user context. For simplicity, we can pass what we have, 
-                                // but ideally the page fetches its own data. We just need a valid token.
-                                // If the page relies on 'user' in localStorage, we should construct a minimal one.
-                                const userPayload = {
-                                    id: requestingUserId,
-                                    isAdmin: isAdmin,
-                                    role: userObj.role,
-                                    employeeId: userObj.employeeId
-                                };
-
-                                // Inject permission to view the loan module
-                                const permissions = {
-                                    hrm_loan: { isView: true, isActive: true }
-                                };
-
-                                const pdfBuffer = await generatePdf(loanUrl, token, userPayload, permissions);
-
-                                mailOptions.attachments = [{
-                                    filename: `Loan_Application_${loan.loanId || loan._id}.pdf`,
-                                    content: pdfBuffer,
-                                    contentType: 'application/pdf'
-                                }];
-                            } catch (error) {
-                                console.error("Failed to generate PDF attachment:", error);
-                                // Continue sending email without attachment? or fail?
-                                // Let's log and continue, maybe append a note in email?
-                            }
-
-                            await transporter.sendMail(mailOptions);
-                        }
-                    }
-                }
-            } catch (e) {
-                console.error("Email error:", e);
             }
         }
 
@@ -240,6 +334,9 @@ export const approveLoan = async (req, res) => {
 
     } catch (error) {
         console.error("Error approving loan:", error);
+        if (error.name === 'CastError') {
+            return res.status(400).json({ message: "Invalid loan ID format" });
+        }
         res.status(500).json({ message: "Internal server error" });
     }
 };

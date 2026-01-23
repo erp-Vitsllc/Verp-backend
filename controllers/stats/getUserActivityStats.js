@@ -50,27 +50,90 @@ export const getUserActivityStats = async (req, res) => {
         const reporteeCustomIds = reportees.map(r => r.employeeId);
         const reporteeObjectIds = reportees.map(r => r._id);
 
+        // HOISTED: Fetch User record for manager (needed for Reward/Fine Sticky checks which ref User)
+        // Fix: In Self View, prioritize the active currentUser to ensure we query for the ID assigned to this session.
+        // This avoids issues where User.findOne returns a stale/duplicate User record.
+        let targetUser = null;
+        if (currentUser && manager && currentUser.employeeId === manager.employeeId) {
+            targetUser = currentUser;
+            console.log(`[Stats] Self View: Using req.user as targetUser (${targetUser._id})`);
+        } else {
+            targetUser = await User.findOne({ employeeId: manager.employeeId });
+            console.log(`[Stats] Manager/Other View: Lookup targetUser found ${targetUser ? targetUser._id : 'NONE'}`);
+        }
+
         // 3. Define Queries for "Needs Action"
         const queries = [
-            // Pending Profiles (Direct Manager)
-            EmployeeBasic.find({ primaryReportee: manager._id, profileApprovalStatus: 'submitted' }),
-            // Pending Notices (Direct Manager)
-            EmployeeBasic.find({ primaryReportee: manager._id, 'noticeRequest.status': 'Pending' }),
-            // Pending Loans (Direct Manager)
-            Loan.find({ employeeObjectId: { $in: reporteeObjectIds }, status: 'Pending' }).populate('employeeObjectId', 'firstName lastName'),
-            // Pending Rewards (Direct Manager)
-            Reward.find({ employeeId: { $in: reporteeCustomIds }, rewardStatus: 'Pending' }),
-            // Pending Fines (Direct Manager)
-            Fine.find({ 'assignedEmployees': { $elemMatch: { employeeId: { $in: reporteeCustomIds }, approvalStatus: 'Pending' } } })
+            // Pending Profiles (Direct Manager - Strict)
+            // Pending Profiles (Using Profile Workflow)
+            EmployeeBasic.find({
+                profileWorkflow: {
+                    $elemMatch: {
+                        assignedTo: manager._id,
+                        status: 'submitted'
+                    }
+                }
+            }),
+
+            // Pending Notices (Using Notice Workflow)
+            EmployeeBasic.find({
+                'noticeRequest.workflow': {
+                    $elemMatch: {
+                        assignedTo: manager._id,
+                        status: 'Pending'
+                    }
+                }
+            }),
+            // Pending Loans (Using Workflow Array)
+            // Logic: Is there a workflow step assigned to ME that is currently PENDING?
+            Loan.find({
+                workflow: {
+                    $elemMatch: {
+                        assignedTo: manager._id, // Loan refs EmployeeBasic
+                        status: 'Pending'
+                    }
+                },
+                status: { $nin: ['Approved', 'Rejected', 'Withdrawn'] }
+            }).populate('employeeObjectId', 'firstName lastName'),
+
+            // Pending Rewards (Using Workflow Array)
+            Reward.find({
+                workflow: {
+                    $elemMatch: {
+                        assignedTo: targetUser ? targetUser._id : null, // Reward refs User
+                        status: 'Pending'
+                    }
+                },
+                rewardStatus: { $nin: ['Approved', 'Rejected', 'Withdrawn'] }
+            }),
+
+            // Pending Fines (Using Workflow Array)
+            Fine.find({
+                workflow: {
+                    $elemMatch: {
+                        assignedTo: targetUser ? targetUser._id : null, // Fine refs User
+                        status: 'Pending'
+                    }
+                },
+                fineStatus: { $nin: ['Approved', 'Rejected', 'Withdrawn', 'Completed'] }
+            })
         ];
 
-        // 4. CEO Queries (Authorization Stage)
+        // 4. CEO Queries (Legacy + Workflow Transition)
         if (isCEO) {
-            queries.push(
-                Loan.find({ status: 'Pending Authorization' }).populate('employeeObjectId', 'firstName lastName'),
-                Reward.find({ rewardStatus: 'Pending Authorization' }),
-                Fine.find({ fineStatus: 'Pending Authorization' })
-            );
+            // ... existing CEO specific queries can remain or ideally use the workflow array too since CEO is just another role in the array.
+            // But for safety during migration, let's keep the explicit "Pending Authorization" check if the workflow array fails or is empty on old records.
+            // Actually, strictly using workflow array is cleaner. If CEO logic in controllers pushes to workflow, we just rely on the above queries!
+            // Wait, the CEO queries above might miss items if "Pending Authorization" status exists but workflow array wasn't backfilled.
+            // Let's rely on the explicit checks above. If isCEO is true, 'targetUser' (User) or 'manager' (Employee) will match the 'assignedTo' in the workflow array pushed by controllers (role: 'CEO').
+            // So we DO NOT need separate queries if the controllers are correct.
+            // However, for safety with legacy data, we might want to keep them or just trust the new flow.
+            // Given the user wants "strict 4 array", let's trust the array.
+            // BUT, we must ensure 'targetUser' (User ID) matches what we pushed for CEO.
+            // In controllers, we pushed 'hodUser._id' (User ID) for CEO.
+            // So `Reward` and `Fine` queries above WILL catch CEO items.
+            // `Loan` pushed 'approverBasic._id' (EmployeeBasic ID). So `Loan` query above WILL catch CEO items.
+            // So we can actually REMOVE the separate isCEO block for strictness!
         }
 
         const results = await Promise.all(queries);
@@ -80,11 +143,6 @@ export const getUserActivityStats = async (req, res) => {
         const pendingLoans = results[2];
         const pendingRewards = results[3];
         const pendingFines = results[4];
-
-        let authorizerTasks = [];
-        if (isCEO) {
-            authorizerTasks = [...results[5], ...results[6], ...results[7]];
-        }
 
         // 5. Build Unified Activity List for "Pending"
         const activityList = [];
@@ -98,87 +156,60 @@ export const getUserActivityStats = async (req, res) => {
 
         pendingNotices.forEach(p => activityList.push({
             id: p._id, type: 'Notice Request', requestedBy: `${p.firstName} ${p.lastName}`,
-            requestedDate: p.noticeRequest.requestedAt, actionedDate: null,
-            status: 'Pending', extra1: p.noticeRequest.reason, extra2: p.noticeRequest.duration,
+            requestedDate: p.noticeRequest?.requestedAt || new Date(), actionedDate: null,
+            status: 'Pending', extra1: p.noticeRequest?.reason, extra2: p.noticeRequest?.duration,
             targetEmployeeId: p.employeeId
         }));
 
         pendingLoans.forEach(l => {
             const empName = l.employeeObjectId ? `${l.employeeObjectId.firstName} ${l.employeeObjectId.lastName}` : 'Employee';
-            activityList.push({
-                id: l._id, type: l.type || 'Loan/Advance', requestedBy: empName,
-                requestedDate: l.createdAt, actionedDate: null,
-                status: 'Pending', extra1: `AED ${l.amount}`, extra2: `${l.duration} Months`,
-                targetEmployeeId: l.employeeId
-            });
+            // Find specific workflow step for me
+            const myStep = l.workflow ? l.workflow.find(w => w.assignedTo && w.assignedTo.toString() === manager._id.toString() && w.status === 'Pending') : null;
+
+            if (myStep) {
+                activityList.push({
+                    id: l._id, type: l.type || 'Loan/Advance', requestedBy: empName,
+                    requestedDate: myStep.assignedAt,
+                    actionedDate: null,
+                    status: 'Pending',
+                    extra1: `AED ${l.amount}`, extra2: `${l.duration} Months`,
+                    targetEmployeeId: l.employeeId
+                });
+            }
         });
 
-        pendingRewards.forEach(r => activityList.push({
-            id: r._id, type: 'Reward', requestedBy: r.employeeName,
-            requestedDate: r.createdAt, actionedDate: null,
-            status: 'Pending', extra1: r.rewardType, extra2: `AED ${r.amount || 0}`,
-            targetEmployeeId: r.employeeId
-        }));
+        pendingRewards.forEach(r => {
+            // Find specific workflow step for me
+            const myStep = r.workflow ? r.workflow.find(w => targetUser && w.assignedTo && w.assignedTo.toString() === targetUser._id.toString() && w.status === 'Pending') : null;
+
+            if (myStep) {
+                activityList.push({
+                    id: r._id, type: 'Reward', requestedBy: r.employeeName,
+                    requestedDate: myStep.assignedAt,
+                    actionedDate: null,
+                    status: 'Pending',
+                    extra1: r.rewardType, extra2: `AED ${r.amount || 0}`,
+                    targetEmployeeId: r.employeeId
+                });
+            }
+        });
 
         pendingFines.forEach(f => {
-            const reporteeEntry = f.assignedEmployees.find(e => reporteeCustomIds.includes(e.employeeId));
-            activityList.push({
-                id: f._id, type: 'Fine', requestedBy: reporteeEntry?.employeeName || 'Multiple',
-                requestedDate: f.createdAt, actionedDate: null,
-                status: 'Pending', extra1: f.category, extra2: `AED ${f.fineAmount}`,
-                targetEmployeeId: reporteeEntry?.employeeId
-            });
-        });
+            // Find specific workflow step for me
+            const myStep = f.workflow ? f.workflow.find(w => targetUser && w.assignedTo && w.assignedTo.toString() === targetUser._id.toString() && w.status === 'Pending') : null;
 
-        if (isCEO) {
-            // Deduplicate if already in list? CEO usually sees Pending Auth items.
-            authorizerTasks.forEach(task => {
-                // Determine type based on model name or properties
-                let type = 'Approval Task';
-                let reqBy = 'System';
-                let amt = '-';
-                let date = task.createdAt;
-                let tEmpId = task.employeeId; // Default
-
-                if (task.fineId) {
-                    type = 'Fine Authorization';
-                    // For Fines, show the employee name(s) involved or "HR/Finance" if generic
-                    // Check if assignedEmployees has names
-                    if (task.assignedEmployees && task.assignedEmployees.length > 0) {
-                        reqBy = task.assignedEmployees.map(e => e.employeeName).join(', ');
-                        if (reqBy.length > 30) reqBy = reqBy.substring(0, 27) + '...';
-                        // Use first emp ID target for Nav
-                        tEmpId = task.assignedEmployees[0]?.employeeId;
-                    } else {
-                        reqBy = 'HR/Finance';
-                    }
-                    amt = `AED ${task.fineAmount}`;
-                }
-                else if (task.rewardId) {
-                    type = 'Reward Authorization';
-                    reqBy = task.employeeName;
-                    amt = `AED ${task.amount || 0}`;
-                    tEmpId = task.employeeId;
-                }
-                else if (task.amount && task.status) {
-                    type = 'Loan Authorization';
-                    // Use populated name if available
-                    reqBy = task.employeeObjectId ? `${task.employeeObjectId.firstName} ${task.employeeObjectId.lastName}` : (task.employeeName || 'Employee');
-                    amt = `AED ${task.amount}`;
-                    tEmpId = task.employeeId;
-                }
-
+            if (myStep) {
+                const reporteeEntry = f.assignedEmployees.find(e => reporteeCustomIds.includes(e.employeeId));
                 activityList.push({
-                    id: task._id, type, requestedBy: reqBy,
-                    requestedDate: date, actionedDate: null,
-                    status: 'Pending', extra1: 'Management Authorization', extra2: amt,
-                    targetEmployeeId: tEmpId
+                    id: f._id, type: 'Fine', requestedBy: reporteeEntry?.employeeName || 'Multiple',
+                    requestedDate: myStep.assignedAt,
+                    actionedDate: null,
+                    status: 'Pending',
+                    extra1: f.category, extra2: `AED ${f.fineAmount}`,
+                    targetEmployeeId: reporteeEntry?.employeeId
                 });
-            });
-        }
-
-        // Fetch the User record for the manager/target (needed for Reward/Fine approval checks which link to User)
-        const targetUser = await User.findOne({ employeeId: manager.employeeId });
+            }
+        });
 
         console.log("Stats Debug:", {
             mode: req.query.targetUserId ? "Manager View" : "Self View",
@@ -191,63 +222,103 @@ export const getUserActivityStats = async (req, res) => {
         });
 
         // 6. Actioned History (Items this user approved/rejected)
-        const myActionedLoans = await Loan.find({ approvedBy: manager._id }).sort({ updatedAt: -1 }).limit(10);
+        // QUERY WORKFLOW ARRAY for 'Approved' status
+        const myActionedLoans = await Loan.find({
+            workflow: {
+                $elemMatch: {
+                    assignedTo: manager._id,
+                    status: 'Approved'
+                }
+            }
+        }).sort({ updatedAt: -1 }).limit(10);
 
         let myActionedRewards = [];
         let myActionedFines = [];
 
         if (targetUser) {
             [myActionedRewards, myActionedFines] = await Promise.all([
-                Reward.find({ approvedBy: targetUser._id }).sort({ updatedAt: -1 }).limit(10),
-                Fine.find({ 'assignedEmployees.approvedBy': targetUser._id }).sort({ updatedAt: -1 }).limit(10)
+                Reward.find({
+                    workflow: {
+                        $elemMatch: {
+                            assignedTo: targetUser._id,
+                            status: 'Approved'
+                        }
+                    }
+                }).sort({ updatedAt: -1 }).limit(10),
+                Fine.find({
+                    workflow: {
+                        $elemMatch: {
+                            assignedTo: targetUser._id,
+                            status: 'Approved'
+                        }
+                    }
+                }).sort({ updatedAt: -1 }).limit(10)
             ]);
         }
 
-        const myActionedNotices = await EmployeeBasic.find({ 'noticeRequest.actionedBy': manager._id }).sort({ 'noticeRequest.actionedAt': -1 }).limit(10);
+        // Helper to query Notice Workflow for History
+        const myActionedNotices = await EmployeeBasic.find({
+            'noticeRequest.workflow': {
+                $elemMatch: {
+                    assignedTo: manager._id,
+                    status: { $in: ['Approved', 'Rejected'] }
+                }
+            }
+        }).sort({ 'noticeRequest.actionedAt': -1 }).limit(10);
 
-        myActionedLoans.forEach(l => activityList.push({
-            id: l._id, type: l.type, requestedBy: l.employeeName || 'Employee',
-            requestedDate: l.createdAt,
-            actionedDate: l.approvedDate || l.updatedAt,
-            status: l.status === 'Rejected' ? 'Rejected' : 'Approved',
-            extra1: l.status === 'Rejected' ? 'Actioned: Rejected' : 'Actioned: Approved',
-            extra2: `AED ${l.amount}`,
-            targetEmployeeId: l.employeeId
-        }));
+        myActionedNotices.forEach(p => {
+            const myStep = p.noticeRequest.workflow ? p.noticeRequest.workflow.find(w => w.assignedTo.toString() === manager._id.toString() && w.status !== 'Pending') : null;
+            activityList.push({
+                id: p._id, type: 'Notice Request', requestedBy: `${p.firstName} ${p.lastName}`,
+                requestedDate: myStep ? myStep.assignedAt : p.noticeRequest.requestedAt,
+                actionedDate: myStep ? myStep.actionedAt : (p.noticeRequest.actionedAt || p.updatedAt),
+                status: myStep ? myStep.status : p.noticeRequest.status,
+                extra1: `Actioned: ${myStep ? myStep.status : p.noticeRequest.status}`,
+                extra2: p.noticeRequest.reason,
+                targetEmployeeId: p.employeeId
+            });
+        });
 
-        myActionedRewards.forEach(r => activityList.push({
-            id: r._id, type: 'Reward', requestedBy: r.employeeName,
-            requestedDate: r.createdAt,
-            actionedDate: r.approvedDate || r.updatedAt,
-            status: r.rewardStatus === 'Rejected' ? 'Rejected' : 'Approved',
-            extra1: r.rewardStatus === 'Rejected' ? 'Actioned: Rejected' : 'Actioned: Approved',
-            extra2: `AED ${r.amount || 0}`,
-            targetEmployeeId: r.employeeId
-        }));
+        myActionedLoans.forEach(l => {
+            const myStep = l.workflow ? l.workflow.find(w => w.assignedTo.toString() === manager._id.toString() && w.status === 'Approved') : null;
+            activityList.push({
+                id: l._id, type: l.type, requestedBy: l.employeeName || 'Employee',
+                requestedDate: l.createdAt,
+                actionedDate: myStep ? myStep.actionedAt : (l.approvedDate || l.updatedAt),
+                status: l.status === 'Rejected' ? 'Rejected' : 'Approved',
+                extra1: l.status === 'Rejected' ? 'Actioned: Rejected' : 'Actioned: Approved',
+                extra2: `AED ${l.amount}`,
+                targetEmployeeId: l.employeeId
+            });
+        });
 
-        myActionedNotices.forEach(p => activityList.push({
-            id: p._id, type: 'Notice Request', requestedBy: `${p.firstName} ${p.lastName}`,
-            requestedDate: p.noticeRequest.requestedAt,
-            actionedDate: p.noticeRequest.actionedAt || p.updatedAt,
-            status: p.noticeRequest.status,
-            extra1: `Actioned: ${p.noticeRequest.status}`,
-            extra2: p.noticeRequest.reason,
-            targetEmployeeId: p.employeeId
-        }));
+        myActionedRewards.forEach(r => {
+            const myStep = r.workflow ? r.workflow.find(w => targetUser && w.assignedTo.toString() === targetUser._id.toString() && w.status === 'Approved') : null;
+            activityList.push({
+                id: r._id, type: 'Reward', requestedBy: r.employeeName,
+                requestedDate: r.createdAt,
+                actionedDate: myStep ? myStep.actionedAt : (r.approvedDate || r.updatedAt),
+                status: r.rewardStatus === 'Rejected' ? 'Rejected' : 'Approved',
+                extra1: r.rewardStatus === 'Rejected' ? 'Actioned: Rejected' : 'Actioned: Approved',
+                extra2: `AED ${r.amount || 0}`,
+                targetEmployeeId: r.employeeId
+            });
+        });
 
         myActionedFines.forEach(f => {
-            // Fix: Use targetUser._id (the person whose stats we are building) to find their approval entry
-            // If targetUser is null, myActionedFines would be empty, so targetUser is safe to access here or safely optional
             const approverIdToCheck = targetUser ? targetUser._id : currentUser._id;
-            const myEntry = f.assignedEmployees.find(e => e.approvedBy?.toString() === approverIdToCheck.toString());
+            const myEntry = f.workflow ? f.workflow.find(w => w.assignedTo.toString() === approverIdToCheck.toString() && w.status === 'Approved') : null;
+            // Fallback to assignedEmployees for legacy
+            const legacyEntry = f.assignedEmployees.find(e => e.approvedBy?.toString() === approverIdToCheck.toString());
+
             activityList.push({
-                id: f._id, type: 'Fine', requestedBy: myEntry?.employeeName || 'Employee',
+                id: f._id, type: 'Fine', requestedBy: legacyEntry?.employeeName || 'Employee',
                 requestedDate: f.createdAt,
-                actionedDate: myEntry?.approvedAt || f.updatedAt,
-                status: myEntry?.approvalStatus === 'Rejected' ? 'Rejected' : 'Approved',
-                extra1: `Actioned: ${myEntry?.approvalStatus}`,
+                actionedDate: myEntry ? myEntry.actionedAt : (legacyEntry?.approvedAt || f.updatedAt),
+                status: legacyEntry?.approvalStatus === 'Rejected' ? 'Rejected' : 'Approved',
+                extra1: `Actioned: Verified`,
                 extra2: `AED ${f.fineAmount}`,
-                targetEmployeeId: myEntry?.employeeId
+                targetEmployeeId: legacyEntry?.employeeId
             });
         });
 

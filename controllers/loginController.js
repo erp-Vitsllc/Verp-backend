@@ -18,7 +18,11 @@ export const login = async (req, res) => {
 
         const emailOrUsername = email.trim();
         const adminUsername = process.env.ADMIN_USERNAME || 'admin';
-        const adminPassword = process.env.ADMIN_PASSWORD || 'ChangeMeNow_Admin!123';
+        const adminPassword = process.env.ADMIN_PASSWORD;
+
+        if (!adminPassword) {
+            console.warn("ADMIN_PASSWORD is not set in environment variables. Admin login disabled.");
+        }
 
         // Check if this is the admin user from .env
         const isAdminLogin = emailOrUsername.toLowerCase() === adminUsername.toLowerCase() && password === adminPassword;

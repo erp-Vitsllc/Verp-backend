@@ -16,22 +16,20 @@ export const getRewardById = async (req, res) => {
 
         if (isValidObjectId) {
             reward = await Reward.findById(searchId)
-                .populate({
-                    path: 'approvedBy',
-                    select: 'name username',
-                    options: { lean: true }
-                })
+                .populate('approvedBy', 'name username')
+                .populate('createdBy', 'name username')
+                .populate('hrApprovedBy', 'name username')
+                .populate('accountsApprovedBy', 'name username')
                 .lean();
         }
 
         // If not found by ID or not an ObjectId, try finding by rewardId
         if (!reward) {
             reward = await Reward.findOne({ rewardId: searchId })
-                .populate({
-                    path: 'approvedBy',
-                    select: 'name username',
-                    options: { lean: true }
-                })
+                .populate('approvedBy', 'name username')
+                .populate('createdBy', 'name username')
+                .populate('hrApprovedBy', 'name username')
+                .populate('accountsApprovedBy', 'name username')
                 .lean();
         }
 
@@ -51,6 +49,7 @@ export const getRewardById = async (req, res) => {
         });
     }
 };
+
 
 
 

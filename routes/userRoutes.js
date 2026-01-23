@@ -6,6 +6,7 @@ import { createUser } from '../controllers/user/createUser.js';
 import { updateUser } from '../controllers/user/updateUser.js';
 import { deleteUser } from '../controllers/user/deleteUser.js';
 import { validatePassword } from '../controllers/user/validatePassword.js';
+import { uploadUserProfilePicture } from '../controllers/user/uploadUserProfilePicture.js';
 import { getGroups } from '../controllers/group/getGroups.js';
 import { getGroupById } from '../controllers/group/getGroupById.js';
 import { createGroup } from '../controllers/group/createGroup.js';
@@ -45,6 +46,9 @@ router.post('/', checkPermission('settings_user_group', 'create'), createUser);
 
 // Update user - requires edit permission
 router.patch('/:id', checkPermission('settings_user_group', 'edit'), updateUser);
+
+// Upload profile picture
+router.post('/:id/upload-profile-picture', checkPermission('settings_user_group', 'edit'), uploadUserProfilePicture);
 
 // Delete user - requires delete permission
 router.delete('/:id', checkPermission('settings_user_group', 'delete'), deleteUser);

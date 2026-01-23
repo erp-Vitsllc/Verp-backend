@@ -4,10 +4,25 @@ import { isValidStorageUrl } from "../../utils/validationHelper.js";
 
 export const updateFine = async (req, res) => {
     try {
-        const { id } = req.params;
+        let { id } = req.params;
         const updates = req.body;
 
-        const fine = await Fine.findById(id);
+        // Sanitize ID (remove artifacts like ":1")
+        if (id && typeof id === 'string' && id.includes(':')) {
+            id = id.split(':')[0].trim();
+        }
+
+        let fine;
+        const isValidObjectId = /^[0-9a-fA-F]{24}$/.test(id);
+
+        if (isValidObjectId) {
+            fine = await Fine.findById(id);
+        }
+
+        if (!fine) {
+            fine = await Fine.findOne({ fineId: id });
+        }
+
         if (!fine) {
             return res.status(404).json({ message: "Fine not found" });
         }
@@ -19,6 +34,12 @@ export const updateFine = async (req, res) => {
                 fine[key] = updates[key];
             }
         });
+
+        // Set rejection tracking if applicable
+        if (oldStatus !== 'Rejected' && fine.fineStatus === 'Rejected') {
+            fine.rejectedBy = req.user?._id;
+            fine.rejectedDate = new Date();
+        }
 
         const updatedFine = await fine.save();
 

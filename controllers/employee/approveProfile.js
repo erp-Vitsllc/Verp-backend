@@ -18,9 +18,17 @@ export const approveProfile = async (req, res) => {
             { employeeId },
             {
                 profileApprovalStatus: "active",
-                profileStatus: "active"
+                profileStatus: "active",
+                // WORKFLOW: Update to Active
+                $set: {
+                    "profileWorkflow.$[elem].status": "active",
+                    "profileWorkflow.$[elem].actionedAt": new Date()
+                }
             },
-            { new: true }
+            {
+                new: true,
+                arrayFilters: [{ "elem.status": "submitted" }] // Update only the submitted entry
+            }
         );
 
         if (!updated) {
