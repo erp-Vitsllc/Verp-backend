@@ -10,9 +10,9 @@ import { getDepartmentHOD } from "../../utils/getDepartmentHOD.js";
 export const approveLoan = async (req, res) => {
     try {
         const { id } = req.params;
-        const { status } = req.body; // Approved or Rejected only (PDF generated server-side)
+        const { status } = req.body; // Approved, Rejected, Pending (Submit), Cancelled
 
-        if (!status || !['Approved', 'Rejected'].includes(status)) {
+        if (!status || !['Approved', 'Rejected', 'Pending', 'Cancelled'].includes(status)) {
             return res.status(400).json({ message: "Invalid status" });
         }
 
@@ -62,7 +62,34 @@ export const approveLoan = async (req, res) => {
         let emailSubject = "";
         let emailType = "";
 
-        if (status === 'Approved') {
+        // 0. SUBMIT / CANCEL STAGE
+        if (status === 'Cancelled') {
+            finalStatus = 'Cancelled';
+        }
+        else if (status === 'Pending') {
+            if (loan.status !== 'Draft') {
+                return res.status(400).json({ message: "Only Draft requests can be submitted for approval." });
+            }
+
+            const applicant = await EmployeeBasic.findOne({ employeeId: loan.employeeId }).populate('primaryReportee');
+            if (!applicant?.primaryReportee) {
+                return res.status(400).json({ message: "Reporting manager not assigned. Please contact HR." });
+            }
+
+            finalStatus = 'Pending';
+            nextApprover = applicant.primaryReportee;
+            emailSubject = "New Loan/Advance Request for Review";
+            emailType = "Manager";
+
+            // Set initial workflow
+            loan.workflow = [{
+                role: 'Manager',
+                assignedTo: nextApprover._id,
+                status: 'Pending',
+                assignedAt: new Date()
+            }];
+        }
+        else if (status === 'Approved') {
             if (isAdmin) {
                 finalStatus = 'Approved';
             } else if (approverBasic) {
@@ -137,6 +164,9 @@ export const approveLoan = async (req, res) => {
         } else if (finalStatus === 'Rejected') {
             loan.rejectedBy = approverBasic ? approverBasic._id : requestingUserId;
             loan.rejectedDate = new Date();
+        } else if (finalStatus === 'Cancelled') {
+            loan.cancelledBy = requestingUserId;
+            loan.cancelledDate = new Date();
         }
 
         if (nextApprover) {

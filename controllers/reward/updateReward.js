@@ -56,6 +56,111 @@ export const updateReward = async (req, res) => {
             let finalStatus = rewardStatus;
             let approverDetails = null;
 
+            // === SUBMIT FROM DRAFT LOGIC ===
+            if (finalStatus === 'Pending' && reward.rewardStatus === 'Draft') {
+                console.log("[UpdateReward] Submitting Draft Reward. Identifying Manager...");
+
+                // Find Requester's Manager (Reportee)
+                const employeeForSnapshot = await EmployeeBasic.findOne({ employeeId: reward.employeeId })
+                    .select('primaryReportee employeeId firstName lastName department designation')
+                    .lean();
+
+                if (employeeForSnapshot && employeeForSnapshot.primaryReportee) {
+                    const managerBasic = await EmployeeBasic.findById(employeeForSnapshot.primaryReportee)
+                        .select('employeeId companyEmail email workEmail firstName lastName')
+                        .lean();
+
+                    if (managerBasic) {
+                        let reporteeUser = null;
+                        // Try to find Manager's User Account
+                        if (managerBasic.employeeId) {
+                            if (req.user && req.user.employeeId === managerBasic.employeeId) {
+                                reporteeUser = req.user;
+                            } else {
+                                reporteeUser = await User.findOne({ employeeId: managerBasic.employeeId });
+                            }
+                        }
+                        if (!reporteeUser && (managerBasic.companyEmail || managerBasic.email)) {
+                            const email = managerBasic.companyEmail || managerBasic.email;
+                            reporteeUser = await User.findOne({ $or: [{ email }, { username: email }] });
+                        }
+
+                        if (reporteeUser) {
+                            console.log(`[UpdateReward] Found Manager: ${reporteeUser.name || reporteeUser.username || reporteeUser.email} (${reporteeUser._id})`);
+                            reward.submittedTo = reporteeUser._id;
+
+                            // Initialize Workflow
+                            reward.workflow = [{
+                                role: 'Manager',
+                                assignedTo: reporteeUser._id,
+                                status: 'Pending',
+                                assignedAt: new Date()
+                            }];
+
+                            // Send Email Notification to Manager
+                            const emailUser = process.env.EMAIL_USER || process.env.VERP_EMAIL || process.env.GMAIL_USER;
+                            const emailPass = process.env.EMAIL_PASS || process.env.VERP_PASS || process.env.GMAIL_PASS;
+
+                            if (emailUser && emailPass) {
+                                try {
+                                    const transporter = nodemailer.createTransport({
+                                        host: (emailUser.includes('@gmail') || process.env.GMAIL_USER) ? "smtp.gmail.com" : "smtp.office365.com",
+                                        port: 587,
+                                        secure: false,
+                                        auth: { user: emailUser, pass: emailPass }
+                                    });
+
+                                    const baseUrl = process.env.FRONTEND_URL || "http://localhost:3000";
+                                    const rewardUrl = `${baseUrl}/HRM/Reward/${reward.rewardId}`;
+                                    const empName = reward.employeeName;
+                                    const managerName = `${managerBasic.firstName} ${managerBasic.lastName}`;
+
+                                    await transporter.sendMail({
+                                        from: `"VeRP System" <${emailUser}>`,
+                                        to: managerBasic.companyEmail || reporteeUser.companyEmail || reporteeUser.email,
+                                        subject: "Request for Reward Approval",
+                                        html: `
+                                            <div style="font-family: Arial, sans-serif; color: #333; max-width: 600px; margin: 0 auto; border: 1px solid #eee; border-radius: 8px; overflow: hidden;">
+                                                <div style="background-color: #f8f9fa; padding: 20px; text-align: center; border-bottom: 1px solid #eee;">
+                                                    <h2 style="margin: 0; color: #1a2e35;">Request for Reward Approval</h2>
+                                                </div>
+                                                
+                                                <div style="padding: 20px;">
+                                                    <p>Dear <strong>${managerName}</strong>,</p>
+                                                    
+                                                    <p>We would like to inform you that a formal request for a <strong>${reward.rewardType}</strong> has been initiated for the following employee:</p>
+                                                    
+                                                    <div style="background-color: #fce4ec; border-left: 4px solid #d81b60; padding: 15px; margin: 20px 0; border-radius: 4px;">
+                                                        <p style="margin: 5px 0;"><strong>Employee Name:</strong> ${empName}</p>
+                                                        <p style="margin: 5px 0;"><strong>Employee ID:</strong> ${employeeForSnapshot.employeeId}</p>
+                                                        <p style="margin: 5px 0;"><strong>Department:</strong> ${employeeForSnapshot.department || 'N/A'}</p>
+                                                        <p style="margin: 5px 0;"><strong>Designation:</strong> ${employeeForSnapshot.designation || 'N/A'}</p>
+                                                        <p style="margin: 5px 0;"><strong>Reward Type:</strong> ${reward.rewardType}</p>
+                                                    </div>
+                                                    
+                                                    <p>Kindly review the details and take appropriate action by approving or rejecting the request.</p>
+                                                    
+                                                    <div style="text-align: center; margin-top: 30px; margin-bottom: 30px;">
+                                                        <a href="${rewardUrl}" style="background-color: #007bff; color: #ffffff; padding: 12px 24px; text-decoration: none; border-radius: 5px; font-weight: bold; display: inline-block;">Review Request</a>
+                                                    </div>
+                                                </div>
+                                                
+                                                <div style="background-color: #f8f9fa; padding: 15px; text-align: center; font-size: 0.8em; color: #888; border-top: 1px solid #eee;">
+                                                    <p style="margin: 0;">This is an automated message from the VeRP System.<br>Please do not reply to this email.</p>
+                                                </div>
+                                            </div>
+                                        `
+                                    });
+                                    console.log("Approval Email Sent");
+                                } catch (e) {
+                                    console.error("Email Error:", e);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             if (rewardStatus === 'Approved' || rewardStatus === 'Pending Authorization' || rewardStatus === 'Pending HR' || rewardStatus === 'Pending Accounts') {
                 // Identify Approver
                 let approverBasic = null;
@@ -118,29 +223,18 @@ export const updateReward = async (req, res) => {
 
                     console.log("[UpdateReward] Roles - CEO:", isCEO, "HR:", isHR, "Accounts:", isAccounts, "Reportee:", isReporteeManager);
 
-                    // LOGIC: Strict 4-Stage Flow
-                    // 1. Pending -> Reportee -> Pending HR
-                    // 2. Pending HR -> HR -> Pending Accounts
-                    // 3. Pending Accounts -> Accounts -> Pending Authorization
-                    // 4. Pending Authorization -> CEO -> Approved
+                    // LOGIC: Simplified 2-Stage Flow (Requester -> Reportee -> CEO)
+                    // 1. Pending -> Reportee -> Pending Authorization (CEO)
+                    // 2. Pending Authorization -> CEO -> Approved
 
                     if (reward.rewardStatus === 'Pending' && isReporteeManager) {
-                        finalStatus = 'Pending HR';
-                    }
-                    else if (reward.rewardStatus === 'Pending HR' && isHR) {
-                        finalStatus = 'Pending Accounts';
-                    }
-                    else if (reward.rewardStatus === 'Pending Accounts' && isAccounts) {
                         finalStatus = 'Pending Authorization';
                     }
                     else if (reward.rewardStatus === 'Pending Authorization' && isCEO) {
                         finalStatus = 'Approved';
                     }
                     else if (isCEO && reward.rewardStatus !== 'Rejected') {
-                        // CEO Override (Optional - keep strictly sequential based on request, but usually CEO can approve anytime)
-                        // For now, sticking to user request: pure sequence.
-                        // Actually, user said "then it goes to..." implying sequence.
-                        // However, if CEO is acting on 'Pending Authorization', handled above.
+                        // CEO Override if needed
                     }
                 }
 
@@ -161,36 +255,12 @@ export const updateReward = async (req, res) => {
             reward.rewardStatus = finalStatus;
 
             // Handle Email Notifications for Pending States (HR, Accounts, CEO)
-            if (['Pending HR', 'Pending Accounts', 'Pending Authorization'].includes(finalStatus)) {
+            if (['Pending Authorization'].includes(finalStatus)) {
                 console.log(`[UpdateReward] Triggering Email logic for ${finalStatus}`);
 
                 let targetHOD = null;
 
-                if (finalStatus === 'Pending HR') {
-                    // Find HR Manager
-                    targetHOD = await EmployeeBasic.findOne({
-                        department: { $regex: /hr|human resource/i },
-                        designation: { $regex: /manager|head|director/i }
-                    }).sort({ profileStatus: 1 });
-
-                    // Fallback: Any HR
-                    if (!targetHOD) {
-                        targetHOD = await EmployeeBasic.findOne({ department: { $regex: /hr|human resource/i } });
-                    }
-                }
-                else if (finalStatus === 'Pending Accounts') {
-                    // Find Finance Manager
-                    targetHOD = await EmployeeBasic.findOne({
-                        department: { $regex: /account|finance/i },
-                        designation: { $regex: /manager|head|director|cfo/i }
-                    }).sort({ profileStatus: 1 });
-
-                    // Fallback: Any Accounts
-                    if (!targetHOD) {
-                        targetHOD = await EmployeeBasic.findOne({ department: { $regex: /account|finance/i } });
-                    }
-                }
-                else if (finalStatus === 'Pending Authorization') {
+                if (finalStatus === 'Pending Authorization') {
                     targetHOD = await getManagementHOD();
                 }
 
@@ -209,9 +279,8 @@ export const updateReward = async (req, res) => {
                         reward.submittedTo = hodUser._id;
 
                         // WORKFLOW UPDATES
-                        if (finalStatus === 'Pending HR') {
-                            // 1. Mark Current (Reportee Manager) as Approved
-                            // Check if we need to insert initial state if not exists
+                        if (finalStatus === 'Pending Authorization') {
+                            // 1. Mark Manager (Reportee) as Approved
                             if (!reward.workflow || reward.workflow.length === 0) {
                                 reward.workflow = [];
                             }
@@ -225,60 +294,12 @@ export const updateReward = async (req, res) => {
                                 managerEntry.status = 'Approved';
                                 managerEntry.actionedAt = new Date();
                             } else {
+                                // Fallback: Insert completed Manager step
                                 reward.workflow.push({
                                     role: 'Manager',
-                                    assignedTo: req.user?._id || approverDetails.id, // Best effort
+                                    assignedTo: req.user?._id || approverDetails.id,
                                     status: 'Approved',
                                     assignedAt: reward.createdAt,
-                                    actionedAt: new Date()
-                                });
-                            }
-
-                            // 2. Push HR
-                            reward.workflow.push({
-                                role: 'HR',
-                                assignedTo: hodUser._id,
-                                status: 'Pending',
-                                assignedAt: new Date()
-                            });
-                        }
-                        else if (finalStatus === 'Pending Accounts') {
-                            // 1. Mark HR Approved
-                            const hrEntry = reward.workflow.find(w => w.role === 'HR' && w.status === 'Pending');
-                            if (hrEntry) {
-                                hrEntry.status = 'Approved';
-                                hrEntry.actionedAt = new Date();
-                            } else {
-                                // Fallback
-                                reward.workflow.push({
-                                    role: 'HR',
-                                    assignedTo: req.user?._id, // The HR person acting now
-                                    status: 'Approved',
-                                    assignedAt: new Date(),
-                                    actionedAt: new Date()
-                                });
-                            }
-
-                            // 2. Push Accounts
-                            reward.workflow.push({
-                                role: 'Accounts',
-                                assignedTo: hodUser._id,
-                                status: 'Pending',
-                                assignedAt: new Date()
-                            });
-                        }
-                        else if (finalStatus === 'Pending Authorization') {
-                            // 1. Mark Accounts Approved
-                            const accEntry = reward.workflow.find(w => w.role === 'Accounts' && w.status === 'Pending');
-                            if (accEntry) {
-                                accEntry.status = 'Approved';
-                                accEntry.actionedAt = new Date();
-                            } else {
-                                reward.workflow.push({
-                                    role: 'Accounts',
-                                    assignedTo: req.user?._id,
-                                    status: 'Approved',
-                                    assignedAt: new Date(),
                                     actionedAt: new Date()
                                 });
                             }

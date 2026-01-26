@@ -19,6 +19,7 @@ export const getLoans = async (req, res) => {
         // Transform data if needed
         const formattedLoans = loans.map(loan => ({
             id: loan._id,
+            loanId: loan.loanId, // Expose the sequential ID
             employeeId: loan.employeeId,
             employeeName: loan.employeeObjectId ? `${loan.employeeObjectId.firstName} ${loan.employeeObjectId.lastName}` : 'N/A',
             type: loan.type,

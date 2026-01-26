@@ -9,29 +9,25 @@ import { sendFineApprovalEmail } from "../../utils/sendFineApprovalEmail.js";
  */
 const generateFineId = async () => {
     try {
-        const generateRandomId = () => {
-            return Math.floor(1000 + Math.random() * 9000).toString();
-        };
+        // Find the last created fine that matches the pattern 'fineXXX'
+        const lastFine = await Fine.findOne({ fineId: /^fine\d+$/i }).sort({ createdAt: -1 }).lean();
 
-        let newFineId = generateRandomId();
-        let exists = await Fine.findOne({ fineId: newFineId }).lean();
-        let attempts = 0;
-        const maxAttempts = 100;
-
-        while (exists && attempts < maxAttempts) {
-            newFineId = generateRandomId();
-            exists = await Fine.findOne({ fineId: newFineId }).lean();
-            attempts++;
+        if (lastFine && lastFine.fineId) {
+            // Extract numeric part (case insensitive replace)
+            const currentNum = parseInt(lastFine.fineId.toLowerCase().replace('fine', ''), 10);
+            if (!isNaN(currentNum)) {
+                // Increment and pad with leading zeros (at least 3 digits)
+                const nextNum = currentNum + 1;
+                return `fine${nextNum.toString().padStart(3, '0')}`;
+            }
         }
 
-        if (attempts >= maxAttempts || exists) {
-            return Date.now().toString().slice(-4);
-        }
-
-        return newFineId;
+        // Start sequence if no matching fines found
+        return 'fine001';
     } catch (error) {
         console.error('Error generating fine ID:', error);
-        return Date.now().toString().slice(-4);
+        // Fallback safely to timestamp-based unique ID in case of DB error
+        return `fine${Date.now().toString().slice(-4)}`;
     }
 };
 
@@ -138,8 +134,57 @@ export const addFine = async (req, res) => {
                 companyAmount: totalComp,
                 payableDuration: parseInt(commonData.payableDuration) || null,
                 monthStart: commonData.monthStart || '',
+                monthStart: commonData.monthStart || '',
                 createdBy: req.user._id // Add Creator
             };
+
+            // --- BULK SNAPSHOT LOGIC: Find Manager for First Employee ---
+            if (finePayload.fineStatus !== 'Draft' && primaryEmp && primaryEmp.employeeId) {
+                const targetEmpId = primaryEmp.employeeId;
+                try {
+                    const employeeForSnapshot = await EmployeeBasic.findOne({ employeeId: targetEmpId })
+                        .select('primaryReportee')
+                        .lean();
+
+                    if (employeeForSnapshot && employeeForSnapshot.primaryReportee) {
+                        const managerBasic = await EmployeeBasic.findById(employeeForSnapshot.primaryReportee)
+                            .select('employeeId companyEmail email workEmail firstName lastName')
+                            .lean();
+
+                        if (managerBasic) {
+                            let reporteeUser = null;
+                            if (managerBasic.employeeId) {
+                                if (req.user && req.user.employeeId === managerBasic.employeeId) {
+                                    reporteeUser = req.user;
+                                } else {
+                                    reporteeUser = await User.findOne({ employeeId: managerBasic.employeeId });
+                                }
+                            }
+                            if (!reporteeUser) {
+                                const managerEmail = managerBasic.companyEmail || managerBasic.workEmail || managerBasic.email;
+                                if (managerEmail) {
+                                    reporteeUser = await User.findOne({
+                                        $or: [{ email: managerEmail }, { username: managerEmail }]
+                                    });
+                                }
+                            }
+
+                            if (reporteeUser) {
+                                finePayload.submittedTo = reporteeUser._id;
+                                finePayload.workflow = [{
+                                    role: 'Reportee',
+                                    assignedTo: reporteeUser._id,
+                                    status: 'Pending',
+                                    assignedAt: new Date()
+                                }];
+                                console.log(`[AddFine] Bulk Fine assigned to Manager: ${reporteeUser.username}`);
+                            }
+                        }
+                    }
+                } catch (snapErr) {
+                    console.error("[AddFine] Error resolving manager for bulk fine:", snapErr);
+                }
+            }
 
             console.log(`[AddFine] Saving SINGLE Bulk Fine. ID: ${fineId}, Group Size: ${fullAssignedList.length}, Total Amount: ${totalFine}`);
 
@@ -149,7 +194,9 @@ export const addFine = async (req, res) => {
                 createdFines.push(newFine);
 
                 // Send Email Notification
-                sendFineApprovalEmail(newFine, fullAssignedList).catch(err => console.error(err));
+                if (newFine.fineStatus !== 'Draft') {
+                    sendFineApprovalEmail(newFine, fullAssignedList).catch(err => console.error(err));
+                }
             } catch (err) {
                 console.error(`[AddFine] Error saving bulk fine:`, err);
                 errors.push({ error: err.message });
@@ -291,66 +338,67 @@ export const addFine = async (req, res) => {
 
         // SNAPSHOT LOGIC: Find Reportee's USER Object for "submittedTo"
         // Use the first assigned employee to determine the manager
-        const targetEmpId = (fineData.assignedEmployees && fineData.assignedEmployees.length > 0)
-            ? fineData.assignedEmployees[0].employeeId
-            : employeeId;
+        if (fineData.fineStatus !== 'Draft') {
+            const targetEmpId = (fineData.assignedEmployees && fineData.assignedEmployees.length > 0)
+                ? fineData.assignedEmployees[0].employeeId
+                : employeeId;
 
-        if (targetEmpId && targetEmpId !== 'PENDING') {
-            const employeeForSnapshot = await EmployeeBasic.findOne({ employeeId: targetEmpId })
-                .select('primaryReportee')
-                .lean();
-
-            if (employeeForSnapshot && employeeForSnapshot.primaryReportee) {
-                // Determine Manager
-                const managerBasic = await EmployeeBasic.findById(employeeForSnapshot.primaryReportee)
-                    .select('employeeId companyEmail email workEmail firstName lastName')
+            if (targetEmpId && targetEmpId !== 'PENDING') {
+                const employeeForSnapshot = await EmployeeBasic.findOne({ employeeId: targetEmpId })
+                    .select('primaryReportee')
                     .lean();
 
-                if (managerBasic) {
-                    // Find Manager User Account
-                    let reporteeUser = null;
+                if (employeeForSnapshot && employeeForSnapshot.primaryReportee) {
+                    // Determine Manager
+                    const managerBasic = await EmployeeBasic.findById(employeeForSnapshot.primaryReportee)
+                        .select('employeeId companyEmail email workEmail firstName lastName')
+                        .lean();
 
-                    if (managerBasic.employeeId) {
-                        // Fix: Prefer the logged-in user if they are the manager
-                        if (req.user && req.user.employeeId === managerBasic.employeeId) {
-                            reporteeUser = req.user;
-                            console.log(`[AddFine] Manager is the requesting user. Using req.user (Preferred): ${req.user._id}`);
-                        } else {
-                            reporteeUser = await User.findOne({ employeeId: managerBasic.employeeId });
+                    if (managerBasic) {
+                        // Find Manager User Account
+                        let reporteeUser = null;
+
+                        if (managerBasic.employeeId) {
+                            // Fix: Prefer the logged-in user if they are the manager
+                            if (req.user && req.user.employeeId === managerBasic.employeeId) {
+                                reporteeUser = req.user;
+                                console.log(`[AddFine] Manager is the requesting user. Using req.user (Preferred): ${req.user._id}`);
+                            } else {
+                                reporteeUser = await User.findOne({ employeeId: managerBasic.employeeId });
+                            }
                         }
-                    }
 
-                    if (!reporteeUser) {
-                        const managerEmail = managerBasic.companyEmail || managerBasic.workEmail || managerBasic.email;
-                        if (managerEmail) {
-                            console.log(`[AddFine] Manager User not found by ID. Trying email: ${managerEmail}`);
-                            reporteeUser = await User.findOne({
-                                $or: [
-                                    { email: managerEmail },
-                                    { username: managerEmail }
-                                ]
+                        if (!reporteeUser) {
+                            const managerEmail = managerBasic.companyEmail || managerBasic.workEmail || managerBasic.email;
+                            if (managerEmail) {
+                                console.log(`[AddFine] Manager User not found by ID. Trying email: ${managerEmail}`);
+                                reporteeUser = await User.findOne({
+                                    $or: [
+                                        { email: managerEmail },
+                                        { username: managerEmail }
+                                    ]
+                                });
+                            }
+                        }
+
+                        if (reporteeUser) {
+                            fineData.submittedTo = reporteeUser._id;
+                            // WORKFLOW: Initial Pending Step (Pushed to Dashboard)
+                            fineData.workflow = [{
+                                role: 'Reportee', // or Manager
+                                assignedTo: reporteeUser._id,
+                                status: 'Pending',
+                                assignedAt: new Date()
+                            }];
+                            console.log(`[AddFine] Dashboard Request Pushed for Manager: ${reporteeUser.username}`);
+
+                            // SNAPSHOT: Log Dashboard State
+                            const currentPendingFines = await Fine.countDocuments({
+                                workflow: { $elemMatch: { assignedTo: reporteeUser._id, status: 'Pending' } },
+                                fineStatus: { $nin: ['Approved', 'Rejected', 'Withdrawn', 'Completed'] }
                             });
-                        }
-                    }
 
-                    if (reporteeUser) {
-                        fineData.submittedTo = reporteeUser._id;
-                        // WORKFLOW: Initial Pending Step (Pushed to Dashboard)
-                        fineData.workflow = [{
-                            role: 'Reportee', // or Manager
-                            assignedTo: reporteeUser._id,
-                            status: 'Pending',
-                            assignedAt: new Date()
-                        }];
-                        console.log(`[AddFine] Dashboard Request Pushed for Manager: ${reporteeUser.username}`);
-
-                        // SNAPSHOT: Log Dashboard State
-                        const currentPendingFines = await Fine.countDocuments({
-                            workflow: { $elemMatch: { assignedTo: reporteeUser._id, status: 'Pending' } },
-                            fineStatus: { $nin: ['Approved', 'Rejected', 'Withdrawn', 'Completed'] }
-                        });
-
-                        console.log(`
+                            console.log(`
 ===================================================
 [DASHBOARD PREVIEW - FINE]
 ---------------------------------------------------
@@ -364,11 +412,12 @@ New Item Pushed            : +1
 ---------------------------------------------------
 TOTAL PENDING ON DASHBOARD : ${currentPendingFines + 1}
 ===================================================`);
+                        } else {
+                            console.warn(`[AddFine] Manager (ID: ${managerBasic.employeeId}) has no User account linked. Dashboard request cannot be created.`);
+                        }
                     } else {
-                        console.warn(`[AddFine] Manager (ID: ${managerBasic.employeeId}) has no User account linked. Dashboard request cannot be created.`);
+                        console.warn(`[AddFine] Primary Reportee (ID: ${employeeForSnapshot.primaryReportee}) not found in EmployeeBasic.`);
                     }
-                } else {
-                    console.warn(`[AddFine] Primary Reportee (ID: ${employeeForSnapshot.primaryReportee}) not found in EmployeeBasic.`);
                 }
             }
         }
@@ -378,7 +427,9 @@ TOTAL PENDING ON DASHBOARD : ${currentPendingFines + 1}
 
         // Send Email Notification
         // Use fineData.assignedEmployees as it was standardized in the payload construction above
-        sendFineApprovalEmail(savedFine, fineData.assignedEmployees).catch(err => console.error(err));
+        if (savedFine.fineStatus !== 'Draft') {
+            sendFineApprovalEmail(savedFine, fineData.assignedEmployees).catch(err => console.error(err));
+        }
 
         return res.status(201).json({
             message: "Fine created successfully",

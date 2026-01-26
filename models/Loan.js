@@ -11,6 +11,10 @@ const loanSchema = new mongoose.Schema({
         ref: 'EmployeeBasic',
         required: true
     },
+    loanId: {
+        type: String
+        // Not making it required yet to avoid breaking existing records without migration
+    },
     type: {
         type: String,
         enum: ['Loan', 'Advance'],
@@ -24,19 +28,24 @@ const loanSchema = new mongoose.Schema({
         type: Number,
         required: true // in months
     },
+    monthStart: {
+        type: String,
+        required: false, // Optional for legacy records
+        default: ''
+    },
     reason: {
         type: String,
         required: true
     },
     status: {
         type: String,
-        enum: ['Pending', 'Pending HR', 'Pending Accounts', 'Pending Authorization', 'Approved', 'Rejected'],
-        default: 'Pending'
+        enum: ['Draft', 'Pending', 'Pending HR', 'Pending Accounts', 'Pending Authorization', 'Approved', 'Rejected', 'Cancelled'],
+        default: 'Draft'
     },
     approvalStatus: {
         type: String,
-        enum: ['Pending', 'Pending HR', 'Pending Accounts', 'Pending Authorization', 'Approved', 'Rejected'],
-        default: 'Pending'
+        enum: ['Draft', 'Pending', 'Pending HR', 'Pending Accounts', 'Pending Authorization', 'Approved', 'Rejected', 'Cancelled'],
+        default: 'Draft'
     },
     appliedDate: {
         type: Date,

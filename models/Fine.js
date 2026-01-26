@@ -96,8 +96,8 @@ const fineSchema = new mongoose.Schema(
         fineStatus: {
             type: String,
             required: true,
-            enum: ['Pending', 'Pending HR', 'Pending Accounts', 'Pending Authorization', 'Approved', 'Active', 'Completed', 'Cancelled', 'Rejected'],
-            default: 'Pending'
+            enum: ['Draft', 'Pending', 'Pending HR', 'Pending Accounts', 'Pending Authorization', 'Approved', 'Active', 'Completed', 'Cancelled', 'Rejected'],
+            default: 'Draft'
         },
         fineAmount: {
             type: Number,

@@ -61,8 +61,13 @@ import { getUserActivityStats } from "../controllers/stats/getUserActivityStats.
 import { getHierarchy } from "../controllers/employee/getHierarchy.js";
 import { getTeamStats } from "../controllers/stats/getTeamStats.js";
 
+import { getNextEmployeeId } from "../controllers/employee/getNextEmployeeId.js";
+
 // Employee list - requires view permission
 router.get("/", checkPermission('hrm_employees_list', 'view'), getEmployees);
+
+// Get next employee ID - requires create permission (or just authenticated)
+router.get("/next-id", checkPermission('hrm_employees_add', 'create'), getNextEmployeeId);
 
 // Dashboard Hierarchy - basic access for anyone logged in
 router.get("/dashboard/hierarchy", getHierarchy);

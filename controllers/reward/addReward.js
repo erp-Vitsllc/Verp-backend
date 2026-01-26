@@ -10,17 +10,23 @@ import nodemailer from "nodemailer";
  */
 const generateRewardId = async () => {
     try {
-        // Get all rewards and find the highest number (more reliable than string sorting)
+        // Get all rewards and find the highest number
         const rewards = await Reward.find({})
             .select('rewardId')
             .lean();
 
         let maxNumber = 0;
 
-        // Extract numbers from all reward IDs and find the maximum
+        // Extract numbers - support both 're' and 'RWD' prefixes for backward compatibility
         rewards.forEach(reward => {
             if (reward.rewardId) {
-                const match = reward.rewardId.match(/re(\d+)/i);
+                // Check for new RWD format first
+                let match = reward.rewardId.match(/RWD(\d+)/i);
+                if (!match) {
+                    // Fallback check for old 're' format
+                    match = reward.rewardId.match(/re(\d+)/i);
+                }
+
                 if (match && match[1]) {
                     const num = parseInt(match[1], 10);
                     if (!isNaN(num) && num > maxNumber) {
@@ -32,7 +38,9 @@ const generateRewardId = async () => {
 
         // Start from the next number
         let nextNumber = maxNumber + 1;
-        let newRewardId = `re${nextNumber}`;
+
+        // Format: RWD001, RWD002, etc.
+        let newRewardId = `RWD${nextNumber.toString().padStart(3, '0')}`;
 
         // Ensure uniqueness - check if this ID already exists
         let exists = await Reward.findOne({ rewardId: newRewardId }).lean();
@@ -42,30 +50,23 @@ const generateRewardId = async () => {
         // Keep incrementing until we find a unique ID
         while (exists && attempts < maxAttempts) {
             nextNumber++;
-            newRewardId = `re${nextNumber}`;
+            newRewardId = `RWD${nextNumber.toString().padStart(3, '0')}`;
             exists = await Reward.findOne({ rewardId: newRewardId }).lean();
             attempts++;
         }
 
-        // If we couldn't find a unique sequential ID, use timestamp with random suffix
+        // If we couldn't find a unique sequential ID after max attempts (rare)
         if (attempts >= maxAttempts || exists) {
-            const timestamp = Date.now();
-            const randomSuffix = Math.random().toString(36).substr(2, 6);
-            newRewardId = `re${timestamp}${randomSuffix}`;
-
-            // Double-check this ID is unique
-            const finalCheck = await Reward.findOne({ rewardId: newRewardId }).lean();
-            if (finalCheck) {
-                // If still exists, add more randomness
-                return `re${timestamp}-${Math.random().toString(36).substr(2, 9)}`;
-            }
+            const timestamp = Date.now().toString().slice(-4);
+            const randomSuffix = Math.floor(Math.random() * 1000).toString().padStart(3, '0');
+            newRewardId = `RWD${timestamp}${randomSuffix}`;
         }
 
         return newRewardId;
     } catch (error) {
         console.error('Error generating reward ID:', error);
-        // Fallback: use timestamp-based ID with random suffix
-        return `re${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+        // Fallback: use timestamp-based ID
+        return `RWD${Date.now().toString().slice(-6)}`;
     }
 };
 
@@ -157,98 +158,100 @@ export const addReward = async (req, res) => {
         };
 
         // SNAPSHOT LOGIC: Find Reportee's USER Object for "submittedTo"
-        // Rewards schema refs "User", not "EmployeeBasic" for approvedBy/submittedTo.
-
-        // 1. Get the EmployeeBasic of the Requester to find their Primary Reportee ID (ObjectId)
-        const employeeForSnapshot = await EmployeeBasic.findOne({ employeeId })
-            .select('primaryReportee')
-            .lean();
-
-        if (employeeForSnapshot && employeeForSnapshot.primaryReportee) {
-            // 2. The primaryReportee in EmployeeBasic is an ObjectId ref to another EmployeeBasic
-            // We need to fetch THAT Manager's EmployeeBasic to get their string 'employeeId' (e.g. "VITS005")
-            // Because the User model links via the string 'employeeId', not the ObjectId.
-            const managerBasic = await EmployeeBasic.findById(employeeForSnapshot.primaryReportee)
-                .select('employeeId companyEmail email workEmail firstName lastName')
+        // Only run if not Draft
+        if (rewardData.rewardStatus !== 'Draft') {
+            // 1. Get the EmployeeBasic of the Requester to find their Primary Reportee ID (ObjectId)
+            const employeeForSnapshot = await EmployeeBasic.findOne({ employeeId })
+                .select('primaryReportee')
                 .lean();
 
-            if (managerBasic) {
-                // 3. Now find the User associated with that Manager
-                // Try by employeeId first
-                let reporteeUser = null;
+            if (employeeForSnapshot && employeeForSnapshot.primaryReportee) {
+                // 2. The primaryReportee in EmployeeBasic is an ObjectId ref to another EmployeeBasic
+                // We need to fetch THAT Manager's EmployeeBasic to get their string 'employeeId' (e.g. "VITS005")
+                // Because the User model links via the string 'employeeId', not the ObjectId.
+                const managerBasic = await EmployeeBasic.findById(employeeForSnapshot.primaryReportee)
+                    .select('employeeId companyEmail email workEmail firstName lastName')
+                    .lean();
 
-                if (managerBasic.employeeId) {
-                    // Fix: Prefer the logged-in user if they are the manager, to avoid picking up duplicate/stale User accounts
-                    if (req.user && req.user.employeeId === managerBasic.employeeId) {
-                        reporteeUser = req.user;
-                        console.log(`[AddReward] Manager is the requesting user. Using req.user (Preferred): ${req.user._id}`);
-                    } else {
-                        reporteeUser = await User.findOne({ employeeId: managerBasic.employeeId });
+                if (managerBasic) {
+                    // 3. Now find the User associated with that Manager
+                    // Try by employeeId first
+                    let reporteeUser = null;
+
+                    if (managerBasic.employeeId) {
+                        // Fix: Prefer the logged-in user if they are the manager, to avoid picking up duplicate/stale User accounts
+                        if (req.user && req.user.employeeId === managerBasic.employeeId) {
+                            reporteeUser = req.user;
+                            console.log(`[AddReward] Manager is the requesting user. Using req.user (Preferred): ${req.user._id}`);
+                        } else {
+                            reporteeUser = await User.findOne({ employeeId: managerBasic.employeeId });
+                        }
                     }
-                }
 
-                // If not found by ID, try email (fallback)
-                if (!reporteeUser) {
-                    const managerEmail = managerBasic.companyEmail || managerBasic.workEmail || managerBasic.email;
-                    if (managerEmail) {
-                        console.log(`[AddReward] Manager User not found by ID. Trying email: ${managerEmail}`);
-                        reporteeUser = await User.findOne({
-                            $or: [
-                                { email: managerEmail },
-                                { username: managerEmail }
-                            ]
+                    // If not found by ID, try email (fallback)
+                    if (!reporteeUser) {
+                        const managerEmail = managerBasic.companyEmail || managerBasic.workEmail || managerBasic.email;
+                        if (managerEmail) {
+                            console.log(`[AddReward] Manager User not found by ID. Trying email: ${managerEmail}`);
+                            reporteeUser = await User.findOne({
+                                $or: [
+                                    { email: managerEmail },
+                                    { username: managerEmail }
+                                ]
+                            });
+                        }
+                    }
+
+                    if (reporteeUser) {
+                        console.log(`[AddReward] Found Manager User: ${reporteeUser.username} (${reporteeUser._id}) for Reportee: ${managerBasic.employeeId}`);
+                        rewardData.submittedTo = reporteeUser._id;
+
+                        // WORKFLOW: Initial Pending Step (Pushed to Dashboard)
+                        // The duration clock starts ticking for the Reportee from NOW.
+                        rewardData.workflow = [{
+                            role: 'Manager',
+                            assignedTo: reporteeUser._id,
+                            status: 'Pending',
+                            assignedAt: new Date()
+                        }];
+                        console.log(`[AddReward] Dashboard Request Pushed for Manager: ${reporteeUser.username} at ${new Date().toISOString()}`);
+
+                        // SNAPSHOT: Log Dashboard State
+                        const currentPending = await Reward.countDocuments({
+                            workflow: { $elemMatch: { assignedTo: reporteeUser._id, status: 'Pending' } },
+                            rewardStatus: { $nin: ['Approved', 'Rejected', 'Withdrawn'] }
                         });
+
+                        console.log("Stats Debug:", {
+                            mode: 'Workflow Assignment',
+                            currentUserId: req.user ? req.user._id : 'N/A',
+                            requestTargetId: null,
+                            managerId: managerBasic._id,
+                            managerEmpId: managerBasic.employeeId,
+                            targetUserFound: !!reporteeUser,
+                            targetUserId: reporteeUser._id
+                        });
+
+                        console.log(`
+    ===================================================
+    [DASHBOARD PREVIEW - REWARD]
+    ---------------------------------------------------
+    Target Manager    : ${reporteeUser.username}
+    Target User ID    : ${reporteeUser._id}
+    Target Emp ID     : ${managerBasic.employeeId}
+    Target Email      : ${reporteeUser.email || reporteeUser.companyEmail}
+    ---------------------------------------------------
+    Pending Rewards (Pre-Save) : ${currentPending}
+    New Item Pushed            : +1
+    ---------------------------------------------------
+    TOTAL PENDING ON DASHBOARD : ${currentPending + 1}
+    ===================================================`);
+                    } else {
+                        console.warn(`[AddReward] Manager (ID: ${managerBasic.employeeId}) has no User account linked. Dashboard request cannot be created.`);
                     }
-                }
-
-                if (reporteeUser) {
-                    console.log(`[AddReward] Found Manager User: ${reporteeUser.username} (${reporteeUser._id}) for Reportee: ${managerBasic.employeeId}`);
-                    rewardData.submittedTo = reporteeUser._id;
-
-                    // WORKFLOW: Initial Pending Step (Pushed to Dashboard)
-                    rewardData.workflow = [{
-                        role: 'Manager',
-                        assignedTo: reporteeUser._id,
-                        status: 'Pending',
-                        assignedAt: new Date()
-                    }];
-                    console.log(`[AddReward] Dashboard Request Pushed for Manager: ${reporteeUser.username}`);
-
-                    // SNAPSHOT: Log Dashboard State
-                    const currentPending = await Reward.countDocuments({
-                        workflow: { $elemMatch: { assignedTo: reporteeUser._id, status: 'Pending' } },
-                        rewardStatus: { $nin: ['Approved', 'Rejected', 'Withdrawn'] }
-                    });
-
-                    console.log("Stats Debug:", {
-                        mode: 'Workflow Assignment',
-                        currentUserId: req.user ? req.user._id : 'N/A',
-                        requestTargetId: null,
-                        managerId: managerBasic._id,
-                        managerEmpId: managerBasic.employeeId,
-                        targetUserFound: !!reporteeUser,
-                        targetUserId: reporteeUser._id
-                    });
-
-                    console.log(`
-===================================================
-[DASHBOARD PREVIEW - REWARD]
----------------------------------------------------
-Target Manager    : ${reporteeUser.username}
-Target User ID    : ${reporteeUser._id}
-Target Emp ID     : ${managerBasic.employeeId}
-Target Email      : ${reporteeUser.email || reporteeUser.companyEmail}
----------------------------------------------------
-Pending Rewards (Pre-Save) : ${currentPending}
-New Item Pushed            : +1
----------------------------------------------------
-TOTAL PENDING ON DASHBOARD : ${currentPending + 1}
-===================================================`);
                 } else {
-                    console.warn(`[AddReward] Manager (ID: ${managerBasic.employeeId}) has no User account linked. Dashboard request cannot be created.`);
+                    console.warn(`[AddReward] Primary Reportee (ID: ${employeeForSnapshot.primaryReportee}) not found in EmployeeBasic.`);
                 }
-            } else {
-                console.warn(`[AddReward] Primary Reportee (ID: ${employeeForSnapshot.primaryReportee}) not found in EmployeeBasic.`);
             }
         }
 
@@ -305,115 +308,117 @@ TOTAL PENDING ON DASHBOARD : ${currentPending + 1}
             console.log('Saved reward ID:', savedReward.rewardId);
 
             // === EMAIL NOTIFICATION LOGIC ===
-            try {
-                // Fetch complete employee details to get reportee info
-                // We need to fetch again or populate the initial fetch if we didn't before.
-                // Since we need primaryReportee which is a ref, we should populate it.
-                // The initial fetch at line 97 was lean and selected specific fields.
-                // Let's do a fresh fetch to be safe and clean.
-                const employeeForEmail = await EmployeeBasic.findOne({ employeeId })
-                    .populate('primaryReportee', 'firstName lastName email companyEmail employeeId')
-                    .select('firstName lastName employeeId department designation primaryReportee')
-                    .lean();
+            if (savedReward.rewardStatus !== 'Draft') {
+                try {
+                    // Fetch complete employee details to get reportee info
+                    // We need to fetch again or populate the initial fetch if we didn't before.
+                    // Since we need primaryReportee which is a ref, we should populate it.
+                    // The initial fetch at line 97 was lean and selected specific fields.
+                    // Let's do a fresh fetch to be safe and clean.
+                    const employeeForEmail = await EmployeeBasic.findOne({ employeeId })
+                        .populate('primaryReportee', 'firstName lastName email companyEmail employeeId')
+                        .select('firstName lastName employeeId department designation primaryReportee')
+                        .lean();
 
-                if (employeeForEmail && employeeForEmail.primaryReportee && employeeForEmail.primaryReportee.email) {
-                    const reportee = employeeForEmail.primaryReportee;
-                    const reporteeEmail = reportee.companyEmail || reportee.workEmail || reportee.email;
-                    const reporteeName = `${reportee.firstName} ${reportee.lastName}`.trim();
+                    if (employeeForEmail && employeeForEmail.primaryReportee && employeeForEmail.primaryReportee.email) {
+                        const reportee = employeeForEmail.primaryReportee;
+                        const reporteeEmail = reportee.companyEmail || reportee.workEmail || reportee.email;
+                        const reporteeName = `${reportee.firstName} ${reportee.lastName}`.trim();
 
-                    // Employee Details
-                    const empName = `${employeeForEmail.firstName} ${employeeForEmail.lastName}`;
-                    const empId = employeeForEmail.employeeId;
-                    const empDept = employeeForEmail.department || 'N/A';
-                    const empDesig = employeeForEmail.designation || 'N/A';
+                        // Employee Details
+                        const empName = `${employeeForEmail.firstName} ${employeeForEmail.lastName}`;
+                        const empId = employeeForEmail.employeeId;
+                        const empDept = employeeForEmail.department || 'N/A';
+                        const empDesig = employeeForEmail.designation || 'N/A';
 
-                    // Email Credentials
-                    // Check all possible environment variable names
-                    const emailUser = process.env.EMAIL_USER || process.env.VERP_EMAIL || process.env.GMAIL_USER;
-                    const emailPass = process.env.EMAIL_PASS || process.env.VERP_PASS || process.env.GMAIL_PASS;
+                        // Email Credentials
+                        // Check all possible environment variable names
+                        const emailUser = process.env.EMAIL_USER || process.env.VERP_EMAIL || process.env.GMAIL_USER;
+                        const emailPass = process.env.EMAIL_PASS || process.env.VERP_PASS || process.env.GMAIL_PASS;
 
-                    if (emailUser && emailPass) {
-                        // Determine SMTP host based on email domain or preference
-                        let smtpHost = "smtp.office365.com"; // Default to Outlook
-                        let smtpPort = 587;
+                        if (emailUser && emailPass) {
+                            // Determine SMTP host based on email domain or preference
+                            let smtpHost = "smtp.office365.com"; // Default to Outlook
+                            let smtpPort = 587;
 
-                        if (emailUser.includes('@gmail.com') || process.env.GMAIL_USER) {
-                            smtpHost = "smtp.gmail.com";
-                            // For secure: false (TLS), use 587
-                        }
+                            if (emailUser.includes('@gmail.com') || process.env.GMAIL_USER) {
+                                smtpHost = "smtp.gmail.com";
+                                // For secure: false (TLS), use 587
+                            }
 
-                        console.log(`Using SMTP Host: ${smtpHost} for user: ${emailUser}`);
+                            console.log(`Using SMTP Host: ${smtpHost} for user: ${emailUser}`);
 
-                        const transporter = nodemailer.createTransport({
-                            host: smtpHost,
-                            port: smtpPort,
-                            secure: false, // true for 465, false for other ports
-                            auth: {
-                                user: emailUser,
-                                pass: emailPass,
-                            },
-                        });
-
-                        const subject = "Request for Reward Approval";
-
-                        // Use Configured URL or localhost fallback
-                        const baseUrl = process.env.FRONTEND_URL || "http://localhost:3000";
-                        const rewardUrl = `${baseUrl}/HRM/Reward/${savedReward.rewardId}`;
-
-                        const html = `
-                            <div style="font-family: Arial, sans-serif; color: #333; max-width: 600px; margin: 0 auto; border: 1px solid #eee; border-radius: 8px; overflow: hidden;">
-                                <div style="background-color: #f8f9fa; padding: 20px; text-align: center; border-bottom: 1px solid #eee;">
-                                    <h2 style="margin: 0; color: #1a2e35;">Request for Reward Approval</h2>
-                                </div>
-                                
-                                <div style="padding: 20px;">
-                                    <p>Dear <strong>${reporteeName}</strong>,</p>
-                                    
-                                    <p>We would like to inform you that a formal request for a <strong>${rewardType}</strong> has been initiated for the following employee:</p>
-                                    
-                                    <div style="background-color: #fce4ec; border-left: 4px solid #d81b60; padding: 15px; margin: 20px 0; border-radius: 4px;">
-                                        <p style="margin: 5px 0;"><strong>Employee Name:</strong> ${empName}</p>
-                                        <p style="margin: 5px 0;"><strong>Employee ID:</strong> ${empId}</p>
-                                        <p style="margin: 5px 0;"><strong>Department:</strong> ${empDept}</p>
-                                        <p style="margin: 5px 0;"><strong>Designation:</strong> ${empDesig}</p>
-                                        <p style="margin: 5px 0;"><strong>Reward Type:</strong> ${rewardType}</p>
-                                    </div>
-                                    
-                                    <p>Kindly review the details and take appropriate action by approving or rejecting the request.</p>
-                                    
-                                    <div style="text-align: center; margin-top: 30px; margin-bottom: 30px;">
-                                        <a href="${rewardUrl}" style="background-color: #007bff; color: #ffffff; padding: 12px 24px; text-decoration: none; border-radius: 5px; font-weight: bold; display: inline-block;">Review Request</a>
-                                    </div>
-                                </div>
-                                
-                                <div style="background-color: #f8f9fa; padding: 15px; text-align: center; font-size: 0.8em; color: #888; border-top: 1px solid #eee;">
-                                    <p style="margin: 0;">This is an automated message from the VeRP System.<br>Please do not reply to this email.</p>
-                                </div>
-                            </div>
-                        `;
-
-                        // Send Email
-                        try {
-                            const info = await transporter.sendMail({
-                                from: `"VeRP System" <${emailUser}>`,
-                                to: reporteeEmail,
-                                subject: subject,
-                                html: html,
+                            const transporter = nodemailer.createTransport({
+                                host: smtpHost,
+                                port: smtpPort,
+                                secure: false, // true for 465, false for other ports
+                                auth: {
+                                    user: emailUser,
+                                    pass: emailPass,
+                                },
                             });
-                            console.log(`[DEBUG] Email sent successfully. MessageID: ${info.messageId}`);
-                            console.log(`Approval email sent to ${reporteeEmail}`);
-                        } catch (sendError) {
-                            console.error('[DEBUG] Transporter Send Error:', sendError);
+
+                            const subject = "Request for Reward Approval";
+
+                            // Use Configured URL or localhost fallback
+                            const baseUrl = process.env.FRONTEND_URL || "http://localhost:3000";
+                            const rewardUrl = `${baseUrl}/HRM/Reward/${savedReward.rewardId}`;
+
+                            const html = `
+                                <div style="font-family: Arial, sans-serif; color: #333; max-width: 600px; margin: 0 auto; border: 1px solid #eee; border-radius: 8px; overflow: hidden;">
+                                    <div style="background-color: #f8f9fa; padding: 20px; text-align: center; border-bottom: 1px solid #eee;">
+                                        <h2 style="margin: 0; color: #1a2e35;">Request for Reward Approval</h2>
+                                    </div>
+                                    
+                                    <div style="padding: 20px;">
+                                        <p>Dear <strong>${reporteeName}</strong>,</p>
+                                        
+                                        <p>We would like to inform you that a formal request for a <strong>${rewardType}</strong> has been initiated for the following employee:</p>
+                                        
+                                        <div style="background-color: #fce4ec; border-left: 4px solid #d81b60; padding: 15px; margin: 20px 0; border-radius: 4px;">
+                                            <p style="margin: 5px 0;"><strong>Employee Name:</strong> ${empName}</p>
+                                            <p style="margin: 5px 0;"><strong>Employee ID:</strong> ${empId}</p>
+                                            <p style="margin: 5px 0;"><strong>Department:</strong> ${empDept}</p>
+                                            <p style="margin: 5px 0;"><strong>Designation:</strong> ${empDesig}</p>
+                                            <p style="margin: 5px 0;"><strong>Reward Type:</strong> ${rewardType}</p>
+                                        </div>
+                                        
+                                        <p>Kindly review the details and take appropriate action by approving or rejecting the request.</p>
+                                        
+                                        <div style="text-align: center; margin-top: 30px; margin-bottom: 30px;">
+                                            <a href="${rewardUrl}" style="background-color: #007bff; color: #ffffff; padding: 12px 24px; text-decoration: none; border-radius: 5px; font-weight: bold; display: inline-block;">Review Request</a>
+                                        </div>
+                                    </div>
+                                    
+                                    <div style="background-color: #f8f9fa; padding: 15px; text-align: center; font-size: 0.8em; color: #888; border-top: 1px solid #eee;">
+                                        <p style="margin: 0;">This is an automated message from the VeRP System.<br>Please do not reply to this email.</p>
+                                    </div>
+                                </div>
+                            `;
+
+                            // Send Email
+                            try {
+                                const info = await transporter.sendMail({
+                                    from: `"VeRP System" <${emailUser}>`,
+                                    to: reporteeEmail,
+                                    subject: subject,
+                                    html: html,
+                                });
+                                console.log(`[DEBUG] Email sent successfully. MessageID: ${info.messageId}`);
+                                console.log(`Approval email sent to ${reporteeEmail}`);
+                            } catch (sendError) {
+                                console.error('[DEBUG] Transporter Send Error:', sendError);
+                            }
+                        } else {
+                            console.log('Email credentials missing, skipping notification.');
                         }
                     } else {
-                        console.log('Email credentials missing, skipping notification.');
+                        console.log('No primary reportee found or email missing, skipping notification.');
                     }
-                } else {
-                    console.log('No primary reportee found or email missing, skipping notification.');
+                } catch (emailError) {
+                    console.error('Failed to send approval email:', emailError);
+                    // Don't block the response, just log the error
                 }
-            } catch (emailError) {
-                console.error('Failed to send approval email:', emailError);
-                // Don't block the response, just log the error
             }
 
             return res.status(201).json({

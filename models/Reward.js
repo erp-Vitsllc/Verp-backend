@@ -30,8 +30,8 @@ const rewardSchema = new mongoose.Schema(
         rewardStatus: {
             type: String,
             required: true,
-            enum: ['Pending', 'Pending HR', 'Pending Accounts', 'Pending Authorization', 'Approved', 'Rejected'],
-            default: 'Pending'
+            enum: ['Draft', 'Pending', 'Pending HR', 'Pending Accounts', 'Pending Authorization', 'Approved', 'Rejected'],
+            default: 'Draft'
         },
         amount: {
             type: Number,

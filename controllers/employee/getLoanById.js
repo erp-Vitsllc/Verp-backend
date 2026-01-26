@@ -55,7 +55,7 @@ export const getLoanById = async (req, res) => {
 
         const data = {
             id: loan._id,
-            loanId: `LOAN-${loan._id.toString().slice(-6).toUpperCase()}`,
+            loanId: loan.loanId || `LOAN-${loan._id.toString().slice(-6).toUpperCase()}`,
             applicantName: `${employee.firstName || ''} ${employee.lastName || ''}`.trim(),
             department: employee.department || 'N/A',
             designation: employee.designation || 'N/A',

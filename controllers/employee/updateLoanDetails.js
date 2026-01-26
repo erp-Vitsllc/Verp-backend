@@ -4,7 +4,7 @@ import { getCompleteEmployee } from "../../services/employeeService.js";
 
 export const updateLoanDetails = async (req, res) => {
     const { id } = req.params;
-    const { type, amount, duration, reason } = req.body;
+    const { type, amount, duration, reason, monthStart, status } = req.body;
 
     try {
         const loan = await Loan.findById(id);
@@ -12,72 +12,104 @@ export const updateLoanDetails = async (req, res) => {
             return res.status(404).json({ message: "Loan request not found" });
         }
 
-        // Update fields
+        // Prevent editing if not Draft or rejected? For now, allow edit if user is authorized.
+        const oldStatus = loan.status;
+        const newStatus = status || loan.status;
+
+        // Update basic fields
         loan.type = type || loan.type;
         loan.amount = amount || loan.amount;
         loan.duration = duration || loan.duration;
         loan.reason = reason || loan.reason;
+        if (monthStart !== undefined) loan.monthStart = monthStart;
+
+        loan.status = newStatus;
+        loan.approvalStatus = newStatus;
+
+        // Transitions: Draft -> Pending
+        let sendEmail = false;
+        let reportee = null;
+        let employeeBasic = null;
+
+        if (oldStatus === 'Draft' && newStatus === 'Pending') {
+            employeeBasic = await getCompleteEmployee(loan.employeeObjectId);
+            if (employeeBasic) {
+                reportee = employeeBasic.primaryReportee;
+                if (reportee) {
+                    loan.submittedTo = reportee._id;
+                    loan.workflow = [{
+                        role: 'Manager',
+                        assignedTo: reportee._id,
+                        status: 'Pending',
+                        assignedAt: new Date()
+                    }];
+                    sendEmail = true;
+                }
+            }
+        }
 
         const savedLoan = await loan.save();
 
-        // Send Email Notification about Update
-        const employeeObjectId = loan.employeeObjectId;
-        const employeeBasic = await getCompleteEmployee(employeeObjectId);
+        // Send Email Notification if status changed to Pending OR if still Pending and details updated
+        if (newStatus === 'Pending' || sendEmail) {
+            if (!employeeBasic) employeeBasic = await getCompleteEmployee(loan.employeeObjectId);
+            if (employeeBasic) {
+                if (!reportee) reportee = employeeBasic.primaryReportee;
+                if (reportee) {
+                    const reporteeEmail = reportee.companyEmail || reportee.workEmail || reportee.email;
+                    if (reporteeEmail) {
+                        const emailUser = process.env.EMAIL_USER?.trim();
+                        const emailPass = process.env.EMAIL_PASS?.trim();
 
-        if (employeeBasic) {
-            const reportee = employeeBasic.primaryReportee;
-            if (reportee) {
-                const reporteeEmail = reportee.companyEmail || reportee.workEmail || reportee.email;
-                if (reporteeEmail) {
-                    const emailUser = process.env.EMAIL_USER?.trim();
-                    const emailPass = process.env.EMAIL_PASS?.trim();
+                        if (emailUser && emailPass) {
+                            const transporter = nodemailer.createTransport({
+                                host: "smtp.office365.com",
+                                port: 587,
+                                secure: false,
+                                auth: { user: emailUser, pass: emailPass }
+                            });
 
-                    if (emailUser && emailPass) {
-                        const transporter = nodemailer.createTransport({
-                            host: "smtp.office365.com",
-                            port: 587,
-                            secure: false,
-                            auth: { user: emailUser, pass: emailPass }
-                        });
+                            const employeeName = `${employeeBasic.firstName || ""} ${employeeBasic.lastName || ""}`.trim();
+                            const reporteeName = `${reportee.firstName || ""} ${reportee.lastName || ""}`.trim();
+                            const subject = `${oldStatus === 'Draft' ? '' : 'UPDATED '}${loan.loanId || type} Application: ${employeeName}`;
 
-                        const employeeName = `${employeeBasic.firstName || ""} ${employeeBasic.lastName || ""}`.trim();
-                        const reporteeName = `${reportee.firstName || ""} ${reportee.lastName || ""}`.trim();
-                        const subject = `UPDATED ${type} Application: ${employeeName}`;
+                            const origin = req.headers.origin || (req.headers.referer ? new URL(req.headers.referer).origin : null);
+                            const baseUrl = origin || process.env.FRONTEND_URL || "http://localhost:3000";
+                            const typeSlug = type ? type.replace(/\s+/g, '-') : 'Loan';
+                            const actionUrl = `${baseUrl}/HRM/LoanAndAdvance/${typeSlug}-${savedLoan._id}`;
 
-                        const origin = req.headers.origin || (req.headers.referer ? new URL(req.headers.referer).origin : null);
-                        const baseUrl = origin || process.env.FRONTEND_URL || "http://localhost:3000";
-                        const actionUrl = `${baseUrl}/HRM/LoanAndAdvance/${savedLoan._id}`;
-
-                        const html = `
-                             <div style="font-family: Arial, sans-serif; color: #333; line-height: 1.6; max-width: 600px; margin: 0 auto; border: 1px solid #eee; border-radius: 10px; overflow: hidden;">
-                                 <div style="background-color: #3b82f6; color: white; padding: 20px; text-align: center;">
-                                     <h2 style="margin: 0;">${type} Application Updated</h2>
-                                 </div>
-                                 <div style="padding: 30px;">
-                                     <p>Hello <strong>${reporteeName}</strong>,</p>
-                                     <p><strong>${employeeName}</strong> has updated their request for ${type}.</p>
-                                     
-                                     <div style="background-color: #eff6ff; padding: 20px; border-radius: 8px; border: 1px solid #dbeafe; margin: 25px 0;">
-                                         <p style="margin: 0;"><strong>Employee:</strong> ${employeeName} (${loan.employeeId})</p>
-                                         <p style="margin: 8px 0 0 0;"><strong>Type:</strong> ${type}</p>
-                                         <p style="margin: 8px 0 0 0;"><strong>New Amount:</strong> ${Number(amount).toLocaleString()}</p>
-                                         <p style="margin: 8px 0 0 0;"><strong>New Duration:</strong> ${duration} Months</p>
-                                          <p style="margin: 8px 0 0 0;"><strong>Reason:</strong> ${reason}</p>
+                            const html = `
+                                 <div style="font-family: Arial, sans-serif; color: #333; line-height: 1.6; max-width: 600px; margin: 0 auto; border: 1px solid #eee; border-radius: 10px; overflow: hidden;">
+                                     <div style="background-color: #3b82f6; color: white; padding: 20px; text-align: center;">
+                                         <h2 style="margin: 0;">${type} Application ${oldStatus === 'Draft' ? 'Submitted' : 'Updated'}</h2>
                                      </div>
-                                     
-                                     <p style="text-align: center; margin: 35px 0;">
-                                         <a href="${actionUrl}" style="background-color: #3b82f6; color: white; padding: 14px 30px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block; font-size: 16px;">View Updated Request</a>
-                                     </p>
+                                     <div style="padding: 30px;">
+                                         <p>Hello <strong>${reporteeName}</strong>,</p>
+                                         <p><strong>${employeeName}</strong> has ${oldStatus === 'Draft' ? 'submitted' : 'updated'} their request for ${type}.</p>
+                                         
+                                         <div style="background-color: #eff6ff; padding: 20px; border-radius: 8px; border: 1px solid #dbeafe; margin: 25px 0;">
+                                             <p style="margin: 0;"><strong>Employee:</strong> ${employeeName} (${loan.employeeId})</p>
+                                             <p style="margin: 8px 0 0 0;"><strong>Type:</strong> ${type}</p>
+                                             <p style="margin: 8px 0 0 0;"><strong>Amount:</strong> ${Number(amount || loan.amount).toLocaleString()}</p>
+                                             <p style="margin: 8px 0 0 0;"><strong>Duration:</strong> ${duration || loan.duration} Months</p>
+                                             <p style="margin: 8px 0 0 0;"><strong>Start Month:</strong> ${monthStart || loan.monthStart || 'Immediate'}</p>
+                                              <p style="margin: 8px 0 0 0;"><strong>Reason:</strong> ${reason || loan.reason}</p>
+                                         </div>
+                                         
+                                         <p style="text-align: center; margin: 35px 0;">
+                                             <a href="${actionUrl}" style="background-color: #3b82f6; color: white; padding: 14px 30px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block; font-size: 16px;">View Request</a>
+                                         </p>
+                                     </div>
                                  </div>
-                             </div>
-                         `;
+                             `;
 
-                        await transporter.sendMail({
-                            from: `"VeRP Portal" <${emailUser}>`,
-                            to: reporteeEmail,
-                            subject,
-                            html
-                        });
+                            await transporter.sendMail({
+                                from: `"VeRP Portal" <${emailUser}>`,
+                                to: reporteeEmail,
+                                subject,
+                                html
+                            });
+                        }
                     }
                 }
             }

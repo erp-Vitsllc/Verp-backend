@@ -56,22 +56,66 @@ export const approveFine = async (req, res) => {
         const isHR = dept.includes('hr') || dept.includes('human resource');
         const isAccounts = dept.includes('account') || dept.includes('finance');
 
-        // Reportee Check
-        // Can approve if user is the assigned employee OR their primary manager (fallback)
-        // Strict requirement: "reportee email and button... only enabled for the reportee"
-        // So we strictly check if user is the assigned employee.
-        // Assuming single employee per fine for this workflow primarily, but code supports array.
-        const isAssignedEmployee = fine.assignedEmployees.some(e => {
-            return userBasic && (e.employeeId === userBasic.employeeId);
-        });
+        // Reportee/Manager Check logic
+        let isAuthorizedManager = false;
+
+        console.log("ApproveFine: Start", { fineId: fine.fineId, status: fine.fineStatus, userId: req.user._id, userEmpId: userBasic?.employeeId });
+
+        // 0. Primary Reportee Check (Hierarchy Fallback)
+        // Explicitly check if the current user is the Manager of the fined employee
+        if (fine.assignedEmployees && fine.assignedEmployees.length > 0) {
+            const finedEmpId = fine.assignedEmployees[0].employeeId;
+            if (finedEmpId) {
+                const finedEmp = await EmployeeBasic.findOne({ employeeId: finedEmpId }).select('primaryReportee');
+                if (finedEmp && finedEmp.primaryReportee) {
+                    // Check against User linked to that Reportee (EmployeeBasic Ref)
+                    // Does req.user (User) match the primaryReportee (EmployeeBasic ID)?
+                    // We need to match User -> EmployeeBasic
+                    // NOTE: This comparison assumes 'primaryReportee' is an ObjectId referencing EmployeeBasic
+                    // AND 'userBasic' is the full EmployeeBasic document of the logged-in user.
+                    // So we must compare finedEmp.primaryReportee (ObjectId) with userBasic._id (ObjectId).
+                    // Previous attempt compared with userBasic._id which IS CORRECT.
+                    if (userBasic && String(finedEmp.primaryReportee) === String(userBasic._id)) {
+                        isAuthorizedManager = true;
+                    }
+                }
+                console.log("ApproveFine: Checked Hierarchy", { finedEmpId, managerRef: finedEmp?.primaryReportee, currentUserBasicId: userBasic?._id, didMatch: isAuthorizedManager });
+            }
+        }
+
+        // 0.5 Creator Check (If Manager created the fine, they can approve it to move it to HR)
+        if (fine.createdBy && String(fine.createdBy) === String(req.user._id)) {
+            isAuthorizedManager = true;
+            console.log("ApproveFine: Authorized via Creator (Self-Created Fine)");
+        }
+
+        // 1. Check strict assignment (SubmittedTo or Workflow)
+        if (fine.submittedTo && fine.submittedTo.toString() === req.user._id.toString()) {
+            isAuthorizedManager = true;
+        } else if (fine.workflow && fine.workflow.some(w => w.status === 'Pending' && w.assignedTo && w.assignedTo.toString() === req.user._id.toString())) {
+            isAuthorizedManager = true;
+        }
+
+        console.log("ApproveFine: Checked Strict", { submittedTo: fine.submittedTo, isAuthorizedManager });
+
+        // 2. Fallback: Check if user is the assigned employee (Self-approval?? usually Manager approves, but keeping for legacy)
+        // Actually, "Reportee" usually means "Reporting Manager". The frontend says "Reportee" step.
+        // If the fined employee is "assignedEmployees", the APPROVER is the Manager.
+        // So checking isAssignedEmployee is strictly WRONG for approval unless it's a self-acknowledgement flow.
+        // But the flow says "Reportee -> HR", implying Manager.
+
+        // We will trust isAuthorizedManager (which relies on addFine.js setting submittedTo correctly).
+        // If submittedTo is missing (legacy), we might need to recalculate manager, but let's stick to the workflow/submittedTo fix I just added.
 
         // 4. State Machine transitions
         let modified = false;
         const currentStatus = fine.fineStatus;
 
-        // --- STAGE 1: Reportee (Pending -> Pending HR) ---
+        console.log("ApproveFine: Entering Stage 1 Check", { currentStatus, isAuthorizedManager, isAdmin });
+
+        // --- STAGE 1: Reportee/Manager (Pending -> Pending HR) ---
         if (currentStatus === 'Pending') {
-            if (isAssignedEmployee || isAdmin) {
+            if (isAuthorizedManager || isAdmin) {
                 fine.fineStatus = 'Pending HR';
                 fine.managerApprovedBy = req.user._id; // Set persistent manager approver
 
@@ -84,15 +128,23 @@ export const approveFine = async (req, res) => {
                 modified = true;
 
                 // Notify HR
+                console.log("hi i found the hod email sending section ");
+
                 const hrHOD = await import("../../utils/getDepartmentHOD.js").then(m => m.getDepartmentHOD('hr'));
                 const hrEmails = hrHOD?.companyEmail ? [hrHOD.companyEmail] : [];
                 if (hrEmails.length === 0) hrEmails.push(process.env.HR_EMAIL || 'hr@verp.com');
 
                 // PUSH TO DASHBOARD: Update workflow & submittedTo
+                let nextApproverFound = false;
+                console.log("hy i found the hod dashboard logic ........");
+
                 if (hrHOD) {
+                    console.log("hi im inside the dashbord logic in fine ....");
+
                     const hrUser = await import("../../models/User.js").then(m => m.default.findOne({ employeeId: hrHOD.employeeId }));
                     if (hrUser) {
                         fine.submittedTo = hrUser._id;
+                        nextApproverFound = true;
 
                         // 1. Mark Current User (Reportee/Manager) as Approved in Workflow
                         if (!fine.workflow) fine.workflow = [];
@@ -130,7 +182,16 @@ export const approveFine = async (req, res) => {
                     }
                 }
 
-                console.log(`[Fine ${fine.fineId}] Reportee Approved. Next HR Approver:`, hrHOD ? `${hrHOD.firstName} ${hrHOD.lastName}` : 'NOT FOUND');
+                if (!nextApproverFound) {
+                    console.warn(`[Fine ${fine.fineId}] HR Approver User NOT FOUND. Releasing 'submittedTo' to allow Department Pool visibility.`);
+                    fine.submittedTo = null; // Release from Manager
+                    // Ensure Workflow for Manager is marked done even if next step fails assignment
+                    if (!fine.workflow) fine.workflow = [];
+                    const managerEntry = fine.workflow.find(w => w.status === 'Pending' && (w.assignedTo?.toString() === req.user._id.toString() || w.role === 'Manager'));
+                    if (managerEntry) { managerEntry.status = 'Approved'; managerEntry.actionedAt = new Date(); }
+                }
+
+                console.log(`[Fine ${fine.fineId}] Reportee Approved. Next HR Approver Found: ${nextApproverFound}`);
                 await sendFineStageEmail(fine, hrEmails, 'HR');
             } else {
                 return res.status(403).json({ message: "Only the assigned employee can approve at this stage." });
@@ -149,10 +210,12 @@ export const approveFine = async (req, res) => {
                 if (accEmails.length === 0) accEmails.push(process.env.ACCOUNTS_EMAIL || 'accounts@verp.com');
 
                 // PUSH TO DASHBOARD: Update workflow & submittedTo
+                let nextApproverFound = false;
                 if (accountsHOD) {
                     const accUser = await import("../../models/User.js").then(m => m.default.findOne({ employeeId: accountsHOD.employeeId }));
                     if (accUser) {
                         fine.submittedTo = accUser._id;
+                        nextApproverFound = true;
 
                         // 1. Update HR Entry in Workflow to Approved
                         const hrEntry = fine.workflow.find(w =>
@@ -186,7 +249,14 @@ export const approveFine = async (req, res) => {
                     }
                 }
 
-                console.log(`[Fine ${fine.fineId}] HR Approved. Next Finance Approver:`, accountsHOD ? `${accountsHOD.firstName} ${accountsHOD.lastName}` : 'NOT FOUND');
+                if (!nextApproverFound) {
+                    console.warn(`[Fine ${fine.fineId}] Accounts Approver User NOT FOUND. Releasing 'submittedTo'.`);
+                    fine.submittedTo = null;
+                    const hrEntry = fine.workflow.find(w => w.status === 'Pending' && (w.assignedTo?.toString() === req.user._id.toString() || w.role === 'HR'));
+                    if (hrEntry) { hrEntry.status = 'Approved'; hrEntry.actionedAt = new Date(); }
+                }
+
+                console.log(`[Fine ${fine.fineId}] HR Approved. Next Finance Approver Found: ${nextApproverFound}`);
                 await sendFineStageEmail(fine, accEmails, 'Accounts');
             } else {
                 return res.status(403).json({ message: "Only HR can approve at this stage." });
@@ -201,11 +271,13 @@ export const approveFine = async (req, res) => {
 
                 // Notify CEO
                 const hod = await getManagementHOD();
+                let nextApproverFound = false;
                 if (hod) {
                     // Update submittedTo
                     const hodUser = await import("../../models/User.js").then(m => m.default.findOne({ employeeId: hod.employeeId }));
                     if (hodUser) {
                         fine.submittedTo = hodUser._id;
+                        nextApproverFound = true;
 
                         // 1. Update Accounts Entry to Approved
                         const accEntry = fine.workflow.find(w =>
@@ -243,6 +315,13 @@ export const approveFine = async (req, res) => {
                         name: 'Accounts Department',
                         designation: 'Finance'
                     });
+                }
+
+                if (!nextApproverFound) {
+                    console.warn(`[Fine ${fine.fineId}] CEO User NOT FOUND. Releasing 'submittedTo'.`);
+                    fine.submittedTo = null;
+                    const accEntry = fine.workflow.find(w => w.status === 'Pending' && (w.assignedTo?.toString() === req.user._id.toString() || w.role === 'Accounts'));
+                    if (accEntry) { accEntry.status = 'Approved'; accEntry.actionedAt = new Date(); }
                 }
             } else {
                 return res.status(403).json({ message: "Only Accounts can approve at this stage." });
