@@ -39,6 +39,7 @@ export const addEmployee = async (req, res) => {
 
             // Login & Access
             email,
+            companyEmail,
             enablePortalAccess,
 
             // Employment Info
@@ -193,6 +194,7 @@ export const addEmployee = async (req, res) => {
                 profileApprovalStatus: profileApprovalStatus || 'draft',
                 profileStatus: profileStatus || 'inactive',
                 email,
+                companyEmail: companyEmail || '',
                 enablePortalAccess: enablePortalAccess || false,
                 dateOfJoining,
             }),
@@ -293,6 +295,7 @@ export const addEmployee = async (req, res) => {
                         username: finalUsername,
                         name: `${firstName} ${lastName}`.trim(),
                         email: (typeof email === 'string' ? email.toLowerCase().trim() : ''),
+                        companyEmail: companyEmail || '',
                         password: hashedPassword,
                         employeeId: cleanedEmployeeId,
                         group: null, // Administrators don't need groups, they get full permissions

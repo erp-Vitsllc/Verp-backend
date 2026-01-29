@@ -112,7 +112,7 @@ export const getEmployees = async (req, res) => {
                         // and restricting reportingAuthority fields
                         firstName: 1, lastName: 1, employeeId: 1, role: 1, department: 1, designation: 1,
                         status: 1, probationPeriod: 1, overtime: 1, profileApprovalStatus: 1, profileStatus: 1,
-                        email: 1, enablePortalAccess: 1, dateOfJoining: 1, contractJoiningDate: 1,
+                        email: 1, companyEmail: 1, enablePortalAccess: 1, dateOfJoining: 1, contractJoiningDate: 1,
                         contactNumber: 1, addressLine1: 1, addressLine2: 1, country: 1, state: 1, city: 1, postalCode: 1,
                         currentAddressLine1: 1, currentAddressLine2: 1, currentCity: 1, currentState: 1, currentCountry: 1, currentPostalCode: 1,
                         gender: 1, dateOfBirth: 1, age: 1, maritalStatus: 1, nationality: 1, fathersName: 1,

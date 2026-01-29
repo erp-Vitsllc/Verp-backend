@@ -31,6 +31,7 @@ const updateUserHandler = async (req, res) => {
             username,
             name,
             email,
+            companyEmail,
             password,
             employeeId,
             group,
@@ -214,12 +215,25 @@ const updateUserHandler = async (req, res) => {
         if (status !== undefined) updateData.status = status;
         if (enablePortalAccess !== undefined) updateData.enablePortalAccess = enablePortalAccess;
         if (isAdmin !== undefined) updateData.isAdmin = isAdmin;
+        if (companyEmail !== undefined) updateData.companyEmail = companyEmail;
 
         const updatedUser = await User.findByIdAndUpdate(
             id,
             { $set: updateData },
             { new: true, runValidators: true }
         ).select('-password').populate('group', 'name');
+
+        // BIDIRECTIONAL SYNC: If companyEmail was updated and user is linked to an employee
+        if (updateData.companyEmail !== undefined && updatedUser.employeeId) {
+            try {
+                await EmployeeBasic.findOneAndUpdate(
+                    { employeeId: updatedUser.employeeId },
+                    { $set: { companyEmail: updateData.companyEmail } }
+                );
+            } catch (err) {
+                console.error(`[updateUser] Error syncing companyEmail to Employee record for ${updatedUser.employeeId}:`, err);
+            }
+        }
 
         return res.status(200).json({
             message: "User updated successfully",

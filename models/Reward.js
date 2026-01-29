@@ -33,6 +33,11 @@ const rewardSchema = new mongoose.Schema(
             enum: ['Draft', 'Pending', 'Pending HR', 'Pending Accounts', 'Pending Authorization', 'Approved', 'Rejected', 'Cancelled'],
             default: 'Draft'
         },
+        approvalStatus: {
+            type: String,
+            enum: ['Draft', 'Pending', 'Pending HR', 'Pending Accounts', 'Pending Authorization', 'Approved', 'Rejected', 'Cancelled'],
+            default: 'Draft'
+        },
         amount: {
             type: Number,
             default: null

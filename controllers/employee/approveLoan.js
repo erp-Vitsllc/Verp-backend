@@ -57,14 +57,21 @@ export const approveLoan = async (req, res) => {
         }
 
         // Determine Next Status and Notifications
-        let finalStatus = status;
+        let finalStatus = status; // The status requested by the frontend (Approved/Rejected)
+        let nextStage = loan.approvalStatus; // Internal tracking
+        let publicStatus = 'Pending'; // Default public status for intermediate steps
+
         let nextApprover = null;
         let emailSubject = "";
         let emailType = "";
 
+        // Determine Current Stage
+        const currentStage = loan.approvalStatus || loan.status;
+
         // 0. SUBMIT / CANCEL STAGE
         if (status === 'Cancelled') {
-            finalStatus = 'Cancelled';
+            publicStatus = 'Cancelled';
+            nextStage = 'Cancelled';
         }
         else if (status === 'Pending') {
             if (loan.status !== 'Draft') {
@@ -76,7 +83,8 @@ export const approveLoan = async (req, res) => {
                 return res.status(400).json({ message: "Reporting manager not assigned. Please contact HR." });
             }
 
-            finalStatus = 'Pending';
+            publicStatus = 'Pending';
+            nextStage = 'Pending';
             nextApprover = applicant.primaryReportee;
             emailSubject = "New Loan/Advance Request for Review";
             emailType = "Manager";
@@ -92,21 +100,24 @@ export const approveLoan = async (req, res) => {
             console.log(`[ApproveLoan] Draft -> Pending transition for Manager: ${nextApprover.employeeId}`);
         }
         else if (status === 'Approved') {
+            // APPROVAL LOGIC
             if (isAdmin) {
-                finalStatus = 'Approved';
+                publicStatus = 'Approved';
+                nextStage = 'Approved';
             } else if (approverBasic) {
-                const currentStatus = loan.status;
 
                 // 1. MANAGER STAGE (Pending -> Pending HR)
-                if (currentStatus === 'Pending') {
+                if (currentStage === 'Pending') {
                     // Check if approver is the manager
                     const applicant = await EmployeeBasic.findOne({ employeeId: loan.employeeId }).populate('primaryReportee');
                     const isReporteeManager = applicant?.primaryReportee?._id?.toString() === approverBasic._id.toString();
 
                     if (isReporteeManager) {
-                        finalStatus = 'Pending HR';
-                        loan.managerApprovedBy = approverBasic._id; // Set persistent manager approver
-                        nextApprover = await getDepartmentHOD('hr'); // Broader search
+                        nextStage = 'Pending HR';
+                        publicStatus = 'Pending'; // Keep visible status as Pending for HR
+
+                        loan.managerApprovedBy = approverBasic._id;
+                        nextApprover = await getDepartmentHOD('hr');
                         console.log('[Loan]', loan.loanId, 'Manager Approved. Next HR Approver:', nextApprover ? `${nextApprover.firstName} ${nextApprover.lastName}` : 'NOT FOUND');
                         emailSubject = "Loan Pending HR Approval";
                         emailType = "HR";
@@ -115,12 +126,14 @@ export const approveLoan = async (req, res) => {
                     }
                 }
                 // 2. HR STAGE (Pending HR -> Pending Accounts)
-                else if (currentStatus === 'Pending HR') {
+                else if (currentStage === 'Pending HR') {
                     const isHR = /human resource|hr/i.test(approverBasic.department);
                     if (isHR) {
-                        finalStatus = 'Pending Accounts';
-                        loan.hrApprovedBy = approverBasic._id; // Set persistent HR approver
-                        nextApprover = await getDepartmentHOD('finance'); // Broader search
+                        nextStage = 'Pending Accounts';
+                        publicStatus = 'Pending'; // Keep visible status as Pending for Accounts
+
+                        loan.hrApprovedBy = approverBasic._id;
+                        nextApprover = await getDepartmentHOD('finance');
                         console.log('[Loan]', loan.loanId, 'HR Approved. Next Finance Approver:', nextApprover ? `${nextApprover.firstName} ${nextApprover.lastName}` : 'NOT FOUND');
                         emailSubject = "Loan Pending Finance Approval";
                         emailType = "Accounts";
@@ -129,11 +142,13 @@ export const approveLoan = async (req, res) => {
                     }
                 }
                 // 3. ACCOUNTS STAGE (Pending Accounts -> Pending Authorization)
-                else if (currentStatus === 'Pending Accounts') {
+                else if (currentStage === 'Pending Accounts') {
                     const isFinance = /finance|accounts/i.test(approverBasic.department);
                     if (isFinance) {
-                        finalStatus = 'Pending Authorization';
-                        loan.accountsApprovedBy = approverBasic._id; // Set persistent Finance approver
+                        nextStage = 'Pending Authorization';
+                        publicStatus = 'Pending'; // Keep visible status as Pending for CEO
+
+                        loan.accountsApprovedBy = approverBasic._id;
                         nextApprover = await getManagementHOD();
                         console.log('[Loan]', loan.loanId, 'Finance Approved. Next CEO:', nextApprover ? `${nextApprover.firstName} ${nextApprover.lastName}` : 'NOT FOUND');
                         emailSubject = "Loan Pending Final Authorization";
@@ -143,22 +158,26 @@ export const approveLoan = async (req, res) => {
                     }
                 }
                 // 4. CEO STAGE (Pending Authorization -> Approved)
-                else if (currentStatus === 'Pending Authorization') {
+                else if (currentStage === 'Pending Authorization') {
                     const isCEO = approverBasic.department && /management/i.test(approverBasic.department) &&
                         ['ceo', 'c.e.o', 'c.e.o.', 'chief executive officer', 'director', 'managing director', 'general manager', 'gm', 'g.m', 'g.m.'].includes(approverBasic.designation?.toLowerCase());
 
                     if (isCEO) {
-                        finalStatus = 'Approved';
+                        nextStage = 'Approved';
+                        publicStatus = 'Approved'; // Final Approval
                     } else {
                         return res.status(403).json({ message: "Only the CEO can Authorize this loan" });
                     }
                 }
             }
+        } else if (status === 'Rejected') {
+            publicStatus = 'Rejected';
+            nextStage = 'Rejected';
         }
 
         // Update Loan
-        loan.status = finalStatus;
-        loan.approvalStatus = finalStatus;
+        loan.status = publicStatus;
+        loan.approvalStatus = nextStage;
 
         if (finalStatus === 'Approved') {
             loan.approvedBy = approverBasic ? approverBasic._id : requestingUserId;
@@ -175,7 +194,7 @@ export const approveLoan = async (req, res) => {
             loan.submittedTo = nextApprover._id;
 
             // WORKFLOW UPDATES (Using EmployeeBasic IDs as per Loan Logic)
-            if (loan.status === 'Pending HR') {
+            if (nextStage === 'Pending HR') {
                 // 1. Manager Step (Approved)
                 if (!loan.workflow) loan.workflow = [];
                 const managerEntry = loan.workflow.find(w =>
@@ -186,15 +205,14 @@ export const approveLoan = async (req, res) => {
                 if (managerEntry) {
                     managerEntry.status = 'Approved';
                     managerEntry.actionedAt = new Date();
-                    // Update role if needed for clarity
                     if (!managerEntry.role) managerEntry.role = 'Manager';
                 } else {
-                    // Fallback: Push new if not found
+                    // Fallback
                     loan.workflow.push({
                         role: 'Manager',
                         assignedTo: approverBasic._id,
                         status: 'Approved',
-                        assignedAt: loan.createdAt, // Backdate
+                        assignedAt: loan.createdAt,
                         actionedAt: new Date()
                     });
                 }
@@ -207,14 +225,13 @@ export const approveLoan = async (req, res) => {
                     assignedAt: new Date()
                 });
             }
-            else if (loan.status === 'Pending Accounts') {
+            else if (nextStage === 'Pending Accounts') {
                 // 1. Mark HR Approved
                 const hrEntry = loan.workflow ? loan.workflow.find(w => w.role === 'HR' && w.status === 'Pending') : null;
                 if (hrEntry) {
                     hrEntry.status = 'Approved';
                     hrEntry.actionedAt = new Date();
                 } else {
-                    // Fallback
                     if (!loan.workflow) loan.workflow = [];
                     loan.workflow.push({
                         role: 'HR',
@@ -233,7 +250,7 @@ export const approveLoan = async (req, res) => {
                     assignedAt: new Date()
                 });
             }
-            else if (loan.status === 'Pending Authorization') {
+            else if (nextStage === 'Pending Authorization') {
                 // 1. Mark Accounts Approved
                 const accEntry = loan.workflow ? loan.workflow.find(w => w.role === 'Accounts' && w.status === 'Pending') : null;
                 if (accEntry) {
@@ -261,7 +278,7 @@ export const approveLoan = async (req, res) => {
         }
 
         // Final Approval (CEO) Update
-        if (finalStatus === 'Approved') {
+        if (nextStage === 'Approved') {
             if (loan.workflow) {
                 const ceoEntry = loan.workflow.find(w => w.role === 'CEO' && w.status === 'Pending');
                 if (ceoEntry) {

@@ -14,6 +14,7 @@ import EmployeeEducation from "../models/EmployeeEducation.js";
 import EmployeeExperience from "../models/EmployeeExperience.js";
 import EmployeeEmergencyContact from "../models/EmployeeEmergencyContact.js";
 import EmployeeTraining from "../models/EmployeeTraining.js";
+import User from "../models/User.js";
 import { getSignedFileUrl } from "../utils/s3Upload.js";
 
 /**
@@ -669,8 +670,8 @@ export const saveEmployeeData = async (employeeId, updatePayload) => {
         // Define field mappings to collections
         const basicFields = [
             'employeeId', 'firstName', 'lastName', 'role', 'department', 'designation',
-            'status', 'probationPeriod', 'reportingAuthority', 'overtime',
-            'profileApprovalStatus', 'profileStatus', 'email', 'password',
+            'status', 'probationPeriod', 'reportingAuthority', 'primaryReportee', 'secondaryReportee', 'overtime',
+            'profileApprovalStatus', 'profileStatus', 'email', 'companyEmail', 'password',
             'enablePortalAccess', 'dateOfJoining', 'contractJoiningDate', 'profilePicture', 'documents', 'trainingDetails'
         ];
 
@@ -835,6 +836,19 @@ export const saveEmployeeData = async (employeeId, updatePayload) => {
         }
 
         await Promise.all(updatePromises);
+
+        // Sync companyEmail to User model if updated
+        if (basicUpdate.companyEmail !== undefined) {
+            try {
+                // Find linked User by employeeId and update their companyEmail
+                await User.findOneAndUpdate(
+                    { employeeId: employeeId },
+                    { $set: { companyEmail: basicUpdate.companyEmail } }
+                );
+            } catch (err) {
+                console.error(`[saveEmployeeData] Error syncing companyEmail to User record for ${employeeId}:`, err);
+            }
+        }
 
         // Return complete updated employee
         return await getCompleteEmployee(employeeId);

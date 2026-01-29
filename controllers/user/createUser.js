@@ -10,6 +10,7 @@ export const createUser = async (req, res) => {
             username,
             name,
             email,
+            companyEmail,
             password,
             employeeId,
             group,
@@ -98,6 +99,7 @@ export const createUser = async (req, res) => {
             username: username.trim(),
             name: name.trim(),
             email: email.trim().toLowerCase(),
+            companyEmail: companyEmail || '',
             password: hashedPassword,
             employeeId: employeeId || null,
             group: group || null,
@@ -109,6 +111,18 @@ export const createUser = async (req, res) => {
         });
 
         const savedUser = await newUser.save();
+
+        // BIDIRECTIONAL SYNC: Update Employee profile if user was created with a companyEmail
+        if (companyEmail && employeeId) {
+            try {
+                await EmployeeBasic.findOneAndUpdate(
+                    { employeeId: employeeId },
+                    { $set: { companyEmail: companyEmail } }
+                );
+            } catch (err) {
+                console.error(`[createUser] Error syncing companyEmail to Employee record for ${employeeId}:`, err);
+            }
+        }
 
         // Remove password from response
         const userResponse = savedUser.toObject();

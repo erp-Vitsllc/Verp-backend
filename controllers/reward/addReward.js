@@ -156,8 +156,8 @@ export const addReward = async (req, res) => {
             employeeName: employeeName, // Use the validated employeeName from above
             rewardType,
             rewardStatus: rewardStatus || 'Pending',
+            approvalStatus: rewardStatus || 'Pending',
             awardedDate: awardedDate ? new Date(awardedDate) : new Date(),
-            remarks: remarks || '',
             remarks: remarks || '',
             title,
             createdBy: req.user ? req.user._id : null
@@ -503,6 +503,7 @@ export const addReward = async (req, res) => {
                     employeeName: retryEmployeeName,
                     rewardType,
                     rewardStatus: rewardStatus || 'Pending',
+                    approvalStatus: rewardStatus || 'Pending',
                     awardedDate: awardedDate ? new Date(awardedDate) : new Date(),
                     remarks: remarks || ''
                 };
@@ -590,6 +591,7 @@ export const addReward = async (req, res) => {
                             employeeName: fallbackEmployeeName,
                             rewardType,
                             rewardStatus: rewardStatus || 'Pending',
+                            approvalStatus: rewardStatus || 'Pending',
                             awardedDate: awardedDate ? new Date(awardedDate) : new Date(),
                             remarks: remarks || ''
                         };

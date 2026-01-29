@@ -67,6 +67,10 @@ export const getUserActivityStats = async (req, res) => {
         const reportees = await EmployeeBasic.find({ primaryReportee: manager._id });
         const reporteeCustomIds = reportees.map(r => r.employeeId);
 
+        // IDs that represent the current user (Employee ID and User ID)
+        // This ensures items appear on dashboard whether they were assigned to the Human or the Account
+        const relevantIds = [manager._id, targetUser?._id].filter(Boolean);
+
         // 3. Define Queries for "Needs Action"
         const queries = [
             // Pending Profiles
@@ -74,11 +78,11 @@ export const getUserActivityStats = async (req, res) => {
                 $or: [
                     {
                         profileWorkflow: {
-                            $elemMatch: { assignedTo: manager._id, status: 'submitted' }
+                            $elemMatch: { assignedTo: { $in: relevantIds }, status: 'submitted' }
                         }
                     },
                     {
-                        profileSubmittedTo: manager._id,
+                        profileSubmittedTo: { $in: relevantIds },
                         profileApprovalStatus: 'submitted'
                     }
                 ]
@@ -88,8 +92,8 @@ export const getUserActivityStats = async (req, res) => {
             EmployeeBasic.find({
                 "noticeRequest.requestedAt": { $exists: true },
                 $or: [
-                    { 'noticeRequest.workflow': { $elemMatch: { assignedTo: manager._id, status: 'Pending' } } },
-                    { 'noticeRequest.submittedTo': manager._id, 'noticeRequest.status': 'Pending' }
+                    { 'noticeRequest.workflow': { $elemMatch: { assignedTo: { $in: relevantIds }, status: 'Pending' } } },
+                    { 'noticeRequest.submittedTo': { $in: relevantIds }, 'noticeRequest.status': 'Pending' }
                 ]
             }),
 
@@ -100,13 +104,13 @@ export const getUserActivityStats = async (req, res) => {
                         $or: [
                             {
                                 workflow: {
-                                    $elemMatch: { assignedTo: manager._id, status: 'Pending' }
+                                    $elemMatch: { assignedTo: { $in: relevantIds }, status: 'Pending' }
                                 }
                             },
                             {
                                 // Fallback: Direct assignment OR email-based (legacy)
                                 $or: [
-                                    { submittedTo: manager._id },
+                                    { submittedTo: { $in: relevantIds } },
                                     { primaryReporteeEmail: { $in: [targetEmail, manager.companyEmail, manager.email].filter(Boolean) } },
                                     ...(isHR ? [{ status: 'Pending HR' }] : []),
                                     ...(isAccounts ? [{ status: 'Pending Accounts' }] : []),
@@ -126,15 +130,17 @@ export const getUserActivityStats = async (req, res) => {
                         $or: [
                             {
                                 workflow: {
-                                    $elemMatch: { assignedTo: targetUser ? targetUser._id : null, status: 'Pending' }
+                                    $elemMatch: { assignedTo: { $in: relevantIds }, status: 'Pending' }
                                 }
                             },
                             {
                                 // Fallback: Direct assignment
-                                submittedTo: targetUser ? targetUser._id : null,
-                                rewardStatus: { $in: ['Pending', 'Pending Authorization'] }
+                                submittedTo: { $in: relevantIds },
+                                rewardStatus: { $in: ['Pending', 'Pending HR', 'Pending Accounts', 'Pending Authorization'] }
                             },
                             // Role Based Visibility
+                            ...(isHR ? [{ rewardStatus: 'Pending HR' }] : []),
+                            ...(isAccounts ? [{ rewardStatus: 'Pending Accounts' }] : []),
                             ...(isCEO ? [{ rewardStatus: 'Pending Authorization' }] : [])
                         ]
                     },
@@ -149,12 +155,12 @@ export const getUserActivityStats = async (req, res) => {
                         $or: [
                             {
                                 workflow: {
-                                    $elemMatch: { assignedTo: targetUser ? targetUser._id : null, status: 'Pending' }
+                                    $elemMatch: { assignedTo: { $in: relevantIds }, status: 'Pending' }
                                 }
                             },
                             {
                                 // Fallback: Direct assignment
-                                submittedTo: targetUser ? targetUser._id : null,
+                                submittedTo: { $in: relevantIds },
                                 fineStatus: { $in: ['Pending', 'Pending HR', 'Pending Accounts', 'Pending Authorization'] }
                             },
                             // Role Based Visibility
@@ -190,8 +196,8 @@ export const getUserActivityStats = async (req, res) => {
         const activityList = [];
 
         pendingProfiles.forEach(p => {
-            const myStep = p.profileWorkflow ? p.profileWorkflow.find(w => w.assignedTo && w.assignedTo.toString() === manager._id.toString() && w.status === 'submitted') : null;
-            const isSubmittedToMe = p.profileSubmittedTo && p.profileSubmittedTo.toString() === manager._id.toString();
+            const myStep = p.profileWorkflow ? p.profileWorkflow.find(w => w.assignedTo && relevantIds.some(id => id.toString() === w.assignedTo.toString()) && w.status === 'submitted') : null;
+            const isSubmittedToMe = p.profileSubmittedTo && relevantIds.some(id => id.toString() === p.profileSubmittedTo.toString());
 
             if (myStep || isSubmittedToMe) {
                 activityList.push({
@@ -204,8 +210,8 @@ export const getUserActivityStats = async (req, res) => {
         });
 
         pendingNotices.forEach(p => {
-            const myStep = p.noticeRequest?.workflow ? p.noticeRequest.workflow.find(w => w.assignedTo && w.assignedTo.toString() === manager._id.toString() && w.status === 'Pending') : null;
-            const isSubmittedToMe = p.noticeRequest?.submittedTo && p.noticeRequest.submittedTo.toString() === manager._id.toString();
+            const myStep = p.noticeRequest?.workflow ? p.noticeRequest.workflow.find(w => w.assignedTo && relevantIds.some(id => id.toString() === w.assignedTo.toString()) && w.status === 'Pending') : null;
+            const isSubmittedToMe = p.noticeRequest?.submittedTo && relevantIds.some(id => id.toString() === p.noticeRequest.submittedTo.toString());
 
             if (myStep || isSubmittedToMe) {
                 activityList.push({
@@ -219,15 +225,15 @@ export const getUserActivityStats = async (req, res) => {
 
         pendingLoans.forEach(l => {
             const empName = l.employeeObjectId ? `${l.employeeObjectId.firstName} ${l.employeeObjectId.lastName}` : 'Employee';
-            const myStep = l.workflow ? l.workflow.find(w => w.assignedTo && w.assignedTo.toString() === manager._id.toString() && w.status === 'Pending') : null;
-            const isSubmittedToMe = l.submittedTo && l.submittedTo.toString() === manager._id.toString();
+            const myStep = l.workflow ? l.workflow.find(w => w.assignedTo && relevantIds.some(id => id.toString() === w.assignedTo.toString()) && w.status === 'Pending') : null;
+            const isSubmittedToMe = l.submittedTo && relevantIds.some(id => id.toString() === l.submittedTo.toString());
 
             if (myStep || isSubmittedToMe) {
                 activityList.push({
                     id: l._id, type: l.type || 'Loan/Advance', requestedBy: empName,
                     requestedDate: myStep ? myStep.assignedAt : (l.updatedAt || l.createdAt),
                     actionedDate: null,
-                    status: 'Pending',
+                    status: ['Pending', 'Pending HR', 'Pending Accounts', 'Pending Authorization'].includes(l.status) ? 'Pending' : l.status,
                     extra1: `AED ${l.amount}`, extra2: `${l.duration} Months`,
                     targetEmployeeId: l.employeeId
                 });
@@ -235,10 +241,10 @@ export const getUserActivityStats = async (req, res) => {
         });
 
         pendingRewards.forEach(r => {
-            let myStep = r.workflow ? r.workflow.find(w => targetUser && w.assignedTo && w.assignedTo.toString() === targetUser._id.toString() && w.status === 'Pending') : null;
+            let myStep = r.workflow ? r.workflow.find(w => w.assignedTo && relevantIds.some(id => id.toString() === w.assignedTo.toString()) && w.status === 'Pending') : null;
 
             // Fallback: Check submittedTo or CEO Role
-            const isSubmittedToMe = (targetUser && r.submittedTo && r.submittedTo.toString() === targetUser._id.toString()) ||
+            const isSubmittedToMe = (r.submittedTo && relevantIds.some(id => id.toString() === r.submittedTo.toString())) ||
                 (isCEO && r.rewardStatus === 'Pending Authorization');
 
             if (myStep || isSubmittedToMe) {
@@ -246,7 +252,7 @@ export const getUserActivityStats = async (req, res) => {
                     id: r.rewardId || r._id, type: 'Reward', requestedBy: r.employeeName,
                     requestedDate: myStep ? myStep.assignedAt : (r.updatedAt || r.createdAt),
                     actionedDate: null,
-                    status: r.rewardStatus || 'Pending',
+                    status: ['Pending', 'Pending HR', 'Pending Accounts', 'Pending Authorization'].includes(r.rewardStatus) ? 'Pending' : r.rewardStatus,
                     extra1: r.rewardType, extra2: `AED ${r.amount || 0}`,
                     targetEmployeeId: r.employeeId
                 });
@@ -254,10 +260,10 @@ export const getUserActivityStats = async (req, res) => {
         });
 
         pendingFines.forEach(f => {
-            const myStep = f.workflow ? f.workflow.find(w => targetUser && w.assignedTo && w.assignedTo.toString() === targetUser._id.toString() && w.status === 'Pending') : null;
+            const myStep = f.workflow ? f.workflow.find(w => w.assignedTo && relevantIds.some(id => id.toString() === w.assignedTo.toString()) && w.status === 'Pending') : null;
 
             // Fallback: Check submittedTo or CEO Role
-            const isSubmittedToMe = (targetUser && f.submittedTo && f.submittedTo.toString() === targetUser._id.toString()) ||
+            const isSubmittedToMe = (f.submittedTo && relevantIds.some(id => id.toString() === f.submittedTo.toString())) ||
                 (isCEO && f.fineStatus === 'Pending Authorization');
 
             if (myStep || isSubmittedToMe) {
@@ -267,7 +273,7 @@ export const getUserActivityStats = async (req, res) => {
                     id: f.fineId || f._id, type: 'Fine', requestedBy: reporteeEntry?.employeeName || assignedList[0]?.employeeName || 'Fine Request',
                     requestedDate: myStep ? myStep.assignedAt : (f.updatedAt || f.createdAt),
                     actionedDate: null,
-                    status: f.fineStatus || 'Pending',
+                    status: ['Pending', 'Pending HR', 'Pending Accounts', 'Pending Authorization'].includes(f.fineStatus) ? 'Pending' : f.fineStatus,
                     extra1: f.category, extra2: `AED ${f.fineAmount}`,
                     targetEmployeeId: reporteeEntry?.employeeId || assignedList[0]?.employeeId
                 });
@@ -321,8 +327,7 @@ export const getUserActivityStats = async (req, res) => {
         });
 
         // 6. Actioned History (Items this user approved/rejected)
-        // 6. Actioned History (Items this user approved/rejected)
-        const relevantIds = [manager._id, targetUser?._id].filter(Boolean); // Check both EmployeeID and UserID
+        // Already calculated relevantIds above
 
         const myActionedLoans = await Loan.find({
             workflow: {
