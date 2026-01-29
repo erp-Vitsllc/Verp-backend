@@ -12,24 +12,40 @@ import { getCompleteEmployee } from "../../services/employeeService.js";
  */
 const generateLoanId = async (type) => {
     try {
-        const prefix = (type && type.toLowerCase().includes('advance')) ? 'adv' : 'loan';
-        const regex = new RegExp(`^${prefix}\\d+$`, 'i');
+        const isAdvance = (type && type.toLowerCase().includes('advance'));
+        const prefix = isAdvance ? 'VEGA-ADV-' : 'VEGA-LON-';
 
-        const lastRecord = await Loan.findOne({ loanId: regex }).sort({ createdAt: -1 }).lean();
+        // Find existing IDs with the specific prefix pattern
+        const regex = new RegExp(`^${prefix}(\\d+)$`, 'i');
 
-        if (lastRecord && lastRecord.loanId) {
-            const currentNum = parseInt(lastRecord.loanId.toLowerCase().replace(prefix, ''), 10);
-            if (!isNaN(currentNum)) {
-                const nextNum = currentNum + 1;
-                return `${prefix}${nextNum.toString().padStart(3, '0')}`;
+        // We use find().lean() and process in memory for safer regex matching across potentially mixed legacy ID types
+        // Or specific regex query. 
+        // Let's use specific regex query but sorting might be tricky if formats mix. 
+        // Best to load relevant IDs and calc max.
+
+        const records = await Loan.find({ loanId: { $regex: regex } }).select('loanId').lean();
+
+        let maxNum = 0;
+        records.forEach(r => {
+            const match = r.loanId.match(regex);
+            if (match && match[1]) {
+                const num = parseInt(match[1], 10);
+                if (num > maxNum) maxNum = num;
             }
-        }
+        });
 
-        return `${prefix}001`;
+        // If no VEGA- format found, fallback check for legacy 'loan001' or 'adv001' just to be safe they don't overlap?
+        // Actually, 'VEGA-LON-0001' is distinct from 'loan001'. No overlap risk in string uniqueness.
+        // We can start fresh sequence for the new format if no previous VEGA- IDs exist.
+
+        const nextNum = maxNum + 1;
+        return `${prefix}${nextNum.toString().padStart(4, '0')}`;
+
     } catch (error) {
         console.error('Error generating loan ID:', error);
-        const prefix = (type && type.toLowerCase().includes('advance')) ? 'adv' : 'loan';
-        return `${prefix}${Date.now().toString().slice(-4)}`;
+        const prefix = (type && type.toLowerCase().includes('advance')) ? 'VEGA-ADV-' : 'VEGA-LON-';
+        const timestamp = Date.now().toString().slice(-4);
+        return `${prefix}ERR-${timestamp}`;
     }
 };
 
@@ -151,7 +167,7 @@ TOTAL PENDING ON DASHBOARD : ${currentPendingLoans + 1}
 
                     // Dynamic URL
                     const origin = req.headers.origin || (req.headers.referer ? new URL(req.headers.referer).origin : null);
-                    const baseUrl = origin || process.env.FRONTEND_URL || "http://localhost:3000";
+                    const baseUrl = process.env.FRONTEND_URL || origin || "http://localhost:3000";
                     const typeSlug = type ? type.replace(/\s+/g, '-') : 'Loan';
                     const actionUrl = `${baseUrl}/HRM/LoanAndAdvance/${typeSlug}-${savedLoan._id}`; // type-id slug
 

@@ -30,7 +30,7 @@ const rewardSchema = new mongoose.Schema(
         rewardStatus: {
             type: String,
             required: true,
-            enum: ['Draft', 'Pending', 'Pending HR', 'Pending Accounts', 'Pending Authorization', 'Approved', 'Rejected'],
+            enum: ['Draft', 'Pending', 'Pending HR', 'Pending Accounts', 'Pending Authorization', 'Approved', 'Rejected', 'Cancelled'],
             default: 'Draft'
         },
         amount: {
@@ -115,7 +115,7 @@ const rewardSchema = new mongoose.Schema(
         workflow: [{
             role: { type: String, required: true },
             assignedTo: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
-            status: { type: String, enum: ['Pending', 'Approved', 'Rejected'], default: 'Pending' },
+            status: { type: String, enum: ['Pending', 'Approved', 'Rejected', 'Cancelled'], default: 'Pending' },
             assignedAt: { type: Date, default: Date.now },
             actionedAt: { type: Date }
         }]

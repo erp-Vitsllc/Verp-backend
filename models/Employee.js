@@ -235,7 +235,7 @@ const employeeSchema = new mongoose.Schema(
                 data: { type: String },
                 publicId: { type: String }
             },
-            status: { type: String, enum: ["Pending", "Approved", "Rejected"], default: "Pending" },
+            status: { type: String, enum: ["Pending", "Approved", "Rejected"] },
             originalStatus: { type: String }, // To revert if rejected
             requestedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" }, // Or Employee ID string depending on auth
             requestedAt: { type: Date, default: Date.now },

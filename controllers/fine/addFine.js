@@ -9,30 +9,119 @@ import { sendFineApprovalEmail } from "../../utils/sendFineApprovalEmail.js";
  */
 const generateFineId = async () => {
     try {
-        // Find the last created fine that matches the pattern 'fineXXX'
-        const lastFine = await Fine.findOne({ fineId: /^fine\d+$/i }).sort({ createdAt: -1 }).lean();
+        // Find all fines with the VEGA-FNE- or VEGA-FINE- format
+        const fines = await Fine.find({
+            fineId: /VEGA-(FINE|FNE)-(\d+)/i
+        }).select('fineId').lean();
 
-        if (lastFine && lastFine.fineId) {
-            // Extract numeric part (case insensitive replace)
-            const currentNum = parseInt(lastFine.fineId.toLowerCase().replace('fine', ''), 10);
-            if (!isNaN(currentNum)) {
-                // Increment and pad with leading zeros (at least 3 digits)
-                const nextNum = currentNum + 1;
-                return `fine${nextNum.toString().padStart(3, '0')}`;
-            }
+        let maxNum = 0;
+
+        if (fines.length > 0) {
+            fines.forEach(f => {
+                const match = f.fineId.match(/VEGA-(FINE|FNE)-(\d+)/i);
+                if (match && match[2]) {
+                    const num = parseInt(match[2], 10);
+                    if (num > maxNum) maxNum = num;
+                }
+            });
         }
 
-        // Start sequence if no matching fines found
-        return 'fine001';
+        const nextNum = maxNum + 1;
+        return `VEGA-FINE-${nextNum.toString().padStart(4, '0')}`;
     } catch (error) {
         console.error('Error generating fine ID:', error);
-        // Fallback safely to timestamp-based unique ID in case of DB error
         return `fine${Date.now().toString().slice(-4)}`;
     }
 };
 
 export const addFine = async (req, res) => {
     try {
+        // --- UNIFIED INTERCEPT: Separate Company Share into Individual Record ---
+        // Whether Single or Bulk, if there is a "Company Amount", we transform it into 
+        // a separate "Employee" record for the company (VEGA-HR-0000).
+
+        let workingEmployees = [];
+
+        // 1. Resolve initial list
+        if (req.body.isBulk && Array.isArray(req.body.employees) && req.body.employees.length > 0) {
+            workingEmployees = [...req.body.employees];
+        } else if (req.body.employees && req.body.employees.length > 0) {
+            // Sometimes isBulk is false but employees array is sent (rare, but handle safely)
+            workingEmployees = [...req.body.employees];
+        } else if (req.body.employeeId) {
+            // Single Request conversion
+            workingEmployees = [{
+                employeeId: req.body.employeeId,
+                // If single request, 'fineAmount' usually is Total. 'employeeAmount' is specifically their share.
+                // We prefer 'employeeAmount' if available, else 'fineAmount' IF 'companyAmount' is handled separately.
+                // However, logic below calculates distinct amounts if creating new structure.
+                fineAmount: parseFloat(req.body.employeeAmount) || 0,
+                employeeAmount: parseFloat(req.body.employeeAmount) || 0,
+                companyAmount: 0 // Explicitly 0, as company share moves to separate record
+            }];
+
+            // Edge case: If ResponsibleFor = 'Employee' and no explicit employeeAmount, use total fineAmount
+            if (!req.body.employeeAmount && req.body.responsibleFor === 'Employee') {
+                const total = parseFloat(req.body.fineAmount) || 0;
+                workingEmployees[0].fineAmount = total;
+                workingEmployees[0].employeeAmount = total;
+            }
+        }
+
+        const rawCompAmt = parseFloat(req.body.companyAmount) || 0;
+        const totalFineAmt = parseFloat(req.body.fineAmount) || 0;
+        const inputResponsibleFor = req.body.responsibleFor;
+
+        // Determine effective Company Liability
+        let compLiability = 0;
+        if (rawCompAmt > 0) {
+            compLiability = rawCompAmt;
+        } else if (inputResponsibleFor === 'Company' || inputResponsibleFor === 'Both') {
+            // If 'Both', we expect rawCompAmt to be > 0. If not, ambiguous.
+            // If 'Company', they take the full hit.
+            if (inputResponsibleFor === 'Company') compLiability = totalFineAmt;
+        }
+
+        if (compLiability > 0) {
+            console.log(`[AddFine] Transforming Company Share (${compLiability}) into VEGA-HR-0000 record.`);
+
+            // Create Company "Employee" Record
+            // Insert at HEAD to ensure it gets Suffix 'A'
+            workingEmployees.unshift({
+                employeeId: 'VEGA-HR-0000',
+                employeeName: 'Vega Digital IT Solutions',
+                fineAmount: compLiability,     // Total Amount for this record
+                employeeAmount: compLiability, // It is their liability
+                companyAmount: 0,              // Zero out field so it doesn't look like a shared fine
+                responsibleFor: 'Employee',    // Treat as individual liability
+                daysWorked: 0
+            });
+
+            // Update Request Body to reflect transformation
+            req.body.isBulk = true;
+            req.body.employees = workingEmployees;
+
+            // IMPORTANT: Clear the global companyAmount so the Bulk Logic doesn't 
+            // try to distribute it across the other employees again.
+            req.body.companyAmount = 0;
+        } else {
+            // If no company liability but we resolved a Single request into workingEmployees array
+            // we should consistency-check if we need to set isBulk=true (e.g. if we want to use the loop logic)
+            // But preserving existing path if not company split is also fine.
+            // However, to be safe, if we populated 'workingEmployees' from a single ID, we can just use the bulk logic 
+            // if we update standard fields.
+
+            if (req.body.employeeId && !req.body.isBulk) {
+                // For standard single requests without company split, we can let them fall through 
+                // to the "SINGLE CREATION LOGIC" block (lines 271+) UNLESS we force bulk here.
+                // The original code passed 'isSingleRequest && isCompanyInvolved'. 
+                // If NOT company involved, original code did nothing.
+                // So we do nothing here, let it fall through.
+            } else if (req.body.isBulk) {
+                // If it was already bulk, ensure we pass the spread workingEmployees in case we modified anything (unlikely here)
+            }
+        }
+
         const { isBulk, employees, ...commonData } = req.body;
 
         // --- BULK CREATION LOGIC ---
@@ -41,7 +130,7 @@ export const addFine = async (req, res) => {
 
         if (isBulk && Array.isArray(bulkList) && bulkList.length > 0) {
             console.log(`[AddFine] Processing Bulk Request. Count: ${bulkList.length}`);
-            const fineId = await generateFineId();
+            const baseFineId = await generateFineId(); // e.g. VEGA-FNE-0001
             const createdFines = [];
             const errors = [];
 
@@ -52,7 +141,7 @@ export const addFine = async (req, res) => {
                     const attachmentDataStr = typeof commonData.attachment.data === 'string' ? commonData.attachment.data : String(commonData.attachment.data);
                     const uploadResult = await uploadDocumentToS3(
                         attachmentDataStr,
-                        `fines/bulk_${fineId}`,
+                        `fines/bulk_${baseFineId}`,
                         commonData.attachment.name || 'fine-attachment.pdf',
                         'raw'
                     );
@@ -72,138 +161,141 @@ export const addFine = async (req, res) => {
                 }
             }
 
-            // Pre-calculate shares if not provided per-item
+            // Pre-calculate shares
             const count = bulkList.length;
             const totalFine = parseFloat(commonData.fineAmount) || 0;
             const totalEmp = parseFloat(commonData.employeeAmount) || 0;
             const totalComp = parseFloat(commonData.companyAmount) || 0;
 
-            const defFineShare = count > 0 ? (totalFine / count) : 0;
-            const defEmpShare = count > 0 ? (totalEmp / count) : 0;
-            const defCompShare = count > 0 ? (totalComp / count) : 0;
+            // If we are splitting into individual records, we need to split the AMOUNTS too.
+            // Assuming the input amounts are TOTALs for the whole group.
+            const fineShare = count > 0 ? (totalFine / count) : 0;
+            const empShare = count > 0 ? (totalEmp / count) : 0;
+            const compShare = count > 0 ? (totalComp / count) : 0;
 
-            // Construct full assignedEmployees list with calculated/provided shares
-            const fullAssignedList = await Promise.all(bulkList.map(async (empData) => {
+            // Suffix generation helper
+            const getSuffix = (index) => {
+                const letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+                // Simple A-Z support. For >26, maybe AA, AB? For now assume < 26.
+                if (index < 26) return `-${letters[index]}`;
+                return `-${index}`; // Fallback for huge lists
+            };
+
+            // Process each employee as an INDIVIDUAL FINE record
+            for (let i = 0; i < count; i++) {
+                const empData = bulkList[i];
                 let eName = empData.employeeName || '';
                 if (!eName && empData.employeeId) {
                     const emp = await EmployeeBasic.findOne({ employeeId: empData.employeeId }).select('firstName lastName').lean();
                     if (emp) eName = `${emp.firstName} ${emp.lastName}`;
                 }
 
-                const isPassed = (empData.fineAmount !== undefined);
-                return {
-                    employeeId: empData.employeeId,
-                    employeeName: eName || 'Unknown',
-                    // Store item-specific details in the array objects if schema allows 
-                    // (Schema currently has employeeId, employeeName, daysWorked. 
-                    // To store individual amounts, schema update would be needed, 
-                    // BUT for now we rely on the fact that for bulk fines, shares are usually equal 
-                    // or calculated on the fly. Ideally we should add 'amount' to assignedEmployees schema, 
-                    // but user said "store inside employee array assigned employees".
-                    // The current schema strictly validates assignedEmployees. 
-                    // We will fit what we can.)
-                    daysWorked: empData.daysWorked || 0
+                // Generate Unique ID for this specific record
+                // If count > 1, append suffix. If count == 1, use base ID.
+                const uniqueFineId = (count > 1) ? `${baseFineId}${getSuffix(i)}` : baseFineId;
+
+                // Use individual amounts if provided by frontend, otherwise fallback to equal distribution
+                const individualFineAmount = (empData.fineAmount !== undefined && empData.fineAmount !== null) ? parseFloat(empData.fineAmount) : fineShare;
+                const individualEmpAmount = (empData.employeeAmount !== undefined && empData.employeeAmount !== null) ? parseFloat(empData.employeeAmount) : empShare;
+                const individualCompAmount = (empData.companyAmount !== undefined && empData.companyAmount !== null) ? parseFloat(empData.companyAmount) : compShare;
+
+                const finePayload = {
+                    fineId: uniqueFineId,
+                    // Store as single assigned employee
+                    assignedEmployees: [{
+                        employeeId: empData.employeeId,
+                        employeeName: eName || 'Unknown',
+                        daysWorked: empData.daysWorked || 0,
+                        individualAmount: individualEmpAmount // Store individual amount here too
+                    }],
+                    fineType: commonData.fineType || 'Other',
+                    fineStatus: commonData.fineStatus || 'Pending',
+
+                    // Use Individual Amounts
+                    fineAmount: individualFineAmount,
+                    employeeAmount: individualEmpAmount,
+                    companyAmount: individualCompAmount,
+
+                    description: commonData.description || '',
+                    awardedDate: commonData.awardedDate ? new Date(commonData.awardedDate) : new Date(),
+                    remarks: commonData.remarks || '',
+                    attachment: attachmentData,
+                    category: commonData.category || 'Other',
+                    subCategory: commonData.subCategory || '',
+                    vehicleId: commonData.vehicleId || null,
+                    projectId: commonData.projectId || null,
+                    projectName: commonData.projectName || '',
+                    engineerName: commonData.engineerName || '',
+                    responsibleFor: commonData.responsibleFor || null,
+                    payableDuration: parseInt(empData.payableDuration || commonData.payableDuration) || null,
+                    monthStart: commonData.monthStart || '',
+                    createdBy: req.user._id
                 };
-            }));
 
-            // Use the first employee as the "Primary" for indexing, or a placeholder if needed.
-            // Since employeeId is required and usually indexed, picking the first one is safe for now 
-            // as getFines searches assignedEmployees too.
-            const primaryEmp = fullAssignedList[0];
-
-            const finePayload = {
-                fineId,
-                // employeeId: primaryEmp.employeeId, // REMOVED
-                // employeeName: primaryEmp.employeeName, // REMOVED
-                fineType: commonData.fineType || 'Other',
-                fineStatus: commonData.fineStatus || 'Pending',
-                fineAmount: totalFine, // Total for the whole group
-                description: commonData.description || '',
-                awardedDate: commonData.awardedDate ? new Date(commonData.awardedDate) : new Date(),
-                remarks: commonData.remarks || '',
-                attachment: attachmentData,
-                category: commonData.category || 'Other',
-                subCategory: commonData.subCategory || '',
-                vehicleId: commonData.vehicleId || null,
-                projectId: commonData.projectId || null,
-                projectName: commonData.projectName || '',
-                engineerName: commonData.engineerName || '',
-                assignedEmployees: fullAssignedList,
-                responsibleFor: commonData.responsibleFor || null,
-                employeeAmount: totalEmp,
-                companyAmount: totalComp,
-                payableDuration: parseInt(commonData.payableDuration) || null,
-                monthStart: commonData.monthStart || '',
-                monthStart: commonData.monthStart || '',
-                createdBy: req.user._id // Add Creator
-            };
-
-            // --- BULK SNAPSHOT LOGIC: Find Manager for First Employee ---
-            if (finePayload.fineStatus !== 'Draft' && primaryEmp && primaryEmp.employeeId) {
-                const targetEmpId = primaryEmp.employeeId;
-                try {
-                    const employeeForSnapshot = await EmployeeBasic.findOne({ employeeId: targetEmpId })
-                        .select('primaryReportee')
-                        .lean();
-
-                    if (employeeForSnapshot && employeeForSnapshot.primaryReportee) {
-                        const managerBasic = await EmployeeBasic.findById(employeeForSnapshot.primaryReportee)
-                            .select('employeeId companyEmail email workEmail firstName lastName')
+                // --- SNAPSHOT LOGIC per Employee ---
+                // Find manager for THIS specific employee
+                if (finePayload.fineStatus !== 'Draft' && empData.employeeId) {
+                    try {
+                        const employeeForSnapshot = await EmployeeBasic.findOne({ employeeId: empData.employeeId })
+                            .select('primaryReportee')
                             .lean();
 
-                        if (managerBasic) {
-                            let reporteeUser = null;
-                            if (managerBasic.employeeId) {
+                        if (employeeForSnapshot && employeeForSnapshot.primaryReportee) {
+                            const managerBasic = await EmployeeBasic.findById(employeeForSnapshot.primaryReportee)
+                                .select('employeeId companyEmail email workEmail firstName lastName')
+                                .lean();
+
+                            if (managerBasic) {
+                                let reporteeUser = null;
                                 if (req.user && req.user.employeeId === managerBasic.employeeId) {
                                     reporteeUser = req.user;
                                 } else {
                                     reporteeUser = await User.findOne({ employeeId: managerBasic.employeeId });
+                                    if (!reporteeUser) {
+                                        const managerEmail = managerBasic.companyEmail || managerBasic.workEmail || managerBasic.email;
+                                        if (managerEmail) {
+                                            reporteeUser = await User.findOne({
+                                                $or: [{ email: managerEmail }, { username: managerEmail }]
+                                            });
+                                        }
+                                    }
                                 }
-                            }
-                            if (!reporteeUser) {
-                                const managerEmail = managerBasic.companyEmail || managerBasic.workEmail || managerBasic.email;
-                                if (managerEmail) {
-                                    reporteeUser = await User.findOne({
-                                        $or: [{ email: managerEmail }, { username: managerEmail }]
-                                    });
-                                }
-                            }
 
-                            if (reporteeUser) {
-                                finePayload.submittedTo = reporteeUser._id;
-                                finePayload.workflow = [{
-                                    role: 'Reportee',
-                                    assignedTo: reporteeUser._id,
-                                    status: 'Pending',
-                                    assignedAt: new Date()
-                                }];
-                                console.log(`[AddFine] Bulk Fine assigned to Manager: ${reporteeUser.username}`);
+                                if (reporteeUser) {
+                                    finePayload.submittedTo = reporteeUser._id;
+                                    finePayload.workflow = [{
+                                        role: 'Reportee',
+                                        assignedTo: reporteeUser._id,
+                                        status: 'Pending',
+                                        assignedAt: new Date()
+                                    }];
+                                }
                             }
                         }
+                    } catch (snapErr) {
+                        console.error('[AddFine] Error resolving manager for:', empData.employeeId, snapErr);
                     }
-                } catch (snapErr) {
-                    console.error("[AddFine] Error resolving manager for bulk fine:", snapErr);
+                }
+
+                try {
+                    const newFine = new Fine(finePayload);
+                    await newFine.save();
+                    createdFines.push(newFine);
+
+                    // Send Email Notification (Individual)
+                    if (newFine.fineStatus !== 'Draft') {
+                        sendFineApprovalEmail(newFine, finePayload.assignedEmployees).catch(err => console.error(err));
+                    }
+                } catch (err) {
+                    console.error(`[AddFine] Error saving individual fine ${uniqueFineId}:`, err);
+                    errors.push({ employeeId: empData.employeeId, error: err.message });
                 }
             }
 
-            console.log(`[AddFine] Saving SINGLE Bulk Fine. ID: ${fineId}, Group Size: ${fullAssignedList.length}, Total Amount: ${totalFine}`);
-
-            try {
-                const newFine = new Fine(finePayload);
-                await newFine.save();
-                createdFines.push(newFine);
-
-                // Send Email Notification
-                if (newFine.fineStatus !== 'Draft') {
-                    sendFineApprovalEmail(newFine, fullAssignedList).catch(err => console.error(err));
-                }
-            } catch (err) {
-                console.error(`[AddFine] Error saving bulk fine:`, err);
-                errors.push({ error: err.message });
-            }
+            console.log(`[AddFine] Bulk Processing Complete. Created: ${createdFines.length}, Errors: ${errors.length}`);
 
             return res.status(201).json({
-                message: `Bulk fine created.`,
+                message: `Bulk fine processing complete. Created ${createdFines.length} records.`,
                 fines: createdFines,
                 errors
             });

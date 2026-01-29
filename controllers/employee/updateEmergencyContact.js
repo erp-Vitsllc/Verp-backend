@@ -9,6 +9,10 @@ export const updateEmergencyContact = async (req, res) => {
         return res.status(400).json({ message: "Name and number are required" });
     }
 
+    if (typeof name !== 'string' || (typeof number !== 'string' && typeof number !== 'number')) {
+        return res.status(400).json({ message: "Name must be a string and number must be a string or number" });
+    }
+
     const trimmedName = name.trim();
     const rawNumber = number.toString().trim();
 

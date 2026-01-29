@@ -20,10 +20,16 @@ const generateRewardId = async () => {
         // Extract numbers - support both 're' and 'RWD' prefixes for backward compatibility
         rewards.forEach(reward => {
             if (reward.rewardId) {
-                // Check for new RWD format first
-                let match = reward.rewardId.match(/RWD(\d+)/i);
+                // Check for new VEGA-RWD format
+                let match = reward.rewardId.match(/VEGA-RWD-(\d+)/i);
+
+                // Fallback to previous RWD format
                 if (!match) {
-                    // Fallback check for old 're' format
+                    match = reward.rewardId.match(/RWD(\d+)/i);
+                }
+
+                // Fallback to old 're' format
+                if (!match) {
                     match = reward.rewardId.match(/re(\d+)/i);
                 }
 
@@ -39,8 +45,8 @@ const generateRewardId = async () => {
         // Start from the next number
         let nextNumber = maxNumber + 1;
 
-        // Format: RWD001, RWD002, etc.
-        let newRewardId = `RWD${nextNumber.toString().padStart(3, '0')}`;
+        // Format: VEGA-RWD-0001, etc.
+        let newRewardId = `VEGA-RWD-${nextNumber.toString().padStart(4, '0')}`;
 
         // Ensure uniqueness - check if this ID already exists
         let exists = await Reward.findOne({ rewardId: newRewardId }).lean();
@@ -50,7 +56,7 @@ const generateRewardId = async () => {
         // Keep incrementing until we find a unique ID
         while (exists && attempts < maxAttempts) {
             nextNumber++;
-            newRewardId = `RWD${nextNumber.toString().padStart(3, '0')}`;
+            newRewardId = `VEGA-RWD-${nextNumber.toString().padStart(4, '0')}`;
             exists = await Reward.findOne({ rewardId: newRewardId }).lean();
             attempts++;
         }
@@ -59,14 +65,14 @@ const generateRewardId = async () => {
         if (attempts >= maxAttempts || exists) {
             const timestamp = Date.now().toString().slice(-4);
             const randomSuffix = Math.floor(Math.random() * 1000).toString().padStart(3, '0');
-            newRewardId = `RWD${timestamp}${randomSuffix}`;
+            newRewardId = `VEGA-RWD-${timestamp}${randomSuffix}`;
         }
 
         return newRewardId;
     } catch (error) {
         console.error('Error generating reward ID:', error);
         // Fallback: use timestamp-based ID
-        return `RWD${Date.now().toString().slice(-6)}`;
+        return `VEGA-RWD-${Date.now().toString().slice(-6)}`;
     }
 };
 

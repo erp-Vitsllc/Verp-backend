@@ -8,7 +8,7 @@ const buildMissingFields = (body, existingDocument) => {
     return REQUIRED_FIELDS.filter((field) => {
         if (field === "upload") {
             // Check if upload is provided OR if existing document exists in DB
-            const hasUpload = body.upload && body.upload.trim() !== '';
+            const hasUpload = body.upload && typeof body.upload === 'string' && body.upload.trim() !== '';
             return !hasUpload && !existingDocument;
         }
         const value = body[field];
@@ -32,6 +32,14 @@ export const updateLabourCardDetails = async (req, res) => {
         uploadName,
         uploadMime,
     } = req.body || {};
+
+    // Type validation
+    if (number !== undefined && typeof number !== 'string') {
+        return res.status(400).json({ message: "Number must be a string" });
+    }
+    if (upload !== undefined && typeof upload !== 'string') {
+        return res.status(400).json({ message: "Upload must be a string (base64 or URL)" });
+    }
 
     try {
         // Get employeeId first to check for existing documents
@@ -66,7 +74,7 @@ export const updateLabourCardDetails = async (req, res) => {
 
         // Handle document upload to IDrive (S3) if new document provided
         let documentData = undefined;
-        if (upload && upload.trim() !== '') {
+        if (upload && typeof upload === 'string' && upload.trim() !== '') {
             // Check if it's already a URL (IDrive or otherwise)
             if (upload.startsWith('http://') || upload.startsWith('https://')) {
                 // Already a URL

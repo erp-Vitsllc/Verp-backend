@@ -54,6 +54,7 @@ export const updateReward = async (req, res) => {
         if (rewardStatus !== undefined) {
             // === NEW APPROVAL LOGIC ===
             let finalStatus = rewardStatus;
+            const currentStatus = reward.rewardStatus;
             let approverDetails = null;
 
             // === SUBMIT FROM DRAFT LOGIC ===
@@ -178,16 +179,22 @@ export const updateReward = async (req, res) => {
                         approverDetails = { name: 'Admin', designation: 'Administrator', isAdmin: true };
                         console.log("[UpdateReward] Approver is Admin");
                     } else {
-                        // Find Employee
-                        approverBasic = await EmployeeBasic.findOne({
-                            $or: [{ _id: approverUserId }, { employeeId: userObj?.employeeId }] // Best effort match
-                        });
-
-                        if (!approverBasic && userObj?.employeeId) {
+                        // Find Employee using linked employeeId
+                        if (userObj?.employeeId) {
                             approverBasic = await EmployeeBasic.findOne({ employeeId: userObj.employeeId });
                         }
 
-                        console.log("[UpdateReward] Approver Employee Found:", approverBasic ? approverBasic.employeeId : 'No');
+                        // Fallback Match by email if needed
+                        if (!approverBasic && (userObj?.email || userObj?.companyEmail)) {
+                            approverBasic = await EmployeeBasic.findOne({
+                                $or: [
+                                    { companyEmail: userObj.companyEmail },
+                                    { email: userObj.email }
+                                ]
+                            });
+                        }
+
+                        console.log("[UpdateReward] Approver Employee Found:", approverBasic ? `${approverBasic.firstName} (${approverBasic.employeeId})` : 'NO - Using Fallback');
                     }
                 }
 
@@ -201,8 +208,8 @@ export const updateReward = async (req, res) => {
                     };
 
                     // Check CEO Validity (Strict)
-                    const isCEO = approverBasic.department && approverBasic.department.toLowerCase() === 'management' &&
-                        ['ceo', 'c.e.o', 'c.e.o.', 'director', 'managing director', 'general manager'].includes(approverBasic.designation?.toLowerCase());
+                    const isCEO = approverBasic.department && (approverBasic.department.toLowerCase() === 'management' || approverBasic.department.toLowerCase() === 'administration' || approverBasic.department.toLowerCase() === 'board of directors') &&
+                        ['ceo', 'c.e.o', 'c.e.o.', 'chief executive officer', 'director', 'managing director', 'general manager', 'gm', 'g.m', 'g.m.'].includes(approverBasic.designation?.toLowerCase()?.trim());
 
                     // Check HR Validity
                     const isHR = approverBasic.department && (approverBasic.department.toLowerCase() === 'hr' || approverBasic.department.toLowerCase() === 'human resource' || approverBasic.department.toLowerCase() === 'human resources');
@@ -234,7 +241,7 @@ export const updateReward = async (req, res) => {
                         finalStatus = 'Approved';
                     }
                     else if (isCEO && reward.rewardStatus !== 'Rejected') {
-                        // CEO Override if needed
+                        finalStatus = 'Approved'; // CEO Override
                     }
                 }
 
@@ -304,7 +311,7 @@ export const updateReward = async (req, res) => {
                                 });
                             }
 
-                            // 2. Push CEO
+                            // 2. Push CEO Step
                             reward.workflow.push({
                                 role: 'CEO',
                                 assignedTo: hodUser._id,
@@ -333,28 +340,36 @@ export const updateReward = async (req, res) => {
                 reward.approvedDate = new Date();
 
                 // Update CEO Workflow to Approved
-                if (reward.workflow) {
-                    const ceoEntry = reward.workflow.find(w => w.role === 'CEO' && w.status === 'Pending');
+                // Update CEO Workflow to Approved
+                if (reward.workflow?.length) {
+
+                    console.log(
+                        `[UpdateReward] CEO Workflow Update: User=${req.user?._id}, Approver=${approverUserId}`
+                    );
+
+                    const ceoEntry = reward.workflow.find(w =>
+                        w.role === 'CEO' &&
+                        w.status === 'Pending'
+                    );
+
+                    console.log(
+                        `[UpdateReward] Found CEO Entry:`,
+                        ceoEntry ? "YES" : "NO"
+                    );
+
                     if (ceoEntry) {
                         ceoEntry.status = 'Approved';
                         ceoEntry.actionedAt = new Date();
-                    } else {
-                        // Fallback logic for direct approval or admin override
-                        reward.workflow.push({
-                            role: 'CEO',
-                            assignedTo: req.user?._id,
-                            status: 'Approved',
-                            assignedAt: new Date(),
-                            actionedAt: new Date()
-                        });
                     }
                 }
 
-                // === EMAIL NOTIFICATION LOGIC (Existing for Employee) ===
+            }
+            // If status is being approved (Final), send email to recipient
+            if (finalStatus === 'Approved' && currentStatus !== 'Approved') {
                 try {
                     // Send email to the *Employee* (receiver of reward)
                     const employeeForEmail = await EmployeeBasic.findOne({ employeeId: reward.employeeId })
-                        .select('firstName lastName email companyEmail employeeId')
+                        .select('firstName lastName email companyEmail')
                         .lean();
 
                     if (employeeForEmail) {
@@ -375,25 +390,22 @@ export const updateReward = async (req, res) => {
                                 const transporter = nodemailer.createTransport({
                                     host: smtpHost,
                                     port: smtpPort,
-                                    secure: false, // true for 465, false for other ports
+                                    secure: false,
                                     auth: { user: emailUser, pass: emailPass }
                                 });
 
-                                // Get Approver Name Dynamic Logic (Simplified as we have details)
-                                let approverName = approverDetails ? approverDetails.name : "Admin";
-
-                                const subject = "Congratulations! You have received a Reward";
+                                const subject = "Congratulations! Your Reward has been Approved";
                                 const html = `
-                                     <div style="font-family: Arial, sans-serif; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
-                                         <h2 style="color: #1a2e35;">Congratulations, ${empName}!</h2>
-                                         <p>We are pleased to inform you that your <strong>${reward.rewardType}</strong> reward has been approved.</p>
-                                         <p>This reward was approved by <strong>${approverName}</strong>.</p>
-                                         <p>Please find your certificate attached to this email.</p>
-                                         <br>
-                                         <p>Best Regards,</p>
-                                         <p>HR Team</p>
-                                     </div>
-                                 `;
+                                    <div style="font-family: Arial, sans-serif; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+                                        <h2 style="color: #2e7d32;">Reward Appointment</h2>
+                                        <p>Dear ${empName},</p>
+                                        <p>We are pleased to inform you that your reward request for <strong>${reward.rewardType}</strong> (${reward.title}) has been <strong>Approved</strong>.</p>
+                                        <p>You can view your reward details and download the certificate (if applicable) through the Employee Portal.</p>
+                                        <br>
+                                        <p>Best Regards,</p>
+                                        <p>Management Team</p>
+                                    </div>
+                                `;
 
                                 const mailOptions = {
                                     from: `"VeRP Notification" <${emailUser}>`,
@@ -413,14 +425,38 @@ export const updateReward = async (req, res) => {
                                 }
 
                                 await transporter.sendMail(mailOptions);
-                                console.log(`Reward approval email sent to ${empEmail}`);
+                                console.log(`[UpdateReward] SUCCESS: Reward approval email sent to ${empEmail}`);
+                            } else {
+                                console.error("[UpdateReward] ERROR: Missing EMAIL_USER or EMAIL_PASS environment variables");
                             }
+                        } else {
+                            console.warn(`[UpdateReward] WARNING: Employee ${empName} has no email address. Skipping email.`);
                         }
+                    } else {
+                        console.error(`[UpdateReward] ERROR: Employee not found for ID ${reward.employeeId}`);
                     }
                 } catch (emailError) {
-                    console.error("Failed to send reward approval email:", emailError);
+                    console.error("[UpdateReward] EXCEPTION: Failed to send reward approval email:", emailError);
                 }
             } else if (rewardStatus === 'Rejected') {
+                // Update Workflow to Rejected
+                if (!reward.workflow) reward.workflow = [];
+                const pendingStep = reward.workflow.find(w => w.status === 'Pending' && (w.assignedTo?.toString() === (req.user?._id || approverUserId)?.toString() || w.role === 'CEO')); // CEO usually is the one rejecting at final stage, or Manager/HR
+
+                if (pendingStep) {
+                    pendingStep.status = 'Rejected';
+                    pendingStep.actionedAt = new Date();
+                } else {
+                    // Fallback log rejection
+                    reward.workflow.push({
+                        role: approverDetails ? approverDetails.designation : 'Reviewer',
+                        assignedTo: req.user?._id || approverUserId,
+                        status: 'Rejected',
+                        assignedAt: new Date(),
+                        actionedAt: new Date()
+                    });
+                }
+
                 // === REJECTION EMAIL LOGIC ===
                 try {
                     const employeeForEmail = await EmployeeBasic.findOne({ employeeId: reward.employeeId })
@@ -468,12 +504,34 @@ export const updateReward = async (req, res) => {
                                     subject: subject,
                                     html: html
                                 });
-                                console.log(`Reward rejection email sent to ${empEmail}`);
+                                console.log(`[UpdateReward] SUCCESS: Reward rejection email sent to ${empEmail}`);
+                            } else {
+                                console.error("[UpdateReward] ERROR: Missing EMAIL_USER or EMAIL_PASS for rejection email");
                             }
+                        } else {
+                            console.warn(`[UpdateReward] WARNING: No email found for rejected employee ${reward.employeeId}`);
                         }
                     }
                 } catch (emailError) {
-                    console.error("Failed to send reward rejection email:", emailError);
+                    console.error("[UpdateReward] EXCEPTION: Failed to send reward rejection email:", emailError);
+                }
+            } else if (rewardStatus === 'Cancelled') {
+                // Update Workflow to Cancelled
+                if (!reward.workflow) reward.workflow = [];
+                // If it's a draft, there might not be a pending step yet, but let's try to find one or add one
+                const pendingStep = reward.workflow.find(w => w.status === 'Pending');
+
+                if (pendingStep) {
+                    pendingStep.status = 'Cancelled';
+                    pendingStep.actionedAt = new Date();
+                } else {
+                    reward.workflow.push({
+                        role: 'Requester',
+                        assignedTo: req.user?._id || reward.createdBy,
+                        status: 'Cancelled',
+                        assignedAt: new Date(),
+                        actionedAt: new Date()
+                    });
                 }
             }
         }
@@ -513,6 +571,7 @@ export const updateReward = async (req, res) => {
         });
     }
 };
+
 
 
 

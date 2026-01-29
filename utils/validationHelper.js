@@ -11,7 +11,7 @@ export const isValidStorageUrl = (url) => {
         const parsed = new URL(url);
         // Strict whitelist of allowed hostnames
         // adjust this if you use other providers (e.g. AWS S3, Cloudinary)
-        return parsed.hostname.endsWith('idrivee2.com');
+        return parsed.hostname === 'idrivee2.com' || parsed.hostname.endsWith('.idrivee2.com');
     } catch (e) {
         return false;
     }

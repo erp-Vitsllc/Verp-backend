@@ -74,7 +74,7 @@ export const updateLoanDetails = async (req, res) => {
                             const subject = `${oldStatus === 'Draft' ? '' : 'UPDATED '}${loan.loanId || type} Application: ${employeeName}`;
 
                             const origin = req.headers.origin || (req.headers.referer ? new URL(req.headers.referer).origin : null);
-                            const baseUrl = origin || process.env.FRONTEND_URL || "http://localhost:3000";
+                            const baseUrl = process.env.FRONTEND_URL || origin || "http://localhost:3000";
                             const typeSlug = type ? type.replace(/\s+/g, '-') : 'Loan';
                             const actionUrl = `${baseUrl}/HRM/LoanAndAdvance/${typeSlug}-${savedLoan._id}`;
 

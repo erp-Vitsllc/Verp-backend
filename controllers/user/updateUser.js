@@ -11,7 +11,20 @@ const __dirname = path.dirname(__filename);
 
 // Update user
 // Note: Rate limiting for this sensitive endpoint should be handled by a global middleware (e.g., express-rate-limit)
-export const updateUser = async (req, res) => {
+import rateLimit from 'express-rate-limit';
+
+// Rate limiter for update operations
+const updateLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 10, // Limit each IP to 10 requests per windowMs
+    message: "Too many update requests from this IP, please try again after 15 minutes",
+    standardHeaders: true,
+    legacyHeaders: false,
+});
+
+// Update user
+// Note: Rate limiting is now applied via the array export
+const updateUserHandler = async (req, res) => {
     try {
         const { id } = req.params;
         const {
@@ -25,6 +38,26 @@ export const updateUser = async (req, res) => {
             enablePortalAccess,
             isAdmin
         } = req.body;
+
+        // Type validation
+        if (typeof id !== 'string') {
+            return res.status(400).json({ message: "Invalid ID format" });
+        }
+        if (username !== undefined && typeof username !== 'string') {
+            return res.status(400).json({ message: "Username must be a string" });
+        }
+        if (name !== undefined && typeof name !== 'string') {
+            return res.status(400).json({ message: "Name must be a string" });
+        }
+        if (email !== undefined && typeof email !== 'string') {
+            return res.status(400).json({ message: "Email must be a string" });
+        }
+        if (password !== undefined && typeof password !== 'string') {
+            return res.status(400).json({ message: "Password must be a string" });
+        }
+        if (employeeId !== undefined && (employeeId !== null && typeof employeeId !== 'string')) {
+            return res.status(400).json({ message: "Employee ID must be a string or null" });
+        }
 
         const user = await User.findById(id);
         if (!user) {
@@ -205,4 +238,6 @@ export const updateUser = async (req, res) => {
         });
     }
 };
+
+export const updateUser = [updateLimiter, updateUserHandler];
 

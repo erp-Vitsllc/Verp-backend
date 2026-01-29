@@ -5,10 +5,16 @@ export const updateTraining = async (req, res) => {
     const { id, trainingId } = req.params;
     const { trainingName, trainingDetails, provider, trainingDate, trainingCost, trainingCertificate } = req.body;
 
-    // Validate required fields
+    // Validate required fields and types
     if (!trainingName || !provider || !trainingDate) {
         return res.status(400).json({
             message: "Training Name, Provider, and Training Date are required"
+        });
+    }
+
+    if (typeof trainingName !== 'string' || typeof provider !== 'string' || (trainingDetails !== undefined && typeof trainingDetails !== 'string')) {
+        return res.status(400).json({
+            message: "Training Name, Provider, and Details must be valid strings"
         });
     }
 

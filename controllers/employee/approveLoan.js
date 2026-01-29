@@ -88,6 +88,8 @@ export const approveLoan = async (req, res) => {
                 status: 'Pending',
                 assignedAt: new Date()
             }];
+
+            console.log(`[ApproveLoan] Draft -> Pending transition for Manager: ${nextApprover.employeeId}`);
         }
         else if (status === 'Approved') {
             if (isAdmin) {
@@ -293,17 +295,50 @@ export const approveLoan = async (req, res) => {
             });
 
             const origin = req.headers.origin || (req.headers.referer ? new URL(req.headers.referer).origin : null);
-            const baseUrl = origin || process.env.FRONTEND_URL || "http://localhost:3000";
-            const actionUrl = `${baseUrl}/HRM/LoanAndAdvance/${loan._id}`;
+            const baseUrl = process.env.FRONTEND_URL || origin || "http://localhost:3000";
+            const typeSlug = loan.type ? loan.type.replace(/\s+/g, '-') : 'Loan';
+            const actionUrl = `${baseUrl}/HRM/LoanAndAdvance/${typeSlug}-${loan._id}`;
 
             // 1. Notify Next Approver
             if (nextApprover && (nextApprover.companyEmail || nextApprover.email)) {
                 try {
-                    const mailOptions = {
-                        from: `"VeRP Notification" <${emailUser}>`,
-                        to: nextApprover.companyEmail || nextApprover.email,
-                        subject: emailSubject,
-                        html: `
+                    let htmlContent = "";
+
+                    if (emailType === "Manager") {
+                        // High quality template for Manager (matches requestLoan.js)
+                        const applicantName = loan.applicantName;
+                        const type = loan.type || 'Loan/Advance';
+                        const amount = loan.amount;
+                        const duration = loan.duration;
+                        const reason = loan.reason;
+                        const employeeId = loan.employeeId;
+
+                        htmlContent = `
+                            <div style="font-family: Arial, sans-serif; color: #333; line-height: 1.6; max-width: 600px; margin: 0 auto; border: 1px solid #eee; border-radius: 10px; overflow: hidden;">
+                                <div style="background-color: #0d9488; color: white; padding: 20px; text-align: center;">
+                                    <h2 style="margin: 0;">${type} Application Review</h2>
+                                </div>
+                                <div style="padding: 30px;">
+                                    <p>Hello <strong>${nextApprover.firstName}</strong>,</p>
+                                    <p><strong>${applicantName}</strong> has submitted a request for ${type} (previously saved as Draft).</p>
+                                    
+                                    <div style="background-color: #f0fdfa; padding: 20px; border-radius: 8px; border: 1px solid #ccfbf1; margin: 25px 0;">
+                                        <p style="margin: 0;"><strong>Employee:</strong> ${applicantName} (${employeeId})</p>
+                                        <p style="margin: 8px 0 0 0;"><strong>Type:</strong> ${type}</p>
+                                        <p style="margin: 8px 0 0 0;"><strong>Amount:</strong> AED ${Number(amount).toLocaleString()}</p>
+                                        <p style="margin: 8px 0 0 0;"><strong>Duration:</strong> ${duration} Months</p>
+                                        <p style="margin: 8px 0 0 0;"><strong>Reason:</strong> ${reason}</p>
+                                    </div>
+                                    
+                                    <p style="text-align: center; margin: 35px 0;">
+                                        <a href="${actionUrl}" style="background-color: #0d9488; color: white; padding: 14px 30px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block; font-size: 16px;">View Request</a>
+                                    </p>
+                                </div>
+                            </div>
+                        `;
+                    } else {
+                        // Standard template for HR/Finance/CEO
+                        htmlContent = `
                             <div style="font-family: Arial, sans-serif; color: #333; max-width: 600px; margin: 0 auto; border: 1px solid #eee; border-radius: 10px; overflow: hidden;">
                                 <div style="background-color: #f59e0b; color: white; padding: 20px; text-align: center;">
                                     <h2 style="margin: 0;">Action Required: ${emailSubject}</h2>
@@ -318,7 +353,14 @@ export const approveLoan = async (req, res) => {
                                     </div>
                                 </div>
                             </div>
-                        `
+                        `;
+                    }
+
+                    const mailOptions = {
+                        from: `"VeRP Notification" <${emailUser}>`,
+                        to: nextApprover.companyEmail || nextApprover.email,
+                        subject: emailSubject,
+                        html: htmlContent
                     };
                     await transporter.sendMail(mailOptions);
                 } catch (emailErr) {

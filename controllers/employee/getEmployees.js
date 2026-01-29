@@ -59,6 +59,7 @@ export const getEmployees = async (req, res) => {
                         sortPriority: {
                             $switch: {
                                 branches: [
+                                    { case: { $eq: ["$employeeId", "VEGA-HR-0000"] }, then: 0 },
                                     { case: { $and: [{ $eq: ["$status", "Notice"] }, { $eq: ["$profileStatus", "inactive"] }] }, then: 1 },
                                     { case: { $and: [{ $eq: ["$status", "Notice"] }, { $eq: ["$profileStatus", "active"] }] }, then: 2 },
                                     { case: { $and: [{ $eq: ["$status", "Probation"] }, { $eq: ["$profileStatus", "inactive"] }] }, then: 3 },

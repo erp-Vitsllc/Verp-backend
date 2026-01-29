@@ -39,6 +39,10 @@ export const getLoanById = async (req, res) => {
                 path: 'rejectedBy',
                 select: 'firstName lastName designation department'
             })
+            .populate({
+                path: 'createdBy',
+                select: 'name'
+            })
             .lean();
 
         if (!loan) {
@@ -79,7 +83,8 @@ export const getLoanById = async (req, res) => {
             hrApprovedBy: loan.hrApprovedBy,
             accountsApprovedBy: loan.accountsApprovedBy,
             hrHODName: hrHOD ? `${hrHOD.firstName} ${hrHOD.lastName}` : 'HR HOD',
-            accountsHODName: accountsHOD ? `${accountsHOD.firstName} ${accountsHOD.lastName}` : 'Finance HOD'
+            accountsHODName: accountsHOD ? `${accountsHOD.firstName} ${accountsHOD.lastName}` : 'Finance HOD',
+            createdBy: loan.createdBy
         };
 
         res.status(200).json(data);

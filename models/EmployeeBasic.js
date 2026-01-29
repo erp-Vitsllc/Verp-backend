@@ -88,7 +88,7 @@ const employeeBasicSchema = new mongoose.Schema(
                 mimeType: { type: String },
                 data: { type: String }
             },
-            status: { type: String, enum: ["Pending", "Approved", "Rejected"], default: "Pending" },
+            status: { type: String, enum: ["Pending", "Approved", "Rejected"] },
             originalStatus: { type: String }, // To revert if rejected
             requestedBy: { type: mongoose.Schema.Types.ObjectId, ref: "EmployeeBasic" },
             // SNAPSHOT: Manager who received the request

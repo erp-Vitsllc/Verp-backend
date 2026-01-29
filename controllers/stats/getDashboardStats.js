@@ -49,7 +49,10 @@ export const getDashboardStats = async (req, res) => {
         ]);
 
         // 4. Notices Stats
-        const pendingNotices = await EmployeeBasic.countDocuments({ "noticeRequest.status": "Pending" });
+        const pendingNotices = await EmployeeBasic.countDocuments({
+            "noticeRequest.status": "Pending",
+            "noticeRequest.requestedAt": { $exists: true }
+        });
 
         // 5. Employees Stats
         const totalEmployees = await EmployeeBasic.countDocuments({ profileStatus: 'active' });

@@ -5,10 +5,16 @@ export const updateExperience = async (req, res) => {
     const { id, experienceId } = req.params;
     const { company, designation, startDate, endDate, certificate } = req.body;
 
-    // Validate required fields
+    // Validate required fields and types
     if (!company || !designation || !startDate) {
         return res.status(400).json({
             message: "Company, Designation, and Start Date are required"
+        });
+    }
+
+    if (typeof company !== 'string' || typeof designation !== 'string') {
+        return res.status(400).json({
+            message: "Company and Designation must be valid strings"
         });
     }
 

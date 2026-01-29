@@ -19,6 +19,8 @@ export const updateBasicDetails = async (req, res) => {
         // 1. Define allowed fields and their target collections
         const allowedFields = [
             "employeeId",
+            "firstName",
+            "lastName",
             "contactNumber",
             "email",
             "country",

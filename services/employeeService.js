@@ -45,6 +45,18 @@ export const getCompleteEmployee = async (id) => {
                 .populate('primaryReportee', 'firstName lastName employeeId email workEmail companyEmail')
                 .populate('secondaryReportee', 'firstName lastName employeeId email workEmail companyEmail')
                 .lean();
+
+            // Support for legacy ID format (VEGA - XXXXX) during transition
+            if (!employeeBasic && typeof id === 'string' && id.startsWith('VEGA - ') && !id.includes('-HR-')) {
+                const legacyId = id.replace('VEGA - ', 'VEGA -HR- ');
+                console.log(`[getCompleteEmployee] ID ${id} not found. Retrying with legacy mapping: ${legacyId}`);
+                employeeBasic = await EmployeeBasic.findOne({ employeeId: legacyId }, null, queryOptions)
+                    .select('-documents.document.data -trainingDetails.certificate.data')
+                    .populate('reportingAuthority', 'firstName lastName employeeId email workEmail companyEmail')
+                    .populate('primaryReportee', 'firstName lastName employeeId email workEmail companyEmail')
+                    .populate('secondaryReportee', 'firstName lastName employeeId email workEmail companyEmail')
+                    .lean();
+            }
         }
 
         if (!employeeBasic) {

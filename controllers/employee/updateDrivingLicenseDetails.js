@@ -8,7 +8,7 @@ const buildMissingFields = (body, existingDocument) => {
     return REQUIRED_FIELDS.filter((field) => {
         if (field === "document") {
             // Check if document is provided OR if existing document exists in DB
-            const hasDocument = body.document && body.document.trim() !== '';
+            const hasDocument = body.document && typeof body.document === 'string' && body.document.trim() !== '';
             return !hasDocument && !existingDocument;
         }
         const value = body[field];
@@ -32,6 +32,14 @@ export const updateDrivingLicenseDetails = async (req, res) => {
         documentName,
         documentMime,
     } = req.body || {};
+
+    // Type validation
+    if (number !== undefined && typeof number !== 'string') {
+        return res.status(400).json({ message: "License number must be a string" });
+    }
+    if (document !== undefined && typeof document !== 'string') {
+        return res.status(400).json({ message: "Document must be a string (base64 or URL)" });
+    }
 
     try {
         // Get employeeId first to check for existing documents

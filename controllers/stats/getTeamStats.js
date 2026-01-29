@@ -116,6 +116,7 @@ export const getTeamStats = async (req, res) => {
                 }),
                 // Pending Notices (Updated for Snapshot Logic)
                 EmployeeBasic.find({
+                    "noticeRequest.requestedAt": { $exists: true },
                     $or: [
                         { 'noticeRequest.submittedTo': reportee._id, 'noticeRequest.status': 'Pending' },
                         { 'noticeRequest.submittedTo': null, primaryReportee: reportee._id, 'noticeRequest.status': 'Pending' }

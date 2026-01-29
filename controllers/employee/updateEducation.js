@@ -5,10 +5,20 @@ export const updateEducation = async (req, res) => {
     const { id, educationId } = req.params;
     const { universityOrBoard, collegeOrInstitute, course, fieldOfStudy, completedYear, certificate } = req.body;
 
-    // Validate required fields
+    // Validate required fields and types
     if (!universityOrBoard || !collegeOrInstitute || !course || !fieldOfStudy || !completedYear) {
         return res.status(400).json({
             message: "University/Board, College/Institute, Course, Field of Study, and Completed Year are required"
+        });
+    }
+
+    if (typeof universityOrBoard !== 'string' ||
+        typeof collegeOrInstitute !== 'string' ||
+        typeof course !== 'string' ||
+        typeof fieldOfStudy !== 'string' ||
+        typeof completedYear !== 'string') {
+        return res.status(400).json({
+            message: "All education fields must be valid strings"
         });
     }
 

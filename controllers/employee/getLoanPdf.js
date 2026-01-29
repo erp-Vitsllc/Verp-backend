@@ -15,7 +15,7 @@ export const getLoanPdf = async (req, res) => {
         // Generate PDF
         try {
             const origin = req.headers.origin || (req.headers.referer ? new URL(req.headers.referer).origin : null);
-            const baseUrl = origin || process.env.FRONTEND_URL || "http://localhost:3000";
+            const baseUrl = process.env.FRONTEND_URL || origin || "http://localhost:3000";
             const loanUrl = `${baseUrl}/HRM/LoanAndAdvance/${loan._id}`;
             const token = req.headers.authorization ? req.headers.authorization.split(' ')[1] : null;
 

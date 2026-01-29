@@ -15,6 +15,8 @@ import { deleteGroup } from '../controllers/group/deleteGroup.js';
 import { protect } from '../middleware/authMiddleware.js';
 import { checkPermission, requireAdmin } from '../middleware/permissionMiddleware.js';
 
+import { sensitiveActionLimiter } from '../middleware/rateLimitMiddleware.js';
+
 const router = express.Router();
 
 // All user routes require authentication
@@ -45,7 +47,7 @@ router.get('/:id', checkPermission('settings_user_group', 'view'), getUserById);
 router.post('/', checkPermission('settings_user_group', 'create'), createUser);
 
 // Update user - requires edit permission
-router.patch('/:id', checkPermission('settings_user_group', 'edit'), updateUser);
+router.patch('/:id', sensitiveActionLimiter, checkPermission('settings_user_group', 'edit'), updateUser);
 
 // Upload profile picture
 router.post('/:id/upload-profile-picture', checkPermission('settings_user_group', 'edit'), uploadUserProfilePicture);

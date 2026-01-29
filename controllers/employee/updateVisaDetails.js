@@ -16,7 +16,7 @@ const buildMissingFields = (body, visaType, existingDocument) => {
     return required.filter((field) => {
         if (field === "visaCopy") {
             // Check if visaCopy is provided OR if existing document exists in DB
-            const hasVisaCopy = body.visaCopy && body.visaCopy.trim() !== '';
+            const hasVisaCopy = body.visaCopy && typeof body.visaCopy === 'string' && body.visaCopy.trim() !== '';
             return !hasVisaCopy && !existingDocument;
         }
         const value = body[field];
@@ -42,6 +42,14 @@ export const updateVisaDetails = async (req, res) => {
         visaCopyName,
         visaCopyMime,
     } = req.body || {};
+
+    // Type validation
+    if (visaNumber !== undefined && typeof visaNumber !== 'string') {
+        return res.status(400).json({ message: "Visa number must be a string" });
+    }
+    if (visaCopy !== undefined && typeof visaCopy !== 'string') {
+        return res.status(400).json({ message: "Visa copy must be a string (base64 or URL)" });
+    }
 
     if (!visaType || !ALLOWED_VISA_TYPES.includes(visaType)) {
         return res.status(400).json({ message: "Invalid visa type provided." });
@@ -81,7 +89,7 @@ export const updateVisaDetails = async (req, res) => {
 
         // Handle document upload to IDrive (S3) if new document provided
         let documentData = undefined;
-        if (visaCopy && visaCopy.trim() !== '') {
+        if (visaCopy && typeof visaCopy === 'string' && visaCopy.trim() !== '') {
             // Check if it's already a URL (IDrive or otherwise)
             if (visaCopy.startsWith('http://') || visaCopy.startsWith('https://')) {
                 // Already a URL

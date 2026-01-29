@@ -46,9 +46,10 @@ export const sendApprovalEmail = async (req, res) => {
         const reporteeName = `${reportee.firstName || ""} ${reportee.lastName || ""}`.trim();
         const subject = `Profile activation request: ${employeeName}`;
 
-        // Dynamic URL logic - get base URL from headers or fallback
+        // Dynamic URL logic - Prioritize environment variable, then request headers
         const origin = req.headers.origin || (req.headers.referer ? new URL(req.headers.referer).origin : null);
-        const baseUrl = origin || process.env.FRONTEND_URL || "http://localhost:3000";
+        const baseUrl = process.env.FRONTEND_URL || origin || "http://localhost:3000";
+        console.log(`[Email Debug] Using Base URL for links: ${baseUrl}`);
         const profileUrl = `${baseUrl}/emp/${employeeBasic.employeeId}`;
 
         const html = `

@@ -11,25 +11,23 @@ export const getNextEmployeeId = async (req, res) => {
         // For a huge DB, aggregation is better.
 
         const lastEmployee = await EmployeeBasic.findOne({
-            employeeId: { $regex: /^VEGA\s-\s\d+$/ }
-        }).sort({ employeeId: -1 }).select('employeeId');
+            employeeId: { $regex: /^VEGA\s(-|-HR-)\s\d+$/ }
+        }).sort({ createdAt: -1 }).select('employeeId');
 
         let nextIdNumber = 1;
 
         if (lastEmployee && lastEmployee.employeeId) {
-            const parts = lastEmployee.employeeId.split('-');
-            if (parts.length === 2) {
-                const numberPart = parseInt(parts[1].trim(), 10);
+            // Extract the number from the end of the string
+            const match = lastEmployee.employeeId.match(/\d+$/);
+            if (match) {
+                const numberPart = parseInt(match[0], 10);
                 if (!isNaN(numberPart)) {
                     nextIdNumber = numberPart + 1;
                 }
             }
-        } else {
-            // Fallback: check if there are ANY employees to determine if we should start at 1
-            // If there are employees but none match 'VEGA - ', start at 1.
         }
 
-        const nextId = `VEGA - ${String(nextIdNumber).padStart(5, '0')}`;
+        const nextId = `VEGA -HR- ${String(nextIdNumber).padStart(5, '0')}`;
 
         return res.status(200).json({
             nextEmployeeId: nextId

@@ -78,18 +78,33 @@ export const addEmployee = async (req, res) => {
         // Validate required fields
         // Check for empty strings, null, undefined, or whitespace-only strings
         const isEmpty = (val) => !val || (typeof val === 'string' && val.trim() === '');
+
+        // Sanitize Employee ID: Remove all spaces to standardized format (e.g. VEGA - HR - 01 -> VEGA-HR-01)
+        if (employeeId && typeof employeeId === 'string') {
+            req.body.employeeId = employeeId.replace(/\s+/g, '');
+        }
+        const cleanedEmployeeId = req.body.employeeId;
+
         // Only keep the minimal must-have fields to align with the simplified form
         // Validate required fields and types
         if (typeof firstName !== 'string' || !firstName.trim() ||
             typeof lastName !== 'string' || !lastName.trim() ||
-            typeof employeeId !== 'string' || !employeeId.trim()) {
+            typeof cleanedEmployeeId !== 'string' || !cleanedEmployeeId.trim() ||
+            (email !== undefined && typeof email !== 'string')) {
             return res.status(400).json({
-                message: "First Name, Last Name, and Employee ID are required and must be valid strings"
+                message: "First Name, Last Name, and Employee ID are required and must be valid strings. Email if provided must be a string."
+            });
+        }
+
+        // Additional check for email if it's required for user creation
+        if (email && typeof email !== 'string') {
+            return res.status(400).json({
+                message: "Invalid email format"
             });
         }
 
         // Check if employee ID already exists
-        const existingEmployeeId = await EmployeeBasic.findOne({ employeeId });
+        const existingEmployeeId = await EmployeeBasic.findOne({ employeeId: cleanedEmployeeId });
         if (existingEmployeeId) {
             return res.status(400).json({ message: "Employee ID already exists" });
         }
@@ -168,7 +183,7 @@ export const addEmployee = async (req, res) => {
             EmployeeBasic.create({
                 firstName,
                 lastName,
-                employeeId,
+                employeeId: cleanedEmployeeId,
                 role: employeeRole,
                 department,
                 designation,
@@ -184,7 +199,7 @@ export const addEmployee = async (req, res) => {
 
             // 2. EmployeeContact
             contactNumber ? EmployeeContact.create({
-                employeeId,
+                employeeId: cleanedEmployeeId,
                 contactNumber,
                 addressLine1: addressLine1 || '',
                 addressLine2: addressLine2 || '',
@@ -196,7 +211,7 @@ export const addEmployee = async (req, res) => {
 
             // 3. EmployeePersonal
             gender ? EmployeePersonal.create({
-                employeeId,
+                employeeId: cleanedEmployeeId,
                 gender,
                 dateOfBirth: dateOfBirth || null,
                 age: age || null,
@@ -206,7 +221,7 @@ export const addEmployee = async (req, res) => {
 
             // 4. EmployeePassport (if expiry dates provided)
             (passportExp || eidExp || medExp) ? EmployeePassport.create({
-                employeeId,
+                employeeId: cleanedEmployeeId,
                 passportExp: passportExp || null,
                 eidExp: eidExp || null,
                 medExp: medExp || null,
@@ -214,7 +229,7 @@ export const addEmployee = async (req, res) => {
 
             // 5. EmployeeSalary
             EmployeeSalary.create({
-                employeeId,
+                employeeId: cleanedEmployeeId,
                 monthlySalary: calculatedTotal,
                 totalSalary: calculatedTotal,
                 basic: basicAmount,
@@ -234,21 +249,21 @@ export const addEmployee = async (req, res) => {
                 // Check if user already exists for this employee
                 const existingUser = await User.findOne({
                     $or: [
-                        { employeeId },
-                        { email: email.toLowerCase().trim() }
+                        { employeeId: cleanedEmployeeId },
+                        { email: (typeof email === 'string' ? email.toLowerCase().trim() : '') }
                     ]
                 });
 
                 if (!existingUser) {
                     // Generate username from first name
-                    let username = firstName ? firstName.toLowerCase().trim() : employeeId.toLowerCase();
+                    let username = (firstName && typeof firstName === 'string') ? firstName.toLowerCase().trim() : (typeof cleanedEmployeeId === 'string' ? cleanedEmployeeId.toLowerCase() : 'user');
 
                     // Remove spaces and special characters from username
                     username = username.replace(/[^a-z0-9]/g, '');
 
                     // If username is empty after cleaning, use employeeId
                     if (!username) {
-                        username = employeeId.toLowerCase();
+                        username = cleanedEmployeeId.toLowerCase();
                     }
 
                     // Check if username already exists, if so append employeeId
@@ -277,9 +292,9 @@ export const addEmployee = async (req, res) => {
                     const newUser = new User({
                         username: finalUsername,
                         name: `${firstName} ${lastName}`.trim(),
-                        email: email.toLowerCase().trim(),
+                        email: (typeof email === 'string' ? email.toLowerCase().trim() : ''),
                         password: hashedPassword,
-                        employeeId: employeeId,
+                        employeeId: cleanedEmployeeId,
                         group: null, // Administrators don't need groups, they get full permissions
                         groupName: null,
                         status: 'Active',
@@ -289,7 +304,7 @@ export const addEmployee = async (req, res) => {
                     });
 
                     await newUser.save();
-                    console.log(`User created automatically for administrator employee: ${employeeId} with username: ${finalUsername}`);
+                    console.log(`User created automatically for administrator employee: ${cleanedEmployeeId} with username: ${finalUsername}`);
                 }
             } catch (userError) {
                 // Log error but don't fail the employee creation
@@ -299,7 +314,7 @@ export const addEmployee = async (req, res) => {
         }
 
         // Get complete employee data for response
-        const savedEmployee = await getCompleteEmployee(employeeId);
+        const savedEmployee = await getCompleteEmployee(cleanedEmployeeId);
 
         return res.status(201).json({
             message: "Employee added successfully",

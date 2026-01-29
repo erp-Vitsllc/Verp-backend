@@ -83,7 +83,7 @@ export const requestNotice = async (req, res) => {
                 const reporteeName = `${reportee.firstName || ""} ${reportee.lastName || ""}`.trim();
                 const employeeName = `${employee.firstName || ""} ${employee.lastName || ""}`.trim();
                 const origin = req.headers.origin || (req.headers.referer ? new URL(req.headers.referer).origin : null);
-                const baseUrl = origin || process.env.FRONTEND_URL || "http://localhost:3000";
+                const baseUrl = process.env.FRONTEND_URL || origin || "http://localhost:3000";
                 const profileUrl = `${baseUrl}/emp/${employee.employeeId}?action=review_notice`;
 
                 const html = `

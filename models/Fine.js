@@ -68,6 +68,10 @@ const fineSchema = new mongoose.Schema(
             approvedAt: {
                 type: Date,
                 default: null
+            },
+            individualAmount: {
+                type: Number,
+                default: 0
             }
         }],
         responsibleFor: {

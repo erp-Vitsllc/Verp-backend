@@ -100,7 +100,11 @@ const loanSchema = new mongoose.Schema({
         status: { type: String, enum: ['Pending', 'Approved', 'Rejected'], default: 'Pending' },
         assignedAt: { type: Date, default: Date.now },
         actionedAt: { type: Date }
-    }]
+    }],
+    createdBy: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User'
+    }
 }, { timestamps: true });
 
 const Loan = mongoose.model("Loan", loanSchema);

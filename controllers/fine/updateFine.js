@@ -11,6 +11,13 @@ export const updateFine = async (req, res) => {
         let { id } = req.params;
         const updates = req.body;
 
+        // Security check for attachment URL to prevent SSRF
+        if (updates.attachment && updates.attachment.url) {
+            if (!isValidStorageUrl(updates.attachment.url)) {
+                return res.status(400).json({ message: "Invalid attachment URL" });
+            }
+        }
+
         // Sanitize ID (remove artifacts like ":1")
         if (id && typeof id === 'string' && id.includes(':')) {
             id = id.split(':')[0].trim();
@@ -89,15 +96,34 @@ export const updateFine = async (req, res) => {
             }
         }
 
+        // Map 'employees' from payload to 'assignedEmployees' in model if provided
+        if (updates.employees && Array.isArray(updates.employees)) {
+            updates.assignedEmployees = updates.employees.map(emp => ({
+                employeeId: emp.employeeId,
+                employeeName: emp.employeeName || 'Unknown',
+                daysWorked: emp.daysWorked || 0,
+                approvalStatus: emp.approvalStatus || 'Pending',
+                individualAmount: emp.employeeAmount || updates.employeeAmount || 0
+            }));
+            delete updates.employees;
+        }
+
         Object.keys(updates).forEach(key => {
             if (updates[key] !== undefined) {
-                fine[key] = updates[key];
+                // If updating assignedEmployees directly
+                if (key === 'assignedEmployees' && Array.isArray(updates[key])) {
+                    fine.assignedEmployees = updates[key].map(emp => ({
+                        ...emp,
+                        individualAmount: emp.individualAmount || emp.employeeAmount || fine.employeeAmount || 0
+                    }));
+                } else {
+                    fine[key] = updates[key];
+                }
             }
         });
 
-
         // Set rejection tracking if applicable
-        if (oldStatus !== 'Rejected' && fine.fineStatus === 'Rejected') {
+        if (oldStatus !== 'Rejected' && updates.fineStatus === 'Rejected') {
             fine.rejectedBy = req.user?._id;
             fine.rejectedDate = new Date();
         }
@@ -111,13 +137,19 @@ export const updateFine = async (req, res) => {
         // If newly rejected, send notification
         if (oldStatus !== 'Rejected' && updatedFine.fineStatus === 'Rejected') {
             try {
-                if (updatedFine.attachment && updatedFine.attachment.url) {
-                    if (!isValidStorageUrl(updatedFine.attachment.url)) {
-                        console.warn('Skipping email due to invalid attachment URL hostname');
-                        return; // Skip email to prevent SSRF
+                // Create a plain object to modify for the email handler
+                // This breaks the direct reference to the Mongoose document
+                const safeFineData = updatedFine.toObject ? updatedFine.toObject() : { ...updatedFine };
+
+                // Explicitly validate and sanitize the attachment URL
+                if (safeFineData.attachment && safeFineData.attachment.url) {
+                    if (!isValidStorageUrl(safeFineData.attachment.url)) {
+                        console.warn(`[UpdateFine] Invalid attachment URL detected (${safeFineData.attachment.url}). Removing attachment from rejection email.`);
+                        safeFineData.attachment = null; // Remove attachment from the object passed to the emailer
                     }
                 }
-                await sendFineRejectedEmail(updatedFine, updatedFine.assignedEmployees);
+
+                await sendFineRejectedEmail(safeFineData, updatedFine.assignedEmployees);
             } catch (err) {
                 console.error("Failed to send rejection email:", err);
             }

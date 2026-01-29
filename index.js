@@ -11,6 +11,7 @@ import rewardRoute from "./routes/rewardRoutes.js";
 import fineRoute from "./routes/fineRoutes.js";
 import departmentRoute from "./routes/departmentRoutes.js";
 import designationRoute from "./routes/designationRoutes.js";
+import { commonLimiter } from "./middleware/rateLimitMiddleware.js";
 
 dotenv.config();
 connectDB(); // <-- Call DB connection
@@ -18,23 +19,20 @@ connectDB(); // <-- Call DB connection
 const app = express();
 app.disable("x-powered-by");
 
-// Enable compression for all responses (reduces payload size by ~70-90%)
-app.use(compression({
-    level: 6, // Compression level (1-9, 6 is a good balance)
-    threshold: 1024, // Only compress responses > 1KB
-    filter: (req, res) => {
-        // Don't compress if client doesn't support it
-        if (req.headers['x-no-compression']) {
-            return false;
-        }
-        // Use compression for JSON responses
-        return compression.filter(req, res);
-    }
+// CORS Configuration - MUST BE FIRST
+app.use(cors({
+    origin: [
+        "http://localhost:3000",
+        "http://localhost:5173",
+        process.env.FRONTEND_URL
+    ].filter(Boolean), // Allow frontend origins and filter out undefined
+    credentials: true,
+    methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization", "x-no-compression"]
 }));
 
-app.use(cors({
-    origin: '*',
-}));
+// Global Rate Limiting
+app.use(commonLimiter);
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 

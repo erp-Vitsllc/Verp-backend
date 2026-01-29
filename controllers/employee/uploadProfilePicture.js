@@ -11,8 +11,9 @@ export const uploadProfilePicture = async (req, res) => {
         const { image } = req.body; // Base64 image string
 
         // 1. Validate Base64 image
-        if (!image) {
-            return res.status(400).json({ message: 'Image is required' });
+        // 1. Validate Base64 image
+        if (!image || typeof image !== 'string') {
+            return res.status(400).json({ message: 'Image is required and must be a string' });
         }
         if (!image.startsWith('data:image/')) {
             return res.status(400).json({ message: 'Invalid image format' });
