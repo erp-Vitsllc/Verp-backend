@@ -1,4 +1,5 @@
 import Designation from "../models/Designation.js";
+import EmployeeBasic from "../models/EmployeeBasic.js";
 import { escapeRegex } from "../utils/regexHelper.js";
 
 // Create a new designation
@@ -76,11 +77,29 @@ export const deleteDesignation = async (req, res) => {
             return res.status(403).json({ message: "Cannot delete system default designation" });
         }
 
-        await Designation.findByIdAndDelete(id);
+        // Check if any employees are assigned to this designation
+        // Note: In EmployeeBasic, designation is stored as a string (the name)
+        const employeeCount = await EmployeeBasic.countDocuments({
+            designation: { $regex: new RegExp(`^${escapeRegex(designation.name)}$`, 'i') }
+        });
 
-        if (!designation) {
-            return res.status(404).json({ message: "Designation not found" });
+        if (employeeCount > 0) {
+            const employees = await EmployeeBasic.find({
+                designation: { $regex: new RegExp(`^${escapeRegex(designation.name)}$`, 'i') }
+            }).select('firstName lastName employeeId');
+
+            return res.status(400).json({
+                message: `This designation contains ${employeeCount} employee(s). You must reassign these employees to another designation before deleting this one.`,
+                employeeCount: employeeCount,
+                employees: employees.map(emp => ({
+                    name: `${emp.firstName} ${emp.lastName}`,
+                    id: emp.employeeId
+                })),
+                designationName: designation.name
+            });
         }
+
+        await Designation.findByIdAndDelete(id);
 
         res.status(200).json({ message: "Designation deleted successfully" });
     } catch (error) {

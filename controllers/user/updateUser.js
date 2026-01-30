@@ -174,16 +174,45 @@ const updateUserHandler = async (req, res) => {
             }
             updateData.email = newEmail;
         }
-        if (password !== undefined) {
-            // Password validation is done separately via validate-password endpoint
-            // This is kept as a backup check
-            const isSamePassword = await bcrypt.compare(password, user.password);
-            if (isSamePassword) {
-                return res.status(400).json({
-                    message: "New password must be different from the current password"
-                });
+        if (password !== undefined && password !== null && password !== '') {
+            // Check if password matches current password
+            if (user.password) {
+                const isMatch = await bcrypt.compare(password, user.password);
+                if (isMatch) {
+                    return res.status(400).json({
+                        message: "New password must be different from the current password"
+                    });
+                }
             }
+
+            // Check if password matches any in history
+            if (user.passwordHistory && user.passwordHistory.length > 0) {
+                for (const oldHash of user.passwordHistory) {
+                    const isMatch = await bcrypt.compare(password, oldHash);
+                    if (isMatch) {
+                        return res.status(400).json({
+                            message: "New password must be different from recently used passwords"
+                        });
+                    }
+                }
+            }
+
+            // Update history: push current hash to history before changing
+            if (user.password) {
+                // Keep only last 5 passwords (optional limit, or just push)
+                const newHistory = [...(user.passwordHistory || [])];
+                newHistory.push(user.password);
+                // Keep only last 5
+                if (newHistory.length > 5) newHistory.shift();
+                updateData.passwordHistory = newHistory;
+            }
+
             updateData.password = await bcrypt.hash(password, 10);
+
+            // Reset expiry date
+            const newExpiry = new Date();
+            newExpiry.setDate(newExpiry.getDate() + 180);
+            updateData.passwordExpiryDate = newExpiry;
         }
         if (employeeId !== undefined) {
             if (employeeId) {

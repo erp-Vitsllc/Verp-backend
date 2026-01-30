@@ -44,6 +44,8 @@ export const addEmployee = async (req, res) => {
 
             // Employment Info
             dateOfJoining,
+            contractJoiningDate,
+            contractExpiryDate,
 
             // Contact Info
             contactNumber,
@@ -123,16 +125,35 @@ export const addEmployee = async (req, res) => {
         const allowedStatuses = ['Probation', 'Permanent', 'Temporary', 'Notice'];
         let normalizedStatus = allowedStatuses.includes(status) ? status : 'Probation';
 
-        // AUTOMATION: If Date of Joining is > 6 months ago, force Permanent
-        if (dateOfJoining) {
-            const joiningDateObj = new Date(dateOfJoining);
-            const sixMonthsAgo = new Date();
-            sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
+        // Rule 1: Tenure >= 6 months (using default probation period of 6)
+        const refJoiningDate = contractJoiningDate || dateOfJoining;
+        const refExpiryDate = contractExpiryDate;
+        let criteriaMetForPermanent = false;
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
 
-            if (joiningDateObj <= sixMonthsAgo) {
-                normalizedStatus = 'Permanent';
-                console.log(`[AddEmployee] Auto-setting status to Permanent for ${firstName} ${lastName} (Joined: ${dateOfJoining})`);
-            }
+        if (refJoiningDate) {
+            const joiningDateObj = new Date(refJoiningDate);
+            const probationEndDate = new Date(joiningDateObj);
+            probationEndDate.setMonth(probationEndDate.getMonth() + 6);
+            probationEndDate.setHours(0, 0, 0, 0);
+            if (probationEndDate <= today) criteriaMetForPermanent = true;
+        }
+
+        // Rule 2: 6 months after contract's expiry (user requirement)
+        if (!criteriaMetForPermanent && refExpiryDate) {
+            const expiryDateObj = new Date(refExpiryDate);
+            const sixMonthsAfterExpiry = new Date(expiryDateObj);
+            sixMonthsAfterExpiry.setMonth(sixMonthsAfterExpiry.getMonth() + 6);
+            sixMonthsAfterExpiry.setHours(0, 0, 0, 0);
+            if (sixMonthsAfterExpiry <= today) criteriaMetForPermanent = true;
+        }
+
+        if (criteriaMetForPermanent) {
+            normalizedStatus = 'Permanent';
+            console.log(`[AddEmployee] Auto-setting status to Permanent for ${firstName} ${lastName}`);
+        } else {
+            normalizedStatus = 'Probation';
         }
 
         // Use designation as role if role is not provided
@@ -197,6 +218,8 @@ export const addEmployee = async (req, res) => {
                 companyEmail: companyEmail || '',
                 enablePortalAccess: enablePortalAccess || false,
                 dateOfJoining,
+                contractJoiningDate: contractJoiningDate || dateOfJoining,
+                contractExpiryDate: contractExpiryDate || null,
             }),
 
             // 2. EmployeeContact

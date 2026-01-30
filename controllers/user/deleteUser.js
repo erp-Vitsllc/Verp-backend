@@ -21,6 +21,42 @@ export const deleteUser = async (req, res) => {
             });
         }
 
+        // Dependency Checks
+        const [
+            linkedEmployee,
+            fineCreations,
+            rewardCreations,
+            loanCreations,
+            fineActions,
+            rewardActions,
+            loanActions
+        ] = await Promise.all([
+            import("../../models/EmployeeBasic.js").then(m => m.default.findOne({ email: user.email })), // Check by email as well to be safe
+            import("../../models/Fine.js").then(m => m.default.countDocuments({ createdBy: id })),
+            import("../../models/Reward.js").then(m => m.default.countDocuments({ createdBy: id })),
+            import("../../models/Loan.js").then(m => m.default.countDocuments({ createdBy: id })),
+            import("../../models/Fine.js").then(m => m.default.countDocuments({
+                $or: [{ approvedBy: id }, { managerApprovedBy: id }, { hrApprovedBy: id }, { accountsApprovedBy: id }]
+            })),
+            import("../../models/Reward.js").then(m => m.default.countDocuments({ approvedBy: id })),
+            import("../../models/Loan.js").then(m => m.default.countDocuments({
+                $or: [{ approvedBy: id }, { managerApprovedBy: id }, { hrApprovedBy: id }, { accountsApprovedBy: id }]
+            }))
+        ]);
+
+        if (linkedEmployee) {
+            return res.status(400).json({
+                message: "Cannot delete user. This account is linked to an active employee profile. Deactivate the employee first."
+            });
+        }
+
+        const totalActions = fineCreations + rewardCreations + loanCreations + fineActions + rewardActions + loanActions;
+        if (totalActions > 0) {
+            return res.status(400).json({
+                message: `Cannot delete user. This account has ${totalActions} associated records (creations or approvals) in the system. Reassign or archive records before deleting the user profile.`
+            });
+        }
+
         // If user is in a group, remove them from the group's users array
         if (user.group) {
             await Group.findByIdAndUpdate(

@@ -5,6 +5,7 @@ import nodemailer from "nodemailer";
 import { getManagementHOD } from "../../utils/getManagementHOD.js";
 import { getDepartmentHOD } from "../../utils/getDepartmentHOD.js";
 import { sendHODAuthorizationEmail } from "../../utils/sendHODAuthorizationEmail.js";
+import { generatePdf } from "../../utils/generatePdf.js";
 
 export const updateReward = async (req, res) => {
     try {
@@ -243,20 +244,12 @@ export const updateReward = async (req, res) => {
                     const currentStage = reward.approvalStatus || reward.rewardStatus;
                     console.log("[UpdateReward] Current Internal Stage:", currentStage);
 
-                    // LOGIC: Manager -> HR -> Accounts -> CEO
-                    // 1. Manager Step -> HR
+                    // LOGIC: Manager -> CEO -> Approved
+                    // 1. Manager Step -> CEO
                     if (currentStage === 'Pending' && isReporteeManager) {
-                        finalStatus = isCEO ? 'Approved' : 'Pending HR';
+                        finalStatus = isCEO ? 'Approved' : 'Pending Authorization';
                     }
-                    // 2. HR Step -> Accounts
-                    else if (currentStage === 'Pending HR' && (isHR || isCEO)) {
-                        finalStatus = 'Pending Accounts';
-                    }
-                    // 3. Accounts Step -> CEO
-                    else if (currentStage === 'Pending Accounts' && (isAccounts || isCEO)) {
-                        finalStatus = 'Pending Authorization';
-                    }
-                    // 4. CEO Step -> Approved
+                    // 2. CEO Step -> Approved
                     else if (currentStage === 'Pending Authorization' && isCEO) {
                         finalStatus = 'Approved';
                     }
@@ -293,29 +286,18 @@ export const updateReward = async (req, res) => {
             reward.rewardStatus = publicStatus;
 
             // Handle Transitions & Emails
-            if (['Pending HR', 'Pending Accounts', 'Pending Authorization'].includes(nextInternalStage)) {
-                console.log(`[UpdateReward] Triggering Email logic for ${nextInternalStage}`);
+            if (nextInternalStage === 'Pending Authorization') {
+                console.log(`[UpdateReward] Triggering CEO Email logic`);
 
-                let targetHOD = null;
-                let emailType = "";
+                const targetHOD = await getManagementHOD();
+                const emailType = "CEO";
 
-                if (nextInternalStage === 'Pending HR') {
-                    targetHOD = await getDepartmentHOD('hr');
-                    emailType = "HR";
-                } else if (nextInternalStage === 'Pending Accounts') {
-                    targetHOD = await getDepartmentHOD('finance');
-                    emailType = "Accounts";
-                } else if (nextInternalStage === 'Pending Authorization') {
-                    targetHOD = await getManagementHOD();
-                    emailType = "CEO";
-                }
-
-                console.log(`[UpdateReward] Target HOD for ${nextInternalStage}:`, targetHOD ? targetHOD.email : 'None');
+                console.log(`[UpdateReward] Target HOD (CEO):`, targetHOD ? targetHOD.email : 'None');
 
                 if (targetHOD && approverDetails) {
                     const hodUser = await User.findOne({ employeeId: targetHOD.employeeId });
                     if (hodUser) {
-                        console.log(`[UpdateReward] Found HOD User: ${hodUser.username} (${hodUser._id}). Assigning ticket.`);
+                        console.log(`[UpdateReward] Found CEO User: ${hodUser.username} (${hodUser._id}). Assigning ticket.`);
                         reward.submittedTo = hodUser._id;
 
                         if (!reward.workflow) reward.workflow = [];
@@ -326,6 +308,7 @@ export const updateReward = async (req, res) => {
                             currentPending.actionedAt = new Date();
                         }
 
+                        // Add CEO Workflow Step
                         reward.workflow.push({
                             role: emailType,
                             assignedTo: hodUser._id,
@@ -333,18 +316,17 @@ export const updateReward = async (req, res) => {
                             assignedAt: new Date()
                         });
 
-                        // Persistent Approvers
-                        if (nextInternalStage === 'Pending HR') reward.managerApprovedBy = approverDetails.id;
-                        if (nextInternalStage === 'Pending Accounts') reward.hrApprovedBy = approverDetails.id;
-                        if (nextInternalStage === 'Pending Authorization') reward.accountsApprovedBy = approverDetails.id;
+                        // Set persistent approver field for historical tracking
+                        // (Manager just approved, so technically managerApprovedBy = approverDetails.id, 
+                        // but sticking to standard fields if we want to track who sent it to CEO)
+                        reward.managerApprovedBy = approverDetails.id;
 
                         await sendHODAuthorizationEmail('Reward', reward, targetHOD, approverDetails);
                     } else {
-                        console.error(`[UpdateReward] CRITICAL: Found HOD Employee but NO LINKED USER ACCOUNT found for ID ${targetHOD.employeeId}.`);
+                        console.error(`[UpdateReward] CRITICAL: Found CEO Employee but NO LINKED USER ACCOUNT found for ID ${targetHOD.employeeId}.`);
                     }
                 } else {
-                    console.warn(`[UpdateReward] Skipping Email for ${nextInternalStage}. Reason: HOD found=${!!targetHOD}, ApproverDetails=${!!approverDetails}`);
-                    if (!targetHOD) console.warn("[UpdateReward] Failed to find HOD for", nextInternalStage);
+                    console.warn(`[UpdateReward] Skipping CEO Email. Reason: HOD found=${!!targetHOD}, ApproverDetails=${!!approverDetails}`);
                 }
             }
 
@@ -438,13 +420,57 @@ export const updateReward = async (req, res) => {
                                     attachments: []
                                 };
 
-                                // Add PDF Attachment if exists
-                                if (req.body.certificatePdf) {
-                                    mailOptions.attachments.push({
-                                        filename: `Certificate-${reward.employeeId}.pdf`,
-                                        content: req.body.certificatePdf,
-                                        encoding: 'base64'
-                                    });
+                                // Prepare Permissions and User Payload for Puppeteer
+                                const requestingUserId = req.user?.id || req.body.createdBy?._id;
+                                let userPayload = { id: requestingUserId, role: 'Admin' }; // Default fallback
+                                let token = req.headers.authorization?.split(' ')[1] || '';
+
+                                try {
+                                    if (requestingUserId) {
+                                        const User = await import("../../models/User.js").then(m => m.default);
+                                        const userObj = await User.findById(requestingUserId);
+                                        if (userObj) {
+                                            userPayload = {
+                                                id: userObj._id,
+                                                isAdmin: userObj.isAdmin || userObj.role === 'Admin',
+                                                role: userObj.role,
+                                                employeeId: userObj.employeeId
+                                            };
+                                        }
+                                    }
+                                } catch (uErr) {
+                                    console.warn("[UpdateReward] Failed to build user payload for Puppeteer:", uErr);
+                                }
+
+                                // Construct URL
+                                const origin = req.headers.origin || (req.headers.referer ? new URL(req.headers.referer).origin : null);
+                                const baseUrl = process.env.FRONTEND_URL || origin || "http://localhost:3000";
+                                const printUrl = `${baseUrl}/HRM/Reward/${reward._id}`;
+                                const selector = '#certificate-container';
+
+                                console.log(`[UpdateReward] Generating Certificate PDF via Puppeteer from: ${printUrl}`);
+
+                                try {
+                                    // Save first so Puppeteer sees updated status if needed (though certificate is static)
+                                    // But we are in a block that hasn't saved yet? 
+                                    // We must save 'reward' to DB to ensure consistency for the headless browser
+                                    await reward.save();
+                                    console.log("[UpdateReward] Reward saved to DB before PDF generation.");
+
+                                    const pdfBuffer = await generatePdf(printUrl, token, userPayload, {}, selector);
+
+                                    if (pdfBuffer) {
+                                        mailOptions.attachments.push({
+                                            filename: `Certificate-${reward.employeeId}.pdf`,
+                                            content: pdfBuffer,
+                                            contentType: 'application/pdf'
+                                        });
+                                        console.log(`[UpdateReward] Puppeteer PDF attached successfully. Size: ${pdfBuffer.length}`);
+                                    }
+                                } catch (pdfErr) {
+                                    console.error("[UpdateReward] Puppeteer PDF Generation Failed:", pdfErr);
+                                    // Continue sending email without attachment or handle error?
+                                    // We'll continue.
                                 }
 
                                 await transporter.sendMail(mailOptions);

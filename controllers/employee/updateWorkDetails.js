@@ -17,7 +17,7 @@ export const updateWorkDetails = async (req, res) => {
             "designation",
             "department",
             "contractJoiningDate",
-            "dateOfJoining",
+            "contractExpiryDate",
             "dateOfJoining",
             "companyEmail",
             "profileStatus",
@@ -51,41 +51,62 @@ export const updateWorkDetails = async (req, res) => {
 
         const employeeId = employee.employeeId;
 
-        // 4. Handle probation period logic
-        if (updatePayload.status && updatePayload.status !== 'Probation') {
-            updatePayload.probationPeriod = null;
-        } else if (updatePayload.status === 'Probation' || (!updatePayload.status && employee.status === 'Probation')) {
-            // If status is Probation (or already Probation), handle probation period
-            const basicRecord = await EmployeeBasic.findOne({ employeeId });
+        // 4. Handle probation period logic (Strict enforcement based on dates)
+        if (updatePayload.status === 'Probation' || updatePayload.status === 'Permanent' || (!updatePayload.status && (employee.status === 'Probation' || employee.status === 'Permanent'))) {
+            const currentStatus = updatePayload.status || employee.status;
 
-            // Set default to 6 months if not provided and not already set
-            if (!updatePayload.probationPeriod) {
-                if (basicRecord && basicRecord.probationPeriod) {
-                    updatePayload.probationPeriod = basicRecord.probationPeriod;
-                } else {
-                    // Default to 6 months if not set
-                    updatePayload.probationPeriod = 6;
+            // Priority: contractJoiningDate > dateOfJoining
+            const refJoiningDate = updatePayload.contractJoiningDate || employee.contractJoiningDate || updatePayload.dateOfJoining || employee.dateOfJoining;
+            const refExpiryDate = updatePayload.contractExpiryDate || employee.contractExpiryDate;
+
+            // Check if status should be automatically changed
+            let criteriaMetForPermanent = false;
+            const today = new Date();
+            today.setHours(0, 0, 0, 0);
+
+            // Check 1: Probation period from joining date has ended
+            const probationMonths = updatePayload.probationPeriod || employee.probationPeriod || 6;
+            if (refJoiningDate) {
+                const joiningDate = new Date(refJoiningDate);
+                const probationEndDate = new Date(joiningDate);
+                probationEndDate.setMonth(probationEndDate.getMonth() + probationMonths);
+                probationEndDate.setHours(0, 0, 0, 0);
+
+                if (probationEndDate <= today) {
+                    criteriaMetForPermanent = true;
                 }
             }
 
-            // Check if probation period has ended and auto-change to Permanent
-            if (employee.dateOfJoining && updatePayload.probationPeriod) {
-                const joiningDate = new Date(employee.dateOfJoining);
-                const probationEndDate = new Date(joiningDate);
-                probationEndDate.setMonth(probationEndDate.getMonth() + updatePayload.probationPeriod);
+            // Check 2: 6 months after contract's expiry (user requirement)
+            if (!criteriaMetForPermanent && refExpiryDate) {
+                const expiryDate = new Date(refExpiryDate);
+                const sixMonthsAfterExpiry = new Date(expiryDate);
+                sixMonthsAfterExpiry.setMonth(sixMonthsAfterExpiry.getMonth() + 6);
+                sixMonthsAfterExpiry.setHours(0, 0, 0, 0);
 
-                const today = new Date();
-                today.setHours(0, 0, 0, 0);
-                probationEndDate.setHours(0, 0, 0, 0);
-
-                // If probation period has ended, automatically change to Permanent
-                if (probationEndDate <= today) {
-                    updatePayload.status = 'Permanent';
-                    updatePayload.probationPeriod = null;
-                    // MANDATORY RESET: Reset profile for re-approval upon becoming Permanent
-                    updatePayload.profileStatus = 'inactive';
-                    updatePayload.profileApprovalStatus = 'draft';
+                if (sixMonthsAfterExpiry <= today) {
+                    criteriaMetForPermanent = true;
                 }
+            }
+
+            // If it should be Permanent but isn't
+            if (criteriaMetForPermanent && currentStatus === 'Probation') {
+                updatePayload.status = 'Permanent';
+                updatePayload.probationPeriod = null;
+                // MANDATORY RESET: Reset profile for re-approval upon becoming Permanent
+                updatePayload.profileStatus = 'inactive';
+                updatePayload.profileApprovalStatus = 'draft';
+                console.log(`[UpdateWorkDetails] Auto-promoting ${employeeId} to Permanent`);
+            }
+            // If it should be Probation but is Permanent (Reversion)
+            else if (!criteriaMetForPermanent && currentStatus === 'Permanent') {
+                updatePayload.status = 'Probation';
+                updatePayload.probationPeriod = 6;
+                console.log(`[UpdateWorkDetails] Auto-reverting ${employeeId} to Probation`);
+            }
+            // Ensure probation period is set if Probation
+            else if (!criteriaMetForPermanent && currentStatus === 'Probation' && !updatePayload.probationPeriod && !employee.probationPeriod) {
+                updatePayload.probationPeriod = 6;
             }
         }
 

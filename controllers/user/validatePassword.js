@@ -43,11 +43,23 @@ export const validatePassword = async (req, res) => {
 
         // Check if password matches current password
         if (user.password) {
-            const isSamePassword = await bcrypt.compare(password, user.password);
-            if (isSamePassword) {
+            const isMatch = await bcrypt.compare(password, user.password);
+            if (isMatch) {
                 return res.status(400).json({
                     message: "New password must be different from the current password"
                 });
+            }
+        }
+
+        // Check if password matches any in passwordHistory
+        if (user.passwordHistory && user.passwordHistory.length > 0) {
+            for (const oldPasswordHash of user.passwordHistory) {
+                const isMatch = await bcrypt.compare(password, oldPasswordHash);
+                if (isMatch) {
+                    return res.status(400).json({
+                        message: "New password must be different from recently used passwords"
+                    });
+                }
             }
         }
 

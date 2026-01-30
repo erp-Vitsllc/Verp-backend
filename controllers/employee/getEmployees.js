@@ -29,7 +29,7 @@ export const getEmployees = async (req, res) => {
         const skip = (page - 1) * limit;
 
         // Basic query/filter hooks (can be expanded later without breaking clients)
-        const filters = {};
+        const filters = { employeeId: { $ne: 'VEGA-HR-0000' } };
         const { department, designation, status, profileStatus, search } = req.query;
 
         if (department) filters.department = department;

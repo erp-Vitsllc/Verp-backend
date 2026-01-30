@@ -1,2 +1,0 @@
-ENDPOINT=s3.ap-southeast-1.idrivee2.com
-BUCKET=verp-backend
