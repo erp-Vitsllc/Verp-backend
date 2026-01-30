@@ -15,6 +15,20 @@ const companySchema = new mongoose.Schema(
         country: { type: String, default: "UAE" },
         registrationNumber: { type: String },
         vatNumber: { type: String },
+
+        // Trade License Details
+        tradeLicenseNumber: { type: String },
+        tradeLicenseIssueDate: { type: Date },
+        tradeLicenseExpiry: { type: Date },
+        tradeLicenseOwnerName: { type: String },
+        tradeLicenseAttachment: { type: String },
+
+        // Establishment Card Details
+        establishmentCardNumber: { type: String },
+        establishmentCardIssueDate: { type: Date },
+        establishmentCardExpiry: { type: Date },
+        establishmentCardAttachment: { type: String },
+
         status: { type: String, enum: ["Active", "Inactive"], default: "Active" },
         createdBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" }
     },
