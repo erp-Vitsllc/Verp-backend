@@ -9,6 +9,7 @@ import { updateEmergencyContact } from "../controllers/employee/updateEmergencyC
 import { deleteEmergencyContact } from "../controllers/employee/deleteEmergencyContact.js";
 import { sendApprovalEmail } from "../controllers/employee/sendApprovalEmail.js";
 import { approveProfile } from "../controllers/employee/approveProfile.js";
+import { rejectProfile } from "../controllers/employee/rejectProfile.js";
 import { deleteEmployee } from "../controllers/employee/deleteEmployee.js";
 import { updateVisaDetails } from "../controllers/employee/updateVisaDetails.js";
 import { deleteVisaDetails } from "../controllers/employee/deleteVisaDetails.js";
@@ -29,6 +30,7 @@ import { addTraining } from "../controllers/employee/addTraining.js";
 import { updateTraining } from "../controllers/employee/updateTraining.js";
 import { deleteTraining } from "../controllers/employee/deleteTraining.js";
 import { uploadProfilePicture } from "../controllers/employee/uploadProfilePicture.js";
+import { uploadSignature } from "../controllers/employee/uploadSignature.js";
 import { uploadDocument } from "../controllers/employee/uploadDocument.js";
 import { deleteDocument } from "../controllers/employee/deleteDocument.js";
 import { addDocument } from "../controllers/employee/addDocument.js";
@@ -113,6 +115,9 @@ router.patch("/driving-license/:id", checkPermission('hrm_employees_view_passpor
 // Upload profile picture - requires edit permission
 router.post("/upload-profile-picture/:id", checkPermission('hrm_employees_view_basic', 'edit'), uploadProfilePicture);
 
+// Upload e-signature - requires work details edit permission
+router.post("/:id/upload-signature", checkPermission('hrm_employees_view_work', 'edit'), uploadSignature);
+
 // Upload document to Cloudinary - requires edit permission
 router.post("/upload-document/:id", checkPermission('hrm_employees_view', 'edit'), uploadDocument);
 router.post("/:id/document", checkPermission('hrm_employees_view', 'edit'), addDocument);
@@ -145,6 +150,9 @@ router.post("/:id/send-approval-email", checkPermission('hrm_employees', 'edit')
 
 // Approve profile - requires edit permission
 router.post("/:id/approve-profile", checkPermission('hrm_employees', 'edit'), approveProfile);
+
+// Reject profile - requires edit permission
+router.post("/:id/reject-profile", checkPermission('hrm_employees', 'edit'), rejectProfile);
 
 // Update profile status (Downgrade/Reset) - requires edit permission
 router.patch("/:id/profile-status", checkPermission('hrm_employees', 'edit'), updateProfileStatus);

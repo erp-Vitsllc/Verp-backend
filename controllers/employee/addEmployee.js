@@ -106,16 +106,21 @@ export const addEmployee = async (req, res) => {
             });
         }
 
+        // Sanitize email if provided
+        const cleanedEmail = email && typeof email === 'string' ? email.trim().toLowerCase() : '';
+
         // Check if employee ID already exists
         const existingEmployeeId = await EmployeeBasic.findOne({ employeeId: cleanedEmployeeId });
         if (existingEmployeeId) {
             return res.status(400).json({ message: "Employee ID already exists" });
         }
 
-        // Check if email already exists
-        const existingEmail = await EmployeeBasic.findOne({ email });
-        if (existingEmail) {
-            return res.status(400).json({ message: "Email already exists" });
+        // Check if email already exists (using sanitized email)
+        if (cleanedEmail) {
+            const existingEmail = await EmployeeBasic.findOne({ email: cleanedEmail });
+            if (existingEmail) {
+                return res.status(400).json({ message: "Email already exists" });
+            }
         }
 
         // Calculate age from date of birth
@@ -214,7 +219,8 @@ export const addEmployee = async (req, res) => {
                 reportingAuthority: reportingAuthority || null,
                 profileApprovalStatus: profileApprovalStatus || 'draft',
                 profileStatus: profileStatus || 'inactive',
-                email,
+                profileStatus: profileStatus || 'inactive',
+                email: cleanedEmail,
                 companyEmail: companyEmail || '',
                 enablePortalAccess: enablePortalAccess || false,
                 dateOfJoining,
@@ -269,13 +275,13 @@ export const addEmployee = async (req, res) => {
         ]);
 
         // If department is "administrator" or "administration", automatically create a user with full permissions
-        if (department && typeof department === 'string' && (department.toLowerCase() === 'administrator' || department.toLowerCase() === 'administration') && email) {
+        if (department && typeof department === 'string' && (department.toLowerCase() === 'administrator' || department.toLowerCase() === 'administration') && cleanedEmail) {
             try {
                 // Check if user already exists for this employee
                 const existingUser = await User.findOne({
                     $or: [
                         { employeeId: cleanedEmployeeId },
-                        { email: (typeof email === 'string' ? email.toLowerCase().trim() : '') }
+                        { email: cleanedEmail }
                     ]
                 });
 
@@ -317,7 +323,7 @@ export const addEmployee = async (req, res) => {
                     const newUser = new User({
                         username: finalUsername,
                         name: `${firstName} ${lastName}`.trim(),
-                        email: (typeof email === 'string' ? email.toLowerCase().trim() : ''),
+                        email: cleanedEmail,
                         companyEmail: companyEmail || '',
                         password: hashedPassword,
                         employeeId: cleanedEmployeeId,

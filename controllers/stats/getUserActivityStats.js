@@ -29,13 +29,12 @@ export const getUserActivityStats = async (req, res) => {
         // Find by: User ID (direct link), Employee ID, or any known email field
         const manager = await EmployeeBasic.findOne({
             $or: [
+                ...(currentUser.employeeObjectId ? [{ _id: currentUser.employeeObjectId }] : []),
                 { _id: currentUser._id || currentUser.id },
                 ...(targetEmployeeId ? [{ employeeId: targetEmployeeId }] : []),
-                ...(targetEmail ? [
-                    { companyEmail: targetEmail },
-                    { email: targetEmail },
-                    { workEmail: targetEmail }
-                ] : [])
+                ...(targetEmail ? [{ companyEmail: targetEmail }] : []),
+                ...(currentUser.email ? [{ email: currentUser.email }] : []),
+                ...(currentUser.email ? [{ workEmail: currentUser.email }] : [])
             ]
         });
 
@@ -67,9 +66,14 @@ export const getUserActivityStats = async (req, res) => {
         const reportees = await EmployeeBasic.find({ primaryReportee: manager._id });
         const reporteeCustomIds = reportees.map(r => r.employeeId);
 
-        // IDs that represent the current user (Employee ID and User ID)
+        // IDs that represent the current user (Employee record ID and User table ID)
         // This ensures items appear on dashboard whether they were assigned to the Human or the Account
-        const relevantIds = [manager._id, targetUser?._id].filter(Boolean);
+        const relevantIds = [
+            manager?._id,
+            currentUser.employeeObjectId,
+            targetUser?._id,
+            currentUser?._id
+        ].filter(Boolean);
 
         // 3. Define Queries for "Needs Action"
         const queries = [
@@ -111,7 +115,7 @@ export const getUserActivityStats = async (req, res) => {
                                 // Fallback: Direct assignment OR email-based (legacy)
                                 $or: [
                                     { submittedTo: { $in: relevantIds } },
-                                    { primaryReporteeEmail: { $in: [targetEmail, manager.companyEmail, manager.email].filter(Boolean) } },
+                                    // Role Based Visibility Fallbacks (matches Reward/Fine logic)
                                     ...(isHR ? [{ status: 'Pending HR' }] : []),
                                     ...(isAccounts ? [{ status: 'Pending Accounts' }] : []),
                                     ...(isCEO ? [{ status: 'Pending Authorization' }] : [])
@@ -379,6 +383,16 @@ export const getUserActivityStats = async (req, res) => {
             }).sort({ updatedAt: -1 }).limit(20)
         ]);
 
+        // 6b. GET ACTIONED PROFILES (History)
+        const myActionedProfiles = await EmployeeBasic.find({
+            profileWorkflow: {
+                $elemMatch: {
+                    assignedTo: { $in: relevantIds },
+                    status: { $in: ['active', 'rejected'] }
+                }
+            }
+        }).sort({ updatedAt: -1 }).limit(10);
+
         // Helper to query Notice Workflow for History
         const myActionedNotices = await EmployeeBasic.find({
             'noticeRequest.workflow': {
@@ -466,10 +480,29 @@ export const getUserActivityStats = async (req, res) => {
             });
         });
 
+        myActionedProfiles.forEach(p => {
+            const mySteps = p.profileWorkflow ? p.profileWorkflow.filter(w =>
+                w.assignedTo && relevantIds.some(id => id.toString() === w.assignedTo.toString()) &&
+                ['active', 'rejected'].includes(w.status)
+            ) : [];
+
+            mySteps.forEach(step => {
+                activityList.push({
+                    id: p._id, type: 'Profile Activation', requestedBy: `${p.firstName} ${p.lastName}`,
+                    requestedDate: step.assignedAt,
+                    actionedDate: step.actionedAt || p.updatedAt,
+                    status: step.status === 'active' ? 'Approved' : 'Rejected',
+                    extra1: `Actioned: ${step.status === 'active' ? 'Approved' : 'Rejected'}`,
+                    extra2: p.employeeId,
+                    targetEmployeeId: p.employeeId
+                });
+            });
+        });
+
         // Final counts
         const pendingCount = activityList.filter(i => i.status === 'Pending').length;
         const approvedCount = activityList.filter(i => i.status === 'Approved').length;
-        const rejectedCount = activityList.filter(i => i.status === 'Rejected').length;
+        const rejectedCount = activityList.filter(i => (i.status === 'Rejected' || i.status === 'rejected')).length;
 
         res.status(200).json({
             pending: pendingCount,

@@ -61,7 +61,7 @@ const loanSchema = new mongoose.Schema({
     // SNAPSHOT: Manager who received the request
     submittedTo: {
         type: mongoose.Schema.Types.ObjectId,
-        ref: 'EmployeeBasic'
+        ref: 'User'
     },
     // Persistent Tracking for the 5-step workflow
     managerApprovedBy: {
@@ -89,14 +89,7 @@ const loanSchema = new mongoose.Schema({
     // NEW: Workflow Array for detailed tracking
     workflow: [{
         role: { type: String, required: true },
-        assignedTo: { type: mongoose.Schema.Types.ObjectId, ref: 'EmployeeBasic' }, // Note: Loans mostly ref EmployeeBasic but we should stick to User if updating auth logic or accept mixed. For consistency with others, User is better, but existing Loan fields ref EmployeeBasic. Let's stick to User for the *User* dashboard, or keep it generic. Dashboard uses `manager._id` (EmployeeBasic). Let's use `ref: 'User'` for consistency with `submittedTo` fix.
-        // Wait, Loan.submittedTo refs EmployeeBasic currently. Let's check Loan.js again.
-        // Line 55: ref: 'EmployeeBasic'.
-        // IF I change to User here, I must ensure controllers find User ID.
-        // The dashboard logic I wrote earlier relies on `manager._id` (EmployeeBasic) for Loans.
-        // Let's use EmployeeBasic for Loan workflow to match existing Loan patterns IF the dashboard expects EmployeeBasic ID.
-        // BUT `getUserActivityStats` checks `submittedTo: manager._id`.
-        // So `assignedTo` should ref `EmployeeBasic`.
+        assignedTo: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
         status: { type: String, enum: ['Pending', 'Approved', 'Rejected'], default: 'Pending' },
         assignedAt: { type: Date, default: Date.now },
         actionedAt: { type: Date }

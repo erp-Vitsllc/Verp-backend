@@ -31,10 +31,12 @@ export const deleteEducation = async (req, res) => {
 
         education.deleteOne();
         await educationRecord.save();
+        const completeEmployee = await getCompleteEmployee(employeeId);
 
         return res.status(200).json({
             message: "Education record deleted successfully",
-            educationDetails: educationRecord.educationDetails
+            educationDetails: educationRecord.educationDetails,
+            employee: completeEmployee
         });
     } catch (err) {
         console.error(err);

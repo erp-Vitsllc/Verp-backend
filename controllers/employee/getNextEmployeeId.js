@@ -10,22 +10,26 @@ export const getNextEmployeeId = async (req, res) => {
         // We fetch all employeeIds to find the max. 
         // For a huge DB, aggregation is better.
 
-        const lastEmployee = await EmployeeBasic.findOne({
-            employeeId: { $regex: /^VEGA\s(-|-HR-)\s\d+$/ }
-        }).sort({ createdAt: -1 }).select('employeeId');
+        // Fetch all IDs matching the patterns (with or without spaces) to find the truly largest numeric value
+        // Matches: VEGA-HR-123, VEGA -HR- 123, VEGA - 123, VEGA-123
+        const employees = await EmployeeBasic.find({
+            employeeId: { $regex: /^VEGA.*?\d+$/ }
+        }).select('employeeId').lean();
 
-        let nextIdNumber = 1;
+        let maxIdNumber = 0;
 
-        if (lastEmployee && lastEmployee.employeeId) {
+        employees.forEach(emp => {
             // Extract the number from the end of the string
-            const match = lastEmployee.employeeId.match(/\d+$/);
+            const match = emp.employeeId.match(/\d+$/);
             if (match) {
-                const numberPart = parseInt(match[0], 10);
-                if (!isNaN(numberPart)) {
-                    nextIdNumber = numberPart + 1;
+                const num = parseInt(match[0], 10);
+                if (!isNaN(num) && num > maxIdNumber) {
+                    maxIdNumber = num;
                 }
             }
-        }
+        });
+
+        const nextIdNumber = maxIdNumber + 1;
 
         const nextId = `VEGA -HR- ${String(nextIdNumber).padStart(5, '0')}`;
 

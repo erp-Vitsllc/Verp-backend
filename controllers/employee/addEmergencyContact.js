@@ -43,9 +43,12 @@ export const addEmergencyContact = async (req, res) => {
             return res.status(404).json({ message: "Employee not found" });
         }
 
+        const completeEmployee = await getCompleteEmployee(employeeId);
+
         return res.status(200).json({
             message: "Emergency contact added",
-            emergencyContacts: updated.emergencyContacts
+            emergencyContacts: updated.emergencyContacts,
+            employee: completeEmployee
         });
     } catch (err) {
         console.error(err);

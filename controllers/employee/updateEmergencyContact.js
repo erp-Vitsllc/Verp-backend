@@ -60,10 +60,12 @@ export const updateEmergencyContact = async (req, res) => {
         }
 
         await updated.save();
+        const completeEmployee = await getCompleteEmployee(employeeId);
 
         return res.status(200).json({
             message: "Emergency contact updated",
-            emergencyContacts: updated.emergencyContacts
+            emergencyContacts: updated.emergencyContacts,
+            employee: completeEmployee
         });
     } catch (err) {
         console.error(err);

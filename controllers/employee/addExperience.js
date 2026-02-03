@@ -57,9 +57,12 @@ export const addExperience = async (req, res) => {
             return res.status(404).json({ message: "Employee not found" });
         }
 
+        const completeEmployee = await getCompleteEmployee(employeeId);
+
         return res.status(200).json({
             message: "Experience details added successfully",
-            experienceDetails: updated.experienceDetails
+            experienceDetails: updated.experienceDetails,
+            employee: completeEmployee
         });
     } catch (err) {
         console.error(err);

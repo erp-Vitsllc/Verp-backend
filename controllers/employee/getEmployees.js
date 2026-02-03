@@ -77,6 +77,90 @@ export const getEmployees = async (req, res) => {
                 { $limit: limit },
                 {
                     $lookup: {
+                        from: "employeepersonals",
+                        localField: "employeeId",
+                        foreignField: "employeeId",
+                        as: "personalInfo"
+                    }
+                },
+                {
+                    $unwind: {
+                        path: "$personalInfo",
+                        preserveNullAndEmptyArrays: true
+                    }
+                },
+                {
+                    $lookup: {
+                        from: "employeecontacts",
+                        localField: "employeeId",
+                        foreignField: "employeeId",
+                        as: "contactInfo"
+                    }
+                },
+                {
+                    $unwind: {
+                        path: "$contactInfo",
+                        preserveNullAndEmptyArrays: true
+                    }
+                },
+                {
+                    $lookup: {
+                        from: "employeelabourcards",
+                        localField: "employeeId",
+                        foreignField: "employeeId",
+                        as: "labourCardInfo"
+                    }
+                },
+                {
+                    $unwind: {
+                        path: "$labourCardInfo",
+                        preserveNullAndEmptyArrays: true
+                    }
+                },
+                {
+                    $lookup: {
+                        from: "employeepassports",
+                        localField: "employeeId",
+                        foreignField: "employeeId",
+                        as: "passportInfo"
+                    }
+                },
+                {
+                    $unwind: {
+                        path: "$passportInfo",
+                        preserveNullAndEmptyArrays: true
+                    }
+                },
+                {
+                    $lookup: {
+                        from: "employeeemiratesids",
+                        localField: "employeeId",
+                        foreignField: "employeeId",
+                        as: "eidInfo"
+                    }
+                },
+                {
+                    $unwind: {
+                        path: "$eidInfo",
+                        preserveNullAndEmptyArrays: true
+                    }
+                },
+                {
+                    $lookup: {
+                        from: "employeemedicalinsurances",
+                        localField: "employeeId",
+                        foreignField: "employeeId",
+                        as: "medInfo"
+                    }
+                },
+                {
+                    $unwind: {
+                        path: "$medInfo",
+                        preserveNullAndEmptyArrays: true
+                    }
+                },
+                {
+                    $lookup: {
                         from: "employeebasics",
                         localField: "reportingAuthority",
                         foreignField: "_id",
@@ -92,7 +176,6 @@ export const getEmployees = async (req, res) => {
                 {
                     $project: {
                         password: 0,
-                        documents: 0,
                         trainingDetails: 0,
                         __v: 0,
                         "reportingAuthority.password": 0,
@@ -101,23 +184,61 @@ export const getEmployees = async (req, res) => {
                         "reportingAuthority.__v": 0,
                         "reportingAuthority.salaryHistory": 0,
                         "reportingAuthority.bankOtherDetails": 0,
-                        // Keep only needed fields for reporting authority to mimic .select('firstName lastName employeeId')
-                        // Actually easier to just exclude heavy fields or re-project, but simplest is mimicking populate select:
-                        // "reportingAuthority": { firstName: 1, lastName: 1, employeeId: 1 } // This works if we re-project
                     }
                 },
                 {
                     $project: {
-                        // Explicitly keeping everything from root (implicit in mongo except when modifying),
-                        // and restricting reportingAuthority fields
                         firstName: 1, lastName: 1, employeeId: 1, role: 1, department: 1, designation: 1,
                         status: 1, probationPeriod: 1, overtime: 1, profileApprovalStatus: 1, profileStatus: 1,
                         email: 1, companyEmail: 1, enablePortalAccess: 1, dateOfJoining: 1, contractJoiningDate: 1,
-                        contactNumber: 1, addressLine1: 1, addressLine2: 1, country: 1, state: 1, city: 1, postalCode: 1,
-                        currentAddressLine1: 1, currentAddressLine2: 1, currentCity: 1, currentState: 1, currentCountry: 1, currentPostalCode: 1,
-                        gender: 1, dateOfBirth: 1, age: 1, maritalStatus: 1, nationality: 1, fathersName: 1,
-                        passportExp: 1, eidExp: 1, medExp: 1,
-                        passportDetails: 1, visaDetails: 1,
+
+                        // Fields from contactInfo
+                        contactNumber: "$contactInfo.contactNumber",
+                        addressLine1: "$contactInfo.addressLine1",
+                        addressLine2: "$contactInfo.addressLine2",
+                        country: "$contactInfo.country",
+                        state: "$contactInfo.state",
+                        city: "$contactInfo.city",
+                        postalCode: "$contactInfo.postalCode",
+                        currentAddressLine1: "$contactInfo.currentAddressLine1",
+                        currentAddressLine2: "$contactInfo.currentAddressLine2",
+                        currentCity: "$contactInfo.currentCity",
+                        currentState: "$contactInfo.currentState",
+                        currentCountry: "$contactInfo.currentCountry",
+                        currentPostalCode: "$contactInfo.currentPostalCode",
+
+                        // Fields from personalInfo
+                        gender: "$personalInfo.gender",
+                        dateOfBirth: "$personalInfo.dateOfBirth",
+                        age: "$personalInfo.age",
+                        maritalStatus: "$personalInfo.maritalStatus",
+                        nationality: "$personalInfo.nationality",
+                        fathersName: "$personalInfo.fathersName",
+
+                        // Generic Documents (projection for chart statistics)
+                        documents: {
+                            $map: {
+                                input: "$documents",
+                                as: "doc",
+                                in: {
+                                    expiryDate: "$$doc.expiryDate",
+                                    type: "$$doc.type"
+                                }
+                            }
+                        },
+
+                        // Expiry Fields (Prioritize dedicated models over legacy fields)
+                        passportExp: { $ifNull: ["$passportInfo.passportExp", "$passportInfo.expiryDate"] },
+                        eidExp: { $ifNull: ["$eidInfo.emiratesId.expiryDate", "$passportInfo.eidExp"] },
+                        medExp: { $ifNull: ["$medInfo.medicalInsurance.expiryDate", "$passportInfo.medExp"] },
+
+                        labourCardExp: "$labourCardInfo.labourCard.expiryDate",
+
+                        passportDetails: {
+                            expiryDate: "$passportInfo.expiryDate",
+                            number: "$passportInfo.number"
+                        },
+                        visaDetails: 1,
                         monthlySalary: 1, basic: 1, basicPercentage: 1, houseRentAllowance: 1, houseRentPercentage: 1,
                         otherAllowance: 1, otherAllowancePercentage: 1, additionalAllowances: 1,
                         profilePicture: 1,

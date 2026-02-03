@@ -31,10 +31,12 @@ export const deleteTraining = async (req, res) => {
 
         training.deleteOne();
         await trainingRecord.save();
+        const completeEmployee = await getCompleteEmployee(employeeId);
 
         return res.status(200).json({
             message: "Training record deleted successfully",
-            trainingDetails: trainingRecord.trainingDetails
+            trainingDetails: trainingRecord.trainingDetails,
+            employee: completeEmployee
         });
     } catch (err) {
         console.error(err);

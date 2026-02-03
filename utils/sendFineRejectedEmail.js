@@ -1,6 +1,7 @@
 import nodemailer from 'nodemailer';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import axios from 'axios';
+import { isValidStorageUrl } from './validationHelper.js';
 
 /**
  * Sends a rejection email to assigned employees when a fine is rejected by CEO/Admin.
@@ -42,9 +43,8 @@ export const sendFineRejectedEmail = async (fine, assignedEmployees) => {
         if (fine.attachment && fine.attachment.url) {
             try {
                 // Validate URL hostname to prevent SSRF
-                const urlObj = new URL(fine.attachment.url);
-                if (!urlObj.hostname.endsWith('idrivee2.com')) {
-                    throw new Error(`Invalid attachment URL hostname: ${urlObj.hostname}`);
+                if (!isValidStorageUrl(fine.attachment.url)) {
+                    throw new Error(`Invalid attachment URL: ${fine.attachment.url}`);
                 }
 
                 const response = await axios.get(fine.attachment.url, { responseType: 'arraybuffer' });

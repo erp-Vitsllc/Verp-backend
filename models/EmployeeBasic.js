@@ -29,7 +29,7 @@ const employeeBasicSchema = new mongoose.Schema(
         overtime: { type: Boolean, default: false },
         profileApprovalStatus: {
             type: String,
-            enum: ["draft", "submitted", "active"],
+            enum: ["draft", "submitted", "active", "rejected"],
             default: "draft"
         },
         profileStatus: {
@@ -44,13 +44,14 @@ const employeeBasicSchema = new mongoose.Schema(
         profileWorkflow: [{
             role: { type: String, required: true }, // e.g. 'Manager'
             assignedTo: { type: mongoose.Schema.Types.ObjectId, ref: 'EmployeeBasic' },
-            status: { type: String, enum: ['submitted', 'active'], default: 'submitted' },
+            status: { type: String, enum: ['submitted', 'active', 'rejected'], default: 'submitted' },
             assignedAt: { type: Date, default: Date.now },
-            actionedAt: { type: Date }
+            actionedAt: { type: Date },
+            comment: { type: String }
         }],
 
         // LOGIN & ACCESS
-        email: { type: String, required: true, unique: true },
+        email: { type: String, required: true, unique: true, trim: true, lowercase: true },
         companyEmail: { type: String, default: '', trim: true, lowercase: true },
         password: { type: String }, // hashed (only if enablePortalAccess is true)
         enablePortalAccess: { type: Boolean, default: false },
@@ -62,6 +63,13 @@ const employeeBasicSchema = new mongoose.Schema(
 
         // PROFILE PICTURE
         profilePicture: { type: String }, // Storage URL
+
+        // SIGNATURE
+        signature: {
+            url: { type: String }, // Storage URL (IDrive/S3)
+            signedAt: { type: Date },
+            ipAddress: { type: String }
+        },
 
         // DOCUMENTS
         documents: [

@@ -168,6 +168,13 @@ export const getCompleteEmployee = async (id) => {
 
         const completeEmployee = {
             ...employeeBasicWithoutDocs,
+            // Ensure signature is properly mapped and ready for signing
+            signature: employeeBasic.signature ? {
+                url: employeeBasic.signature.url,
+                publicId: employeeBasic.signature.url, // Store Key as publicId for signUrl helper
+                signedAt: employeeBasic.signature.signedAt,
+                ipAddress: employeeBasic.signature.ipAddress
+            } : undefined,
             // Include documents but exclude base64 data (metadata only) - reduces payload by ~90%
             documents: basicDocuments ? basicDocuments.map(doc => ({
                 type: doc.type,
@@ -634,6 +641,11 @@ export const getCompleteEmployee = async (id) => {
         // Notice Request Attachment
         if (completeEmployee.noticeRequest?.attachment) {
             signingPromises.push(signUrl(completeEmployee.noticeRequest.attachment));
+        }
+
+        // Signature signing
+        if (completeEmployee.signature) {
+            signingPromises.push(signUrl(completeEmployee.signature, 'signature'));
         }
 
         // Wait for all URLs to be signed

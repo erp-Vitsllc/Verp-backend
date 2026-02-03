@@ -65,10 +65,12 @@ export const updateExperience = async (req, res) => {
         }
 
         await experienceRecord.save();
+        const completeEmployee = await getCompleteEmployee(employeeId);
 
         return res.status(200).json({
             message: "Experience details updated successfully",
-            experienceDetails: experienceRecord.experienceDetails
+            experienceDetails: experienceRecord.experienceDetails,
+            employee: completeEmployee
         });
     } catch (err) {
         console.error(err);

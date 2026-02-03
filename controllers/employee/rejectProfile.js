@@ -2,11 +2,12 @@ import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { getCompleteEmployee } from "../../services/employeeService.js";
 import { sendProfileNotification } from "../../utils/sendProfileNotification.js";
 
-export const approveProfile = async (req, res) => {
+export const rejectProfile = async (req, res) => {
     const { id } = req.params;
+    const { reason } = req.body;
 
     try {
-        // Get employeeId from employee record
+        // Get employee record
         const employee = await getCompleteEmployee(id);
         if (!employee) {
             return res.status(404).json({ message: "Employee not found" });
@@ -15,15 +16,17 @@ export const approveProfile = async (req, res) => {
         const employeeId = employee.employeeId;
 
         // Update EmployeeBasic
+        // Set profileApprovalStatus to 'rejected'
+        // Update workflow entry to 'rejected'
         const updated = await EmployeeBasic.findOneAndUpdate(
             { employeeId },
             {
-                profileApprovalStatus: "active",
-                profileStatus: "active",
-                // WORKFLOW: Update to Active
+                profileApprovalStatus: "rejected",
+                profileStatus: "inactive",
                 $set: {
-                    "profileWorkflow.$[elem].status": "active",
-                    "profileWorkflow.$[elem].actionedAt": new Date()
+                    "profileWorkflow.$[elem].status": "rejected",
+                    "profileWorkflow.$[elem].actionedAt": new Date(),
+                    "profileWorkflow.$[elem].comment": reason || "Profile activation request rejected."
                 }
             },
             {
@@ -33,30 +36,29 @@ export const approveProfile = async (req, res) => {
         );
 
         if (!updated) {
-            return res.status(404).json({ message: "Employee not found" });
+            return res.status(404).json({ message: "Employee submission not found" });
         }
 
         // Get complete employee data for response
         const completeEmployee = await getCompleteEmployee(employeeId);
 
         // Trigger Email Notification (Background)
-        const manager = req.user; // The person who approved
+        const manager = req.user; // The person who rejected
         sendProfileNotification({
             employee: completeEmployee,
             manager: manager,
-            status: 'active'
+            status: 'rejected',
+            reason: reason || "Profile activation request rejected. Please review your details."
         }).catch(err => console.error("Async Email Error:", err));
 
         delete completeEmployee.password;
 
         return res.status(200).json({
-            message: "Employee profile marked as approved.",
+            message: "Employee profile activation rejected.",
             employee: completeEmployee
         });
     } catch (error) {
-        console.error("Failed to approve profile:", error);
-        return res.status(500).json({ message: error.message || "Failed to approve profile." });
+        console.error("Failed to reject profile:", error);
+        return res.status(500).json({ message: error.message || "Failed to reject profile." });
     }
 };
-
-

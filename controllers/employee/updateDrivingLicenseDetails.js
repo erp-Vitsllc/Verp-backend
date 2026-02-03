@@ -1,5 +1,5 @@
 import EmployeeDrivingLicense from "../../models/EmployeeDrivingLicense.js";
-import { resolveEmployeeId } from "../../services/employeeService.js";
+import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeService.js";
 import { uploadDocumentToS3, deleteDocumentFromS3 } from "../../utils/s3Upload.js";
 
 const REQUIRED_FIELDS = ["number", "issueDate", "expiryDate", "document"];
@@ -131,9 +131,12 @@ export const updateDrivingLicenseDetails = async (req, res) => {
         console.log("   Driving License Number:", drivingLicensePayload.number);
         console.log("   Expiry Date:", drivingLicensePayload.expiryDate);
 
+        const completeEmployee = await getCompleteEmployee(employeeId);
+
         return res.json({
             message: "Driving License details updated successfully.",
             drivingLicenceDetails: updatedDrivingLicense.drivingLicenceDetails,
+            employee: completeEmployee
         });
     } catch (error) {
         console.error("Failed to update Driving License details:", error);

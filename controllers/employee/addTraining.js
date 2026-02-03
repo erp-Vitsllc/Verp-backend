@@ -57,9 +57,12 @@ export const addTraining = async (req, res) => {
             return res.status(404).json({ message: "Employee not found" });
         }
 
+        const completeEmployee = await getCompleteEmployee(employeeId);
+
         return res.status(200).json({
             message: "Training details added successfully",
-            trainingDetails: updated.trainingDetails
+            trainingDetails: updated.trainingDetails,
+            employee: completeEmployee
         });
     } catch (err) {
         console.error(err);

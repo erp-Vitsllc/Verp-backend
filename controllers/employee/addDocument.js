@@ -1,7 +1,7 @@
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { uploadDocumentToS3 } from "../../utils/s3Upload.js";
 import mongoose from "mongoose";
-import { resolveEmployeeId } from "../../services/employeeService.js";
+import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeService.js";
 
 // @desc    Add a document to employee's documents list
 // @route   POST /api/Employee/:id/document
@@ -63,11 +63,12 @@ export const addDocument = async (req, res) => {
         if (!employee.documents) employee.documents = [];
         employee.documents.push(newDocument);
 
-        const updatedEmployee = await employee.save();
+        const savedEmployee = await employee.save();
+        const completeEmployee = await getCompleteEmployee(employee.employeeId);
 
         res.status(200).json({
             message: "Document added successfully",
-            employee: updatedEmployee
+            employee: completeEmployee
         });
 
     } catch (error) {

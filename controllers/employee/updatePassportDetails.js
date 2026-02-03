@@ -1,6 +1,6 @@
 import EmployeePassport from "../../models/EmployeePassport.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
-import { resolveEmployeeId } from "../../services/employeeService.js";
+import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeService.js";
 import { uploadDocumentToS3, deleteDocumentFromS3 } from "../../utils/s3Upload.js";
 
 const REQUIRED_FIELDS = ["number", "issueDate", "expiryDate"];
@@ -142,6 +142,7 @@ export const updatePassportDetails = async (req, res) => {
         console.log("✅ Passport details saved for employee:", employeeId);
         console.log("   Passport Number:", passportPayload.number);
         console.log("   Expiry Date:", passportPayload.expiryDate);
+        const completeEmployee = await getCompleteEmployee(employeeId);
 
         return res.json({
             message: "Passport details updated successfully.",
@@ -154,6 +155,7 @@ export const updatePassportDetails = async (req, res) => {
                 document: updatedPassport.document,
                 lastUpdated: updatedPassport.lastUpdated,
             },
+            employee: completeEmployee
         });
     } catch (error) {
         console.error("Failed to update passport details:", error);

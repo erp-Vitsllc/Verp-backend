@@ -44,10 +44,12 @@ export const deleteEmergencyContact = async (req, res) => {
         }
 
         await contactRecord.save();
+        const completeEmployee = await getCompleteEmployee(employeeId);
 
         return res.status(200).json({
             message: "Emergency contact deleted",
-            emergencyContacts: contactRecord.emergencyContacts
+            emergencyContacts: contactRecord.emergencyContacts,
+            employee: completeEmployee
         });
     } catch (err) {
         console.error(err);

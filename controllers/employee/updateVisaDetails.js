@@ -1,5 +1,5 @@
 import EmployeeVisa from "../../models/EmployeeVisa.js";
-import { resolveEmployeeId } from "../../services/employeeService.js";
+import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeService.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { uploadDocumentToS3, deleteDocumentFromS3 } from "../../utils/s3Upload.js";
 
@@ -160,6 +160,8 @@ export const updateVisaDetails = async (req, res) => {
             );
         }
 
+        const completeEmployee = await getCompleteEmployee(employeeId);
+
         return res.json({
             message: `${visaType} visa details updated successfully.`,
             visaDetails: {
@@ -167,6 +169,7 @@ export const updateVisaDetails = async (req, res) => {
                 employment: updatedVisa.employment,
                 spouse: updatedVisa.spouse,
             },
+            employee: completeEmployee
         });
     } catch (error) {
         console.error("Failed to update visa details:", error);

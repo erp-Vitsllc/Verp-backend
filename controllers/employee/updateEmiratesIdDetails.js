@@ -1,5 +1,5 @@
 import EmployeeEmiratesId from "../../models/EmployeeEmiratesId.js";
-import { resolveEmployeeId } from "../../services/employeeService.js";
+import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeService.js";
 import { uploadDocumentToS3, deleteDocumentFromS3 } from "../../utils/s3Upload.js";
 
 const REQUIRED_FIELDS = ["number", "issueDate", "expiryDate", "upload"];
@@ -127,9 +127,12 @@ export const updateEmiratesIdDetails = async (req, res) => {
             { upsert: true, new: true }
         );
 
+        const completeEmployee = await getCompleteEmployee(employeeId);
+
         return res.json({
             message: "Emirates ID details updated successfully.",
             emiratesIdDetails: updatedEmiratesId.emiratesId,
+            employee: completeEmployee
         });
     } catch (error) {
         console.error("Failed to update Emirates ID details:", error);

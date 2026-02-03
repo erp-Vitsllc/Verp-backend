@@ -2,6 +2,7 @@ import nodemailer from "nodemailer";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import Loan from "../../models/Loan.js";
 import EmployeeSalary from "../../models/EmployeeSalary.js";
+import User from "../../models/User.js";
 import { getCompleteEmployee } from "../../services/employeeService.js";
 
 
@@ -108,42 +109,40 @@ export const requestLoan = async (req, res) => {
         };
 
         if (targetStatus === 'Pending') {
-            loanData.submittedTo = reportee._id;
+            // SNAPSHOT: Find Reportee's USER Object for "submittedTo"
+            // This ensures consistent dashboard behavior across modules (Reward, Fine, Loan)
+            let reporteeUser = null;
+
+            if (reportee.employeeId) {
+                // Try finding by employeeId first
+                reporteeUser = await User.findOne({ employeeId: reportee.employeeId });
+            }
+
+            if (!reporteeUser) {
+                // Fallback: search by email
+                const mEmail = reportee.companyEmail || reportee.workEmail || reportee.email;
+                if (mEmail) {
+                    reporteeUser = await User.findOne({
+                        $or: [{ email: mEmail }, { username: mEmail }, { companyEmail: mEmail }]
+                    });
+                }
+            }
+
+            // Assign ID (Prefer User ID, fallback to Employee ID if no user account exists)
+            const assignmentId = reporteeUser ? reporteeUser._id : reportee._id;
+
+            loanData.submittedTo = assignmentId;
             loanData.workflow = [{
                 role: 'Manager',
-                assignedTo: reportee._id,
+                assignedTo: assignmentId,
                 status: 'Pending',
                 assignedAt: new Date()
             }];
+
+            console.log(`[RequestLoan] Loan Pushed for Manager: ${reportee.employeeId} (Account: ${reporteeUser ? 'Found' : 'Missing - Falling back to Employee ID'})`);
         }
 
         const newLoan = new Loan(loanData);
-
-        if (targetStatus === 'Pending') {
-            console.log(`[RequestLoan] Dashboard Request Pushed for Manager: ${reportee.employeeId}`);
-
-            // SNAPSHOT: Log Dashboard State
-            const currentPendingLoans = await Loan.countDocuments({
-                workflow: { $elemMatch: { assignedTo: reportee._id, status: 'Pending' } },
-                status: { $nin: ['Approved', 'Rejected', 'Withdrawn', 'Cancelled'] }
-            });
-
-            console.log(`
-===================================================
-[DASHBOARD PREVIEW - LOAN]
----------------------------------------------------
-Target Manager    : ${reportee.firstName} ${reportee.lastName}
-Target Emp Object : ${reportee._id}
-Target Emp ID     : ${reportee.employeeId}
-Target Email      : ${reportee.companyEmail || reportee.email}
----------------------------------------------------
-Pending Loans (Pre-Save)   : ${currentPendingLoans}
-New Item Pushed            : +1
----------------------------------------------------
-TOTAL PENDING ON DASHBOARD : ${currentPendingLoans + 1}
-===================================================`);
-        }
-
         const savedLoan = await newLoan.save();
 
         // 3. Send Email ONLY if Submit for Approval

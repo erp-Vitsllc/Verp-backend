@@ -63,10 +63,12 @@ export const updateEducation = async (req, res) => {
         }
 
         await educationRecord.save();
+        const completeEmployee = await getCompleteEmployee(employeeId);
 
         return res.status(200).json({
             message: "Education details updated successfully",
-            educationDetails: educationRecord.educationDetails
+            educationDetails: educationRecord.educationDetails,
+            employee: completeEmployee
         });
     } catch (err) {
         console.error(err);

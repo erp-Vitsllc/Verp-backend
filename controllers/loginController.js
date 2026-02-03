@@ -35,7 +35,7 @@ export const login = async (req, res) => {
             user = await User.findOne({
                 $or: [
                     { username: adminUsername.toLowerCase() },
-                    { email: 'verp@vitsllc.com' }
+                    { email: process.env.SYSTEM_ADMIN_EMAIL || 'verp@vitsllc.com' }
                 ]
             });
 
@@ -47,7 +47,7 @@ export const login = async (req, res) => {
                 user = new User({
                     username: adminUsername.toLowerCase(),
                     name: 'Super User(System)',
-                    email: 'verp@vitsllc.com',
+                    email: process.env.SYSTEM_ADMIN_EMAIL || 'verp@vitsllc.com',
                     password: null, // Admin password is NOT stored in MongoDB - only in .env
                     employeeId: null,
                     group: null,
@@ -66,8 +66,8 @@ export const login = async (req, res) => {
                 if (user.name !== 'Super User(System)') {
                     user.name = 'Super User(System)';
                 }
-                if (user.email !== 'verp@vitsllc.com') {
-                    user.email = 'verp@vitsllc.com';
+                if (user.email !== (process.env.SYSTEM_ADMIN_EMAIL || 'verp@vitsllc.com')) {
+                    user.email = process.env.SYSTEM_ADMIN_EMAIL || 'verp@vitsllc.com';
                 }
                 if (user.employeeId !== null) {
                     user.employeeId = null;
@@ -127,6 +127,13 @@ export const login = async (req, res) => {
             { expiresIn: "2h" }
         );
 
+        // Find associated EmployeeBasic record to get its ObjectId
+        let employeeObjectId = null;
+        if (user.employeeId) {
+            const emp = await EmployeeBasic.findOne({ employeeId: user.employeeId }).select('_id');
+            if (emp) employeeObjectId = emp._id;
+        }
+
         return res.status(200).json({
             message: "Login successful",
             token,
@@ -136,6 +143,7 @@ export const login = async (req, res) => {
                 email: user.email,
                 username: user.username,
                 employeeId: user.employeeId,
+                employeeObjectId: employeeObjectId, // Added for frontend logic
                 isAdmin: isSystemAdmin,
                 isAdministrator: isSystemAdmin
             },

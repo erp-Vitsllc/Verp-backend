@@ -1,5 +1,6 @@
 import jwt from "jsonwebtoken";
 import User from "../models/User.js";
+import EmployeeBasic from "../models/EmployeeBasic.js";
 
 /**
  * Authentication middleware - verifies JWT token and attaches user to request
@@ -30,6 +31,13 @@ export const protect = async (req, res, next) => {
             return res.status(401).json({ message: "Portal access is disabled for this user" });
         }
 
+        // Find linked employee record if available
+        let employeeObjectId = null;
+        if (user.employeeId) {
+            const emp = await EmployeeBasic.findOne({ employeeId: user.employeeId }).select('_id');
+            if (emp) employeeObjectId = emp._id;
+        }
+
         // Attach user info to request
         req.user = {
             id: user._id.toString(),
@@ -38,6 +46,7 @@ export const protect = async (req, res, next) => {
             role: user.role,
             companyEmail: user.companyEmail,
             employeeId: user.employeeId,
+            employeeObjectId: employeeObjectId, // Linked EmployeeBasic ObjectId
             ...decoded
         };
 

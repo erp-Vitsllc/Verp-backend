@@ -31,10 +31,12 @@ export const deleteExperience = async (req, res) => {
 
         experience.deleteOne();
         await experienceRecord.save();
+        const completeEmployee = await getCompleteEmployee(employeeId);
 
         return res.status(200).json({
             message: "Experience record deleted successfully",
-            experienceDetails: experienceRecord.experienceDetails
+            experienceDetails: experienceRecord.experienceDetails,
+            employee: completeEmployee
         });
     } catch (err) {
         console.error(err);

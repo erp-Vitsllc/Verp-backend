@@ -90,9 +90,18 @@ export const sendApprovalEmail = async (req, res) => {
         });
         console.log("[Email Debug] Email sent successfully via transporter.");
 
-        // Update profile approval status
+        // Update profile approval status and record the submission target for dashboard visibility
         await EmployeeBasic.findByIdAndUpdate(employeeBasic._id, {
-            profileApprovalStatus: "submitted"
+            profileApprovalStatus: "submitted",
+            profileSubmittedTo: reportee._id,
+            $push: {
+                profileWorkflow: {
+                    role: 'Manager',
+                    assignedTo: reportee._id,
+                    status: 'submitted',
+                    assignedAt: new Date()
+                }
+            }
         });
 
         return res.status(200).json({ message: "Approval request sent successfully." });

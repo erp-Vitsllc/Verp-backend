@@ -21,7 +21,11 @@ export const getLoanById = async (req, res) => {
             })
             .populate({
                 path: 'submittedTo',
-                select: 'firstName lastName designation department'
+                select: 'name'
+            })
+            .populate({
+                path: 'workflow.assignedTo',
+                select: 'name'
             })
             .populate({
                 path: 'managerApprovedBy',

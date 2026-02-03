@@ -1,7 +1,7 @@
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { uploadDocumentToS3 } from "../../utils/s3Upload.js";
 import mongoose from "mongoose";
-import { resolveEmployeeId } from "../../services/employeeService.js";
+import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeService.js";
 
 // @desc    Update a document in employee's documents list
 // @route   PATCH /api/Employee/:id/document/:index
@@ -66,11 +66,12 @@ export const updateDocument = async (req, res) => {
             }
         }
 
-        const updatedEmployee = await employee.save();
+        const savedEmployee = await employee.save();
+        const completeEmployee = await getCompleteEmployee(employee.employeeId);
 
         res.status(200).json({
             message: "Document updated successfully",
-            employee: updatedEmployee
+            employee: completeEmployee
         });
 
     } catch (error) {

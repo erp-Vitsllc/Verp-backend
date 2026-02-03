@@ -86,13 +86,18 @@ export const approveLoan = async (req, res) => {
             publicStatus = 'Pending';
             nextStage = 'Pending';
             nextApprover = applicant.primaryReportee;
+
+            // Define nextAssignmentId here
+            const nextUser = await User.findOne({ employeeId: nextApprover.employeeId });
+            const nextAssignmentId = nextUser ? nextUser._id : nextApprover._id;
+
             emailSubject = "New Loan/Advance Request for Review";
             emailType = "Manager";
 
             // Set initial workflow
             loan.workflow = [{
                 role: 'Manager',
-                assignedTo: nextApprover._id,
+                assignedTo: nextAssignmentId,
                 status: 'Pending',
                 assignedAt: new Date()
             }];
@@ -191,15 +196,19 @@ export const approveLoan = async (req, res) => {
         }
 
         if (nextApprover) {
-            loan.submittedTo = nextApprover._id;
+            // Find User ID for next approver to ensure dashboard visibility
+            const nextUser = await User.findOne({ employeeId: nextApprover.employeeId });
+            const nextAssignmentId = nextUser ? nextUser._id : nextApprover._id;
 
-            // WORKFLOW UPDATES (Using EmployeeBasic IDs as per Loan Logic)
+            loan.submittedTo = nextAssignmentId;
+
+            // WORKFLOW UPDATES
             if (nextStage === 'Pending HR') {
                 // 1. Manager Step (Approved)
                 if (!loan.workflow) loan.workflow = [];
                 const managerEntry = loan.workflow.find(w =>
                     w.status === 'Pending' &&
-                    (w.role === 'Manager' || w.assignedTo?.toString() === approverBasic._id.toString())
+                    (w.role === 'Manager' || w.assignedTo?.toString() === approverBasic?._id?.toString() || w.assignedTo?.toString() === userObj?._id?.toString())
                 );
 
                 if (managerEntry) {
@@ -208,9 +217,10 @@ export const approveLoan = async (req, res) => {
                     if (!managerEntry.role) managerEntry.role = 'Manager';
                 } else {
                     // Fallback
+                    const managerUser = await User.findOne({ employeeId: approverBasic?.employeeId });
                     loan.workflow.push({
                         role: 'Manager',
-                        assignedTo: approverBasic._id,
+                        assignedTo: managerUser ? managerUser._id : (approverBasic ? approverBasic._id : requestingUserId),
                         status: 'Approved',
                         assignedAt: loan.createdAt,
                         actionedAt: new Date()
@@ -220,7 +230,7 @@ export const approveLoan = async (req, res) => {
                 // 2. HR Step (Pending)
                 loan.workflow.push({
                     role: 'HR',
-                    assignedTo: nextApprover._id,
+                    assignedTo: nextAssignmentId,
                     status: 'Pending',
                     assignedAt: new Date()
                 });
@@ -233,9 +243,10 @@ export const approveLoan = async (req, res) => {
                     hrEntry.actionedAt = new Date();
                 } else {
                     if (!loan.workflow) loan.workflow = [];
+                    const hrUser = await User.findOne({ employeeId: approverBasic?.employeeId });
                     loan.workflow.push({
                         role: 'HR',
-                        assignedTo: approverBasic._id,
+                        assignedTo: hrUser ? hrUser._id : (approverBasic ? approverBasic._id : requestingUserId),
                         status: 'Approved',
                         assignedAt: new Date(),
                         actionedAt: new Date()
@@ -245,7 +256,7 @@ export const approveLoan = async (req, res) => {
                 // 2. Push Accounts (Pending)
                 loan.workflow.push({
                     role: 'Accounts',
-                    assignedTo: nextApprover._id,
+                    assignedTo: nextAssignmentId,
                     status: 'Pending',
                     assignedAt: new Date()
                 });
@@ -258,9 +269,10 @@ export const approveLoan = async (req, res) => {
                     accEntry.actionedAt = new Date();
                 } else {
                     if (!loan.workflow) loan.workflow = [];
+                    const accUser = await User.findOne({ employeeId: approverBasic?.employeeId });
                     loan.workflow.push({
                         role: 'Accounts',
-                        assignedTo: approverBasic._id,
+                        assignedTo: accUser ? accUser._id : (approverBasic ? approverBasic._id : requestingUserId),
                         status: 'Approved',
                         assignedAt: new Date(),
                         actionedAt: new Date()
@@ -270,7 +282,7 @@ export const approveLoan = async (req, res) => {
                 // 2. Push CEO (Pending)
                 loan.workflow.push({
                     role: 'CEO',
-                    assignedTo: nextApprover._id,
+                    assignedTo: nextAssignmentId,
                     status: 'Pending',
                     assignedAt: new Date()
                 });
@@ -286,9 +298,10 @@ export const approveLoan = async (req, res) => {
                     ceoEntry.actionedAt = new Date();
                 } else {
                     // Fallback
+                    const ceoUser = await User.findOne({ employeeId: approverBasic?.employeeId });
                     loan.workflow.push({
                         role: 'CEO',
-                        assignedTo: approverBasic ? approverBasic._id : requestingUserId,
+                        assignedTo: ceoUser ? ceoUser._id : (approverBasic ? approverBasic._id : requestingUserId),
                         status: 'Approved',
                         assignedAt: new Date(),
                         actionedAt: new Date()

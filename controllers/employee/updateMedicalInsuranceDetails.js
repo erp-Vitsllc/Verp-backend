@@ -1,5 +1,5 @@
 import EmployeeMedicalInsurance from "../../models/EmployeeMedicalInsurance.js";
-import { resolveEmployeeId } from "../../services/employeeService.js";
+import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeService.js";
 import { uploadDocumentToS3, deleteDocumentFromS3 } from "../../utils/s3Upload.js";
 
 const REQUIRED_FIELDS = ["provider", "number", "issueDate", "expiryDate", "upload"];
@@ -129,9 +129,12 @@ export const updateMedicalInsuranceDetails = async (req, res) => {
             { upsert: true, new: true }
         );
 
+        const completeEmployee = await getCompleteEmployee(employeeId);
+
         return res.json({
             message: "Medical Insurance details updated successfully.",
             medicalInsuranceDetails: updatedMedicalInsurance.medicalInsurance,
+            employee: completeEmployee
         });
     } catch (error) {
         console.error("Failed to update Medical Insurance details:", error);

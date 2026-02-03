@@ -29,6 +29,10 @@ export const createUser = async (req, res) => {
             });
         }
 
+        if (employeeId && typeof employeeId !== 'string') {
+            return res.status(400).json({ message: "Employee ID must be a string" });
+        }
+
         // Validate password requirements
         if (password.length < 8) {
             return res.status(400).json({

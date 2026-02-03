@@ -103,7 +103,7 @@ export const getEmployeeDocument = async (req, res) => {
                 const edu = await EmployeeEducation.findOne({ employeeId });
                 const eduItem = edu?.educationDetails?.id(docId);
                 if (eduItem?.certificate) {
-                    documentData = eduItem.certificate.data;
+                    documentData = eduItem.certificate.url || eduItem.certificate.data;
                     documentName = eduItem.certificate.name;
                     mimeType = eduItem.certificate.mimeType;
                 }
@@ -114,7 +114,7 @@ export const getEmployeeDocument = async (req, res) => {
                 const exp = await EmployeeExperience.findOne({ employeeId });
                 const expItem = exp?.experienceDetails?.id(docId);
                 if (expItem?.certificate) {
-                    documentData = expItem.certificate.data;
+                    documentData = expItem.certificate.url || expItem.certificate.data;
                     documentName = expItem.certificate.name;
                     mimeType = expItem.certificate.mimeType;
                 }
@@ -125,7 +125,7 @@ export const getEmployeeDocument = async (req, res) => {
                 const training = await EmployeeTraining.findOne({ employeeId });
                 const trainItem = training?.trainingDetails?.id(docId);
                 if (trainItem?.certificate) {
-                    documentData = trainItem.certificate.data;
+                    documentData = trainItem.certificate.url || trainItem.certificate.data;
                     documentName = trainItem.certificate.name;
                     mimeType = trainItem.certificate.mimeType;
                 }
@@ -136,7 +136,7 @@ export const getEmployeeDocument = async (req, res) => {
                 const basic = await EmployeeBasic.findOne({ employeeId });
                 const basicDoc = basic?.documents?.id(docId);
                 if (basicDoc?.document) {
-                    documentData = basicDoc.document.data;
+                    documentData = basicDoc.document.url || basicDoc.document.data;
                     documentName = basicDoc.document.name;
                     mimeType = basicDoc.document.mimeType;
                 }

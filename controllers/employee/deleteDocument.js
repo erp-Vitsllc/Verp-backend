@@ -1,6 +1,6 @@
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import mongoose from "mongoose";
-import { resolveEmployeeId } from "../../services/employeeService.js";
+import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeService.js";
 
 // @desc    Delete a document from employee's documents list
 // @route   DELETE /api/Employee/:id/document/:index
@@ -32,11 +32,12 @@ export const deleteDocument = async (req, res) => {
         // Remove document from array
         employee.documents.splice(docIndex, 1);
 
-        const updatedEmployee = await employee.save();
+        const savedEmployee = await employee.save();
+        const completeEmployee = await getCompleteEmployee(employee.employeeId);
 
         res.status(200).json({
             message: "Document deleted successfully",
-            employee: updatedEmployee
+            employee: completeEmployee
         });
 
     } catch (error) {

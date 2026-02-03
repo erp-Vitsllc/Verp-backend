@@ -1,5 +1,5 @@
 import EmployeeLabourCard from "../../models/EmployeeLabourCard.js";
-import { resolveEmployeeId } from "../../services/employeeService.js";
+import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeService.js";
 import { uploadDocumentToS3, deleteDocumentFromS3 } from "../../utils/s3Upload.js";
 
 const REQUIRED_FIELDS = ["number", "expiryDate", "upload"];
@@ -129,9 +129,12 @@ export const updateLabourCardDetails = async (req, res) => {
             { upsert: true, new: true }
         );
 
+        const completeEmployee = await getCompleteEmployee(employeeId);
+
         return res.json({
             message: "Labour Card details updated successfully.",
             labourCardDetails: updatedLabourCard.labourCard,
+            employee: completeEmployee
         });
     } catch (error) {
         console.error("Failed to update Labour Card details:", error);
