@@ -13,6 +13,7 @@ const employeeBasicSchema = new mongoose.Schema(
         role: { type: String, default: '' }, // HR Manager, Developer…
         department: { type: String, default: '' }, // Administration, HR, IT…
         designation: { type: String, default: '' },
+        company: { type: mongoose.Schema.Types.ObjectId, ref: "Company", default: null },
         status: {
             type: String,
             enum: ["Probation", "Permanent", "Temporary", "Notice"],

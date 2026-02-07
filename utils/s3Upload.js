@@ -87,17 +87,38 @@ export const uploadDocumentToS3 = async (base64Data, folder = 'employee-document
 
 /**
  * Generate a signed URL for a private file
- * @param {string} key - The S3 key (file path)
- * @param {number} expiresIn - Expiration time in seconds (default 3600 = 1 hour)
+ * @param {string} key - The S3 key (file path) or an existing URL
+ * @param {number} expiresIn - Expiration time in seconds (default 86400 = 24 hours)
  * @returns {Promise<string>} Signed URL
  */
-export const getSignedFileUrl = async (key, expiresIn = 7200) => {
+export const getSignedFileUrl = async (key, expiresIn = 86400) => {
     try {
         if (!key) return null;
 
-        // If key is already a full URL, try to extract Key or return as is
-        // But for new system, we expect Key.
-        if (key.startsWith('http')) return key;
+        // If key is already a full URL, try to extract the Key
+        if (typeof key === 'string' && key.startsWith('http')) {
+            // Check if it's our storage URL and extract the key part
+            // Match against common folders to find where the key starts
+            const folders = ['asset-invoices', 'asset-photos', 'employee-documents', 'profile-pictures', 'signatures', 'rewards', 'fines', 'company-documents'];
+            for (const folder of folders) {
+                const index = key.indexOf(folder);
+                if (index !== -1) {
+                    // Extract the key part (folder/filename) and strip query params
+                    const extractedKey = key.substring(index).split('?')[0];
+                    key = decodeURIComponent(extractedKey);
+                    console.log(`[S3Upload] Extracted and decoded key "${key}" from URL`);
+                    break;
+                }
+            }
+
+            // If we still have a URL (wasn't one of ours or couldn't extract), return as is
+            if (key.startsWith('http')) return key;
+        }
+
+        // Handle base64 fallbacks (if any old data exists)
+        if (typeof key === 'string' && key.startsWith('data:image')) {
+            return key;
+        }
 
         const command = new GetObjectCommand({
             Bucket: bucketName,
@@ -108,7 +129,7 @@ export const getSignedFileUrl = async (key, expiresIn = 7200) => {
         return url;
     } catch (error) {
         console.error('Error generating signed URL:', error);
-        return null; // Return null if failed so frontend handles it gracefully
+        return typeof key === 'string' && key.startsWith('http') ? key : null;
     }
 };
 

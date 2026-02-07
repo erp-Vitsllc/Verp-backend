@@ -26,6 +26,9 @@ const companySchema = new mongoose.Schema(
         owners: [
             {
                 name: { type: String },
+                email: { type: String },
+                phone: { type: String },
+                nationality: { type: String },
                 sharePercentage: { type: String },
                 attachment: { type: String },
                 passport: {
@@ -76,18 +79,55 @@ const companySchema = new mongoose.Schema(
         establishmentCardAttachment: { type: String },
 
         status: { type: String, enum: ["Active", "Inactive"], default: "Active" },
+
+        // General Documents
         documents: [
             {
                 type: { type: String },
                 description: { type: String },
+                authority: { type: String },
+                issueDate: { type: Date },
+                expiryDate: { type: Date },
                 document: {
                     url: { type: String },
                     name: { type: String },
                     mimeType: { type: String }
-                },
-                expiryDate: { type: Date }
+                }
             }
         ],
+
+        // Structured Records
+        insurance: [
+            {
+                type: { type: String }, // Medical, Liability, etc.
+                provider: { type: String },
+                startDate: { type: Date },
+                expiryDate: { type: Date },
+                value: { type: Number },
+                document: {
+                    url: { type: String },
+                    name: { type: String },
+                    mimeType: { type: String }
+                }
+            }
+        ],
+
+        ejari: [
+            {
+                authority: { type: String }, // Landlord, Agency, etc.
+                startDate: { type: Date },
+                expiryDate: { type: Date },
+                value: { type: Number },
+                document: {
+                    url: { type: String },
+                    name: { type: String },
+                    mimeType: { type: String }
+                }
+            }
+        ],
+
+        customTabs: [String],
+
         trainingDetails: [
             {
                 trainingName: { type: String },
@@ -100,6 +140,15 @@ const companySchema = new mongoose.Schema(
                     name: { type: String },
                     mimeType: { type: String }
                 }
+            }
+        ],
+        responsibilities: [
+            {
+                category: { type: String }, // e.g., hr, accounts
+                employeeId: { type: String },
+                employeeName: { type: String },
+                designation: { type: String },
+                empObjectId: { type: mongoose.Schema.Types.ObjectId, ref: "Employee" }
             }
         ],
         createdBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" }

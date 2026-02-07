@@ -9,7 +9,8 @@ export const generatePdf = async (url, token, user, permissions = {}, selector =
             args: ['--no-sandbox', '--disable-setuid-sandbox']
         });
 
-        const page = await browser.newPage();
+        console.log(`[generatePdf] Starting generation for: ${url}`);
+        page = await browser.newPage();
 
         // set viewport
         await page.setViewport({ width: 1200, height: 800 });
@@ -36,13 +37,26 @@ export const generatePdf = async (url, token, user, permissions = {}, selector =
         page.on('console', msg => console.log('PAGE LOG:', msg.text()));
 
         // Navigate to the page
+        console.log(`[generatePdf] Navigating to URL...`);
         await page.goto(url, {
-            waitUntil: 'networkidle0',
+            waitUntil: 'networkidle2',
             timeout: 60000
         });
+        console.log(`[generatePdf] Navigation complete. Waiting for selector: ${selector}`);
 
         // Wait for the form container to be visible
-        await page.waitForSelector(selector, { timeout: 30000 });
+        try {
+            await page.waitForSelector(selector, { timeout: 30000 });
+            console.log(`[generatePdf] Selector found. Waiting for layout stability...`);
+            // Small delay to ensure any layout shifts or animations settle
+            await new Promise(resolve => setTimeout(resolve, 500));
+            console.log(`[generatePdf] Ready to isolate container.`);
+        } catch (timeoutErr) {
+            const currentUrl = page.url();
+            const title = await page.title();
+            console.error(`[generatePdf] Timeout waiting for ${selector}. Current URL: ${currentUrl}, Title: ${title}`);
+            throw new Error(`Failed to find ${selector} on page after 30s. Current URL: ${currentUrl}, Title: ${title}`);
+        }
 
         // Isolate the form container: Remove everything else from the body
         await page.evaluate((sel) => {
@@ -81,9 +95,16 @@ export const generatePdf = async (url, token, user, permissions = {}, selector =
             `
         });
 
+        // Calculate the height of the content dynamically
+        const height = await page.evaluate((sel) => {
+            const el = document.querySelector(sel);
+            return el ? el.getBoundingClientRect().height : document.body.scrollHeight;
+        }, selector);
+
         // Generate PDF
         const pdfBuffer = await page.pdf({
-            format: 'A4',
+            width: '210mm',
+            height: `${height}px`,
             printBackground: true,
             margin: {
                 top: '0px',

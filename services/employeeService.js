@@ -37,6 +37,7 @@ export const getCompleteEmployee = async (id) => {
                 .populate('reportingAuthority', 'firstName lastName employeeId email workEmail companyEmail')
                 .populate('primaryReportee', 'firstName lastName employeeId email workEmail companyEmail')
                 .populate('secondaryReportee', 'firstName lastName employeeId email workEmail companyEmail')
+                .populate('company', 'name companyId logo')
                 .lean();
         } else {
             // It's an employeeId (string)
@@ -45,6 +46,7 @@ export const getCompleteEmployee = async (id) => {
                 .populate('reportingAuthority', 'firstName lastName employeeId email workEmail companyEmail')
                 .populate('primaryReportee', 'firstName lastName employeeId email workEmail companyEmail')
                 .populate('secondaryReportee', 'firstName lastName employeeId email workEmail companyEmail')
+                .populate('company', 'name companyId logo')
                 .lean();
 
             // Support for legacy ID format (VEGA - XXXXX) during transition
@@ -56,6 +58,7 @@ export const getCompleteEmployee = async (id) => {
                     .populate('reportingAuthority', 'firstName lastName employeeId email workEmail companyEmail')
                     .populate('primaryReportee', 'firstName lastName employeeId email workEmail companyEmail')
                     .populate('secondaryReportee', 'firstName lastName employeeId email workEmail companyEmail')
+                    .populate('company', 'name companyId logo')
                     .lean();
             }
         }
@@ -681,7 +684,7 @@ export const saveEmployeeData = async (employeeId, updatePayload) => {
 
         // Define field mappings to collections
         const basicFields = [
-            'employeeId', 'firstName', 'lastName', 'role', 'department', 'designation',
+            'employeeId', 'firstName', 'lastName', 'role', 'department', 'designation', 'company',
             'status', 'probationPeriod', 'reportingAuthority', 'primaryReportee', 'secondaryReportee', 'overtime',
             'profileApprovalStatus', 'profileStatus', 'email', 'companyEmail', 'password',
             'enablePortalAccess', 'dateOfJoining', 'contractJoiningDate', 'profilePicture', 'documents', 'trainingDetails'

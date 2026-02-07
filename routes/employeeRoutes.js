@@ -54,6 +54,21 @@ import { getLoanPdf } from "../controllers/employee/getLoanPdf.js";
 // All employee routes require authentication
 router.use(protect);
 
+// Get current employee profile
+router.get("/me", async (req, res) => {
+    try {
+        const { getCompleteEmployee } = await import("../services/employeeService.js");
+        const employee = await getCompleteEmployee(req.user.employeeObjectId);
+        if (!employee) {
+            return res.status(404).json({ message: "Employee not found" });
+        }
+        res.json(employee);
+    } catch (error) {
+        console.error("Error in /me:", error);
+        res.status(500).json({ message: "Server Error" });
+    }
+});
+
 // Get loan eligible employees - requires view permission
 // Place this BEFORE /:id routes to prevent conflict
 router.get("/loan-eligible", checkPermission('hrm_loan', 'view'), getLoanEligibleEmployees);

@@ -16,9 +16,19 @@ export const getCompanies = async (req, res) => {
 
         const companies = await Company.find(filters).sort({ createdAt: -1 });
 
+        const { getSignedFileUrl } = await import("../../utils/s3Upload.js");
+
+        const processedCompanies = await Promise.all(companies.map(async (company) => {
+            const companyObj = company.toObject();
+            if (companyObj.logo) {
+                companyObj.logo = await getSignedFileUrl(companyObj.logo);
+            }
+            return companyObj;
+        }));
+
         return res.status(200).json({
             message: "Companies fetched successfully",
-            companies
+            companies: processedCompanies
         });
     } catch (error) {
         console.error("Error in getCompanies:", error);

@@ -74,8 +74,9 @@ export const addEmployee = async (req, res) => {
             houseRentAllowance,
             houseRentPercentage,
             otherAllowance,
-            otherAllowancePercentage,
+            otherPercentage,
             additionalAllowances,
+            company,
         } = req.body;
 
         // Validate required fields
@@ -93,9 +94,10 @@ export const addEmployee = async (req, res) => {
         if (typeof firstName !== 'string' || !firstName.trim() ||
             typeof lastName !== 'string' || !lastName.trim() ||
             typeof cleanedEmployeeId !== 'string' || !cleanedEmployeeId.trim() ||
+            !company ||
             (email !== undefined && typeof email !== 'string')) {
             return res.status(400).json({
-                message: "First Name, Last Name, and Employee ID are required and must be valid strings. Email if provided must be a string."
+                message: "First Name, Last Name, Company, and Employee ID are required and must be valid strings. Email if provided must be a string."
             });
         }
 
@@ -224,6 +226,7 @@ export const addEmployee = async (req, res) => {
                 companyEmail: companyEmail || '',
                 enablePortalAccess: enablePortalAccess || false,
                 dateOfJoining,
+                company: company || null,
                 contractJoiningDate: contractJoiningDate || dateOfJoining,
                 contractExpiryDate: contractExpiryDate || null,
             }),

@@ -115,9 +115,13 @@ export const approveLoan = async (req, res) => {
                 if (currentStage === 'Pending') {
                     // Check if approver is the manager
                     const applicant = await EmployeeBasic.findOne({ employeeId: loan.employeeId }).populate('primaryReportee');
+                    // NEW: Robust identity check (ID or Email)
                     const isReporteeManager = applicant?.primaryReportee?._id?.toString() === approverBasic._id.toString();
+                    const reporterEmail = applicant?.primaryReportee?.companyEmail || applicant?.primaryReportee?.email;
+                    const approverEmail = approverBasic.companyEmail || approverBasic.email;
+                    const isEmailMatch = reporterEmail && approverEmail && reporterEmail.toLowerCase() === approverEmail.toLowerCase();
 
-                    if (isReporteeManager) {
+                    if (isReporteeManager || isEmailMatch) {
                         nextStage = 'Pending HR';
                         publicStatus = 'Pending'; // Keep visible status as Pending for HR
 
@@ -132,8 +136,10 @@ export const approveLoan = async (req, res) => {
                 }
                 // 2. HR STAGE (Pending HR -> Pending Accounts)
                 else if (currentStage === 'Pending HR') {
-                    const isHR = /human resource|hr/i.test(approverBasic.department);
-                    if (isHR) {
+                    const isHR = approverBasic.department && /human resource|hr/i.test(approverBasic.department);
+                    const isAssignedHR = loan.submittedTo && (String(loan.submittedTo) === String(requestingUserId) || String(loan.submittedTo) === String(approverBasic._id));
+
+                    if (isHR || isAssignedHR || isAdmin) {
                         nextStage = 'Pending Accounts';
                         publicStatus = 'Pending'; // Keep visible status as Pending for Accounts
 
@@ -148,8 +154,10 @@ export const approveLoan = async (req, res) => {
                 }
                 // 3. ACCOUNTS STAGE (Pending Accounts -> Pending Authorization)
                 else if (currentStage === 'Pending Accounts') {
-                    const isFinance = /finance|accounts/i.test(approverBasic.department);
-                    if (isFinance) {
+                    const isFinance = approverBasic.department && /finance|accounts/i.test(approverBasic.department);
+                    const isAssignedFinance = loan.submittedTo && (String(loan.submittedTo) === String(requestingUserId) || String(loan.submittedTo) === String(approverBasic._id));
+
+                    if (isFinance || isAssignedFinance || isAdmin) {
                         nextStage = 'Pending Authorization';
                         publicStatus = 'Pending'; // Keep visible status as Pending for CEO
 
@@ -184,7 +192,7 @@ export const approveLoan = async (req, res) => {
         loan.status = publicStatus;
         loan.approvalStatus = nextStage;
 
-        if (finalStatus === 'Approved') {
+        if (finalStatus === 'Approved' && nextStage === 'Approved') {
             loan.approvedBy = approverBasic ? approverBasic._id : requestingUserId;
             loan.approvedDate = new Date();
         } else if (finalStatus === 'Rejected') {
@@ -398,8 +406,8 @@ export const approveLoan = async (req, res) => {
                 }
             }
 
-            // 2. Notify Employee on Approval
-            if (finalStatus === 'Approved') {
+            // 2. Notify Employee on FULL Approval ONLY
+            if (finalStatus === 'Approved' && nextStage === 'Approved') {
                 try {
                     const applicant = await EmployeeBasic.findOne({ employeeId: loan.employeeId });
                     if (applicant && (applicant.companyEmail || applicant.email)) {

@@ -16,6 +16,7 @@ export const updateWorkDetails = async (req, res) => {
             "probationPeriod",
             "designation",
             "department",
+            "company",
             "contractJoiningDate",
             "contractExpiryDate",
             "dateOfJoining",

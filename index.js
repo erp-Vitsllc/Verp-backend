@@ -13,6 +13,7 @@ import departmentRoute from "./routes/departmentRoutes.js";
 import designationRoute from "./routes/designationRoutes.js";
 import companyRoute from "./routes/companyRoutes.js";
 import assetTypeRoute from "./routes/assetTypeRoutes.js";
+import assetItemRoute from "./routes/assetItemRoutes.js"; // <-- Add asset item routes
 import { commonLimiter } from "./middleware/rateLimitMiddleware.js";
 
 dotenv.config();
@@ -64,6 +65,7 @@ app.use("/api/Department", departmentRoute);
 app.use("/api/Designation", designationRoute);
 app.use("/api/Company", companyRoute);
 app.use("/api/AssetType", assetTypeRoute);
+app.use("/api/AssetItem", assetItemRoute);
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`Server running at http://localhost:${PORT}`));

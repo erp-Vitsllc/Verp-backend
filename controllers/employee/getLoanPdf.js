@@ -7,23 +7,33 @@ export const getLoanPdf = async (req, res) => {
         const { id } = req.params;
         const requestingUserId = req.user?.id;
 
-        const loan = await Loan.findById(id);
+        // Clean ID just in case (handles prefixes like Loan- or Advance-)
+        const cleanId = id.includes('-') ? id.split('-').pop() : id;
+
+        const loan = await Loan.findById(cleanId);
         if (!loan) {
-            return res.status(404).json({ message: "Loan not found" });
+            console.error(`[getLoanPdf] Loan not found: ${id} (Cleaned: ${cleanId})`);
+            return res.status(404).json({ message: "Loan request not found" });
         }
 
         // Generate PDF
         try {
-            const origin = req.headers.origin || (req.headers.referer ? new URL(req.headers.referer).origin : null);
+            const referer = req.headers.referer;
+            const origin = req.headers.origin || (referer ? new URL(referer).origin : null);
             const baseUrl = process.env.FRONTEND_URL || origin || "http://localhost:3000";
-            const loanUrl = `${baseUrl}/HRM/LoanAndAdvance/${loan._id}`;
+
+            // Be consistent with the URL format used in other notifications
+            const typeSlug = loan.type ? loan.type.replace(/\s+/g, '-') : 'Loan';
+            const loanUrl = `${baseUrl}/HRM/LoanAndAdvance/${typeSlug}-${loan._id}`;
             const token = req.headers.authorization ? req.headers.authorization.split(' ')[1] : null;
 
-            console.log("PDF Generation Debug:", {
+            console.log("[getLoanPdf] PDF Generation Request:", {
                 origin,
                 baseUrl,
                 loanUrl,
-                hasToken: !!token
+                hasToken: !!token,
+                loanId: loan._id,
+                requestingUserId
             });
 
             // Get user details for auth injection

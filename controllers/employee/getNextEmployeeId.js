@@ -1,19 +1,26 @@
 import EmployeeBasic from "../../models/EmployeeBasic.js";
+import Company from "../../models/Company.js";
 
 // Get next sequential Employee ID
 export const getNextEmployeeId = async (req, res) => {
     try {
-        // Find the employee with the "largest" employeeId string that matches the pattern 'VEGA - '
-        // Since string sorting might not be perfect for 'VEGA - 10' vs 'VEGA - 2', we need to be careful.
-        // However, standard regex query to extract numbers is cleaner.
+        const { companyId } = req.query;
+        let prefix = "VEGA -HR-";
 
-        // We fetch all employeeIds to find the max. 
-        // For a huge DB, aggregation is better.
+        if (companyId) {
+            const company = await Company.findById(companyId);
+            if (company && company.companyId) {
+                // Use companyId as prefix, sanitized (e.g., EST-001 -> EST001)
+                const sanitizedPrefix = company.companyId.replace(/[^a-zA-Z0-9]/g, '');
+                prefix = `${sanitizedPrefix}-`;
+            }
+        }
 
-        // Fetch all IDs matching the patterns (with or without spaces) to find the truly largest numeric value
-        // Matches: VEGA-HR-123, VEGA -HR- 123, VEGA - 123, VEGA-123
+        // Fetch all IDs matching the prefix to find the truly largest numeric value
+        const regex = new RegExp(`^${prefix.replace(/\s/g, '\\s*')}.*?\\d+$`);
+
         const employees = await EmployeeBasic.find({
-            employeeId: { $regex: /^VEGA.*?\d+$/ }
+            employeeId: { $regex: regex }
         }).select('employeeId').lean();
 
         let maxIdNumber = 0;
@@ -30,8 +37,7 @@ export const getNextEmployeeId = async (req, res) => {
         });
 
         const nextIdNumber = maxIdNumber + 1;
-
-        const nextId = `VEGA -HR- ${String(nextIdNumber).padStart(5, '0')}`;
+        const nextId = `${prefix}${String(nextIdNumber).padStart(5, '0')}`;
 
         return res.status(200).json({
             nextEmployeeId: nextId

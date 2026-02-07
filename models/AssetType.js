@@ -1,33 +1,19 @@
 import mongoose from 'mongoose';
 
 const assetTypeSchema = new mongoose.Schema({
-    assetId: {
+    typeId: {
         type: String,
-        required: [true, 'Asset ID is required'],
-        trim: true,
+        required: true,
         unique: true
     },
-    type: { // "Name" of the asset type
+    name: { // The Type Name (e.g. Laptop)
         type: String,
-        required: [true, 'Asset Type/Name is required'],
+        required: true,
         trim: true
     },
-    category: {
+    imagePreview: {
         type: String,
-        required: [true, 'Category is required'],
-        trim: true
-    },
-    total: {
-        type: Number,
-        default: 0
-    },
-    assigned: {
-        type: Number,
-        default: 0
-    },
-    unassigned: {
-        type: Number,
-        default: 0
+        default: null
     },
     description: {
         type: String,
