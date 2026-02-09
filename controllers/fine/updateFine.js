@@ -44,7 +44,22 @@ export const updateFine = async (req, res) => {
 
         // === SUBMIT FROM DRAFT LOGIC ===
         if (oldStatus === 'Draft' && updates.fineStatus === 'Pending') {
-            console.log("[UpdateFine] Submitting Draft Fine. Identifying Manager...");
+            console.log("[UpdateFine] Submitting Draft Fine. Validating Company linkage...");
+
+            const bulkIds = fine.assignedEmployees.map(e => e.employeeId).filter(id => id);
+            const employeesWithNoCompany = await EmployeeBasic.find({
+                employeeId: { $in: bulkIds },
+                $or: [{ company: { $exists: false } }, { company: null }]
+            }).select('firstName lastName employeeId');
+
+            if (employeesWithNoCompany.length > 0) {
+                const names = employeesWithNoCompany.map(e => `${e.firstName} ${e.lastName || ''}`.trim());
+                return res.status(400).json({
+                    message: `Cannot submit: The following users have no company: ${names.join(', ')}. Please update their profile first.`
+                });
+            }
+
+            console.log("[UpdateFine] Identifying Manager for submission...");
 
             // Use the first assigned employee to determine the manager
             const targetEmpId = (fine.assignedEmployees && fine.assignedEmployees.length > 0)

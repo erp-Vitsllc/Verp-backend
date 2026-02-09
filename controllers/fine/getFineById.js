@@ -2,6 +2,7 @@ import Fine from "../../models/Fine.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { getSignedFileUrl } from "../../utils/s3Upload.js";
 import { getDepartmentHOD } from "../../utils/getDepartmentHOD.js";
+import { getManagementHOD } from "../../utils/getManagementHOD.js";
 
 export const getFineById = async (req, res) => {
     try {
@@ -23,10 +24,10 @@ export const getFineById = async (req, res) => {
                 $or: [{ _id: id }, { fineId: id }]
             })
                 .populate('createdBy', 'firstName lastName email department designation')
-                .populate('managerApprovedBy', 'firstName lastName email department designation')
-                .populate('hrApprovedBy', 'firstName lastName email department designation')
-                .populate('accountsApprovedBy', 'firstName lastName email department designation')
-                .populate('approvedBy', 'firstName lastName email department designation')
+                .populate('managerApprovedBy', 'firstName lastName email department designation employeeId')
+                .populate('hrApprovedBy', 'firstName lastName email department designation employeeId')
+                .populate('accountsApprovedBy', 'firstName lastName email department designation employeeId')
+                .populate('approvedBy', 'firstName lastName email department designation employeeId')
                 .populate('rejectedBy', 'firstName lastName email department designation')
                 .populate('submittedTo', 'firstName lastName email department designation')
                 .lean();
@@ -34,9 +35,9 @@ export const getFineById = async (req, res) => {
             // Not an ObjectId, so must be a custom fineId
             fine = await Fine.findOne({ fineId: id })
                 .populate('createdBy', 'name email department designation')
-                .populate('hrApprovedBy', 'name email department designation')
-                .populate('accountsApprovedBy', 'name email department designation')
-                .populate('approvedBy', 'name email department designation')
+                .populate('hrApprovedBy', 'name email department designation employeeId')
+                .populate('accountsApprovedBy', 'name email department designation employeeId')
+                .populate('approvedBy', 'name email department designation employeeId')
                 .lean();
         }
 
@@ -73,14 +74,24 @@ export const getFineById = async (req, res) => {
             });
         }
 
+        // Determine the primary employee for context (Context Aware)
+        // Check assignedEmployees first, then fallback to legacy/direct employeeId if present
+        const targetEmployeeId = fine.assignedEmployees?.[0]?.employeeId || fine.employeeId;
+
         // Fetch current HODs for display fallbacks in tracker
-        const hrHOD = await getDepartmentHOD('hr');
-        const accountsHOD = await getDepartmentHOD('finance');
+        // Passes the employee ID to find THEIR company's specific responsibilities
+        const hrHOD = await getDepartmentHOD('hr', targetEmployeeId);
+        const accountsHOD = await getDepartmentHOD('finance', targetEmployeeId);
+        const ceoHOD = await getManagementHOD(targetEmployeeId);
 
         return res.status(200).json({
             ...fine,
-            hrHODName: hrHOD ? `${hrHOD.firstName} ${hrHOD.lastName}` : 'HR HOD',
-            accountsHODName: accountsHOD ? `${accountsHOD.firstName} ${accountsHOD.lastName}` : 'Finance HOD'
+            hrHODName: hrHOD ? `${hrHOD.firstName} ${hrHOD.lastName}` : 'Unknown',
+            hrHODId: hrHOD ? hrHOD.employeeId : null,
+            accountsHODName: accountsHOD ? `${accountsHOD.firstName} ${accountsHOD.lastName}` : 'Unknown',
+            accountsHODId: accountsHOD ? accountsHOD.employeeId : null,
+            ceoName: ceoHOD ? `${ceoHOD.firstName} ${ceoHOD.lastName}` : 'Unknown',
+            ceoEmployeeId: ceoHOD ? ceoHOD.employeeId : null
         });
     } catch (error) {
         console.error('Error fetching fine:', error);

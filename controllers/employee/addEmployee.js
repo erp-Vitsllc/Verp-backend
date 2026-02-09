@@ -271,7 +271,7 @@ export const addEmployee = async (req, res) => {
                 houseRentAllowance: hraAmount,
                 houseRentPercentage: houseRentPercentage || 20,
                 otherAllowance: otherAmount,
-                otherAllowancePercentage: otherAllowancePercentage || 20,
+                otherAllowancePercentage: otherPercentage || 20,
                 additionalAllowances: additionalAllowances || [],
                 salaryHistory: initialSalaryHistory, // Add initial history entry
             }),

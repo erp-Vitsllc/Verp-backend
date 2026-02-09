@@ -95,12 +95,16 @@ export const addReward = async (req, res) => {
         console.log('Looking up employee:', employeeId);
         // Verify employee exists
         const employee = await EmployeeBasic.findOne({ employeeId })
-            .select('firstName lastName employeeId')
+            .select('firstName lastName employeeId company')
             .lean();
 
         if (!employee) {
             console.log('Employee not found');
             return res.status(404).json({ message: "Employee not found" });
+        }
+
+        if (!employee.company) {
+            return res.status(400).json({ message: "Employee is not linked to any company. Cannot proceed." });
         }
 
         // Ensure employee has required fields
@@ -368,7 +372,7 @@ export const addReward = async (req, res) => {
 
                             // Use Configured URL or localhost fallback
                             const baseUrl = process.env.FRONTEND_URL || "http://localhost:3000";
-                            const rewardUrl = `${baseUrl}/HRM/Reward/${savedReward.rewardId}`;
+                            const rewardUrl = `${baseUrl}/HRM/Reward/${savedReward._id}`;
 
                             const html = `
                                 <div style="font-family: Arial, sans-serif; color: #333; max-width: 600px; margin: 0 auto; border: 1px solid #eee; border-radius: 8px; overflow: hidden;">

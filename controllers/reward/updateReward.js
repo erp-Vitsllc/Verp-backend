@@ -45,9 +45,23 @@ export const updateReward = async (req, res) => {
             reward.employeeName = `${employee.firstName} ${employee.lastName}`;
         }
 
-        // Update fields
+        // Update basic fields immediately
         if (rewardType) reward.rewardType = rewardType;
-        if (rewardType) reward.rewardType = rewardType;
+        if (amount !== undefined) reward.amount = amount;
+        if (description !== undefined) reward.description = description;
+        if (awardedDate) reward.awardedDate = new Date(awardedDate);
+        if (remarks !== undefined) reward.remarks = remarks;
+
+        // Update certificate fields immediately
+        if (title !== undefined) reward.title = title;
+        if (employeeName !== undefined) reward.employeeName = employeeName;
+        if (certHeader !== undefined) reward.certHeader = certHeader;
+        if (certSubHeader !== undefined) reward.certSubHeader = certSubHeader;
+        if (certPresentationText !== undefined) reward.certPresentationText = certPresentationText;
+        if (certSigner1Name !== undefined) reward.certSigner1Name = certSigner1Name;
+        if (certSigner1Title !== undefined) reward.certSigner1Title = certSigner1Title;
+        if (certSigner2Name !== undefined) reward.certSigner2Name = certSigner2Name;
+        if (certSigner2Title !== undefined) reward.certSigner2Title = certSigner2Title;
 
         // Handle explicit approver fields from frontend
         if (req.body.hrApprovedBy) reward.hrApprovedBy = req.body.hrApprovedBy;
@@ -111,21 +125,22 @@ export const updateReward = async (req, res) => {
 
                             if (emailUser && emailPass) {
                                 try {
+                                    const smtpHost = (emailUser.includes('@gmail') || process.env.GMAIL_USER) ? "smtp.gmail.com" : "smtp.office365.com";
                                     const transporter = nodemailer.createTransport({
-                                        host: (emailUser.includes('@gmail') || process.env.GMAIL_USER) ? "smtp.gmail.com" : "smtp.office365.com",
+                                        host: smtpHost,
                                         port: 587,
                                         secure: false,
                                         auth: { user: emailUser, pass: emailPass }
                                     });
 
                                     const baseUrl = process.env.FRONTEND_URL || "http://localhost:3000";
-                                    const rewardUrl = `${baseUrl}/HRM/Reward/${reward.rewardId}`;
+                                    const rewardUrl = `${baseUrl}/HRM/Reward/${reward._id}`;
                                     const empName = reward.employeeName;
                                     const managerName = `${managerBasic.firstName} ${managerBasic.lastName}`;
 
                                     await transporter.sendMail({
                                         from: `"VeRP System" <${emailUser}>`,
-                                        to: managerBasic.companyEmail || reporteeUser.companyEmail || reporteeUser.email,
+                                        to: managerBasic.companyEmail || managerBasic.email || reporteeUser.companyEmail || reporteeUser.email,
                                         subject: "Request for Reward Approval",
                                         html: `
                                             <div style="font-family: Arial, sans-serif; color: #333; max-width: 600px; margin: 0 auto; border: 1px solid #eee; border-radius: 8px; overflow: hidden;">
@@ -215,15 +230,18 @@ export const updateReward = async (req, res) => {
                         id: approverBasic._id
                     };
 
-                    // Check CEO Validity (Strict)
-                    const isCEO = approverBasic.department && (approverBasic.department.toLowerCase() === 'management' || approverBasic.department.toLowerCase() === 'administration' || approverBasic.department.toLowerCase() === 'board of directors') &&
-                        ['ceo', 'c.e.o', 'c.e.o.', 'chief executive officer', 'director', 'managing director', 'general manager', 'gm', 'g.m', 'g.m.'].includes(approverBasic.designation?.toLowerCase()?.trim());
 
-                    // Check HR Validity
-                    const isHR = approverBasic.department && (approverBasic.department.toLowerCase() === 'hr' || approverBasic.department.toLowerCase() === 'human resource' || approverBasic.department.toLowerCase() === 'human resources');
+                    // Check Management Validity (Dynamic - from Company Responsibilities)
+                    const targetManagementHOD = await getManagementHOD(reward.employeeId);
+                    const isManagement = targetManagementHOD && targetManagementHOD._id.toString() === approverBasic._id.toString();
 
-                    // Check Accounts Validity
-                    const isAccounts = approverBasic.department && (approverBasic.department.toLowerCase() === 'accounts' || approverBasic.department.toLowerCase() === 'finance' || approverBasic.department.toLowerCase() === 'account');
+                    // Check HR Validity (Dynamic)
+                    const targetHRHOD = await getDepartmentHOD('hr', reward.employeeId);
+                    const isHR = targetHRHOD && targetHRHOD._id.toString() === approverBasic._id.toString();
+
+                    // Check Accounts Validity (Dynamic)
+                    const targetAccountsHOD = await getDepartmentHOD('accounts', reward.employeeId);
+                    const isAccounts = targetAccountsHOD && targetAccountsHOD._id.toString() === approverBasic._id.toString();
 
                     // Check Reportee Status (of the reward receiver)
                     const rewardReceiver = await EmployeeBasic.findOne({ employeeId: reward.employeeId }).populate('primaryReportee');
@@ -236,7 +254,7 @@ export const updateReward = async (req, res) => {
                         }
                     }
 
-                    console.log("[UpdateReward] Roles - CEO:", isCEO, "HR:", isHR, "Accounts:", isAccounts, "Reportee:", isReporteeManager);
+                    console.log("[UpdateReward] Roles - Management:", isManagement, "HR:", isHR, "Accounts:", isAccounts, "Reportee:", isReporteeManager);
                     console.log("[UpdateReward] Current Status:", reward.rewardStatus);
 
 
@@ -244,17 +262,17 @@ export const updateReward = async (req, res) => {
                     const currentStage = reward.approvalStatus || reward.rewardStatus;
                     console.log("[UpdateReward] Current Internal Stage:", currentStage);
 
-                    // LOGIC: Manager -> CEO -> Approved
-                    // 1. Manager Step -> CEO
+                    // LOGIC: Manager -> Management -> Approved
+                    // 1. Manager Step -> Management
                     if (currentStage === 'Pending' && isReporteeManager) {
-                        finalStatus = isCEO ? 'Approved' : 'Pending Authorization';
+                        finalStatus = isManagement ? 'Approved' : 'Pending Authorization';
                     }
-                    // 2. CEO Step -> Approved
-                    else if (currentStage === 'Pending Authorization' && isCEO) {
+                    // 2. Management Step -> Approved
+                    else if (currentStage === 'Pending Authorization' && isManagement) {
                         finalStatus = 'Approved';
                     }
-                    // CEO Override
-                    else if (isCEO && reward.rewardStatus !== 'Rejected') {
+                    // Management Override
+                    else if (isManagement && reward.rewardStatus !== 'Rejected') {
                         finalStatus = 'Approved';
                     }
                 }
@@ -287,17 +305,17 @@ export const updateReward = async (req, res) => {
 
             // Handle Transitions & Emails
             if (nextInternalStage === 'Pending Authorization') {
-                console.log(`[UpdateReward] Triggering CEO Email logic`);
+                console.log(`[UpdateReward] Triggering Management Email logic`);
 
-                const targetHOD = await getManagementHOD();
-                const emailType = "CEO";
+                const targetHOD = await getManagementHOD(reward.employeeId);
+                const emailType = "Management";
 
-                console.log(`[UpdateReward] Target HOD (CEO):`, targetHOD ? targetHOD.email : 'None');
+                console.log(`[UpdateReward] Target HOD (Management):`, targetHOD ? targetHOD.email : 'None');
 
                 if (targetHOD && approverDetails) {
                     const hodUser = await User.findOne({ employeeId: targetHOD.employeeId });
                     if (hodUser) {
-                        console.log(`[UpdateReward] Found CEO User: ${hodUser.username} (${hodUser._id}). Assigning ticket.`);
+                        console.log(`[UpdateReward] Found Management User: ${hodUser.username} (${hodUser._id}). Assigning ticket.`);
                         reward.submittedTo = hodUser._id;
 
                         if (!reward.workflow) reward.workflow = [];
@@ -308,7 +326,7 @@ export const updateReward = async (req, res) => {
                             currentPending.actionedAt = new Date();
                         }
 
-                        // Add CEO Workflow Step
+                        // Add Management Workflow Step
                         reward.workflow.push({
                             role: emailType,
                             assignedTo: hodUser._id,
@@ -318,15 +336,15 @@ export const updateReward = async (req, res) => {
 
                         // Set persistent approver field for historical tracking
                         // (Manager just approved, so technically managerApprovedBy = approverDetails.id, 
-                        // but sticking to standard fields if we want to track who sent it to CEO)
+                        // but sticking to standard fields if we want to track who sent it to Management)
                         reward.managerApprovedBy = approverDetails.id;
 
                         await sendHODAuthorizationEmail('Reward', reward, targetHOD, approverDetails);
                     } else {
-                        console.error(`[UpdateReward] CRITICAL: Found CEO Employee but NO LINKED USER ACCOUNT found for ID ${targetHOD.employeeId}.`);
+                        console.error(`[UpdateReward] CRITICAL: Found Management Employee but NO LINKED USER ACCOUNT found for ID ${targetHOD.employeeId}.`);
                     }
                 } else {
-                    console.warn(`[UpdateReward] Skipping CEO Email. Reason: HOD found=${!!targetHOD}, ApproverDetails=${!!approverDetails}`);
+                    console.warn(`[UpdateReward] Skipping Management Email. Reason: HOD found=${!!targetHOD}, ApproverDetails=${!!approverDetails}`);
                 }
             }
 
@@ -337,30 +355,30 @@ export const updateReward = async (req, res) => {
 
                 if (!reward.approvedDate) reward.approvedDate = new Date();
 
-                // Update CEO Workflow to Approved
+                // Update Management Workflow to Approved
                 if (reward.workflow?.length) {
 
                     console.log(
-                        `[UpdateReward] CEO Workflow Update Check: User=${req.user?._id}`
+                        `[UpdateReward] Management Workflow Update Check: User=${req.user?._id}`
                     );
 
                     if (reward.workflow) {
                         console.log("Current Workflow:", JSON.stringify(reward.workflow, null, 2));
                     }
 
-                    const ceoEntry = reward.workflow.find(w =>
-                        w.role === 'CEO' &&
+                    const managementEntry = reward.workflow.find(w =>
+                        w.role === 'Management' &&
                         w.status === 'Pending'
                     );
 
                     console.log(
-                        `[UpdateReward] Found Pending CEO Entry:`,
-                        ceoEntry ? "YES" : "NO"
+                        `[UpdateReward] Found Pending Management Entry:`,
+                        managementEntry ? "YES" : "NO"
                     );
 
-                    if (ceoEntry) {
-                        ceoEntry.status = 'Approved';
-                        ceoEntry.actionedAt = new Date();
+                    if (managementEntry) {
+                        managementEntry.status = 'Approved';
+                        managementEntry.actionedAt = new Date();
 
                         // Explicitly ensure reward status is Approved
                         finalStatus = 'Approved';
@@ -369,6 +387,7 @@ export const updateReward = async (req, res) => {
                 }
 
             }
+
             // If status is being approved (Final), send email to recipient
             if (finalStatus === 'Approved' && currentStatus !== 'Approved') {
                 try {
@@ -459,13 +478,15 @@ export const updateReward = async (req, res) => {
 
                                     const pdfBuffer = await generatePdf(printUrl, token, userPayload, {}, selector);
 
-                                    if (pdfBuffer) {
+                                    if (pdfBuffer && pdfBuffer.length > 1000) {
                                         mailOptions.attachments.push({
-                                            filename: `Certificate-${reward.employeeId}.pdf`,
+                                            filename: `Certificate-${reward.rewardId || reward._id}.pdf`,
                                             content: pdfBuffer,
                                             contentType: 'application/pdf'
                                         });
                                         console.log(`[UpdateReward] Puppeteer PDF attached successfully. Size: ${pdfBuffer.length}`);
+                                    } else {
+                                        console.warn(`[UpdateReward] PDF generation returned invalid/empty buffer. Length: ${pdfBuffer ? pdfBuffer.length : 'null'}`);
                                     }
                                 } catch (pdfErr) {
                                     console.error("[UpdateReward] Puppeteer PDF Generation Failed:", pdfErr);
@@ -490,7 +511,7 @@ export const updateReward = async (req, res) => {
             } else if (rewardStatus === 'Rejected') {
                 // Update Workflow to Rejected
                 if (!reward.workflow) reward.workflow = [];
-                const pendingStep = reward.workflow.find(w => w.status === 'Pending' && (w.assignedTo?.toString() === (req.user?._id || approverUserId)?.toString() || w.role === 'CEO')); // CEO usually is the one rejecting at final stage, or Manager/HR
+                const pendingStep = reward.workflow.find(w => w.status === 'Pending' && (w.assignedTo?.toString() === (req.user?._id || approverUserId)?.toString() || w.role === 'Management')); // Management usually is the one rejecting at final stage, or Manager/HR
 
                 if (pendingStep) {
                     pendingStep.status = 'Rejected';
@@ -584,21 +605,7 @@ export const updateReward = async (req, res) => {
                 }
             }
         }
-        if (amount !== undefined) reward.amount = amount;
-        if (description !== undefined) reward.description = description;
-        if (awardedDate) reward.awardedDate = new Date(awardedDate);
-        if (remarks !== undefined) reward.remarks = remarks;
 
-        // Update certificate fields
-        if (title !== undefined) reward.title = title;
-        if (employeeName !== undefined) reward.employeeName = employeeName;
-        if (certHeader !== undefined) reward.certHeader = certHeader;
-        if (certSubHeader !== undefined) reward.certSubHeader = certSubHeader;
-        if (certPresentationText !== undefined) reward.certPresentationText = certPresentationText;
-        if (certSigner1Name !== undefined) reward.certSigner1Name = certSigner1Name;
-        if (certSigner1Title !== undefined) reward.certSigner1Title = certSigner1Title;
-        if (certSigner2Name !== undefined) reward.certSigner2Name = certSigner2Name;
-        if (certSigner2Title !== undefined) reward.certSigner2Title = certSigner2Title;
 
         await reward.save();
 

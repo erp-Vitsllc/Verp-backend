@@ -130,6 +130,29 @@ export const addFine = async (req, res) => {
 
         if (isBulk && Array.isArray(bulkList) && bulkList.length > 0) {
             console.log(`[AddFine] Processing Bulk Request. Count: ${bulkList.length}`);
+
+            // VALIDATION: Check if all users have a company (Strict Mode)
+            // Skip this strict check ONLY if fineStatus is 'Draft' (allowing users to save and fix later)
+            if (commonData.fineStatus !== 'Draft') {
+                const bulkIds = bulkList.map(e => e.employeeId).filter(id => id);
+                if (bulkIds.length > 0) {
+                    const employeesWithNoCompany = await EmployeeBasic.find({
+                        employeeId: { $in: bulkIds },
+                        $or: [
+                            { company: { $exists: false } }, // Field missing
+                            { company: null }                // Field is null
+                        ]
+                    }).select('firstName lastName employeeId');
+
+                    if (employeesWithNoCompany.length > 0) {
+                        const names = employeesWithNoCompany.map(e => `${e.firstName} ${e.lastName || ''}`.trim());
+                        return res.status(400).json({
+                            message: `The following users have no company: ${names.join(', ')}. Please assign them to a company in their profile before submitting for approval.`
+                        });
+                    }
+                }
+            }
+
             const baseFineId = await generateFineId(); // e.g. VEGA-FNE-0001
             const createdFines = [];
             const errors = [];
@@ -354,11 +377,14 @@ export const addFine = async (req, res) => {
             employeeName = 'Project Damage (Pending)';
         } else {
             const employee = await EmployeeBasic.findOne({ employeeId })
-                .select('firstName lastName employeeId')
+                .select('firstName lastName employeeId company')
                 .lean();
 
             if (!employee) {
                 return res.status(404).json({ message: "Employee not found" });
+            }
+            if (!employee.company && fineStatus !== 'Draft') {
+                return res.status(400).json({ message: "Employee is not linked to any company. Cannot proceed with submission." });
             }
             employeeName = `${employee.firstName || ''} ${employee.lastName || ''}`.trim();
         }

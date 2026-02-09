@@ -39,11 +39,11 @@ export const approveFine = async (req, res) => {
         } else if (req.user.companyEmail) {
             userBasic = await EmployeeBasic.findOne({ companyEmail: req.user.companyEmail });
         } else if (req.user.email) {
-            userBasic = await EmployeeBasic.findOne({ companyEmail: req.user.email });
+            userBasic = await EmployeeBasic.findOne({ $or: [{ companyEmail: req.user.email }, { email: req.user.email }, { workEmail: req.user.email }] });
         }
 
-        // Admin Override (for debugging/super-admin actions)
-        const isAdmin = req.user.role === 'Admin' || req.user.role === 'SuperAdmin';
+        // Admin Override 
+        const isAdmin = req.user.isAdmin === true;
         if (!userBasic && !isAdmin) {
             return res.status(403).json({ message: "User not recognized as an employee." });
         }
@@ -52,9 +52,10 @@ export const approveFine = async (req, res) => {
         const dept = (userBasic?.department || '').toLowerCase();
         const desig = (userBasic?.designation || '').toLowerCase();
 
-        const isCEO = dept.includes('management') && ['ceo', 'c.e.o', 'c.e.o.', 'chief executive officer', 'director', 'managing director', 'general manager', 'gm', 'g.m'].includes(desig);
-        const isHR = dept.includes('hr') || dept.includes('human resource');
-        const isAccounts = dept.includes('account') || dept.includes('finance');
+
+        const isManagement = dept.includes('management') && ['ceo', 'c.e.o', 'c.e.o.', 'chief executive officer', 'director', 'managing director', 'general manager', 'gm', 'g.m'].includes(desig);
+        const isHR = dept.includes('hr') || dept.includes('human resource') || dept.includes('hrm') || dept.includes('human resources') || desig.includes('hr');
+        const isAccounts = dept.includes('account') || dept.includes('finance') || dept.includes('payroll') || desig.includes('account');
 
         // Reportee/Manager Check logic
         let isAuthorizedManager = false;
@@ -130,7 +131,8 @@ export const approveFine = async (req, res) => {
                 // Notify HR
                 console.log("hi i found the hod email sending section ");
 
-                const hrHOD = await import("../../utils/getDepartmentHOD.js").then(m => m.getDepartmentHOD('hr'));
+                const applicantId = fine.assignedEmployees?.[0]?.employeeId;
+                const hrHOD = await import("../../utils/getDepartmentHOD.js").then(m => m.getDepartmentHOD('hr', applicantId));
                 const hrEmails = hrHOD?.companyEmail ? [hrHOD.companyEmail] : [];
                 if (hrEmails.length === 0) hrEmails.push(process.env.HR_EMAIL || 'hr@verp.com');
 
@@ -199,13 +201,17 @@ export const approveFine = async (req, res) => {
         }
         // --- STAGE 2: HR (Pending HR -> Pending Accounts) ---
         else if (currentStatus === 'Pending HR') {
-            if (isHR || isAdmin) {
+            const isAssignedToMe = fine.submittedTo?.toString() === req.user._id.toString() ||
+                fine.workflow?.some(w => w.status === 'Pending' && w.role === 'HR' && w.assignedTo?.toString() === req.user._id.toString());
+
+            if (isHR || isAdmin || isAssignedToMe) {
                 fine.fineStatus = 'Pending Accounts';
                 fine.hrApprovedBy = req.user._id;
                 modified = true;
 
                 // Notify Accounts
-                const accountsHOD = await import("../../utils/getDepartmentHOD.js").then(m => m.getDepartmentHOD('finance'));
+                const applicantId = fine.assignedEmployees?.[0]?.employeeId;
+                const accountsHOD = await import("../../utils/getDepartmentHOD.js").then(m => m.getDepartmentHOD('finance', applicantId));
                 const accEmails = accountsHOD?.companyEmail ? [accountsHOD.companyEmail] : [];
                 if (accEmails.length === 0) accEmails.push(process.env.ACCOUNTS_EMAIL || 'accounts@verp.com');
 
@@ -264,13 +270,17 @@ export const approveFine = async (req, res) => {
         }
         // --- STAGE 3: Accounts (Pending Accounts -> Pending Authorization) ---
         else if (currentStatus === 'Pending Accounts') {
-            if (isAccounts || isAdmin) {
+            const isAssignedToMe = fine.submittedTo?.toString() === req.user._id.toString() ||
+                fine.workflow?.some(w => w.status === 'Pending' && w.role === 'Accounts' && w.assignedTo?.toString() === req.user._id.toString());
+
+            if (isAccounts || isAdmin || isAssignedToMe) {
                 fine.fineStatus = 'Pending Authorization';
                 fine.accountsApprovedBy = req.user._id;
                 modified = true;
 
-                // Notify CEO
-                const hod = await getManagementHOD();
+                // Notify Management
+                const applicantId = fine.assignedEmployees?.[0]?.employeeId;
+                const hod = await getManagementHOD(applicantId);
                 let nextApproverFound = false;
                 if (hod) {
                     // Update submittedTo
@@ -298,11 +308,11 @@ export const approveFine = async (req, res) => {
                             });
                         }
 
-                        // 2. Push Next Step (CEO)
-                        const nextStepExists = fine.workflow.some(w => w.role === 'CEO' && w.status === 'Pending');
+                        // 2. Push Next Step (Management)
+                        const nextStepExists = fine.workflow.some(w => w.role === 'Management' && w.status === 'Pending');
                         if (!nextStepExists) {
                             fine.workflow.push({
-                                role: 'CEO',
+                                role: 'Management',
                                 assignedTo: hodUser._id,
                                 status: 'Pending',
                                 assignedAt: new Date()
@@ -310,7 +320,7 @@ export const approveFine = async (req, res) => {
                         }
                     }
 
-                    console.log(`[Fine ${fine.fineId}] Finance Approved. Next CEO:`, hod ? `${hod.firstName} ${hod.lastName}` : 'NOT FOUND');
+                    console.log(`[Fine ${fine.fineId}] Finance Approved. Next Management:`, hod ? `${hod.firstName} ${hod.lastName}` : 'NOT FOUND');
                     await sendHODAuthorizationEmail('Fine', fine, hod, {
                         name: 'Accounts Department',
                         designation: 'Finance'
@@ -318,7 +328,7 @@ export const approveFine = async (req, res) => {
                 }
 
                 if (!nextApproverFound) {
-                    console.warn(`[Fine ${fine.fineId}] CEO User NOT FOUND. Releasing 'submittedTo'.`);
+                    console.warn(`[Fine ${fine.fineId}] Management User NOT FOUND. Releasing 'submittedTo'.`);
                     fine.submittedTo = null;
                     const accEntry = fine.workflow.find(w => w.status === 'Pending' && (w.assignedTo?.toString() === req.user._id.toString() || w.role === 'Accounts'));
                     if (accEntry) { accEntry.status = 'Approved'; accEntry.actionedAt = new Date(); }
@@ -327,9 +337,12 @@ export const approveFine = async (req, res) => {
                 return res.status(403).json({ message: "Only Accounts can approve at this stage." });
             }
         }
-        // --- STAGE 4: CEO (Pending Authorization -> Approved) ---
+        // --- STAGE 4: Management (Pending Authorization -> Approved) ---
         else if (currentStatus === 'Pending Authorization') {
-            if (isCEO || isAdmin) {
+            const isAssignedToMe = fine.submittedTo?.toString() === req.user._id.toString() ||
+                fine.workflow?.some(w => w.status === 'Pending' && w.role === 'Management' && w.assignedTo?.toString() === req.user._id.toString());
+
+            if (isManagement || isAdmin || isAssignedToMe) {
                 fine.fineStatus = 'Approved';
                 fine.approvedBy = req.user._id;
                 fine.approvedDate = new Date();
@@ -342,18 +355,18 @@ export const approveFine = async (req, res) => {
                     e.approvedBy = req.user._id;
                 });
 
-                // Update CEO Workflow to Approved
-                const ceoEntry = fine.workflow.find(w =>
+                // Update Management Workflow to Approved
+                const managementEntry = fine.workflow.find(w =>
                     w.status === 'Pending' &&
-                    (w.assignedTo?.toString() === req.user._id.toString() || w.role === 'CEO')
+                    (w.assignedTo?.toString() === req.user._id.toString() || w.role === 'Management')
                 );
 
-                if (ceoEntry) {
-                    ceoEntry.status = 'Approved';
-                    ceoEntry.actionedAt = new Date();
+                if (managementEntry) {
+                    managementEntry.status = 'Approved';
+                    managementEntry.actionedAt = new Date();
                 } else {
                     fine.workflow.push({
-                        role: 'CEO',
+                        role: 'Management',
                         assignedTo: req.user._id,
                         status: 'Approved',
                         assignedAt: new Date(),
@@ -365,9 +378,10 @@ export const approveFine = async (req, res) => {
                 await sendFineConfirmedEmail(fine, fine.assignedEmployees);
 
             } else {
-                return res.status(403).json({ message: "Only CEO/Management can approve at this stage." });
+                return res.status(403).json({ message: "Only Management can approve at this stage." });
             }
         }
+
         else {
             return res.status(400).json({ message: "No actionable status found for this fine." });
         }

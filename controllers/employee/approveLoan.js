@@ -31,7 +31,7 @@ export const approveLoan = async (req, res) => {
         let approverDetails = null;
 
         const userObj = await User.findById(requestingUserId);
-        const isAdmin = userObj?.isAdmin || userObj?.role === 'Admin' || userObj?.role === 'SuperAdmin';
+        const isAdmin = req.user.isAdmin === true;
 
         if (isAdmin) {
             approverDetails = { name: 'Admin', designation: 'Administrator', isAdmin: true };
@@ -126,7 +126,7 @@ export const approveLoan = async (req, res) => {
                         publicStatus = 'Pending'; // Keep visible status as Pending for HR
 
                         loan.managerApprovedBy = approverBasic._id;
-                        nextApprover = await getDepartmentHOD('hr');
+                        nextApprover = await getDepartmentHOD('hr', loan.employeeObjectId);
                         console.log('[Loan]', loan.loanId, 'Manager Approved. Next HR Approver:', nextApprover ? `${nextApprover.firstName} ${nextApprover.lastName}` : 'NOT FOUND');
                         emailSubject = "Loan Pending HR Approval";
                         emailType = "HR";
@@ -136,7 +136,7 @@ export const approveLoan = async (req, res) => {
                 }
                 // 2. HR STAGE (Pending HR -> Pending Accounts)
                 else if (currentStage === 'Pending HR') {
-                    const isHR = approverBasic.department && /human resource|hr/i.test(approverBasic.department);
+                    const isHR = approverBasic.department && /human resource|hr|hrm/i.test(approverBasic.department) || (approverBasic.designation && /hr/i.test(approverBasic.designation));
                     const isAssignedHR = loan.submittedTo && (String(loan.submittedTo) === String(requestingUserId) || String(loan.submittedTo) === String(approverBasic._id));
 
                     if (isHR || isAssignedHR || isAdmin) {
@@ -144,7 +144,7 @@ export const approveLoan = async (req, res) => {
                         publicStatus = 'Pending'; // Keep visible status as Pending for Accounts
 
                         loan.hrApprovedBy = approverBasic._id;
-                        nextApprover = await getDepartmentHOD('finance');
+                        nextApprover = await getDepartmentHOD('finance', loan.employeeObjectId);
                         console.log('[Loan]', loan.loanId, 'HR Approved. Next Finance Approver:', nextApprover ? `${nextApprover.firstName} ${nextApprover.lastName}` : 'NOT FOUND');
                         emailSubject = "Loan Pending Finance Approval";
                         emailType = "Accounts";
@@ -154,7 +154,7 @@ export const approveLoan = async (req, res) => {
                 }
                 // 3. ACCOUNTS STAGE (Pending Accounts -> Pending Authorization)
                 else if (currentStage === 'Pending Accounts') {
-                    const isFinance = approverBasic.department && /finance|accounts/i.test(approverBasic.department);
+                    const isFinance = approverBasic.department && /finance|accounts|payroll/i.test(approverBasic.department) || (approverBasic.designation && /account/i.test(approverBasic.designation));
                     const isAssignedFinance = loan.submittedTo && (String(loan.submittedTo) === String(requestingUserId) || String(loan.submittedTo) === String(approverBasic._id));
 
                     if (isFinance || isAssignedFinance || isAdmin) {
@@ -162,24 +162,24 @@ export const approveLoan = async (req, res) => {
                         publicStatus = 'Pending'; // Keep visible status as Pending for CEO
 
                         loan.accountsApprovedBy = approverBasic._id;
-                        nextApprover = await getManagementHOD();
-                        console.log('[Loan]', loan.loanId, 'Finance Approved. Next CEO:', nextApprover ? `${nextApprover.firstName} ${nextApprover.lastName}` : 'NOT FOUND');
+                        nextApprover = await getManagementHOD(loan.employeeObjectId);
+                        console.log('[Loan]', loan.loanId, 'Finance Approved. Next Management:', nextApprover ? `${nextApprover.firstName} ${nextApprover.lastName}` : 'NOT FOUND');
                         emailSubject = "Loan Pending Final Authorization";
-                        emailType = "CEO";
+                        emailType = "Management";
                     } else {
                         return res.status(403).json({ message: "Only Finance/Accounts can approve at this stage" });
                     }
                 }
-                // 4. CEO STAGE (Pending Authorization -> Approved)
+                // 4. Management STAGE (Pending Authorization -> Approved)
                 else if (currentStage === 'Pending Authorization') {
-                    const isCEO = approverBasic.department && /management/i.test(approverBasic.department) &&
+                    const isManagement = approverBasic.department && /management/i.test(approverBasic.department) &&
                         ['ceo', 'c.e.o', 'c.e.o.', 'chief executive officer', 'director', 'managing director', 'general manager', 'gm', 'g.m', 'g.m.'].includes(approverBasic.designation?.toLowerCase());
 
-                    if (isCEO) {
+                    if (isManagement) {
                         nextStage = 'Approved';
                         publicStatus = 'Approved'; // Final Approval
                     } else {
-                        return res.status(403).json({ message: "Only the CEO can Authorize this loan" });
+                        return res.status(403).json({ message: "Only Management can Authorize this loan" });
                     }
                 }
             }
@@ -287,9 +287,9 @@ export const approveLoan = async (req, res) => {
                     });
                 }
 
-                // 2. Push CEO (Pending)
+                // 2. Push Management (Pending)
                 loan.workflow.push({
-                    role: 'CEO',
+                    role: 'Management',
                     assignedTo: nextAssignmentId,
                     status: 'Pending',
                     assignedAt: new Date()
@@ -297,19 +297,19 @@ export const approveLoan = async (req, res) => {
             }
         }
 
-        // Final Approval (CEO) Update
+        // Final Approval (Management) Update
         if (nextStage === 'Approved') {
             if (loan.workflow) {
-                const ceoEntry = loan.workflow.find(w => w.role === 'CEO' && w.status === 'Pending');
-                if (ceoEntry) {
-                    ceoEntry.status = 'Approved';
-                    ceoEntry.actionedAt = new Date();
+                const managementEntry = loan.workflow.find(w => w.role === 'Management' && w.status === 'Pending');
+                if (managementEntry) {
+                    managementEntry.status = 'Approved';
+                    managementEntry.actionedAt = new Date();
                 } else {
                     // Fallback
-                    const ceoUser = await User.findOne({ employeeId: approverBasic?.employeeId });
+                    const managementUser = await User.findOne({ employeeId: approverBasic?.employeeId });
                     loan.workflow.push({
-                        role: 'CEO',
-                        assignedTo: ceoUser ? ceoUser._id : (approverBasic ? approverBasic._id : requestingUserId),
+                        role: 'Management',
+                        assignedTo: managementUser ? managementUser._id : (approverBasic ? approverBasic._id : requestingUserId),
                         status: 'Approved',
                         assignedAt: new Date(),
                         actionedAt: new Date()
@@ -425,7 +425,7 @@ export const approveLoan = async (req, res) => {
                                     </div>
                                     <div style="padding: 30px;">
                                         <p>Dear ${applicant.firstName},</p>
-                                        <p>Your loan application for <strong>AED ${Number(loan.amount).toLocaleString()}</strong> has been fully approved by all departments including HR, Finance, and CEO.</p>
+                                        <p>Your loan application for <strong>AED ${Number(loan.amount).toLocaleString()}</strong> has been fully approved by all departments including HR, Finance, and Management.</p>
                                         <p>Please find the approved document attached.</p>
                                     </div>
                                 </div>

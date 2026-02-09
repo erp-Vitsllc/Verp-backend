@@ -61,6 +61,10 @@ export const requestLoan = async (req, res) => {
             return res.status(404).json({ message: "Employee details not found." });
         }
 
+        if (!employeeBasic.company) {
+            return res.status(400).json({ message: "Employee is not linked to any company. Cannot proceed." });
+        }
+
         const reportee = employeeBasic.primaryReportee;
         const targetStatus = status || 'Draft';
 

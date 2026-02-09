@@ -1,16 +1,6 @@
 import nodemailer from 'nodemailer';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 
-const transporter = nodemailer.createTransport({
-    host: 'smtp.office365.com',
-    port: 587,
-    secure: false, // true for 465, false for other ports
-    auth: {
-        user: process.env.EMAIL_USER,
-        pass: process.env.EMAIL_PASS
-    }
-});
-
 /**
  * Sends fine approval notification emails to reporting managers.
  * Groups employees by their Primary Reportee and sends consolidated emails.
@@ -22,12 +12,32 @@ export const sendFineApprovalEmail = async (fine, assignedEmployees) => {
     try {
         console.log(`[FineEmail] Starting notification process for Fine ${fine.fineId}`);
 
+        const emailUser = process.env.EMAIL_USER;
+        const emailPass = process.env.EMAIL_PASS;
+
+        if (!emailUser || !emailPass) {
+            console.error('[FineEmail] SMTP credentials missing.');
+            return;
+        }
+
+        const smtpHost = emailUser.includes('@gmail.com') ? 'smtp.gmail.com' : 'smtp.office365.com';
+
+        const transporter = nodemailer.createTransport({
+            host: smtpHost,
+            port: 587,
+            secure: false,
+            auth: {
+                user: emailUser,
+                pass: emailPass
+            }
+        });
+
         // 1. Fetch full details for all assigned employees to get their Manager
         const employeeIds = assignedEmployees.map(e => e.employeeId);
         // Use EmployeeBasic as it contains the primaryReportee field
         const fullEmployees = await EmployeeBasic.find({ employeeId: { $in: employeeIds } })
             .select('employeeId firstName lastName department designation primaryReportee')
-            .populate('primaryReportee', 'companyEmail') // Populate manager to get email directly
+            .populate('primaryReportee', 'companyEmail email') // Populate manager to get email directly
             .lean();
 
         // 2. Map full details back to the assigned list
@@ -44,12 +54,12 @@ export const sendFineApprovalEmail = async (fine, assignedEmployees) => {
 
             // Get Manager Details
             let managerEmail = null;
-            if (fullEmp.primaryReportee && fullEmp.primaryReportee.companyEmail) {
-                managerEmail = fullEmp.primaryReportee.companyEmail;
+            if (fullEmp.primaryReportee) {
+                managerEmail = fullEmp.primaryReportee.companyEmail || fullEmp.primaryReportee.email;
             }
 
             if (!managerEmail) {
-                console.warn(`[FineEmail] No manager email found for employee ${fullEmp.employeeId} (Manager field: ${fullEmp.primaryReportee})`);
+                console.warn(`[FineEmail] No manager email found for employee ${fullEmp.employeeId}`);
                 continue; // Skip if no manager to notify
             }
 
@@ -69,7 +79,7 @@ export const sendFineApprovalEmail = async (fine, assignedEmployees) => {
         // 3. Send Emails
         // Use environment variable for frontend URL, fallback to localhost
         const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
-        const fineLink = `${frontendUrl}/HRM/Fine/${fine.fineId}`;
+        const fineLink = `${frontendUrl}/HRM/Fine/${fine._id}`;
 
         for (const [managerEmail, employeesList] of Object.entries(emailsToSend)) {
 
@@ -128,7 +138,7 @@ export const sendFineApprovalEmail = async (fine, assignedEmployees) => {
             `;
 
             await transporter.sendMail({
-                from: `"VeRP Notification" <${process.env.EMAIL_USER}>`,
+                from: `"VeRP Notification" <${emailUser}>`,
                 to: managerEmail,
                 subject: `Action Required: Fine Approval for ${employeesList.length > 1 ? 'Multiple Employees' : employeesList[0].name} - ${fine.fineId}`,
                 html: htmlContent

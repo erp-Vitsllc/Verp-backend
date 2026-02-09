@@ -1,6 +1,7 @@
 import Loan from "../../models/Loan.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { getDepartmentHOD } from "../../utils/getDepartmentHOD.js";
+import { getManagementHOD } from "../../utils/getManagementHOD.js";
 
 export const getLoanById = async (req, res) => {
     try {
@@ -17,7 +18,7 @@ export const getLoanById = async (req, res) => {
             })
             .populate({
                 path: 'approvedBy',
-                select: 'firstName lastName designation department'
+                select: 'firstName lastName designation department employeeId'
             })
             .populate({
                 path: 'submittedTo',
@@ -29,15 +30,15 @@ export const getLoanById = async (req, res) => {
             })
             .populate({
                 path: 'managerApprovedBy',
-                select: 'firstName lastName designation department'
+                select: 'firstName lastName designation department employeeId'
             })
             .populate({
                 path: 'hrApprovedBy',
-                select: 'firstName lastName designation department'
+                select: 'firstName lastName designation department employeeId'
             })
             .populate({
                 path: 'accountsApprovedBy',
-                select: 'firstName lastName designation department'
+                select: 'firstName lastName designation department employeeId'
             })
             .populate({
                 path: 'rejectedBy',
@@ -53,13 +54,14 @@ export const getLoanById = async (req, res) => {
             return res.status(404).json({ message: "Loan request not found" });
         }
 
-        // Fetch current HODs for display fallbacks in tracker
-        const hrHOD = await getDepartmentHOD('hr');
-        const accountsHOD = await getDepartmentHOD('finance');
-
         // Format response
         const employee = loan.employeeObjectId || {};
         const hod = employee.primaryReportee || {};
+
+        // Fetch current HODs for display fallbacks in tracker (Context Aware)
+        // Passes the employee object ID to find THEIR company's specific responsibilities
+        const hrHOD = await getDepartmentHOD('hr', employee._id);
+        const accountsHOD = await getDepartmentHOD('finance', employee._id);
 
         const data = {
             id: loan._id,
@@ -86,8 +88,12 @@ export const getLoanById = async (req, res) => {
             managerApprovedBy: loan.managerApprovedBy,
             hrApprovedBy: loan.hrApprovedBy,
             accountsApprovedBy: loan.accountsApprovedBy,
-            hrHODName: hrHOD ? `${hrHOD.firstName} ${hrHOD.lastName}` : 'HR HOD',
-            accountsHODName: accountsHOD ? `${accountsHOD.firstName} ${accountsHOD.lastName}` : 'Finance HOD',
+            hrHODName: hrHOD ? `${hrHOD.firstName} ${hrHOD.lastName}` : 'Unknown',
+            hrHODId: hrHOD ? hrHOD.employeeId : null,
+            accountsHODName: accountsHOD ? `${accountsHOD.firstName} ${accountsHOD.lastName}` : 'Unknown',
+            accountsHODId: accountsHOD ? accountsHOD.employeeId : null,
+            ceoName: await getManagementHOD(employee._id).then(ceo => ceo ? `${ceo.firstName} ${ceo.lastName}` : 'Unknown'),
+            ceoEmployeeId: await getManagementHOD(employee._id).then(ceo => ceo ? ceo.employeeId : null),
             createdBy: loan.createdBy
         };
 

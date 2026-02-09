@@ -10,9 +10,9 @@ import nodemailer from 'nodemailer';
  */
 export const sendHODAuthorizationEmail = async (type, item, hod, requester) => {
     try {
-        const hEmail = hod.companyEmail || hod.personalEmail;
+        const hEmail = hod.companyEmail || hod.email;
         if (!hEmail) {
-            console.warn('[HODEmail] HOD has no email, skipping.');
+            console.warn('[HODEmail] HOD has no email (companyEmail or email), skipping.');
             return;
         }
 
@@ -25,8 +25,14 @@ export const sendHODAuthorizationEmail = async (type, item, hod, requester) => {
             return;
         }
 
+        // Determine SMTP host based on email domain or preference
+        let smtpHost = process.env.SMTP_HOST || "smtp.office365.com"; // Default to Outlook
+        if (emailUser.includes('@gmail.com') || process.env.GMAIL_USER) {
+            smtpHost = "smtp.gmail.com";
+        }
+
         const transporter = nodemailer.createTransport({
-            host: process.env.SMTP_HOST || (emailUser.includes('@gmail.com') ? 'smtp.gmail.com' : 'smtp.office365.com'),
+            host: smtpHost,
             port: parseInt(process.env.SMTP_PORT) || 587,
             secure: false,
             auth: {
@@ -41,7 +47,7 @@ export const sendHODAuthorizationEmail = async (type, item, hod, requester) => {
         let subjectId = '';
 
         if (type === 'Fine') {
-            link = `${frontendUrl}/HRM/Fine/${item.fineId}`;
+            link = `${frontendUrl}/HRM/Fine/${item._id}`;
             subjectId = item.fineId;
             detailsHtml = `
                 <p><strong>Fine ID:</strong> ${item.fineId}</p>

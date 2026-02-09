@@ -16,8 +16,44 @@ export const updateCompany = async (req, res) => {
         // Update fields provided in req.body
         const updateData = req.body;
 
-        // Prevent updating companyId if it already exists (immutable)
-        delete updateData.companyId;
+        if (updateData.responsibilities && Array.isArray(updateData.responsibilities)) {
+            const EmployeeBasic = (await import("../../models/EmployeeBasic.js")).default;
+            const User = (await import("../../models/User.js")).default;
+
+            const existingResps = company.responsibilities || [];
+
+            for (const resp of updateData.responsibilities) {
+                if (!resp.employeeId) continue;
+
+                // Check if this specific assignment already exists to allow simple removals or non-responsibility updates
+                const isExisting = existingResps.some(er =>
+                    er.employeeId === resp.employeeId &&
+                    er.category === resp.category
+                );
+
+                if (isExisting) continue;
+
+                // Check employee exists and has company email
+                const employee = await EmployeeBasic.findOne({ employeeId: resp.employeeId });
+                if (!employee) {
+                    return res.status(400).json({ message: `Employee ${resp.employeeId} not found` });
+                }
+
+                if (!employee.companyEmail) {
+                    return res.status(400).json({
+                        message: `Employee ${employee.firstName} ${employee.lastName} (${resp.employeeId}) cannot be assigned a responsibility because they do not have a company email address.`
+                    });
+                }
+
+                // Check if employee is also a user
+                const user = await User.findOne({ employeeId: resp.employeeId });
+                if (!user) {
+                    return res.status(400).json({
+                        message: `Employee ${employee.firstName} ${employee.lastName} (${resp.employeeId}) cannot be assigned a responsibility because they are not registered as a system user.`
+                    });
+                }
+            }
+        }
 
         const updatedCompany = await Company.findByIdAndUpdate(
             company._id,

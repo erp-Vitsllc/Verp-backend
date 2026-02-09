@@ -26,9 +26,6 @@ const companySchema = new mongoose.Schema(
         owners: [
             {
                 name: { type: String },
-                email: { type: String },
-                phone: { type: String },
-                nationality: { type: String },
                 sharePercentage: { type: String },
                 attachment: { type: String },
                 passport: {
@@ -85,9 +82,10 @@ const companySchema = new mongoose.Schema(
             {
                 type: { type: String },
                 description: { type: String },
-                authority: { type: String },
                 issueDate: { type: Date },
+                startDate: { type: Date },
                 expiryDate: { type: Date },
+                value: { type: Number },
                 document: {
                     url: { type: String },
                     name: { type: String },
@@ -114,7 +112,6 @@ const companySchema = new mongoose.Schema(
 
         ejari: [
             {
-                authority: { type: String }, // Landlord, Agency, etc.
                 startDate: { type: Date },
                 expiryDate: { type: Date },
                 value: { type: Number },

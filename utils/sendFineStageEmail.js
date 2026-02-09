@@ -1,20 +1,30 @@
 import nodemailer from 'nodemailer';
 
-const transporter = nodemailer.createTransport({
-    host: 'smtp.office365.com',
-    port: 587,
-    secure: false, // true for 465, false for other ports
-    auth: {
-        user: process.env.EMAIL_USER,
-        pass: process.env.EMAIL_PASS
-    }
-});
-
 export const sendFineStageEmail = async (fine, recipients, stageName) => {
     if (!recipients || recipients.length === 0) {
         console.warn(`[Email] No recipients for ${stageName} stage notification.`);
         return;
     }
+
+    const emailUser = process.env.EMAIL_USER;
+    const emailPass = process.env.EMAIL_PASS;
+
+    if (!emailUser || !emailPass) {
+        console.error('[Email] SMTP credentials missing.');
+        return;
+    }
+
+    const smtpHost = emailUser.includes('@gmail.com') ? 'smtp.gmail.com' : 'smtp.office365.com';
+
+    const transporter = nodemailer.createTransport({
+        host: smtpHost,
+        port: 587,
+        secure: false,
+        auth: {
+            user: emailUser,
+            pass: emailPass
+        }
+    });
 
     // Ensure recipients is an array or string
     const to = Array.isArray(recipients) ? recipients.join(',') : recipients;
@@ -46,7 +56,7 @@ export const sendFineStageEmail = async (fine, recipients, stageName) => {
 
     try {
         await transporter.sendMail({
-            from: `"VeRP Notification" <${process.env.EMAIL_USER}>`,
+            from: `"VeRP Notification" <${emailUser}>`,
             to,
             subject,
             html

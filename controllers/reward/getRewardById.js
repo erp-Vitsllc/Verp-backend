@@ -1,4 +1,6 @@
 import Reward from "../../models/Reward.js";
+import { getDepartmentHOD } from "../../utils/getDepartmentHOD.js";
+import { getManagementHOD } from "../../utils/getManagementHOD.js";
 
 export const getRewardById = async (req, res) => {
     try {
@@ -16,20 +18,22 @@ export const getRewardById = async (req, res) => {
 
         if (isValidObjectId) {
             reward = await Reward.findById(searchId)
-                .populate('approvedBy', 'name username')
+                .populate('approvedBy', 'name username employeeId')
                 .populate('createdBy', 'name username')
-                .populate('hrApprovedBy', 'name username')
-                .populate('accountsApprovedBy', 'name username')
+                .populate('hrApprovedBy', 'name username employeeId')
+                .populate('accountsApprovedBy', 'name username employeeId')
+                .populate('workflow.assignedTo', 'name username firstName lastName employeeId')
                 .lean();
         }
 
         // If not found by ID or not an ObjectId, try finding by rewardId
         if (!reward) {
             reward = await Reward.findOne({ rewardId: searchId })
-                .populate('approvedBy', 'name username')
+                .populate('approvedBy', 'name username employeeId')
                 .populate('createdBy', 'name username')
-                .populate('hrApprovedBy', 'name username')
-                .populate('accountsApprovedBy', 'name username')
+                .populate('hrApprovedBy', 'name username employeeId')
+                .populate('accountsApprovedBy', 'name username employeeId')
+                .populate('workflow.assignedTo', 'name username firstName lastName employeeId')
                 .lean();
         }
 
@@ -37,9 +41,22 @@ export const getRewardById = async (req, res) => {
             return res.status(404).json({ message: "Reward not found" });
         }
 
+        // Fetch HODs with context (Pass employeeId to resolve company)
+        const hrHOD = await getDepartmentHOD('hr', reward.employeeId);
+        const accountsHOD = await getDepartmentHOD('finance', reward.employeeId);
+        const ceoHOD = await getManagementHOD(reward.employeeId);
+
         return res.status(200).json({
             message: "Reward fetched successfully",
-            reward
+            reward: {
+                ...reward,
+                hrHODName: hrHOD ? `${hrHOD.firstName} ${hrHOD.lastName}` : 'Unknown',
+                hrHODId: hrHOD ? hrHOD.employeeId : null,
+                accountsHODName: accountsHOD ? `${accountsHOD.firstName} ${accountsHOD.lastName}` : 'Unknown',
+                accountsHODId: accountsHOD ? accountsHOD.employeeId : null,
+                ceoName: ceoHOD ? `${ceoHOD.firstName} ${ceoHOD.lastName}` : 'Unknown',
+                ceoEmployeeId: ceoHOD ? ceoHOD.employeeId : null
+            }
         });
     } catch (error) {
         console.error('Error fetching reward:', error);
@@ -49,18 +66,3 @@ export const getRewardById = async (req, res) => {
         });
     }
 };
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
