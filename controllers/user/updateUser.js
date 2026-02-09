@@ -260,7 +260,7 @@ const updateUserHandler = async (req, res) => {
                     { $set: { companyEmail: updateData.companyEmail } }
                 );
             } catch (err) {
-                console.error(`[updateUser] Error syncing companyEmail to Employee record for ${updatedUser.employeeId}:`, err);
+                console.error('[updateUser] Error syncing companyEmail to Employee record for:', updatedUser.employeeId, err);
             }
         }
 

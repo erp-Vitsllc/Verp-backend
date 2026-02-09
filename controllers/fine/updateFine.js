@@ -11,10 +11,10 @@ export const updateFine = async (req, res) => {
         let { id } = req.params;
         const updates = req.body;
 
-        // Security check for attachment URL to prevent SSRF
+        // Security check for attachment URL to prevent SSRF (Early exit)
         if (updates.attachment && updates.attachment.url) {
             if (!isValidStorageUrl(updates.attachment.url)) {
-                return res.status(400).json({ message: "Invalid attachment URL" });
+                return res.status(400).json({ message: "Invalid or unauthorized attachment URL provided." });
             }
         }
 
@@ -23,13 +23,12 @@ export const updateFine = async (req, res) => {
             id = id.split(':')[0].trim();
         }
 
+        // ... (rest of lookup logic)
         let fine;
         const isValidObjectId = /^[0-9a-fA-F]{24}$/.test(id);
-
         if (isValidObjectId) {
             fine = await Fine.findById(id);
         }
-
         if (!fine) {
             fine = await Fine.findOne({ fineId: id });
         }
@@ -38,14 +37,22 @@ export const updateFine = async (req, res) => {
             return res.status(404).json({ message: "Fine not found" });
         }
 
-        // Update fields
         const oldStatus = fine.fineStatus;
         let shouldSendApprovalEmail = false;
 
-        // === SUBMIT FROM DRAFT LOGIC ===
-        if (oldStatus === 'Draft' && updates.fineStatus === 'Pending') {
-            console.log("[UpdateFine] Submitting Draft Fine. Validating Company linkage...");
+        // 1. Explicitly Define Allowed Fields (Fix Mass Assignment)
+        const allowedUpdates = [
+            'fineStatus', 'description', 'awardedDate', 'remarks',
+            'attachment', 'category', 'subCategory', 'vehicleId',
+            'projectId', 'projectName', 'engineerName', 'responsibleFor',
+            'employeeAmount', 'companyAmount', 'payableDuration', 'monthStart',
+            'employees' // handled below
+        ];
 
+        // 2. Perform submission logic from Draft -> Pending
+        if (oldStatus === 'Draft' && updates.fineStatus === 'Pending') {
+            // ... (keep submission logic)
+            console.log("[UpdateFine] Submitting Draft Fine. Validating Company linkage...");
             const bulkIds = fine.assignedEmployees.map(e => e.employeeId).filter(id => id);
             const employeesWithNoCompany = await EmployeeBasic.find({
                 employeeId: { $in: bulkIds },
@@ -59,51 +66,25 @@ export const updateFine = async (req, res) => {
                 });
             }
 
-            console.log("[UpdateFine] Identifying Manager for submission...");
-
-            // Use the first assigned employee to determine the manager
+            // Manager Identification
             const targetEmpId = (fine.assignedEmployees && fine.assignedEmployees.length > 0)
                 ? fine.assignedEmployees[0].employeeId
                 : null;
 
             if (targetEmpId) {
-                const employeeForSnapshot = await EmployeeBasic.findOne({ employeeId: targetEmpId })
-                    .select('primaryReportee')
-                    .lean();
-
+                const employeeForSnapshot = await EmployeeBasic.findOne({ employeeId: targetEmpId }).select('primaryReportee').lean();
                 if (employeeForSnapshot && employeeForSnapshot.primaryReportee) {
                     const managerBasic = await EmployeeBasic.findById(employeeForSnapshot.primaryReportee)
-                        .select('employeeId companyEmail email workEmail firstName lastName')
-                        .lean();
-
+                        .select('employeeId companyEmail email workEmail firstName lastName').lean();
                     if (managerBasic) {
-                        let reporteeUser = null;
-                        if (managerBasic.employeeId) {
-                            if (req.user && req.user.employeeId === managerBasic.employeeId) {
-                                reporteeUser = req.user;
-                            } else {
-                                reporteeUser = await User.findOne({ employeeId: managerBasic.employeeId });
-                            }
-                        }
+                        let reporteeUser = await User.findOne({ employeeId: managerBasic.employeeId });
                         if (!reporteeUser) {
                             const managerEmail = managerBasic.companyEmail || managerBasic.workEmail || managerBasic.email;
-                            if (managerEmail) {
-                                reporteeUser = await User.findOne({ $or: [{ email: managerEmail }, { username: managerEmail }] });
-                            }
+                            if (managerEmail) reporteeUser = await User.findOne({ $or: [{ email: managerEmail }, { username: managerEmail }] });
                         }
-
                         if (reporteeUser) {
-                            console.log(`[UpdateFine] Found Manager: ${reporteeUser.name || reporteeUser.username || reporteeUser.email}`);
-                            updates.submittedTo = reporteeUser._id;
-
-                            // Initialize Workflow
-                            updates.workflow = [{
-                                role: 'Reportee',
-                                assignedTo: reporteeUser._id,
-                                status: 'Pending',
-                                assignedAt: new Date()
-                            }];
-
+                            fine.submittedTo = reporteeUser._id;
+                            fine.workflow = [{ role: 'Reportee', assignedTo: reporteeUser._id, status: 'Pending', assignedAt: new Date() }];
                             shouldSendApprovalEmail = true;
                         }
                     }
@@ -111,33 +92,31 @@ export const updateFine = async (req, res) => {
             }
         }
 
-        // Map 'employees' from payload to 'assignedEmployees' in model if provided
-        if (updates.employees && Array.isArray(updates.employees)) {
-            updates.assignedEmployees = updates.employees.map(emp => ({
-                employeeId: emp.employeeId,
-                employeeName: emp.employeeName || 'Unknown',
-                daysWorked: emp.daysWorked || 0,
-                approvalStatus: emp.approvalStatus || 'Pending',
-                individualAmount: emp.employeeAmount || updates.employeeAmount || 0
-            }));
-            delete updates.employees;
-        }
-
-        Object.keys(updates).forEach(key => {
+        // 3. Apply updates only for allowed fields
+        allowedUpdates.forEach(key => {
             if (updates[key] !== undefined) {
-                // If updating assignedEmployees directly
-                if (key === 'assignedEmployees' && Array.isArray(updates[key])) {
-                    fine.assignedEmployees = updates[key].map(emp => ({
-                        ...emp,
-                        individualAmount: emp.individualAmount || emp.employeeAmount || fine.employeeAmount || 0
+                if (key === 'employees' && Array.isArray(updates.employees)) {
+                    fine.assignedEmployees = updates.employees.map(emp => ({
+                        employeeId: emp.employeeId,
+                        employeeName: emp.employeeName || 'Unknown',
+                        daysWorked: emp.daysWorked || 0,
+                        approvalStatus: emp.approvalStatus || 'Pending',
+                        individualAmount: emp.employeeAmount || updates.employeeAmount || 0
                     }));
-                } else {
+                } else if (key === 'attachment') {
+                    // Double check URL inside attachment object if modified
+                    if (updates.attachment && updates.attachment.url && !isValidStorageUrl(updates.attachment.url)) {
+                        // ignore malicious URL update
+                        console.warn("[UpdateFine] Attempted to update with invalid attachment URL. Skipping attachment update.");
+                    } else {
+                        fine.attachment = updates.attachment;
+                    }
+                } else if (key !== 'employees') {
                     fine[key] = updates[key];
                 }
             }
         });
 
-        // Set rejection tracking if applicable
         if (oldStatus !== 'Rejected' && updates.fineStatus === 'Rejected') {
             fine.rejectedBy = req.user?._id;
             fine.rejectedDate = new Date();

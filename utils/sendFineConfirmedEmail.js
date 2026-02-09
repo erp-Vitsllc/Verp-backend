@@ -44,14 +44,22 @@ export const sendFineConfirmedEmail = async (fine, assignedEmployees) => {
         const attachments = [];
         if (fine.attachment && fine.attachment.url) {
             try {
-                // Validate URL hostname to prevent SSRF
-                const urlObj = new URL(fine.attachment.url);
-                if (!urlObj.hostname.endsWith('idrivee2.com')) {
-                    throw new Error(`Invalid attachment URL hostname: ${urlObj.hostname}`);
+                const rawUrl = String(fine.attachment.url);
+
+                // INLINE VALIDATION FOR SNYK (Explicit check right before use)
+                const isSafe = /^https:\/\/[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.idrivee2\.com\/[^\s<>]+$/i.test(rawUrl);
+
+                if (!isSafe || rawUrl.includes('localhost') || rawUrl.includes('127.0.0.1')) {
+                    throw new Error(`SSRF Blocked: Invalid attachment URL signature: ${rawUrl}`);
                 }
 
                 // Fetch the file stream from the URL (S3)
-                const response = await axios.get(fine.attachment.url, { responseType: 'arraybuffer' });
+                const response = await axios.get(rawUrl, {
+                    responseType: 'arraybuffer',
+                    timeout: 5000,           // 5 seconds timeout
+                    maxContentLength: 5242880 // 5MB limit
+                });
+
                 attachments.push({
                     filename: fine.attachment.name || `fine_${fine.fineId}_doc.pdf`,
                     content: response.data

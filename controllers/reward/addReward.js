@@ -83,13 +83,23 @@ export const addReward = async (req, res) => {
 
         const { employeeId, rewardType, amount, description, title, giftName, rewardStatus, awardedDate, remarks, attachment } = req.body;
 
+        // Strict Type Validation for Snyk (HTTPSourceWithUncheckedType / FormatString)
+        if (employeeId !== undefined && typeof employeeId !== 'string') {
+            return res.status(400).json({ message: "Invalid employeeId format" });
+        }
+        if (rewardType !== undefined && typeof rewardType !== 'string') {
+            return res.status(400).json({ message: "Invalid rewardType format" });
+        }
+        if (description !== undefined && typeof description !== 'string') {
+            return res.status(400).json({ message: "Invalid description format" });
+        }
+        if (title !== undefined && typeof title !== 'string') {
+            return res.status(400).json({ message: "Invalid title format" });
+        }
+
         // Basic validation
         if (!employeeId || !rewardType || !title) {
             return res.status(400).json({ message: "Employee ID, Title, and Reward Type are required" });
-        }
-
-        if (!rewardType) {
-            return res.status(400).json({ message: "Reward Type is required" });
         }
 
         console.log('Looking up employee:', employeeId);

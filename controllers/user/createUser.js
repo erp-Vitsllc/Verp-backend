@@ -124,7 +124,7 @@ export const createUser = async (req, res) => {
                     { $set: { companyEmail: companyEmail } }
                 );
             } catch (err) {
-                console.error(`[createUser] Error syncing companyEmail to Employee record for ${employeeId}:`, err);
+                console.error('[createUser] Error syncing companyEmail to Employee record for:', employeeId, err);
             }
         }
 

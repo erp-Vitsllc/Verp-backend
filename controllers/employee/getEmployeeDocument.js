@@ -14,10 +14,20 @@ import { resolveEmployeeId } from "../../services/employeeService.js";
 
 export const getEmployeeDocument = async (req, res) => {
     const { id } = req.params;
-    const { type, subType, docId } = req.query;
+    let { type, subType, docId } = req.query;
 
-    if (!type) {
-        return res.status(400).json({ message: "Document type is required" });
+    // Strict Type Checking for Security (Satisfy Snyk HTTPSourceWithUncheckedType)
+    if (typeof type !== 'string' || type.trim() === '') {
+        return res.status(400).json({ message: "Document type is required and must be a string" });
+    }
+    type = type.trim();
+
+    if (subType !== undefined && subType !== null && typeof subType !== 'string') {
+        return res.status(400).json({ message: "Invalid subType provided" });
+    }
+
+    if (docId !== undefined && docId !== null && typeof docId !== 'string') {
+        return res.status(400).json({ message: "Invalid docId provided" });
     }
 
     try {
@@ -168,9 +178,9 @@ export const getEmployeeDocument = async (req, res) => {
                 if (!sl) {
                     return res.status(404).json({ message: "Salary record not found" });
                 }
-                // Try to find the history item by _id
+                // Try to find the history item by _id (Safely converting to String via global constructor)
                 const historyItem = sl?.salaryHistory?.id(docId) ||
-                    sl?.salaryHistory?.find(entry => entry._id?.toString() === docId.toString());
+                    sl?.salaryHistory?.find(entry => String(entry?._id) === String(docId));
                 if (historyItem?.offerLetter) {
                     // Check if it's a Cloudinary URL (new format) or base64 (old format)
                     documentData = historyItem.offerLetter.url || historyItem.offerLetter.data;

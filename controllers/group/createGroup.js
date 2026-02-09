@@ -6,10 +6,16 @@ import { escapeRegex } from "../../utils/regexHelper.js";
 // Create new group
 export const createGroup = async (req, res) => {
     try {
-        const { name, users = [], permissions = {}, status = 'Active' } = req.body;
+        const { name: rawName, users = [], permissions = {}, status = 'Active' } = req.body;
         const userId = req.user?.id;
 
-        if (!name || name.trim() === '') {
+        // Strict type check to satisfy Snyk "Externally-controlled format string"
+        if (typeof rawName !== 'string') {
+            return res.status(400).json({ message: "Invalid group name type" });
+        }
+        const name = rawName.trim();
+
+        if (name === '') {
             return res.status(400).json({
                 message: "Group name is required"
             });
