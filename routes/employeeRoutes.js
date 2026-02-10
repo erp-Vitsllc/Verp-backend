@@ -58,14 +58,34 @@ router.use(protect);
 router.get("/me", async (req, res) => {
     try {
         const { getCompleteEmployee } = await import("../services/employeeService.js");
-        const employee = await getCompleteEmployee(req.user.employeeObjectId);
-        if (!employee) {
-            return res.status(404).json({ message: "Employee not found" });
+
+        // Try searching by employeeObjectId (preferred)
+        let employee = null;
+        if (req.user.employeeObjectId) {
+            employee = await getCompleteEmployee(req.user.employeeObjectId);
         }
+
+        // Fallback to searching by employeeId string if not found by ObjectId
+        if (!employee && req.user.employeeId) {
+            console.log(`[Employee Routes] /me: Employee not found by ObjectId ${req.user.employeeObjectId}, trying employeeId: ${req.user.employeeId}`);
+            employee = await getCompleteEmployee(req.user.employeeId);
+        }
+
+        if (!employee) {
+            // If still not found, it might be a user without an employee record (e.g. system admin)
+            // Return user info from req.user instead of failing with 404
+            console.log(`[Employee Routes] /me: No linked employee found for user ${req.user.id}. Returning user info.`);
+            return res.json({
+                ...req.user,
+                isOnlyUser: true,
+                message: "No linked employee record found"
+            });
+        }
+
         res.json(employee);
     } catch (error) {
         console.error("Error in /me:", error);
-        res.status(500).json({ message: "Server Error" });
+        res.status(500).json({ message: "Server Error", error: error.message });
     }
 });
 

@@ -14,21 +14,48 @@ export const getCompanies = async (req, res) => {
             ];
         }
 
-        const companies = await Company.find(filters).sort({ createdAt: -1 });
+        // Use aggregation to count employees for each company
+        const processedCompanies = await Company.aggregate([
+            { $match: filters },
+            { $sort: { createdAt: -1 } },
+            {
+                $lookup: {
+                    from: "employeebasics",
+                    let: { companyId: "$_id" },
+                    pipeline: [
+                        {
+                            $match: {
+                                $expr: { $eq: ["$company", "$$companyId"] },
+                                employeeId: { $ne: "VEGA-HR-0000" }
+                            }
+                        }
+                    ],
+                    as: "employees"
+                }
+            },
+            {
+                $addFields: {
+                    employeeCount: { $size: "$employees" }
+                }
+            },
+            { $project: { employees: 0 } }
+        ]);
 
         const { getSignedFileUrl } = await import("../../utils/s3Upload.js");
 
-        const processedCompanies = await Promise.all(companies.map(async (company) => {
-            const companyObj = company.toObject();
-            if (companyObj.logo) {
-                companyObj.logo = await getSignedFileUrl(companyObj.logo);
+        const finalizedCompanies = await Promise.all(processedCompanies.map(async (company) => {
+            if (company.logo) {
+                company.logo = await getSignedFileUrl(company.logo);
             }
-            return companyObj;
+            return company;
         }));
+
+        const totalCompaniesWithEmployees = finalizedCompanies.filter(c => c.employeeCount > 0).length;
 
         return res.status(200).json({
             message: "Companies fetched successfully",
-            companies: processedCompanies
+            companies: finalizedCompanies,
+            totalCompaniesWithEmployees
         });
     } catch (error) {
         console.error("Error in getCompanies:", error);

@@ -187,10 +187,26 @@ export const getEmployees = async (req, res) => {
                     }
                 },
                 {
+                    $lookup: {
+                        from: "companies",
+                        localField: "company",
+                        foreignField: "_id",
+                        as: "companyInfo"
+                    }
+                },
+                {
+                    $unwind: {
+                        path: "$companyInfo",
+                        preserveNullAndEmptyArrays: true
+                    }
+                },
+                {
                     $project: {
                         firstName: 1, lastName: 1, employeeId: 1, role: 1, department: 1, designation: 1,
                         status: 1, probationPeriod: 1, overtime: 1, profileApprovalStatus: 1, profileStatus: 1,
                         email: 1, companyEmail: 1, enablePortalAccess: 1, dateOfJoining: 1, contractJoiningDate: 1,
+                        company: 1,
+                        companyName: "$companyInfo.name",
 
                         // Fields from contactInfo
                         contactNumber: "$contactInfo.contactNumber",
@@ -355,10 +371,17 @@ export const getEmployees = async (req, res) => {
             }
         }));
 
+        // Calculate total companies with at least one employee (global stat)
+        const companiesWithEmployeesCount = (await EmployeeBasic.distinct("company", {
+            company: { $ne: null },
+            employeeId: { $ne: 'VEGA-HR-0000' }
+        })).length;
+
         clearTimeout(timeout);
         return res.status(200).json({
             message: "Employees fetched successfully",
             employees: employeesWithVisas,
+            companiesWithEmployeesCount, // Added this field
             pagination: {
                 page,
                 limit,

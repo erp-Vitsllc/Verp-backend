@@ -19,8 +19,9 @@ export const getCompany = async (req, res) => {
             return res.status(404).json({ message: "Company not found" });
         }
 
-        // Get employee count (excluding placeholder)
+        // Get employee count (excluding placeholder) for this specific company
         const employeeCount = await EmployeeBasic.countDocuments({
+            company: company._id,
             employeeId: { $ne: "VEGA-HR-0000" }
         });
 
