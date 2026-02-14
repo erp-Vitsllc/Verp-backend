@@ -68,8 +68,8 @@ export const requestLoan = async (req, res) => {
         const reportee = employeeBasic.primaryReportee;
         const targetStatus = status || 'Draft';
 
-        if (targetStatus === 'Pending' && !reportee) {
-            return res.status(400).json({ message: "Primary reportee not assigned. Cannot submit loan." });
+        if (!reportee) {
+            return res.status(400).json({ message: "Primary reportee not assigned. Please assign a manager first." });
         }
 
         // --- VALIDATION: Probation & Salary Checks ---
@@ -149,7 +149,21 @@ export const requestLoan = async (req, res) => {
         const newLoan = new Loan(loanData);
         const savedLoan = await newLoan.save();
 
-        // 3. Send Email ONLY if Submit for Approval
+        // 3. Sync with Dashboard Action Table
+        if (targetStatus === 'Pending') {
+            const { syncDashboardAction } = await import("../../utils/syncDashboard.js");
+            await syncDashboardAction({
+                requestId: savedLoan._id,
+                requestType: 'Loan',
+                assignedTo: reportee._id, // Use Employee ID for assignment
+                status: 'Pending',
+                subjectEmployee: employeeBasic,
+                extra1: `AED ${amount}`,
+                extra2: `${duration} Months`
+            });
+        }
+
+        // 4. Send Email ONLY if Submit for Approval
         if (targetStatus === 'Pending' && reportee) {
             const reporteeEmail = reportee.companyEmail || reportee.workEmail || reportee.email;
             if (reporteeEmail) {

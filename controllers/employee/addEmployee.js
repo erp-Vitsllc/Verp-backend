@@ -227,7 +227,7 @@ export const addEmployee = async (req, res) => {
                 enablePortalAccess: enablePortalAccess || false,
                 dateOfJoining,
                 company: company || null,
-                contractJoiningDate: contractJoiningDate || dateOfJoining,
+                contractJoiningDate: contractJoiningDate || null,
                 contractExpiryDate: contractExpiryDate || null,
             }),
 

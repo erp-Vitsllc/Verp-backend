@@ -30,6 +30,34 @@ export const sendProfileNotification = async ({ employee, manager, status, reaso
         const managerName = `${manager.firstName || ""} ${manager.lastName || ""}`.trim();
 
         const isApproved = status.toLowerCase() === 'active' || status.toLowerCase() === 'approved';
+
+        let recipientList = [employeeEmail];
+
+        if (!isApproved) {
+            // Fetch Previous Approvers from profileWorkflow
+            const previousApprovers = (employee.profileWorkflow || [])
+                .filter(w => w.status === 'active' && w.assignedTo);
+
+            if (previousApprovers.length > 0) {
+                // We need to fetch their emails. Since we might not have a direct ref here, 
+                // and this is utility, we should ideally have passed them or we'll do a quick fetch
+                try {
+                    const EmployeeBasic = (await import("../models/EmployeeBasic.js")).default;
+                    const approverIds = previousApprovers.map(p => p.assignedTo);
+                    const approverEmps = await EmployeeBasic.find({ _id: { $in: approverIds } })
+                        .select('companyEmail workEmail email');
+
+                    const approverEmails = approverEmps
+                        .map(ae => ae.companyEmail || ae.workEmail || ae.email)
+                        .filter(e => e);
+
+                    recipientList = [...new Set([...recipientList, ...approverEmails])];
+                } catch (fetchErr) {
+                    console.error("[Email Error] Failed to fetch previous approver emails:", fetchErr);
+                }
+            }
+        }
+
         const subject = isApproved
             ? `Your VeRP Profile has been Activated!`
             : `Update Required: Profile Activation Request`;
@@ -75,7 +103,7 @@ export const sendProfileNotification = async ({ employee, manager, status, reaso
 
         await transporter.sendMail({
             from: `"VeRP Portal" <${emailUser}>`,
-            to: employeeEmail,
+            to: recipientList,
             subject,
             html
         });

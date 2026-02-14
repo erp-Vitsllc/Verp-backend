@@ -92,7 +92,8 @@ const loanSchema = new mongoose.Schema({
         assignedTo: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
         status: { type: String, enum: ['Pending', 'Approved', 'Rejected'], default: 'Pending' },
         assignedAt: { type: Date, default: Date.now },
-        actionedAt: { type: Date }
+        actionedAt: { type: Date },
+        comment: { type: String }
     }],
     createdBy: {
         type: mongoose.Schema.Types.ObjectId,

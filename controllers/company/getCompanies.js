@@ -9,6 +9,7 @@ export const getCompanies = async (req, res) => {
         if (search) {
             filters.$or = [
                 { name: { $regex: search, $options: "i" } },
+                { nickName: { $regex: search, $options: "i" } },
                 { companyId: { $regex: search, $options: "i" } },
                 { email: { $regex: search, $options: "i" } }
             ];

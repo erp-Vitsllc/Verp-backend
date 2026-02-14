@@ -49,10 +49,25 @@ export const getDashboardStats = async (req, res) => {
         ]);
 
         // 4. Notices Stats
-        const pendingNotices = await EmployeeBasic.countDocuments({
-            "noticeRequest.status": "Pending",
-            "noticeRequest.requestedAt": { $exists: true }
-        });
+        // Find the employee record for the current user to get their ID
+        const currentEmp = await EmployeeBasic.findOne({
+            $or: [
+                ...(currentUser.employeeObjectId ? [{ _id: currentUser.employeeObjectId }] : []),
+                ...(currentUser.employeeId ? [{ employeeId: currentUser.employeeId }] : [])
+            ]
+        }).select('_id');
+
+        let pendingNotices = 0;
+        if (currentEmp) {
+            pendingNotices = await EmployeeBasic.countDocuments({
+                "noticeRequest.status": "Pending",
+                "noticeRequest.requestedAt": { $exists: true },
+                $or: [
+                    { "noticeRequest.submittedTo": currentEmp._id },
+                    { "noticeRequest.submittedTo": null, primaryReportee: currentEmp._id }
+                ]
+            });
+        }
 
         // 5. Employees Stats
         const totalEmployees = await EmployeeBasic.countDocuments({ profileStatus: 'active' });

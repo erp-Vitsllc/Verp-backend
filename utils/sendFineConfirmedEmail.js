@@ -13,21 +13,44 @@ export const sendFineConfirmedEmail = async (fine, assignedEmployees) => {
     try {
         console.log(`[FineConfirmedEmail] Preparing email for Fine #${fine.fineId}`);
 
-        // 1. Fetch Employee Emails
+        // 1. Fetch Employee Emails and their Managers
         const employeeIds = assignedEmployees.map(e => e.employeeId);
         const fullEmployees = await EmployeeBasic.find({ employeeId: { $in: employeeIds } })
-            .select('employeeId firstName lastName companyEmail personalEmail');
+            .select('employeeId firstName lastName companyEmail personalEmail primaryReportee')
+            .populate('primaryReportee', 'companyEmail personalEmail');
 
-        const recipients = fullEmployees
-            .map(emp => emp.companyEmail || emp.personalEmail)
-            .filter(email => email);
+        // Fetch Creator Email (Need User model)
+        const User = await import("../models/User.js").then(m => m.default);
+        const creator = await User.findById(fine.createdBy).select('email companyEmail').lean();
+
+        const recipientEmails = new Set();
+
+        // 1. Add Employee Emails
+        fullEmployees.forEach(emp => {
+            const mail = emp.companyEmail || emp.personalEmail;
+            if (mail) recipientEmails.add(mail);
+
+            // 2. Add Manager Emails (His Reportee/Supervisor)
+            if (emp.primaryReportee) {
+                const managerMail = emp.primaryReportee.companyEmail || emp.primaryReportee.personalEmail;
+                if (managerMail) recipientEmails.add(managerMail);
+            }
+        });
+
+        // 3. Add Creator Email
+        if (creator) {
+            const creatorMail = creator.companyEmail || creator.email;
+            if (creatorMail) recipientEmails.add(creatorMail);
+        }
+
+        const recipients = Array.from(recipientEmails);
 
         if (recipients.length === 0) {
-            console.warn('[FineConfirmedEmail] No valid email addresses found for employees.');
+            console.warn('[FineConfirmedEmail] No valid email addresses found for anyone.');
             return;
         }
 
-        console.log(`[FineConfirmedEmail] Sending to: ${recipients.join(', ')}`);
+        console.log(`[FineConfirmedEmail] Sending to ${recipients.length} recipients: ${recipients.join(', ')}`);
 
         // 2. Transporter Setup
         const transporter = nodemailer.createTransport({

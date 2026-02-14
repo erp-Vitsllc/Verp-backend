@@ -184,8 +184,13 @@ export const approveLoan = async (req, res) => {
                 }
             }
         } else if (status === 'Rejected') {
+            const { rejectionReason } = req.body;
+            if (!rejectionReason || rejectionReason.trim().length === 0) {
+                return res.status(400).json({ message: "Reason for rejection is mandatory." });
+            }
             publicStatus = 'Rejected';
             nextStage = 'Rejected';
+            loan.rejectionReason = rejectionReason;
         }
 
         // Update Loan
@@ -297,6 +302,24 @@ export const approveLoan = async (req, res) => {
             }
         }
 
+        if (nextStage === 'Rejected') {
+            const rejectedStep = loan.workflow.find(w => w.status === 'Pending');
+            if (rejectedStep) {
+                rejectedStep.status = 'Rejected';
+                rejectedStep.actionedAt = new Date();
+                rejectedStep.comment = loan.rejectionReason;
+            } else {
+                loan.workflow.push({
+                    role: 'Reviewer',
+                    assignedTo: requestingUserId,
+                    status: 'Rejected',
+                    assignedAt: new Date(),
+                    actionedAt: new Date(),
+                    comment: loan.rejectionReason
+                });
+            }
+        }
+
         // Final Approval (Management) Update
         if (nextStage === 'Approved') {
             if (loan.workflow) {
@@ -319,6 +342,34 @@ export const approveLoan = async (req, res) => {
         }
 
         await loan.save();
+
+        // Sync Dashboard Action Table
+        const { syncDashboardAction } = await import("../../utils/syncDashboard.js");
+        const applicant = await EmployeeBasic.findOne({ employeeId: loan.employeeId });
+
+        // A. Resolve existing pending actions for this request
+        const isFinalStatus = finalStatus === 'Approved' || finalStatus === 'Rejected';
+        await syncDashboardAction({
+            requestId: loan._id,
+            requestType: 'Loan',
+            // Specifically clear the acting user's task
+            assignedTo: isFinalStatus ? null : req.user?._id,
+            status: isFinalStatus ? finalStatus : 'Approved',
+            subjectEmployee: applicant
+        });
+
+        // B. If there's a next approver, create a new pending action for them
+        if (nextApprover && (nextStage.includes('Pending') || nextStage === 'Pending')) {
+            await syncDashboardAction({
+                requestId: loan._id,
+                requestType: 'Loan',
+                assignedTo: nextApprover._id,
+                status: 'Pending',
+                subjectEmployee: applicant,
+                extra1: `AED ${loan.amount}`,
+                extra2: `${loan.duration} Months`
+            });
+        }
 
         // Handle Notifications
         const emailUser = process.env.EMAIL_USER?.trim();
@@ -409,33 +460,120 @@ export const approveLoan = async (req, res) => {
             // 2. Notify Employee on FULL Approval ONLY
             if (finalStatus === 'Approved' && nextStage === 'Approved') {
                 try {
-                    const applicant = await EmployeeBasic.findOne({ employeeId: loan.employeeId });
-                    if (applicant && (applicant.companyEmail || applicant.email)) {
-                        const permissions = { hrm_loan: { isView: true, isActive: true } };
-                        const pdfBuffer = await generatePdf(actionUrl, req.headers.authorization?.split(' ')[1], { id: requestingUserId, isAdmin: isAdmin, role: userObj.role, employeeId: userObj.employeeId }, permissions);
+                    const applicant = await EmployeeBasic.findOne({ employeeId: loan.employeeId }).populate('primaryReportee');
+                    const creator = await User.findById(loan.createdBy);
 
-                        const mailOptions = {
-                            from: `"VeRP Notification" <${emailUser}>`,
-                            to: applicant.companyEmail || applicant.email,
-                            subject: "Loan Application Approved",
-                            html: `
-                                <div style="font-family: Arial, sans-serif; color: #333; max-width: 600px; margin: 0 auto; border: 1px solid #eee; border-radius: 10px; overflow: hidden;">
-                                    <div style="background-color: #22c55e; color: white; padding: 20px; text-align: center;">
-                                        <h2 style="margin: 0;">Congratulations!</h2>
+                    if (applicant) {
+                        const recipientEmails = new Set();
+
+                        // 1. Applicant Email
+                        const appEmail = applicant.companyEmail || applicant.email;
+                        if (appEmail) recipientEmails.add(appEmail);
+
+                        // 2. Manager Email (His Reportee/Supervisor)
+                        if (applicant.primaryReportee) {
+                            const managerEmail = applicant.primaryReportee.companyEmail || applicant.primaryReportee.email;
+                            if (managerEmail) recipientEmails.add(managerEmail);
+                        }
+
+                        // 3. Creator Email
+                        if (creator) {
+                            const creatorEmail = creator.companyEmail || creator.email;
+                            if (creatorEmail) recipientEmails.add(creatorEmail);
+                        }
+
+                        if (recipientEmails.size > 0) {
+                            const permissions = { hrm_loan: { isView: true, isActive: true } };
+                            const pdfBuffer = await generatePdf(actionUrl, req.headers.authorization?.split(' ')[1], { id: requestingUserId, isAdmin: isAdmin, role: userObj.role, employeeId: userObj.employeeId }, permissions);
+
+                            const mailOptions = {
+                                from: `"VeRP Notification" <${emailUser}>`,
+                                to: Array.from(recipientEmails).join(', '),
+                                subject: "Loan Application Approved",
+                                html: `
+                                    <div style="font-family: Arial, sans-serif; color: #333; max-width: 600px; margin: 0 auto; border: 1px solid #eee; border-radius: 10px; overflow: hidden;">
+                                        <div style="background-color: #22c55e; color: white; padding: 20px; text-align: center;">
+                                            <h2 style="margin: 0;">Congratulations!</h2>
+                                        </div>
+                                        <div style="padding: 30px;">
+                                            <p>Dear All,</p>
+                                            <p>The loan application for <strong>${applicant.firstName} ${applicant.lastName}</strong> (AED ${Number(loan.amount).toLocaleString()}) has been fully approved by all departments including HR, Finance, and Management.</p>
+                                            <p>Please find the approved document attached.</p>
+                                            <br>
+                                            <p>Best Regards,</p>
+                                            <p>VeRP System</p>
+                                        </div>
                                     </div>
-                                    <div style="padding: 30px;">
-                                        <p>Dear ${applicant.firstName},</p>
-                                        <p>Your loan application for <strong>AED ${Number(loan.amount).toLocaleString()}</strong> has been fully approved by all departments including HR, Finance, and Management.</p>
-                                        <p>Please find the approved document attached.</p>
-                                    </div>
-                                </div>
-                            `,
-                            attachments: [{ filename: `Approved_Loan_${loan.loanId || loan._id}.pdf`, content: pdfBuffer, contentType: 'application/pdf' }]
-                        };
-                        await transporter.sendMail(mailOptions);
+                                `,
+                                attachments: [{ filename: `Approved_Loan_${loan.loanId || loan._id}.pdf`, content: pdfBuffer, contentType: 'application/pdf' }]
+                            };
+                            await transporter.sendMail(mailOptions);
+                            console.log(`[ApproveLoan] Success email sent to ${recipientEmails.size} recipients: ${Array.from(recipientEmails).join(', ')}`);
+                        }
                     }
                 } catch (emailErr) {
                     console.error("Employee Approval Email Error:", emailErr);
+                }
+            }
+            else if (finalStatus === 'Rejected') {
+                // Notify Employee, Requester, and Previous Approvers on Rejection
+                try {
+                    const notificationIds = (loan.workflow || [])
+                        .filter(w => w.status === 'Approved' && w.assignedTo)
+                        .map(w => w.assignedTo.toString());
+
+                    if (loan.createdBy) notificationIds.push(loan.createdBy.toString());
+
+                    const [applicant, userObjects] = await Promise.all([
+                        EmployeeBasic.findOne({ employeeId: loan.employeeId }).select('firstName lastName email companyEmail'),
+                        User.find({ _id: { $in: notificationIds } }).select('email companyEmail')
+                    ]);
+
+                    if (applicant) {
+                        const recipientEmails = new Set();
+
+                        // Add Applicant
+                        const appEmail = applicant.companyEmail || applicant.email;
+                        if (appEmail) recipientEmails.add(appEmail);
+
+                        // Add Previous Approvers & Requester
+                        if (userObjects && userObjects.length > 0) {
+                            userObjects.forEach(u => {
+                                const mail = u.companyEmail || u.email;
+                                if (mail) recipientEmails.add(mail);
+                            });
+                        }
+
+                        if (recipientEmails.size > 0) {
+                            const mailOptions = {
+                                from: `"VeRP Notification" <${emailUser}>`,
+                                to: Array.from(recipientEmails).join(', '),
+                                subject: `Update regarding your ${loan.type || 'Loan'} Application`,
+                                html: `
+                                    <div style="font-family: Arial, sans-serif; color: #333; max-width: 600px; margin: 0 auto; border: 1px solid #eee; border-radius: 10px; overflow: hidden;">
+                                        <div style="background-color: #ef4444; color: white; padding: 20px; text-align: center;">
+                                            <h2 style="margin: 0;">Loan Application Update</h2>
+                                        </div>
+                                        <div style="padding: 30px;">
+                                            <p>Dear All,</p>
+                                            <p>The <strong>${loan.type || 'Loan/Advance'}</strong> application for <strong>${loan.applicantName}</strong> (AED ${Number(loan.amount).toLocaleString()}) has been <strong>Rejected</strong>.</p>
+                                            <div style="background-color: #fef2f2; padding: 15px; border-radius: 6px; border: 1px solid #fee2e2; margin: 20px 0;">
+                                                <p style="margin: 0;"><strong>Reason for Rejection:</strong> ${loan.rejectionReason}</p>
+                                            </div>
+                                            <p>If you have any questions, please contact the HR department.</p>
+                                            <br>
+                                            <p>Best Regards,</p>
+                                            <p>VeRP System</p>
+                                        </div>
+                                    </div>
+                                `
+                            };
+                            await transporter.sendMail(mailOptions);
+                            console.log(`[ApproveLoan] Rejection email sent to ${recipientEmails.size} recipients`);
+                        }
+                    }
+                } catch (emailErr) {
+                    console.error("Loan Rejection Email Error:", emailErr);
                 }
             }
         }

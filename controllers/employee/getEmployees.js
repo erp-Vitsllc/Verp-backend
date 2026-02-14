@@ -207,6 +207,7 @@ export const getEmployees = async (req, res) => {
                         email: 1, companyEmail: 1, enablePortalAccess: 1, dateOfJoining: 1, contractJoiningDate: 1,
                         company: 1,
                         companyName: "$companyInfo.name",
+                        companyNickName: "$companyInfo.nickName",
 
                         // Fields from contactInfo
                         contactNumber: "$contactInfo.contactNumber",

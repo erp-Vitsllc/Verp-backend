@@ -3,6 +3,7 @@ import mongoose from "mongoose";
 const companySchema = new mongoose.Schema(
     {
         name: { type: String, required: true },
+        nickName: { type: String },
         companyId: { type: String, required: true, unique: true }, // e.g., EST-001
         establishedDate: { type: Date },
         logo: { type: String }, // Storage URL
@@ -26,6 +27,7 @@ const companySchema = new mongoose.Schema(
         owners: [
             {
                 name: { type: String },
+                nationality: { type: String },
                 sharePercentage: { type: String },
                 attachment: { type: String },
                 passport: {
@@ -112,6 +114,7 @@ const companySchema = new mongoose.Schema(
 
         ejari: [
             {
+                type: { type: String }, // Dynamic name like "Office Rental", "Warehouse Lease"
                 startDate: { type: Date },
                 expiryDate: { type: Date },
                 value: { type: Number },

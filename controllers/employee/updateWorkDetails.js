@@ -52,6 +52,15 @@ export const updateWorkDetails = async (req, res) => {
 
         const employeeId = employee.employeeId;
 
+        // Auto-fill contractJoiningDate with dateOfJoining if not provided
+        // This ensures contract joining date always has a value when DOJ is available
+        if (!updatePayload.contractJoiningDate && !employee.contractJoiningDate) {
+            const doj = updatePayload.dateOfJoining || employee.dateOfJoining;
+            if (doj) {
+                updatePayload.contractJoiningDate = doj;
+            }
+        }
+
         // 4. Handle probation period logic (Strict enforcement based on dates)
         if (updatePayload.status === 'Probation' || updatePayload.status === 'Permanent' || (!updatePayload.status && (employee.status === 'Probation' || employee.status === 'Permanent'))) {
             const currentStatus = updatePayload.status || employee.status;

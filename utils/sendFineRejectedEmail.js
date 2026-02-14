@@ -1,5 +1,6 @@
 import nodemailer from 'nodemailer';
 import EmployeeBasic from '../models/EmployeeBasic.js';
+import User from '../models/User.js';
 import axios from 'axios';
 
 /**
@@ -14,15 +15,37 @@ export const sendFineRejectedEmail = async (fine, assignedEmployees) => {
 
         // 1. Fetch Employee Emails
         const employeeIds = assignedEmployees.map(e => e.employeeId);
-        const fullEmployees = await EmployeeBasic.find({ employeeId: { $in: employeeIds } })
-            .select('employeeId firstName lastName companyEmail personalEmail');
 
-        const recipients = fullEmployees
-            .map(emp => emp.companyEmail || emp.personalEmail)
-            .filter(email => email);
+        // 1b. Fetch Previous Approver Emails from Workflow
+        const previousApproverIds = (fine.workflow || [])
+            .filter(w => w.status === 'Approved' && w.assignedTo)
+            .map(w => w.assignedTo);
+
+        const [fullEmployees, previousApproverUsers] = await Promise.all([
+            EmployeeBasic.find({ employeeId: { $in: employeeIds } })
+                .select('employeeId firstName lastName companyEmail personalEmail'),
+            User.find({ _id: { $in: previousApproverIds } })
+                .select('email companyEmail')
+        ]);
+
+        const recipientEmails = new Set();
+
+        // Add Target Employees
+        fullEmployees.forEach(emp => {
+            const mail = emp.companyEmail || emp.personalEmail;
+            if (mail) recipientEmails.add(mail);
+        });
+
+        // Add Previous Approvers
+        previousApproverUsers.forEach(u => {
+            const mail = u.companyEmail || u.email;
+            if (mail) recipientEmails.add(mail);
+        });
+
+        const recipients = Array.from(recipientEmails);
 
         if (recipients.length === 0) {
-            console.warn('[FineRejectedEmail] No valid email addresses found for employees.');
+            console.warn('[FineRejectedEmail] No valid email addresses found for employees or previous approvers.');
             return;
         }
 
@@ -82,6 +105,7 @@ export const sendFineRejectedEmail = async (fine, assignedEmployees) => {
                     <p><strong>Fine Type:</strong> ${fine.fineType}</p>
                     <p><strong>Category:</strong> ${fine.category}</p>
                     <p><strong>Amount:</strong> ${Number(fine.fineAmount).toLocaleString()} AED</p>
+                    ${fine.rejectionReason ? `<p><strong>Reason for Rejection:</strong> ${fine.rejectionReason}</p>` : ''}
                     ${fine.remarks ? `<p><strong>Remarks:</strong> ${fine.remarks}</p>` : ''}
                 </div>
 

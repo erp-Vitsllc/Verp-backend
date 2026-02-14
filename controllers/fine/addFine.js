@@ -131,25 +131,30 @@ export const addFine = async (req, res) => {
         if (isBulk && Array.isArray(bulkList) && bulkList.length > 0) {
             console.log(`[AddFine] Processing Bulk Request. Count: ${bulkList.length}`);
 
-            // VALIDATION: Check if all users have a company (Strict Mode)
-            // Skip this strict check ONLY if fineStatus is 'Draft' (allowing users to save and fix later)
-            if (commonData.fineStatus !== 'Draft') {
-                const bulkIds = bulkList.map(e => e.employeeId).filter(id => id);
-                if (bulkIds.length > 0) {
-                    const employeesWithNoCompany = await EmployeeBasic.find({
-                        employeeId: { $in: bulkIds },
-                        $or: [
-                            { company: { $exists: false } }, // Field missing
-                            { company: null }                // Field is null
-                        ]
-                    }).select('firstName lastName employeeId');
+            // VALIDATION: Check if all users have a company AND primaryReportee (Strict Mode)
+            const bulkIds = bulkList.map(e => e.employeeId).filter(id => id && id !== 'VEGA-HR-0000');
+            if (bulkIds.length > 0) {
+                const invalidEmployees = await EmployeeBasic.find({
+                    employeeId: { $in: bulkIds },
+                    $or: [
+                        { company: { $exists: false } },
+                        { company: null },
+                        { primaryReportee: { $exists: false } }, // No manager
+                        { primaryReportee: null }
+                    ]
+                }).select('firstName lastName employeeId company primaryReportee');
 
-                    if (employeesWithNoCompany.length > 0) {
-                        const names = employeesWithNoCompany.map(e => `${e.firstName} ${e.lastName || ''}`.trim());
-                        return res.status(400).json({
-                            message: `The following users have no company: ${names.join(', ')}. Please assign them to a company in their profile before submitting for approval.`
-                        });
-                    }
+                if (invalidEmployees.length > 0) {
+                    const noCompany = invalidEmployees.filter(e => !e.company).map(e => `${e.firstName} ${e.lastName || ''}`.trim());
+                    const noReportee = invalidEmployees.filter(e => e.company && !e.primaryReportee).map(e => `${e.firstName} ${e.lastName || ''}`.trim());
+
+                    let errorMsg = "";
+                    if (noCompany.length > 0) errorMsg += `Users with no company: ${noCompany.join(', ')}. `;
+                    if (noReportee.length > 0) errorMsg += `Users with no Primary Reportee (Manager): ${noReportee.join(', ')}. `;
+
+                    return res.status(400).json({
+                        message: `${errorMsg}Please fix this in their profile before creating the fine.`
+                    });
                 }
             }
 
@@ -301,13 +306,27 @@ export const addFine = async (req, res) => {
                 }
 
                 try {
-                    const newFine = new Fine(finePayload);
-                    await newFine.save();
-                    createdFines.push(newFine);
+                    const fineModel = new Fine(finePayload);
+                    const savedFineRecord = await fineModel.save();
+                    createdFines.push(savedFineRecord);
 
-                    // Send Email Notification (Individual)
-                    if (newFine.fineStatus !== 'Draft') {
-                        sendFineApprovalEmail(newFine, finePayload.assignedEmployees).catch(err => console.error(err));
+                    // === SYNC DASHBOARD ACTION (BULK) ===
+                    if (savedFineRecord.fineStatus !== 'Draft') {
+                        const { syncDashboardAction } = await import("../../utils/syncDashboard.js");
+                        const reporteeStep = savedFineRecord.workflow?.find(w => w.status === 'Pending');
+                        if (reporteeStep) {
+                            const subjectEmp = await EmployeeBasic.findOne({ employeeId: empData.employeeId });
+                            await syncDashboardAction({
+                                requestId: savedFineRecord._id,
+                                requestType: 'Fine',
+                                assignedTo: reporteeStep.assignedTo,
+                                status: 'Pending',
+                                subjectEmployee: subjectEmp,
+                                extra1: savedFineRecord.fineType,
+                                extra2: `AED ${savedFineRecord.fineAmount}`
+                            });
+                        }
+                        sendFineApprovalEmail(savedFineRecord, finePayload.assignedEmployees).catch(err => console.error(err));
                     }
                 } catch (err) {
                     console.error(`[AddFine] Error saving individual fine ${uniqueFineId}:`, err);
@@ -377,14 +396,17 @@ export const addFine = async (req, res) => {
             employeeName = 'Project Damage (Pending)';
         } else {
             const employee = await EmployeeBasic.findOne({ employeeId })
-                .select('firstName lastName employeeId company')
+                .select('firstName lastName employeeId company primaryReportee')
                 .lean();
 
             if (!employee) {
                 return res.status(404).json({ message: "Employee not found" });
             }
-            if (!employee.company && fineStatus !== 'Draft') {
-                return res.status(400).json({ message: "Employee is not linked to any company. Cannot proceed with submission." });
+            if (!employee.company) {
+                return res.status(400).json({ message: "Employee is not linked to any company. Cannot proceed." });
+            }
+            if (!employee.primaryReportee && employeeId !== 'VEGA-HR-0000') {
+                return res.status(400).json({ message: "Employee has no Primary Reportee (Manager) assigned. Please fix this first." });
             }
             employeeName = `${employee.firstName || ''} ${employee.lastName || ''}`.trim();
         }
@@ -446,8 +468,8 @@ export const addFine = async (req, res) => {
                 daysWorked: 0
             }],
             responsibleFor: responsibleFor || null,
+            fineAmount: parseFloat(fineAmount) || (parseFloat(employeeAmount) || 0) + (parseFloat(companyAmount) || 0),
             employeeAmount: parseFloat(employeeAmount) || 0,
-            companyAmount: parseFloat(companyAmount) || 0,
             companyAmount: parseFloat(companyAmount) || 0,
             payableDuration: parseInt(payableDuration) || null,
             monthStart: monthStart || '',
@@ -543,9 +565,25 @@ TOTAL PENDING ON DASHBOARD : ${currentPendingFines + 1}
         const fine = new Fine(fineData);
         const savedFine = await fine.save();
 
-        // Send Email Notification
-        // Use fineData.assignedEmployees as it was standardized in the payload construction above
+        // === SYNC DASHBOARD ACTION (SINGLE) ===
         if (savedFine.fineStatus !== 'Draft') {
+            const { syncDashboardAction } = await import("../../utils/syncDashboard.js");
+            const reporteeStep = savedFine.workflow?.find(w => w.status === 'Pending');
+            if (reporteeStep) {
+                const targetEmpId = (savedFine.assignedEmployees && savedFine.assignedEmployees.length > 0)
+                    ? savedFine.assignedEmployees[0].employeeId
+                    : employeeId;
+                const subjectEmp = await EmployeeBasic.findOne({ employeeId: targetEmpId });
+                await syncDashboardAction({
+                    requestId: savedFine._id,
+                    requestType: 'Fine',
+                    assignedTo: reporteeStep.assignedTo,
+                    status: 'Pending',
+                    subjectEmployee: subjectEmp,
+                    extra1: savedFine.fineType,
+                    extra2: `AED ${savedFine.fineAmount}`
+                });
+            }
             sendFineApprovalEmail(savedFine, fineData.assignedEmployees).catch(err => console.error(err));
         }
 

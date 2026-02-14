@@ -40,6 +40,22 @@ export const submitApproval = async (req, res) => {
             return res.status(404).json({ message: "Employee not found" });
         }
 
+        // === SYNC DASHBOARD ACTION ===
+        try {
+            const { syncDashboardAction } = await import("../../utils/syncDashboard.js");
+            await syncDashboardAction({
+                requestId: updated._id,
+                requestType: 'Profile Activation',
+                assignedTo: updated.profileSubmittedTo,
+                status: 'Pending',
+                subjectEmployee: updated,
+                extra1: 'New Profile Submission',
+                extra2: updated.designation || ''
+            });
+        } catch (syncErr) {
+            console.error("[SubmitApproval] Dashboard Sync Error:", syncErr);
+        }
+
         // Get complete employee data for response
         const completeEmployee = await getCompleteEmployee(employeeId);
         delete completeEmployee.password;

@@ -2,7 +2,7 @@ import Company from "../../models/Company.js";
 
 export const addCompany = async (req, res) => {
     try {
-        const { name, companyId, email, phone, website, address, city, state, country, registrationNumber, vatNumber, logo, establishedDate } = req.body;
+        const { name, nickName, companyId, email, phone, website, address, city, state, country, registrationNumber, vatNumber, logo, establishedDate } = req.body;
 
         // Check if companyId already exists
         const existingCompany = await Company.findOne({ companyId });
@@ -12,6 +12,7 @@ export const addCompany = async (req, res) => {
 
         const newCompany = new Company({
             name,
+            nickName,
             companyId,
             email,
             phone,

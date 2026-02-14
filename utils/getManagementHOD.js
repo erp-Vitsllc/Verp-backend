@@ -64,35 +64,7 @@ export const getManagementHOD = async (identifier = null) => {
             }
         }
 
-        // 3. Fallback to Designation Search Logic
-        const designations = [
-            'CEO', 'C.E.O', 'C.E.O.', 'Chief Executive Officer',
-            'Director', 'Managing Director',
-            'General Manager', 'GM', 'G.M', 'G.M.'
-        ];
-
-        let hod = await EmployeeBasic.findOne({
-            company: targetCompanyId,
-            $or: [
-                { designation: { $in: ['CEO', 'Chief Executive Officer', 'Managing Director', 'Director'].map(d => new RegExp(`^${d}$`, 'i')) } },
-                { department: { $regex: /management/i }, designation: { $in: designations.map(d => new RegExp(`^${d}$`, 'i')) } }
-            ]
-        })
-            .sort({ profileStatus: 1, createdAt: 1 }) // Active first, then oldest/first created
-            .select('employeeId firstName lastName companyEmail email designation profileStatus');
-
-        if (hod) {
-            if (hod.profileStatus !== 'active') {
-                console.warn(`[getManagementHOD] Found CEO (${hod.firstName}) via designation but profile is INACTIVE.`);
-            }
-            console.log('[getManagementHOD] Found CEO via Designation Search:', {
-                id: hod.employeeId,
-                name: `${hod.firstName} ${hod.lastName}`
-            });
-            return hod;
-        }
-
-        console.warn('[getManagementHOD] No CEO found via Responsibilities OR Designation.');
+        console.warn('[getManagementHOD] No CEO found via Company Responsibilities.');
         return null;
 
     } catch (error) {

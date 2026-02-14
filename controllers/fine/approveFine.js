@@ -388,6 +388,43 @@ export const approveFine = async (req, res) => {
 
         if (modified) {
             await fine.save();
+
+            // === SYNC DASHBOARD ACTION ===
+            try {
+                const { syncDashboardAction } = await import("../../utils/syncDashboard.js");
+                const targetEmpId = (fine.assignedEmployees && fine.assignedEmployees.length > 0)
+                    ? fine.assignedEmployees[0].employeeId
+                    : null;
+                const subjectEmp = targetEmpId ? await EmployeeBasic.findOne({ employeeId: targetEmpId }) : null;
+
+                // 1. Resolve current pending steps
+                const isFinalStatus = fine.fineStatus === 'Approved' || fine.fineStatus === 'Rejected';
+                await syncDashboardAction({
+                    requestId: fine._id,
+                    requestType: 'Fine',
+                    // Specifically clear the acting user's task
+                    assignedTo: isFinalStatus ? null : req.user?._id,
+                    status: isFinalStatus ? fine.fineStatus : 'Approved',
+                    subjectEmployee: subjectEmp
+                });
+
+                // 2. If there's a new pending step, create it
+                const nextPendingStep = fine.workflow?.find(w => w.status === 'Pending');
+                if (nextPendingStep) {
+                    await syncDashboardAction({
+                        requestId: fine._id,
+                        requestType: 'Fine',
+                        assignedTo: nextPendingStep.assignedTo,
+                        status: 'Pending',
+                        subjectEmployee: subjectEmp,
+                        extra1: fine.fineType,
+                        extra2: `AED ${fine.fineAmount}`
+                    });
+                }
+            } catch (syncErr) {
+                console.error("[ApproveFine] Dashboard Sync Error:", syncErr);
+            }
+
             return res.status(200).json({
                 message: "Fine approved successfully.",
                 fine

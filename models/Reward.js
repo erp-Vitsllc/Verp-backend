@@ -120,9 +120,10 @@ const rewardSchema = new mongoose.Schema(
         workflow: [{
             role: { type: String, required: true },
             assignedTo: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
-            status: { type: String, enum: ['Pending', 'Approved', 'Rejected', 'Cancelled'], default: 'Pending' },
+            status: { type: String, enum: ['Draft', 'Pending', 'Approved', 'Rejected', 'Cancelled'], default: 'Pending' },
             assignedAt: { type: Date, default: Date.now },
-            actionedAt: { type: Date }
+            actionedAt: { type: Date },
+            comment: { type: String }
         }]
     },
     { timestamps: true }

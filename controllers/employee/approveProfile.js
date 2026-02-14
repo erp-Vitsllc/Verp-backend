@@ -36,6 +36,19 @@ export const approveProfile = async (req, res) => {
             return res.status(404).json({ message: "Employee not found" });
         }
 
+        // === SYNC DASHBOARD ACTION ===
+        try {
+            const { syncDashboardAction } = await import("../../utils/syncDashboard.js");
+            await syncDashboardAction({
+                requestId: updated._id,
+                requestType: 'Profile Activation',
+                status: 'Approved',
+                subjectEmployee: updated
+            });
+        } catch (syncErr) {
+            console.error("[ApproveProfile] Dashboard Sync Error:", syncErr);
+        }
+
         // Get complete employee data for response
         const completeEmployee = await getCompleteEmployee(employeeId);
 

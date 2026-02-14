@@ -90,6 +90,23 @@ export const updateFine = async (req, res) => {
                     }
                 }
             }
+        } else if (updates.resubmit && oldStatus === 'Rejected') {
+            // === RESUBMIT LOGIC ===
+            console.log("[UpdateFine] Resubmitting previously rejected fine.");
+            const rejectedStep = (fine.workflow || []).find(w => w.status === 'Rejected');
+            if (rejectedStep) {
+                // Reset the rejected step to Pending
+                rejectedStep.status = 'Pending';
+                rejectedStep.actionedAt = null;
+                if (updates.remarks) rejectedStep.comment = `RESUBMITTED: ${updates.remarks}`;
+
+                fine.fineStatus = 'Pending';
+
+                fine.submittedTo = rejectedStep.assignedTo;
+                shouldSendApprovalEmail = true;
+
+                console.log(`[UpdateFine] Resubmitting: Role=${rejectedStep.role} -> TargetStatus=Pending`);
+            }
         }
 
         // 3. Apply updates only for allowed fields
@@ -118,11 +135,68 @@ export const updateFine = async (req, res) => {
         });
 
         if (oldStatus !== 'Rejected' && updates.fineStatus === 'Rejected') {
+            if (!updates.rejectionReason || updates.rejectionReason.trim().length === 0) {
+                return res.status(400).json({ message: "Reason for rejection is mandatory." });
+            }
             fine.rejectedBy = req.user?._id;
             fine.rejectedDate = new Date();
+            fine.rejectionReason = updates.rejectionReason;
+
+            // NEW: Update Workflow to Rejected
+            if (!fine.workflow) fine.workflow = [];
+            const pendingStep = fine.workflow.find(w => w.status === 'Pending');
+            if (pendingStep) {
+                pendingStep.status = 'Rejected';
+                pendingStep.actionedAt = new Date();
+                pendingStep.comment = updates.rejectionReason;
+            } else {
+                fine.workflow.push({
+                    role: 'Reviewer',
+                    assignedTo: req.user?._id,
+                    status: 'Rejected',
+                    assignedAt: new Date(),
+                    actionedAt: new Date(),
+                    comment: updates.rejectionReason
+                });
+            }
         }
 
         const updatedFine = await fine.save();
+
+        // === SYNC DASHBOARD ACTION ===
+        try {
+            const { syncDashboardAction } = await import("../../utils/syncDashboard.js");
+            const targetEmpId = (updatedFine.assignedEmployees && updatedFine.assignedEmployees.length > 0)
+                ? updatedFine.assignedEmployees[0].employeeId
+                : null;
+            const subjectEmp = targetEmpId ? await EmployeeBasic.findOne({ employeeId: targetEmpId }) : null;
+
+            // 1. Resolve current pending steps
+            await syncDashboardAction({
+                requestId: updatedFine._id,
+                requestType: 'Fine',
+                status: updatedFine.fineStatus,
+                subjectEmployee: subjectEmp,
+                actionedBy: req.user?._id,
+                comment: updatedFine.rejectionReason
+            });
+
+            // 2. If there's a new pending step, create it
+            const nextPendingStep = updatedFine.workflow?.find(w => w.status === 'Pending');
+            if (nextPendingStep) {
+                await syncDashboardAction({
+                    requestId: updatedFine._id,
+                    requestType: 'Fine',
+                    assignedTo: nextPendingStep.assignedTo,
+                    status: 'Pending',
+                    subjectEmployee: subjectEmp,
+                    extra1: updatedFine.fineType,
+                    extra2: `AED ${updatedFine.fineAmount}`
+                });
+            }
+        } catch (syncErr) {
+            console.error("[UpdateFine] Dashboard Sync Error:", syncErr);
+        }
 
         if (shouldSendApprovalEmail) {
             sendFineApprovalEmail(updatedFine, updatedFine.assignedEmployees).catch(err => console.error("[UpdateFine] Failed to send approval email:", err));

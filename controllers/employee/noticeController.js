@@ -71,6 +71,24 @@ export const requestNotice = async (req, res) => {
         };
         await employee.save();
 
+        // === SYNC DASHBOARD ACTION ===
+        try {
+            const { syncDashboardAction } = await import("../../utils/syncDashboard.js");
+            if (reporteeInit) {
+                await syncDashboardAction({
+                    requestId: employee._id,
+                    requestType: 'Notice Request',
+                    assignedTo: reporteeInit._id,
+                    status: 'Pending',
+                    subjectEmployee: employee,
+                    extra1: reason,
+                    extra2: duration
+                });
+            }
+        } catch (syncErr) {
+            console.error("[RequestNotice] Dashboard Sync Error:", syncErr);
+        }
+
         // Send email to Primary Reportee
         // We need populated reportee data
         const fullEmployee = await getCompleteEmployee(id);
@@ -129,7 +147,10 @@ export const requestNotice = async (req, res) => {
 
 export const updateNoticeStatus = async (req, res) => {
     const { id } = req.params;
-    const { status, actionedBy } = req.body; // status: "Approved" | "Rejected"
+    const { status, actionedBy, rejectionReason } = req.body; // status: "Approved" | "Rejected"
+    if (status === 'Rejected' && (!rejectionReason || rejectionReason.trim().length === 0)) {
+        return res.status(400).json({ message: "Reason for rejection is mandatory." });
+    }
 
     try {
         let employee;
@@ -156,6 +177,7 @@ export const updateNoticeStatus = async (req, res) => {
             if (pendingStep) {
                 pendingStep.status = status;
                 pendingStep.actionedAt = new Date();
+                if (status === 'Rejected') pendingStep.comment = rejectionReason;
             } else {
                 // Fallback if missing
                 employee.noticeRequest.workflow.push({
@@ -163,7 +185,8 @@ export const updateNoticeStatus = async (req, res) => {
                     assignedTo: actionedBy || employee.primaryReportee, // Best effort
                     status: status,
                     assignedAt: new Date(),
-                    actionedAt: new Date()
+                    actionedAt: new Date(),
+                    comment: status === 'Rejected' ? rejectionReason : undefined
                 });
             }
         }
@@ -201,6 +224,21 @@ export const updateNoticeStatus = async (req, res) => {
 
         await employee.save();
 
+        // === SYNC DASHBOARD ACTION ===
+        try {
+            const { syncDashboardAction } = await import("../../utils/syncDashboard.js");
+            await syncDashboardAction({
+                requestId: employee._id,
+                requestType: 'Notice Request',
+                status: status, // Approved or Rejected
+                subjectEmployee: employee,
+                actionedBy: resolvedApproverId,
+                comment: status === 'Rejected' ? rejectionReason : undefined
+            });
+        } catch (syncErr) {
+            console.error("[UpdateNoticeStatus] Dashboard Sync Error:", syncErr);
+        }
+
         // Get Approver Name (Actioned By or Primary Reportee)
         let approverName = "Your Supervisor";
 
@@ -219,9 +257,23 @@ export const updateNoticeStatus = async (req, res) => {
             }
         }
 
-        // Notify Employee
+        // Notify Recipients (Employee + Previous Approvers)
         const employeeEmail = employee.companyEmail || employee.workEmail || employee.email;
-        if (employeeEmail) {
+        let recipients = employeeEmail ? [employeeEmail] : [];
+
+        if (status === 'Rejected' && employee.noticeRequest?.workflow?.length > 0) {
+            const previousApproverIds = employee.noticeRequest.workflow
+                .filter(w => w.status === 'Approved' && w.assignedTo)
+                .map(w => w.assignedTo);
+
+            if (previousApproverIds.length > 0) {
+                const approvers = await EmployeeBasic.find({ _id: { $in: previousApproverIds } }).select('companyEmail workEmail email');
+                const approverEmails = approvers.map(a => a.companyEmail || a.workEmail || a.email).filter(e => e);
+                recipients = [...new Set([...recipients, ...approverEmails])];
+            }
+        }
+
+        if (recipients.length > 0) {
             const employeeName = `${employee.firstName || ""} ${employee.lastName || ""}`.trim();
             const subject = `Notice Period ${status}`;
             const color = status === 'Approved' ? '#10b981' : '#ef4444'; // Green or Red
@@ -243,6 +295,7 @@ export const updateNoticeStatus = async (req, res) => {
             This is to inform you that your Notice Period has been 
             <strong>${status}</strong> by <strong>${approverName}</strong>.
         </p>
+        <p><strong>Reason for Rejection:</strong> ${rejectionReason}</p>
         `}
         
         <p>Thank you for your attention to this matter.</p>
@@ -252,7 +305,7 @@ export const updateNoticeStatus = async (req, res) => {
 </div>
 
             `;
-            await sendEmail(employeeEmail, subject, html);
+            await sendEmail(recipients, subject, html);
         }
 
         res.status(200).json({ message: `Request ${status} successfully.` });

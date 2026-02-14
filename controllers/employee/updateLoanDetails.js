@@ -46,6 +46,32 @@ export const updateLoanDetails = async (req, res) => {
                     sendEmail = true;
                 }
             }
+        } else if (req.body.resubmit && oldStatus === 'Rejected') {
+            // === RESUBMIT LOGIC ===
+            console.log("[UpdateLoan] Resubmitting previously rejected loan.");
+            const rejectedStep = (loan.workflow || []).find(w => w.status === 'Rejected');
+            if (rejectedStep) {
+                // Reset the rejected step to Pending
+                rejectedStep.status = 'Pending';
+                rejectedStep.actionedAt = null;
+                if (reason) rejectedStep.comment = `RESUBMITTED: ${reason}`;
+
+                loan.status = 'Pending';
+                loan.approvalStatus = rejectedStep.role === 'Manager' ? 'Pending' :
+                    rejectedStep.role === 'Accounts' ? 'Pending Accounts' :
+                        'Pending Authorization';
+
+                loan.submittedTo = rejectedStep.assignedTo;
+                sendEmail = true;
+
+                // For email logic
+                employeeBasic = await getCompleteEmployee(loan.employeeObjectId);
+                const User = await import("../../models/User.js").then(m => m.default);
+                const nextUser = await User.findById(rejectedStep.assignedTo);
+                if (nextUser) {
+                    reportee = await EmployeeBasic.findOne({ employeeId: nextUser.employeeId });
+                }
+            }
         }
 
         const savedLoan = await loan.save();

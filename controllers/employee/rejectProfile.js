@@ -5,6 +5,9 @@ import { sendProfileNotification } from "../../utils/sendProfileNotification.js"
 export const rejectProfile = async (req, res) => {
     const { id } = req.params;
     const { reason } = req.body;
+    if (!reason || reason.trim().length === 0) {
+        return res.status(400).json({ message: "Reason for rejection is mandatory." });
+    }
 
     try {
         // Get employee record
@@ -37,6 +40,21 @@ export const rejectProfile = async (req, res) => {
 
         if (!updated) {
             return res.status(404).json({ message: "Employee submission not found" });
+        }
+
+        // === SYNC DASHBOARD ACTION ===
+        try {
+            const { syncDashboardAction } = await import("../../utils/syncDashboard.js");
+            await syncDashboardAction({
+                requestId: updated._id,
+                requestType: 'Profile Activation',
+                status: 'Rejected',
+                subjectEmployee: updated,
+                actionedBy: req.user?._id,
+                comment: reason
+            });
+        } catch (syncErr) {
+            console.error("[RejectProfile] Dashboard Sync Error:", syncErr);
         }
 
         // Get complete employee data for response
