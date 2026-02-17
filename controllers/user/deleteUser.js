@@ -31,7 +31,7 @@ export const deleteUser = async (req, res) => {
             rewardActions,
             loanActions
         ] = await Promise.all([
-            import("../../models/EmployeeBasic.js").then(m => m.default.findOne({ email: user.email })), // Check by email as well to be safe
+            import("../../models/EmployeeBasic.js").then(m => m.default.findOne({ email: user.email })),
             import("../../models/Fine.js").then(m => m.default.countDocuments({ createdBy: id })),
             import("../../models/Reward.js").then(m => m.default.countDocuments({ createdBy: id })),
             import("../../models/Loan.js").then(m => m.default.countDocuments({ createdBy: id })),
@@ -44,9 +44,43 @@ export const deleteUser = async (req, res) => {
             }))
         ]);
 
+        const blockers = [];
+
+        // Check if linked to an employee with active responsibilities
         if (linkedEmployee) {
+            const [reportees, companyResponsibilities] = await Promise.all([
+                import("../../models/EmployeeBasic.js").then(m => m.default.find({
+                    $or: [
+                        { reportingAuthority: linkedEmployee._id },
+                        { primaryReportee: linkedEmployee._id },
+                        { secondaryReportee: linkedEmployee._id }
+                    ]
+                }).select('firstName lastName employeeId')),
+                import("../../models/Company.js").then(m => m.default.find({
+                    "responsibilities.empObjectId": linkedEmployee._id
+                }).select('name responsibilities'))
+            ]);
+
+            if (reportees.length > 0) {
+                const reporteeNames = reportees.map(r => `${r.firstName} ${r.lastName} (${r.employeeId})`).slice(0, 5).join(', ');
+                const moreText = reportees.length > 5 ? ` and ${reportees.length - 5} others` : '';
+                blockers.push(`User is a Reporting Authority for: ${reporteeNames}${moreText}.`);
+            }
+
+            if (companyResponsibilities.length > 0) {
+                companyResponsibilities.forEach(comp => {
+                    const roles = comp.responsibilities
+                        .filter(r => r.empObjectId?.toString() === linkedEmployee._id.toString())
+                        .map(r => r.category)
+                        .filter((v, i, a) => a.indexOf(v) === i); // Unique categories
+                    blockers.push(`User is assigned as ${roles.join(', ')} for company "${comp.name}".`);
+                });
+            }
+        }
+
+        if (blockers.length > 0) {
             return res.status(400).json({
-                message: "Cannot delete user. This account is linked to an active employee profile. Deactivate the employee first."
+                message: `Cannot delete user. ${blockers.join(' ')} Please reassign these responsibilities before deleting the profile.`
             });
         }
 

@@ -5,7 +5,8 @@ import { sensitiveActionLimiter } from "../middleware/rateLimitMiddleware.js";
 
 const router = express.Router();
 
-router.post("", sensitiveActionLimiter, login);
+// router.post("", sensitiveActionLimiter, login);
+router.post("", login);
 
 export default router;
 

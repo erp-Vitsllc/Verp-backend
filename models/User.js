@@ -44,6 +44,10 @@ const userSchema = new mongoose.Schema(
         passwordExpiryDate: { type: Date, default: null }, // Password expires in 180 days
         passwordHistory: [{ type: String }], // Array of hashed previous passwords
 
+        // Login Protection
+        loginAttempts: { type: Number, default: 0 },
+        lockUntil: { type: Date, default: null },
+
         // Profile Picture
         profilePicture: { type: String, default: null },
 

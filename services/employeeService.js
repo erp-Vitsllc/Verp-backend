@@ -852,16 +852,37 @@ export const saveEmployeeData = async (employeeId, updatePayload) => {
 
         await Promise.all(updatePromises);
 
-        // Sync companyEmail to User model if updated
-        if (basicUpdate.companyEmail !== undefined) {
+        // Sync companyEmail and Name to User model if updated
+        if (basicUpdate.companyEmail !== undefined || basicUpdate.firstName !== undefined || basicUpdate.lastName !== undefined) {
             try {
-                // Find linked User by employeeId and update their companyEmail
-                await User.findOneAndUpdate(
-                    { employeeId: employeeId },
-                    { $set: { companyEmail: basicUpdate.companyEmail } }
-                );
+                const userUpdate = {};
+                if (basicUpdate.companyEmail !== undefined) userUpdate.companyEmail = basicUpdate.companyEmail;
+
+                // If name changed, update User.name too
+                if (basicUpdate.firstName !== undefined || basicUpdate.lastName !== undefined) {
+                    const currentEmp = await EmployeeBasic.findOne({ employeeId }).select('firstName lastName').lean();
+                    const fName = basicUpdate.firstName !== undefined ? basicUpdate.firstName : (currentEmp?.firstName || '');
+                    const lName = basicUpdate.lastName !== undefined ? basicUpdate.lastName : (currentEmp?.lastName || '');
+                    userUpdate.name = `${fName} ${lName}`.trim();
+
+                    // Also sync DashboardAction.subjectName for PENDING actions
+                    const DashboardAction = (await import("../models/DashboardAction.js")).default;
+                    await DashboardAction.updateMany(
+                        { subjectEmployeeId: employeeId, status: 'Pending' },
+                        { $set: { subjectName: userUpdate.name } }
+                    );
+                    console.log(`[saveEmployeeData] Synced new name "${userUpdate.name}" to pending dashboard actions for ${employeeId}`);
+                }
+
+                if (Object.keys(userUpdate).length > 0) {
+                    await User.findOneAndUpdate(
+                        { employeeId: employeeId },
+                        { $set: userUpdate }
+                    );
+                    console.log(`[saveEmployeeData] Synced updates to User record for ${employeeId}:`, Object.keys(userUpdate));
+                }
             } catch (err) {
-                console.error(`[saveEmployeeData] Error syncing companyEmail to User record for ${employeeId}:`, err);
+                console.error(`[saveEmployeeData] Error syncing updates to User record for ${employeeId}:`, err);
             }
         }
 

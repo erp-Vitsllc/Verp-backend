@@ -105,42 +105,54 @@ export const getTeamStats = async (req, res) => {
             const subReporteeIds = subReportees.map(r => r._id);
             const subReporteeCustomIds = subReportees.map(r => r.employeeId);
 
-            // Queries (Copied from getUserActivityStats logic)
+            // IDs that represent this reportee
+            const reporteeUser = await User.findOne({ employeeId: reportee.employeeId });
+            const relevantIds = [reportee._id, reporteeUser?._id].filter(Boolean);
+
+            // Queries (Unified with getUserActivityStats logic)
+            const DashboardAction = await import("../../models/DashboardAction.js").then(m => m.default);
+            const dashboardPendingItems = await DashboardAction.find({
+                $or: [
+                    { assignedTo: { $in: relevantIds } },
+                    { assignedToEmpId: reportee.employeeId }
+                ],
+                status: 'Pending'
+            }).lean();
+
             const queries = [
-                // Pending Profiles (Updated for Snapshot Logic)
+                // Pending Profiles
                 EmployeeBasic.find({
                     $or: [
-                        { profileSubmittedTo: reportee._id, profileApprovalStatus: 'submitted' },
-                        { profileSubmittedTo: null, primaryReportee: reportee._id, profileApprovalStatus: 'submitted' } // Legacy fallback
+                        { profileSubmittedTo: { $in: relevantIds }, profileApprovalStatus: 'submitted' },
+                        { profileSubmittedTo: null, primaryReportee: reportee._id, profileApprovalStatus: 'submitted' }
                     ]
                 }),
-                // Pending Notices (Updated for Snapshot Logic)
+                // Pending Notices
                 EmployeeBasic.find({
                     "noticeRequest.requestedAt": { $exists: true },
                     $or: [
-                        { 'noticeRequest.submittedTo': reportee._id, 'noticeRequest.status': 'Pending' },
+                        { 'noticeRequest.submittedTo': { $in: relevantIds }, 'noticeRequest.status': 'Pending' },
                         { 'noticeRequest.submittedTo': null, primaryReportee: reportee._id, 'noticeRequest.status': 'Pending' }
                     ]
                 }),
                 // Pending Loans
                 Loan.find({
                     $or: [
-                        { submittedTo: reportee._id, status: 'Pending' },
-                        { submittedTo: null, employeeObjectId: reportee._id, status: 'Pending' }
+                        { submittedTo: { $in: relevantIds }, status: 'Pending' },
+                        { submittedTo: null, employeeObjectId: { $in: relevantIds }, status: 'Pending' }
                     ]
                 }),
                 // Pending Rewards
                 Reward.find({
                     $or: [
-                        { submittedTo: reportee._id, rewardStatus: 'Pending' },
+                        { submittedTo: { $in: relevantIds }, rewardStatus: 'Pending' },
                         { submittedTo: null, employeeId: reportee.employeeId, rewardStatus: 'Pending' }
                     ]
                 }),
                 // Pending Fines
                 Fine.find({
                     $or: [
-                        { submittedTo: reportee._id, 'assignedEmployees.approvalStatus': 'Pending' },
-                        // Note: Fine schema structure for assignedEmployees matches element match logic
+                        { submittedTo: { $in: relevantIds }, 'assignedEmployees.approvalStatus': 'Pending' },
                         { submittedTo: null, 'assignedEmployees': { $elemMatch: { employeeId: reportee.employeeId, approvalStatus: 'Pending' } } }
                     ]
                 })
@@ -148,51 +160,126 @@ export const getTeamStats = async (req, res) => {
 
             const [pendingProfiles, pendingNotices, pendingLoans, pendingRewards, pendingFines] = await Promise.all(queries);
 
-            // Actioned History (Limited to 10 each, just like getUserActivityStats)
-            const myActionedLoans = await Loan.find({ approvedBy: reportee._id }).sort({ updatedAt: -1 }).limit(10);
-            const myActionedNotices = await EmployeeBasic.find({ 'noticeRequest.actionedBy': reportee._id }).sort({ 'noticeRequest.actionedAt': -1 }).limit(10);
+            // Outgoing Requests (To satisfy 'Total' count like individual dashboard)
+            const outgoingQueries = [
+                Loan.find({ $or: [{ employeeId: reportee.employeeId }, { createdBy: reporteeUser?._id }] }).limit(10),
+                Reward.find({ $or: [{ employeeId: reportee.employeeId }, { createdBy: reporteeUser?._id }] }).limit(10),
+                Fine.find({ $or: [{ "assignedEmployees.employeeId": reportee.employeeId }, { createdBy: reporteeUser?._id }] }).limit(10)
+            ];
+            const [myLoans, myRewards, myFines] = await Promise.all(outgoingQueries);
 
-            // For Rewards/Fines we need the User object of the reportee (to match approvedBy)
-            const reporteeUser = await User.findOne({ employeeId: reportee.employeeId });
-            let myActionedRewards = [];
-            let myActionedFines = [];
+            // Actioned History (Items this user approved/rejected)
+            const myActionedLoans = await Loan.find({
+                workflow: {
+                    $elemMatch: {
+                        assignedTo: { $in: relevantIds },
+                        status: { $in: ['Approved', 'Rejected'] }
+                    }
+                }
+            }).sort({ updatedAt: -1 }).limit(10);
 
-            if (reporteeUser) {
-                [myActionedRewards, myActionedFines] = await Promise.all([
-                    Reward.find({ approvedBy: reporteeUser._id }).sort({ updatedAt: -1 }).limit(10),
-                    Fine.find({ 'assignedEmployees.approvedBy': reporteeUser._id }).sort({ updatedAt: -1 }).limit(10)
-                ]);
-            }
+            const myActionedRewards = await Reward.find({
+                workflow: {
+                    $elemMatch: {
+                        assignedTo: { $in: relevantIds },
+                        status: { $in: ['Approved', 'Rejected'] }
+                    }
+                }
+            }).sort({ updatedAt: -1 }).limit(10);
 
-            // Combine into a list to count stats
-            let items = [];
+            const myActionedFines = await Fine.find({
+                workflow: {
+                    $elemMatch: {
+                        assignedTo: { $in: relevantIds },
+                        status: { $in: ['Approved', 'Rejected'] }
+                    }
+                }
+            }).sort({ updatedAt: -1 }).limit(10);
 
-            // Add Pending
-            pendingProfiles.forEach(p => items.push({ status: 'Pending', date: p.createdAt }));
-            pendingNotices.forEach(p => items.push({ status: 'Pending', date: p.noticeRequest.requestedAt }));
-            pendingLoans.forEach(p => items.push({ status: 'Pending', date: p.createdAt }));
-            pendingRewards.forEach(p => items.push({ status: 'Pending', date: p.createdAt }));
-            pendingFines.forEach(p => items.push({ status: 'Pending', date: p.createdAt })); // Approximate
+            const myActionedProfiles = await EmployeeBasic.find({
+                profileWorkflow: {
+                    $elemMatch: {
+                        assignedTo: { $in: relevantIds },
+                        status: { $in: ['active', 'rejected'] }
+                    }
+                }
+            }).sort({ updatedAt: -1 }).limit(10);
 
-            // Add Actioned
-            myActionedLoans.forEach(p => items.push({ status: p.status === 'Rejected' ? 'Rejected' : 'Approved' }));
-            myActionedNotices.forEach(p => items.push({ status: p.noticeRequest.status }));
-            myActionedRewards.forEach(p => items.push({ status: p.rewardStatus === 'Rejected' ? 'Rejected' : 'Approved' }));
+            const myActionedNotices = await EmployeeBasic.find({
+                'noticeRequest.workflow': {
+                    $elemMatch: {
+                        assignedTo: { $in: relevantIds },
+                        status: { $in: ['Approved', 'Rejected'] }
+                    }
+                }
+            }).sort({ 'noticeRequest.actionedAt': -1 }).limit(10);
 
-            myActionedFines.forEach(f => {
-                const myEntry = f.assignedEmployees.find(e => e.approvedBy?.toString() === (reporteeUser ? reporteeUser._id.toString() : ''));
-                if (myEntry) items.push({ status: myEntry.approvalStatus === 'Rejected' ? 'Rejected' : 'Approved' });
+            // Build Unified List like getUserActivityStats
+            const items = [];
+            const seen = new Set();
+
+            // 1. Inbox (DashboardAction + Fallbacks)
+            dashboardPendingItems.forEach(i => {
+                if (!seen.has(i.requestId.toString())) {
+                    items.push({ status: 'Pending', scope: 'inbox', date: i.requestedDate });
+                    seen.add(i.requestId.toString());
+                }
+            });
+            pendingProfiles.forEach(p => {
+                if (!seen.has(p._id.toString())) {
+                    items.push({ status: 'Pending', scope: 'inbox', date: p.createdAt });
+                    seen.add(p._id.toString());
+                }
+            });
+            pendingNotices.forEach(p => {
+                const id = p._id.toString() + "_notice";
+                if (!seen.has(id)) {
+                    items.push({ status: 'Pending', scope: 'inbox', date: p.noticeRequest?.requestedAt });
+                    seen.add(id);
+                }
+            });
+            pendingLoans.forEach(l => {
+                if (!seen.has(l._id.toString())) {
+                    items.push({ status: 'Pending', scope: 'inbox', date: l.createdAt });
+                    seen.add(l._id.toString());
+                }
+            });
+            pendingRewards.forEach(r => {
+                if (!seen.has(r._id.toString())) {
+                    items.push({ status: 'Pending', scope: 'inbox', date: r.createdAt });
+                    seen.add(r._id.toString());
+                }
+            });
+            pendingFines.forEach(f => {
+                if (!seen.has(f._id.toString())) {
+                    items.push({ status: 'Pending', scope: 'inbox', date: f.createdAt });
+                    seen.add(f._id.toString());
+                }
             });
 
-            // Calculate Counts for this Reportee
-            const total = items.length;
-            const pending = items.filter(i => i.status === 'Pending').length;
-            const approved = items.filter(i => i.status === 'Approved').length;
-            const rejected = items.filter(i => i.status === 'Rejected').length;
-            const completed = approved + rejected;
+            // 2. Outgoing
+            myLoans.forEach(l => { if (!seen.has(l._id.toString())) { items.push({ status: 'Pending', scope: 'outgoing' }); seen.add(l._id.toString()); } });
+            myRewards.forEach(r => { if (!seen.has(r._id.toString())) { items.push({ status: 'Pending', scope: 'outgoing' }); seen.add(r._id.toString()); } });
+            myFines.forEach(f => { if (!seen.has(f._id.toString())) { items.push({ status: 'Pending', scope: 'outgoing' }); seen.add(f._id.toString()); } });
 
-            // Overdue Calculation (Only for Pending)
-            const overdue = items.filter(i => isOverdue(i.date, i.status)).length;
+            // 3. Actioned History
+            myActionedLoans.forEach(l => items.push({ status: l.status === 'Rejected' ? 'Rejected' : 'Approved', scope: 'inbox' }));
+            myActionedRewards.forEach(r => items.push({ status: r.rewardStatus === 'Rejected' ? 'Rejected' : 'Approved', scope: 'inbox' }));
+            myActionedFines.forEach(f => items.push({ status: f.fineStatus === 'Rejected' ? 'Rejected' : 'Approved', scope: 'inbox' }));
+            myActionedProfiles.forEach(p => items.push({ status: p.profileApprovalStatus === 'rejected' ? 'Rejected' : 'Approved', scope: 'inbox' }));
+            myActionedNotices.forEach(p => items.push({ status: p.noticeRequest?.status || 'Approved', scope: 'inbox' }));
+
+            // Calculate Counts for this Reportee
+            const inboxItems = items.filter(i => i.scope === 'inbox');
+            const pendingInbox = inboxItems.filter(i => i.status === 'Pending');
+            const actioned = inboxItems.filter(i => i.status === 'Approved' || i.status === 'Rejected');
+
+            const pending = pendingInbox.length;
+            const completed = actioned.length;
+            const total = pending + completed;
+            const approved = inboxItems.filter(i => i.status === 'Approved').length;
+            const rejected = inboxItems.filter(i => i.status === 'Rejected').length;
+            const overdue = pendingInbox.filter(i => isOverdue(i.date, i.status)).length;
 
             // Add to Global Sum
             combinedStats.total += total;

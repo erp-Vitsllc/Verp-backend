@@ -4,6 +4,8 @@ import Company from "../../models/Company.js";
 import User from "../../models/User.js";
 import { uploadDocumentToS3 } from "../../utils/s3Upload.js";
 import nodemailer from "nodemailer";
+import { getDepartmentHOD } from "../../utils/getDepartmentHOD.js";
+import { getManagementHOD } from "../../utils/getManagementHOD.js";
 
 /**
  * Generate auto-incrementing reward ID in format: re1322, re1323, etc.

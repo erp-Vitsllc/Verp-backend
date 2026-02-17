@@ -392,10 +392,17 @@ export const approveLoan = async (req, res) => {
             if (nextApprover && (nextApprover.companyEmail || nextApprover.email)) {
                 try {
                     let htmlContent = "";
+                    const applicantName = loan.applicantName || (applicant ? `${applicant.firstName} ${applicant.lastName}` : 'Employee');
+                    const workflowHistoryHtml = (loan.workflow || []).map(w => `
+                        <div style="margin-bottom: 8px; font-size: 13px; display: flex; align-items: center; gap: 10px;">
+                            <span style="color: ${w.status === 'Approved' ? '#059669' : w.status === 'Rejected' ? '#dc2626' : '#64748b'}; font-weight: 800; font-size: 14px;">${w.status === 'Approved' ? '✓' : w.status === 'Rejected' ? '✗' : '○'}</span>
+                            <strong style="width: 80px; color: #475569;">${w.role}:</strong> 
+                            <span style="color: #1e293b; font-weight: 600;">${w.status}</span>
+                            ${w.actionedAt ? `<span style="color: #94a3b8; font-size: 11px;">(${new Date(w.actionedAt).toLocaleDateString()})</span>` : ''}
+                        </div>
+                    `).join('');
 
                     if (emailType === "Manager") {
-                        // High quality template for Manager (matches requestLoan.js)
-                        const applicantName = loan.applicantName;
                         const type = loan.type || 'Loan/Advance';
                         const amount = loan.amount;
                         const duration = loan.duration;
@@ -403,24 +410,43 @@ export const approveLoan = async (req, res) => {
                         const employeeId = loan.employeeId;
 
                         htmlContent = `
-                            <div style="font-family: Arial, sans-serif; color: #333; line-height: 1.6; max-width: 600px; margin: 0 auto; border: 1px solid #eee; border-radius: 10px; overflow: hidden;">
-                                <div style="background-color: #0d9488; color: white; padding: 20px; text-align: center;">
-                                    <h2 style="margin: 0;">${type} Application Review</h2>
+                            <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; color: #333; line-height: 1.6; max-width: 600px; margin: 0 auto; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden;">
+                                <div style="background: linear-gradient(135deg, #0d9488 0%, #0f766e 100%); color: white; padding: 25px; text-align: center;">
+                                    <h2 style="margin: 0; font-size: 20px; font-weight: 800;">PENDING REVIEW: ${type.toUpperCase()}</h2>
+                                    <p style="margin: 5px 0 0 0; opacity: 0.85; font-size: 14px;">Reference: ${loan.loanId || loan._id}</p>
                                 </div>
-                                <div style="padding: 30px;">
+                                <div style="padding: 30px; background-color: #ffffff;">
                                     <p>Hello <strong>${nextApprover.firstName}</strong>,</p>
-                                    <p><strong>${applicantName}</strong> has submitted a request for ${type} (previously saved as Draft).</p>
+                                    <p>An application for <strong>${type}</strong> from <strong>${applicantName}</strong> is pending your review.</p>
                                     
-                                    <div style="background-color: #f0fdfa; padding: 20px; border-radius: 8px; border: 1px solid #ccfbf1; margin: 25px 0;">
-                                        <p style="margin: 0;"><strong>Employee:</strong> ${applicantName} (${employeeId})</p>
-                                        <p style="margin: 8px 0 0 0;"><strong>Type:</strong> ${type}</p>
-                                        <p style="margin: 8px 0 0 0;"><strong>Amount:</strong> AED ${Number(amount).toLocaleString()}</p>
-                                        <p style="margin: 8px 0 0 0;"><strong>Duration:</strong> ${duration} Months</p>
-                                        <p style="margin: 8px 0 0 0;"><strong>Reason:</strong> ${reason}</p>
+                                    <div style="background-color: #f8fafc; padding: 25px; border-radius: 10px; border-left: 4px solid #0d9488; margin: 25px 0;">
+                                        <table style="width: 100%; border-collapse: collapse;">
+                                            <tr>
+                                                <td style="padding: 6px 0; color: #64748b; font-size: 13px; width: 40%;"><strong>Applicant:</strong></td>
+                                                <td style="padding: 6px 0; color: #1e293b; font-size: 14px; font-weight: 600;">${applicantName} (${employeeId})</td>
+                                            </tr>
+                                            <tr>
+                                                <td style="padding: 6px 0; color: #64748b; font-size: 13px;"><strong>Amount:</strong></td>
+                                                <td style="padding: 6px 0; color: #0d9488; font-size: 16px; font-weight: 800;">AED ${Number(amount).toLocaleString()}</td>
+                                            </tr>
+                                            <tr>
+                                                <td style="padding: 6px 0; color: #64748b; font-size: 13px;"><strong>Duration:</strong></td>
+                                                <td style="padding: 6px 0; color: #1e293b; font-size: 14px;">${duration} Months</td>
+                                            </tr>
+                                            <tr>
+                                                <td style="padding: 6px 0; color: #64748b; font-size: 13px;"><strong>Reason:</strong></td>
+                                                <td style="padding: 6px 0; color: #475569; font-size: 13px; font-style: italic;">"${reason}"</td>
+                                            </tr>
+                                        </table>
+                                    </div>
+
+                                    <div style="margin-top: 25px; border: 1px solid #f1f5f9; padding: 20px; border-radius: 8px;">
+                                        <h4 style="margin: 0 0 15px 0; font-size: 13px; color: #1e293b; text-transform: uppercase;">Application Progress:</h4>
+                                        ${workflowHistoryHtml}
                                     </div>
                                     
                                     <p style="text-align: center; margin: 35px 0;">
-                                        <a href="${actionUrl}" style="background-color: #0d9488; color: white; padding: 14px 30px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block; font-size: 16px;">View Request</a>
+                                        <a href="${actionUrl}" style="background-color: #0d9488; color: white; padding: 14px 35px; text-decoration: none; border-radius: 8px; font-weight: bold; display: inline-block;">Action Request</a>
                                     </p>
                                 </div>
                             </div>
@@ -428,17 +454,39 @@ export const approveLoan = async (req, res) => {
                     } else {
                         // Standard template for HR/Finance/CEO
                         htmlContent = `
-                            <div style="font-family: Arial, sans-serif; color: #333; max-width: 600px; margin: 0 auto; border: 1px solid #eee; border-radius: 10px; overflow: hidden;">
-                                <div style="background-color: #f59e0b; color: white; padding: 20px; text-align: center;">
-                                    <h2 style="margin: 0;">Action Required: ${emailSubject}</h2>
+                            <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; color: #333; line-height: 1.6; max-width: 600px; margin: 0 auto; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden;">
+                                <div style="background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%); color: white; padding: 25px; text-align: center;">
+                                    <h2 style="margin: 0; font-size: 20px; font-weight: 800;">${emailSubject.toUpperCase()}</h2>
+                                    <p style="margin: 5px 0 0 0; opacity: 0.85; font-size: 14px;">Reference: ${loan.loanId || loan._id}</p>
                                 </div>
-                                <div style="padding: 30px;">
-                                    <p>Dear ${nextApprover.firstName},</p>
+                                <div style="padding: 30px; background-color: #ffffff;">
+                                    <p>Dear <strong>${nextApprover.firstName}</strong>,</p>
                                     <p>A loan application requires your review at the <strong>${emailType}</strong> stage.</p>
-                                    <p><strong>Applicant:</strong> ${loan.applicantName}</p>
-                                    <p><strong>Amount:</strong> AED ${Number(loan.amount).toLocaleString()}</p>
-                                    <div style="text-align: center; margin: 30px 0;">
-                                        <a href="${actionUrl}" style="background-color: #f59e0b; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; font-weight: bold;">Review Application</a>
+                                    
+                                    <div style="background-color: #fffbeb; padding: 25px; border-radius: 10px; border-left: 4px solid #f59e0b; margin: 25px 0;">
+                                        <table style="width: 100%; border-collapse: collapse;">
+                                            <tr>
+                                                <td style="padding: 6px 0; color: #78350f; font-size: 13px; width: 40%;"><strong>Applicant:</strong></td>
+                                                <td style="padding: 6px 0; color: #451a03; font-size: 14px; font-weight: 600;">${applicantName}</td>
+                                            </tr>
+                                            <tr>
+                                                <td style="padding: 6px 0; color: #78350f; font-size: 13px;"><strong>Amount:</strong></td>
+                                                <td style="padding: 6px 0; color: #b45309; font-size: 16px; font-weight: 800;">AED ${Number(loan.amount).toLocaleString()}</td>
+                                            </tr>
+                                            <tr>
+                                                <td style="padding: 6px 0; color: #78350f; font-size: 13px;"><strong>Reason:</strong></td>
+                                                <td style="padding: 6px 0; color: #451a03; font-size: 13px;">${loan.reason}</td>
+                                            </tr>
+                                        </table>
+                                    </div>
+
+                                    <div style="margin-top: 25px; border: 1px solid #fef3c7; padding: 20px; border-radius: 8px;">
+                                        <h4 style="margin: 0 0 15px 0; font-size: 13px; color: #451a03; text-transform: uppercase;">Current Approval Path:</h4>
+                                        ${workflowHistoryHtml}
+                                    </div>
+
+                                    <div style="text-align: center; margin: 35px 0;">
+                                        <a href="${actionUrl}" style="background-color: #f59e0b; color: white; padding: 14px 35px; text-decoration: none; border-radius: 8px; font-weight: bold;">Review Application</a>
                                     </div>
                                 </div>
                             </div>
@@ -495,13 +543,38 @@ export const approveLoan = async (req, res) => {
                                         <div style="background-color: #22c55e; color: white; padding: 20px; text-align: center;">
                                             <h2 style="margin: 0;">Congratulations!</h2>
                                         </div>
-                                        <div style="padding: 30px;">
+                                        <div style="padding: 30px; background-color: #ffffff;">
                                             <p>Dear All,</p>
-                                            <p>The loan application for <strong>${applicant.firstName} ${applicant.lastName}</strong> (AED ${Number(loan.amount).toLocaleString()}) has been fully approved by all departments including HR, Finance, and Management.</p>
-                                            <p>Please find the approved document attached.</p>
-                                            <br>
-                                            <p>Best Regards,</p>
-                                            <p>VeRP System</p>
+                                            <p>We are pleased to inform you that the loan application for <strong>${applicant.firstName} ${applicant.lastName}</strong> has been <strong>fully approved</strong>.</p>
+                                            
+                                            <div style="background-color: #f0fdfa; padding: 25px; border-radius: 10px; border-left: 4px solid #22c55e; margin: 25px 0;">
+                                                <table style="width: 100%; border-collapse: collapse;">
+                                                    <tr>
+                                                        <td style="padding: 6px 0; color: #166534; font-size: 13px; width: 40%;"><strong>Amount Approved:</strong></td>
+                                                        <td style="padding: 6px 0; color: #14532d; font-size: 16px; font-weight: 800;">AED ${Number(loan.amount).toLocaleString()}</td>
+                                                    </tr>
+                                                    <tr>
+                                                        <td style="padding: 6px 0; color: #166534; font-size: 13px;"><strong>Final Status:</strong></td>
+                                                        <td style="padding: 6px 0;"><span style="background-color: #dcfce7; color: #166534; padding: 4px 10px; border-radius: 9999px; font-size: 11px; font-weight: 800;">PASSED</span></td>
+                                                    </tr>
+                                                    <tr>
+                                                        <td style="padding: 6px 0; color: #166534; font-size: 13px;"><strong>Approval Date:</strong></td>
+                                                        <td style="padding: 6px 0; color: #14532d; font-size: 14px;">${new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })}</td>
+                                                    </tr>
+                                                </table>
+                                            </div>
+
+                                            <div style="margin-top: 25px; border: 1px solid #f0fdf4; padding: 20px; border-radius: 8px;">
+                                                <h4 style="margin: 0 0 15px 0; font-size: 13px; color: #166534; text-transform: uppercase;">Approval History:</h4>
+                                                ${(loan.workflow || []).map(w => `
+                                                    <div style="margin-bottom: 8px; font-size: 13px;">
+                                                        <span style="color: #22c55e;">✓</span> <strong>${w.role}:</strong> Approved
+                                                    </div>
+                                                `).join('')}
+                                            </div>
+
+                                            <p style="margin-top: 25px; color: #4b5563;">Please find the official approved document attached to this email.</p>
+                                            <p>Best Regards,<br><strong>VeRP System</strong></p>
                                         </div>
                                     </div>
                                 `,
@@ -525,18 +598,24 @@ export const approveLoan = async (req, res) => {
                     if (loan.createdBy) notificationIds.push(loan.createdBy.toString());
 
                     const [applicant, userObjects] = await Promise.all([
-                        EmployeeBasic.findOne({ employeeId: loan.employeeId }).select('firstName lastName email companyEmail'),
+                        EmployeeBasic.findOne({ employeeId: loan.employeeId }).populate('primaryReportee').select('firstName lastName email companyEmail primaryReportee'),
                         User.find({ _id: { $in: notificationIds } }).select('email companyEmail')
                     ]);
 
                     if (applicant) {
                         const recipientEmails = new Set();
 
-                        // Add Applicant
+                        // 1. Add Applicant
                         const appEmail = applicant.companyEmail || applicant.email;
                         if (appEmail) recipientEmails.add(appEmail);
 
-                        // Add Previous Approvers & Requester
+                        // 2. Add Manager Email
+                        if (applicant.primaryReportee) {
+                            const managerEmail = applicant.primaryReportee.companyEmail || applicant.primaryReportee.email;
+                            if (managerEmail) recipientEmails.add(managerEmail);
+                        }
+
+                        // 3. Add Previous Approvers & Requester
                         if (userObjects && userObjects.length > 0) {
                             userObjects.forEach(u => {
                                 const mail = u.companyEmail || u.email;

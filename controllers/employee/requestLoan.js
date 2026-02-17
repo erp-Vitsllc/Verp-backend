@@ -180,35 +180,69 @@ export const requestLoan = async (req, res) => {
 
                     const employeeName = `${employeeBasic.firstName || ""} ${employeeBasic.lastName || ""}`.trim();
                     const reporteeName = `${reportee.firstName || ""} ${reportee.lastName || ""}`.trim();
-                    const subject = `${type} Application: ${employeeName}`;
+                    const subject = `[NEW] ${type} Application: ${employeeName}`;
 
                     // Dynamic URL
                     const origin = req.headers.origin || (req.headers.referer ? new URL(req.headers.referer).origin : null);
                     const baseUrl = process.env.FRONTEND_URL || origin || "http://localhost:3000";
                     const typeSlug = type ? type.replace(/\s+/g, '-') : 'Loan';
-                    const actionUrl = `${baseUrl}/HRM/LoanAndAdvance/${typeSlug}-${savedLoan._id}`; // type-id slug
+                    const actionUrl = `${baseUrl}/HRM/LoanAndAdvance/${typeSlug}-${savedLoan._id}`;
 
                     const html = `
-                        <div style="font-family: Arial, sans-serif; color: #333; line-height: 1.6; max-width: 600px; margin: 0 auto; border: 1px solid #eee; border-radius: 10px; overflow: hidden;">
-                            <div style="background-color: #0d9488; color: white; padding: 20px; text-align: center;">
-                                <h2 style="margin: 0;">${type} Application Review</h2>
+                        <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; color: #333; line-height: 1.6; max-width: 600px; margin: 0 auto; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden; shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);">
+                            <div style="background: linear-gradient(135deg, #0d9488 0%, #0f766e 100%); color: white; padding: 25px; text-align: center;">
+                                <h2 style="margin: 0; font-size: 22px; font-weight: 800; letter-spacing: -0.025em;">${type.toUpperCase()} APPLICATION</h2>
+                                <p style="margin: 5px 0 0 0; opacity: 0.9; font-size: 14px;">Reference ID: ${newLoanId}</p>
                             </div>
-                            <div style="padding: 30px;">
-                                <p>Hello <strong>${reporteeName}</strong>,</p>
-                                <p><strong>${employeeName}</strong> has submitted a request for ${type}.</p>
+                            <div style="padding: 30px; background-color: #ffffff;">
+                                <p style="font-size: 16px;">Hello <strong>${reporteeName}</strong>,</p>
+                                <p style="color: #4b5563;"><strong>${employeeName}</strong> has submitted a new application for a ${type}. Please review the details below:</p>
                                 
-                                <div style="background-color: #f0fdfa; padding: 20px; border-radius: 8px; border: 1px solid #ccfbf1; margin: 25px 0;">
-                                    <p style="margin: 0;"><strong>Employee:</strong> ${employeeName} (${employeeId})</p>
-                                    <p style="margin: 8px 0 0 0;"><strong>Type:</strong> ${type}</p>
-                                    <p style="margin: 8px 0 0 0;"><strong>Amount:</strong> ${Number(amount).toLocaleString()}</p>
-                                    <p style="margin: 8px 0 0 0;"><strong>Duration:</strong> ${duration} Months</p>
-                                    <p style="margin: 8px 0 0 0;"><strong>Start Month:</strong> ${monthStart || 'Immediate'}</p>
-                                    <p style="margin: 8px 0 0 0;"><strong>Reason:</strong> ${reason}</p>
+                                <div style="background-color: #f8fafc; padding: 25px; border-radius: 10px; border-left: 4px solid #0d9488; margin: 25px 0;">
+                                    <table style="width: 100%; border-collapse: collapse;">
+                                        <tr>
+                                            <td style="padding: 8px 0; color: #64748b; font-size: 13px; width: 40%;"><strong>Applied By:</strong></td>
+                                            <td style="padding: 8px 0; color: #1e293b; font-size: 14px; font-weight: 600;">${employeeName} (${employeeId})</td>
+                                        </tr>
+                                        <tr>
+                                            <td style="padding: 8px 0; color: #64748b; font-size: 13px;"><strong>Amount:</strong></td>
+                                            <td style="padding: 8px 0; color: #0d9488; font-size: 16px; font-weight: 800;">AED ${Number(amount).toLocaleString()}</td>
+                                        </tr>
+                                        <tr>
+                                            <td style="padding: 8px 0; color: #64748b; font-size: 13px;"><strong>Current Status:</strong></td>
+                                            <td style="padding: 8px 0;"><span style="background-color: #fef3c7; color: #92400e; padding: 4px 10px; border-radius: 9999px; font-size: 11px; font-weight: 800; text-transform: uppercase;">${targetStatus}</span></td>
+                                        </tr>
+                                        <tr>
+                                            <td style="padding: 8px 0; color: #64748b; font-size: 13px;"><strong>Created On:</strong></td>
+                                            <td style="padding: 8px 0; color: #1e293b; font-size: 14px;">${new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })}</td>
+                                        </tr>
+                                        <tr>
+                                            <td style="padding: 8px 0; color: #64748b; font-size: 13px;"><strong>Duration:</strong></td>
+                                            <td style="padding: 8px 0; color: #1e293b; font-size: 14px;">${duration} Months</td>
+                                        </tr>
+                                        <tr>
+                                            <td style="padding: 8px 0; color: #64748b; font-size: 13px;"><strong>Reason:</strong></td>
+                                            <td style="padding: 8px 0; color: #475569; font-size: 14px; font-style: italic;">"${reason}"</td>
+                                        </tr>
+                                    </table>
+                                </div>
+
+                                <div style="margin-top: 20px; border-top: 1px dashed #e2e8f0; padding-top: 20px;">
+                                    <h4 style="margin: 0 0 10px 0; font-size: 14px; color: #1e293b; text-transform: uppercase; letter-spacing: 0.05em;">Initial Workflow Steps:</h4>
+                                    <div style="font-size: 12px; color: #64748b;">
+                                        <div style="margin-bottom: 5px;">✅ 1. Submission (Completed)</div>
+                                        <div style="margin-bottom: 5px;">⏳ 2. Line Manager Approval (Pending)</div>
+                                        <div style="margin-bottom: 5px;">◽ 3. HR Verification</div>
+                                        <div style="margin-bottom: 5px;">◽ 4. Finance Approval</div>
+                                        <div style="margin-bottom: 5px;">◽ 5. Final Management Authorization</div>
+                                    </div>
                                 </div>
                                 
-                                <p style="text-align: center; margin: 35px 0;">
-                                    <a href="${actionUrl}" style="background-color: #0d9488; color: white; padding: 14px 30px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block; font-size: 16px;">View Request</a>
+                                <p style="text-align: center; margin: 40px 0 20px 0;">
+                                    <a href="${actionUrl}" style="background: #0d9488; color: white; padding: 16px 40px; text-decoration: none; border-radius: 8px; font-weight: bold; display: inline-block; font-size: 16px; box-shadow: 0 4px 6px -1px rgba(13, 148, 136, 0.3);">Review & Action</a>
                                 </p>
+                                
+                                <p style="font-size: 12px; color: #94a3b8; text-align: center;">This is an automated notification from the VeRP System. Please do not reply directly to this email.</p>
                             </div>
                         </div>
                     `;

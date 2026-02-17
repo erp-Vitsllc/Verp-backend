@@ -5,6 +5,8 @@ import { isValidStorageUrl } from "../../utils/validationHelper.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import User from "../../models/User.js";
 import { sendFineApprovalEmail } from "../../utils/sendFineApprovalEmail.js";
+import { getDepartmentHOD } from "../../utils/getDepartmentHOD.js";
+import { getManagementHOD } from "../../utils/getManagementHOD.js";
 
 export const updateFine = async (req, res) => {
     try {
@@ -83,8 +85,32 @@ export const updateFine = async (req, res) => {
                             if (managerEmail) reporteeUser = await User.findOne({ $or: [{ email: managerEmail }, { username: managerEmail }] });
                         }
                         if (reporteeUser) {
-                            fine.submittedTo = reporteeUser._id;
-                            fine.workflow = [{ role: 'Reportee', assignedTo: reporteeUser._id, status: 'Pending', assignedAt: new Date() }];
+                            // NEXT PERSON LOGIC: If Manager is submitting, jump to HR
+                            if (reporteeUser._id.toString() === req.user?._id?.toString()) {
+                                console.log("[UpdateFine] Submitter is the Manager. Jumping to HR step.");
+                                const targetEmp = await EmployeeBasic.findOne({ employeeId: targetEmpId }).select('company').lean();
+                                const hrHOD = await getDepartmentHOD('hr', targetEmp?.company || targetEmpId);
+
+                                if (hrHOD) {
+                                    const hrUser = await User.findOne({ employeeId: hrHOD.employeeId });
+                                    if (hrUser) {
+                                        fine.submittedTo = hrUser._id;
+                                        fine.workflow = [
+                                            { role: 'Reportee', assignedTo: req.user._id, status: 'Approved', assignedAt: new Date(), actionedAt: new Date() },
+                                            { role: 'HR', assignedTo: hrUser._id, status: 'Pending', assignedAt: new Date() }
+                                        ];
+                                    } else {
+                                        fine.submittedTo = reporteeUser._id;
+                                        fine.workflow = [{ role: 'Reportee', assignedTo: reporteeUser._id, status: 'Pending', assignedAt: new Date() }];
+                                    }
+                                } else {
+                                    fine.submittedTo = reporteeUser._id;
+                                    fine.workflow = [{ role: 'Reportee', assignedTo: reporteeUser._id, status: 'Pending', assignedAt: new Date() }];
+                                }
+                            } else {
+                                fine.submittedTo = reporteeUser._id;
+                                fine.workflow = [{ role: 'Reportee', assignedTo: reporteeUser._id, status: 'Pending', assignedAt: new Date() }];
+                            }
                             shouldSendApprovalEmail = true;
                         }
                     }

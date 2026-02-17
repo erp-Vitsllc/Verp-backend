@@ -145,41 +145,42 @@ export const approveFine = async (req, res) => {
 
                     const hrUser = await import("../../models/User.js").then(m => m.default.findOne({ employeeId: hrHOD.employeeId }));
                     if (hrUser) {
-                        fine.submittedTo = hrUser._id;
-                        nextApproverFound = true;
-
-                        // 1. Mark Current User (Reportee/Manager) as Approved in Workflow
+                        // Mark Manager step as approved
                         if (!fine.workflow) fine.workflow = [];
+                        const managerEntry = fine.workflow.find(w => w.status === 'Pending' && (w.assignedTo?.toString() === req.user._id.toString() || w.role === 'Manager' || w.role === 'Reportee'));
+                        if (managerEntry) { managerEntry.status = 'Approved'; managerEntry.actionedAt = new Date(); }
+                        else { fine.workflow.push({ role: 'Manager', assignedTo: req.user._id, status: 'Approved', assignedAt: new Date(), actionedAt: new Date() }); }
 
-                        // Strict check: Find the pending step assigned to ME or my role
-                        const managerEntry = fine.workflow.find(w =>
-                            w.status === 'Pending' &&
-                            (w.assignedTo?.toString() === req.user._id.toString() || w.role === 'Manager' || w.role === 'Reportee')
-                        );
+                        // SKIP SELF LOGIC: If HR is the same as Manager
+                        if (hrUser._id.toString() === req.user._id.toString()) {
+                            console.log("[ApproveFine] HR HOD is the same as current approver. Skipping HR stage.");
+                            fine.hrApprovedBy = req.user._id;
 
-                        if (managerEntry) {
-                            managerEntry.status = 'Approved';
-                            managerEntry.actionedAt = new Date();
+                            // Move to Accounts
+                            const accountsHOD = await import("../../utils/getDepartmentHOD.js").then(m => m.getDepartmentHOD('finance', applicantId));
+                            if (accountsHOD) {
+                                const accUser = await import("../../models/User.js").then(m => m.default.findOne({ employeeId: accountsHOD.employeeId }));
+                                if (accUser && accUser._id.toString() !== req.user._id.toString()) {
+                                    fine.submittedTo = accUser._id;
+                                    fine.fineStatus = 'Pending Accounts';
+                                    fine.workflow.push({ role: 'HR', assignedTo: req.user._id, status: 'Approved', assignedAt: new Date(), actionedAt: new Date() });
+                                    fine.workflow.push({ role: 'Accounts', assignedTo: accUser._id, status: 'Pending', assignedAt: new Date() });
+                                    nextApproverFound = true;
+                                } else if (accUser) {
+                                    // Even Accounts is me? Keep going to Management
+                                    // For now, let's just stop at one skip to avoid infinite recursion or skipping everything
+                                    fine.submittedTo = accUser._id;
+                                    fine.fineStatus = 'Pending Accounts';
+                                    fine.workflow.push({ role: 'HR', assignedTo: req.user._id, status: 'Approved', assignedAt: new Date(), actionedAt: new Date() });
+                                    fine.workflow.push({ role: 'Accounts', assignedTo: accUser._id, status: 'Pending', assignedAt: new Date() });
+                                    nextApproverFound = true;
+                                }
+                            }
                         } else {
-                            // Fallback if no pending step found for me (legacy data)
-                            fine.workflow.push({
-                                role: 'Manager',
-                                assignedTo: req.user._id,
-                                status: 'Approved',
-                                assignedAt: fine.createdAt || new Date(),
-                                actionedAt: new Date()
-                            });
-                        }
-
-                        // 2. Push Next Step (HR) - ONLY if not already pending
-                        const nextStepExists = fine.workflow.some(w => w.role === 'HR' && w.status === 'Pending');
-                        if (!nextStepExists) {
-                            fine.workflow.push({
-                                role: 'HR',
-                                assignedTo: hrUser._id,
-                                status: 'Pending',
-                                assignedAt: new Date()
-                            });
+                            fine.submittedTo = hrUser._id;
+                            fine.fineStatus = 'Pending HR';
+                            fine.workflow.push({ role: 'HR', assignedTo: hrUser._id, status: 'Pending', assignedAt: new Date() });
+                            nextApproverFound = true;
                         }
                     }
                 }

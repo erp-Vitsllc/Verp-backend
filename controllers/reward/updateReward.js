@@ -94,15 +94,68 @@ export const updateReward = async (req, res) => {
                     // Map the rejected role to the equivalent internal stage
                     const roleMap = {
                         'Manager': 'Pending',
+                        'Reportee': 'Pending',
+                        'Primary Reportee': 'Pending',
                         'Accounts': 'Pending Accounts',
                         'Management': 'Pending Authorization'
                     };
 
-                    finalStatus = roleMap[rejectedStep.role] || finalStatus;
+                    finalStatus = roleMap[rejectedStep.role] || 'Pending';
                     reward.approvalStatus = finalStatus;
                     reward.rewardStatus = 'Pending';
+                    reward.submittedTo = rejectedStep.assignedTo;
 
-                    console.log(`[UpdateReward] Resumitting: Role=${rejectedStep.role} -> TargetStage=${finalStatus}`);
+                    console.log(`[UpdateReward] Resubmitting: Role=${rejectedStep.role} -> TargetStage=${finalStatus} -> AssignedTo=${reward.submittedTo}`);
+
+                    // === RESUBMIT EMAIL NOTIFICATION ===
+                    try {
+                        const User = (await import("../../models/User.js")).default;
+                        const nodemailer = (await import("nodemailer")).default;
+                        const targetUser = await User.findById(reward.submittedTo).select('email companyEmail name username');
+
+                        if (targetUser && (targetUser.email || targetUser.companyEmail)) {
+                            const emailUser = process.env.EMAIL_USER || process.env.VERP_EMAIL || process.env.GMAIL_USER;
+                            const emailPass = process.env.EMAIL_PASS || process.env.VERP_PASS || process.env.GMAIL_PASS;
+
+                            if (emailUser && emailPass) {
+                                let smtpHost = (emailUser.includes('@gmail.com') || process.env.GMAIL_USER) ? "smtp.gmail.com" : "smtp.office365.com";
+                                const transporter = nodemailer.createTransport({
+                                    host: smtpHost,
+                                    port: 587,
+                                    secure: false,
+                                    auth: { user: emailUser, pass: emailPass }
+                                });
+
+                                const baseUrl = process.env.FRONTEND_URL || "http://localhost:3000";
+                                const rewardUrl = `${baseUrl}/HRM/Reward/${reward._id}`;
+                                const empName = reward.employeeName || "Employee";
+
+                                await transporter.sendMail({
+                                    from: `"VeRP Notification" <${emailUser}>`,
+                                    to: targetUser.companyEmail || targetUser.email,
+                                    subject: `Resubmitted Reward Request: ${reward.rewardType} - ${empName}`,
+                                    html: `
+                                        <div style="font-family: Arial, sans-serif; color: #333; max-width: 600px; margin: 0 auto; border: 1px solid #eee; border-radius: 8px; overflow: hidden;">
+                                            <div style="background-color: #f8f9fa; padding: 20px; text-align: center; border-bottom: 1px solid #eee;">
+                                                <h2 style="margin: 0; color: #1a2e35;">Reward Resubmitted</h2>
+                                            </div>
+                                            <div style="padding: 20px;">
+                                                <p>Hello ${targetUser.name || targetUser.username},</p>
+                                                <p>The reward request for <strong>${empName}</strong> has been resubmitted after your previous rejection.</p>
+                                                <p><strong>Remarks from Requester:</strong> ${remarks || 'No remarks provided'}</p>
+                                                <div style="text-align: center; margin-top: 30px; margin-bottom: 30px;">
+                                                    <a href="${rewardUrl}" style="background-color: #007bff; color: #ffffff; padding: 12px 24px; text-decoration: none; border-radius: 5px; font-weight: bold; display: inline-block;">Review Resubmission</a>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    `
+                                });
+                                console.log(`[UpdateReward] Resubmit email sent to ${targetUser.email || targetUser.companyEmail}`);
+                            }
+                        }
+                    } catch (mailErr) {
+                        console.error("[UpdateReward] Failed to send resubmit email:", mailErr);
+                    }
                 }
             }
 
@@ -149,75 +202,112 @@ export const updateReward = async (req, res) => {
                             reward.submittedTo = reporteeUser._id;
                             reward.approvalStatus = 'Pending';
 
-                            // Initialize Workflow with multiple steps if Gift/Cash
                             const isCashOrGift = reward.rewardType === 'Cash Reward' || reward.rewardType === 'Gift Reward';
 
-                            reward.workflow = [{
-                                role: 'Manager',
-                                assignedTo: reporteeUser._id,
-                                status: 'Pending',
-                                assignedAt: new Date()
-                            }];
-
-                            const recipients = [{
-                                email: managerBasic.companyEmail || managerBasic.email || reporteeUser.companyEmail || reporteeUser.email,
-                                name: `${managerBasic.firstName} ${managerBasic.lastName}`,
-                                role: 'Primary Reportee'
-                            }];
-
                             // Resolve Company String ID for HOD utilities
-                            let resolvedCompanyId = employeeForSnapshot.company;
-                            if (!resolvedCompanyId) {
+                            let resolvedCompanyIdForSnapshot = employeeForSnapshot.company;
+                            if (!resolvedCompanyIdForSnapshot) {
                                 const creator = await User.findById(req.user?.id).select('employeeId');
                                 if (creator?.employeeId) {
                                     const creatorEmp = await EmployeeBasic.findOne({ employeeId: creator.employeeId }).select('company');
-                                    if (creatorEmp?.company) resolvedCompanyId = creatorEmp.company;
+                                    if (creatorEmp?.company) resolvedCompanyIdForSnapshot = creatorEmp.company;
                                 }
                             }
 
                             let hodContext = reward.employeeId;
-                            if (resolvedCompanyId) {
-                                const companyObj = await Company.findById(resolvedCompanyId).select('companyId');
+                            if (resolvedCompanyIdForSnapshot) {
+                                const companyObj = await Company.findById(resolvedCompanyIdForSnapshot).select('companyId');
                                 if (companyObj?.companyId) hodContext = companyObj.companyId;
                             }
 
-                            if (isCashOrGift) {
-                                // Find Accounts HOD
-                                const accountsHOD = await getDepartmentHOD('accounts', hodContext);
-                                if (accountsHOD) {
-                                    const accountsUser = await User.findOne({ employeeId: accountsHOD.employeeId });
-                                    if (accountsUser) {
-                                        reward.workflow.push({
-                                            role: 'Accounts',
-                                            assignedTo: accountsUser._id,
-                                            status: 'Pending',
-                                            assignedAt: new Date()
-                                        });
-                                        recipients.push({
-                                            email: accountsHOD.companyEmail || accountsHOD.email || accountsUser.companyEmail || accountsUser.email,
-                                            name: `${accountsHOD.firstName} ${accountsHOD.lastName}`,
-                                            role: 'Accounts HOD'
-                                        });
+                            let finalRecipients = [];
+
+                            // NEXT PERSON LOGIC: If the manager is the one submitting, move to next step
+                            if (reporteeUser._id.toString() === req.user?._id?.toString()) {
+                                console.log("[UpdateReward] Submitter is the Manager. Moving to next workflow step.");
+
+                                let nextTarget = null;
+                                let nextTargetRole = null;
+
+                                if (isCashOrGift) {
+                                    // Move to Accounts
+                                    const accountsHOD = await getDepartmentHOD('accounts', hodContext);
+                                    if (accountsHOD) {
+                                        const accountsUser = await User.findOne({ employeeId: accountsHOD.employeeId });
+                                        if (accountsUser) {
+                                            nextTarget = accountsUser;
+                                            nextTargetRole = 'Accounts';
+                                            finalRecipients.push({
+                                                email: accountsHOD.companyEmail || accountsHOD.email || accountsUser.companyEmail || accountsUser.email,
+                                                name: `${accountsHOD.firstName} ${accountsHOD.lastName}`,
+                                                role: 'Accounts HOD'
+                                            });
+                                        }
                                     }
                                 }
-                            }
 
-                            // Management Step (Parallel for Gift/Cash, Sequential for Certificates)
-                            const managementHOD = await getManagementHOD(hodContext);
-                            if (managementHOD) {
-                                const managementUser = await User.findOne({ employeeId: managementHOD.employeeId });
-                                if (managementUser) {
-                                    reward.workflow.push({
-                                        role: 'Management',
-                                        assignedTo: managementUser._id,
-                                        status: isCashOrGift ? 'Pending' : 'Draft', // Only Pending for Gift/Cash
-                                        assignedAt: new Date()
+                                if (!nextTarget) {
+                                    // Move to Management
+                                    const managementHOD = await getManagementHOD(hodContext);
+                                    if (managementHOD) {
+                                        const managementUser = await User.findOne({ employeeId: managementHOD.employeeId });
+                                        if (managementUser) {
+                                            nextTarget = managementUser;
+                                            nextTargetRole = 'Management';
+                                            finalRecipients.push({
+                                                email: managementHOD.companyEmail || managementHOD.email || managementUser.companyEmail || managementUser.email,
+                                                name: `${managementHOD.firstName} ${managementHOD.lastName}`,
+                                                role: 'Management (Manager)'
+                                            });
+                                        }
+                                    }
+                                }
+
+                                if (nextTarget) {
+                                    reward.submittedTo = nextTarget._id;
+                                    reward.workflow = [
+                                        { role: 'Manager', assignedTo: req.user._id, status: 'Approved', assignedAt: new Date(), actionedAt: new Date() },
+                                        { role: nextTargetRole || 'Next', assignedTo: nextTarget._id, status: 'Pending', assignedAt: new Date() }
+                                    ];
+                                } else {
+                                    reward.submittedTo = reporteeUser._id;
+                                    reward.workflow = [{ role: 'Manager', assignedTo: reporteeUser._id, status: 'Pending', assignedAt: new Date() }];
+                                    finalRecipients.push({
+                                        email: managerBasic.companyEmail || managerBasic.email || reporteeUser.companyEmail || reporteeUser.email,
+                                        name: `${managerBasic.firstName} ${managerBasic.lastName}`,
+                                        role: 'Primary Reportee'
                                     });
-                                    recipients.push({
-                                        email: managementHOD.companyEmail || managementHOD.email || managementUser.companyEmail || managementUser.email,
-                                        name: `${managementHOD.firstName} ${managementHOD.lastName}`,
-                                        role: 'Management (Manager)'
-                                    });
+                                }
+                            } else {
+                                reward.submittedTo = reporteeUser._id;
+                                reward.workflow = [{ role: 'Manager', assignedTo: reporteeUser._id, status: 'Pending', assignedAt: new Date() }];
+                                finalRecipients.push({
+                                    email: managerBasic.companyEmail || managerBasic.email || reporteeUser.companyEmail || reporteeUser.email,
+                                    name: `${managerBasic.firstName} ${managerBasic.lastName}`,
+                                    role: 'Primary Reportee'
+                                });
+
+                                // Add other steps for tracker visibility if not already added
+                                if (isCashOrGift) {
+                                    const accountsHOD = await getDepartmentHOD('accounts', hodContext);
+                                    if (accountsHOD) {
+                                        const accountsUser = await User.findOne({ employeeId: accountsHOD.employeeId });
+                                        if (accountsUser) {
+                                            reward.workflow.push({ role: 'Accounts', assignedTo: accountsUser._id, status: 'Pending', assignedAt: new Date() });
+                                        }
+                                    }
+                                }
+                                const managementHOD = await getManagementHOD(hodContext);
+                                if (managementHOD) {
+                                    const managementUser = await User.findOne({ employeeId: managementHOD.employeeId });
+                                    if (managementUser) {
+                                        reward.workflow.push({
+                                            role: 'Management',
+                                            assignedTo: managementUser._id,
+                                            status: isCashOrGift ? 'Pending' : 'Draft',
+                                            assignedAt: new Date()
+                                        });
+                                    }
                                 }
                             }
 
@@ -225,7 +315,7 @@ export const updateReward = async (req, res) => {
                             const emailUser = process.env.EMAIL_USER || process.env.VERP_EMAIL || process.env.GMAIL_USER;
                             const emailPass = process.env.EMAIL_PASS || process.env.VERP_PASS || process.env.GMAIL_PASS;
 
-                            if (emailUser && emailPass) {
+                            if (emailUser && emailPass && finalRecipients.length > 0) {
                                 try {
                                     const smtpHost = (emailUser.includes('@gmail') || process.env.GMAIL_USER) ? "smtp.gmail.com" : "smtp.office365.com";
                                     const transporter = nodemailer.createTransport({
@@ -237,13 +327,13 @@ export const updateReward = async (req, res) => {
 
                                     const baseUrl = process.env.FRONTEND_URL || "http://localhost:3000";
                                     const rewardUrl = `${baseUrl}/HRM/Reward/${reward._id}`;
-                                    const empName = reward.employeeName;
+                                    const empNameForEmail = reward.employeeName;
 
-                                    for (const recipient of recipients) {
+                                    for (const recipient of finalRecipients) {
                                         await transporter.sendMail({
                                             from: `"VeRP System" <${emailUser}>`,
                                             to: recipient.email,
-                                            subject: `Reward Approval Request: ${reward.rewardType} - ${empName}`,
+                                            subject: `Reward Approval Request: ${reward.rewardType} - ${empNameForEmail}`,
                                             html: `
                                                 <div style="font-family: Arial, sans-serif; color: #333; max-width: 600px; margin: 0 auto; border: 1px solid #eee; border-radius: 8px; overflow: hidden;">
                                                     <div style="background-color: #f8f9fa; padding: 20px; text-align: center; border-bottom: 1px solid #eee;">
@@ -253,7 +343,7 @@ export const updateReward = async (req, res) => {
                                                         <p>Dear <strong>${recipient.name}</strong> (${recipient.role}),</p>
                                                         <p>A formal request for a <strong>${reward.rewardType}</strong> has been initiated for the following employee:</p>
                                                         <div style="background-color: #fce4ec; border-left: 4px solid #d81b60; padding: 15px; margin: 20px 0; border-radius: 4px;">
-                                                            <p style="margin: 5px 0;"><strong>Employee Name:</strong> ${empName}</p>
+                                                            <p style="margin: 5px 0;"><strong>Employee Name:</strong> ${empNameForEmail}</p>
                                                             <p style="margin: 5px 0;"><strong>Employee ID:</strong> ${employeeForSnapshot.employeeId}</p>
                                                             <p style="margin: 5px 0;"><strong>Department:</strong> ${employeeForSnapshot.department || 'N/A'}</p>
                                                             <p style="margin: 5px 0;"><strong>Designation:</strong> ${employeeForSnapshot.designation || 'N/A'}</p>
@@ -710,7 +800,8 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
 
                     const [employeeForEmail, userObjects] = await Promise.all([
                         EmployeeBasic.findOne({ employeeId: reward.employeeId })
-                            .select('firstName lastName email companyEmail')
+                            .select('firstName lastName email companyEmail primaryReportee')
+                            .populate('primaryReportee', 'firstName lastName email companyEmail')
                             .lean(),
                         User.find({ _id: { $in: notificationIds } })
                     ]);
@@ -721,6 +812,12 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
                         // Add Employee (Receiver)
                         const empEmail = employeeForEmail.companyEmail || employeeForEmail.email;
                         if (empEmail) recipientEmails.add(empEmail);
+
+                        // Add Manager Email
+                        if (employeeForEmail.primaryReportee) {
+                            const managerEmail = employeeForEmail.primaryReportee.companyEmail || employeeForEmail.primaryReportee.email;
+                            if (managerEmail) recipientEmails.add(managerEmail);
+                        }
 
                         // Add User Emails (Approvers & Requester)
                         if (userObjects && userObjects.length > 0) {

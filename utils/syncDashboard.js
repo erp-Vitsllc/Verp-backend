@@ -46,20 +46,37 @@ export const syncDashboardAction = async (data) => {
         // 2. If status IS Pending, we ensure there is a record for the assignedTo user
         if (!assignedTo) return;
 
-        // Get the assignedTo employee's custom ID for faster fetching if needed
-        const assignee = await EmployeeBasic.findById(assignedTo).select('employeeId');
+        let actualAssignedTo = assignedTo;
+        let assignee = await EmployeeBasic.findById(assignedTo).select('employeeId firstName lastName');
+
+        if (!assignee) {
+            // It might be a USER ID (from User collection). 
+            // We need to resolve it to an Employee ID because DashboardAction.assignedTo refs EmployeeBasic
+            const User = (await import("../models/User.js")).default;
+            const user = await User.findById(assignedTo).select('employeeId');
+            if (user) {
+                assignee = await EmployeeBasic.findOne({ employeeId: user.employeeId }).select('employeeId firstName lastName');
+                if (assignee) {
+                    actualAssignedTo = assignee._id;
+                    console.log(`[syncDashboardAction] Resolved UserID ${assignedTo} to EmployeeID ${actualAssignedTo} (${assignee.employeeId})`);
+                }
+            }
+        }
+
+        if (!assignee) {
+            console.warn(`[syncDashboardAction] Could not resolve assignedTo ID ${assignedTo} to any Employee record.`);
+            return;
+        }
 
         // Upsert the pending action
-        // We use requestId + assignedTo as the unique key for a PENDING item
-        // because one request might go through multiple people, but only one is active at a time for that user.
         await DashboardAction.findOneAndUpdate(
-            { requestId: requestId, assignedTo: assignedTo, status: 'Pending' },
+            { requestId: requestId, assignedTo: actualAssignedTo, status: 'Pending' },
             {
-                assignedToEmpId: assignee?.employeeId,
+                assignedToEmpId: assignee.employeeId,
                 requestType: requestType,
                 status: 'Pending',
                 subjectEmployeeId: subjectEmployee?.employeeId,
-                subjectName: subjectEmployee ? `${subjectEmployee.firstName} ${subjectEmployee.lastName}` : '',
+                subjectName: subjectEmployee ? `${subjectEmployee.firstName} ${subjectEmployee.lastName}` : (data.subjectName || ''),
                 requestedDate: new Date(),
                 extra1: extra1,
                 extra2: extra2

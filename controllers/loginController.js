@@ -86,28 +86,65 @@ export const login = async (req, res) => {
             }
             isSystemAdmin = true;
         } else {
-            // Regular user login
+            // Regular user login - find user by email or username first
             user = await User.findOne({
                 $or: [
                     { email: emailOrUsername.toLowerCase() },
                     { username: emailOrUsername }
-                ],
-                status: 'Active',
-                enablePortalAccess: true
+                ]
             });
 
-            if (!user)
-                return res.status(404).json({ message: "User not found or portal access not enabled" });
-
-            // Check if password exists
-            if (!user.password) {
-                return res.status(401).json({ message: "Password not set for this user" });
+            if (!user) {
+                return res.status(404).json({ message: "User not found" });
             }
 
-            // Compare password
-            const validPassword = await bcrypt.compare(password, user.password);
-            if (!validPassword)
-                return res.status(401).json({ message: "Invalid credentials" });
+            if (user.status !== 'Active') {
+                return res.status(403).json({ message: `Your account is ${user.status}. Please contact administrator.` });
+            }
+
+            // Check if account is temporarily locked (1 hour block)
+            if (user.lockUntil && user.lockUntil > Date.now()) {
+                const remainingMinutes = Math.ceil((user.lockUntil - Date.now()) / (60 * 1000));
+                return res.status(403).json({
+                    message: `Too many failed attempts. Your account is locked for ${remainingMinutes} more minutes.`
+                });
+            }
+        }
+
+        // Check if password exists (skip for system admin as password is already validated from .env)
+        if (!isAdminLogin && !user.password) {
+            return res.status(401).json({ message: "Password not set for this user" });
+        }
+
+        // Compare password (already validated if isAdminLogin is true)
+        const validPassword = isAdminLogin ? true : await bcrypt.compare(password, user.password);
+
+        if (!validPassword) {
+            // Increment failed attempts for non-admin logins
+            if (!isAdminLogin) {
+                user.loginAttempts = (user.loginAttempts || 0) + 1;
+
+                // If 5 or more attempts, lock for 1 hour
+                if (user.loginAttempts >= 5) {
+                    user.lockUntil = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
+                    await user.save();
+                    return res.status(403).json({
+                        message: "Too many failed attempts. Your account has been locked for 1 hour."
+                    });
+                }
+
+                await user.save();
+                return res.status(401).json({
+                    message: `Invalid credentials. ${5 - user.loginAttempts} attempts remaining.`
+                });
+            }
+            return res.status(401).json({ message: "Invalid credentials" });
+        }
+
+        // Login success - Reset attempts and lockout
+        if (!isAdminLogin) {
+            user.loginAttempts = 0;
+            user.lockUntil = null;
         }
 
         // Get user permissions (for system admin, this will return all permissions)

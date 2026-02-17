@@ -3,6 +3,7 @@ import Reward from "../../models/Reward.js";
 import Fine from "../../models/Fine.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import User from "../../models/User.js";
+import Company from "../../models/Company.js";
 
 /**
  * Get Activity Stats for the Logged-in User (or a specific target user in their team)
@@ -52,67 +53,129 @@ export const getUserActivityStats = async (req, res) => {
             }
         }
 
-        const dept = (manager.department || '').toLowerCase();
-        const desig = (manager.designation || '').toLowerCase();
-
-        const isCEO = (dept.includes('management') || dept.includes('administration') || dept.includes('board of directors')) &&
-            ['ceo', 'c.e.o', 'c.e.o.', 'chief executive officer', 'director', 'managing director', 'general manager', 'gm', 'g.m', 'g.m.'].includes(desig);
-
-        const isHR = dept.includes('hr') || dept.includes('human resource');
-        const isAccounts = dept.includes('finance') || dept.includes('account');
-
         let targetUser;
         if (!req.query.targetUserId) {
             targetUser = currentUser;
         } else {
-            // Find the User record for the target employee
             targetUser = await User.findOne({ employeeId: manager.employeeId });
             if (!targetUser) {
                 console.warn(`[getUserActivityStats] No User record found for Target Employee ID: ${manager.employeeId}`);
-                // Use manager data directly if no user account exists
                 targetUser = { _id: manager._id, employeeId: manager.employeeId };
             }
         }
+
+        // IDs that represent the user we are looking at
+        let relevantIds = [];
+        if (req.query.targetUserId) {
+            relevantIds = [manager?._id, targetUser?._id].filter(Boolean);
+        } else {
+            relevantIds = [manager?._id, currentUser.employeeObjectId, currentUser?._id].filter(Boolean);
+        }
+
+        // Fetch Designated Responsibilities from Company
+        const responsibleCompanies = await Company.find({
+            "responsibilities.empObjectId": { $in: relevantIds }
+        }, { responsibilities: 1 });
+
+        let isDesignatedHR = false;
+        let isDesignatedAccounts = false;
+        let isDesignatedCEO = false;
+
+        responsibleCompanies.forEach(c => {
+            if (c.responsibilities) {
+                c.responsibilities.forEach(r => {
+                    if (relevantIds.some(id => id.toString() === r.empObjectId?.toString())) {
+                        const cat = (r.category || '').toLowerCase();
+                        if (cat.includes('hr') || cat.includes('human')) isDesignatedHR = true;
+                        if (cat.includes('account') || cat.includes('finance')) isDesignatedAccounts = true;
+                        if (cat.includes('management') || cat.includes('ceo')) isDesignatedCEO = true;
+                    }
+                });
+            }
+        });
+
+        const dept = (manager.department || '').toLowerCase();
+        const desig = (manager.designation || '').toLowerCase();
+
+        const isCEO = isDesignatedCEO || ((dept.includes('management') || dept.includes('administration') || dept.includes('board of directors')) &&
+            ['ceo', 'c.e.o', 'c.e.o.', 'chief executive officer', 'director', 'managing director', 'general manager', 'gm', 'g.m', 'g.m.'].includes(desig));
+
+        const isHR = isDesignatedHR || (dept.includes('hr') || dept.includes('human resource'));
+        const isAccounts = isDesignatedAccounts || (dept.includes('finance') || dept.includes('account'));
 
         // 2. Find Reportees
         const reportees = await EmployeeBasic.find({ primaryReportee: manager._id });
         const reporteeCustomIds = reportees.map(r => r.employeeId);
 
-        // IDs that represent the current user (Employee record ID and User table ID)
-        // This ensures items appear on dashboard whether they were assigned to the Human or the Account
-        const relevantIds = [
-            manager?._id,
-            currentUser.employeeObjectId,
-            targetUser?._id,
-            currentUser?._id
-        ].filter(Boolean);
-
-        // 3. Define Queries for "Needs Action" (Using Unified DashboardAction)
+        // 3. Define Queries for "Needs Action"
         const DashboardAction = await import("../../models/DashboardAction.js").then(m => m.default);
         const dashboardPendingItems = await DashboardAction.find({
-            assignedTo: { $in: relevantIds },
+            $or: [
+                { assignedTo: { $in: relevantIds } },
+                { assignedToEmpId: targetEmployeeId }
+            ],
             status: 'Pending'
         }).lean();
 
-        // Separate Logic for "MY REQUESTS" (Keep original behavior for these)
-        const queries = [
-            Loan.find({ $or: [{ employeeId: targetEmployeeId }, { createdBy: currentUser._id }] })
-                .populate('createdBy', 'name')
-                .sort({ createdAt: -1 }).limit(10),
-            Reward.find({ $or: [{ employeeId: targetEmployeeId }, { createdBy: currentUser._id }] })
-                .populate('createdBy', 'name')
-                .sort({ createdAt: -1 }).limit(10),
-            Fine.find({ $or: [{ "assignedEmployees.employeeId": targetEmployeeId }, { createdBy: currentUser._id }] })
-                .populate('createdBy', 'name')
-                .sort({ createdAt: -1 }).limit(10)
+        // 4. Fallback/Direct Queries for "Needs Action" (in case DashboardAction sync is delayed)
+        const inboxQueries = [
+            // Pending Profiles
+            EmployeeBasic.find({
+                $or: [
+                    { profileSubmittedTo: { $in: relevantIds }, profileApprovalStatus: 'submitted' },
+                    { profileSubmittedTo: null, primaryReportee: manager._id, profileApprovalStatus: 'submitted' }
+                ]
+            }),
+            // Pending Notices
+            EmployeeBasic.find({
+                "noticeRequest.requestedAt": { $exists: true },
+                $or: [
+                    { 'noticeRequest.submittedTo': { $in: relevantIds }, 'noticeRequest.status': 'Pending' },
+                    { 'noticeRequest.submittedTo': null, primaryReportee: manager._id, 'noticeRequest.status': 'Pending' }
+                ]
+            }),
+            // Pending Loans
+            Loan.find({
+                $or: [
+                    { submittedTo: { $in: relevantIds }, status: 'Pending' },
+                    { submittedTo: null, employeeObjectId: { $in: relevantIds }, status: 'Pending' }
+                ]
+            }),
+            // Pending Rewards
+            Reward.find({
+                $or: [
+                    { submittedTo: { $in: relevantIds }, rewardStatus: 'Pending' },
+                    { submittedTo: null, employeeId: targetEmployeeId, rewardStatus: 'Pending' }
+                ]
+            }),
+            // Pending Fines
+            Fine.find({
+                $or: [
+                    { submittedTo: { $in: relevantIds }, fineStatus: { $in: ['Pending', 'Pending HR', 'Pending Accounts', 'Pending Authorization'] } },
+                    ...(isHR ? [{ fineStatus: 'Pending HR' }] : []),
+                    ...(isAccounts ? [{ fineStatus: 'Pending Accounts' }] : []),
+                    ...(isCEO ? [{ fineStatus: 'Pending Authorization' }] : [])
+                ]
+            })
         ];
 
-        const results = await Promise.all(queries);
+        // Queries for "MY OWN REQUESTS"
+        const outgoingQueries = [
+            Loan.find({ $or: [{ employeeId: targetEmployeeId }, { createdBy: targetUser?._id }] })
+                .populate('createdBy', 'name')
+                .sort({ createdAt: -1 }).limit(15),
+            Reward.find({ $or: [{ employeeId: targetEmployeeId }, { createdBy: targetUser?._id }] })
+                .populate('createdBy', 'name')
+                .sort({ createdAt: -1 }).limit(15),
+            Fine.find({ $or: [{ "assignedEmployees.employeeId": targetEmployeeId }, { createdBy: targetUser?._id }] })
+                .populate('createdBy', 'name')
+                .sort({ createdAt: -1 }).limit(15)
+        ];
 
-        // My own items
-        const myLoans = results[0];
-        const myRewards = results[1];
-        const myFines = results[2];
+        const [
+            pendingProfiles, pendingNotices, pendingLoans, pendingRewards, pendingFines,
+            myLoans, myRewards, myFines
+        ] = await Promise.all([...inboxQueries, ...outgoingQueries]);
 
         // 5. Build Unified Activity List for "Pending" (Using DashboardAction)
         const activityList = [];
@@ -129,12 +192,160 @@ export const getUserActivityStats = async (req, res) => {
                 status: 'Pending',
                 extra1: item.extra1,
                 extra2: item.extra2,
-                targetEmployeeId: item.subjectEmployeeId
+                targetEmployeeId: item.subjectEmployeeId,
+                scope: 'inbox'
             });
             seenRequests.set(reqIdStr, 'Pending');
         });
 
-        // 5b. Add "My Own Requests" to Activity List
+        // 5.1 Add Direct Inbox Items (De-duplicate with DashboardAction)
+        pendingProfiles.forEach(p => {
+            const reqIdStr = p._id.toString();
+            if (!seenRequests.has(reqIdStr)) {
+                activityList.push({
+                    id: p._id, type: 'Profile Activation', requestedBy: `${p.firstName} ${p.lastName}`,
+                    requestedDate: p.createdAt, actionedDate: null, status: 'Pending',
+                    extra1: p.employeeId, extra2: p.designation, targetEmployeeId: p.employeeId,
+                    scope: 'inbox'
+                });
+                seenRequests.set(reqIdStr, 'Pending');
+            }
+        });
+
+        pendingNotices.forEach(p => {
+            const reqIdStr = p._id.toString() + "_notice";
+            if (!seenRequests.has(reqIdStr)) {
+                activityList.push({
+                    id: p._id, type: 'Notice Request', requestedBy: `${p.firstName} ${p.lastName}`,
+                    requestedDate: p.noticeRequest.requestedAt, actionedDate: null, status: 'Pending',
+                    extra1: p.noticeRequest.reason, extra2: p.noticeRequest.duration, targetEmployeeId: p.employeeId,
+                    isNotice: true, scope: 'inbox'
+                });
+                seenRequests.set(reqIdStr, 'Pending');
+            }
+        });
+
+        pendingLoans.forEach(l => {
+            const reqIdStr = l._id.toString();
+            if (!seenRequests.has(reqIdStr)) {
+                activityList.push({
+                    id: l._id, type: l.type || 'Loan/Advance', requestedBy: l.employeeName || 'Employee',
+                    requestedDate: l.createdAt, actionedDate: null, status: 'Pending',
+                    extra1: `AED ${l.amount}`, extra2: `${l.duration} Months`, targetEmployeeId: l.employeeId,
+                    scope: 'inbox'
+                });
+                seenRequests.set(reqIdStr, 'Pending');
+            }
+        });
+
+        pendingRewards.forEach(r => {
+            const reqIdStr = r._id.toString();
+            if (!seenRequests.has(reqIdStr)) {
+                activityList.push({
+                    id: r._id, type: 'Reward', requestedBy: r.employeeName,
+                    requestedDate: r.createdAt, actionedDate: null, status: 'Pending',
+                    extra1: r.rewardType, extra2: `AED ${r.amount}`, targetEmployeeId: r.employeeId,
+                    scope: 'inbox'
+                });
+                seenRequests.set(reqIdStr, 'Pending');
+            }
+        });
+
+        // Helper to fetch Company info ONLY for filtered fines to avoid N+1 issues
+        const fineEmpIds = new Set();
+        pendingFines.forEach(f => {
+            if (f.assignedEmployees) f.assignedEmployees.forEach(ae => fineEmpIds.add(ae.employeeId));
+        });
+
+        // Batch fetch employee company details
+        const fineEmployees = await EmployeeBasic.find({ employeeId: { $in: Array.from(fineEmpIds) } }, { employeeId: 1, company: 1, companyId: 1 });
+        const empCompanyMap = {};
+        const uniqueCompanyIds = new Set();
+
+        fineEmployees.forEach(e => {
+            const cId = e.companyId || (e.company && e.company.toString()) || e.company;
+            if (cId) {
+                empCompanyMap[e.employeeId] = cId;
+                uniqueCompanyIds.add(cId.toString());
+            }
+        });
+
+        // Fetch Company Responsibilities
+        const involvedCompanies = await Company.find({ _id: { $in: Array.from(uniqueCompanyIds) } }, { responsibilities: 1 });
+        const companyRespMap = {};
+        involvedCompanies.forEach(c => {
+            companyRespMap[c._id.toString()] = c.responsibilities || [];
+        });
+
+        // Get Current Manager's Company
+        const myCompanyId = manager.companyId || (manager.company && manager.company.toString()) || manager.company;
+
+        pendingFines.forEach(f => {
+            const reqIdStr = f._id.toString();
+            if (!seenRequests.has(reqIdStr)) {
+                let isVisible = false;
+
+                // 1. Direct Assignment (Standard)
+                if (f.submittedTo && relevantIds.some(id => id.toString() === f.submittedTo.toString())) {
+                    isVisible = true;
+                }
+                // 2. Role-based Visibility (Company Scoped & Designated)
+                else {
+                    const fEmpIds = f.assignedEmployees?.map(e => e.employeeId) || [];
+
+                    // Identify the company this fine belongs to
+                    let targetCompanyId = null;
+                    const belongsToMyCompany = fEmpIds.some(eid => {
+                        const cId = empCompanyMap[eid];
+                        if (cId) targetCompanyId = cId;
+                        return cId && myCompanyId && cId.toString() === myCompanyId.toString();
+                    });
+
+                    // Check Designated Responsibilities
+                    let isDesignatedHR = false;
+                    let isDesignatedAccounts = false;
+
+                    if (targetCompanyId) {
+                        const resps = companyRespMap[targetCompanyId.toString()] || [];
+                        isDesignatedHR = resps.some(r =>
+                            (r.category === 'hr' || r.category === 'human resource') &&
+                            relevantIds.some(id => id.toString() === (r.empObjectId?.toString() || r.employeeObjectId?.toString()))
+                        );
+                        isDesignatedAccounts = resps.some(r =>
+                            (r.category === 'accounts' || r.category === 'finance') &&
+                            relevantIds.some(id => id.toString() === (r.empObjectId?.toString() || r.employeeObjectId?.toString()))
+                        );
+                    }
+
+                    if (targetCompanyId) {
+                        if (f.fineStatus === 'Pending HR') {
+                            if (isDesignatedHR) isVisible = true;
+                            else if (belongsToMyCompany && isHR) isVisible = true;
+                        }
+                        if (f.fineStatus === 'Pending Accounts') {
+                            if (isDesignatedAccounts) isVisible = true;
+                            else if (belongsToMyCompany && isAccounts) isVisible = true;
+                        }
+                        if (f.fineStatus === 'Pending Authorization') {
+                            if (belongsToMyCompany && isCEO) isVisible = true;
+                        }
+                    }
+                }
+
+                if (isVisible) {
+                    activityList.push({
+                        id: f._id, type: 'Fine', requestedBy: f.assignedEmployees?.[0]?.employeeName || 'Employee',
+                        requestedDate: f.createdAt, actionedDate: null, status: 'Pending',
+                        extra1: f.category, extra2: `AED ${f.fineAmount}`,
+                        targetEmployeeId: f.assignedEmployees?.[0]?.employeeId || targetEmployeeId,
+                        scope: 'inbox'
+                    });
+                    seenRequests.set(reqIdStr, 'Pending');
+                }
+            }
+        });
+
+        // 5.2 Add "My Own Requests" to Activity List
         myLoans.forEach(l => {
             const reqIdStr = l._id.toString();
             if (!seenRequests.has(reqIdStr)) {
@@ -148,7 +359,8 @@ export const getUserActivityStats = async (req, res) => {
                     status: ['Pending', 'Pending HR', 'Pending Accounts', 'Pending Authorization', 'Draft'].includes(l.status) ? 'Pending' : l.status,
                     extra1: `AED ${l.amount}`, extra2: `${l.duration} Months`,
                     targetEmployeeId: l.employeeId,
-                    employeeId: targetEmployeeId
+                    employeeId: targetEmployeeId,
+                    scope: 'outgoing'
                 });
                 seenRequests.set(reqIdStr, 'Pending');
             }
@@ -167,7 +379,8 @@ export const getUserActivityStats = async (req, res) => {
                     status: ['Pending', 'Pending HR', 'Pending Accounts', 'Pending Authorization', 'Draft'].includes(r.rewardStatus) ? 'Pending' : r.rewardStatus,
                     extra1: r.rewardType, extra2: `AED ${r.amount || 0}`,
                     targetEmployeeId: r.employeeId,
-                    employeeId: targetEmployeeId
+                    employeeId: targetEmployeeId,
+                    scope: 'outgoing'
                 });
                 seenRequests.set(reqIdStr, 'Pending');
             }
@@ -186,7 +399,8 @@ export const getUserActivityStats = async (req, res) => {
                     status: ['Pending', 'Pending HR', 'Pending Accounts', 'Pending Authorization', 'Draft'].includes(f.fineStatus) ? 'Pending' : f.fineStatus,
                     extra1: f.category, extra2: `AED ${f.fineAmount}`,
                     targetEmployeeId: targetEmployeeId,
-                    employeeId: targetEmployeeId
+                    employeeId: targetEmployeeId,
+                    scope: 'outgoing'
                 });
                 seenRequests.set(reqIdStr, 'Pending');
             }
@@ -213,7 +427,8 @@ export const getUserActivityStats = async (req, res) => {
                         status: status,
                         extra1: p.employeeId, extra2: p.designation,
                         targetEmployeeId: p.employeeId,
-                        employeeId: p.employeeId
+                        employeeId: p.employeeId,
+                        scope: 'outgoing'
                     });
                     seenRequests.set(reqIdStr, status);
                 }
@@ -234,7 +449,8 @@ export const getUserActivityStats = async (req, res) => {
                         extra1: n.reason, extra2: n.duration,
                         targetEmployeeId: manager.employeeId,
                         employeeId: manager.employeeId,
-                        isNotice: true // Helper for frontend
+                        isNotice: true, // Helper for frontend
+                        scope: 'outgoing'
                     });
                     seenRequests.set(reqIdStr, status);
                 }
@@ -337,7 +553,8 @@ export const getUserActivityStats = async (req, res) => {
                 extra1: `Actioned: ${status}`,
                 extra2: p.noticeRequest?.reason,
                 targetEmployeeId: p.employeeId,
-                isNotice: true
+                isNotice: true,
+                scope: 'inbox'
             };
 
             if (seenRequests.has(reqIdStr)) {
@@ -362,7 +579,8 @@ export const getUserActivityStats = async (req, res) => {
                 status: status,
                 extra1: `Actioned: ${status}`,
                 extra2: `AED ${l.amount}`,
-                targetEmployeeId: l.employeeId
+                targetEmployeeId: l.employeeId,
+                scope: 'inbox'
             };
 
             if (seenRequests.has(reqIdStr)) {
@@ -395,7 +613,8 @@ export const getUserActivityStats = async (req, res) => {
                 status: status,
                 extra1: `Actioned: ${status}`,
                 extra2: `AED ${r.amount || 0}`,
-                targetEmployeeId: r.employeeId
+                targetEmployeeId: r.employeeId,
+                scope: 'inbox'
             };
 
             if (seenRequests.has(reqIdStr)) {
@@ -430,7 +649,8 @@ export const getUserActivityStats = async (req, res) => {
                 status: status,
                 extra1: `Actioned: Verified`,
                 extra2: `AED ${f.fineAmount}`,
-                targetEmployeeId: legacyEntry?.employeeId
+                targetEmployeeId: legacyEntry?.employeeId,
+                scope: 'inbox'
             };
 
             if (seenRequests.has(reqIdStr)) {
@@ -458,7 +678,8 @@ export const getUserActivityStats = async (req, res) => {
                     status: status,
                     extra1: `Actioned: ${status}`,
                     extra2: p.employeeId,
-                    targetEmployeeId: p.employeeId
+                    targetEmployeeId: p.employeeId,
+                    scope: 'inbox'
                 };
 
                 // Since one profile can have multiple steps, we only add/update once

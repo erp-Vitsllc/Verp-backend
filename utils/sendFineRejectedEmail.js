@@ -13,7 +13,7 @@ export const sendFineRejectedEmail = async (fine, assignedEmployees) => {
     try {
         console.log(`[FineRejectedEmail] Preparing rejection email for Fine #${fine.fineId}`);
 
-        // 1. Fetch Employee Emails
+        // 1. Fetch Employee Emails and their Managers
         const employeeIds = assignedEmployees.map(e => e.employeeId);
 
         // 1b. Fetch Previous Approver Emails from Workflow
@@ -21,19 +21,29 @@ export const sendFineRejectedEmail = async (fine, assignedEmployees) => {
             .filter(w => w.status === 'Approved' && w.assignedTo)
             .map(w => w.assignedTo);
 
-        const [fullEmployees, previousApproverUsers] = await Promise.all([
+        // 1c. Fetch Creator (User)
+        const creatorId = fine.createdBy;
+
+        const [fullEmployees, previousApproverUsers, creatorUser] = await Promise.all([
             EmployeeBasic.find({ employeeId: { $in: employeeIds } })
-                .select('employeeId firstName lastName companyEmail personalEmail'),
+                .select('employeeId firstName lastName companyEmail personalEmail primaryReportee')
+                .populate('primaryReportee', 'companyEmail personalEmail'),
             User.find({ _id: { $in: previousApproverIds } })
-                .select('email companyEmail')
+                .select('email companyEmail'),
+            creatorId ? User.findById(creatorId).select('email companyEmail') : null
         ]);
 
         const recipientEmails = new Set();
 
-        // Add Target Employees
+        // Add Target Employees & Managers
         fullEmployees.forEach(emp => {
             const mail = emp.companyEmail || emp.personalEmail;
             if (mail) recipientEmails.add(mail);
+
+            if (emp.primaryReportee) {
+                const managerMail = emp.primaryReportee.companyEmail || emp.primaryReportee.personalEmail;
+                if (managerMail) recipientEmails.add(managerMail);
+            }
         });
 
         // Add Previous Approvers
@@ -41,6 +51,12 @@ export const sendFineRejectedEmail = async (fine, assignedEmployees) => {
             const mail = u.companyEmail || u.email;
             if (mail) recipientEmails.add(mail);
         });
+
+        // Add Creator
+        if (creatorUser) {
+            const creatorMail = creatorUser.companyEmail || creatorUser.email;
+            if (creatorMail) recipientEmails.add(creatorMail);
+        }
 
         const recipients = Array.from(recipientEmails);
 
