@@ -277,8 +277,12 @@ export const addEmployee = async (req, res) => {
             }),
         ]);
 
-        // If department is "administrator" or "administration", automatically create a user with full permissions
-        if (department && typeof department === 'string' && (department.toLowerCase() === 'administrator' || department.toLowerCase() === 'administration') && cleanedEmail) {
+        // If department is "administrator"/"administration", automatically make them admin
+        const isAdministrator = department && typeof department === 'string' && (department.toLowerCase() === 'administrator' || department.toLowerCase() === 'administration');
+        let newUser = null;
+
+        // Create user for ANY employee with an email, regardless of portal access flag
+        if (cleanedEmail) {
             try {
                 // Check if user already exists for this employee
                 const existingUser = await User.findOne({
@@ -303,6 +307,7 @@ export const addEmployee = async (req, res) => {
                     // Check if username already exists, if so append employeeId
                     let finalUsername = username;
                     let usernameExists = await User.findOne({ username: finalUsername });
+                    // Also append a number if username exists to ensure uniqueness
                     let counter = 1;
                     while (usernameExists) {
                         finalUsername = `${username}${counter}`;
@@ -322,28 +327,28 @@ export const addEmployee = async (req, res) => {
                     const passwordExpiryDate = new Date();
                     passwordExpiryDate.setDate(passwordExpiryDate.getDate() + 180);
 
-                    // Create user for administrator
-                    const newUser = new User({
+                    // Create user
+                    newUser = new User({
                         username: finalUsername,
                         name: `${firstName} ${lastName}`.trim(),
                         email: cleanedEmail,
                         companyEmail: companyEmail || '',
                         password: hashedPassword,
                         employeeId: cleanedEmployeeId,
-                        group: null, // Administrators don't need groups, they get full permissions
+                        group: null, // Administrators don't need groups, regular users will need to be assigned one manually later
                         groupName: null,
                         status: 'Active',
-                        enablePortalAccess: true,
-                        isAdmin: true, // Mark as admin to get all permissions
+                        enablePortalAccess: enablePortalAccess || false, // Use provided value to match EmployeeBasic
+                        isAdmin: isAdministrator, // Mark as admin only if department is administrator
                         passwordExpiryDate: passwordExpiryDate,
                     });
 
                     await newUser.save();
-                    console.log(`User created automatically for administrator employee: ${cleanedEmployeeId} with username: ${finalUsername}`);
+                    console.log(`User created automatically for employee: ${cleanedEmployeeId} with username: ${finalUsername}. Is Admin: ${isAdministrator}`);
                 }
             } catch (userError) {
                 // Log error but don't fail the employee creation
-                console.error('Error creating user for administrator:', userError);
+                console.error('Error creating user for employee:', userError);
                 // Continue with employee creation even if user creation fails
             }
         }
@@ -351,9 +356,19 @@ export const addEmployee = async (req, res) => {
         // Get complete employee data for response
         const savedEmployee = await getCompleteEmployee(cleanedEmployeeId);
 
+        let userResponse = null;
+        if (newUser) {
+            userResponse = {
+                username: newUser.username,
+                isGeneratedPassword: !process.env.DEFAULT_ADMIN_PASSWORD,
+                defaultPassword: process.env.DEFAULT_ADMIN_PASSWORD ? 'See server .env' : 'Check server logs for random password'
+            };
+        }
+
         return res.status(201).json({
             message: "Employee added successfully",
             employee: savedEmployee,
+            createdUser: userResponse
         });
     } catch (error) {
         console.error('Error adding employee:', error);

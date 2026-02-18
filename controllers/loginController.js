@@ -87,12 +87,28 @@ export const login = async (req, res) => {
             isSystemAdmin = true;
         } else {
             // Regular user login - find user by email or username first
+            console.log(`[Login] Attempting login for: '${emailOrUsername}'`);
+
+            const escapedInput = emailOrUsername.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
             user = await User.findOne({
                 $or: [
-                    { email: emailOrUsername.toLowerCase() },
-                    { username: emailOrUsername }
+                    // 1. Exact Match (Best case)
+                    { email: emailOrUsername },
+                    { username: emailOrUsername },
+                    // 2. Case Insensitive (Matches 'ramees' to 'Ramees')
+                    { email: { $regex: new RegExp(`^${escapedInput}$`, 'i') } },
+                    { username: { $regex: new RegExp(`^${escapedInput}$`, 'i') } },
+                    // 3. Loose Match (Handles spaces like ' Ramees ')
+                    { email: { $regex: new RegExp(`^\\s*${escapedInput}\\s*$`, 'i') } },
+                    { username: { $regex: new RegExp(`^\\s*${escapedInput}\\s*$`, 'i') } }
                 ]
             });
+            if (user) {
+                console.log(`User found: ${user.username} (${user.email})`);
+            } else {
+                console.log(`User NOT found for input: '${emailOrUsername}'`);
+            }
 
             if (!user) {
                 return res.status(404).json({ message: "User not found" });

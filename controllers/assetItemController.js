@@ -129,7 +129,7 @@ export const getAssetItemDetail = async (req, res) => {
         const item = await AssetItem.findById(id)
             .populate({
                 path: 'assignedTo',
-                select: 'firstName lastName employeeId profilePicture companyEmail workEmail department dateOfJoining reportingAuthority primaryReportee',
+                select: 'firstName lastName employeeId profilePicture companyEmail workEmail department dateOfJoining reportingAuthority primaryReportee signature',
                 populate: [
                     {
                         path: 'reportingAuthority',
@@ -183,6 +183,10 @@ export const getAssetItemDetail = async (req, res) => {
 
         if (itemObj.assignedBy?.signature?.url) {
             itemObj.assignedBy.signature.url = await getSignedFileUrl(itemObj.assignedBy.signature.url);
+        }
+
+        if (itemObj.assignedTo?.signature?.url) {
+            itemObj.assignedTo.signature.url = await getSignedFileUrl(itemObj.assignedTo.signature.url);
         }
 
         res.status(200).json(itemObj);
@@ -506,6 +510,29 @@ export const respondToAssignment = async (req, res) => {
                     action: 'Accept',
                     comment: comments
                 });
+            }
+
+            // Notify Reportee (Manager) if different from Assigner
+            if (isAssignee && item.assignedTo?.primaryReportee) {
+                try {
+                    const managerId = item.assignedTo.primaryReportee._id || item.assignedTo.primaryReportee;
+                    const assignerId = item.assignedBy?._id;
+
+                    if (managerId.toString() !== assignerId?.toString()) {
+                        const manager = await EmployeeBasic.findById(managerId);
+                        if (manager) {
+                            await sendAssetResponseEmail({
+                                asset: item,
+                                actor,
+                                recipient: manager,
+                                action: 'Accept',
+                                comment: comments
+                            });
+                        }
+                    }
+                } catch (err) {
+                    console.error('Error notifying reportee:', err);
+                }
             }
         } else if (action === 'AcceptWithComments') {
 

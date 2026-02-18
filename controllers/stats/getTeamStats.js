@@ -4,6 +4,7 @@ import Reward from "../../models/Reward.js";
 import Fine from "../../models/Fine.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import User from "../../models/User.js";
+import AssetItem from "../../models/AssetItem.js";
 import mongoose from "mongoose";
 
 /**
@@ -155,10 +156,15 @@ export const getTeamStats = async (req, res) => {
                         { submittedTo: { $in: relevantIds }, 'assignedEmployees.approvalStatus': 'Pending' },
                         { submittedTo: null, 'assignedEmployees': { $elemMatch: { employeeId: reportee.employeeId, approvalStatus: 'Pending' } } }
                     ]
+                }),
+                // Pending Assets (Allocation Requests)
+                AssetItem.find({
+                    actionRequiredBy: { $in: relevantIds },
+                    acceptanceStatus: 'Pending'
                 })
             ];
 
-            const [pendingProfiles, pendingNotices, pendingLoans, pendingRewards, pendingFines] = await Promise.all(queries);
+            const [pendingProfiles, pendingNotices, pendingLoans, pendingRewards, pendingFines, pendingAssets] = await Promise.all(queries);
 
             // Outgoing Requests (To satisfy 'Total' count like individual dashboard)
             const outgoingQueries = [
@@ -248,6 +254,12 @@ export const getTeamStats = async (req, res) => {
                 if (!seen.has(r._id.toString())) {
                     items.push({ status: 'Pending', scope: 'inbox', date: r.createdAt });
                     seen.add(r._id.toString());
+                }
+            });
+            pendingAssets.forEach(a => {
+                if (!seen.has(a._id.toString())) {
+                    items.push({ status: 'Pending', scope: 'inbox', date: a.updatedAt || a.createdAt });
+                    seen.add(a._id.toString());
                 }
             });
             pendingFines.forEach(f => {
