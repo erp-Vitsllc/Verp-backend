@@ -44,6 +44,30 @@ export const getAssetItems = async (req, res) => {
         console.error('Error fetching asset items:', error);
         res.status(500).json({ message: 'Server Error' });
     }
+
+};
+
+// @desc    Get all assigned assets (regardless of type)
+// @route   GET /api/AssetItem/assigned/all
+// @access  Private
+export const getAllAssignedAssets = async (req, res) => {
+    try {
+        const items = await AssetItem.find({
+            status: { $in: ['Assigned', 'Active', 'Returned'] },
+            assignedTo: { $ne: null }
+        })
+            .select('assetId name assignedTo')
+            .populate({
+                path: 'assignedTo',
+                select: 'firstName lastName employeeId'
+            })
+            .sort({ name: 1 });
+
+        res.status(200).json(items);
+    } catch (error) {
+        console.error('Error fetching assigned assets:', error);
+        res.status(500).json({ message: 'Server Error' });
+    }
 };
 
 // @desc    Create a new asset item
@@ -607,6 +631,67 @@ export const respondToAssignment = async (req, res) => {
         res.status(200).json(item);
     } catch (error) {
         console.error('Error responding to assignment:', error);
+        res.status(500).json({ message: 'Server Error' });
+    }
+};
+
+// @desc    Return an asset item (unassign)
+// @route   PUT /api/AssetItem/:id/return
+// @access  Private
+export const returnAssetItem = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const item = await AssetItem.findById(id);
+
+        if (!item) {
+            return res.status(404).json({ message: 'Asset not found' });
+        }
+
+        // Store current details for history
+        const prevAssignedTo = item.assignedTo;
+        const originalAssigner = item.assignedBy;
+
+        if (originalAssigner) {
+            // Return to the original assigner
+            item.assignedTo = originalAssigner;
+            item.assignedBy = req.user.employeeObjectId; // Person processing the return
+            item.status = 'Returned'; // Status set to Returned
+
+            // Should it require acceptance? 
+            // User didn't specify, but usually returns are acknowledged. 
+            // For now, let's assume it's just assigned back.
+            item.acceptanceStatus = 'Pending';
+            item.actionRequiredBy = originalAssigner;
+        } else {
+            // Fallback if no assigner found - unassign completely
+            item.assignedTo = null;
+            item.assignedBy = null;
+            item.status = 'Unassigned';
+            item.acceptanceStatus = 'Pending';
+            item.actionRequiredBy = null;
+        }
+
+        // Reset other fields
+        item.assignmentType = null;
+        item.assignedDays = null;
+        item.negotiationHistory = [];
+
+        await item.save();
+
+        // Log History
+        await AssetHistory.create({
+            assetId: item._id,
+            action: 'Returned',
+            assignedTo: prevAssignedTo,
+            performedBy: req.user.employeeObjectId || req.user._id // Fallback to user ID if employee link missing
+        });
+
+        await updateAssetTypeCounts(item.typeId);
+
+        res.status(200).json(item);
+
+    } catch (error) {
+        console.error('Error returning asset item:', error);
         res.status(500).json({ message: 'Server Error' });
     }
 };

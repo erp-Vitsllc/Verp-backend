@@ -349,12 +349,37 @@ export const approveFine = async (req, res) => {
                 fine.approvedDate = new Date();
                 modified = true;
 
-                // Mark all assigned as Approved (for consistency with display logic)
+                // Mark all assigned employees approved
                 fine.assignedEmployees.forEach(e => {
                     e.approvalStatus = 'Approved';
                     e.approvedAt = new Date();
                     e.approvedBy = req.user._id;
                 });
+
+                // --- Update Asset Status ---
+                if (fine.assetId && (fine.fineType === 'Loss & Damage' || fine.category === 'Damage')) {
+                    const AssetItem = (await import("../../models/AssetItem.js")).default;
+                    const asset = await AssetItem.findOne({ assetId: fine.assetId });
+
+                    if (asset) {
+                        // Mark as Lost or Damaged (effectively returned/unassigned from employee)
+                        // If type is explicitly 'Loss', set to 'Lost'. Otherwise 'Unassigned' (Returned/Maintenance needed)
+                        // Or utilize 'Maintenance' if available. 
+                        // Per user request "returned status show", defaulting to 'Unassigned' (available/returned) 
+                        // but maybe adding a note or handling 'Lost'.
+                        const newStatus = fine.fineType === 'Loss' ? 'Lost' : 'Unassigned';
+
+                        asset.status = newStatus;
+                        asset.assignedTo = null;
+                        asset.assignedDate = null;
+                        asset.assignedBy = null;
+                        // Determine acceptanceStatus? Reset to null or 'Pending' if unassigned?
+                        asset.acceptanceStatus = 'Pending'; // Reset for next assignment
+
+                        await asset.save();
+                        console.log(`[ApproveFine] Asset ${fine.assetId} status updated to ${newStatus}`);
+                    }
+                }
 
                 // Update Management Workflow to Approved
                 const managementEntry = fine.workflow.find(w =>

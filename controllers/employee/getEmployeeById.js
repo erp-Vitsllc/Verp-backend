@@ -1,7 +1,9 @@
 import { getCompleteEmployee, saveEmployeeData } from "../../services/employeeService.js";
+import AssetItem from "../../models/AssetItem.js";
 import Fine from "../../models/Fine.js";
 import Reward from "../../models/Reward.js";
 import Loan from "../../models/Loan.js";
+import { getSignedFileUrl } from "../../utils/s3Upload.js";
 
 // Get single employee by ID
 export const getEmployeeById = async (req, res) => {
@@ -60,26 +62,62 @@ export const getEmployeeById = async (req, res) => {
         try {
             const fines = await Fine.find({
                 "assignedEmployees.employeeId": employee.employeeId,
-                fineStatus: { $in: ["Approved", "Active", "Completed"] }
+                fineStatus: { $in: ["Approved", "Completed", "Active"] } // Include Active/Completed as per request implies "Approved" in broad sense or final state
             }).sort({ createdAt: -1 }).lean();
 
             const rewards = await Reward.find({
-                employeeId: employee.employeeId
+                employeeId: employee.employeeId,
+                rewardStatus: 'Approved'
             }).sort({ createdAt: -1 }).lean();
 
+            // Fetch Approved Loans and Advances
             const loans = await Loan.find({
                 employeeId: employee.employeeId,
                 status: "Approved"
             }).sort({ createdAt: -1 }).lean();
 
+            // Fetch Accepted Assets
+            let assets = await AssetItem.find({
+                assignedTo: employee._id,
+                acceptanceStatus: 'Accepted'
+            }).populate('typeId categoryId').lean();
+
+            // Sign URLs for asset invoices
+            assets = await Promise.all(assets.map(async (asset) => {
+                if (asset.invoiceFile) {
+                    try {
+                        const signedUrl = await getSignedFileUrl(asset.invoiceFile);
+                        return { ...asset, invoiceFile: signedUrl };
+                    } catch (err) {
+                        console.error(`[getEmployeeById] Failed to sign invoice URL for asset ${asset.assetId}:`, err);
+                        return asset;
+                    }
+                }
+                return asset;
+            }));
+
             employee.fines = fines || [];
             employee.rewards = rewards || [];
             employee.loans = loans || [];
             employee.loanAmount = 0; // Placeholder for future Loan module logic if needed
+            employee.assets = assets || []; // Add assets to main employee object
+
+            // Also add to salary object if it exists (as per request "salary tab under asset tab")
+            if (employee.monthlySalary !== undefined || employee.totalSalary !== undefined) {
+                // If salary object structure exists implicitly or explicitly
+                employee.salaryAssets = assets || [];
+            }
+            // Add explicitly to salary result if structure allows (salary is spread in getCompleteEmployee return)
+            // Since getCompleteEmployee flattens salary fields into root, we don't have a 'salary' object per se in the final response except what's reconstructed or passed.
+            // But wait, getCompleteEmployee returns salary fields merged into root.
+            // So user probably means UI tab.
+            // Adding 'assets' to root should be sufficient for frontend to pick it up.
         } catch (err) {
-            console.error('[getEmployeeById] Error fetching fines/rewards:', err);
+            console.error('[getEmployeeById] Error fetching fines/rewards/assets:', err);
             employee.fines = [];
             employee.rewards = [];
+            employee.loans = [];
+            employee.assets = [];
             employee.loanAmount = 0;
         }
 

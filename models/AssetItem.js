@@ -71,7 +71,7 @@ const assetItemSchema = new mongoose.Schema({
     },
     status: {
         type: String,
-        enum: ['Assigned', 'Unassigned', 'Maintenance', 'Lost'],
+        enum: ['Assigned', 'Unassigned', 'Maintenance', 'Lost', 'Returned'],
         default: 'Unassigned'
     },
     assignmentType: {
