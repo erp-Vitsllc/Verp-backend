@@ -179,7 +179,7 @@ export const addEmployee = async (req, res) => {
         const monthNames = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
         const joiningDate = dateOfJoining ? new Date(dateOfJoining) : new Date();
         const firstDayOfMonth = new Date(joiningDate.getFullYear(), joiningDate.getMonth(), 1);
-        const month = monthNames[joiningDate.getMonth()];
+        const month = `${monthNames[joiningDate.getMonth()]} ${joiningDate.getFullYear()}`;
 
         // Extract vehicle allowance from additionalAllowances
         const vehicleAllowance = additionalAllowances?.find(a => a.type?.toLowerCase().includes('vehicle'))?.amount
@@ -193,7 +193,7 @@ export const addEmployee = async (req, res) => {
 
         const initialSalaryHistory = [{
             month: month,
-            fromDate: firstDayOfMonth,
+            fromDate: joiningDate, // Use exact joining date instead of 1st of month
             toDate: null, // Active entry
             basic: basicAmount,
             houseRentAllowance: hraAmount,
@@ -202,6 +202,13 @@ export const addEmployee = async (req, res) => {
             fuelAllowance: fuelAllowance,
             additionalAllowances: additionalAllowances || [],
             totalSalary: calculatedTotal,
+            // Add offer letter to history if it exists (handling both structure types)
+            offerLetter: req.body.offerLetter ? {
+                url: req.body.offerLetter.url,
+                data: req.body.offerLetter.data,
+                name: req.body.offerLetter.name,
+                mimeType: req.body.offerLetter.mimeType
+            } : undefined,
             createdAt: joiningDate,
             isInitial: true
         }];
