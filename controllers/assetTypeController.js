@@ -41,7 +41,8 @@ export const createAssetType = async (req, res) => {
         console.log('DEBUG: createAssetType body:', req.body);
         let {
             mode, category, type, name, assetValue, purchaseDate, quantity, warranty, warrantyYears, warrantyAttachment, invoiceNumber, imagePreview, description, invoiceFile, accessories,
-            vehicleCode, plateNumber, modelYear, currentKilometer, registrationExpiryDate
+            vehicleCode, plateNumber, modelYear, currentKilometer, registrationExpiryDate,
+            insuranceExpiryDate, oilChangeDate, gearOilDueDate, nextServiceDate
         } = req.body;
 
         if (mode === 'category') {
@@ -181,7 +182,11 @@ export const createAssetType = async (req, res) => {
                     plateNumber,
                     modelYear,
                     currentKilometer,
-                    registrationExpiryDate
+                    registrationExpiryDate,
+                    insuranceExpiryDate,
+                    oilChangeDate,
+                    gearOilDueDate,
+                    nextServiceDate
                 };
 
                 const newAsset = await AssetItem.create(assetData);
@@ -302,7 +307,11 @@ export const getAssetTypes = async (req, res) => {
                 plateNumber: a.plateNumber,
                 modelYear: a.modelYear,
                 currentKilometer: a.currentKilometer,
-                registrationExpiryDate: a.registrationExpiryDate
+                registrationExpiryDate: a.registrationExpiryDate,
+                insuranceExpiryDate: a.insuranceExpiryDate,
+                oilChangeDate: a.oilChangeDate,
+                gearOilDueDate: a.gearOilDueDate,
+                nextServiceDate: a.nextServiceDate
             })))
         ];
 

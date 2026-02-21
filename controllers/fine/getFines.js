@@ -11,7 +11,9 @@ export const getFines = async (req, res) => {
             type,
             startDate,
             endDate,
-            employeeId
+            employeeId,
+            vehicleId,
+            assetId
         } = req.query;
 
         const query = {};
@@ -33,6 +35,8 @@ export const getFines = async (req, res) => {
         if (employeeId) {
             query['assignedEmployees.employeeId'] = employeeId;
         }
+        if (vehicleId) query.vehicleId = vehicleId;
+        if (assetId) query.assetId = assetId;
 
         if (startDate || endDate) {
             query.awardedDate = {};
