@@ -29,6 +29,14 @@ const fineSchema = new mongoose.Schema(
             type: String,
             default: null
         },
+        assetId: {
+            type: String,
+            default: null
+        },
+        assetName: {
+            type: String,
+            default: ''
+        },
         projectId: {
             type: String,
             default: null

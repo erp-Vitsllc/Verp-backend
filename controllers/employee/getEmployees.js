@@ -269,15 +269,18 @@ export const getEmployees = async (req, res) => {
             EmployeeBasic.countDocuments(filters, queryOptions),
         ]);
 
-        // AUTOMATION: Lazy update status for employees > 6 months (Self-Healing)
-        const sixMonthsAgo = new Date();
-        sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
+        // AUTOMATION: Lazy update status for employees who passed probation (Self-Healing)
         const idsToUpdate = [];
+        const today = new Date();
 
         employees.forEach(emp => {
-            if (emp.dateOfJoining && emp.status !== 'Permanent') {
+            if (emp.dateOfJoining && emp.status === 'Probation') {
                 const joinDate = new Date(emp.dateOfJoining);
-                if (joinDate <= sixMonthsAgo) {
+                const probationPeriod = emp.probationPeriod || 6;
+                const probationEndDate = new Date(joinDate);
+                probationEndDate.setMonth(joinDate.getMonth() + probationPeriod);
+
+                if (today >= probationEndDate) {
                     // Update in-memory for immediate UI reflection
                     emp.status = 'Permanent';
                     emp.probationPeriod = null;

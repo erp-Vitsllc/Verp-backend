@@ -76,11 +76,16 @@ export const getEmployeeById = async (req, res) => {
                 status: "Approved"
             }).sort({ createdAt: -1 }).lean();
 
-            // Fetch Accepted Assets
+            // Fetch Assigned Assets (Accepted, Pending, or Returned to this user)
             let assets = await AssetItem.find({
-                assignedTo: employee._id,
-                acceptanceStatus: 'Accepted'
-            }).populate('typeId categoryId').lean();
+                $or: [
+                    { assignedTo: employee._id, acceptanceStatus: { $in: ['Accepted', 'Pending'] } },
+                    { assignedBy: employee._id, status: 'Returned' }
+                ]
+            }).populate('typeId categoryId assignedTo assignedBy').lean();
+
+            console.log(`[getEmployeeById] Fetching assets for employee ${employee._id} (${employee.firstName})`);
+            console.log(`[getEmployeeById] Found ${assets.length} assets. Statuses:`, assets.map(a => `${a.assetId}:${a.acceptanceStatus}`));
 
             // Sign URLs for asset invoices
             assets = await Promise.all(assets.map(async (asset) => {

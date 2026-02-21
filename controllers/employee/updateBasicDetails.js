@@ -65,7 +65,8 @@ export const updateBasicDetails = async (req, res) => {
             "offerLetter",
             "profilePicture",
             "documents",
-            "trainingDetails"
+            "trainingDetails",
+            "enablePortalAccess"
         ];
 
         // 2. Build updatePayload

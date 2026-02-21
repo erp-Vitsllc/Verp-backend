@@ -132,35 +132,38 @@ export const addEmployee = async (req, res) => {
         const allowedStatuses = ['Probation', 'Permanent', 'Temporary', 'Notice'];
         let normalizedStatus = allowedStatuses.includes(status) ? status : 'Probation';
 
-        // Rule 1: Tenure >= 6 months (using default probation period of 6)
+        // Rule 1: Tenure >= probation period
         const refJoiningDate = contractJoiningDate || dateOfJoining;
         const refExpiryDate = contractExpiryDate;
         let criteriaMetForPermanent = false;
         const today = new Date();
         today.setHours(0, 0, 0, 0);
 
+        const activeProbationPeriod = parseInt(probationPeriod) || 6;
+
         if (refJoiningDate) {
             const joiningDateObj = new Date(refJoiningDate);
             const probationEndDate = new Date(joiningDateObj);
-            probationEndDate.setMonth(probationEndDate.getMonth() + 6);
+            probationEndDate.setMonth(probationEndDate.getMonth() + activeProbationPeriod);
             probationEndDate.setHours(0, 0, 0, 0);
             if (probationEndDate <= today) criteriaMetForPermanent = true;
         }
 
-        // Rule 2: 6 months after contract's expiry (user requirement)
+        // Rule 2: duration after contract's expiry (user requirement)
         if (!criteriaMetForPermanent && refExpiryDate) {
             const expiryDateObj = new Date(refExpiryDate);
-            const sixMonthsAfterExpiry = new Date(expiryDateObj);
-            sixMonthsAfterExpiry.setMonth(sixMonthsAfterExpiry.getMonth() + 6);
-            sixMonthsAfterExpiry.setHours(0, 0, 0, 0);
-            if (sixMonthsAfterExpiry <= today) criteriaMetForPermanent = true;
+            const periodAfterExpiry = new Date(expiryDateObj);
+            periodAfterExpiry.setMonth(periodAfterExpiry.getMonth() + activeProbationPeriod);
+            periodAfterExpiry.setHours(0, 0, 0, 0);
+            if (periodAfterExpiry <= today) criteriaMetForPermanent = true;
         }
 
         if (criteriaMetForPermanent) {
             normalizedStatus = 'Permanent';
             console.log(`[AddEmployee] Auto-setting status to Permanent for ${firstName} ${lastName}`);
         } else {
-            normalizedStatus = 'Probation';
+            // Keep the provided status if it's valid, otherwise default to Probation
+            normalizedStatus = allowedStatuses.includes(status) ? status : 'Probation';
         }
 
         // Use designation as role if role is not provided
@@ -286,96 +289,12 @@ export const addEmployee = async (req, res) => {
 
         // If department is "administrator"/"administration", automatically make them admin
         const isAdministrator = department && typeof department === 'string' && (department.toLowerCase() === 'administrator' || department.toLowerCase() === 'administration');
-        let newUser = null;
-
-        // Create user for ANY employee with an email, regardless of portal access flag
-        if (cleanedEmail) {
-            try {
-                // Check if user already exists for this employee
-                const existingUser = await User.findOne({
-                    $or: [
-                        { employeeId: cleanedEmployeeId },
-                        { email: cleanedEmail }
-                    ]
-                });
-
-                if (!existingUser) {
-                    // Generate username from first name
-                    let username = (firstName && typeof firstName === 'string') ? firstName.toLowerCase().trim() : (typeof cleanedEmployeeId === 'string' ? cleanedEmployeeId.toLowerCase() : 'user');
-
-                    // Remove spaces and special characters from username
-                    username = username.replace(/[^a-z0-9]/g, '');
-
-                    // If username is empty after cleaning, use employeeId
-                    if (!username) {
-                        username = cleanedEmployeeId.toLowerCase();
-                    }
-
-                    // Check if username already exists, if so append employeeId
-                    let finalUsername = username;
-                    let usernameExists = await User.findOne({ username: finalUsername });
-                    // Also append a number if username exists to ensure uniqueness
-                    let counter = 1;
-                    while (usernameExists) {
-                        finalUsername = `${username}${counter}`;
-                        usernameExists = await User.findOne({ username: finalUsername });
-                        counter++;
-                    }
-
-                    // Generate a default password (can be changed later)
-                    // Generate a random string as fallback instead of hardcoded password
-                    const randomString = Math.random().toString(36).slice(-10) + Math.random().toString(36).slice(-10);
-                    const defaultPassword = process.env.DEFAULT_ADMIN_PASSWORD || `AutoGen${randomString}!`;
-
-                    // Hash password
-                    const hashedPassword = await bcrypt.hash(defaultPassword, 10);
-
-                    // Calculate password expiry date (180 days from now)
-                    const passwordExpiryDate = new Date();
-                    passwordExpiryDate.setDate(passwordExpiryDate.getDate() + 180);
-
-                    // Create user
-                    newUser = new User({
-                        username: finalUsername,
-                        name: `${firstName} ${lastName}`.trim(),
-                        email: cleanedEmail,
-                        companyEmail: companyEmail || '',
-                        password: hashedPassword,
-                        employeeId: cleanedEmployeeId,
-                        group: null, // Administrators don't need groups, regular users will need to be assigned one manually later
-                        groupName: null,
-                        status: 'Active',
-                        enablePortalAccess: enablePortalAccess || false, // Use provided value to match EmployeeBasic
-                        isAdmin: isAdministrator, // Mark as admin only if department is administrator
-                        passwordExpiryDate: passwordExpiryDate,
-                    });
-
-                    await newUser.save();
-                    console.log(`User created automatically for employee: ${cleanedEmployeeId} with username: ${finalUsername}. Is Admin: ${isAdministrator}`);
-                }
-            } catch (userError) {
-                // Log error but don't fail the employee creation
-                console.error('Error creating user for employee:', userError);
-                // Continue with employee creation even if user creation fails
-            }
-        }
-
         // Get complete employee data for response
         const savedEmployee = await getCompleteEmployee(cleanedEmployeeId);
 
-        let userResponse = null;
-        if (newUser) {
-            userResponse = {
-                username: newUser.username,
-                isGeneratedPassword: !process.env.DEFAULT_ADMIN_PASSWORD,
-                defaultPassword: process.env.DEFAULT_ADMIN_PASSWORD ? 'See server .env' : 'Check server logs for random password'
-            };
-        }
-
         return res.status(201).json({
             message: "Employee added successfully",
-            employee: savedEmployee,
-            createdUser: userResponse
+            employee: savedEmployee
         });
     } catch (error) {
         console.error('Error adding employee:', error);

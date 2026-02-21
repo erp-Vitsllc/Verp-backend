@@ -40,7 +40,8 @@ export const createAssetType = async (req, res) => {
     try {
         console.log('DEBUG: createAssetType body:', req.body);
         let {
-            mode, category, type, name, assetValue, purchaseDate, quantity, warranty, warrantyYears, warrantyAttachment, invoiceNumber, imagePreview, description, invoiceFile, accessories
+            mode, category, type, name, assetValue, purchaseDate, quantity, warranty, warrantyYears, warrantyAttachment, invoiceNumber, imagePreview, description, invoiceFile, accessories,
+            vehicleCode, plateNumber, modelYear, currentKilometer, registrationExpiryDate
         } = req.body;
 
         if (mode === 'category') {
@@ -96,13 +97,21 @@ export const createAssetType = async (req, res) => {
 
         } else {
             // Asset Mode
-            if (!type || !name || !assetValue) {
-                return res.status(400).json({ message: 'Name, Type, and Value are required' });
+            if (!type || !name) {
+                return res.status(400).json({ message: 'Name and Type are required' });
             }
 
-            // Find type
-            const t = await AssetType.findOne({ name: type });
-            if (!t) return res.status(400).json({ message: 'Selected Type not found.' });
+            // Find type or auto-create if missing
+            let t = await AssetType.findOne({ name: type });
+            if (!t) {
+                // Auto-create type if not found (e.g. for Car/Van/Pickup)
+                const typeId = await generateGenericId(AssetType, 'asset-type-', 'typeId');
+                t = await AssetType.create({
+                    typeId,
+                    name: type,
+                    description: `Auto-created type: ${type}`
+                });
+            }
 
             // Find category provided in request
             let catId = null;
@@ -167,7 +176,12 @@ export const createAssetType = async (req, res) => {
                     imagePreview: imageS3Key,
                     photo: imageS3Key,
                     invoiceFile,
-                    accessories: formattedAccessories
+                    accessories: formattedAccessories,
+                    vehicleCode,
+                    plateNumber,
+                    modelYear,
+                    currentKilometer,
+                    registrationExpiryDate
                 };
 
                 const newAsset = await AssetItem.create(assetData);
@@ -283,7 +297,12 @@ export const getAssetTypes = async (req, res) => {
                         attachment: accObj.attachment ? await getSignedFileUrl(accObj.attachment) : null
                     };
                 })),
-                assignedTo: a.assignedTo
+                assignedTo: a.assignedTo,
+                vehicleCode: a.vehicleCode,
+                plateNumber: a.plateNumber,
+                modelYear: a.modelYear,
+                currentKilometer: a.currentKilometer,
+                registrationExpiryDate: a.registrationExpiryDate
             })))
         ];
 

@@ -16,6 +16,8 @@ import EmployeeEmergencyContact from "../models/EmployeeEmergencyContact.js";
 import EmployeeTraining from "../models/EmployeeTraining.js";
 import User from "../models/User.js";
 import { getSignedFileUrl } from "../utils/s3Upload.js";
+import { checkAndUpdateProbationStatus } from "../utils/employeeStatusHelper.js";
+
 
 /**
  * Get complete employee data by ID (can be _id or employeeId)
@@ -66,6 +68,9 @@ export const getCompleteEmployee = async (id) => {
         if (!employeeBasic) {
             return null;
         }
+
+        // AUTO-UPDATE: Check if probation has ended
+        employeeBasic = await checkAndUpdateProbationStatus(employeeBasic);
 
         const employeeId = employeeBasic.employeeId;
 

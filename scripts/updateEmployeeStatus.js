@@ -28,21 +28,27 @@ const updateStatuses = async () => {
 
         const employees = await EmployeeBasic.find({});
         let updatedCount = 0;
-        const sixMonthsAgo = new Date();
-        sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
 
         for (const emp of employees) {
             let normalized = normalizeStatus(emp.status);
 
-            // Check 6-month rule
-            if (emp.dateOfJoining) {
+            // Check probation rule
+            if (emp.dateOfJoining && normalized === "Probation") {
                 const joinDate = new Date(emp.dateOfJoining);
-                if (joinDate <= sixMonthsAgo) {
+                const probationPeriod = emp.probationPeriod || 6; // Default to 6 months if not specified
+
+                const probationEndDate = new Date(joinDate);
+                probationEndDate.setMonth(joinDate.getMonth() + probationPeriod);
+
+                const today = new Date();
+
+                if (today >= probationEndDate) {
                     normalized = "Permanent";
                 }
             }
 
             if (emp.status !== normalized) {
+                console.log(`Updating ${emp.employeeId}: ${emp.status} -> ${normalized}`);
                 emp.status = normalized;
                 if (normalized === "Permanent") emp.probationPeriod = null;
                 await emp.save();

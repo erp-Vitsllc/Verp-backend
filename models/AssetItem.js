@@ -71,7 +71,7 @@ const assetItemSchema = new mongoose.Schema({
     },
     status: {
         type: String,
-        enum: ['Assigned', 'Unassigned', 'Maintenance', 'Lost', 'Returned'],
+        enum: ['Assigned', 'Unassigned', 'Maintenance', 'Lost', 'Returned', 'Pending'],
         default: 'Unassigned'
     },
     assignmentType: {
@@ -105,7 +105,12 @@ const assetItemSchema = new mongoose.Schema({
         name: { type: String, required: true },
         amount: { type: Number, default: 0 },
         attachment: { type: String, default: null }
-    }]
+    }],
+    vehicleCode: { type: String, trim: true },
+    plateNumber: { type: String, trim: true },
+    modelYear: { type: String, trim: true },
+    currentKilometer: { type: Number, default: 0 },
+    registrationExpiryDate: { type: Date, default: null }
 }, {
     timestamps: true
 });

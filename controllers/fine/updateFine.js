@@ -45,7 +45,7 @@ export const updateFine = async (req, res) => {
         // 1. Explicitly Define Allowed Fields (Fix Mass Assignment)
         const allowedUpdates = [
             'fineStatus', 'description', 'awardedDate', 'remarks',
-            'attachment', 'category', 'subCategory', 'vehicleId',
+            'attachment', 'category', 'subCategory', 'vehicleId', 'assetId', 'assetName',
             'projectId', 'projectName', 'engineerName', 'responsibleFor',
             'employeeAmount', 'companyAmount', 'payableDuration', 'monthStart',
             'employees' // handled below

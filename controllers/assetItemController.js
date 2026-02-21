@@ -251,7 +251,7 @@ export const assignAssetItem = async (req, res) => {
         item.assignedBy = req.user.employeeObjectId;
         item.assignmentType = assignmentType;
         item.assignedDays = assignmentType === 'Temporary' ? assignedDays : null;
-        item.status = 'Assigned';
+        item.status = 'Pending';
         item.acceptanceStatus = 'Pending';
         item.actionRequiredBy = assignedTo; // Assignee must respond first
         item.negotiationHistory = [];
@@ -352,7 +352,7 @@ export const bulkAssignAssetItems = async (req, res) => {
             assignedBy: req.user.employeeObjectId,
             assignmentType,
             assignedDays: assignmentType === 'Temporary' ? assignedDays : null,
-            status: 'Assigned',
+            status: 'Pending',
             acceptanceStatus: 'Pending',
             actionRequiredBy: assignedTo, // Assignee must respond
             negotiationHistory: []
@@ -523,6 +523,7 @@ export const respondToAssignment = async (req, res) => {
 
         } else if (action === 'Accept') {
             // Final Acceptance
+            item.status = 'Assigned';
             item.acceptanceStatus = 'Accepted';
             item.actionRequiredBy = null;
 
@@ -651,30 +652,52 @@ export const returnAssetItem = async (req, res) => {
         const prevAssignedTo = item.assignedTo;
         const originalAssigner = item.assignedBy;
 
-        if (originalAssigner) {
-            // Return to the original assigner
-            item.assignedTo = originalAssigner;
-            item.assignedBy = req.user.employeeObjectId; // Person processing the return
-            item.status = 'Returned'; // Status set to Returned
+        const { reassignTo, assignmentType, assignedDays } = req.body;
 
-            // Should it require acceptance? 
-            // User didn't specify, but usually returns are acknowledged. 
-            // For now, let's assume it's just assigned back.
-            item.acceptanceStatus = 'Pending';
-            item.actionRequiredBy = originalAssigner;
-        } else {
-            // Fallback if no assigner found - unassign completely
-            item.assignedTo = null;
-            item.assignedBy = null;
-            item.status = 'Unassigned';
-            item.acceptanceStatus = 'Pending';
+        if (reassignTo) {
+            // Explicit reassignment requested
+            const newAssignee = await EmployeeBasic.findById(reassignTo);
+            if (!newAssignee) {
+                return res.status(404).json({ message: "Target employee for reassignment not found" });
+            }
+
+            item.assignedTo = newAssignee._id;
+            item.assignedBy = req.user.employeeObjectId;
+            item.status = 'Returned';
+            item.acceptanceStatus = 'Accepted';
             item.actionRequiredBy = null;
-        }
 
-        // Reset other fields
-        item.assignmentType = null;
-        item.assignedDays = null;
-        item.negotiationHistory = [];
+            // Set assignment details if provided
+            item.assignmentType = assignmentType || 'Permanent';
+            item.assignedDays = assignedDays || null;
+            item.negotiationHistory = [];
+        } else if (originalAssigner) {
+            // Assign back to the original assigner as 'Returned'
+            item.assignedTo = originalAssigner;
+            item.assignedBy = req.user.employeeObjectId;
+            item.status = 'Returned';
+            item.acceptanceStatus = 'Accepted';
+            item.actionRequiredBy = null;
+
+            // Reset other fields
+            item.assignmentType = null;
+            item.assignedDays = null;
+            item.negotiationHistory = [];
+        } else {
+            // Default return - mark as returned
+            item.assignedTo = null;
+            // We keep assignedBy as record of who originally assigned it? 
+            // Or clear it? User said "goes to the assigner status is returned"
+            // Let's keep assignedBy but set assignedTo to null.
+            item.status = 'Returned';
+            item.acceptanceStatus = 'Accepted';
+            item.actionRequiredBy = null;
+
+            // Reset other fields
+            item.assignmentType = null;
+            item.assignedDays = null;
+            item.negotiationHistory = [];
+        }
 
         await item.save();
 
@@ -718,7 +741,8 @@ export const getAssetHistory = async (req, res) => {
 const updateAssetTypeCounts = async (typeId) => {
     const total = await AssetItem.countDocuments({ typeId: typeId });
     const assigned = await AssetItem.countDocuments({ typeId: typeId, status: 'Assigned' });
-    const unassigned = total - assigned;
+    const pending = await AssetItem.countDocuments({ typeId: typeId, status: 'Pending' });
+    const unassigned = total - assigned - pending;
 
     await AssetType.findByIdAndUpdate(typeId, {
         total,

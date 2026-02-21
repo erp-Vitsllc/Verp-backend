@@ -378,6 +378,21 @@ export const approveFine = async (req, res) => {
 
                         await asset.save();
                         console.log(`[ApproveFine] Asset ${fine.assetId} status updated to ${newStatus}`);
+
+                        // Create Asset History Record
+                        try {
+                            const AssetHistory = (await import("../../models/AssetHistory.js")).default;
+                            await AssetHistory.create({
+                                assetId: asset._id,
+                                action: newStatus === 'Lost' ? 'Returned' : 'Returned', // Using 'Returned' as catch-all or specific if enum allows
+                                assignedTo: null, // It's being unassigned
+                                performedBy: req.user.employeeId ? (await EmployeeBasic.findOne({ employeeId: req.user.employeeId }))?._id : null,
+                                comments: `Asset ${newStatus} due to approved Fine (${fine.fineId}). Description: ${fine.description}`,
+                                date: new Date()
+                            });
+                        } catch (historyErr) {
+                            console.error("[ApproveFine] Failed to create Asset History:", historyErr);
+                        }
                     }
                 }
 
