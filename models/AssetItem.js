@@ -71,7 +71,7 @@ const assetItemSchema = new mongoose.Schema({
     },
     status: {
         type: String,
-        enum: ['Assigned', 'Unassigned', 'Maintenance', 'Lost', 'Returned', 'Pending', 'Service'],
+        enum: ['Assigned', 'Unassigned', 'Maintenance', 'On Service', 'Lost', 'Returned', 'Pending'],
         default: 'Unassigned'
     },
     assignmentType: {
@@ -114,7 +114,27 @@ const assetItemSchema = new mongoose.Schema({
     insuranceExpiryDate: { type: Date, default: null },
     oilChangeDate: { type: Date, default: null },
     gearOilDueDate: { type: Date, default: null },
-    nextServiceDate: { type: Date, default: null }
+    lastServiceDate: { type: Date, default: null },
+    nextServiceDate: { type: Date, default: null },
+    documents: [{
+        type: { type: String },
+        issueAuthority: { type: String },
+        issueDate: { type: Date },
+        expiryDate: { type: Date },
+        description: { type: String },
+        attachment: { type: String } // URL to uploaded document
+    }],
+    services: [{
+        serviceType: { type: String, enum: ['Oil Service', 'Taxi Charge', 'Mechanical Work', 'Body Work', 'Accident Repair', 'Other'] },
+        date: { type: Date, default: Date.now },
+        expiryDate: { type: Date },
+        currentKm: { type: Number },
+        description: { type: String },
+        paidBy: { type: String, enum: ['Company', 'Employee'] },
+        value: { type: Number },
+        remark: { type: String },
+        invoice: { type: String } // URL to uploaded invoice
+    }]
 }, {
     timestamps: true
 });

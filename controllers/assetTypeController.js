@@ -29,6 +29,18 @@ const generateGenericId = async (model, prefix, fieldName) => {
     }
 };
 
+const UAE_PLATE_REGEX = /^([A-Z]{1,3})?\s?(\d{1,6})$/;
+
+const normalizePlate = (val) => {
+    if (!val) return val;
+    const trimmed = val.trim().toUpperCase();
+    const match = trimmed.match(UAE_PLATE_REGEX);
+    if (!match) return trimmed;
+    const letters = match[1];
+    const numbers = match[2];
+    return letters ? `${letters} ${numbers}` : numbers;
+};
+
 // Helper to generate accessory suffix (A, B, C...)
 const generateAccessoryId = (assetId, index) => {
     const charCode = 65 + (index % 26);
@@ -42,8 +54,16 @@ export const createAssetType = async (req, res) => {
         let {
             mode, category, type, name, assetValue, purchaseDate, quantity, warranty, warrantyYears, warrantyAttachment, invoiceNumber, imagePreview, description, invoiceFile, accessories,
             vehicleCode, plateNumber, modelYear, currentKilometer, registrationExpiryDate,
-            insuranceExpiryDate, oilChangeDate, gearOilDueDate, nextServiceDate
+            insuranceExpiryDate, oilChangeDate, gearOilDueDate, lastServiceDate, nextServiceDate
         } = req.body;
+
+        // UAE Plate Validation if provided (usually for vehicles)
+        if (plateNumber) {
+            if (!UAE_PLATE_REGEX.test(plateNumber.trim().toUpperCase())) {
+                return res.status(400).json({ message: 'Enter a valid UAE vehicle plate number' });
+            }
+            plateNumber = normalizePlate(plateNumber);
+        }
 
         if (mode === 'category') {
             if (!category) return res.status(400).json({ message: 'Category name is required' });
@@ -186,6 +206,7 @@ export const createAssetType = async (req, res) => {
                     insuranceExpiryDate,
                     oilChangeDate,
                     gearOilDueDate,
+                    lastServiceDate,
                     nextServiceDate
                 };
 
@@ -311,6 +332,7 @@ export const getAssetTypes = async (req, res) => {
                 insuranceExpiryDate: a.insuranceExpiryDate,
                 oilChangeDate: a.oilChangeDate,
                 gearOilDueDate: a.gearOilDueDate,
+                lastServiceDate: a.lastServiceDate,
                 nextServiceDate: a.nextServiceDate
             })))
         ];
@@ -433,7 +455,14 @@ export const updateAssetItem = async (req, res) => {
                         asset[key] = updates[key];
                     }
                 } else {
-                    asset[key] = updates[key];
+                    if (key === 'plateNumber' && updates[key]) {
+                        if (!UAE_PLATE_REGEX.test(updates[key].trim().toUpperCase())) {
+                            return res.status(400).json({ message: 'Enter a valid UAE vehicle plate number' });
+                        }
+                        asset[key] = normalizePlate(updates[key]);
+                    } else {
+                        asset[key] = updates[key];
+                    }
                 }
             }
         }

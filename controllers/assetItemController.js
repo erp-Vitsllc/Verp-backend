@@ -75,7 +75,7 @@ export const getAllAssignedAssets = async (req, res) => {
 // @access  Private
 export const createAssetItem = async (req, res) => {
     try {
-        let { assetTypeId, name, photo, status, categoryId, assetValue, purchaseDate, warrantyYears, accessories } = req.body;
+        let { assetTypeId, name, photo, status, categoryId, assetValue, purchaseDate, warrantyYears, lastServiceDate, accessories } = req.body;
 
         if (!assetTypeId || !name) {
             return res.status(400).json({ message: 'Asset Type and Name are required' });
@@ -131,6 +131,7 @@ export const createAssetItem = async (req, res) => {
             purchaseDate: purchaseDate || null,
             warrantyYears: warrantyYears || 0,
             status: status || 'Unassigned',
+            lastServiceDate: lastServiceDate || null,
             accessories: formattedAccessories
         });
 
@@ -211,6 +212,22 @@ export const getAssetItemDetail = async (req, res) => {
 
         if (itemObj.assignedTo?.signature?.url) {
             itemObj.assignedTo.signature.url = await getSignedFileUrl(itemObj.assignedTo.signature.url);
+        }
+
+        if (itemObj.documents && itemObj.documents.length > 0) {
+            for (let doc of itemObj.documents) {
+                if (doc.attachment) {
+                    doc.attachment = await getSignedFileUrl(doc.attachment);
+                }
+            }
+        }
+
+        if (itemObj.services && itemObj.services.length > 0) {
+            for (let service of itemObj.services) {
+                if (service.invoice) {
+                    service.invoice = await getSignedFileUrl(service.invoice);
+                }
+            }
         }
 
         res.status(200).json(itemObj);
@@ -663,7 +680,7 @@ export const returnAssetItem = async (req, res) => {
 
             item.assignedTo = newAssignee._id;
             item.assignedBy = req.user.employeeObjectId;
-            item.status = 'Returned';
+            item.status = 'Unassigned';
             item.acceptanceStatus = 'Accepted';
             item.actionRequiredBy = null;
 
@@ -675,7 +692,7 @@ export const returnAssetItem = async (req, res) => {
             // Assign back to the original assigner as 'Returned'
             item.assignedTo = originalAssigner;
             item.assignedBy = req.user.employeeObjectId;
-            item.status = 'Returned';
+            item.status = 'Unassigned';
             item.acceptanceStatus = 'Accepted';
             item.actionRequiredBy = null;
 
@@ -689,7 +706,7 @@ export const returnAssetItem = async (req, res) => {
             // We keep assignedBy as record of who originally assigned it? 
             // Or clear it? User said "goes to the assigner status is returned"
             // Let's keep assignedBy but set assignedTo to null.
-            item.status = 'Returned';
+            item.status = 'Unassigned';
             item.acceptanceStatus = 'Accepted';
             item.actionRequiredBy = null;
 
@@ -734,6 +751,201 @@ export const getAssetHistory = async (req, res) => {
     } catch (error) {
         console.error('Error fetching asset history:', error);
         res.status(500).json({ message: 'Server Error' });
+    }
+};
+
+// @desc    Add a document to an asset item
+// @route   POST /api/AssetItem/:id/document
+// @access  Private
+export const addAssetDocument = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { type, issueAuthority, issueDate, expiryDate, description, document } = req.body;
+
+        const asset = await AssetItem.findById(id);
+        if (!asset) {
+            return res.status(404).json({ message: 'Asset not found' });
+        }
+
+        let documentUrl = null;
+        if (document && document.data) {
+            try {
+                // Upload to S3 under asset-documents folder
+                const uploadResult = await uploadDocumentToS3(document.data, 'asset-documents', document.name);
+                documentUrl = uploadResult.publicId;
+            } catch (error) {
+                console.error('Error uploading document to S3:', error);
+                return res.status(500).json({ message: 'Failed to upload document' });
+            }
+        }
+
+        asset.documents.push({
+            type,
+            issueAuthority: issueAuthority || null,
+            issueDate: issueDate || null,
+            expiryDate: expiryDate || null,
+            description: description || null,
+            attachment: documentUrl
+        });
+
+        await asset.save();
+
+        // Return signed URL for immediate UI update if needed
+        const newDoc = asset.documents[asset.documents.length - 1].toObject();
+        if (newDoc.attachment) {
+            newDoc.attachment = await getSignedFileUrl(newDoc.attachment);
+        }
+
+        res.status(200).json({ message: 'Document added successfully', document: newDoc });
+    } catch (error) {
+        console.error('Error adding asset document:', error);
+        res.status(500).json({ message: 'Internal server error' });
+    }
+};
+
+// @desc    Update an existing document on an asset item
+// @route   PUT /api/AssetItem/:id/document/:docId
+// @access  Private
+export const updateAssetDocument = async (req, res) => {
+    try {
+        const { id, docId } = req.params;
+        const { type, issueAuthority, issueDate, expiryDate, description, document } = req.body;
+
+        const asset = await AssetItem.findById(id);
+        if (!asset) {
+            return res.status(404).json({ message: 'Asset not found' });
+        }
+
+        // Find the document subdocument by _id
+        const doc = asset.documents.id(docId);
+        if (!doc) {
+            return res.status(404).json({ message: 'Document not found' });
+        }
+
+        // Update fields
+        if (type) doc.type = type;
+        if (issueAuthority !== undefined) doc.issueAuthority = issueAuthority;
+        if (issueDate !== undefined) doc.issueDate = issueDate;
+        if (expiryDate !== undefined) doc.expiryDate = expiryDate;
+        if (description !== undefined) doc.description = description;
+
+        // Upload new file only if provided
+        if (document && document.data) {
+            try {
+                const uploadResult = await uploadDocumentToS3(document.data, 'asset-documents', document.name);
+                doc.attachment = uploadResult.publicId;
+            } catch (error) {
+                console.error('Error uploading document to S3:', error);
+                return res.status(500).json({ message: 'Failed to upload document' });
+            }
+        }
+
+        await asset.save();
+
+        const updatedDoc = doc.toObject();
+        if (updatedDoc.attachment) {
+            updatedDoc.attachment = await getSignedFileUrl(updatedDoc.attachment);
+        }
+
+        res.status(200).json({ message: 'Document updated successfully', document: updatedDoc });
+    } catch (error) {
+        console.error('Error updating asset document:', error);
+        res.status(500).json({ message: 'Internal server error' });
+    }
+};
+
+// @desc    Delete a document from an asset item
+// @route   DELETE /api/AssetItem/:id/document/:docId
+// @access  Private
+export const deleteAssetDocument = async (req, res) => {
+    try {
+        const { id, docId } = req.params;
+
+        const asset = await AssetItem.findById(id);
+        if (!asset) {
+            return res.status(404).json({ message: 'Asset not found' });
+        }
+
+        const doc = asset.documents.id(docId);
+        if (!doc) {
+            return res.status(404).json({ message: 'Document not found' });
+        }
+
+        asset.documents.pull({ _id: docId });
+        await asset.save();
+
+        res.status(200).json({ message: 'Document deleted successfully' });
+    } catch (error) {
+        console.error('Error deleting asset document:', error);
+        res.status(500).json({ message: 'Internal server error' });
+    }
+};
+
+// @desc    Add a service record to an asset item
+// @route   POST /api/AssetItem/:id/service
+// @access  Private
+export const addAssetService = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { serviceType, date, expiryDate, currentKm, description, paidBy, value, remark, invoice } = req.body;
+
+        const asset = await AssetItem.findById(id);
+        if (!asset) {
+            return res.status(404).json({ message: 'Asset not found' });
+        }
+
+        let invoiceUrl = null;
+        if (invoice && invoice.data) {
+            try {
+                const uploadResult = await uploadDocumentToS3(invoice.data, 'asset-service-invoices', invoice.name);
+                invoiceUrl = uploadResult.publicId;
+            } catch (error) {
+                console.error('Error uploading invoice to S3:', error);
+                return res.status(500).json({ message: 'Failed to upload invoice' });
+            }
+        }
+
+        // Create the service record
+        const newService = {
+            serviceType,
+            date: date || new Date(),
+            expiryDate: expiryDate || null,
+            currentKm: currentKm || null,
+            description,
+            paidBy,
+            value: value || 0,
+            remark,
+            invoice: invoiceUrl
+        };
+
+        asset.services.push(newService);
+
+        // Update asset's current kilometer if provided in service record
+        if (currentKm && Number(currentKm) > (asset.currentKilometer || 0)) {
+            asset.currentKilometer = Number(currentKm);
+        }
+
+        // Update specialized dates if it's an Oil Service
+        if (serviceType === 'Oil Service') {
+            asset.oilChangeDate = date || new Date();
+            asset.lastServiceDate = date || new Date();
+        } else {
+            // General last service date update
+            asset.lastServiceDate = date || new Date();
+        }
+
+        await asset.save();
+
+        // Return signed URL for the new invoice
+        const addedService = asset.services[asset.services.length - 1].toObject();
+        if (addedService.invoice) {
+            addedService.invoice = await getSignedFileUrl(addedService.invoice);
+        }
+
+        res.status(200).json({ message: 'Service record added successfully', service: addedService });
+    } catch (error) {
+        console.error('Error adding asset service:', error);
+        res.status(500).json({ message: 'Internal server error' });
     }
 };
 
