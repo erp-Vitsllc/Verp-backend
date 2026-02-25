@@ -61,6 +61,11 @@ const assetItemSchema = new mongoose.Schema({
         type: String,
         default: null
     },
+    images: [{
+        url: { type: String, required: true },
+        caption: { type: String, default: '' },
+        date: { type: Date, default: Date.now }
+    }],
     assignedTo: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'EmployeeBasic'
@@ -71,7 +76,7 @@ const assetItemSchema = new mongoose.Schema({
     },
     status: {
         type: String,
-        enum: ['Assigned', 'Unassigned', 'Maintenance', 'On Service', 'Lost', 'Returned', 'Pending'],
+        enum: ['Assigned', 'Unassigned', 'Maintenance', 'On Service', 'Service', 'Lost', 'Returned', 'Pending'],
         default: 'Unassigned'
     },
     assignmentType: {
@@ -93,6 +98,11 @@ const assetItemSchema = new mongoose.Schema({
         ref: 'EmployeeBasic',
         default: null
     },
+    acceptedBy: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'EmployeeBasic',
+        default: null
+    },
     negotiationHistory: [{
         sender: { type: mongoose.Schema.Types.ObjectId, ref: 'EmployeeBasic' },
         message: { type: String },
@@ -104,7 +114,12 @@ const assetItemSchema = new mongoose.Schema({
         accessoryId: { type: String },
         name: { type: String, required: true },
         amount: { type: Number, default: 0 },
-        attachment: { type: String, default: null }
+        attachment: { type: String, default: null },
+        status: {
+            type: String,
+            enum: ['Attached', 'Transfered', 'Lost', 'Damaged', 'End of Life'],
+            default: 'Attached'
+        }
     }],
     vehicleCode: { type: String, trim: true },
     plateNumber: { type: String, trim: true },
@@ -128,12 +143,14 @@ const assetItemSchema = new mongoose.Schema({
         serviceType: { type: String, enum: ['Oil Service', 'Taxi Charge', 'Mechanical Work', 'Body Work', 'Accident Repair', 'Other'] },
         date: { type: Date, default: Date.now },
         expiryDate: { type: Date },
+        serviceDuration: { type: String },   // e.g. "7 days", "2 weeks"
         currentKm: { type: Number },
         description: { type: String },
         paidBy: { type: String, enum: ['Company', 'Employee'] },
         value: { type: Number },
         remark: { type: String },
-        invoice: { type: String } // URL to uploaded invoice
+        invoice: { type: String },           // URL to uploaded invoice
+        attachment: { type: String }         // URL to any supporting attachment
     }]
 }, {
     timestamps: true

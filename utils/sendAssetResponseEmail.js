@@ -29,24 +29,23 @@ export const sendAssetResponseEmail = async ({ asset, actor, recipient, action, 
         const actorName = `${actor.firstName || ""} ${actor.lastName || ""}`.trim();
         const assetName = asset.name;
 
-        let subject = "";
-        let actionDescription = "";
-        let color = "#2563eb"; // default blue
+        const isSelfRecipient = recipient._id?.toString() === asset.assignedTo?._id?.toString();
+        const subjectRecipientPart = isSelfRecipient ? "Assigned to You" : `for ${asset.assignedTo?.firstName || "Employee"}`;
 
         switch (action) {
             case 'Accept':
-                subject = `Asset Accepted: ${assetName} (${asset.assetId})`;
-                actionDescription = `has <strong>ACCEPTED</strong> the assignment of asset <strong>${assetName}</strong>.`;
+                subject = `Asset Accepted: ${assetName} (${subjectRecipientPart})`;
+                actionDescription = `has <strong>ACCEPTED</strong> the assignment of asset <strong>${assetName}</strong> ${isSelfRecipient ? 'assigned to you' : (asset.assignedTo ? `for <strong>${asset.assignedTo.firstName}</strong>` : '')}.`;
                 color = "#10b981"; // emerald
                 break;
             case 'Reject':
-                subject = `Asset Rejected: ${assetName} (${asset.assetId})`;
-                actionDescription = `has <strong>REJECTED</strong> the assignment of asset <strong>${assetName}</strong>.`;
+                subject = `Asset Rejected: ${assetName} (${subjectRecipientPart})`;
+                actionDescription = `has <strong>REJECTED</strong> the assignment of asset <strong>${assetName}</strong> ${isSelfRecipient ? 'assigned to you' : (asset.assignedTo ? `for <strong>${asset.assignedTo.firstName}</strong>` : '')}.`;
                 color = "#ef4444"; // red
                 break;
             case 'AcceptWithComments':
-                subject = `Asset Negotiation/Comment: ${assetName} (${asset.assetId})`;
-                actionDescription = `has sent a <strong>response/comment</strong> regarding asset <strong>${assetName}</strong>. Action is required.`;
+                subject = `Asset Response: ${assetName} (${subjectRecipientPart})`;
+                actionDescription = `has sent a <strong>response/comment</strong> regarding the assignment of <strong>${assetName}</strong> ${isSelfRecipient ? 'assigned to you' : (asset.assignedTo ? `for <strong>${asset.assignedTo.firstName}</strong>` : '')}.`;
                 color = "#3b82f6"; // blue
                 break;
         }
@@ -58,10 +57,10 @@ export const sendAssetResponseEmail = async ({ asset, actor, recipient, action, 
         const html = `
             <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; color: #1e293b; line-height: 1.6; max-width: 600px; margin: 0 auto; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden; background-color: #ffffff;">
                 <div style="background-color: ${color}; color: white; padding: 30px; text-align: center;">
-                    <h1 style="margin: 0; font-size: 24px;">Asset Update</h1>
+                    <h1 style="margin: 0; font-size: 24px;">Asset Assignment Update</h1>
                 </div>
                 <div style="padding: 40px;">
-                    <p style="font-size: 16px;">Hello ${recipient.firstName},</p>
+                    <p style="font-size: 16px;">Hello ${recipient.firstName || "User"},</p>
                     
                     <p><strong>${actorName}</strong> ${actionDescription}</p>
                     

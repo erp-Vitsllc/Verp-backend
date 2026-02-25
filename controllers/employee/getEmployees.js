@@ -188,6 +188,30 @@ export const getEmployees = async (req, res) => {
                 },
                 {
                     $lookup: {
+                        from: "users",
+                        localField: "employeeId",
+                        foreignField: "employeeId",
+                        as: "userInfo"
+                    }
+                },
+                {
+                    $addFields: {
+                        // Dynamically calculate portal access based on linked user and company email
+                        hasActiveUser: {
+                            $gt: [{
+                                $size: {
+                                    $filter: {
+                                        input: "$userInfo",
+                                        as: "u",
+                                        cond: { $eq: ["$$u.status", "Active"] }
+                                    }
+                                }
+                            }, 0]
+                        }
+                    }
+                },
+                {
+                    $lookup: {
                         from: "companies",
                         localField: "company",
                         foreignField: "_id",
@@ -204,7 +228,15 @@ export const getEmployees = async (req, res) => {
                     $project: {
                         firstName: 1, lastName: 1, employeeId: 1, role: 1, department: 1, designation: 1,
                         status: 1, probationPeriod: 1, overtime: 1, profileApprovalStatus: 1, profileStatus: 1,
-                        email: 1, companyEmail: 1, enablePortalAccess: 1, dateOfJoining: 1, contractJoiningDate: 1,
+                        email: 1, companyEmail: 1,
+                        // Update enablePortalAccess to be true if they have an active user OR manual flag, AND a company email
+                        enablePortalAccess: {
+                            $and: [
+                                { $or: [{ $ifNull: ["$enablePortalAccess", false] }, "$hasActiveUser"] },
+                                { $gt: [{ $strLenCP: { $ifNull: ["$companyEmail", ""] } }, 0] }
+                            ]
+                        },
+                        dateOfJoining: 1, contractJoiningDate: 1,
                         company: 1,
                         companyName: "$companyInfo.name",
                         companyNickName: "$companyInfo.nickName",
@@ -262,7 +294,9 @@ export const getEmployees = async (req, res) => {
                         bankName: 1, accountName: 1, accountNumber: 1, ibanNumber: 1, swiftCode: 1,
                         emergencyContacts: 1, educationDetails: 1, experienceDetails: 1, salaryHistory: 1,
                         createdAt: 1, updatedAt: 1,
-                        reportingAuthority: { _id: 1, firstName: 1, lastName: 1, employeeId: 1 }
+                        reportingAuthority: { _id: 1, firstName: 1, lastName: 1, employeeId: 1 },
+                        primaryReportee: 1,
+                        secondaryReportee: 1
                     }
                 }
             ]).option(queryOptions), // Passing options to aggregate

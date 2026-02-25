@@ -121,7 +121,12 @@ export const createUser = async (req, res) => {
             try {
                 await EmployeeBasic.findOneAndUpdate(
                     { employeeId: employeeId },
-                    { $set: { companyEmail: companyEmail } }
+                    {
+                        $set: {
+                            companyEmail: companyEmail || '',
+                            enablePortalAccess: enablePortalAccess
+                        }
+                    }
                 );
             } catch (err) {
                 console.error('[createUser] Error syncing companyEmail to Employee record for:', employeeId, err);

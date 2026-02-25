@@ -7,7 +7,7 @@ const dashboardActionSchema = new mongoose.Schema({
     requestType: {
         type: String,
         required: true,
-        enum: ['Loan', 'Reward', 'Fine', 'Profile Activation', 'Notice Request']
+        enum: ['Loan', 'Reward', 'Fine', 'Profile Activation', 'Notice Request', 'Asset']
     },
     status: {
         type: String,
@@ -17,6 +17,7 @@ const dashboardActionSchema = new mongoose.Schema({
     subjectEmployeeId: { type: String }, // The employee the request is ABOUT (e.g. VITS002)
     subjectName: { type: String }, // firstName + lastName
     requestedDate: { type: Date, default: Date.now },
+    requestedByName: { type: String }, // Name of person who initiated the request
     actionedDate: { type: Date },
     actionedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'EmployeeBasic' },
     comment: { type: String },

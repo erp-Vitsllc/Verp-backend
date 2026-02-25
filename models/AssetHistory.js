@@ -26,6 +26,10 @@ const assetHistorySchema = mongoose.Schema({
         type: String,
         default: null
     },
+    details: {
+        type: mongoose.Schema.Types.Mixed,
+        default: {}
+    },
     date: {
         type: Date,
         default: Date.now

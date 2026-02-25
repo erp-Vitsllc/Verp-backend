@@ -169,12 +169,16 @@ export const getUserActivityStats = async (req, res) => {
                 .sort({ createdAt: -1 }).limit(15),
             Fine.find({ $or: [{ "assignedEmployees.employeeId": targetEmployeeId }, { createdBy: targetUser?._id }] })
                 .populate('createdBy', 'name')
-                .sort({ createdAt: -1 }).limit(15)
+                .sort({ createdAt: -1 }).limit(15),
+            // Outgoing Assets (Assigned by me)
+            import("../../models/AssetItem.js").then(m => m.default).then(Model =>
+                Model.find({ assignedBy: { $in: relevantIds } }).sort({ createdAt: -1 }).limit(15)
+            )
         ];
 
         const [
             pendingProfiles, pendingNotices, pendingLoans, pendingRewards, pendingFines,
-            myLoans, myRewards, myFines
+            myLoans, myRewards, myFines, myAssignedAssets
         ] = await Promise.all([...inboxQueries, ...outgoingQueries]);
 
         // 5. Build Unified Activity List for "Pending" (Using DashboardAction)
@@ -186,7 +190,7 @@ export const getUserActivityStats = async (req, res) => {
             activityList.push({
                 id: item.requestId,
                 type: item.requestType,
-                requestedBy: item.subjectName || 'Unknown',
+                requestedBy: item.requestedByName || item.subjectName || 'Unknown',
                 requestedDate: item.requestedDate,
                 actionedDate: null,
                 status: 'Pending',
@@ -406,6 +410,26 @@ export const getUserActivityStats = async (req, res) => {
             }
         });
 
+        // 5.2.1 Add "My Assigned Assets" (Assigned by me)
+        (myAssignedAssets || []).forEach(asset => {
+            const reqIdStr = asset._id.toString();
+            if (!seenRequests.has(reqIdStr)) {
+                activityList.push({
+                    id: asset._id,
+                    type: 'Asset',
+                    requestedBy: 'Me',
+                    requestedDate: asset.createdAt,
+                    actionedDate: asset.acceptanceStatus !== 'Pending' ? asset.updatedAt : null,
+                    status: asset.acceptanceStatus === 'Pending' ? 'Pending' : asset.acceptanceStatus,
+                    extra1: `${asset.assetId} - ${asset.name}`,
+                    extra2: asset.assignmentType,
+                    targetEmployeeId: asset.assignedTo,
+                    scope: 'outgoing'
+                });
+                seenRequests.set(reqIdStr, asset.acceptanceStatus);
+            }
+        });
+
         // 5c. Add "My Profile/Notice Requests"
         if (manager) {
             // Profile Activation Request
@@ -536,9 +560,40 @@ export const getUserActivityStats = async (req, res) => {
             }
         }).sort({ 'noticeRequest.actionedAt': -1 }).limit(10);
 
+        // 6c. GET ACTIONED ASSETS (History)
+        const myActionedAssetActions = await DashboardAction.find({
+            assignedTo: { $in: relevantIds },
+            requestType: 'Asset',
+            status: { $in: ['Approved', 'Rejected'] }
+        }).sort({ actionedDate: -1, updatedAt: -1 }).limit(20).lean();
+
         // Process these history items
         // We add these ONLY if not already in the list as Pending. 
         // If already in as pending, we prefer the 'Approved/Rejected' status for the actioner.
+
+        myActionedAssetActions.forEach(action => {
+            const reqIdStr = action.requestId.toString();
+            const activityItem = {
+                id: action.requestId,
+                type: 'Asset',
+                requestedBy: action.requestedByName || action.subjectName || 'Unknown',
+                requestedDate: action.requestedDate,
+                actionedDate: action.actionedDate || action.updatedAt,
+                status: action.status,
+                extra1: action.extra1,
+                extra2: action.extra2,
+                targetEmployeeId: action.subjectEmployeeId,
+                scope: 'inbox'
+            };
+
+            if (seenRequests.has(reqIdStr)) {
+                const idx = activityList.findIndex(item => item.id.toString() === reqIdStr && item.type === 'Asset');
+                if (idx !== -1) activityList[idx] = activityItem;
+            } else {
+                activityList.push(activityItem);
+                seenRequests.set(reqIdStr, action.status);
+            }
+        });
 
         myActionedNotices.forEach(p => {
             const reqIdStr = p._id.toString() + "_notice";

@@ -99,6 +99,19 @@ export const deleteUser = async (req, res) => {
             );
         }
 
+        // BIDIRECTIONAL SYNC: Disable portal access on Employee profile
+        if (user.employeeId) {
+            try {
+                const EmployeeBasic = (await import("../../models/EmployeeBasic.js")).default;
+                await EmployeeBasic.findOneAndUpdate(
+                    { employeeId: user.employeeId },
+                    { $set: { enablePortalAccess: false } }
+                );
+            } catch (err) {
+                console.error('[deleteUser] Error disabling portal access for:', user.employeeId, err);
+            }
+        }
+
         // Delete the user
         await User.findByIdAndDelete(id);
 

@@ -252,15 +252,20 @@ const updateUserHandler = async (req, res) => {
             { new: true, runValidators: true }
         ).select('-password').populate('group', 'name');
 
-        // BIDIRECTIONAL SYNC: If companyEmail was updated and user is linked to an employee
-        if (updateData.companyEmail !== undefined && updatedUser.employeeId) {
+        if (updatedUser.employeeId) {
             try {
-                await EmployeeBasic.findOneAndUpdate(
-                    { employeeId: updatedUser.employeeId },
-                    { $set: { companyEmail: updateData.companyEmail } }
-                );
+                const syncData = {};
+                if (updateData.companyEmail !== undefined) syncData.companyEmail = updateData.companyEmail;
+                if (updateData.enablePortalAccess !== undefined) syncData.enablePortalAccess = updateData.enablePortalAccess;
+
+                if (Object.keys(syncData).length > 0) {
+                    await EmployeeBasic.findOneAndUpdate(
+                        { employeeId: updatedUser.employeeId },
+                        { $set: syncData }
+                    );
+                }
             } catch (err) {
-                console.error('[updateUser] Error syncing companyEmail to Employee record for:', updatedUser.employeeId, err);
+                console.error('[updateUser] Error syncing data to Employee record for:', updatedUser.employeeId, err);
             }
         }
 

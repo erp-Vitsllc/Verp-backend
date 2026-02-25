@@ -82,7 +82,7 @@ export const getEmployeeById = async (req, res) => {
                     { assignedTo: employee._id, acceptanceStatus: { $in: ['Accepted', 'Pending'] } },
                     { assignedBy: employee._id, status: 'Returned' }
                 ]
-            }).populate('typeId categoryId assignedTo assignedBy').lean();
+            }).populate('typeId categoryId assignedTo assignedBy acceptedBy').lean();
 
             console.log(`[getEmployeeById] Fetching assets for employee ${employee._id} (${employee.firstName})`);
             console.log(`[getEmployeeById] Found ${assets.length} assets. Statuses:`, assets.map(a => `${a.assetId}:${a.acceptanceStatus}`));

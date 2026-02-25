@@ -30,9 +30,11 @@ export const sendAssetAssignmentEmail = async ({ asset, employee, recipient, isB
         const assetName = isBulk ? `${assetCount} Assets` : asset.name;
         const assetIdDisplay = isBulk ? "Multiple Assets" : asset.assetId;
 
-        const subject = isBulk
-            ? `New Batch Asset Assignment: ${assetCount} Items`
-            : `Asset Assignment Notification: ${asset.name} (${asset.assetId})`;
+        const isSelfAssignment = recipient._id?.toString() === employee._id?.toString();
+
+        const subject = isSelfAssignment
+            ? (isBulk ? `New Batch Asset Assignment: ${assetCount} Items Assigned to You` : `New Asset Assigned to You: ${asset.name} (${asset.assetId})`)
+            : (isBulk ? `New Batch Asset Assignment for ${employeeName}: ${assetCount} Items` : `Asset Assignment Notification for ${employeeName}: ${asset.name} (${asset.assetId})`);
 
         const frontendUrl = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/'/g, "");
         const assetId = asset._id?.toString() || asset.id?.toString();
@@ -42,15 +44,17 @@ export const sendAssetAssignmentEmail = async ({ asset, employee, recipient, isB
 
         console.log(`[Email Debug] Generating button URL: ${buttonUrl}`);
 
+        const recipientName = recipient.firstName || "User";
+
         const html = `
             <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; color: #1e293b; line-height: 1.6; max-width: 600px; margin: 0 auto; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden; background-color: #ffffff;">
                 <div style="background-color: #2563eb; color: white; padding: 30px; text-align: center;">
                     <h1 style="margin: 0; font-size: 24px;">Asset Assignment</h1>
                 </div>
                 <div style="padding: 40px;">
-                    <p style="font-size: 16px;">Hello,</p>
+                    <p style="font-size: 16px;">Hello ${recipientName},</p>
                     
-                    <p>A new ${isBulk ? 'batch of assets has' : 'asset has'} been assigned to <strong>${employeeName}</strong>.</p>
+                    <p>A new ${isBulk ? 'batch of assets has' : 'asset has'} been assigned to <strong>${isSelfAssignment ? 'you' : employeeName}</strong>.</p>
                     
                     <div style="background-color: #f8fafc; padding: 25px; border-radius: 8px; margin: 25px 0; border: 1px solid #e2e8f0;">
                         <table style="width: 100%; border-collapse: collapse;">

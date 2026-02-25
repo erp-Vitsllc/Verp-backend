@@ -91,7 +91,8 @@ export const getCompleteEmployee = async (id) => {
             educationResult,
             experienceResult,
             emergencyContactResult,
-            trainingResult
+            trainingResult,
+            userResult
         ] = await Promise.allSettled([
             EmployeeContact.findOne({ employeeId }, null, queryOptions).select('-__v').lean(),
             EmployeePersonal.findOne({ employeeId }, null, queryOptions).select('-__v').lean(),
@@ -107,6 +108,7 @@ export const getCompleteEmployee = async (id) => {
             EmployeeExperience.findOne({ employeeId }, null, queryOptions).select('-__v -experienceDetails.certificate.data').lean(),
             EmployeeEmergencyContact.findOne({ employeeId }, null, queryOptions).select('-__v').lean(),
             EmployeeTraining.findOne({ employeeId }, null, queryOptions).select('-__v -trainingDetails.certificate.data').lean(),
+            User.findOne({ employeeId, status: 'Active' }, 'enablePortalAccess', queryOptions).lean()
         ]);
 
         // Extract values from Promise.allSettled results, handle errors gracefully
@@ -124,6 +126,22 @@ export const getCompleteEmployee = async (id) => {
         const experience = experienceResult.status === 'fulfilled' ? experienceResult.value : null;
         const emergencyContact = emergencyContactResult.status === 'fulfilled' ? emergencyContactResult.value : null;
         const training = trainingResult.status === 'fulfilled' ? trainingResult.value : null;
+        const linkedUser = userResult.status === 'fulfilled' ? userResult.value : null;
+
+        // Update enablePortalAccess based on linked user existence, status, and existence of company email
+        employeeBasic.enablePortalAccess = !!(linkedUser && linkedUser.enablePortalAccess && employeeBasic.companyEmail);
+
+        // Actually, just handle it properly in the destruction
+        // Re-assigning results to be clearer
+        const results = [
+            contactResult, personalResult, passportResult, visaResult, emiratesIdResult,
+            labourCardResult, medicalInsuranceResult, drivingLicenseResult, salaryResult,
+            bankResult, educationResult, experienceResult, emergencyContactResult, trainingResult,
+            userResult // The 15th promise
+        ];
+
+        // Let's rewrite the destruction to be safer
+
 
         // Log any failed queries (but don't fail the entire request)
         const failedQueries = [
@@ -857,11 +875,15 @@ export const saveEmployeeData = async (employeeId, updatePayload) => {
 
         await Promise.all(updatePromises);
 
-        // Sync companyEmail and Name to User model if updated
-        if (basicUpdate.companyEmail !== undefined || basicUpdate.firstName !== undefined || basicUpdate.lastName !== undefined) {
+        // Sync companyEmail, enablePortalAccess and Name to User model if updated
+        if (basicUpdate.companyEmail !== undefined ||
+            basicUpdate.enablePortalAccess !== undefined ||
+            basicUpdate.firstName !== undefined ||
+            basicUpdate.lastName !== undefined) {
             try {
                 const userUpdate = {};
                 if (basicUpdate.companyEmail !== undefined) userUpdate.companyEmail = basicUpdate.companyEmail;
+                if (basicUpdate.enablePortalAccess !== undefined) userUpdate.enablePortalAccess = basicUpdate.enablePortalAccess;
 
                 // If name changed, update User.name too
                 if (basicUpdate.firstName !== undefined || basicUpdate.lastName !== undefined) {
