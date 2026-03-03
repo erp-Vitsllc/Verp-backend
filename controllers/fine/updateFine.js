@@ -148,7 +148,7 @@ export const updateFine = async (req, res) => {
                         } else {
                             f.attachment = updates.attachment;
                         }
-                    } else if (key !== 'employees' && key !== 'fineStatus') {
+                    } else if (key !== 'employees') {
                         f[key] = updates[key];
                     }
                 }
