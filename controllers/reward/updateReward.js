@@ -7,6 +7,7 @@ import { getManagementHOD } from "../../utils/getManagementHOD.js";
 import { getDepartmentHOD } from "../../utils/getDepartmentHOD.js";
 import { sendHODAuthorizationEmail } from "../../utils/sendHODAuthorizationEmail.js";
 import { generatePdf } from "../../utils/generatePdf.js";
+import { uploadDocumentToS3 } from "../../utils/s3Upload.js";
 
 export const updateReward = async (req, res) => {
     try {
@@ -28,7 +29,8 @@ export const updateReward = async (req, res) => {
             certSigner1Name,
             certSigner1Title,
             certSigner2Name,
-            certSigner2Title
+            certSigner2Title,
+            attachment
         } = req.body;
 
         const reward = await Reward.findById(id);
@@ -63,6 +65,31 @@ export const updateReward = async (req, res) => {
         if (certSigner1Title !== undefined) reward.certSigner1Title = certSigner1Title;
         if (certSigner2Name !== undefined) reward.certSigner2Name = certSigner2Name;
         if (certSigner2Title !== undefined) reward.certSigner2Title = certSigner2Title;
+
+        // Handle attachment for update/resubmit
+        if (attachment && attachment.data) {
+            try {
+                console.log(`[UpdateReward] Processing attachment: ${attachment.name}`);
+                const attachmentDataStr = typeof attachment.data === 'string' ? attachment.data : String(attachment.data);
+
+                const uploadResult = await uploadDocumentToS3(
+                    attachmentDataStr,
+                    `rewards/${reward.employeeId}`,
+                    attachment.name || 'reward-attachment.pdf',
+                    'raw'
+                );
+
+                reward.attachment = {
+                    url: uploadResult.url,
+                    publicId: uploadResult.publicId,
+                    name: attachment.name || '',
+                    mimeType: attachment.mimeType || 'application/pdf'
+                };
+                console.log(`[UpdateReward] Attachment updated in S3: ${uploadResult.url}`);
+            } catch (uploadError) {
+                console.error(`[UpdateReward] Attachment upload failed:`, uploadError);
+            }
+        }
 
         // Handle explicit approver fields from frontend
         if (req.body.hrApprovedBy) reward.hrApprovedBy = req.body.hrApprovedBy;
@@ -130,7 +157,7 @@ export const updateReward = async (req, res) => {
                                 const rewardUrl = `${baseUrl}/HRM/Reward/${reward._id}`;
                                 const empName = reward.employeeName || "Employee";
 
-                                await transporter.sendMail({
+                                const mailOptions = {
                                     from: `"VeRP Notification" <${emailUser}>`,
                                     to: targetUser.companyEmail || targetUser.email,
                                     subject: `Resubmitted Reward Request: ${reward.rewardType} - ${empName}`,
@@ -148,8 +175,18 @@ export const updateReward = async (req, res) => {
                                                 </div>
                                             </div>
                                         </div>
-                                    `
-                                });
+                                    `,
+                                    attachments: []
+                                };
+
+                                if (reward.attachment && reward.attachment.url) {
+                                    mailOptions.attachments.push({
+                                        filename: reward.attachment.name || 'Reward-Attachment.pdf',
+                                        path: reward.attachment.url
+                                    });
+                                }
+
+                                await transporter.sendMail(mailOptions);
                                 console.log(`[UpdateReward] Resubmit email sent to ${targetUser.email || targetUser.companyEmail}`);
                             }
                         }
@@ -684,7 +721,7 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
                                         <h2 style="color: #2e7d32; text-align: center;">Reward Approved</h2>
                                         <p>Dear All,</p>
                                         <p>We are pleased to inform you that the reward request for <strong>${employeeForEmail.firstName} ${employeeForEmail.lastName}</strong> regarding <strong>${reward.rewardType}</strong> (${reward.title}) has been <strong>Approved</strong>.</p>
-                                        <p>Please find the reward certificate (if applicable) attached to this email.</p>
+                                        <p>Please find the reward certificate ${reward.attachment && (reward.attachment.url || reward.attachment.publicId) ? 'and original documentation' : ''} attached to this email.</p>
                                         <br>
                                         <p>Best Regards,</p>
                                         <p>Management Team</p>
@@ -699,6 +736,33 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
                                     attachments: []
                                 };
 
+                                // --- 1. Add Original Attachment (if any) ---
+                                if (reward.attachment && (reward.attachment.url || reward.attachment.publicId)) {
+                                    try {
+                                        const { getSignedFileUrl } = await import("../../utils/s3Upload.js");
+                                        const axios = (await import("axios")).default;
+                                        const refreshedUrl = await getSignedFileUrl(reward.attachment.publicId || reward.attachment.url);
+
+                                        if (refreshedUrl) {
+                                            console.log(`[UpdateReward] Fetching original attachment from: ${refreshedUrl}`);
+                                            const attResponse = await axios.get(refreshedUrl, {
+                                                responseType: 'arraybuffer',
+                                                timeout: 30000,
+                                                maxContentLength: Infinity
+                                            });
+
+                                            mailOptions.attachments.push({
+                                                filename: reward.attachment.name || 'original_attachment.pdf',
+                                                content: Buffer.from(attResponse.data)
+                                            });
+                                            console.log(`[UpdateReward] Success: Original attachment added to email.`);
+                                        }
+                                    } catch (attErr) {
+                                        console.error("[UpdateReward] Failed to fetch original attachment:", attErr.message);
+                                    }
+                                }
+
+                                // --- 2. Generate and Add Certificate PDF ---
                                 // Prepare Permissions and User Payload for Puppeteer
                                 const requestingUserId = req.user?.id || req.body.createdBy?._id;
                                 let userPayload = { id: requestingUserId, role: 'Admin' }; // Default fallback
@@ -706,7 +770,6 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
 
                                 try {
                                     if (requestingUserId) {
-                                        const User = await import("../../models/User.js").then(m => m.default);
                                         const userObj = await User.findById(requestingUserId);
                                         if (userObj) {
                                             userPayload = {
@@ -723,20 +786,35 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
 
                                 // Construct URL
                                 const origin = req.headers.origin || (req.headers.referer ? new URL(req.headers.referer).origin : null);
-                                const baseUrl = process.env.FRONTEND_URL || origin || "http://localhost:3000";
+                                const baseUrl = origin || process.env.FRONTEND_URL || "http://localhost:3000";
                                 const printUrl = `${baseUrl}/HRM/Reward/${reward._id}`;
                                 const selector = '#certificate-container';
 
                                 console.log(`[UpdateReward] Generating Certificate PDF via Puppeteer from: ${printUrl}`);
 
                                 try {
-                                    // Save first so Puppeteer sees updated status if needed (though certificate is static)
-                                    // But we are in a block that hasn't saved yet? 
-                                    // We must save 'reward' to DB to ensure consistency for the headless browser
+                                    // Ensure reward state is saved so emails are accurate
                                     await reward.save();
-                                    console.log("[UpdateReward] Reward saved to DB before PDF generation.");
 
-                                    const pdfBuffer = await generatePdf(printUrl, token, userPayload, {}, selector);
+                                    let pdfBuffer = null;
+
+                                    if (req.body.certificatePdf) {
+                                        console.log(`[UpdateReward] Received frontend-generated Base64 Certificate PDF. String length: ${req.body.certificatePdf.length}`);
+
+                                        let base64Data = req.body.certificatePdf;
+                                        if (base64Data.includes(',')) {
+                                            console.log("[UpdateReward] Stripping Data URI prefix from certificatePdf");
+                                            base64Data = base64Data.split(',')[1];
+                                        }
+
+                                        pdfBuffer = Buffer.from(base64Data, 'base64');
+                                        console.log(`[UpdateReward] Converted to Buffer. Buffer size: ${pdfBuffer.length} bytes`);
+                                    } else {
+                                        console.log(`[UpdateReward] Generating Certificate PDF via Puppeteer from: ${printUrl}`);
+                                        const { generatePdf } = await import("../../utils/generatePdf.js");
+                                        pdfBuffer = await generatePdf(printUrl, token, userPayload, { hrm_reward: { isView: true, isActive: true } }, selector);
+                                        console.log(`[UpdateReward] Puppeteer PDF generated. Buffer size: ${pdfBuffer ? pdfBuffer.length : 0} bytes`);
+                                    }
 
                                     if (pdfBuffer && pdfBuffer.length > 1000) {
                                         mailOptions.attachments.push({
@@ -744,18 +822,22 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
                                             content: pdfBuffer,
                                             contentType: 'application/pdf'
                                         });
-                                        console.log(`[UpdateReward] Puppeteer PDF attached successfully. Size: ${pdfBuffer.length}`);
+                                        console.log(`[UpdateReward] Success: Certificate PDF attached. Size: ${pdfBuffer.length}`);
                                     } else {
-                                        console.warn(`[UpdateReward] PDF generation returned invalid/empty buffer. Length: ${pdfBuffer ? pdfBuffer.length : 'null'}`);
+                                        console.warn(`[UpdateReward] Warning: PDF buffer too small or null: ${pdfBuffer ? pdfBuffer.length : 'null'}`);
                                     }
                                 } catch (pdfErr) {
-                                    console.error("[UpdateReward] Puppeteer PDF Generation Failed:", pdfErr);
-                                    // Continue sending email without attachment or handle error?
-                                    // We'll continue.
+                                    console.error("[UpdateReward] ERROR: PDF Generation or Attachment Failed:", pdfErr.message);
                                 }
 
-                                await transporter.sendMail(mailOptions);
-                                console.log(`[UpdateReward] SUCCESS: Final Approval email sent to ${empEmail}`);
+                                // --- 3. Send Email ---
+                                if (mailOptions.attachments.length > 0) {
+                                    await transporter.sendMail(mailOptions);
+                                    console.log(`[UpdateReward] SUCCESS: Final Approval email with ${mailOptions.attachments.length} attachments sent to ${Array.from(recipientEmails).join(', ')}`);
+                                } else {
+                                    console.warn("[UpdateReward] WARNING: Sending email with ZERO attachments.");
+                                    await transporter.sendMail(mailOptions);
+                                }
                             } else {
                                 console.error("[UpdateReward] ERROR: Missing EMAIL_USER or EMAIL_PASS environment variables");
                             }
@@ -942,6 +1024,8 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
         } catch (syncErr) {
             console.error("[UpdateReward] Dashboard Sync Error:", syncErr);
         }
+
+        await reward.save();
 
         return res.status(200).json({
             message: "Reward updated successfully",

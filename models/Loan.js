@@ -98,6 +98,12 @@ const loanSchema = new mongoose.Schema({
     createdBy: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'User'
+    },
+    attachment: {
+        url: { type: String },
+        publicId: { type: String },
+        name: { type: String },
+        mimeType: { type: String }
     }
 }, { timestamps: true });
 

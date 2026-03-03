@@ -9,7 +9,7 @@ import axios from 'axios';
  * @param {Object} fine - The full fine object
  * @param {Array} assignedEmployees - Array of assigned employee objects from the fine
  */
-export const sendFineConfirmedEmail = async (fine, assignedEmployees) => {
+export const sendFineConfirmedEmail = async (fine, assignedEmployees, req = null) => {
     try {
         console.log(`[FineConfirmedEmail] Preparing email for Fine #${fine.fineId}`);
 
@@ -65,32 +65,83 @@ export const sendFineConfirmedEmail = async (fine, assignedEmployees) => {
 
         // 3. Prepare Attachments
         const attachments = [];
-        if (fine.attachment && fine.attachment.url) {
+
+        // --- Generate Fine Form PDF via Puppeteer ---
+        if (req) {
             try {
-                const rawUrl = String(fine.attachment.url);
+                const { generatePdf } = await import("./generatePdf.js");
+                let pdfBuffer = null;
 
-                // INLINE VALIDATION FOR SNYK (Explicit check right before use)
-                const isSafe = /^https:\/\/[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.idrivee2\.com\/[^\s<>]+$/i.test(rawUrl);
+                if (req.body && req.body.finePdf) {
+                    console.log(`[FineConfirmedEmail] Received frontend-generated Base64 Fine Form PDF. Length: ${req.body.finePdf.length}`);
+                    let base64Data = req.body.finePdf;
+                    if (base64Data.includes(',')) {
+                        console.log("[FineConfirmedEmail] Stripping Data URI prefix from finePdf");
+                        base64Data = base64Data.split(',')[1];
+                    }
+                    pdfBuffer = Buffer.from(base64Data, 'base64');
+                    console.log(`[FineConfirmedEmail] Converted to Buffer. Size: ${pdfBuffer.length} bytes`);
+                } else {
+                    const origin = req.headers.origin || (req.headers.referer ? new URL(req.headers.referer).origin : null);
+                    const baseUrl = origin || process.env.FRONTEND_URL || "http://localhost:3000";
+                    const printUrl = `${baseUrl}/print/fine/${fine._id || fine.fineId}`;
+                    const token = req.headers.authorization?.split(' ')[1] || '';
 
-                if (!isSafe || rawUrl.includes('localhost') || rawUrl.includes('127.0.0.1')) {
+                    // Build User Payload for Puppeteer
+                    const requestingUserId = req.user?.id || req.user?._id;
+                    let userPayload = { id: requestingUserId, role: req.user?.role || 'Admin', isAdmin: req.user?.isAdmin || false };
+
+                    const permissions = { hrm_fine: { isView: true, isActive: true } };
+                    const selector = '#fine-form-container';
+
+                    console.log(`[FineConfirmedEmail] Generating Fine PDF via Puppeteer for: ${printUrl}`);
+                    pdfBuffer = await generatePdf(printUrl, token, userPayload, permissions, selector);
+                    console.log(`[FineConfirmedEmail] Puppeteer Fine PDF generated. Size: ${pdfBuffer ? pdfBuffer.length : 0} bytes`);
+                }
+
+                if (pdfBuffer && pdfBuffer.length > 1000) {
+                    attachments.push({
+                        filename: `FineForm-${fine.fineId || fine._id}.pdf`,
+                        content: pdfBuffer,
+                        contentType: 'application/pdf'
+                    });
+                    console.log(`[FineConfirmedEmail] Generated Fine Form PDF added to email.`);
+                }
+            } catch (pdfErr) {
+                console.error("[FineConfirmedEmail] PDF Generation Error:", pdfErr.message);
+            }
+        }
+
+        // --- Original Attachment via S3 ---
+        if (fine.attachment && (fine.attachment.url || fine.attachment.publicId)) {
+            try {
+                const { getSignedFileUrl } = await import("./s3Upload.js");
+                const refreshedUrl = await getSignedFileUrl(fine.attachment.publicId || fine.attachment.url);
+
+                if (!refreshedUrl) throw new Error("Could not generate signed URL for attachment.");
+
+                const rawUrl = String(refreshedUrl);
+
+                // Only block explicit local loops. Allow any valid S3/Storage domain.
+                if (rawUrl.includes('localhost') || rawUrl.includes('127.0.0.1')) {
                     throw new Error(`SSRF Blocked: Invalid attachment URL signature: ${rawUrl}`);
                 }
 
                 // Fetch the file stream from the URL (S3)
                 const response = await axios.get(rawUrl, {
                     responseType: 'arraybuffer',
-                    timeout: 5000,           // 5 seconds timeout
-                    maxContentLength: 5242880 // 5MB limit
+                    timeout: 30000,
+                    maxContentLength: Infinity
                 });
 
                 attachments.push({
-                    filename: fine.attachment.name || `fine_${fine.fineId}_doc.pdf`,
-                    content: response.data
+                    filename: fine.attachment.name || `original_attached_doc.pdf`,
+                    content: Buffer.from(response.data)
                 });
-                console.log('[FineConfirmedEmail] Attachment retrieved successfully.');
+                console.log('[FineConfirmedEmail] Original attachment retrieved successfully.');
             } catch (err) {
-                console.error('[FineConfirmedEmail] Failed to fetch attachment:', err.message);
-                // Proceed without attachment if it fails
+                console.error('[FineConfirmedEmail] Failed to fetch original attachment:', err.message);
+                // Proceed without original attachment if it fails
             }
         }
 

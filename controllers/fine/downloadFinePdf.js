@@ -25,8 +25,8 @@ export const downloadFinePdf = async (req, res) => {
 
         // Construct Frontend URL
         const origin = req.headers.origin || (req.headers.referer ? new URL(req.headers.referer).origin : null);
-        const baseUrl = process.env.FRONTEND_URL || origin || "http://localhost:3000";
-        const printUrl = `${baseUrl}/HRM/Fine/${fine._id}`;
+        const baseUrl = origin || process.env.FRONTEND_URL || "http://localhost:3000";
+        const printUrl = `${baseUrl}/print/fine/${fine._id}`;
 
         console.log(`Generating Fine PDF from: ${printUrl}`);
 

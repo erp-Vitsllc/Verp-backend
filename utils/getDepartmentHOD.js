@@ -22,16 +22,10 @@ export const getDepartmentHOD = async (departmentType, identifier = null) => {
 
         // 1. Resolve Company ID
         if (identifier) {
-            // Check if identifier is a Company ID format (e.g. EST-...) 
-            // OR checks if it's an employee ID (String or ObjectId)
-
-            // Try as Company ID first
             const directCompany = await Company.findOne({ companyId: identifier });
             if (directCompany) {
                 targetCompanyId = directCompany._id;
             } else {
-                // Try as Employee
-                // Can be ObjectId or String ID
                 let empQuery = {};
                 const idStr = String(identifier);
 
@@ -44,46 +38,42 @@ export const getDepartmentHOD = async (departmentType, identifier = null) => {
                 const emp = await EmployeeBasic.findOne(empQuery).select('company');
                 if (emp && emp.company) {
                     targetCompanyId = emp.company;
-                } else if (emp && !emp.company) {
-                    console.warn(`[getDepartmentHOD] Employee ${identifier} belongs to NO company. Strict check failed.`);
-                    return null; // "no company no request allowed"
                 }
             }
         }
 
-        // If no identifier provided, fallbacks? User implies strictness. 
-        // But for backward compat or if called without ID in some legacy path, 
-        // we might defaulting to finding *any* company? 
-        // User request: "check the emp have no comopany no request allowed". 
-        // So we strictly need a company context.
-
-        // If no identifier provided or no company linked, return null (Strict Mode)
-        if (!targetCompanyId) {
-            return null;
-        }
-
-        // 2. Fetch Company Responsibilities
-        const company = await Company.findById(targetCompanyId);
-        if (!company) return null;
-
-        // 3. Find Responsibility
-        // Responsibilities array: { category: 'hr', empObjectId: ... }
-        const responsibility = company.responsibilities?.find(r => r.category && r.category.toLowerCase() === category);
-
-        if (responsibility && responsibility.empObjectId) {
-            const delegatedEmp = await EmployeeBasic.findById(responsibility.empObjectId)
-                .select('employeeId firstName lastName companyEmail email designation department profileStatus');
-
-            if (delegatedEmp) {
-                return delegatedEmp;
+        // 2. Try Specific Company first
+        if (targetCompanyId) {
+            const company = await Company.findById(targetCompanyId);
+            if (company) {
+                const responsibility = company.responsibilities?.find(r => r.category && r.category.toLowerCase() === category);
+                if (responsibility && responsibility.empObjectId) {
+                    const delegatedEmp = await EmployeeBasic.findById(responsibility.empObjectId)
+                        .select('employeeId firstName lastName companyEmail email designation department profileStatus');
+                    if (delegatedEmp) return delegatedEmp;
+                }
             }
         }
 
-        // If we fall through here, it means company exists but no responsibility is set for this category.
-        // User said: "if no responsibilities show the unknown in red color" -> Returning null achieves this (handled by frontend).
-        // User also said: "not checking the designation" -> So we DO NOT search by role anymore.
+        // 3. Centralized Fallback: If not found in target company, look in ANY company
+        // This handles cases where HR/Accounts are "same for all" but defined in a main company
+        const anyCompanyWithCategory = await Company.findOne({
+            "responsibilities.category": { $regex: new RegExp(`^${category}$`, 'i') }
+        });
 
-        console.warn(`[getDepartmentHOD] No responsibility defined for ${category} in company ${company.name} (${company.companyId})`);
+        if (anyCompanyWithCategory) {
+            const responsibility = anyCompanyWithCategory.responsibilities.find(r => r.category && r.category.toLowerCase() === category);
+            if (responsibility && responsibility.empObjectId) {
+                const delegatedEmp = await EmployeeBasic.findById(responsibility.empObjectId)
+                    .select('employeeId firstName lastName companyEmail email designation department profileStatus');
+                if (delegatedEmp) {
+                    console.log(`[getDepartmentHOD] Using Centralized ${category} HOD from company ${anyCompanyWithCategory.name}`);
+                    return delegatedEmp;
+                }
+            }
+        }
+
+        console.warn(`[getDepartmentHOD] No responsibility defined for ${category} anywhere.`);
         return null;
 
     } catch (error) {
@@ -91,3 +81,4 @@ export const getDepartmentHOD = async (departmentType, identifier = null) => {
         return null;
     }
 };
+

@@ -197,6 +197,37 @@ export const addReward = async (req, res) => {
             createdBy: req.user ? req.user._id : null
         };
 
+        // Handle attachment for primary creation
+        if (attachment && attachment.data) {
+            try {
+                console.log(`[AddReward] Processing attachment: ${attachment.name}`);
+                const attachmentDataStr = typeof attachment.data === 'string' ? attachment.data : String(attachment.data);
+
+                const uploadResult = await uploadDocumentToS3(
+                    attachmentDataStr,
+                    `rewards/${employeeId}`,
+                    attachment.name || 'reward-attachment.pdf',
+                    'raw'
+                );
+
+                rewardData.attachment = {
+                    url: uploadResult.url,
+                    publicId: uploadResult.publicId,
+                    name: attachment.name || '',
+                    mimeType: attachment.mimeType || 'application/pdf'
+                };
+                console.log(`[AddReward] Attachment uploaded to S3: ${uploadResult.url}`);
+            } catch (uploadError) {
+                console.error(`[AddReward] Attachment upload failed:`, uploadError);
+                // Fallback to storing raw data if S3 fails, but ideally S3 should work
+                rewardData.attachment = {
+                    data: attachment.data,
+                    name: attachment.name || '',
+                    mimeType: attachment.mimeType || 'application/pdf'
+                };
+            }
+        }
+
         // SNAPSHOT LOGIC: Find Reportee's USER Object for "submittedTo"
         // Only run if not Draft
         if (rewardData.rewardStatus !== 'Draft') {
@@ -468,13 +499,25 @@ ${rewardData.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.padEnd(12)} As
                                         </div>
                                     `;
 
-                                    try {
-                                        await transporter.sendMail({
-                                            from: `"VeRP System" <${emailUser}>`,
-                                            to: recipient.email,
-                                            subject: subject,
-                                            html: html
+                                    const mailOptions = {
+                                        from: `"VeRP System" <${emailUser}>`,
+                                        to: recipient.email,
+                                        subject: subject,
+                                        html: html,
+                                        attachments: []
+                                    };
+
+                                    // Add attachment if it exists
+                                    if (savedReward.attachment && savedReward.attachment.url) {
+                                        mailOptions.attachments.push({
+                                            filename: savedReward.attachment.name || 'Reward-Attachment.pdf',
+                                            path: savedReward.attachment.url
                                         });
+                                        console.log(`[AddReward] Attachment added to email for ${recipient.email}: ${savedReward.attachment.url}`);
+                                    }
+
+                                    try {
+                                        await transporter.sendMail(mailOptions);
                                         console.log(`[AddReward] SUCCESS: Email sent to ${recipient.email}`);
                                     } catch (sendError) {
                                         console.error(`[AddReward] FAILED: Email to ${recipient.email}:`, sendError);

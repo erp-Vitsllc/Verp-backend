@@ -72,6 +72,22 @@ export const requestLoan = async (req, res) => {
             return res.status(400).json({ message: "Primary reportee not assigned. Please assign a manager first." });
         }
 
+        // --- VALIDATION: Existing Loan Check ---
+        // Block if employee already has an Approved or In-Progress loan/advance
+        const existingLoan = await Loan.findOne({
+            employeeId: employeeBasic.employeeId,
+            status: { $in: ['Approved', 'Pending', 'Pending HR', 'Pending Accounts', 'Pending Authorization'] }
+        }).lean();
+
+        if (existingLoan) {
+            const isApproved = existingLoan.status === 'Approved';
+            return res.status(400).json({
+                message: isApproved
+                    ? `This employee already has an Approved ${existingLoan.type} (${existingLoan.loanId}). A new request cannot be submitted while a loan is active.`
+                    : `This employee already has a ${existingLoan.type} application in progress (${existingLoan.loanId} - ${existingLoan.status}).`
+            });
+        }
+
         // --- VALIDATION: Probation & Salary Checks ---
         const salaryRecord = await EmployeeSalary.findOne({ employeeId: employeeBasic.employeeId });
 
@@ -111,6 +127,32 @@ export const requestLoan = async (req, res) => {
             createdBy: req.user ? req.user.id : null,
             workflow: []
         };
+
+        // Handle attachment if provided in request body
+        const { attachment } = req.body;
+        if (attachment && attachment.data) {
+            try {
+                const { uploadDocumentToS3 } = await import("../../utils/s3Upload.js");
+                console.log(`[RequestLoan] Processing attachment: ${attachment.name}`);
+                const uploadResult = await uploadDocumentToS3(
+                    attachment.data,
+                    `loans/${employeeId}`,
+                    attachment.name || 'loan-attachment.pdf',
+                    'raw'
+                );
+
+                loanData.attachment = {
+                    url: uploadResult.url,
+                    publicId: uploadResult.publicId,
+                    name: attachment.name || '',
+                    mimeType: attachment.mimeType || 'application/pdf'
+                };
+                console.log(`[RequestLoan] Attachment uploaded to S3: ${uploadResult.url}`);
+            } catch (uploadError) {
+                console.error(`[RequestLoan] Attachment upload failed:`, uploadError);
+                // Continue without attachment if upload fails
+            }
+        }
 
         if (targetStatus === 'Pending') {
             // SNAPSHOT: Find Reportee's USER Object for "submittedTo"
@@ -247,12 +289,24 @@ export const requestLoan = async (req, res) => {
                         </div>
                     `;
 
-                    await transporter.sendMail({
+                    const mailOptions = {
                         from: `"VeRP Portal" <${emailUser}>`,
                         to: reporteeEmail,
                         subject,
-                        html
-                    });
+                        html,
+                        attachments: []
+                    };
+
+                    // Add attachment if it exists
+                    if (savedLoan.attachment && savedLoan.attachment.url) {
+                        mailOptions.attachments.push({
+                            filename: savedLoan.attachment.name || 'Loan-Attachment.pdf',
+                            path: savedLoan.attachment.url
+                        });
+                        console.log(`[Loan] Attachment added to email for ${reporteeEmail}: ${savedLoan.attachment.url}`);
+                    }
+
+                    await transporter.sendMail(mailOptions);
                     console.log(`[Loan] Email sent to ${reporteeEmail}`);
                 }
             }

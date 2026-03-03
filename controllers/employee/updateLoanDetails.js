@@ -23,6 +23,33 @@ export const updateLoanDetails = async (req, res) => {
         loan.reason = reason || loan.reason;
         if (monthStart !== undefined) loan.monthStart = monthStart;
 
+        // Handle attachment update
+        const { attachment } = req.body;
+        if (attachment && attachment.data) {
+            try {
+                const { uploadDocumentToS3 } = await import("../../utils/s3Upload.js");
+                const uploadResult = await uploadDocumentToS3(
+                    attachment.data,
+                    `loans/${loan.employeeId}`,
+                    attachment.name || 'loan-attachment.pdf',
+                    'raw'
+                );
+
+                loan.attachment = {
+                    url: uploadResult.url,
+                    publicId: uploadResult.publicId,
+                    name: attachment.name || '',
+                    mimeType: attachment.mimeType || 'application/pdf'
+                };
+                console.log(`[UpdateLoan] New attachment uploaded: ${uploadResult.url}`);
+            } catch (uploadError) {
+                console.error(`[UpdateLoan] Attachment upload failed:`, uploadError);
+            }
+        } else if (attachment === null) {
+            // Optional: Clear attachment if null is explicitly passed
+            loan.attachment = undefined;
+        }
+
         loan.status = newStatus;
         loan.approvalStatus = newStatus;
 
@@ -32,6 +59,23 @@ export const updateLoanDetails = async (req, res) => {
         let employeeBasic = null;
 
         if (oldStatus === 'Draft' && newStatus === 'Pending') {
+            // --- VALIDATION: Existing Loan Check ---
+            // Block if employee already has an Approved or In-Progress loan/advance (excluding this one)
+            const activeLoan = await Loan.findOne({
+                _id: { $ne: id },
+                employeeId: loan.employeeId,
+                status: { $in: ['Approved', 'Pending', 'Pending HR', 'Pending Accounts', 'Pending Authorization'] }
+            }).lean();
+
+            if (activeLoan) {
+                const isApproved = activeLoan.status === 'Approved';
+                return res.status(400).json({
+                    message: isApproved
+                        ? `This employee already has an Approved loan (${activeLoan.loanId}). A new request cannot be submitted while a loan is active.`
+                        : `This employee already has another loan application in progress (${activeLoan.loanId} - ${activeLoan.status}).`
+                });
+            }
+
             employeeBasic = await getCompleteEmployee(loan.employeeObjectId);
             if (employeeBasic) {
                 reportee = employeeBasic.primaryReportee;
@@ -47,6 +91,19 @@ export const updateLoanDetails = async (req, res) => {
                 }
             }
         } else if (req.body.resubmit && oldStatus === 'Rejected') {
+            // --- VALIDATION: Existing Loan Check for Resubmit ---
+            const activeLoan = await Loan.findOne({
+                _id: { $ne: id },
+                employeeId: loan.employeeId,
+                status: { $in: ['Approved', 'Pending', 'Pending HR', 'Pending Accounts', 'Pending Authorization'] }
+            }).lean();
+
+            if (activeLoan) {
+                return res.status(400).json({
+                    message: `Cannot resubmit this application. The employee already has another ${activeLoan.status === 'Approved' ? 'active Approved loan' : 'application in progress'} (${activeLoan.loanId}).`
+                });
+            }
+
             // === RESUBMIT LOGIC ===
             console.log("[UpdateLoan] Resubmitting previously rejected loan.");
             const rejectedStep = (loan.workflow || []).find(w => w.status === 'Rejected');

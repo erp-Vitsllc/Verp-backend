@@ -116,6 +116,12 @@ const rewardSchema = new mongoose.Schema(
             ref: "User",
             default: null
         },
+        attachment: {
+            url: { type: String },
+            publicId: { type: String },
+            name: { type: String },
+            mimeType: { type: String }
+        },
         // NEW: Workflow Array for detailed tracking
         workflow: [{
             role: { type: String, required: true },

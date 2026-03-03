@@ -172,10 +172,11 @@ export const approveLoan = async (req, res) => {
                 }
                 // 4. Management STAGE (Pending Authorization -> Approved)
                 else if (currentStage === 'Pending Authorization') {
-                    const isManagement = approverBasic.department && /management/i.test(approverBasic.department) &&
-                        ['ceo', 'c.e.o', 'c.e.o.', 'chief executive officer', 'director', 'managing director', 'general manager', 'gm', 'g.m', 'g.m.'].includes(approverBasic.designation?.toLowerCase());
+                    const isMgtDept = approverBasic.department && /management|corporate|board|executive/i.test(approverBasic.department);
+                    const isMgtTitle = ['ceo', 'c.e.o', 'c.e.o.', 'chief executive officer', 'director', 'managing director', 'general manager', 'gm', 'g.m', 'g.m.'].includes(approverBasic.designation?.toLowerCase());
+                    const isAssignedMgt = loan.submittedTo && (String(loan.submittedTo) === String(requestingUserId) || String(loan.submittedTo) === String(approverBasic._id));
 
-                    if (isManagement) {
+                    if (isMgtTitle || isMgtDept || isAssignedMgt || isAdmin) {
                         nextStage = 'Approved';
                         publicStatus = 'Approved'; // Final Approval
                     } else {
@@ -384,7 +385,7 @@ export const approveLoan = async (req, res) => {
             });
 
             const origin = req.headers.origin || (req.headers.referer ? new URL(req.headers.referer).origin : null);
-            const baseUrl = process.env.FRONTEND_URL || origin || "http://localhost:3000";
+            const baseUrl = origin || process.env.FRONTEND_URL || "http://localhost:3000";
             const typeSlug = loan.type ? loan.type.replace(/\s+/g, '-') : 'Loan';
             const actionUrl = `${baseUrl}/HRM/LoanAndAdvance/${typeSlug}-${loan._id}`;
 
@@ -532,54 +533,98 @@ export const approveLoan = async (req, res) => {
 
                         if (recipientEmails.size > 0) {
                             const permissions = { hrm_loan: { isView: true, isActive: true } };
-                            const pdfBuffer = await generatePdf(actionUrl, req.headers.authorization?.split(' ')[1], { id: requestingUserId, isAdmin: isAdmin, role: userObj.role, employeeId: userObj.employeeId }, permissions);
+
+                            // IMPORTANT: Save state BEFORE generating PDF so Puppeteer sees updated status
+                            await loan.save();
+
+                            let pdfBuffer = null;
+                            if (req.body.loanPdf) {
+                                console.log(`[ApproveLoan] Received frontend-generated Base64 Loan PDF. Length: ${req.body.loanPdf.length}`);
+                                let base64Data = req.body.loanPdf;
+                                if (base64Data.includes(',')) {
+                                    console.log("[ApproveLoan] Stripping Data URI prefix from loanPdf");
+                                    base64Data = base64Data.split(',')[1];
+                                }
+                                pdfBuffer = Buffer.from(base64Data, 'base64');
+                                console.log(`[ApproveLoan] Converted to Buffer. Size: ${pdfBuffer.length} bytes`);
+                            } else {
+                                const { generatePdf } = await import("../../utils/generatePdf.js");
+                                pdfBuffer = await generatePdf(actionUrl, req.headers.authorization?.split(' ')[1], { id: requestingUserId, isAdmin: isAdmin, role: userObj.role, employeeId: userObj.employeeId }, permissions);
+                                console.log(`[ApproveLoan] Puppeteer Loan PDF generated. Size: ${pdfBuffer ? pdfBuffer.length : 0} bytes`);
+                            }
 
                             const mailOptions = {
                                 from: `"VeRP Notification" <${emailUser}>`,
                                 to: Array.from(recipientEmails).join(', '),
                                 subject: "Loan Application Approved",
                                 html: `
-                                    <div style="font-family: Arial, sans-serif; color: #333; max-width: 600px; margin: 0 auto; border: 1px solid #eee; border-radius: 10px; overflow: hidden;">
-                                        <div style="background-color: #22c55e; color: white; padding: 20px; text-align: center;">
-                                            <h2 style="margin: 0;">Congratulations!</h2>
-                                        </div>
-                                        <div style="padding: 30px; background-color: #ffffff;">
-                                            <p>Dear All,</p>
-                                            <p>We are pleased to inform you that the loan application for <strong>${applicant.firstName} ${applicant.lastName}</strong> has been <strong>fully approved</strong>.</p>
-                                            
-                                            <div style="background-color: #f0fdfa; padding: 25px; border-radius: 10px; border-left: 4px solid #22c55e; margin: 25px 0;">
-                                                <table style="width: 100%; border-collapse: collapse;">
-                                                    <tr>
-                                                        <td style="padding: 6px 0; color: #166534; font-size: 13px; width: 40%;"><strong>Amount Approved:</strong></td>
-                                                        <td style="padding: 6px 0; color: #14532d; font-size: 16px; font-weight: 800;">AED ${Number(loan.amount).toLocaleString()}</td>
-                                                    </tr>
-                                                    <tr>
-                                                        <td style="padding: 6px 0; color: #166534; font-size: 13px;"><strong>Final Status:</strong></td>
-                                                        <td style="padding: 6px 0;"><span style="background-color: #dcfce7; color: #166534; padding: 4px 10px; border-radius: 9999px; font-size: 11px; font-weight: 800;">PASSED</span></td>
-                                                    </tr>
-                                                    <tr>
-                                                        <td style="padding: 6px 0; color: #166534; font-size: 13px;"><strong>Approval Date:</strong></td>
-                                                        <td style="padding: 6px 0; color: #14532d; font-size: 14px;">${new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })}</td>
-                                                    </tr>
-                                                </table>
-                                            </div>
+                                     <div style="font-family: Arial, sans-serif; color: #333; max-width: 600px; margin: 0 auto; border: 1px solid #eee; border-radius: 10px; overflow: hidden;">
+                                         <div style="background-color: #22c55e; color: white; padding: 20px; text-align: center;">
+                                             <h2 style="margin: 0;">Congratulations!</h2>
+                                         </div>
+                                         <div style="padding: 30px; background-color: #ffffff;">
+                                             <p>Dear All,</p>
+                                             <p>We are pleased to inform you that the loan application for <strong>${applicant.firstName} ${applicant.lastName}</strong> has been <strong>fully approved</strong>.</p>
+                                             
+                                             <div style="background-color: #f0fdfa; padding: 25px; border-radius: 10px; border-left: 4px solid #22c55e; margin: 25px 0;">
+                                                 <table style="width: 100%; border-collapse: collapse;">
+                                                     <tr>
+                                                         <td style="padding: 6px 0; color: #166534; font-size: 13px; width: 40%;"><strong>Amount Approved:</strong></td>
+                                                         <td style="padding: 6px 0; color: #14532d; font-size: 16px; font-weight: 800;">AED ${Number(loan.amount).toLocaleString()}</td>
+                                                     </tr>
+                                                     <tr>
+                                                         <td style="padding: 6px 0; color: #166534; font-size: 13px;"><strong>Final Status:</strong></td>
+                                                         <td style="padding: 6px 0;"><span style="background-color: #dcfce7; color: #166534; padding: 4px 10px; border-radius: 9999px; font-size: 11px; font-weight: 800; text-transform: uppercase;">${finalStatus}</span></td>
+                                                     </tr>
+                                                     <tr>
+                                                         <td style="padding: 6px 0; color: #166534; font-size: 13px;"><strong>Approval Date:</strong></td>
+                                                         <td style="padding: 6px 0; color: #14532d; font-size: 14px;">${new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })}</td>
+                                                     </tr>
+                                                 </table>
+                                             </div>
 
-                                            <div style="margin-top: 25px; border: 1px solid #f0fdf4; padding: 20px; border-radius: 8px;">
-                                                <h4 style="margin: 0 0 15px 0; font-size: 13px; color: #166534; text-transform: uppercase;">Approval History:</h4>
-                                                ${(loan.workflow || []).map(w => `
-                                                    <div style="margin-bottom: 8px; font-size: 13px;">
-                                                        <span style="color: #22c55e;">✓</span> <strong>${w.role}:</strong> Approved
-                                                    </div>
-                                                `).join('')}
-                                            </div>
+                                             <div style="margin-top: 25px; border: 1px solid #f0fdf4; padding: 20px; border-radius: 8px;">
+                                                 <h4 style="margin: 0 0 15px 0; font-size: 13px; color: #166534; text-transform: uppercase;">Approval History:</h4>
+                                                 ${(loan.workflow || []).map(w => `
+                                                     <div style="margin-bottom: 8px; font-size: 13px;">
+                                                         <span style="color: #22c55e;">✓</span> <strong>${w.role}:</strong> Approved
+                                                     </div>
+                                                 `).join('')}
+                                             </div>
 
-                                            <p style="margin-top: 25px; color: #4b5563;">Please find the official approved document attached to this email.</p>
-                                            <p>Best Regards,<br><strong>VeRP System</strong></p>
-                                        </div>
-                                    </div>
-                                `,
+                                              <p style="margin-top: 25px; color: #4b5563;">Please find the official approved document${loan.attachment?.url ? ' and original documentation' : ''} attached to this email.</p>
+                                              <p>Best Regards,<br><strong>VeRP System</strong></p>
+                                          </div>
+                                      </div>
+                                  `,
                                 attachments: [{ filename: `Approved_Loan_${loan.loanId || loan._id}.pdf`, content: pdfBuffer, contentType: 'application/pdf' }]
                             };
+
+                            // Add original loan attachment if it exists
+                            if (loan.attachment && (loan.attachment.url || loan.attachment.publicId)) {
+                                try {
+                                    const { getSignedFileUrl } = await import("../../utils/s3Upload.js");
+                                    const axios = (await import("axios")).default;
+                                    const refreshedUrl = await getSignedFileUrl(loan.attachment.publicId || loan.attachment.url);
+                                    if (refreshedUrl) {
+                                        console.log(`[ApproveLoan] Fetching original loan document from: ${refreshedUrl}`);
+                                        const attResponse = await axios.get(refreshedUrl, {
+                                            responseType: 'arraybuffer',
+                                            timeout: 30000,
+                                            maxContentLength: Infinity
+                                        });
+
+                                        mailOptions.attachments.push({
+                                            filename: loan.attachment.name || 'Loan-Original-Documentation.pdf',
+                                            content: Buffer.from(attResponse.data)
+                                        });
+                                        console.log(`[ApproveLoan] Success: Original loan attachment added to email.`);
+                                    }
+                                } catch (attErr) {
+                                    console.error("[ApproveLoan] Failed to fetch original attachment:", attErr.message);
+                                }
+                            }
+
                             await transporter.sendMail(mailOptions);
                             console.log(`[ApproveLoan] Success email sent to ${recipientEmails.size} recipients: ${Array.from(recipientEmails).join(', ')}`);
                         }
@@ -656,6 +701,8 @@ export const approveLoan = async (req, res) => {
                 }
             }
         }
+
+        await loan.save();
 
         res.status(200).json({ message: `Loan ${finalStatus === 'Pending Authorization' ? 'submitted for authorization' : status.toLowerCase()}`, loan });
 

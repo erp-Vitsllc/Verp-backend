@@ -11,7 +11,7 @@ export const getManagementHOD = async (identifier = null) => {
     try {
         let targetCompanyId = null;
 
-        // 1. Resolve Company ID (Similar to getDepartmentHOD)
+        // 1. Resolve Company ID
         if (identifier) {
             const directCompany = await Company.findOne({ companyId: identifier });
             if (directCompany) {
@@ -31,16 +31,10 @@ export const getManagementHOD = async (identifier = null) => {
             }
         }
 
-        // Strict Mode: No company context = No Management HOD found
-        if (!targetCompanyId) {
-            return null;
-        }
-
-        // 2. Try Company Responsibilities First
+        // 2. Try Specific Company first
         if (targetCompanyId) {
             const company = await Company.findById(targetCompanyId);
             if (company) {
-                // Check for 'management' or 'ceo' category in responsibilities
                 const responsibility = company.responsibilities?.find(r =>
                     r.category && (r.category.toLowerCase() === 'management' || r.category.toLowerCase() === 'ceo')
                 );
@@ -48,23 +42,31 @@ export const getManagementHOD = async (identifier = null) => {
                 if (responsibility && responsibility.empObjectId) {
                     const delegatedEmp = await EmployeeBasic.findById(responsibility.empObjectId)
                         .select('employeeId firstName lastName companyEmail email designation department profileStatus');
-
-                    if (delegatedEmp) {
-                        console.log(`[getManagementHOD] Found delegated CEO from Company Responsibilities: ${delegatedEmp.firstName}`);
-                        return delegatedEmp;
-                    }
-                } else if (responsibility && responsibility.employeeId) {
-                    const delegatedEmp = await EmployeeBasic.findOne({ employeeId: responsibility.employeeId })
-                        .select('employeeId firstName lastName companyEmail email designation department profileStatus');
-                    if (delegatedEmp) {
-                        console.log(`[getManagementHOD] Found delegated CEO from Company Responsibilities (ID): ${delegatedEmp.firstName}`);
-                        return delegatedEmp;
-                    }
+                    if (delegatedEmp) return delegatedEmp;
                 }
             }
         }
 
-        console.warn('[getManagementHOD] No CEO found via Company Responsibilities.');
+        // 3. Centralized Fallback: If not found in target, look in ANY company
+        const anyCompanyWithMgmt = await Company.findOne({
+            "responsibilities.category": { $regex: /^(management|ceo)$/i }
+        });
+
+        if (anyCompanyWithMgmt) {
+            const responsibility = anyCompanyWithMgmt.responsibilities.find(r =>
+                r.category && (r.category.toLowerCase() === 'management' || r.category.toLowerCase() === 'ceo')
+            );
+            if (responsibility && responsibility.empObjectId) {
+                const delegatedEmp = await EmployeeBasic.findById(responsibility.empObjectId)
+                    .select('employeeId firstName lastName companyEmail email designation department profileStatus');
+                if (delegatedEmp) {
+                    console.log(`[getManagementHOD] Using Centralized Management from company ${anyCompanyWithMgmt.name}`);
+                    return delegatedEmp;
+                }
+            }
+        }
+
+        console.warn('[getManagementHOD] No CEO found anywhere.');
         return null;
 
     } catch (error) {
@@ -72,3 +74,4 @@ export const getManagementHOD = async (identifier = null) => {
         return null;
     }
 };
+

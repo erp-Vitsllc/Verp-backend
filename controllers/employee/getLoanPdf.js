@@ -20,7 +20,7 @@ export const getLoanPdf = async (req, res) => {
         try {
             const referer = req.headers.referer;
             const origin = req.headers.origin || (referer ? new URL(referer).origin : null);
-            const baseUrl = process.env.FRONTEND_URL || origin || "http://localhost:3000";
+            const baseUrl = origin || process.env.FRONTEND_URL || "http://localhost:3000";
 
             // Be consistent with the URL format used in other notifications
             const typeSlug = loan.type ? loan.type.replace(/\s+/g, '-') : 'Loan';

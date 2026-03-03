@@ -7,7 +7,7 @@ import { sendFineApprovalEmail } from "../../utils/sendFineApprovalEmail.js";
 /**
  * Generate unique random fine ID (4 digits)
  */
-const generateFineId = async () => {
+export const generateFineIdInternal = async () => {
     try {
         // Find all fines with the VEGA-FNE- or VEGA-FINE- format
         const fines = await Fine.find({
@@ -131,34 +131,32 @@ export const addFine = async (req, res) => {
         if (isBulk && Array.isArray(bulkList) && bulkList.length > 0) {
             console.log(`[AddFine] Processing Bulk Request. Count: ${bulkList.length}`);
 
-            // VALIDATION: Check if all users have a company AND primaryReportee (Strict Mode)
+            let employeesWithCompany = [];
             const bulkIds = bulkList.map(e => e.employeeId).filter(id => id && id !== 'VEGA-HR-0000');
             if (bulkIds.length > 0) {
-                const invalidEmployees = await EmployeeBasic.find({
-                    employeeId: { $in: bulkIds },
-                    $or: [
-                        { company: { $exists: false } },
-                        { company: null },
-                        { primaryReportee: { $exists: false } }, // No manager
-                        { primaryReportee: null }
-                    ]
-                }).select('firstName lastName employeeId company primaryReportee');
+                employeesWithCompany = await EmployeeBasic.find({
+                    employeeId: { $in: bulkIds }
+                }).select('firstName lastName employeeId company').populate('company', 'name').lean();
+
+                const invalidEmployees = employeesWithCompany.filter(e => !e.company);
 
                 if (invalidEmployees.length > 0) {
-                    const noCompany = invalidEmployees.filter(e => !e.company).map(e => `${e.firstName} ${e.lastName || ''}`.trim());
-                    const noReportee = invalidEmployees.filter(e => e.company && !e.primaryReportee).map(e => `${e.firstName} ${e.lastName || ''}`.trim());
-
-                    let errorMsg = "";
-                    if (noCompany.length > 0) errorMsg += `Users with no company: ${noCompany.join(', ')}. `;
-                    if (noReportee.length > 0) errorMsg += `Users with no Primary Reportee (Manager): ${noReportee.join(', ')}. `;
-
+                    const noCompany = invalidEmployees.map(e => `${e.firstName} ${e.lastName || ''}`.trim());
                     return res.status(400).json({
-                        message: `${errorMsg}Please fix this in their profile before creating the fine.`
+                        message: `Users with no company: ${noCompany.join(', ')}. Please fix this in their profile before creating the fine.`
+                    });
+                }
+
+                // NEW: Ensure all belong to the SAME COMPANY
+                const companyIds = [...new Set(employeesWithCompany.map(e => String(e.company?._id || e.company)))];
+                if (companyIds.length > 1) {
+                    return res.status(400).json({
+                        message: "All employees in a group fine must belong to the same company."
                     });
                 }
             }
 
-            const baseFineId = await generateFineId(); // e.g. VEGA-FNE-0001
+            const baseFineId = await generateFineIdInternal(); // e.g. VEGA-FNE-0001
             const createdFines = [];
             const errors = [];
 
@@ -237,7 +235,7 @@ export const addFine = async (req, res) => {
                         individualAmount: individualEmpAmount // Store individual amount here too
                     }],
                     fineType: commonData.fineType || 'Other',
-                    fineStatus: commonData.fineStatus || 'Pending',
+                    fineStatus: (commonData.fineStatus === 'Pending' || !commonData.fineStatus) ? 'Pending HR' : commonData.fineStatus,
 
                     // Use Individual Amounts
                     fineAmount: individualFineAmount,
@@ -250,6 +248,8 @@ export const addFine = async (req, res) => {
                     attachment: attachmentData,
                     category: commonData.category || 'Other',
                     subCategory: commonData.subCategory || '',
+                    company: employeesWithCompany.find(e => e.employeeId === empData.employeeId)?.company?._id || (employeesWithCompany.length > 0 ? employeesWithCompany[0].company?._id : null),
+                    companyName: employeesWithCompany.find(e => e.employeeId === empData.employeeId)?.company?.name || (employeesWithCompany.length > 0 ? employeesWithCompany[0].company?.name : ''),
                     vehicleId: commonData.vehicleId || null,
                     assetId: commonData.assetId || null,
                     assetName: commonData.assetName || '',
@@ -262,48 +262,26 @@ export const addFine = async (req, res) => {
                     createdBy: req.user._id
                 };
 
-                // --- SNAPSHOT LOGIC per Employee ---
-                // Find manager for THIS specific employee
-                if (finePayload.fineStatus !== 'Draft' && empData.employeeId) {
+                // BULK: Route directly to HR (no reportee step)
+                if (finePayload.fineStatus !== 'Draft') {
                     try {
-                        const employeeForSnapshot = await EmployeeBasic.findOne({ employeeId: empData.employeeId })
-                            .select('primaryReportee')
-                            .lean();
-
-                        if (employeeForSnapshot && employeeForSnapshot.primaryReportee) {
-                            const managerBasic = await EmployeeBasic.findById(employeeForSnapshot.primaryReportee)
-                                .select('employeeId companyEmail email workEmail firstName lastName')
-                                .lean();
-
-                            if (managerBasic) {
-                                let reporteeUser = null;
-                                if (req.user && req.user.employeeId === managerBasic.employeeId) {
-                                    reporteeUser = req.user;
-                                } else {
-                                    reporteeUser = await User.findOne({ employeeId: managerBasic.employeeId });
-                                    if (!reporteeUser) {
-                                        const managerEmail = managerBasic.companyEmail || managerBasic.workEmail || managerBasic.email;
-                                        if (managerEmail) {
-                                            reporteeUser = await User.findOne({
-                                                $or: [{ email: managerEmail }, { username: managerEmail }]
-                                            });
-                                        }
-                                    }
-                                }
-
-                                if (reporteeUser) {
-                                    finePayload.submittedTo = reporteeUser._id;
-                                    finePayload.workflow = [{
-                                        role: 'Reportee',
-                                        assignedTo: reporteeUser._id,
-                                        status: 'Pending',
-                                        assignedAt: new Date()
-                                    }];
-                                }
+                        const { getDepartmentHOD } = await import('../../utils/getDepartmentHOD.js');
+                        const hrHOD = await getDepartmentHOD('hr', empData.employeeId);
+                        if (hrHOD) {
+                            const hrUser = await User.findOne({ employeeId: hrHOD.employeeId });
+                            if (hrUser) {
+                                finePayload.submittedTo = hrUser._id;
+                                finePayload.fineStatus = 'Pending HR';
+                                finePayload.workflow = [{
+                                    role: 'HR',
+                                    assignedTo: hrUser._id,
+                                    status: 'Pending',
+                                    assignedAt: new Date()
+                                }];
                             }
                         }
                     } catch (snapErr) {
-                        console.error('[AddFine] Error resolving manager for:', empData.employeeId, snapErr);
+                        console.error('[AddFine] Error resolving HR for:', empData.employeeId, snapErr);
                     }
                 }
 
@@ -401,6 +379,7 @@ export const addFine = async (req, res) => {
         } else {
             const employee = await EmployeeBasic.findOne({ employeeId })
                 .select('firstName lastName employeeId company primaryReportee')
+                .populate('company', 'name')
                 .lean();
 
             if (!employee) {
@@ -409,13 +388,11 @@ export const addFine = async (req, res) => {
             if (!employee.company) {
                 return res.status(400).json({ message: "Employee is not linked to any company. Cannot proceed." });
             }
-            if (!employee.primaryReportee && employeeId !== 'VEGA-HR-0000') {
-                return res.status(400).json({ message: "Employee has no Primary Reportee (Manager) assigned. Please fix this first." });
-            }
+            // Removed: primaryReportee check — fine goes directly to HR now
             employeeName = `${employee.firstName || ''} ${employee.lastName || ''}`.trim();
         }
 
-        const fineId = await generateFineId();
+        const fineId = await generateFineIdInternal();
 
         let attachmentData = null;
         if (attachment && attachment.data) {
@@ -453,7 +430,7 @@ export const addFine = async (req, res) => {
             // employeeId, // REMOVED
             // employeeName, // REMOVED
             fineType: subCategory || fineType || 'Other',
-            fineStatus: fineStatus || 'Pending',
+            fineStatus: (fineStatus === 'Pending' || !fineStatus) ? 'Pending HR' : fineStatus,
             fineAmount: parseFloat(fineAmount) || 0, // Allow 0
             description: description || '',
             awardedDate: awardedDate ? new Date(awardedDate) : new Date(),
@@ -461,6 +438,8 @@ export const addFine = async (req, res) => {
             attachment: attachmentData,
             category: category || 'Other',
             subCategory: subCategory || '',
+            company: employee?.company?._id || null,
+            companyName: employee?.company?.name || '',
             vehicleId: vehicleId || null,
             assetId: assetId || null,
             assetName: assetName || '',
@@ -482,88 +461,32 @@ export const addFine = async (req, res) => {
             createdBy: req.user._id // Add Creator
         };
 
-        // SNAPSHOT LOGIC: Find Reportee's USER Object for "submittedTo"
-        // Use the first assigned employee to determine the manager
+        // SINGLE: Route directly to HR (no reportee step)
         if (fineData.fineStatus !== 'Draft') {
             const targetEmpId = (fineData.assignedEmployees && fineData.assignedEmployees.length > 0)
                 ? fineData.assignedEmployees[0].employeeId
                 : employeeId;
 
             if (targetEmpId && targetEmpId !== 'PENDING') {
-                const employeeForSnapshot = await EmployeeBasic.findOne({ employeeId: targetEmpId })
-                    .select('primaryReportee')
-                    .lean();
-
-                if (employeeForSnapshot && employeeForSnapshot.primaryReportee) {
-                    // Determine Manager
-                    const managerBasic = await EmployeeBasic.findById(employeeForSnapshot.primaryReportee)
-                        .select('employeeId companyEmail email workEmail firstName lastName')
-                        .lean();
-
-                    if (managerBasic) {
-                        // Find Manager User Account
-                        let reporteeUser = null;
-
-                        if (managerBasic.employeeId) {
-                            // Fix: Prefer the logged-in user if they are the manager
-                            if (req.user && req.user.employeeId === managerBasic.employeeId) {
-                                reporteeUser = req.user;
-                                console.log(`[AddFine] Manager is the requesting user. Using req.user (Preferred): ${req.user._id}`);
-                            } else {
-                                reporteeUser = await User.findOne({ employeeId: managerBasic.employeeId });
-                            }
-                        }
-
-                        if (!reporteeUser) {
-                            const managerEmail = managerBasic.companyEmail || managerBasic.workEmail || managerBasic.email;
-                            if (managerEmail) {
-                                console.log(`[AddFine] Manager User not found by ID. Trying email: ${managerEmail}`);
-                                reporteeUser = await User.findOne({
-                                    $or: [
-                                        { email: managerEmail },
-                                        { username: managerEmail }
-                                    ]
-                                });
-                            }
-                        }
-
-                        if (reporteeUser) {
-                            fineData.submittedTo = reporteeUser._id;
-                            // WORKFLOW: Initial Pending Step (Pushed to Dashboard)
+                try {
+                    const { getDepartmentHOD } = await import('../../utils/getDepartmentHOD.js');
+                    const hrHOD = await getDepartmentHOD('hr', targetEmpId);
+                    if (hrHOD) {
+                        const hrUser = await User.findOne({ employeeId: hrHOD.employeeId });
+                        if (hrUser) {
+                            fineData.submittedTo = hrUser._id;
+                            fineData.fineStatus = 'Pending HR';
                             fineData.workflow = [{
-                                role: 'Reportee', // or Manager
-                                assignedTo: reporteeUser._id,
+                                role: 'HR',
+                                assignedTo: hrUser._id,
                                 status: 'Pending',
                                 assignedAt: new Date()
                             }];
-                            console.log(`[AddFine] Dashboard Request Pushed for Manager: ${reporteeUser.username}`);
-
-                            // SNAPSHOT: Log Dashboard State
-                            const currentPendingFines = await Fine.countDocuments({
-                                workflow: { $elemMatch: { assignedTo: reporteeUser._id, status: 'Pending' } },
-                                fineStatus: { $nin: ['Approved', 'Rejected', 'Withdrawn', 'Completed'] }
-                            });
-
-                            console.log(`
-===================================================
-[DASHBOARD PREVIEW - FINE]
----------------------------------------------------
-Target Manager    : ${reporteeUser.username}
-Target User ID    : ${reporteeUser._id}
-Target Emp ID     : ${managerBasic.employeeId}
-Target Email      : ${reporteeUser.email || reporteeUser.companyEmail}
----------------------------------------------------
-Pending Fines (Pre-Save)   : ${currentPendingFines}
-New Item Pushed            : +1
----------------------------------------------------
-TOTAL PENDING ON DASHBOARD : ${currentPendingFines + 1}
-===================================================`);
-                        } else {
-                            console.warn(`[AddFine] Manager (ID: ${managerBasic.employeeId}) has no User account linked. Dashboard request cannot be created.`);
+                            console.log(`[AddFine] Fine routed directly to HR: ${hrUser._id}`);
                         }
-                    } else {
-                        console.warn(`[AddFine] Primary Reportee (ID: ${employeeForSnapshot.primaryReportee}) not found in EmployeeBasic.`);
                     }
+                } catch (snapErr) {
+                    console.error('[AddFine] Error resolving HR:', snapErr);
                 }
             }
         }

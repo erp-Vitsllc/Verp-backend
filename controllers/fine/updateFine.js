@@ -26,18 +26,32 @@ export const updateFine = async (req, res) => {
         }
 
         // ... (rest of lookup logic)
-        let fine;
+        // 1. Fetch Related Fines (Support Group Updates)
         const isValidObjectId = /^[0-9a-fA-F]{24}$/.test(id);
+        let fines = [];
+
         if (isValidObjectId) {
-            fine = await Fine.findById(id);
-        }
-        if (!fine) {
-            fine = await Fine.findOne({ fineId: id });
+            const targetFine = await Fine.findById(id);
+            if (targetFine) {
+                const baseId = targetFine.fineId.split('-').length > 3
+                    ? targetFine.fineId.split('-').slice(0, 3).join('-')
+                    : targetFine.fineId;
+                const baseIdRegex = new RegExp(`^${baseId}(-[A-Z0-9]+)?$`, 'i');
+                fines = await Fine.find({ fineId: baseIdRegex });
+            }
         }
 
-        if (!fine) {
-            return res.status(404).json({ message: "Fine not found" });
+        if (fines.length === 0) {
+            const baseId = id.split('-').length > 3 ? id.split('-').slice(0, 3).join('-') : id;
+            const baseIdRegex = new RegExp(`^${baseId}(-[A-Z0-9]+)?$`, 'i');
+            fines = await Fine.find({ fineId: baseIdRegex });
         }
+
+        if (fines.length === 0) {
+            return res.status(404).json({ message: "Fine(s) not found" });
+        }
+
+        const fine = fines[0]; // Primary reference for logic
 
         const oldStatus = fine.fineStatus;
         let shouldSendApprovalEmail = false;
@@ -53,9 +67,12 @@ export const updateFine = async (req, res) => {
 
         // 2. Perform submission logic from Draft -> Pending
         if (oldStatus === 'Draft' && updates.fineStatus === 'Pending') {
-            // ... (keep submission logic)
-            console.log("[UpdateFine] Submitting Draft Fine. Validating Company linkage...");
-            const bulkIds = fine.assignedEmployees.map(e => e.employeeId).filter(id => id);
+            console.log("[UpdateFine] Submitting Draft Fine. Routing directly to HR...");
+            const bulkIds = fine.assignedEmployees
+                .map(e => e.employeeId)
+                .filter(id => id && id !== 'VEGA-HR-0000');
+
+            // Validation: Company check
             const employeesWithNoCompany = await EmployeeBasic.find({
                 employeeId: { $in: bulkIds },
                 $or: [{ company: { $exists: false } }, { company: null }]
@@ -68,122 +85,106 @@ export const updateFine = async (req, res) => {
                 });
             }
 
-            // Manager Identification
+            // Identify target HR HOD for the first employee's company
             const targetEmpId = (fine.assignedEmployees && fine.assignedEmployees.length > 0)
                 ? fine.assignedEmployees[0].employeeId
                 : null;
 
             if (targetEmpId) {
-                const employeeForSnapshot = await EmployeeBasic.findOne({ employeeId: targetEmpId }).select('primaryReportee').lean();
-                if (employeeForSnapshot && employeeForSnapshot.primaryReportee) {
-                    const managerBasic = await EmployeeBasic.findById(employeeForSnapshot.primaryReportee)
-                        .select('employeeId companyEmail email workEmail firstName lastName').lean();
-                    if (managerBasic) {
-                        let reporteeUser = await User.findOne({ employeeId: managerBasic.employeeId });
-                        if (!reporteeUser) {
-                            const managerEmail = managerBasic.companyEmail || managerBasic.workEmail || managerBasic.email;
-                            if (managerEmail) reporteeUser = await User.findOne({ $or: [{ email: managerEmail }, { username: managerEmail }] });
-                        }
-                        if (reporteeUser) {
-                            // NEXT PERSON LOGIC: If Manager is submitting, jump to HR
-                            if (reporteeUser._id.toString() === req.user?._id?.toString()) {
-                                console.log("[UpdateFine] Submitter is the Manager. Jumping to HR step.");
-                                const targetEmp = await EmployeeBasic.findOne({ employeeId: targetEmpId }).select('company').lean();
-                                const hrHOD = await getDepartmentHOD('hr', targetEmp?.company || targetEmpId);
-
-                                if (hrHOD) {
-                                    const hrUser = await User.findOne({ employeeId: hrHOD.employeeId });
-                                    if (hrUser) {
-                                        fine.submittedTo = hrUser._id;
-                                        fine.workflow = [
-                                            { role: 'Reportee', assignedTo: req.user._id, status: 'Approved', assignedAt: new Date(), actionedAt: new Date() },
-                                            { role: 'HR', assignedTo: hrUser._id, status: 'Pending', assignedAt: new Date() }
-                                        ];
-                                    } else {
-                                        fine.submittedTo = reporteeUser._id;
-                                        fine.workflow = [{ role: 'Reportee', assignedTo: reporteeUser._id, status: 'Pending', assignedAt: new Date() }];
-                                    }
-                                } else {
-                                    fine.submittedTo = reporteeUser._id;
-                                    fine.workflow = [{ role: 'Reportee', assignedTo: reporteeUser._id, status: 'Pending', assignedAt: new Date() }];
-                                }
-                            } else {
-                                fine.submittedTo = reporteeUser._id;
-                                fine.workflow = [{ role: 'Reportee', assignedTo: reporteeUser._id, status: 'Pending', assignedAt: new Date() }];
+                try {
+                    const hrHOD = await getDepartmentHOD('hr', targetEmpId);
+                    if (hrHOD) {
+                        const hrUser = await User.findOne({ employeeId: hrHOD.employeeId });
+                        if (hrUser) {
+                            for (const f of fines) {
+                                f.submittedTo = hrUser._id;
+                                f.fineStatus = 'Pending HR';
+                                f.workflow = [
+                                    { role: 'HR', assignedTo: hrUser._id, status: 'Pending', assignedAt: new Date() }
+                                ];
+                                await f.save();
                             }
                             shouldSendApprovalEmail = true;
+                            console.log(`[UpdateFine] ${fines.length} Fines routed directly to HR: ${hrUser._id}`);
                         }
                     }
+                } catch (snapErr) {
+                    console.error('[UpdateFine] Error resolving HR:', snapErr);
                 }
             }
         } else if (updates.resubmit && oldStatus === 'Rejected') {
             // === RESUBMIT LOGIC ===
             console.log("[UpdateFine] Resubmitting previously rejected fine.");
             const rejectedStep = (fine.workflow || []).find(w => w.status === 'Rejected');
-            if (rejectedStep) {
-                // Reset the rejected step to Pending
-                rejectedStep.status = 'Pending';
-                rejectedStep.actionedAt = null;
-                if (updates.remarks) rejectedStep.comment = `RESUBMITTED: ${updates.remarks}`;
+            for (const f of fines) {
+                const rejectedStep = (f.workflow || []).find(w => w.status === 'Rejected');
+                if (rejectedStep) {
+                    rejectedStep.status = 'Pending';
+                    rejectedStep.actionedAt = null;
+                    if (updates.remarks) rejectedStep.comment = `RESUBMITTED: ${updates.remarks}`;
 
-                fine.fineStatus = 'Pending';
+                    if (rejectedStep.role === 'HR') f.fineStatus = 'Pending HR';
+                    else if (rejectedStep.role === 'Accounts') f.fineStatus = 'Pending Accounts';
+                    else if (rejectedStep.role === 'Management' || rejectedStep.role === 'CEO') f.fineStatus = 'Pending Authorization';
+                    else f.fineStatus = 'Pending Review';
 
-                fine.submittedTo = rejectedStep.assignedTo;
-                shouldSendApprovalEmail = true;
-
-                console.log(`[UpdateFine] Resubmitting: Role=${rejectedStep.role} -> TargetStatus=Pending`);
-            }
-        }
-
-        // 3. Apply updates only for allowed fields
-        allowedUpdates.forEach(key => {
-            if (updates[key] !== undefined) {
-                if (key === 'employees' && Array.isArray(updates.employees)) {
-                    fine.assignedEmployees = updates.employees.map(emp => ({
-                        employeeId: emp.employeeId,
-                        employeeName: emp.employeeName || 'Unknown',
-                        daysWorked: emp.daysWorked || 0,
-                        approvalStatus: emp.approvalStatus || 'Pending',
-                        individualAmount: emp.employeeAmount || updates.employeeAmount || 0
-                    }));
-                } else if (key === 'attachment') {
-                    // Double check URL inside attachment object if modified
-                    if (updates.attachment && updates.attachment.url && !isValidStorageUrl(updates.attachment.url)) {
-                        // ignore malicious URL update
-                        console.warn("[UpdateFine] Attempted to update with invalid attachment URL. Skipping attachment update.");
-                    } else {
-                        fine.attachment = updates.attachment;
-                    }
-                } else if (key !== 'employees') {
-                    fine[key] = updates[key];
+                    f.submittedTo = rejectedStep.assignedTo;
+                    await f.save();
                 }
             }
-        });
+            shouldSendApprovalEmail = true;
+            console.log(`[UpdateFine] Resubmitted group of ${fines.length} fines.`);
+        }
+
+        // 3. Apply updates only for allowed fields (Loop all for bulk update)
+        for (const f of fines) {
+            allowedUpdates.forEach(key => {
+                if (updates[key] !== undefined) {
+                    if (key === 'employees' && Array.isArray(updates.employees)) {
+                        // Skip bulk employee list update for individual suffix records unless specified
+                    } else if (key === 'attachment') {
+                        if (updates.attachment && updates.attachment.url && !isValidStorageUrl(updates.attachment.url)) {
+                            console.warn("[UpdateFine] Invalid URL. Skipping.");
+                        } else {
+                            f.attachment = updates.attachment;
+                        }
+                    } else if (key !== 'employees' && key !== 'fineStatus') {
+                        f[key] = updates[key];
+                    }
+                }
+            });
+            await f.save();
+        }
 
         if (oldStatus !== 'Rejected' && updates.fineStatus === 'Rejected') {
             if (!updates.rejectionReason || updates.rejectionReason.trim().length === 0) {
                 return res.status(400).json({ message: "Reason for rejection is mandatory." });
             }
-            fine.rejectedBy = req.user?._id;
-            fine.rejectedDate = new Date();
-            fine.rejectionReason = updates.rejectionReason;
 
-            // NEW: Update Workflow to Rejected
-            if (!fine.workflow) fine.workflow = [];
-            const pendingStep = fine.workflow.find(w => w.status === 'Pending');
-            if (pendingStep) {
-                pendingStep.status = 'Rejected';
-                pendingStep.actionedAt = new Date();
-                pendingStep.comment = updates.rejectionReason;
-            } else {
-                fine.workflow.push({
-                    role: 'Reviewer',
-                    assignedTo: req.user?._id,
-                    status: 'Rejected',
-                    assignedAt: new Date(),
-                    actionedAt: new Date(),
-                    comment: updates.rejectionReason
-                });
+            for (const f of fines) {
+                f.fineStatus = 'Rejected';
+                f.rejectedBy = req.user?._id;
+                f.rejectedDate = new Date();
+                f.rejectionReason = updates.rejectionReason;
+
+                // Update Workflow to Rejected
+                if (!f.workflow) f.workflow = [];
+                const pendingStep = f.workflow.find(w => w.status === 'Pending');
+                if (pendingStep) {
+                    pendingStep.status = 'Rejected';
+                    pendingStep.actionedAt = new Date();
+                    pendingStep.comment = updates.rejectionReason;
+                } else {
+                    f.workflow.push({
+                        role: 'Reviewer',
+                        assignedTo: req.user?._id,
+                        status: 'Rejected',
+                        assignedAt: new Date(),
+                        actionedAt: new Date(),
+                        comment: updates.rejectionReason
+                    });
+                }
+                await f.save();
             }
         }
 

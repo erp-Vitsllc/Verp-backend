@@ -14,12 +14,12 @@ export const getFineById = async (req, res) => {
         }
 
         let fine;
+        let relatedFines = [];
 
         // Check if id is a valid MongoDB ObjectId
         const isValidObjectId = /^[0-9a-fA-F]{24}$/.test(id);
 
         if (isValidObjectId) {
-            // Try matching either _id or fineId (in case fineId happens to look like an objectId, unlikely but safe)
             fine = await Fine.findOne({
                 $or: [{ _id: id }, { fineId: id }]
             })
@@ -30,15 +30,60 @@ export const getFineById = async (req, res) => {
                 .populate('approvedBy', 'firstName lastName email department designation employeeId')
                 .populate('rejectedBy', 'firstName lastName email department designation')
                 .populate('submittedTo', 'firstName lastName email department designation')
+                .populate('workflow.assignedTo', 'firstName lastName employeeId')
                 .lean();
         } else {
-            // Not an ObjectId, so must be a custom fineId
+            // Check if it's an exact match or a base ID (look for suffixes)
             fine = await Fine.findOne({ fineId: id })
-                .populate('createdBy', 'name email department designation')
-                .populate('hrApprovedBy', 'name email department designation employeeId')
-                .populate('accountsApprovedBy', 'name email department designation employeeId')
-                .populate('approvedBy', 'name email department designation employeeId')
+                .populate('createdBy', 'firstName lastName email department designation')
+                .populate('hrApprovedBy', 'firstName lastName email department designation employeeId')
+                .populate('accountsApprovedBy', 'firstName lastName email department designation employeeId')
+                .populate('approvedBy', 'firstName lastName email department designation employeeId')
+                .populate('workflow.assignedTo', 'firstName lastName employeeId')
                 .lean();
+
+            if (!fine) {
+                // Try searching for related records (e.g. if ID is VEGA-FINE-0009, find -A, -B, -CO etc)
+                // We use a regex to find exact base or base with any suffix
+                const baseIdRegex = new RegExp(`^${id}(-[A-Z0-9]+)?$`);
+                relatedFines = await Fine.find({ fineId: baseIdRegex })
+                    .populate('createdBy', 'firstName lastName email department designation')
+                    .populate('hrApprovedBy', 'firstName lastName email department designation employeeId')
+                    .populate('accountsApprovedBy', 'firstName lastName email department designation employeeId')
+                    .populate('approvedBy', 'firstName lastName email department designation employeeId')
+                    .populate('workflow.assignedTo', 'firstName lastName employeeId')
+                    .sort({ fineId: 1 })
+                    .lean();
+
+                if (relatedFines.length > 0) {
+                    // SYNTHESIZE GROUPED FINE
+                    const first = relatedFines[0];
+                    fine = { ...first }; // copy common props
+
+                    // Merge assignedEmployees
+                    const allAssigned = [];
+                    let totalFineAmt = 0;
+                    let totalEmpAmt = 0;
+                    let totalCompAmt = 0;
+
+                    relatedFines.forEach(rf => {
+                        if (rf.assignedEmployees) {
+                            allAssigned.push(...rf.assignedEmployees);
+                        }
+                        totalFineAmt += parseFloat(rf.fineAmount) || 0;
+                        totalEmpAmt += parseFloat(rf.employeeAmount) || 0;
+                        totalCompAmt += parseFloat(rf.companyAmount) || 0;
+                    });
+
+                    // Update synthesized fields
+                    fine.fineId = id; // use base ID
+                    fine.isGroupView = true;
+                    fine.assignedEmployees = allAssigned;
+                    fine.fineAmount = totalFineAmt;
+                    fine.employeeAmount = totalEmpAmt;
+                    fine.companyAmount = totalCompAmt;
+                }
+            }
         }
 
         if (!fine) {
@@ -75,8 +120,9 @@ export const getFineById = async (req, res) => {
         }
 
         // Determine the primary employee for context (Context Aware)
-        // Check assignedEmployees first, then fallback to legacy/direct employeeId if present
-        const targetEmployeeId = fine.assignedEmployees?.[0]?.employeeId || fine.employeeId;
+        // Skip 'VEGA-HR-0000' (Company share record) to find the actual company of the group
+        const realEmployee = fine.assignedEmployees?.find(e => e.employeeId && e.employeeId !== 'VEGA-HR-0000');
+        const targetEmployeeId = realEmployee?.employeeId || (fine.assignedEmployees?.[0]?.employeeId) || fine.employeeId;
 
         // Fetch current HODs for display fallbacks in tracker
         // Passes the employee ID to find THEIR company's specific responsibilities

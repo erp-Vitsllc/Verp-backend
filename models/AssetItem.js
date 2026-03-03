@@ -76,7 +76,7 @@ const assetItemSchema = new mongoose.Schema({
     },
     status: {
         type: String,
-        enum: ['Assigned', 'Unassigned', 'Maintenance', 'On Service', 'Service', 'Lost', 'Returned', 'Pending'],
+        enum: ['Assigned', 'Unassigned', 'Maintenance', 'On Service', 'Service', 'Lost', 'Returned', 'Pending', 'End of Life', 'Out of Service'],
         default: 'Unassigned'
     },
     assignmentType: {
@@ -96,6 +96,15 @@ const assetItemSchema = new mongoose.Schema({
     actionRequiredBy: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'EmployeeBasic',
+        default: null
+    },
+    pendingAction: {
+        type: String,
+        enum: ['End of Life', 'Loss and Damage', null],
+        default: null
+    },
+    pendingActionDetails: {
+        type: mongoose.Schema.Types.Mixed,
         default: null
     },
     acceptedBy: {
@@ -119,8 +128,23 @@ const assetItemSchema = new mongoose.Schema({
             type: String,
             enum: ['Attached', 'Transfered', 'Lost', 'Damaged', 'End of Life'],
             default: 'Attached'
+        },
+        // Pending approval workflow for accessory-level actions
+        pendingAction: {
+            type: String,
+            enum: ['Transfer', 'Loss and Damage', 'End of Life', null],
+            default: null
+        },
+        pendingActionDetails: {
+            targetAssetId: { type: mongoose.Schema.Types.ObjectId, ref: 'AssetItem', default: null },
+            reason: { type: String, default: null },
+            attachment: { type: String, default: null },
+            fineData: { type: mongoose.Schema.Types.Mixed, default: null },
+            requestedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'EmployeeBasic', default: null },
+            requestedAt: { type: Date, default: null }
         }
     }],
+    accessoriesAttachment: { type: String, default: null },
     vehicleCode: { type: String, trim: true },
     plateNumber: { type: String, trim: true },
     modelYear: { type: String, trim: true },

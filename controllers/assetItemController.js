@@ -9,6 +9,33 @@ import User from '../models/User.js';
 import { sendAssetAssignmentEmail } from '../utils/sendAssetAssignmentEmail.js';
 import { sendAssetResponseEmail } from '../utils/sendAssetResponseEmail.js';
 import DashboardAction from '../models/DashboardAction.js';
+import { sendAssetActionApprovalEmail } from '../utils/sendAssetActionApprovalEmail.js';
+import { sendAssetActionFinalAcknowledgeEmail } from '../utils/sendAssetActionFinalAcknowledgeEmail.js';
+import Fine from '../models/Fine.js';
+import AssetCategory from '../models/AssetCategory.js';
+import { getDepartmentHOD } from '../utils/getDepartmentHOD.js';
+
+// Helper to generate unique fine IDs (copied from fineController/addFine)
+const generateFineIdInternal = async () => {
+    try {
+        const fines = await Fine.find({ fineId: /VEGA-(FINE|FNE)-(\d+)/i }).select('fineId').lean();
+        let maxNum = 0;
+        if (fines.length > 0) {
+            fines.forEach(f => {
+                const match = f.fineId.match(/VEGA-(FINE|FNE)-(\d+)/i);
+                if (match && match[2]) {
+                    const num = parseInt(match[2], 10);
+                    if (num > maxNum) maxNum = num;
+                }
+            });
+        }
+        const nextNum = maxNum + 1;
+        return `VEGA - FINE - ${nextNum.toString().padStart(4, '0')} `;
+    } catch (error) {
+        console.error('Error generating internal fine ID:', error);
+        return `fine${Date.now().toString().slice(-4)} `;
+    }
+};
 
 // @desc    Get all items for a specific asset type
 // @route   GET /api/AssetItem/:typeId
@@ -59,7 +86,7 @@ export const getAllAssignedAssets = async (req, res) => {
             status: { $in: ['Assigned', 'Active', 'Returned'] },
             assignedTo: { $ne: null }
         })
-            .select('assetId name assignedTo')
+            .select('assetId name assignedTo accessories assetValue')
             .populate({
                 path: 'assignedTo',
                 select: 'firstName lastName employeeId'
@@ -148,6 +175,49 @@ export const createAssetItem = async (req, res) => {
     }
 };
 
+// @desc    Update an existing asset item
+// @route   PUT /api/AssetItem/:id
+// @access  Private
+export const updateAssetItem = async (req, res) => {
+    try {
+        const { id } = req.params;
+        let { name, photo, status, categoryId, assetValue, purchaseDate, warrantyYears, lastServiceDate } = req.body;
+
+        const item = await AssetItem.findById(id);
+        if (!item) {
+            return res.status(404).json({ message: 'Asset not found' });
+        }
+
+        if (name) item.name = name;
+        if (categoryId !== undefined) item.categoryId = categoryId || null;
+        if (assetValue !== undefined) item.assetValue = assetValue || 0;
+        if (purchaseDate !== undefined) item.purchaseDate = purchaseDate || null;
+        if (warrantyYears !== undefined) item.warrantyYears = warrantyYears || 0;
+        if (status) item.status = status;
+        if (lastServiceDate !== undefined) item.lastServiceDate = lastServiceDate || null;
+
+        // Handle Photo Upload if changed
+        if (photo && photo.startsWith('data:image')) {
+            try {
+                const uploadResult = await uploadDocumentToS3(photo, 'asset-photos');
+                item.photo = uploadResult.publicId;
+                item.imagePreview = uploadResult.publicId;
+            } catch (error) {
+                console.error('Error uploading asset photo to S3:', error);
+            }
+        } else if (photo === null) {
+            // they removed the photo? maybe not support deleting this way.
+        }
+
+        await item.save();
+
+        res.status(200).json(item);
+    } catch (error) {
+        console.error('Error updating asset item:', error);
+        res.status(500).json({ message: 'Server Error' });
+    }
+};
+
 // @desc    Get single asset item details
 // @route   GET /api/AssetItem/detail/:id
 // @access  Private
@@ -165,7 +235,7 @@ export const getAssetItemDetail = async (req, res) => {
                     },
                     {
                         path: 'primaryReportee',
-                        select: 'firstName lastName'
+                        select: 'firstName lastName employeeId'
                     }
                 ]
             })
@@ -175,6 +245,7 @@ export const getAssetItemDetail = async (req, res) => {
             })
             .populate('acceptedBy', 'firstName lastName signature')
             .populate('typeId', 'name imagePreview')
+            .populate('actionRequiredBy', 'firstName lastName employeeId')
             .populate('categoryId', 'name imagePreview');
 
         if (!item) {
@@ -230,6 +301,9 @@ export const getAssetItemDetail = async (req, res) => {
             for (let service of itemObj.services) {
                 if (service.invoice) {
                     service.invoice = await getSignedFileUrl(service.invoice);
+                }
+                if (service.attachment) {
+                    service.attachment = await getSignedFileUrl(service.attachment);
                 }
             }
         }
@@ -309,15 +383,15 @@ export const assignAssetItem = async (req, res) => {
                 requestId: item._id,
                 requestType: 'Asset',
                 subjectEmployeeId: subjectEmp?.employeeId,
-                subjectName: `${subjectEmp?.firstName || ""} ${subjectEmp?.lastName || ""}`.trim(),
-                requestedByName: `${assigner?.firstName || "System"} ${assigner?.lastName || ""}`.trim(),
-                extra1: `${item.assetId} - ${item.name}`,
+                subjectName: `${subjectEmp?.firstName || ""} ${subjectEmp?.lastName || ""} `.trim(),
+                requestedByName: `${assigner?.firstName || "System"} ${assigner?.lastName || ""} `.trim(),
+                extra1: `${item.assetId} - ${item.name} `,
                 extra2: item.assignmentType,
                 status: 'Pending'
             });
             console.log(`[Dashboard] Created asset action for ${actionRecipient?.employeeId}`);
         } catch (err) {
-            console.error(`[Dashboard Error] Failed to create action for asset ${item.assetId}:`, err);
+            console.error(`[Dashboard Error] Failed to create action for asset ${item.assetId}: `, err);
         }
 
         // Log to Asset History with Snapshot
@@ -378,7 +452,7 @@ export const assignAssetItem = async (req, res) => {
                     const manager = await EmployeeBasic.findById(managerId);
 
                     if (manager) {
-                        console.log(`[Asset Assignment] No company email for ${employee.firstName}. Notifying manager: ${manager.firstName}`);
+                        console.log(`[Asset Assignment] No company email for ${employee.firstName}.Notifying manager: ${manager.firstName} `);
                         await sendAssetAssignmentEmail({
                             asset: updatedItem,
                             employee: employee,
@@ -468,9 +542,9 @@ export const bulkAssignAssetItems = async (req, res) => {
                 requestId: asset._id,
                 requestType: 'Asset',
                 subjectEmployeeId: subjectEmp?.employeeId,
-                subjectName: `${subjectEmp?.firstName || ""} ${subjectEmp?.lastName || ""}`.trim(),
-                requestedByName: `${assigner?.firstName || "System"} ${assigner?.lastName || ""}`.trim(),
-                extra1: `${asset.assetId} - ${asset.name}`,
+                subjectName: `${subjectEmp?.firstName || ""} ${subjectEmp?.lastName || ""} `.trim(),
+                requestedByName: `${assigner?.firstName || "System"} ${assigner?.lastName || ""} `.trim(),
+                extra1: `${asset.assetId} - ${asset.name} `,
                 extra2: asset.assignmentType,
                 status: 'Pending'
             }));
@@ -478,7 +552,7 @@ export const bulkAssignAssetItems = async (req, res) => {
             await DashboardAction.insertMany(dashboardActions);
             console.log(`[Dashboard] Created ${dashboardActions.length} asset actions for ${actionRecipient?.employeeId}`);
         } catch (err) {
-            console.error(`[Dashboard Error] Failed to create bulk asset actions:`, err);
+            console.error(`[Dashboard Error] Failed to create bulk asset actions: `, err);
         }
 
         // Log history for each asset with Snapshot
@@ -528,7 +602,7 @@ export const bulkAssignAssetItems = async (req, res) => {
                     const manager = await EmployeeBasic.findById(managerId);
 
                     if (manager) {
-                        console.log(`[Bulk Asset Assignment] No company email or portal access for ${employee.firstName}. Notifying manager: ${manager.firstName}`);
+                        console.log(`[Bulk Asset Assignment] No company email or portal access for ${employee.firstName}.Notifying manager: ${manager.firstName} `);
                         await sendAssetAssignmentEmail({
                             asset: firstAsset,
                             employee: employee,
@@ -565,9 +639,9 @@ export const downloadHandoverPdf = async (req, res) => {
         // URL to the frontend print page we created
         const origin = req.headers.origin || (req.headers.referer ? new URL(req.headers.referer).origin : null);
         const baseUrl = origin || process.env.FRONTEND_URL || 'http://localhost:3000';
-        const printUrl = `${baseUrl}/print/asset-handover/${id}`;
+        const printUrl = `${baseUrl} /print/asset - handover / ${id} `;
 
-        console.log(`Generating Asset Handover PDF from: ${printUrl}`);
+        console.log(`Generating Asset Handover PDF from: ${printUrl} `);
 
         const token = req.headers.authorization?.split(' ')[1] || '';
 
@@ -590,7 +664,7 @@ export const downloadHandoverPdf = async (req, res) => {
         const pdfBuffer = await generatePdf(printUrl, token, userPayload, permissions, selector);
 
         res.setHeader('Content-Type', 'application/pdf');
-        res.setHeader('Content-Disposition', `attachment; filename="HandoverForm-${asset.assetId}.pdf"`);
+        res.setHeader('Content-Disposition', `attachment; filename = "HandoverForm-${asset.assetId}.pdf"`);
         res.send(pdfBuffer);
 
     } catch (error) {
@@ -777,7 +851,7 @@ export const respondToAssignment = async (req, res) => {
                 existingAction.actionedBy = currentUser;
                 existingAction.comment = comments;
                 await existingAction.save();
-                console.log(`[Dashboard] Updated existing action for ${item.assetId} to ${existingAction.status}`);
+                console.log(`[Dashboard] Updated existing action for ${item.assetId} to ${existingAction.status} `);
             }
 
             // If it's a negotiation (AcceptWithComments), create a new action for the next person in line
@@ -793,16 +867,16 @@ export const respondToAssignment = async (req, res) => {
                     requestId: item._id,
                     requestType: 'Asset',
                     subjectEmployeeId: subjectEmp?.employeeId,
-                    subjectName: `${subjectEmp?.firstName || ""} ${subjectEmp?.lastName || ""}`.trim(),
-                    requestedByName: `${senderEmp?.firstName || ""} ${senderEmp?.lastName || ""}`.trim(),
-                    extra1: `${item.assetId} - ${item.name}`,
-                    extra2: `Update Required: ${comments}`,
+                    subjectName: `${subjectEmp?.firstName || ""} ${subjectEmp?.lastName || ""} `.trim(),
+                    requestedByName: `${senderEmp?.firstName || ""} ${senderEmp?.lastName || ""} `.trim(),
+                    extra1: `${item.assetId} - ${item.name} `,
+                    extra2: `Update Required: ${comments} `,
                     status: 'Pending'
                 });
                 console.log(`[Dashboard] Created negotiation action for ${nextActor?.employeeId}`);
             }
         } catch (err) {
-            console.error(`[Dashboard Error] Failed to update action for asset ${item.assetId}:`, err);
+            console.error(`[Dashboard Error] Failed to update action for asset ${item.assetId}: `, err);
         }
 
         // Log final actions with Snapshot
@@ -828,7 +902,7 @@ export const respondToAssignment = async (req, res) => {
                 action: 'Accepted',
                 assignedTo: item.assignedTo,
                 performedBy: req.user.employeeObjectId,
-                comments: isManager ? `Accepted by manager on behalf of employee. ${comments || ''}` : comments,
+                comments: isManager ? `Accepted by manager on behalf of employee.${comments || ''} ` : comments,
                 details: {
                     ...snapshotItem.toObject(),
                     isAcceptedByManager: isManager
@@ -933,7 +1007,7 @@ export const returnAssetItem = async (req, res) => {
 export const updateAssetStatus = async (req, res) => {
     try {
         const { id } = req.params;
-        const { status, note, serviceDuration, description, invoice, attachment } = req.body;
+        const { status, note, serviceDuration, description, invoice, attachment, serviceReport, amount } = req.body;
         // status: 'Unassigned' | 'Service' | 'Live'
 
         const allowedStatuses = ['Unassigned', 'Service', 'Live'];
@@ -945,6 +1019,8 @@ export const updateAssetStatus = async (req, res) => {
         if (!item) return res.status(404).json({ message: 'Asset not found' });
 
         const prevStatus = item.status;
+        let serviceRecord = null;
+        let completionRecord = null;
 
         // Capture snapshot before mutation
         const snapshotItem = await AssetItem.findById(item._id)
@@ -965,7 +1041,7 @@ export const updateAssetStatus = async (req, res) => {
             item.status = 'Service';
 
             // Build service record
-            const serviceRecord = {
+            serviceRecord = {
                 date: new Date(),
                 serviceDuration: serviceDuration || null,
                 description: description || note || null,
@@ -974,12 +1050,13 @@ export const updateAssetStatus = async (req, res) => {
             // Upload invoice if provided (base64)
             if (invoice?.data) {
                 try {
-                    const invoiceUrl = await uploadDocumentToS3(
+                    const invoiceResult = await uploadDocumentToS3(
                         invoice.data,
-                        invoice.name || `service-invoice-${Date.now()}.pdf`,
-                        invoice.mimeType || 'application/pdf'
+                        'asset-services',
+                        invoice.name || `service - invoice - ${Date.now()}.pdf`,
+                        'auto'
                     );
-                    serviceRecord.invoice = invoiceUrl;
+                    serviceRecord.invoice = invoiceResult.publicId;
                 } catch (uploadErr) {
                     console.error('Invoice upload failed:', uploadErr);
                 }
@@ -988,12 +1065,13 @@ export const updateAssetStatus = async (req, res) => {
             // Upload attachment if provided (base64)
             if (attachment?.data) {
                 try {
-                    const attachUrl = await uploadDocumentToS3(
+                    const attachResult = await uploadDocumentToS3(
                         attachment.data,
-                        attachment.name || `service-attachment-${Date.now()}.pdf`,
-                        attachment.mimeType || 'application/pdf'
+                        'asset-services',
+                        attachment.name || `service - attachment - ${Date.now()}.pdf`,
+                        'auto'
                     );
-                    serviceRecord.attachment = attachUrl;
+                    serviceRecord.attachment = attachResult.publicId;
                 } catch (uploadErr) {
                     console.error('Attachment upload failed:', uploadErr);
                 }
@@ -1002,8 +1080,33 @@ export const updateAssetStatus = async (req, res) => {
             item.services.push(serviceRecord);
 
         } else if (status === 'Live') {
-            // Restore from Service back to Unassigned
-            item.status = 'Unassigned';
+            // Restore from Service back to previous status
+            item.status = item.assignedTo ? 'Assigned' : 'Unassigned';
+
+            // Add completion record if data provided
+            if (serviceReport || amount) {
+                completionRecord = {
+                    date: new Date(),
+                    description: serviceReport,
+                    value: amount || 0,
+                    serviceType: 'Other'
+                };
+
+                if (attachment?.data) {
+                    try {
+                        const attachResult = await uploadDocumentToS3(
+                            attachment.data,
+                            'asset-services',
+                            attachment.name || `service - report - ${Date.now()}.pdf`,
+                            'auto'
+                        );
+                        completionRecord.attachment = attachResult.publicId;
+                    } catch (uploadErr) {
+                        console.error('Completion attachment upload failed:', uploadErr);
+                    }
+                }
+                item.services.push(completionRecord);
+            }
         }
 
         await item.save();
@@ -1011,10 +1114,16 @@ export const updateAssetStatus = async (req, res) => {
         // Log history
         await AssetHistory.create({
             assetId: item._id,
-            action: status === 'Unassigned' ? 'Unassigned' : status === 'Service' ? 'Service' : 'Restored',
+            action: status === 'Unassigned' ? 'Unassigned' : status === 'Service' ? 'Service' : 'Live',
             performedBy: req.user.employeeObjectId,
-            comments: description || note || null,
-            details: statusSnapshot
+            comments: description || note || serviceReport || null,
+            file: (status === 'Service' ? (serviceRecord?.invoice || serviceRecord?.attachment) : completionRecord?.attachment) || null,
+            details: {
+                ...statusSnapshot,
+                serviceDuration: serviceDuration || null,
+                amount: amount || 0,
+                serviceReport: serviceReport || null
+            }
         });
 
         await updateAssetTypeCounts(item.typeId);
@@ -1022,7 +1131,7 @@ export const updateAssetStatus = async (req, res) => {
         res.status(200).json(item);
     } catch (error) {
         console.error('Error updating asset status:', error);
-        res.status(500).json({ message: 'Server Error' });
+        res.status(500).json({ message: 'Server Error', error: error.message, stack: error.stack });
     }
 };
 
@@ -1039,7 +1148,7 @@ export const addAssetImage = async (req, res) => {
         const item = await AssetItem.findById(id);
         if (!item) return res.status(404).json({ message: 'Asset not found' });
 
-        const url = await uploadDocumentToS3(imageData, imageName || `asset-image-${Date.now()}.jpg`, imageMime || 'image/jpeg');
+        const url = await uploadDocumentToS3(imageData, imageName || `asset - image - ${Date.now()}.jpg`, imageMime || 'image/jpeg');
 
         item.images.push({ url, caption: caption || '', date: date ? new Date(date) : new Date() });
         await item.save();
@@ -1082,7 +1191,19 @@ export const getAssetHistory = async (req, res) => {
             .populate('assignedTo', 'firstName lastName employeeId')
             .sort({ date: -1 });
 
-        res.status(200).json(history);
+        // Sign URLs for attachments
+        const historyWithUrls = await Promise.all(history.map(async (record) => {
+            const recordObj = record.toObject();
+            if (recordObj.file) {
+                recordObj.file = await getSignedFileUrl(recordObj.file);
+            }
+            if (recordObj.details && recordObj.details.invoice) {
+                recordObj.details.invoice = await getSignedFileUrl(recordObj.details.invoice);
+            }
+            return recordObj;
+        }));
+
+        res.status(200).json(historyWithUrls);
     } catch (error) {
         console.error('Error fetching asset history:', error);
         res.status(500).json({ message: 'Server Error' });
@@ -1340,7 +1461,7 @@ export const transferAssetAccessory = async (req, res) => {
             assetId: sourceAsset._id,
             action: 'Comment',
             performedBy: req.user.employeeObjectId,
-            comments: `Accessory "${accessory.name}" (${accessory.accessoryId}) transfered to asset ${targetAsset.assetId}`
+            comments: `Accessory "${accessory.name}"(${accessory.accessoryId}) transfered to asset ${targetAsset.assetId} `
         });
 
         // Log History for Target
@@ -1348,7 +1469,7 @@ export const transferAssetAccessory = async (req, res) => {
             assetId: targetAsset._id,
             action: 'Comment',
             performedBy: req.user.employeeObjectId,
-            comments: `Accessory "${accessory.name}" received from asset ${sourceAsset.assetId}`
+            comments: `Accessory "${accessory.name}" received from asset ${sourceAsset.assetId} `
         });
 
         res.status(200).json({ message: 'Accessory transfered successfully', sourceAsset, targetAsset });
@@ -1384,12 +1505,708 @@ export const manageAccessoryStatus = async (req, res) => {
             assetId: asset._id,
             action: 'Comment',
             performedBy: req.user.employeeObjectId,
-            comments: `Accessory "${accessory.name}" marked as ${status}. Note: ${comments || 'No comments'}`
+            comments: `Accessory "${accessory.name}" marked as ${status}.Note: ${comments || 'No comments'} `
         });
 
-        res.status(200).json({ message: `Accessory marked as ${status}`, asset });
+        res.status(200).json({ message: `Accessory marked as ${status} `, asset });
     } catch (error) {
         console.error('Error updating accessory status:', error);
         res.status(500).json({ message: 'Internal server error' });
     }
 };
+
+// @desc    Request Asset Action (End of Life or Loss & Damage)
+// @route   PUT /api/AssetItem/:id/request-action
+// @access  Private
+export const requestAssetAction = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { actionType, reason, attachment, fineData } = req.body; // actionType: 'End of Life' or 'Loss and Damage'
+
+        if (!['End of Life', 'Loss and Damage'].includes(actionType)) {
+            return res.status(400).json({ message: 'Invalid action type' });
+        }
+
+        const asset = await AssetItem.findById(id).populate({
+            path: 'assignedTo',
+            populate: { path: 'primaryReportee' }
+        });
+
+        if (!asset) {
+            return res.status(404).json({ message: 'Asset not found' });
+        }
+
+        if (!asset.assignedTo) {
+            return res.status(400).json({ message: 'No user assigned to this asset. Cannot request action.' });
+        }
+
+        // Upload attachment if present
+        let fileUrl = null;
+        if (attachment && attachment.startsWith('data:')) {
+            const uploadResult = await uploadDocumentToS3(attachment, 'asset-history');
+            fileUrl = uploadResult.publicId;
+        }
+
+        // Store pending request in asset
+        asset.pendingAction = actionType;
+        asset.pendingActionDetails = {
+            reason: reason,
+            attachment: fileUrl,
+            fineData: fineData || null // Store full fine payload
+        };
+
+        // Determine who gets the request
+        const requesterId = req.user._id.toString();
+        const managerId = asset.assignedTo.primaryReportee?._id?.toString();
+        const isManagerRequester = requesterId === managerId;
+
+        if (isManagerRequester && actionType === 'End of Life') {
+            // Manager initiated EOL -> Instantly Mark Out of Service
+            asset.status = 'Out of Service';
+
+            await AssetHistory.create({
+                assetId: asset._id,
+                action: 'Out of Service',
+                performedBy: req.user._id,
+                comments: `Manager initiated and finalized End of Life. Reason: ${reason}`,
+                file: fileUrl,
+                date: new Date(),
+                details: { type: 'ActionRequest', action: actionType }
+            });
+
+            asset.assignedTo = null;
+            asset.assignmentType = null;
+            asset.pendingAction = null;
+            asset.pendingActionDetails = null;
+            asset.actionRequiredBy = null;
+
+            await asset.save();
+            return res.status(200).json({
+                message: `${actionType} reported and finalized by manager. Asset marked Out of Service.`,
+                asset
+            });
+        }
+
+        // DEFAULT: Goes to Manager for approval
+        if (!asset.assignedTo.primaryReportee) {
+            return res.status(400).json({ message: 'Reporting manager not found for assigned user. Cannot request approval.' });
+        }
+
+        asset.actionRequiredBy = asset.assignedTo.primaryReportee._id;
+        asset.status = 'Pending';
+
+        await asset.save();
+
+        // Create history log for the request
+        await AssetHistory.create({
+            assetId: asset._id,
+            action: 'Comment',
+            performedBy: req.user._id,
+            comments: `Requested ${actionType}. Reason: ${reason}`,
+            file: fileUrl,
+            date: new Date(),
+            details: { type: 'ActionRequest', action: actionType }
+        });
+
+        const requesterName = `${req.user.firstName} ${req.user.lastName}`;
+
+        await sendAssetActionApprovalEmail(
+            asset,
+            actionType,
+            asset.assignedTo.primaryReportee,
+            { name: requesterName },
+            reason
+        );
+
+        res.status(200).json({ message: `${actionType} request sent to manager for approval`, asset });
+    } catch (error) {
+        console.error('Error requesting asset action:', error);
+        res.status(500).json({ message: 'Internal server error' });
+    }
+};
+
+// @desc    Handle Asset Action Approval/Rejection
+export const handleAssetActionApproval = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { approve, comment } = req.body;
+
+        const asset = await AssetItem.findById(id).populate({
+            path: 'assignedTo',
+            populate: [{ path: 'primaryReportee' }, { path: 'company' }]
+        });
+        if (!asset) return res.status(404).json({ message: 'Asset not found' });
+        if (!asset.pendingAction) return res.status(400).json({ message: 'No pending action' });
+
+        const actionType = asset.pendingAction;
+
+        // AUTH CHECK
+        const currentUserId = req.user.employeeObjectId?.toString() || req.user._id?.toString();
+        if (asset.actionRequiredBy?.toString() !== currentUserId) {
+            return res.status(403).json({ message: 'You are not authorized to approve this action.' });
+        }
+
+        if (approve) {
+            if (actionType === 'Loss and Damage') {
+                // Manager approved, create the fine record directly
+                if (asset.pendingActionDetails?.fineData) {
+                    try {
+                        const Fine = (await import('../models/Fine.js')).default;
+                        const { generateFineIdInternal } = await import('./fine/addFine.js');
+                        const fd = asset.pendingActionDetails.fineData;
+                        const uniqueFineId = await generateFineIdInternal();
+
+                        const { employees, ...cleanFd } = fd;
+                        const fineModel = new Fine({
+                            ...cleanFd,
+                            assignedEmployees: employees || fd.assignedEmployees || [],
+                            company: asset.assignedTo?.company?._id || fd.company,
+                            companyName: asset.assignedTo?.company?.name || fd.companyName || '',
+                            fineId: uniqueFineId,
+                            fineStatus: 'Draft',
+                            hrApprovedBy: req.user._id,
+                            createdBy: req.user._id,
+                            awardedDate: new Date(),
+                            assetObjectId: asset._id,
+                            attachment: asset.pendingActionDetails.attachment ? {
+                                url: asset.pendingActionDetails.attachment,
+                                name: 'Loss and Damage.pdf',
+                                mimeType: 'application/pdf'
+                            } : fd.attachment
+                        });
+                        await fineModel.save();
+                        console.log(`[Asset] Fine created from manager approval: ${uniqueFineId}`);
+                    } catch (fineErr) {
+                        console.error('[Asset] Fine creation failed during manager approval:', fineErr);
+                    }
+                }
+            }
+
+            // FINALIZATION: Mark Out of Service & Unassign immediately upon manager approval
+            asset.status = 'Out of Service';
+
+            await AssetHistory.create({
+                assetId: asset._id,
+                action: 'Out of Service',
+                performedBy: req.user.employeeObjectId || req.user._id,
+                comments: `Approved "${actionType}" and finalized by Manager. ${comment || ''}`,
+                date: new Date(),
+                details: { status: 'ApprovedAndFinalized', originalAction: actionType }
+            });
+
+            // UNASSIGN Asset directly, removing the need for employee acknowledgement
+            asset.assignedTo = null;
+            asset.assignmentType = null;
+            asset.pendingAction = null;
+            asset.pendingActionDetails = null;
+            asset.actionRequiredBy = null;
+
+        } else {
+            // Rejected
+            asset.status = 'Assigned';
+            asset.pendingAction = null;
+            asset.pendingActionDetails = null;
+            asset.actionRequiredBy = null;
+
+            await AssetHistory.create({
+                assetId: asset._id,
+                action: 'Comment',
+                performedBy: req.user.employeeObjectId,
+                comments: `Action "${actionType}" rejected/cancelled by authority. Reason: ${comment || 'N/A'}`,
+                date: new Date(),
+                details: { status: 'RejectedByAuthority', originalAction: actionType }
+            });
+        }
+
+        await asset.save();
+        res.status(200).json({
+            message: approve ? `Request approved. Asset marked as Out of Service.` : `${actionType} request rejected`,
+            asset
+        });
+    } catch (error) {
+        console.error('Error handling asset action approval:', error);
+        res.status(500).json({ message: 'Internal server error' });
+    }
+};
+
+// @desc    Finalize Asset Action (Reportee Acknowledgement)
+// @route   PUT /api/AssetItem/:id/finalize-action
+// @access  Private (Assigned User)
+export const finalizeAssetAction = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { approve, comment } = req.body; // finalize/accept or decline
+
+        const asset = await AssetItem.findById(id).populate('assignedTo');
+        if (!asset) {
+            return res.status(404).json({ message: 'Asset not found' });
+        }
+
+        if (!asset.pendingAction) {
+            return res.status(400).json({ message: 'No pending action found for this asset' });
+        }
+
+        const actionType = asset.pendingAction;
+
+        // Verify that the user is the one assigned
+        if (asset.actionRequiredBy && asset.actionRequiredBy.toString() !== req.user._id.toString()) {
+            return res.status(403).json({ message: 'You are not authorized to finalize this action' });
+        }
+
+        if (approve) {
+            // Finalize: Status becomes 'Out of Service'
+            asset.status = 'Out of Service';
+
+            // Log history
+            await AssetHistory.create({
+                assetId: asset._id,
+                action: 'Out of Service',
+                performedBy: req.user.employeeObjectId,
+                comments: `Finalized ${actionType} by Reportee. ${comment || ''}`,
+                file: asset.pendingActionDetails?.attachment,
+                date: new Date(),
+                details: { status: 'Finalized', originalAction: actionType }
+            });
+
+            // UNASSIGN Asset upon EOL/L&D completion
+            asset.assignedTo = null;
+            asset.assignmentType = null;
+            asset.pendingAction = null;
+            asset.pendingActionDetails = null;
+            asset.actionRequiredBy = null;
+
+        } else {
+            // Declined — return to manager or restore?
+            await AssetHistory.create({
+                assetId: asset._id,
+                action: 'Comment',
+                performedBy: req.user.employeeObjectId,
+                comments: `Reportee declined/questioned ${actionType}. Reason: ${comment || ''}`,
+                date: new Date(),
+                details: { status: 'DeclinedByReportee', originalAction: actionType }
+            });
+            // Restoring status to Assigned if declined
+            asset.status = 'Assigned';
+            asset.pendingAction = null;
+            asset.pendingActionDetails = null;
+            asset.actionRequiredBy = null;
+        }
+
+        await asset.save();
+        res.status(200).json({
+            message: approve ? `Asset marked as Out of Service` : `Action declined/restored`,
+            asset
+        });
+    } catch (error) {
+        console.error('Error finalizing asset action:', error);
+        res.status(500).json({ message: 'Internal server error' });
+    }
+};
+
+// @desc    Mark Asset as End of Life (Legacy direct call - potentially redirecting to requestAction)
+export const endOfLifeAsset = requestAssetAction;
+
+// @desc    Upload Accessories Tab Attachment
+// @route   PUT /api/AssetItem/:id/accessories-attachment
+// @access  Private
+export const uploadAccessoriesAttachment = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { attachment } = req.body;
+
+        const asset = await AssetItem.findById(id);
+        if (!asset) return res.status(404).json({ message: 'Asset not found' });
+
+        if (attachment && attachment.startsWith('data:')) {
+            const uploadResult = await uploadDocumentToS3(attachment, 'asset-accessories');
+            asset.accessoriesAttachment = uploadResult.publicId;
+        }
+
+        await asset.save();
+        res.status(200).json({ message: 'Attachment uploaded', asset });
+    } catch (error) {
+        console.error('Error uploading accessories attachment:', error);
+        res.status(500).json({ message: 'Server error' });
+    }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ACCESSORY-LEVEL ACTION WORKFLOW
+// These functions handle Transfer / Loss & Damage / EOL for individual
+// accessories WITHOUT touching the main asset's status field.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// @desc    Request an action on a single accessory (Transfer / L&D / EOL)
+// @route   PUT /api/AssetItem/:id/accessories/:accId/request-action
+// @access  Private
+export const requestAccessoryAction = async (req, res) => {
+    try {
+        const { id, accId } = req.params;
+        const { actionType, reason, attachment, targetAssetId, fineData } = req.body;
+
+        if (!['Transfer', 'Loss and Damage', 'End of Life'].includes(actionType)) {
+            return res.status(400).json({ message: 'Invalid accessory action type' });
+        }
+
+        const asset = await AssetItem.findById(id).populate({
+            path: 'assignedTo',
+            populate: { path: 'primaryReportee' }
+        });
+
+        if (!asset) return res.status(404).json({ message: 'Asset not found' });
+        if (!asset.assignedTo) return res.status(400).json({ message: 'Asset has no assigned user.' });
+
+        const accessory = asset.accessories.find(a => a._id.toString() === accId || a.accessoryId === accId);
+        if (!accessory) return res.status(404).json({ message: 'Accessory not found' });
+        if (accessory.pendingAction) {
+            return res.status(400).json({ message: `This accessory already has a pending "${accessory.pendingAction}" request.` });
+        }
+
+        // Upload attachment if present
+        let fileUrl = null;
+        if (attachment && attachment.startsWith('data:')) {
+            const uploadResult = await uploadDocumentToS3(attachment, 'asset-accessories');
+            fileUrl = uploadResult.publicId;
+        }
+
+        // Store the pending request ON THE ACCESSORY
+        accessory.pendingAction = actionType;
+        accessory.pendingActionDetails = {
+            reason: reason || null,
+            attachment: fileUrl,
+            fineData: fineData || null,
+            targetAssetId: targetAssetId || null,
+            requestedBy: req.user.employeeObjectId || req.user._id,
+            requestedAt: new Date()
+        };
+
+        // Determine who gets the request
+        const requesterId = (req.user.employeeObjectId || req.user._id).toString();
+        const managerId = asset.assignedTo.primaryReportee?._id?.toString();
+        const isManagerRequester = requesterId === managerId;
+
+        if (isManagerRequester && ['End of Life'].includes(actionType)) {
+            // Manager reported EOL -> goes to Employee for acknowledgment
+            asset.actionRequiredBy = asset.assignedTo._id;
+        } else {
+            // Others (including L&D from non-manager) -> goes to Manager for approval
+            asset.actionRequiredBy = asset.assignedTo.primaryReportee?._id;
+        }
+
+        asset.markModified('accessories');
+        await asset.save();
+
+        // Log history
+        await AssetHistory.create({
+            assetId: asset._id,
+            action: 'Comment',
+            performedBy: req.user.employeeObjectId || req.user._id,
+            comments: `Accessory "${accessory.name}" (${accessory.accessoryId}): "${actionType}" requested. Reason: ${reason || 'N/A'}`,
+            date: new Date(),
+            details: { type: 'AccessoryActionRequest', action: actionType, accessoryId: accessory.accessoryId }
+        });
+
+        // Send email notification to the reportee/manager using the existing email utility
+        try {
+            const reporter = asset.assignedTo.primaryReportee;
+            if (reporter) {
+                // Look up requester name from EmployeeBasic since req.user doesn't carry firstName/lastName
+                const requesterEmp = req.user.employeeObjectId
+                    ? await EmployeeBasic.findById(req.user.employeeObjectId).select('firstName lastName').lean()
+                    : null;
+                const requesterName = requesterEmp
+                    ? `${requesterEmp.firstName} ${requesterEmp.lastName}`
+                    : req.user.email || 'Employee';
+
+                // Reuse the existing approval email utility (it handles SMTP config internally)
+                await sendAssetActionApprovalEmail(
+                    { ...asset.toObject(), assetId: asset.assetId, name: `${asset.name} - Accessory: ${accessory.name} (${accessory.accessoryId})` },
+                    actionType,
+                    reporter,
+                    { name: requesterName },
+                    reason || 'No reason provided'
+                );
+            }
+        } catch (emailErr) {
+            console.error('[AccessoryAction] Email send failed (non-fatal):', emailErr);
+        }
+
+        res.status(200).json({
+            message: `"${actionType}" request submitted for accessory "${accessory.name}". Pending reportee approval.`,
+            asset
+        });
+    } catch (error) {
+        console.error('Error requesting accessory action:', error);
+        res.status(500).json({ message: 'Internal server error' });
+    }
+};
+
+// @desc    Reportee responds to an accessory action (Accept or Reject)
+// @route   PUT /api/AssetItem/:id/accessories/:accId/respond-action
+// @access  Private
+export const respondAccessoryAction = async (req, res) => {
+    try {
+        const { id, accId } = req.params;
+        const { approve, comment, attachment } = req.body;
+
+        let fileUrl = null;
+        if (approve && attachment && attachment.startsWith('data:')) {
+            const uploadResult = await uploadDocumentToS3(attachment, 'asset-accessories');
+            fileUrl = uploadResult.publicId;
+        }
+
+        const asset = await AssetItem.findById(id).populate({
+            path: 'assignedTo',
+            populate: [{ path: 'primaryReportee' }, { path: 'company' }]
+        });
+        if (!asset) return res.status(404).json({ message: 'Asset not found' });
+
+        const accessory = asset.accessories.find(a => a._id.toString() === accId || a.accessoryId === accId);
+        if (!accessory) return res.status(404).json({ message: 'Accessory not found' });
+        if (!accessory.pendingAction) return res.status(400).json({ message: 'No pending action on this accessory' });
+
+        const { pendingAction, pendingActionDetails } = accessory;
+
+        if (approve) {
+            // If the responder is a manager or authority, finalize the action for accessories immediately
+            const requesterId = (req.user.employeeObjectId || req.user._id).toString();
+            const managerId = asset.assignedTo.primaryReportee?._id?.toString() || asset.assignedTo.primaryReportee?.toString();
+            const isManager = requesterId === managerId;
+
+            if (isManager) {
+                // Execute the action (Transfer / L&D / EOL) immediately
+                if (pendingAction === 'Transfer') {
+                    const targetAssetId = pendingActionDetails?.targetAssetId;
+                    if (!targetAssetId) return res.status(400).json({ message: 'Transfer target asset not set' });
+
+                    const targetAsset = await AssetItem.findById(targetAssetId);
+                    if (!targetAsset) return res.status(404).json({ message: 'Target asset not found' });
+
+                    const accIndex = asset.accessories.findIndex(a => a._id.toString() === accId || a.accessoryId === accId);
+                    const accToMove = asset.accessories[accIndex].toObject();
+
+                    asset.accessories.splice(accIndex, 1);
+                    const { pendingAction: _pa, pendingActionDetails: _pad, _id: _oldId, ...cleanAcc } = accToMove;
+                    targetAsset.accessories.push({ ...cleanAcc, status: 'Attached', pendingAction: null, _id: new mongoose.Types.ObjectId() });
+
+                    await targetAsset.save();
+
+                    await AssetHistory.create({
+                        assetId: asset._id,
+                        action: 'Comment',
+                        performedBy: req.user.employeeObjectId || req.user._id,
+                        comments: `Accessory "${accToMove.name}" transfer finalized by manager to ${targetAsset.assetId}. ${comment || ''}`,
+                        file: fileUrl,
+                        date: new Date()
+                    });
+                } else if (pendingAction === 'Loss and Damage') {
+                    accessory.status = 'Damaged';
+                    accessory.pendingAction = null;
+
+                    // Create fine now
+                    if (pendingActionDetails?.fineData) {
+                        try {
+                            const Fine = (await import('../models/Fine.js')).default;
+                            const { generateFineIdInternal } = await import('./fine/addFine.js');
+                            const uniqueFineId = await generateFineIdInternal();
+                            const fd = pendingActionDetails.fineData;
+
+                            const { employees, ...cleanFd } = fd;
+                            const fineModel = new Fine({
+                                ...cleanFd,
+                                assignedEmployees: employees || fd.assignedEmployees || [],
+                                company: asset.assignedTo?.company?._id || fd.company,
+                                companyName: asset.assignedTo?.company?.name || fd.companyName || '',
+                                fineId: uniqueFineId,
+                                fineStatus: 'Draft',
+                                createdBy: req.user._id, // Must be User ID for ref
+                                awardedDate: new Date(),
+                                assetObjectId: asset._id,
+                                attachment: fileUrl ? { url: fileUrl, name: 'L&D Manager Photo.pdf', mimeType: 'application/pdf' } : (pendingActionDetails.attachment ? { url: pendingActionDetails.attachment, name: 'L&D Reporter Photo.pdf', mimeType: 'application/pdf' } : fd.attachment)
+                            });
+                            await fineModel.save();
+                        } catch (err) { console.error('Fine Generation Error:', err); }
+                    }
+
+                    await AssetHistory.create({
+                        assetId: asset._id,
+                        action: 'Comment',
+                        performedBy: req.user.employeeObjectId || req.user._id,
+                        comments: `Accessory "${accessory.name}" Loss & Damage finalized by manager. ${comment || ''}`,
+                        file: fileUrl,
+                        date: new Date()
+                    });
+                } else if (pendingAction === 'End of Life') {
+                    const accIndex = asset.accessories.findIndex(a => a._id.toString() === accId || a.accessoryId === accId);
+                    const { name: accName, accessoryId: accCode } = asset.accessories[accIndex];
+                    asset.accessories.splice(accIndex, 1);
+
+                    await AssetHistory.create({
+                        assetId: asset._id,
+                        action: 'Comment',
+                        performedBy: req.user.employeeObjectId || req.user._id,
+                        comments: `Accessory "${accName}" (${accCode}) End of Life finalized by manager. ${comment || ''}`,
+                        file: fileUrl,
+                        date: new Date()
+                    });
+                }
+
+                asset.actionRequiredBy = null;
+                asset.markModified('accessories');
+                await asset.save();
+
+                return res.status(200).json({ message: "Action approved and finalized by manager.", asset });
+            }
+
+            // DEFAULT: If it's not the manager responding (maybe the employee acknowledging a manager's request)
+            const employeeId = asset.assignedTo._id.toString();
+
+            if (requesterId !== employeeId) {
+                // ... Authority check (HR) ...
+                if (pendingAction === 'Loss and Damage') {
+                    const hrHod = await getDepartmentHOD('hr', asset.assignedTo._id);
+                    const isHR = hrHod && hrHod._id.toString() === req.user._id.toString();
+
+                    if (!isHR) {
+                        // Manager approved, route to HR
+                        asset.actionRequiredBy = hrHod?._id || null;
+                        if (!asset.actionRequiredBy) return res.status(400).json({ message: 'HR HOD not found. Approval stalled.' });
+
+                        await AssetHistory.create({
+                            assetId: asset._id,
+                            action: 'Comment',
+                            performedBy: req.user._id,
+                            comments: `Manager approved "${pendingAction}" for accessory "${accessory.name}". Pending HR Review.`,
+                            date: new Date(),
+                            details: { type: 'AccessoryApprovedByManager', accessoryId: accessory.accessoryId }
+                        });
+
+                        await asset.save();
+                        return res.status(200).json({ message: "Approved by manager. Sent to HR HOD for review.", asset });
+                    }
+
+                    // HR approved (Authority) -> Create fine
+                    if (pendingActionDetails?.fineData) {
+                        try {
+                            const Fine = (await import('../models/Fine.js')).default;
+                            const { generateFineIdInternal } = await import('./fine/addFine.js');
+                            const uniqueFineId = await generateFineIdInternal();
+                            const fd = pendingActionDetails.fineData;
+
+                            const { employees, ...cleanFd } = fd;
+                            const fineModel = new Fine({
+                                ...cleanFd,
+                                assignedEmployees: employees || fd.assignedEmployees || [],
+                                company: asset.assignedTo?.company?._id || fd.company,
+                                companyName: asset.assignedTo?.company?.name || fd.companyName || '',
+                                fineId: uniqueFineId,
+                                fineStatus: 'Draft',
+                                createdBy: req.user._id, // Must be User ID for ref
+                                awardedDate: new Date(),
+                                assetObjectId: asset._id,
+                                attachment: pendingActionDetails.attachment ? { url: pendingActionDetails.attachment, name: 'L&D Photo.pdf', mimeType: 'application/pdf' } : fd.attachment
+                            });
+                            await fineModel.save();
+                        } catch (err) { console.error('Authority Fine Error:', err); }
+                    }
+                }
+
+                // Now send to Employee for acknowledgment
+                asset.actionRequiredBy = asset.assignedTo._id;
+
+                await AssetHistory.create({
+                    assetId: asset._id,
+                    action: 'Comment',
+                    performedBy: req.user._id,
+                    comments: `Authority approved "${pendingAction}" for accessory "${accessory.name}". Pending reportee acknowledgment.`,
+                    date: new Date(),
+                    details: { type: 'AccessoryActionAuthorityApproved', accessoryId: accessory.accessoryId }
+                });
+
+                await asset.save();
+                return res.status(200).json({ message: "Action approved by authority. Sent to reportee for acknowledgment.", asset });
+            }
+
+            // IF it reaches here, it means the responder IS the employee (Final step)
+            if (pendingAction === 'Transfer') {
+                const targetAssetId = pendingActionDetails?.targetAssetId;
+                if (!targetAssetId) return res.status(400).json({ message: 'Transfer target asset not set' });
+
+                const targetAsset = await AssetItem.findById(targetAssetId);
+                if (!targetAsset) return res.status(404).json({ message: 'Target asset not found' });
+
+                const accIndex = asset.accessories.findIndex(a => a._id.toString() === accId || a.accessoryId === accId);
+                const accToMove = asset.accessories[accIndex].toObject();
+
+                asset.accessories.splice(accIndex, 1);
+                const { pendingAction: _pa, pendingActionDetails: _pad, _id: _oldId, ...cleanAcc } = accToMove;
+                targetAsset.accessories.push({ ...cleanAcc, status: 'Attached', pendingAction: null, _id: new mongoose.Types.ObjectId() });
+
+                await asset.save();
+                await targetAsset.save();
+
+                await AssetHistory.create({
+                    assetId: asset._id,
+                    action: 'Comment',
+                    performedBy: req.user._id,
+                    comments: `Accessory "${accToMove.name}" transfered to ${targetAsset.assetId}. ${comment || ''}`,
+                    date: new Date()
+                });
+            } else if (pendingAction === 'Loss and Damage') {
+                accessory.status = 'Damaged';
+                accessory.pendingAction = null;
+                await AssetHistory.create({
+                    assetId: asset._id,
+                    action: 'Comment',
+                    performedBy: req.user._id,
+                    comments: `Accessory "${accessory.name}" Loss & Damage finalized by reportee. ${comment || ''}`,
+                    date: new Date()
+                });
+            } else if (pendingAction === 'End of Life') {
+                const accIndex = asset.accessories.findIndex(a => a._id.toString() === accId || a.accessoryId === accId);
+                const { name: accName, accessoryId: accCode } = asset.accessories[accIndex];
+                asset.accessories.splice(accIndex, 1);
+                await AssetHistory.create({
+                    assetId: asset._id,
+                    action: 'Comment',
+                    performedBy: req.user._id,
+                    comments: `Accessory "${accName}" (${accCode}) End of Life finalized by reportee. ${comment || ''}`,
+                    date: new Date()
+                });
+            }
+
+            asset.actionRequiredBy = null;
+            asset.markModified('accessories');
+            await asset.save();
+
+        } else {
+            // Reject
+            accessory.pendingAction = null;
+            accessory.pendingActionDetails = null;
+            asset.actionRequiredBy = null;
+            await asset.save();
+
+            await AssetHistory.create({
+                assetId: asset._id,
+                action: 'Comment',
+                performedBy: req.user._id,
+                comments: `Accessory "${accessory.name}" ${pendingAction} request rejected. ${comment || ''}`,
+                date: new Date()
+            });
+        }
+
+        res.status(200).json({
+            message: approve ? `Accessory action processed.` : `Accessory action rejected.`,
+            asset
+        });
+    } catch (error) {
+        console.error('Error responding to accessory action:', error);
+        res.status(500).json({ message: 'Internal server error' });
+    }
+};
+
+// @desc    Finalize Accessory Action (Reportee Acknowledgement)
+// @route   PUT /api/AssetItem/:id/accessories/:accId/finalize-action
+// @access  Private (Assigned User)
+export const finalizeAccessoryAction = respondAccessoryAction;
+

@@ -37,6 +37,19 @@ const fineSchema = new mongoose.Schema(
             type: String,
             default: ''
         },
+        assetObjectId: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'AssetItem',
+            default: null
+        },
+        accessoryId: {
+            type: String,
+            default: null
+        },
+        accessoryName: {
+            type: String,
+            default: ''
+        },
         projectId: {
             type: String,
             default: null
@@ -94,6 +107,16 @@ const fineSchema = new mongoose.Schema(
         companyAmount: {
             type: Number,
             default: 0
+        },
+        company: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'Company',
+            index: true,
+            default: null
+        },
+        companyName: {
+            type: String,
+            default: ''
         },
         payableDuration: {
             type: Number,

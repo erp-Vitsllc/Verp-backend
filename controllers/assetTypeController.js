@@ -367,6 +367,10 @@ export const deleteAssetType = async (req, res) => {
     try {
         const { id } = req.params;
 
+        if (!mongoose.Types.ObjectId.isValid(id)) {
+            return res.status(400).json({ message: 'Invalid ID format for deletion.' });
+        }
+
         // Try Category first
         let item = await AssetCategory.findById(id);
         if (item) {
@@ -397,7 +401,7 @@ export const deleteAssetType = async (req, res) => {
         res.status(404).json({ message: 'Item not found' });
     } catch (error) {
         console.error('Error deleting asset entity:', error);
-        res.status(500).json({ message: 'Server Error' });
+        res.status(500).json({ message: 'Server Error', error: error.message, stack: error.stack });
     }
 };
 
