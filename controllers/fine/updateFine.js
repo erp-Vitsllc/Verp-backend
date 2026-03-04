@@ -171,6 +171,7 @@ export const updateFine = async (req, res) => {
                 if (!f.workflow) f.workflow = [];
                 const pendingStep = f.workflow.find(w => w.status === 'Pending');
                 if (pendingStep) {
+                    // This creates the rejection step
                     pendingStep.status = 'Rejected';
                     pendingStep.actionedAt = new Date();
                     pendingStep.comment = updates.rejectionReason;
@@ -184,6 +185,16 @@ export const updateFine = async (req, res) => {
                         comment: updates.rejectionReason
                     });
                 }
+                
+                // Route back to previous approver or creator for editing/resubmission
+                let routeBackTo = f.createdBy;
+                const approvedSteps = f.workflow.filter(w => w.status === 'Approved');
+                if (approvedSteps.length > 0) {
+                    routeBackTo = approvedSteps[approvedSteps.length - 1].assignedTo;
+                }
+                f.submittedTo = routeBackTo;
+
+
                 await f.save();
             }
         }
@@ -198,27 +209,35 @@ export const updateFine = async (req, res) => {
                 : null;
             const subjectEmp = targetEmpId ? await EmployeeBasic.findOne({ employeeId: targetEmpId }) : null;
 
+            const isGroup = fines.length > 1;
+            const reqType = isGroup ? 'Group Fine Request' : 'Fine';
+            const subjectName = isGroup ? `Group Fine - ${fines.length} Employees` : undefined;
+
             // 1. Resolve current pending steps
             await syncDashboardAction({
                 requestId: updatedFine._id,
-                requestType: 'Fine',
+                requestType: reqType,
                 status: updatedFine.fineStatus,
                 subjectEmployee: subjectEmp,
+                subjectName: subjectName,
                 actionedBy: req.user?._id,
                 comment: updatedFine.rejectionReason
             });
 
-            // 2. If there's a new pending step, create it
+            // 2. If there's a new pending step (e.g., after resubmit or rejection back to creator), create it
             const nextPendingStep = updatedFine.workflow?.find(w => w.status === 'Pending');
             if (nextPendingStep) {
                 await syncDashboardAction({
                     requestId: updatedFine._id,
-                    requestType: 'Fine',
+                    requestType: reqType,
                     assignedTo: nextPendingStep.assignedTo,
                     status: 'Pending',
                     subjectEmployee: subjectEmp,
+                    subjectName: subjectName,
                     extra1: updatedFine.fineType,
-                    extra2: `AED ${updatedFine.fineAmount}`
+                    extra2: isGroup 
+                        ? `Total: AED ${fines.reduce((sum, f) => sum + (f.fineAmount || 0), 0)}`
+                        : `AED ${updatedFine.fineAmount}`
                 });
             }
         } catch (syncErr) {
@@ -226,25 +245,26 @@ export const updateFine = async (req, res) => {
         }
 
         if (shouldSendApprovalEmail) {
-            sendFineApprovalEmail(updatedFine, updatedFine.assignedEmployees).catch(err => console.error("[UpdateFine] Failed to send approval email:", err));
+            const allAssigned = fines.flatMap(f => f.assignedEmployees);
+            sendFineApprovalEmail(updatedFine, allAssigned).catch(err => console.error("[UpdateFine] Failed to send approval email:", err));
         }
 
         // If newly rejected, send notification
         if (oldStatus !== 'Rejected' && updatedFine.fineStatus === 'Rejected') {
             try {
                 // Create a plain object to modify for the email handler
-                // This breaks the direct reference to the Mongoose document
                 const safeFineData = updatedFine.toObject ? updatedFine.toObject() : { ...updatedFine };
 
                 // Explicitly validate and sanitize the attachment URL
                 if (safeFineData.attachment && safeFineData.attachment.url) {
                     if (!isValidStorageUrl(safeFineData.attachment.url)) {
                         console.warn(`[UpdateFine] Invalid attachment URL detected (${safeFineData.attachment.url}). Removing attachment from rejection email.`);
-                        safeFineData.attachment = null; // Remove attachment from the object passed to the emailer
+                        safeFineData.attachment = null; 
                     }
                 }
 
-                await sendFineRejectedEmail(safeFineData, updatedFine.assignedEmployees);
+                const allAssigned = fines.flatMap(f => f.assignedEmployees);
+                await sendFineRejectedEmail(safeFineData, allAssigned);
             } catch (err) {
                 console.error("Failed to send rejection email:", err);
             }

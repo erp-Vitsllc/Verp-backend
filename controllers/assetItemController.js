@@ -86,11 +86,13 @@ export const getAllAssignedAssets = async (req, res) => {
             status: { $in: ['Assigned', 'Active', 'Returned'] },
             assignedTo: { $ne: null }
         })
-            .select('assetId name assignedTo accessories assetValue')
+            .select('assetId name assignedTo accessories assetValue status updatedAt typeId categoryId invoiceFile')
             .populate({
                 path: 'assignedTo',
                 select: 'firstName lastName employeeId'
             })
+            .populate('typeId', 'name')
+            .populate('categoryId', 'name')
             .sort({ name: 1 });
 
         res.status(200).json(items);

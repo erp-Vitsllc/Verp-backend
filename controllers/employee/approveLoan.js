@@ -513,25 +513,49 @@ export const approveLoan = async (req, res) => {
                     const creator = await User.findById(loan.createdBy);
 
                     if (applicant) {
-                        const recipientEmails = new Set();
+                        const toEmails = new Set();
+                        const ccEmails = new Set();
 
                         // 1. Applicant Email
                         const appEmail = applicant.companyEmail || applicant.email;
-                        if (appEmail) recipientEmails.add(appEmail);
+                        if (appEmail) toEmails.add(appEmail);
 
                         // 2. Manager Email (His Reportee/Supervisor)
                         if (applicant.primaryReportee) {
                             const managerEmail = applicant.primaryReportee.companyEmail || applicant.primaryReportee.email;
-                            if (managerEmail) recipientEmails.add(managerEmail);
+                            if (managerEmail) ccEmails.add(managerEmail);
                         }
 
                         // 3. Creator Email
                         if (creator) {
                             const creatorEmail = creator.companyEmail || creator.email;
-                            if (creatorEmail) recipientEmails.add(creatorEmail);
+                            if (creatorEmail) ccEmails.add(creatorEmail);
                         }
 
-                        if (recipientEmails.size > 0) {
+                        // 4. Fetch HR, Accounts, Management
+                        try {
+                            const hrHOD = await import("../../utils/getDepartmentHOD.js").then(m => m.getDepartmentHOD('hr', loan.employeeId));
+                            if (hrHOD && (hrHOD.companyEmail || hrHOD.personalEmail || hrHOD.email)) {
+                                ccEmails.add(hrHOD.companyEmail || hrHOD.personalEmail || hrHOD.email);
+                            }
+
+                            const accountsHOD = await import("../../utils/getDepartmentHOD.js").then(m => m.getDepartmentHOD('finance', loan.employeeId));
+                            if (accountsHOD && (accountsHOD.companyEmail || accountsHOD.personalEmail || accountsHOD.email)) {
+                                ccEmails.add(accountsHOD.companyEmail || accountsHOD.personalEmail || accountsHOD.email);
+                            }
+
+                            const managementHOD = await import("../../utils/getManagementHOD.js").then(m => m.getManagementHOD(loan.employeeId));
+                            if (managementHOD && (managementHOD.companyEmail || managementHOD.personalEmail || managementHOD.email)) {
+                                ccEmails.add(managementHOD.companyEmail || managementHOD.personalEmail || managementHOD.email);
+                            }
+                        } catch (e) {
+                            console.warn("[ApproveLoan] Could not fetch HOD emails for CC", e.message);
+                        }
+
+                        const toRecipients = Array.from(toEmails);
+                        const ccRecipients = Array.from(ccEmails);
+
+                        if (toRecipients.length > 0 || ccRecipients.length > 0) {
                             const permissions = { hrm_loan: { isView: true, isActive: true } };
 
                             // IMPORTANT: Save state BEFORE generating PDF so Puppeteer sees updated status
@@ -555,7 +579,8 @@ export const approveLoan = async (req, res) => {
 
                             const mailOptions = {
                                 from: `"VeRP Notification" <${emailUser}>`,
-                                to: Array.from(recipientEmails).join(', '),
+                                to: toRecipients,
+                                cc: ccRecipients,
                                 subject: "Loan Application Approved",
                                 html: `
                                      <div style="font-family: Arial, sans-serif; color: #333; max-width: 600px; margin: 0 auto; border: 1px solid #eee; border-radius: 10px; overflow: hidden;">
@@ -626,7 +651,7 @@ export const approveLoan = async (req, res) => {
                             }
 
                             await transporter.sendMail(mailOptions);
-                            console.log(`[ApproveLoan] Success email sent to ${recipientEmails.size} recipients: ${Array.from(recipientEmails).join(', ')}`);
+                            console.log(`[ApproveLoan] Success email sent to ${toRecipients.length} TO and ${ccRecipients.length} CC recipients.`);
                         }
                     }
                 } catch (emailErr) {

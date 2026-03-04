@@ -2,12 +2,12 @@ import nodemailer from 'nodemailer';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 
 /**
- * Sends fine approval notification emails to reporting managers.
- * Groups employees by their Primary Reportee and sends consolidated emails.
+ * Sends fine approval notification emails to HR.
  * 
  * @param {Object} fine - The created fine object (mongoose document)
  * @param {Array} assignedEmployees - List of employees involved in the fine
  */
+import { getDepartmentHOD } from './getDepartmentHOD.js';
 export const sendFineApprovalEmail = async (fine, assignedEmployees) => {
     try {
         console.log(`[FineEmail] Starting notification process for Fine ${fine.fineId}`);
@@ -32,42 +32,24 @@ export const sendFineApprovalEmail = async (fine, assignedEmployees) => {
             }
         });
 
-        // 1. Fetch full details for all assigned employees to get their Manager
+        // 1. Fetch full details for all assigned employees
         const employeeIds = assignedEmployees.map(e => e.employeeId);
-        // Use EmployeeBasic as it contains the primaryReportee field
         const fullEmployees = await EmployeeBasic.find({ employeeId: { $in: employeeIds } })
-            .select('employeeId firstName lastName department designation primaryReportee')
-            .populate('primaryReportee', 'companyEmail email') // Populate manager to get email directly
+            .select('employeeId firstName lastName department designation')
             .lean();
 
         // 2. Map full details back to the assigned list
-        // and Group by Manager Email
-        const emailsToSend = {}; // { 'manager@email.com': [ { empDetails } ] }
+        const employeementDetails = [];
 
         for (const assigned of assignedEmployees) {
             const fullEmp = fullEmployees.find(e => e.employeeId === assigned.employeeId);
 
             if (!fullEmp) {
-                console.warn(`[FineEmail] Employee ${assigned.employeeId} not found in DB, skipping email grouping.`);
+                console.warn(`[FineEmail] Employee ${assigned.employeeId} not found in DB, skipping.`);
                 continue;
             }
 
-            // Get Manager Details
-            let managerEmail = null;
-            if (fullEmp.primaryReportee) {
-                managerEmail = fullEmp.primaryReportee.companyEmail || fullEmp.primaryReportee.email;
-            }
-
-            if (!managerEmail) {
-                console.warn(`[FineEmail] No manager email found for employee ${fullEmp.employeeId}`);
-                continue; // Skip if no manager to notify
-            }
-
-            if (!emailsToSend[managerEmail]) {
-                emailsToSend[managerEmail] = [];
-            }
-
-            emailsToSend[managerEmail].push({
+            employeementDetails.push({
                 employeeId: fullEmp.employeeId,
                 name: `${fullEmp.firstName} ${fullEmp.lastName}`,
                 department: fullEmp.department || 'N/A',
@@ -76,22 +58,32 @@ export const sendFineApprovalEmail = async (fine, assignedEmployees) => {
             });
         }
 
+        if (employeementDetails.length === 0) {
+            console.warn('[FineEmail] No employee details found to send email.');
+            return;
+        }
+
+        // Get HR Email
+        const targetEmpId = assignedEmployees[0]?.employeeId;
+        const hrHOD = await getDepartmentHOD('hr', targetEmpId);
+        let hrEmail = hrHOD ? hrHOD.companyEmail : null;
+        if (!hrEmail) hrEmail = process.env.HR_EMAIL || 'hr@verp.com';
+
+
         // 3. Send Emails
         // Use environment variable for frontend URL, fallback to localhost
         const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
         const fineLink = `${frontendUrl}/HRM/Fine/${fine._id}`;
 
-        for (const [managerEmail, employeesList] of Object.entries(emailsToSend)) {
-
-            // Generate HTML Table for Employees
-            const rows = employeesList.map(emp => `
-                <tr>
-                    <td style="padding: 10px; border-bottom: 1px solid #eee;">${emp.employeeId}</td>
-                    <td style="padding: 10px; border-bottom: 1px solid #eee;"><strong>${emp.name}</strong></td>
-                    <td style="padding: 10px; border-bottom: 1px solid #eee;">${emp.department}</td>
-                    <td style="padding: 10px; border-bottom: 1px solid #eee;">${emp.designation}</td>
-                </tr>
-            `).join('');
+        // Generate HTML Table for Employees
+        const rows = employeementDetails.map(emp => `
+            <tr>
+                <td style="padding: 10px; border-bottom: 1px solid #eee;">${emp.employeeId}</td>
+                <td style="padding: 10px; border-bottom: 1px solid #eee;"><strong>${emp.name}</strong></td>
+                <td style="padding: 10px; border-bottom: 1px solid #eee;">${emp.department}</td>
+                <td style="padding: 10px; border-bottom: 1px solid #eee;">${emp.designation}</td>
+            </tr>
+        `).join('');
 
             const htmlContent = `
                 <div style="font-family: Arial, sans-serif; color: #333; max-width: 600px; margin: 0 auto; border: 1px solid #eaeaea; border-radius: 8px; overflow: hidden;">
@@ -101,8 +93,8 @@ export const sendFineApprovalEmail = async (fine, assignedEmployees) => {
                     </div>
                     
                     <div style="padding: 20px;">
-                        <p>Dear Manager,</p>
-                        <p>The following employee(s) reporting to you have been issued a fine pending your review and approval.</p>
+                        <p>Dear HR,</p>
+                        <p>The following employee(s) have been issued a fine pending your review and approval.</p>
                         
                         <div style="background-color: #fff3e0; padding: 15px; border-radius: 6px; margin: 20px 0;">
                             <p style="margin: 0;"><strong>Fine Type:</strong> ${fine.fineType}</p>
@@ -139,14 +131,13 @@ export const sendFineApprovalEmail = async (fine, assignedEmployees) => {
 
             await transporter.sendMail({
                 from: `"VeRP Notification" <${emailUser}>`,
-                to: managerEmail,
-                subject: `Action Required: Fine Approval for ${employeesList.length > 1 ? 'Multiple Employees' : employeesList[0].name} - ${fine.fineId}`,
+                to: hrEmail,
+                subject: `Action Required: Fine Approval for ${employeementDetails.length > 1 ? 'Multiple Employees' : employeementDetails[0].name} - ${fine.fineId}`,
                 html: htmlContent
             });
 
-            console.log(`[FineEmail] Email sent to ${managerEmail} for ${employeesList.length} employees.`);
-        }
-
+            console.log(`[FineEmail] Email sent to ${hrEmail} for ${employeementDetails.length} employees.`);
+        
     } catch (error) {
         console.error('[FineEmail] Error sending fine emails:', error);
     }

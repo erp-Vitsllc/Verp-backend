@@ -33,7 +33,6 @@ export const getFineById = async (req, res) => {
                 .populate('workflow.assignedTo', 'firstName lastName employeeId')
                 .lean();
         } else {
-            // Check if it's an exact match or a base ID (look for suffixes)
             fine = await Fine.findOne({ fineId: id })
                 .populate('createdBy', 'firstName lastName email department designation')
                 .populate('hrApprovedBy', 'firstName lastName email department designation employeeId')
@@ -41,49 +40,55 @@ export const getFineById = async (req, res) => {
                 .populate('approvedBy', 'firstName lastName email department designation employeeId')
                 .populate('workflow.assignedTo', 'firstName lastName employeeId')
                 .lean();
+        }
 
-            if (!fine) {
-                // Try searching for related records (e.g. if ID is VEGA-FINE-0009, find -A, -B, -CO etc)
-                // We use a regex to find exact base or base with any suffix
-                const baseIdRegex = new RegExp(`^${id}(-[A-Z0-9]+)?$`);
-                relatedFines = await Fine.find({ fineId: baseIdRegex })
-                    .populate('createdBy', 'firstName lastName email department designation')
-                    .populate('hrApprovedBy', 'firstName lastName email department designation employeeId')
-                    .populate('accountsApprovedBy', 'firstName lastName email department designation employeeId')
-                    .populate('approvedBy', 'firstName lastName email department designation employeeId')
-                    .populate('workflow.assignedTo', 'firstName lastName employeeId')
-                    .sort({ fineId: 1 })
-                    .lean();
+        // --- SYNTHESIZE GROUPED FINE IF SIBLINGS EXIST ---
+        // Determine the base ID
+        let baseIdToUse = id;
+        if (fine) {
+            baseIdToUse = fine.fineId.split('-').length > 3 ? fine.fineId.split('-').slice(0, 3).join('-') : fine.fineId;
+        } else {
+            baseIdToUse = id.split('-').length > 3 ? id.split('-').slice(0, 3).join('-') : id;
+        }
 
-                if (relatedFines.length > 0) {
-                    // SYNTHESIZE GROUPED FINE
-                    const first = relatedFines[0];
-                    fine = { ...first }; // copy common props
+        const baseIdRegex = new RegExp(`^${baseIdToUse}(-[A-Z0-9]+)?$`, 'i');
+        relatedFines = await Fine.find({ fineId: baseIdRegex })
+            .populate('createdBy', 'firstName lastName email department designation')
+            .populate('hrApprovedBy', 'firstName lastName email department designation employeeId')
+            .populate('accountsApprovedBy', 'firstName lastName email department designation employeeId')
+            .populate('approvedBy', 'firstName lastName email department designation employeeId')
+            .populate('workflow.assignedTo', 'firstName lastName employeeId')
+            .sort({ fineId: 1 })
+            .lean();
 
-                    // Merge assignedEmployees
-                    const allAssigned = [];
-                    let totalFineAmt = 0;
-                    let totalEmpAmt = 0;
-                    let totalCompAmt = 0;
+        if (relatedFines.length > 1) {
+            // Group Fine synthesized view
+            const first = relatedFines[0];
+            fine = { ...first }; // copy common props
 
-                    relatedFines.forEach(rf => {
-                        if (rf.assignedEmployees) {
-                            allAssigned.push(...rf.assignedEmployees);
-                        }
-                        totalFineAmt += parseFloat(rf.fineAmount) || 0;
-                        totalEmpAmt += parseFloat(rf.employeeAmount) || 0;
-                        totalCompAmt += parseFloat(rf.companyAmount) || 0;
-                    });
+            const allAssigned = [];
+            let totalFineAmt = 0;
+            let totalEmpAmt = 0;
+            let totalCompAmt = 0;
 
-                    // Update synthesized fields
-                    fine.fineId = id; // use base ID
-                    fine.isGroupView = true;
-                    fine.assignedEmployees = allAssigned;
-                    fine.fineAmount = totalFineAmt;
-                    fine.employeeAmount = totalEmpAmt;
-                    fine.companyAmount = totalCompAmt;
+            relatedFines.forEach(rf => {
+                if (rf.assignedEmployees) {
+                    allAssigned.push(...rf.assignedEmployees);
                 }
-            }
+                totalFineAmt += parseFloat(rf.fineAmount) || 0;
+                totalEmpAmt += parseFloat(rf.employeeAmount) || 0;
+                totalCompAmt += parseFloat(rf.companyAmount) || 0;
+            });
+
+            // Update synthesized fields
+            fine.fineId = baseIdToUse; // use base ID
+            fine.isGroupView = true;
+            fine.assignedEmployees = allAssigned;
+            fine.fineAmount = totalFineAmt;
+            fine.employeeAmount = totalEmpAmt;
+            fine.companyAmount = totalCompAmt;
+        } else if (relatedFines.length === 1 && !fine) {
+            fine = relatedFines[0];
         }
 
         if (!fine) {

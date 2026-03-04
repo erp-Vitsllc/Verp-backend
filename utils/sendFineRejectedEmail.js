@@ -106,11 +106,42 @@ export const sendFineRejectedEmail = async (fine, assignedEmployees) => {
         }
 
         // 4. Email Content
-        const subject = `Update regarding Fine Request: #${fine.fineId}`;
+        const isGroup = assignedEmployees.length > 1;
+        const subject = isGroup 
+            ? `Update regarding Group Fine Request: #${fine.fineId}`
+            : `Update regarding Fine Request: #${fine.fineId}`;
+
+        // Prepare dynamic employees list table
+        let employeesTable = '';
+        if (isGroup) {
+            const rows = assignedEmployees.map(e => `
+                <tr>
+                    <td style="border: 1px solid #ddd; padding: 8px;">${e.employeeName || e.employeeId}</td>
+                    <td style="border: 1px solid #ddd; padding: 8px;">${e.employeeId}</td>
+                    <td style="border: 1px solid #ddd; padding: 8px;">${Number(e.amount).toLocaleString()} AED</td>
+                </tr>
+            `).join('');
+
+            employeesTable = `
+                <div style="margin-top: 20px;">
+                    <p><strong>Employees Included in this Group Fine:</strong></p>
+                    <table style="width: 100%; border-collapse: collapse; font-size: 14px;">
+                        <thead>
+                            <tr style="background-color: #f8f9fa;">
+                                <th style="border: 1px solid #ddd; padding: 8px; text-align: left;">Name</th>
+                                <th style="border: 1px solid #ddd; padding: 8px; text-align: left;">ID</th>
+                                <th style="border: 1px solid #ddd; padding: 8px; text-align: left;">Share</th>
+                            </tr>
+                        </thead>
+                        <tbody>${rows}</tbody>
+                    </table>
+                </div>
+            `;
+        }
 
         const html = `
             <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #eee; border-radius: 8px;">
-                <h2 style="color: #d32f2f; margin-bottom: 20px;">Fine Request Update</h2>
+                <h2 style="color: #d32f2f; margin-bottom: 20px;">Fine Request Update${isGroup ? ' (Group Request)' : ''}</h2>
                 
                 <p>Dear Employee,</p>
                 
@@ -123,6 +154,8 @@ export const sendFineRejectedEmail = async (fine, assignedEmployees) => {
                     <p><strong>Amount:</strong> ${Number(fine.fineAmount).toLocaleString()} AED</p>
                     ${fine.rejectionReason ? `<p><strong>Reason for Rejection:</strong> ${fine.rejectionReason}</p>` : ''}
                     ${fine.remarks ? `<p><strong>Remarks:</strong> ${fine.remarks}</p>` : ''}
+                    
+                    ${employeesTable}
                 </div>
 
                 <p>If you have any questions regarding this decision, please contact the HR department.</p>

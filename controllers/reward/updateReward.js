@@ -528,12 +528,9 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
 
             // Update Statuses
             const nextInternalStage = finalStatus;
-            let publicStatus = 'Pending';
-
-            if (nextInternalStage === 'Approved') publicStatus = 'Approved';
-            else if (nextInternalStage === 'Rejected') publicStatus = 'Rejected';
-            else if (nextInternalStage === 'Cancelled') publicStatus = 'Cancelled';
-            else if (nextInternalStage === 'Draft') publicStatus = 'Draft';
+            
+            // Allow publicStatus to reflect the exact current progression stage
+            let publicStatus = finalStatus;
 
             reward.approvalStatus = nextInternalStage;
             reward.rewardStatus = publicStatus;
@@ -658,10 +655,20 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
                     if (managementEntry) {
                         managementEntry.status = 'Approved';
                         managementEntry.actionedAt = new Date();
+                    }
 
-                        // Explicitly ensure reward status is Approved
-                        finalStatus = 'Approved';
-                        reward.rewardStatus = 'Approved';
+                    // Explicitly ensure reward status is Approved
+                    finalStatus = 'Approved';
+                    reward.rewardStatus = 'Approved';
+
+                    // Update skipped/pending workflows to Approved
+                    if (reward.workflow) {
+                        reward.workflow.forEach(w => {
+                            if (w.status === 'Pending') {
+                                w.status = 'Approved';
+                                w.actionedAt = new Date();
+                            }
+                        });
                     }
                 }
 
@@ -679,25 +686,52 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
                     const creator = await User.findById(reward.createdBy).select('email companyEmail').lean();
 
                     if (employeeForEmail) {
-                        const recipientEmails = new Set();
+                        const toEmails = new Set();
+                        const ccEmails = new Set();
 
                         // 1. Employee Email
                         const empEmail = employeeForEmail.companyEmail || employeeForEmail.email;
-                        if (empEmail) recipientEmails.add(empEmail);
+                        if (empEmail) toEmails.add(empEmail);
 
                         // 2. Manager Email (His Reportee/Supervisor)
                         if (employeeForEmail.primaryReportee) {
                             const managerEmail = employeeForEmail.primaryReportee.companyEmail || employeeForEmail.primaryReportee.email;
-                            if (managerEmail) recipientEmails.add(managerEmail);
+                            if (managerEmail) ccEmails.add(managerEmail);
                         }
 
                         // 3. Creator Email
                         if (creator) {
                             const creatorEmail = creator.companyEmail || creator.email;
-                            if (creatorEmail) recipientEmails.add(creatorEmail);
+                            if (creatorEmail) ccEmails.add(creatorEmail);
                         }
 
-                        if (recipientEmails.size > 0) {
+                        // 4. Fetch HR, Accounts, Management
+                        try {
+                            const { getDepartmentHOD } = await import("../../utils/getDepartmentHOD.js");
+                            const { getManagementHOD } = await import("../../utils/getManagementHOD.js");
+
+                            const hrHOD = await getDepartmentHOD('hr', reward.employeeId);
+                            if (hrHOD && (hrHOD.companyEmail || hrHOD.personalEmail || hrHOD.email)) {
+                                ccEmails.add(hrHOD.companyEmail || hrHOD.personalEmail || hrHOD.email);
+                            }
+
+                            const accountsHOD = await getDepartmentHOD('finance', reward.employeeId);
+                            if (accountsHOD && (accountsHOD.companyEmail || accountsHOD.personalEmail || accountsHOD.email)) {
+                                ccEmails.add(accountsHOD.companyEmail || accountsHOD.personalEmail || accountsHOD.email);
+                            }
+
+                            const managementHOD = await getManagementHOD(reward.employeeId);
+                            if (managementHOD && (managementHOD.companyEmail || managementHOD.personalEmail || managementHOD.email)) {
+                                ccEmails.add(managementHOD.companyEmail || managementHOD.personalEmail || managementHOD.email);
+                            }
+                        } catch (e) {
+                            console.warn("[UpdateReward] Could not fetch HOD emails for CC", e.message);
+                        }
+
+                        const toRecipients = Array.from(toEmails);
+                        const ccRecipients = Array.from(ccEmails);
+
+                        if (toRecipients.length > 0 || ccRecipients.length > 0) {
                             const emailUser = process.env.EMAIL_USER || process.env.VERP_EMAIL || process.env.GMAIL_USER;
                             const emailPass = process.env.EMAIL_PASS || process.env.VERP_PASS || process.env.GMAIL_PASS;
 
@@ -730,7 +764,8 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
 
                                 const mailOptions = {
                                     from: `"VeRP Notification" <${emailUser}>`,
-                                    to: Array.from(recipientEmails).join(', '),
+                                    to: toRecipients,
+                                    cc: ccRecipients,
                                     subject: subject,
                                     html: html,
                                     attachments: []
@@ -833,7 +868,7 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
                                 // --- 3. Send Email ---
                                 if (mailOptions.attachments.length > 0) {
                                     await transporter.sendMail(mailOptions);
-                                    console.log(`[UpdateReward] SUCCESS: Final Approval email with ${mailOptions.attachments.length} attachments sent to ${Array.from(recipientEmails).join(', ')}`);
+                                    console.log(`[UpdateReward] SUCCESS: Final Approval email with ${mailOptions.attachments.length} attachments sent to ${toRecipients.length} TO and ${ccRecipients.length} CC recipients.`);
                                 } else {
                                     console.warn("[UpdateReward] WARNING: Sending email with ZERO attachments.");
                                     await transporter.sendMail(mailOptions);

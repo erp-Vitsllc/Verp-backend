@@ -304,26 +304,32 @@ export const approveFine = async (req, res) => {
             const { syncDashboardAction } = await import("../../utils/syncDashboard.js");
             const targetEmpId = fine.assignedEmployees?.[0]?.employeeId || null;
             const subjectEmp = targetEmpId ? await EmployeeBasic.findOne({ employeeId: targetEmpId }) : null;
+            
+            const isGroup = fines.length > 1;
+            const reqType = isGroup ? 'Group Fine Request' : 'Fine';
+            const subjectName = isGroup ? `Group Fine - ${fines.length} Employees` : undefined;
 
             const isFinalStatus = fine.fineStatus === 'Approved' || fine.fineStatus === 'Rejected';
             await syncDashboardAction({
                 requestId: fine._id,
-                requestType: 'Fine',
+                requestType: reqType,
                 assignedTo: isFinalStatus ? null : req.user?._id,
                 status: isFinalStatus ? fine.fineStatus : 'Approved',
-                subjectEmployee: subjectEmp
+                subjectEmployee: subjectEmp,
+                subjectName: subjectName
             });
 
             const nextPendingStep = fine.workflow?.find(w => w.status === 'Pending');
             if (nextPendingStep) {
                 await syncDashboardAction({
                     requestId: fine._id,
-                    requestType: 'Fine',
+                    requestType: reqType,
                     assignedTo: nextPendingStep.assignedTo,
                     status: 'Pending',
                     subjectEmployee: subjectEmp,
+                    subjectName: subjectName,
                     extra1: fine.fineType,
-                    extra2: `AED ${fine.fineAmount}`
+                    extra2: `Total: AED ${fines.reduce((sum, f) => sum + (f.fineAmount || 0), 0)}` // total for group
                 });
             }
         } catch (syncErr) {

@@ -290,24 +290,7 @@ export const addFine = async (req, res) => {
                     const savedFineRecord = await fineModel.save();
                     createdFines.push(savedFineRecord);
 
-                    // === SYNC DASHBOARD ACTION (BULK) ===
-                    if (savedFineRecord.fineStatus !== 'Draft') {
-                        const { syncDashboardAction } = await import("../../utils/syncDashboard.js");
-                        const reporteeStep = savedFineRecord.workflow?.find(w => w.status === 'Pending');
-                        if (reporteeStep) {
-                            const subjectEmp = await EmployeeBasic.findOne({ employeeId: empData.employeeId });
-                            await syncDashboardAction({
-                                requestId: savedFineRecord._id,
-                                requestType: 'Fine',
-                                assignedTo: reporteeStep.assignedTo,
-                                status: 'Pending',
-                                subjectEmployee: subjectEmp,
-                                extra1: savedFineRecord.fineType,
-                                extra2: `AED ${savedFineRecord.fineAmount}`
-                            });
-                        }
-                        sendFineApprovalEmail(savedFineRecord, finePayload.assignedEmployees).catch(err => console.error(err));
-                    }
+                    // Dashboard/Email sync moved OUTSIDE the loop for bulk fines
                 } catch (err) {
                     console.error(`[AddFine] Error saving individual fine ${uniqueFineId}:`, err);
                     errors.push({ employeeId: empData.employeeId, error: err.message });
@@ -315,6 +298,33 @@ export const addFine = async (req, res) => {
             }
 
             console.log(`[AddFine] Bulk Processing Complete. Created: ${createdFines.length}, Errors: ${errors.length}`);
+
+            // === GROUP DASHBOARD ACTION & EMAIL ===
+            if (createdFines.length > 0 && String(createdFines[0].fineStatus) !== 'Draft') {
+                const firstFine = createdFines[0];
+                const reporteeStep = firstFine.workflow?.find(w => w.status === 'Pending');
+
+                if (reporteeStep) {
+                    try {
+                        const { syncDashboardAction } = await import("../../utils/syncDashboard.js");
+                        await syncDashboardAction({
+                            requestId: firstFine._id, // Dashboard will link to the FIRST fine in the group
+                            requestType: 'Group Fine Request',
+                            assignedTo: reporteeStep.assignedTo,
+                            status: 'Pending',
+                            subjectName: `Group Fine - ${createdFines.length} Employees`,
+                            extra1: firstFine.fineType,
+                            extra2: `Total: AED ${totalFine}`
+                        });
+                    } catch (err) {
+                        console.error('[AddFine] Error matching group dashboard action:', err);
+                    }
+                }
+
+                // Prepare a unified assignedEmployees array for the email
+                const allAssigned = createdFines.map(f => f.assignedEmployees[0]);
+                sendFineApprovalEmail(firstFine, allAssigned).catch(err => console.error(err));
+            }
 
             return res.status(201).json({
                 message: `Bulk fine processing complete. Created ${createdFines.length} records.`,
