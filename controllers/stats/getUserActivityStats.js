@@ -563,7 +563,7 @@ export const getUserActivityStats = async (req, res) => {
         // 6c. GET ACTIONED ASSETS (History)
         const myActionedAssetActions = await DashboardAction.find({
             assignedTo: { $in: relevantIds },
-            requestType: 'Asset',
+            requestType: { $in: ['Asset', 'Asset Approval'] },
             status: { $in: ['Approved', 'Rejected'] }
         }).sort({ actionedDate: -1, updatedAt: -1 }).limit(20).lean();
 

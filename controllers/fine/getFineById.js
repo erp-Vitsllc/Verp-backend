@@ -8,9 +8,17 @@ export const getFineById = async (req, res) => {
     try {
         let { id } = req.params;
 
-        // Sanitize ID (remove artifacts like ":1")
-        if (id && typeof id === 'string' && id.includes(':')) {
-            id = id.split(':')[0].trim();
+        // Clean ID: strip artifacts like ":1"
+        if (id && typeof id === 'string') {
+            try {
+                id = decodeURIComponent(id);
+            } catch (e) {
+                // ignore
+            }
+            if (id.includes(':')) {
+                id = id.split(':')[0];
+            }
+            id = id.trim();
         }
 
         let fine;

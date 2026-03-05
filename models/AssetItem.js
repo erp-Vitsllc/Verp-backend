@@ -76,7 +76,7 @@ const assetItemSchema = new mongoose.Schema({
     },
     status: {
         type: String,
-        enum: ['Assigned', 'Unassigned', 'Maintenance', 'On Service', 'Service', 'Lost', 'Returned', 'Pending', 'End of Life', 'Out of Service'],
+        enum: ['Assigned', 'Unassigned', 'Maintenance', 'On Service', 'Service', 'Lost', 'Returned', 'Pending', 'End of Life', 'Out of Service', 'Draft', 'Rejected'],
         default: 'Unassigned'
     },
     assignmentType: {
@@ -110,6 +110,16 @@ const assetItemSchema = new mongoose.Schema({
     acceptedBy: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'EmployeeBasic',
+        default: null
+    },
+    createdBy: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User',
+        default: null
+    },
+    updatedBy: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User',
         default: null
     },
     negotiationHistory: [{
@@ -174,7 +184,9 @@ const assetItemSchema = new mongoose.Schema({
         value: { type: Number },
         remark: { type: String },
         invoice: { type: String },           // URL to uploaded invoice
-        attachment: { type: String }         // URL to any supporting attachment
+        attachment: { type: String },        // URL to any supporting attachment
+        requestedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'EmployeeBasic' },
+        lastWarningSentAt: { type: Date, default: null }
     }]
 }, {
     timestamps: true

@@ -1,8 +1,11 @@
 import AssetType from '../models/AssetType.js';
 import AssetCategory from '../models/AssetCategory.js';
 import AssetItem from '../models/AssetItem.js';
+import DashboardAction from '../models/DashboardAction.js';
+import { getDepartmentHOD } from '../utils/getDepartmentHOD.js';
 import mongoose from 'mongoose';
 import { uploadDocumentToS3, getSignedFileUrl } from '../utils/s3Upload.js';
+import { sendAssetCreationApprovalEmail } from '../utils/sendAssetCreationApprovalEmail.js';
 
 // @desc    Create a new asset type
 // @route   POST /api/AssetType
@@ -145,6 +148,25 @@ export const createAssetType = async (req, res) => {
                 return res.status(400).json({ message: 'Valid Category is required for individual assets.' });
             }
 
+            // Approval Logic: Check if creator is Asset Controller or Admin
+            const assetController = await getDepartmentHOD('assetcontroller');
+            const isAdmin = req.user.isAdmin === true || req.user.isAdministrator === true;
+            const isAssetController = assetController && assetController._id.toString() === req.user.employeeObjectId?.toString();
+
+            let initialStatus = 'Draft';
+            let actionRequiredBy = null;
+
+            if (isAdmin || isAssetController) {
+                initialStatus = 'Unassigned';
+                console.log(`[Asset creation (Bulk/Type)] Created directly as Unassigned by ${isAdmin ? 'Admin' : 'Asset Controller'}`);
+            } else if (assetController) {
+                actionRequiredBy = assetController._id;
+                console.log(`[Asset creation (Bulk/Type)] Created as Draft by regular user ${req.user.employeeId}. Action required by Asset Controller ${assetController.employeeId}`);
+            } else {
+                initialStatus = 'Draft';
+                console.log(`[Asset creation (Bulk/Type)] Created as Draft by regular user ${req.user.employeeId}. NOTE: No Asset Controller found to process approval.`);
+            }
+
             const qty = Math.max(1, Number(quantity) || 1);
             const createdAssets = [];
 
@@ -198,6 +220,9 @@ export const createAssetType = async (req, res) => {
                     photo: imageS3Key,
                     invoiceFile,
                     accessories: formattedAccessories,
+                    status: initialStatus,
+                    actionRequiredBy: actionRequiredBy,
+                    createdBy: req.user._id,
                     vehicleCode,
                     plateNumber,
                     modelYear,
@@ -214,19 +239,40 @@ export const createAssetType = async (req, res) => {
                 createdAssets.push(newAsset.toObject());
             }
 
-            // Prepare the first asset for the response (same as before)
-            const assetObj = createdAssets[0];
-            if (assetObj.imagePreview) {
-                assetObj.imagePreview = await getSignedFileUrl(assetObj.imagePreview);
-            }
-            if (assetObj.invoiceFile) {
-                assetObj.invoiceFile = await getSignedFileUrl(assetObj.invoiceFile);
-            }
-            if (assetObj.warrantyAttachment) {
-                assetObj.warrantyAttachment = await getSignedFileUrl(assetObj.warrantyAttachment);
+            // Notification Logic (Batch-level)
+            if (initialStatus === 'Draft' && actionRequiredBy) {
+                try {
+                    await DashboardAction.create({
+                        assignedTo: actionRequiredBy,
+                        assignedToEmpId: assetController.employeeId,
+                        requestId: createdAssets[0]._id,
+                        requestType: 'Asset Approval',
+                        subjectEmployeeId: req.user.employeeId,
+                        subjectName: req.user.name,
+                        requestedByName: req.user.name,
+                        extra1: `${createdAssets[0].assetId}${qty > 1 ? ` (Batch of ${qty})` : ''} - ${name}`,
+                        extra2: 'New Asset Creation Approval Request',
+                        status: 'Pending'
+                    });
+
+                    await sendAssetCreationApprovalEmail({
+                        asset: createdAssets[0],
+                        recipient: assetController,
+                        creatorName: req.user.name || 'System User',
+                        isBulk: qty > 1,
+                        assetCount: qty
+                    });
+                } catch (notiErr) {
+                    console.error('[Asset creation (Bulk)] Notification error:', notiErr);
+                }
             }
 
-            // Sign accessory attachments for the returned object
+            // Prepare first asset for response
+            const assetObj = createdAssets[0];
+            if (assetObj.imagePreview) assetObj.imagePreview = await getSignedFileUrl(assetObj.imagePreview);
+            if (assetObj.invoiceFile) assetObj.invoiceFile = await getSignedFileUrl(assetObj.invoiceFile);
+            if (assetObj.warrantyAttachment) assetObj.warrantyAttachment = await getSignedFileUrl(assetObj.warrantyAttachment);
+
             if (assetObj.accessories && Array.isArray(assetObj.accessories)) {
                 assetObj.accessories = await Promise.all(assetObj.accessories.map(async (acc) => ({
                     ...acc,
@@ -241,8 +287,7 @@ export const createAssetType = async (req, res) => {
         console.error('CRITICAL: createAssetType Failed:', error);
         res.status(500).json({
             message: `Server Error: ${error.message}`,
-            error: error.message,
-            stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+            error: error.message
         });
     }
 };
@@ -261,6 +306,7 @@ export const getAssetTypes = async (req, res) => {
         const assets = await AssetItem.find()
             .populate('typeId')
             .populate('categoryId')
+            .populate('actionRequiredBy', 'firstName lastName')
             .populate({
                 path: 'assignedTo',
                 select: 'firstName lastName employeeId department primaryReportee reportingAuthority',
@@ -316,6 +362,8 @@ export const getAssetTypes = async (req, res) => {
                 assigned: a.status === 'Assigned' ? 1 : 0,
                 unassigned: a.status === 'Unassigned' ? 1 : 0,
                 invoiceFile: await getSignedFileUrl(a.invoiceFile),
+                actionRequiredBy: a.actionRequiredBy,
+                pendingAction: a.pendingAction,
                 accessories: await Promise.all((a.accessories || []).map(async (acc) => {
                     const accObj = acc.toObject ? acc.toObject() : acc;
                     return {
