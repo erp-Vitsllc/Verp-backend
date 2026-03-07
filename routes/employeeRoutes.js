@@ -49,6 +49,7 @@ import { getLoanById } from "../controllers/employee/getLoanById.js";
 import { approveLoan } from "../controllers/employee/approveLoan.js";
 import { updateLoanDetails } from "../controllers/employee/updateLoanDetails.js";
 import { getLoanPdf } from "../controllers/employee/getLoanPdf.js";
+import { deleteLoan } from "../controllers/employee/deleteLoan.js";
 
 
 // All employee routes require authentication
@@ -212,6 +213,7 @@ router.put("/loans/:id", checkPermission('hrm_loan', 'view'), updateLoanDetails)
 router.get("/loans/:id/pdf", checkPermission('hrm_loan', 'view'), getLoanPdf); // New PDF Download Route
 router.get("/loans", checkPermission('hrm_loan', 'view'), getLoans);
 router.get("/loans/:id", checkPermission('hrm_loan', 'view'), getLoanById);
+router.delete("/loans/:id", checkPermission('hrm_loan', 'view'), deleteLoan);
 
 
 // Get specific document - requires view permission

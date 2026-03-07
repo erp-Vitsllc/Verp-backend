@@ -22,22 +22,24 @@ export const getDepartmentHOD = async (departmentType, identifier = null) => {
 
         // 1. Resolve Company ID
         if (identifier) {
-            const directCompany = await Company.findOne({ companyId: identifier });
-            if (directCompany) {
-                targetCompanyId = directCompany._id;
-            } else {
-                let empQuery = {};
-                const idStr = String(identifier);
-
-                if (idStr.match(/^[0-9a-fA-F]{24}$/)) {
-                    empQuery = { _id: identifier };
+            const idStr = String(identifier);
+            if (idStr.match(/^[0-9a-fA-F]{24}$/)) {
+                // Could be Company _id or Employee _id
+                const directComp = await Company.findById(identifier).select('_id');
+                if (directComp) {
+                    targetCompanyId = directComp._id;
                 } else {
-                    empQuery = { employeeId: identifier };
+                    const emp = await EmployeeBasic.findById(identifier).select('company');
+                    if (emp && emp.company) targetCompanyId = emp.company;
                 }
-
-                const emp = await EmployeeBasic.findOne(empQuery).select('company');
-                if (emp && emp.company) {
-                    targetCompanyId = emp.company;
+            } else {
+                // Try companyId (e.g. EST-001)
+                const comp = await Company.findOne({ companyId: identifier }).select('_id');
+                if (comp) {
+                    targetCompanyId = comp._id;
+                } else {
+                    const emp = await EmployeeBasic.findOne({ employeeId: identifier }).select('company');
+                    if (emp && emp.company) targetCompanyId = emp.company;
                 }
             }
         }
@@ -46,34 +48,31 @@ export const getDepartmentHOD = async (departmentType, identifier = null) => {
         if (targetCompanyId) {
             const company = await Company.findById(targetCompanyId);
             if (company) {
-                const responsibility = company.responsibilities?.find(r => r.category && r.category.toLowerCase() === category);
+                const responsibility = company.responsibilities?.find(r =>
+                    r.category && r.category.toLowerCase() === category && r.status === 'Active'
+                );
                 if (responsibility && responsibility.empObjectId) {
                     const delegatedEmp = await EmployeeBasic.findById(responsibility.empObjectId)
-                        .select('employeeId firstName lastName companyEmail email designation department profileStatus');
+                        .select('employeeId firstName lastName companyEmail email designation department profileStatus signature');
                     if (delegatedEmp) return delegatedEmp;
                 }
             }
         }
 
-        // 3. Centralized Fallback: If not found in target company, look in ANY company
-        // This handles cases where HR/Accounts are "same for all" but defined in a main company
-        const anyCompanyWithCategory = await Company.findOne({
-            "responsibilities.category": { $regex: new RegExp(`^${category}$`, 'i') }
-        });
-
-        if (anyCompanyWithCategory) {
-            const responsibility = anyCompanyWithCategory.responsibilities.find(r => r.category && r.category.toLowerCase() === category);
+        // 3. Centralized Fallback:
+        // If not found in specific company, find the first active responsibility of this category anywhere.
+        // The user says "entire erp npt depends omn a or any company"
+        const allCompanies = await Company.find({ 'responsibilities.category': category, 'responsibilities.status': 'Active' });
+        for (const comp of allCompanies) {
+            const responsibility = comp.responsibilities.find(r => r.category.toLowerCase() === category && r.status === 'Active');
             if (responsibility && responsibility.empObjectId) {
                 const delegatedEmp = await EmployeeBasic.findById(responsibility.empObjectId)
-                    .select('employeeId firstName lastName companyEmail email designation department profileStatus');
-                if (delegatedEmp) {
-                    console.log(`[getDepartmentHOD] Using Centralized ${category} HOD from company ${anyCompanyWithCategory.name}`);
-                    return delegatedEmp;
-                }
+                    .select('employeeId firstName lastName companyEmail email designation department profileStatus signature');
+                if (delegatedEmp) return delegatedEmp;
             }
         }
 
-        console.warn(`[getDepartmentHOD] No responsibility defined for ${category} anywhere.`);
+        console.warn(`[getDepartmentHOD] No responsibility defined for ${category} anywhere in the system.`);
         return null;
 
     } catch (error) {

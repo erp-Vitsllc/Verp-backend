@@ -9,10 +9,10 @@ export const deleteLoan = async (req, res) => {
             return res.status(404).json({ message: "Loan/Advance not found" });
         }
 
-        // Strict Deletion Policy - Only 'Draft' records can be deleted.
-        if (loan.status !== 'Draft') {
+        // Strict Deletion Policy - Only non-active records can be deleted.
+        if (!['Draft', 'Cancelled', 'Rejected'].includes(loan.status)) {
             return res.status(400).json({
-                message: `Cannot delete record with '${loan.status}' status. ONLY 'Draft' records can be deleted. Please cancel or reject active records instead.`
+                message: `Cannot delete record with '${loan.status}' status. ONLY 'Draft', 'Cancelled', or 'Rejected' records can be deleted.`
             });
         }
 

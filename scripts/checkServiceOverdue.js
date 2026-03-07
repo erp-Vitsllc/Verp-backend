@@ -17,7 +17,6 @@ const checkOverdueServices = async () => {
         // Find all assets currently in Service status
         const assetsInService = await AssetItem.find({ status: 'Service' });
 
-        const assetController = await getDepartmentHOD('assetcontroller');
         const today = new Date();
         let notifiedCount = 0;
 
@@ -33,6 +32,7 @@ const checkOverdueServices = async () => {
 
                     const initiatorId = currentService.requestedBy || asset.requestedBy;
                     const initiator = initiatorId ? await EmployeeBasic.findById(initiatorId) : null;
+                    const assetController = await getDepartmentHOD('assetcontroller', initiatorId || asset.assignedTo);
 
                     const recipients = [];
                     if (assetController) recipients.push(assetController);

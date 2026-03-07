@@ -149,7 +149,7 @@ export const createAssetType = async (req, res) => {
             }
 
             // Approval Logic: Check if creator is Asset Controller or Admin
-            const assetController = await getDepartmentHOD('assetcontroller');
+            const assetController = await getDepartmentHOD('assetcontroller', req.user.employeeObjectId);
             const isAdmin = req.user.isAdmin === true || req.user.isAdministrator === true;
             const isAssetController = assetController && assetController._id.toString() === req.user.employeeObjectId?.toString();
 

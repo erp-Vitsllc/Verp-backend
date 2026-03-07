@@ -47,26 +47,10 @@ export const getManagementHOD = async (identifier = null) => {
             }
         }
 
-        // 3. Centralized Fallback: If not found in target, look in ANY company
-        const anyCompanyWithMgmt = await Company.findOne({
-            "responsibilities.category": { $regex: /^(management|ceo)$/i }
-        });
+        // 3. Removed Centralized Fallback:
+        // Responsibilities must now be defined explicitly per company.
 
-        if (anyCompanyWithMgmt) {
-            const responsibility = anyCompanyWithMgmt.responsibilities.find(r =>
-                r.category && (r.category.toLowerCase() === 'management' || r.category.toLowerCase() === 'ceo')
-            );
-            if (responsibility && responsibility.empObjectId) {
-                const delegatedEmp = await EmployeeBasic.findById(responsibility.empObjectId)
-                    .select('employeeId firstName lastName companyEmail email designation department profileStatus');
-                if (delegatedEmp) {
-                    console.log(`[getManagementHOD] Using Centralized Management from company ${anyCompanyWithMgmt.name}`);
-                    return delegatedEmp;
-                }
-            }
-        }
-
-        console.warn('[getManagementHOD] No CEO found anywhere.');
+        console.warn('[getManagementHOD] No Management HOD defined in target company.');
         return null;
 
     } catch (error) {

@@ -148,7 +148,8 @@ const companySchema = new mongoose.Schema(
                 employeeId: { type: String },
                 employeeName: { type: String },
                 designation: { type: String },
-                empObjectId: { type: mongoose.Schema.Types.ObjectId, ref: "Employee" }
+                empObjectId: { type: mongoose.Schema.Types.ObjectId, ref: "Employee" },
+                status: { type: String, enum: ["Pending", "Active"], default: "Pending" }
             }
         ],
         createdBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" }

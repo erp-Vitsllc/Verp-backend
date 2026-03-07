@@ -108,11 +108,17 @@ export const getUserActivityStats = async (req, res) => {
         const reporteeCustomIds = reportees.map(r => r.employeeId);
 
         // 3. Define Queries for "Needs Action"
+        // 3. Define Queries for "Needs Action"
         const DashboardAction = await import("../../models/DashboardAction.js").then(m => m.default);
+        const isAdmin = ['Admin', 'CEO', 'Director', 'General Manager'].includes(currentUser.role) || currentUser.isAdmin;
+
+        const allAssetTypes = ['Asset', 'Asset Approval', 'Asset Assignment', 'Asset Transfer', 'Asset Loss Damage', 'Asset End of Life', 'Asset Accessory'];
+
         const dashboardPendingItems = await DashboardAction.find({
             $or: [
                 { assignedTo: { $in: relevantIds } },
-                { assignedToEmpId: targetEmployeeId }
+                { assignedToEmpId: targetEmployeeId },
+                ...(isAdmin ? [{ requestType: 'Responsibility Approval' }] : [])
             ],
             status: 'Pending'
         }).lean();
@@ -186,9 +192,10 @@ export const getUserActivityStats = async (req, res) => {
         const seenRequests = new Map(); // requestId -> status to track and deduplicate
 
         dashboardPendingItems.forEach(item => {
-            const reqIdStr = item.requestId.toString();
+            const reqIdStr = item.requestId?.toString();
             activityList.push({
-                id: item.requestId,
+                id: reqIdStr,
+                actionId: item._id.toString(),
                 type: item.requestType,
                 requestedBy: item.requestedByName || item.subjectName || 'Unknown',
                 requestedDate: item.requestedDate,
@@ -196,10 +203,10 @@ export const getUserActivityStats = async (req, res) => {
                 status: 'Pending',
                 extra1: item.extra1,
                 extra2: item.extra2,
-                targetEmployeeId: item.subjectEmployeeId,
+                targetEmployeeId: item.subjectEmployeeId?.toString(),
                 scope: 'inbox'
             });
-            seenRequests.set(reqIdStr, 'Pending');
+            if (reqIdStr) seenRequests.set(reqIdStr, 'Pending');
         });
 
         // 5.1 Add Direct Inbox Items (De-duplicate with DashboardAction)
@@ -207,7 +214,7 @@ export const getUserActivityStats = async (req, res) => {
             const reqIdStr = p._id.toString();
             if (!seenRequests.has(reqIdStr)) {
                 activityList.push({
-                    id: p._id, type: 'Profile Activation', requestedBy: `${p.firstName} ${p.lastName}`,
+                    id: p._id.toString(), type: 'Profile Activation', requestedBy: `${p.firstName} ${p.lastName}`,
                     requestedDate: p.createdAt, actionedDate: null, status: 'Pending',
                     extra1: p.employeeId, extra2: p.designation, targetEmployeeId: p.employeeId,
                     scope: 'inbox'
@@ -233,7 +240,7 @@ export const getUserActivityStats = async (req, res) => {
             const reqIdStr = l._id.toString();
             if (!seenRequests.has(reqIdStr)) {
                 activityList.push({
-                    id: l._id, type: l.type || 'Loan/Advance', requestedBy: l.employeeName || 'Employee',
+                    id: l._id.toString(), type: l.type || 'Loan/Advance', requestedBy: l.employeeName || 'Employee',
                     requestedDate: l.createdAt, actionedDate: null, status: 'Pending',
                     extra1: `AED ${l.amount}`, extra2: `${l.duration} Months`, targetEmployeeId: l.employeeId,
                     scope: 'inbox'
@@ -246,7 +253,7 @@ export const getUserActivityStats = async (req, res) => {
             const reqIdStr = r._id.toString();
             if (!seenRequests.has(reqIdStr)) {
                 activityList.push({
-                    id: r._id, type: 'Reward', requestedBy: r.employeeName,
+                    id: r._id.toString(), type: 'Reward', requestedBy: r.employeeName,
                     requestedDate: r.createdAt, actionedDate: null, status: 'Pending',
                     extra1: r.rewardType, extra2: `AED ${r.amount}`, targetEmployeeId: r.employeeId,
                     scope: 'inbox'
@@ -338,7 +345,7 @@ export const getUserActivityStats = async (req, res) => {
 
                 if (isVisible) {
                     activityList.push({
-                        id: f._id, type: 'Fine', requestedBy: f.assignedEmployees?.[0]?.employeeName || 'Employee',
+                        id: f._id.toString(), type: 'Fine', requestedBy: f.assignedEmployees?.[0]?.employeeName || 'Employee',
                         requestedDate: f.createdAt, actionedDate: null, status: 'Pending',
                         extra1: f.category, extra2: `AED ${f.fineAmount}`,
                         targetEmployeeId: f.assignedEmployees?.[0]?.employeeId || targetEmployeeId,
@@ -415,7 +422,7 @@ export const getUserActivityStats = async (req, res) => {
             const reqIdStr = asset._id.toString();
             if (!seenRequests.has(reqIdStr)) {
                 activityList.push({
-                    id: asset._id,
+                    id: asset._id.toString(),
                     type: 'Asset',
                     requestedBy: 'Me',
                     requestedDate: asset.createdAt,
@@ -423,7 +430,7 @@ export const getUserActivityStats = async (req, res) => {
                     status: asset.acceptanceStatus === 'Pending' ? 'Pending' : asset.acceptanceStatus,
                     extra1: `${asset.assetId} - ${asset.name}`,
                     extra2: asset.assignmentType,
-                    targetEmployeeId: asset.assignedTo,
+                    targetEmployeeId: asset.assignedTo?.toString(),
                     scope: 'outgoing'
                 });
                 seenRequests.set(reqIdStr, asset.acceptanceStatus);
@@ -560,10 +567,10 @@ export const getUserActivityStats = async (req, res) => {
             }
         }).sort({ 'noticeRequest.actionedAt': -1 }).limit(10);
 
-        // 6c. GET ACTIONED ASSETS (History)
+        // 6c. GET ACTIONED ASSETS (History) — allAssetTypes already declared above
         const myActionedAssetActions = await DashboardAction.find({
             assignedTo: { $in: relevantIds },
-            requestType: { $in: ['Asset', 'Asset Approval'] },
+            requestType: { $in: allAssetTypes },
             status: { $in: ['Approved', 'Rejected'] }
         }).sort({ actionedDate: -1, updatedAt: -1 }).limit(20).lean();
 

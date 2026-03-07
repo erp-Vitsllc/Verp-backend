@@ -3,6 +3,7 @@ import EmployeeBasic from "../../models/EmployeeBasic.js";
 import Loan from "../../models/Loan.js";
 import EmployeeSalary from "../../models/EmployeeSalary.js";
 import User from "../../models/User.js";
+import Company from "../../models/Company.js";
 import { getCompleteEmployee } from "../../services/employeeService.js";
 
 
@@ -65,11 +66,15 @@ export const requestLoan = async (req, res) => {
             return res.status(400).json({ message: "Employee is not linked to any company. Cannot proceed." });
         }
 
-        const reportee = employeeBasic.primaryReportee;
-        const targetStatus = status || 'Draft';
+        let hrResp = null;
+        if (employeeBasic.company?._id) {
+            const applicantCompany = await Company.findById(employeeBasic.company._id);
+            hrResp = applicantCompany?.responsibilities?.find(r => r.category === 'hr' && r.status === 'Active');
+        }
+        const targetStatus = status === 'Pending' ? 'Pending HR' : (status || 'Draft');
 
-        if (!reportee) {
-            return res.status(400).json({ message: "Primary reportee not assigned. Please assign a manager first." });
+        if (status === 'Pending' && !hrResp) {
+            return res.status(400).json({ message: "HR Admin not assigned for your company. Please wait until an HR is assigned." });
         }
 
         // --- VALIDATION: Existing Loan Check ---
@@ -154,50 +159,36 @@ export const requestLoan = async (req, res) => {
             }
         }
 
-        if (targetStatus === 'Pending') {
-            // SNAPSHOT: Find Reportee's USER Object for "submittedTo"
-            // This ensures consistent dashboard behavior across modules (Reward, Fine, Loan)
-            let reporteeUser = null;
+        if (targetStatus === 'Pending HR') {
+            let hrUser = null;
 
-            if (reportee.employeeId) {
-                // Try finding by employeeId first
-                reporteeUser = await User.findOne({ employeeId: reportee.employeeId });
+            if (hrResp.employeeId) {
+                hrUser = await User.findOne({ employeeId: hrResp.employeeId });
             }
 
-            if (!reporteeUser) {
-                // Fallback: search by email
-                const mEmail = reportee.companyEmail || reportee.workEmail || reportee.email;
-                if (mEmail) {
-                    reporteeUser = await User.findOne({
-                        $or: [{ email: mEmail }, { username: mEmail }, { companyEmail: mEmail }]
-                    });
-                }
-            }
-
-            // Assign ID (Prefer User ID, fallback to Employee ID if no user account exists)
-            const assignmentId = reporteeUser ? reporteeUser._id : reportee._id;
+            const assignmentId = hrUser ? hrUser._id : hrResp.empObjectId;
 
             loanData.submittedTo = assignmentId;
             loanData.workflow = [{
-                role: 'Manager',
+                role: 'HR Admin',
                 assignedTo: assignmentId,
                 status: 'Pending',
                 assignedAt: new Date()
             }];
 
-            console.log(`[RequestLoan] Loan Pushed for Manager: ${reportee.employeeId} (Account: ${reporteeUser ? 'Found' : 'Missing - Falling back to Employee ID'})`);
+            console.log(`[RequestLoan] Loan Pushed for HR: ${hrResp.employeeId} (Account: ${hrUser ? 'Found' : 'Missing'})`);
         }
 
         const newLoan = new Loan(loanData);
         const savedLoan = await newLoan.save();
 
         // 3. Sync with Dashboard Action Table
-        if (targetStatus === 'Pending') {
+        if (targetStatus === 'Pending HR') {
             const { syncDashboardAction } = await import("../../utils/syncDashboard.js");
             await syncDashboardAction({
                 requestId: savedLoan._id,
                 requestType: 'Loan',
-                assignedTo: reportee._id, // Use Employee ID for assignment
+                assignedTo: hrResp.empObjectId, // Use Employee Object ID for assignment
                 status: 'Pending',
                 subjectEmployee: employeeBasic,
                 extra1: `AED ${amount}`,
@@ -206,8 +197,11 @@ export const requestLoan = async (req, res) => {
         }
 
         // 4. Send Email ONLY if Submit for Approval
-        if (targetStatus === 'Pending' && reportee) {
-            const reporteeEmail = reportee.companyEmail || reportee.workEmail || reportee.email;
+        if (targetStatus === 'Pending HR' && hrResp) {
+            // Find HR employee basic to get their email
+            const hrEmployee = await EmployeeBasic.findById(hrResp.empObjectId);
+            const reporteeEmail = hrEmployee?.companyEmail || hrEmployee?.workEmail || hrEmployee?.email || hrResp.email || 'hr@vitsllc.com';
+
             if (reporteeEmail) {
                 const emailUser = process.env.EMAIL_USER?.trim();
                 const emailPass = process.env.EMAIL_PASS?.trim();
@@ -221,7 +215,7 @@ export const requestLoan = async (req, res) => {
                     });
 
                     const employeeName = `${employeeBasic.firstName || ""} ${employeeBasic.lastName || ""}`.trim();
-                    const reporteeName = `${reportee.firstName || ""} ${reportee.lastName || ""}`.trim();
+                    const reporteeName = hrEmployee ? `${hrEmployee.firstName || ""} ${hrEmployee.lastName || ""}`.trim() : 'HR Administrator';
                     const subject = `[NEW] ${type} Application: ${employeeName}`;
 
                     // Dynamic URL
@@ -273,10 +267,9 @@ export const requestLoan = async (req, res) => {
                                     <h4 style="margin: 0 0 10px 0; font-size: 14px; color: #1e293b; text-transform: uppercase; letter-spacing: 0.05em;">Initial Workflow Steps:</h4>
                                     <div style="font-size: 12px; color: #64748b;">
                                         <div style="margin-bottom: 5px;">✅ 1. Submission (Completed)</div>
-                                        <div style="margin-bottom: 5px;">⏳ 2. Line Manager Approval (Pending)</div>
-                                        <div style="margin-bottom: 5px;">◽ 3. HR Verification</div>
-                                        <div style="margin-bottom: 5px;">◽ 4. Finance Approval</div>
-                                        <div style="margin-bottom: 5px;">◽ 5. Final Management Authorization</div>
+                                        <div style="margin-bottom: 5px;">⏳ 2. HR Verification (Pending)</div>
+                                        <div style="margin-bottom: 5px;">◽ 3. Finance Approval</div>
+                                        <div style="margin-bottom: 5px;">◽ 4. Final Management Authorization</div>
                                     </div>
                                 </div>
                                 

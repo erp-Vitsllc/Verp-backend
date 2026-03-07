@@ -36,12 +36,12 @@ export const sendAssetActionApprovalEmail = async (asset, actionType, manager, r
         });
 
         const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
-        const link = `${frontendUrl}/HRM/Asset/details/${asset._id}?authAction=${actionType === 'End of Life' ? 'eol' : 'damage'}`;
+        const link = `${frontendUrl}/HRM/Asset/details/${asset._id}?authAction=${actionType === 'End of Life' ? 'eol' : actionType === 'Transfer' ? 'transfer' : 'damage'}`;
 
         const htmlContent = `
             <div style="font-family: Arial, sans-serif; color: #333; max-width: 600px; margin: 0 auto; border: 1px solid #eaeaea; border-radius: 8px; overflow: hidden;">
                 <div style="background-color: #f8f9fa; padding: 20px; border-bottom: 1px solid #eaeaea;">
-                    <h2 style="color: #dc3545; margin: 0;">Asset Action Approval Required</h2>
+                    <h2 style="color: ${actionType === 'Transfer' ? '#2563eb' : '#dc3545'}; margin: 0;">Asset Action Approval Required</h2>
                     <p style="margin: 5px 0 0; color: #666;">Asset: <strong>${asset.assetId} - ${asset.name}</strong></p>
                 </div>
                 

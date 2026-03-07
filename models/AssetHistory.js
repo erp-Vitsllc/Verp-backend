@@ -9,11 +9,20 @@ const assetHistorySchema = mongoose.Schema({
     action: {
         type: String,
         required: true,
-        enum: ['Assigned', 'Accepted', 'Rejected', 'Returned', 'Unassigned', 'Comment', 'Service', 'Restored', 'Live', 'End of Life', 'Out of Service']
+        enum: ['Created', 'Assigned', 'Accepted', 'Rejected', 'Returned', 'Unassigned', 'Comment', 'Service', 'Restored', 'Live', 'End of Life', 'Out of Service', 'Service Send', 'Service Receive']
     },
     assignedTo: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'EmployeeBasic'
+    },
+    assignedToType: {
+        type: String,
+        enum: ['Employee', 'Company'],
+        default: 'Employee'
+    },
+    assignedCompany: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Company'
     },
     performedBy: {
         type: mongoose.Schema.Types.ObjectId,

@@ -70,6 +70,16 @@ const assetItemSchema = new mongoose.Schema({
         type: mongoose.Schema.Types.ObjectId,
         ref: 'EmployeeBasic'
     },
+    assignedToType: {
+        type: String,
+        enum: ['Employee', 'Company'],
+        default: 'Employee'
+    },
+    assignedCompany: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Company',
+        default: null
+    },
     assignedBy: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'EmployeeBasic'

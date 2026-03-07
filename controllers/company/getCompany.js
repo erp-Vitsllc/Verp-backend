@@ -29,6 +29,7 @@ export const getCompany = async (req, res) => {
         const companyObj = company.toObject();
 
         const { getSignedFileUrl } = await import("../../utils/s3Upload.js");
+        const AssetItem = await import("../../models/AssetItem.js").then(m => m.default);
 
         // Core Documents
         if (companyObj.tradeLicenseAttachment) {
@@ -39,6 +40,38 @@ export const getCompany = async (req, res) => {
         }
         if (companyObj.logo) {
             companyObj.logo = await getSignedFileUrl(companyObj.logo);
+        }
+
+        // Add Financial stats to responsibilities for FlowChart display
+        if (companyObj.responsibilities && Array.isArray(companyObj.responsibilities)) {
+            for (const resp of companyObj.responsibilities) {
+                if (resp.empObjectId) {
+                    try {
+                        const assets = await AssetItem.find({ assignedTo: resp.empObjectId, status: 'Assigned' });
+                        let totalAssetValue = 0;
+                        let totalAccValue = 0;
+
+                        assets.forEach(asset => {
+                            totalAssetValue += (Number(asset.assetValue) || 0);
+                            if (asset.accessories && Array.isArray(asset.accessories)) {
+                                asset.accessories.forEach(acc => {
+                                    if (acc.status === 'Attached') {
+                                        totalAccValue += (Number(acc.amount) || 0);
+                                    }
+                                });
+                            }
+                        });
+
+                        resp.financials = {
+                            assetValue: totalAssetValue,
+                            accValue: totalAccValue
+                        };
+                    } catch (err) {
+                        console.error(`Error calculating financials for employee ${resp.employeeId}:`, err);
+                        resp.financials = { assetValue: 0, accValue: 0 };
+                    }
+                }
+            }
         }
 
         // Owners Documents

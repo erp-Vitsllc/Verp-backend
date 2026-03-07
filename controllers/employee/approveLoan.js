@@ -6,6 +6,8 @@ import nodemailer from "nodemailer";
 import { getManagementHOD } from "../../utils/getManagementHOD.js";
 import { sendHODAuthorizationEmail } from "../../utils/sendHODAuthorizationEmail.js";
 import { getDepartmentHOD } from "../../utils/getDepartmentHOD.js";
+import { getCompleteEmployee } from "../../services/employeeService.js";
+import Company from "../../models/Company.js";
 
 export const approveLoan = async (req, res) => {
     try {
@@ -78,31 +80,39 @@ export const approveLoan = async (req, res) => {
                 return res.status(400).json({ message: "Only Draft requests can be submitted for approval." });
             }
 
-            const applicant = await EmployeeBasic.findOne({ employeeId: loan.employeeId }).populate('primaryReportee');
-            if (!applicant?.primaryReportee) {
-                return res.status(400).json({ message: "Reporting manager not assigned. Please contact HR." });
+            const applicant = await getCompleteEmployee(loan.employeeId);
+            let hrResp = null;
+            if (applicant?.company?._id) {
+                const applicantCompany = await Company.findById(applicant.company._id);
+                hrResp = applicantCompany?.responsibilities?.find(r => r.category === 'hr' && r.status === 'Active');
+            }
+
+            if (!hrResp) {
+                return res.status(400).json({ message: "HR Admin not assigned for your company. Please wait until an HR is assigned." });
             }
 
             publicStatus = 'Pending';
-            nextStage = 'Pending';
-            nextApprover = applicant.primaryReportee;
+            nextStage = 'Pending HR';
 
-            // Define nextAssignmentId here
-            const nextUser = await User.findOne({ employeeId: nextApprover.employeeId });
-            const nextAssignmentId = nextUser ? nextUser._id : nextApprover._id;
+            let hrUser = null;
+            if (hrResp.employeeId) {
+                hrUser = await User.findOne({ employeeId: hrResp.employeeId });
+            }
+            const nextAssignmentId = hrUser ? hrUser._id : hrResp.empObjectId;
+            nextApprover = await EmployeeBasic.findById(hrResp.empObjectId);
 
             emailSubject = "New Loan/Advance Request for Review";
-            emailType = "Manager";
+            emailType = "HR";
 
             // Set initial workflow
             loan.workflow = [{
-                role: 'Manager',
+                role: 'HR Admin',
                 assignedTo: nextAssignmentId,
                 status: 'Pending',
                 assignedAt: new Date()
             }];
 
-            console.log(`[ApproveLoan] Draft -> Pending transition for Manager: ${nextApprover.employeeId}`);
+            console.log(`[ApproveLoan] Draft -> Pending HR transition. Assigned to: ${hrResp.employeeId}`);
         }
         else if (status === 'Approved') {
             // APPROVAL LOGIC
@@ -111,31 +121,8 @@ export const approveLoan = async (req, res) => {
                 nextStage = 'Approved';
             } else if (approverBasic) {
 
-                // 1. MANAGER STAGE (Pending -> Pending HR)
-                if (currentStage === 'Pending') {
-                    // Check if approver is the manager
-                    const applicant = await EmployeeBasic.findOne({ employeeId: loan.employeeId }).populate('primaryReportee');
-                    // NEW: Robust identity check (ID or Email)
-                    const isReporteeManager = applicant?.primaryReportee?._id?.toString() === approverBasic._id.toString();
-                    const reporterEmail = applicant?.primaryReportee?.companyEmail || applicant?.primaryReportee?.email;
-                    const approverEmail = approverBasic.companyEmail || approverBasic.email;
-                    const isEmailMatch = reporterEmail && approverEmail && reporterEmail.toLowerCase() === approverEmail.toLowerCase();
-
-                    if (isReporteeManager || isEmailMatch) {
-                        nextStage = 'Pending HR';
-                        publicStatus = 'Pending'; // Keep visible status as Pending for HR
-
-                        loan.managerApprovedBy = approverBasic._id;
-                        nextApprover = await getDepartmentHOD('hr', loan.employeeObjectId);
-                        console.log('[Loan]', loan.loanId, 'Manager Approved. Next HR Approver:', nextApprover ? `${nextApprover.firstName} ${nextApprover.lastName}` : 'NOT FOUND');
-                        emailSubject = "Loan Pending HR Approval";
-                        emailType = "HR";
-                    } else {
-                        return res.status(403).json({ message: "Only the reporting manager can approve at this stage" });
-                    }
-                }
-                // 2. HR STAGE (Pending HR -> Pending Accounts)
-                else if (currentStage === 'Pending HR') {
+                // 1. HR STAGE (Pending OR Pending HR -> Pending Accounts)
+                if (currentStage === 'Pending' || currentStage === 'Pending HR') {
                     const isHR = approverBasic.department && /human resource|hr|hrm/i.test(approverBasic.department) || (approverBasic.designation && /hr/i.test(approverBasic.designation));
                     const isAssignedHR = loan.submittedTo && (String(loan.submittedTo) === String(requestingUserId) || String(loan.submittedTo) === String(approverBasic._id));
 
@@ -218,30 +205,7 @@ export const approveLoan = async (req, res) => {
 
             // WORKFLOW UPDATES
             if (nextStage === 'Pending HR') {
-                // 1. Manager Step (Approved)
-                if (!loan.workflow) loan.workflow = [];
-                const managerEntry = loan.workflow.find(w =>
-                    w.status === 'Pending' &&
-                    (w.role === 'Manager' || w.assignedTo?.toString() === approverBasic?._id?.toString() || w.assignedTo?.toString() === userObj?._id?.toString())
-                );
-
-                if (managerEntry) {
-                    managerEntry.status = 'Approved';
-                    managerEntry.actionedAt = new Date();
-                    if (!managerEntry.role) managerEntry.role = 'Manager';
-                } else {
-                    // Fallback
-                    const managerUser = await User.findOne({ employeeId: approverBasic?.employeeId });
-                    loan.workflow.push({
-                        role: 'Manager',
-                        assignedTo: managerUser ? managerUser._id : (approverBasic ? approverBasic._id : requestingUserId),
-                        status: 'Approved',
-                        assignedAt: loan.createdAt,
-                        actionedAt: new Date()
-                    });
-                }
-
-                // 2. HR Step (Pending)
+                // If it got pushed to Pending HR, it means it was a Draft submission
                 loan.workflow.push({
                     role: 'HR',
                     assignedTo: nextAssignmentId,

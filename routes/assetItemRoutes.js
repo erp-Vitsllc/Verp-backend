@@ -3,13 +3,64 @@ import { createAssetItem, getAssetItems, getAllAssignedAssets, getUnassignedAsse
 import { protect } from '../middleware/authMiddleware.js';
 import { getDepartmentHOD } from '../utils/getDepartmentHOD.js';
 
-const requireAssetController = async (req, res, next) => {
+/**
+ * Middleware to restrict access to Asset Controller or Admin only.
+ * Used for creating assets, assigning, and operations on UNASSIGNED assets.
+ */
+const requireAssetControllerOrAdmin = async (req, res, next) => {
     try {
-        const assetController = await getDepartmentHOD('assetcontroller');
-        if (!assetController) {
-            return res.status(403).json({ message: 'Asset Controller must be assigned in the Global Settings (Flowchart) before performing asset operations.' });
+        const isAdmin = req.user.isAdmin === true || req.user.role === 'Admin' || req.user.role === 'ROOT';
+        if (isAdmin) return next();
+
+        const assetController = await getDepartmentHOD('assetcontroller', req.user.employeeObjectId);
+        const isAssetController = assetController && assetController._id.toString() === req.user.employeeObjectId?.toString();
+
+        if (!isAssetController) {
+            return res.status(403).json({ message: 'Access denied. Only Asset Controller or Admin can perform this operation.' });
         }
         next();
+    } catch (error) {
+        next(error);
+    }
+};
+
+/**
+ * Middleware for granular asset CRUD operations.
+ * 1. If asset is UNASSIGNED: Only Asset Controller or Admin.
+ * 2. If asset is ASSIGNED: Asset Controller, Admin, or the ASSIGNED USER.
+ */
+const requireAssetFullAccess = async (req, res, next) => {
+    try {
+        const { id } = req.params;
+        const isAdmin = req.user.isAdmin === true || req.user.role === 'Admin' || req.user.role === 'ROOT';
+        const assetController = await getDepartmentHOD('assetcontroller', req.user.employeeObjectId);
+        const isAssetController = assetController && assetController._id.toString() === req.user.employeeObjectId?.toString();
+
+        // Admin & Asset Controller always have full access
+        if (isAdmin || isAssetController) return next();
+
+        // Specific Asset Access
+        if (id) {
+            const AssetItem = (await import('../models/AssetItem.js')).default;
+            const asset = await AssetItem.findById(id).select('assignedTo status actionRequiredBy');
+            if (asset) {
+                const currentUserId = req.user.employeeObjectId?.toString();
+
+                // 1. Allow if Assigned User (unless asset is explicitly unassigned or in draft/creation phase)
+                const isAssignedUser = asset.assignedTo?.toString() === currentUserId;
+                if (isAssignedUser && asset.status !== 'Unassigned' && asset.status !== 'Draft') {
+                    return next();
+                }
+
+                // 2. Allow if the current action is specifically required from this user (e.g., Transfer recipient, Manager, HOD)
+                const isActionRequiredByMe = asset.actionRequiredBy?.toString() === currentUserId;
+                if (isActionRequiredByMe) {
+                    return next();
+                }
+            }
+        }
+
+        return res.status(403).json({ message: 'Access denied. You do not have permission to modify this asset.' });
     } catch (error) {
         next(error);
     }
@@ -18,7 +69,7 @@ const requireAssetController = async (req, res, next) => {
 const router = express.Router();
 
 router.route('/')
-    .post(protect, requireAssetController, createAssetItem);
+    .post(protect, requireAssetControllerOrAdmin, createAssetItem);
 
 router.get('/assigned/all', protect, getAllAssignedAssets);
 router.get('/unassigned/controller/:employeeId', protect, getUnassignedAssetsForEmployee);
@@ -28,32 +79,32 @@ router.get('/:id/history', protect, getAssetHistory);
 router.get('/history-record/:historyId', protect, getHistoryRecord);
 router.get('/handover-pdf/:id', protect, downloadHandoverPdf);
 router.get('/history-handover-pdf/:historyId', protect, downloadHistoryHandoverPdf);
-router.put('/bulk/assign', protect, requireAssetController, bulkAssignAssetItems);
-router.put('/:id/assign', protect, requireAssetController, assignAssetItem);
-router.put('/:id/respond', protect, requireAssetController, respondToAssignment);
-router.put('/:id/approve-creation', protect, requireAssetController, respondToAssetCreation);
-router.put('/:id/return', protect, requireAssetController, returnAssetItem);
-router.put('/:id/status', protect, requireAssetController, updateAssetStatus);
-router.post('/:id/document', protect, requireAssetController, addAssetDocument);
-router.put('/:id/document/:docId', protect, requireAssetController, updateAssetDocument);
-router.delete('/:id/document/:docId', protect, requireAssetController, deleteAssetDocument);
-router.post('/:id/service', protect, requireAssetController, addAssetService);
-router.post('/:id/images', protect, requireAssetController, addAssetImage);
-router.delete('/:id/images/:imageId', protect, requireAssetController, deleteAssetImage);
+router.put('/bulk/assign', protect, requireAssetControllerOrAdmin, bulkAssignAssetItems);
+router.put('/:id/assign', protect, requireAssetControllerOrAdmin, assignAssetItem);
+router.put('/:id/respond', protect, requireAssetFullAccess, respondToAssignment);
+router.put('/:id/approve-creation', protect, requireAssetControllerOrAdmin, respondToAssetCreation);
+router.put('/:id/return', protect, requireAssetControllerOrAdmin, returnAssetItem);
+router.put('/:id/status', protect, requireAssetFullAccess, updateAssetStatus);
+router.post('/:id/document', protect, requireAssetFullAccess, addAssetDocument);
+router.put('/:id/document/:docId', protect, requireAssetFullAccess, updateAssetDocument);
+router.delete('/:id/document/:docId', protect, requireAssetControllerOrAdmin, deleteAssetDocument);
+router.post('/:id/service', protect, requireAssetFullAccess, addAssetService);
+router.post('/:id/images', protect, requireAssetFullAccess, addAssetImage);
+router.delete('/:id/images/:imageId', protect, requireAssetControllerOrAdmin, deleteAssetImage);
 
-router.put('/:id', protect, requireAssetController, updateAssetItem);
-router.put('/:id/end-of-life', protect, requireAssetController, endOfLifeAsset);
-router.put('/:id/request-action', protect, requireAssetController, requestAssetAction);
-router.put('/:id/approve-action', protect, requireAssetController, handleAssetActionApproval);
-router.put('/:id/finalize-action', protect, requireAssetController, finalizeAssetAction);
+router.put('/:id', protect, requireAssetControllerOrAdmin, updateAssetItem);
+router.put('/:id/end-of-life', protect, requireAssetFullAccess, endOfLifeAsset);
+router.put('/:id/request-action', protect, requireAssetFullAccess, requestAssetAction);
+router.put('/:id/approve-action', protect, requireAssetControllerOrAdmin, handleAssetActionApproval);
+router.put('/:id/finalize-action', protect, requireAssetControllerOrAdmin, finalizeAssetAction);
 
 // Accessories
-router.put('/:id/accessories/:accId/transfer', protect, requireAssetController, transferAssetAccessory);
-router.put('/:id/accessories/:accId/status', protect, requireAssetController, manageAccessoryStatus);
-router.put('/:id/accessories-attachment', protect, requireAssetController, uploadAccessoriesAttachment);
-router.put('/:id/accessories/:accId/request-action', protect, requireAssetController, requestAccessoryAction);
-router.put('/:id/accessories/:accId/respond-action', protect, requireAssetController, respondAccessoryAction);
-router.put('/:id/accessories/:accId/finalize-action', protect, requireAssetController, finalizeAccessoryAction);
+router.put('/:id/accessories/:accId/transfer', protect, requireAssetControllerOrAdmin, transferAssetAccessory);
+router.put('/:id/accessories/:accId/status', protect, requireAssetFullAccess, manageAccessoryStatus);
+router.put('/:id/accessories-attachment', protect, requireAssetFullAccess, uploadAccessoriesAttachment);
+router.put('/:id/accessories/:accId/request-action', protect, requireAssetFullAccess, requestAccessoryAction);
+router.put('/:id/accessories/:accId/respond-action', protect, requireAssetFullAccess, respondAccessoryAction);
+router.put('/:id/accessories/:accId/finalize-action', protect, requireAssetControllerOrAdmin, finalizeAccessoryAction);
 
 router.route('/:typeId')
     .get(protect, getAssetItems);

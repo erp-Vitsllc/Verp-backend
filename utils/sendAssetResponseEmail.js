@@ -1,6 +1,6 @@
 import nodemailer from "nodemailer";
 
-export const sendAssetResponseEmail = async ({ asset, actor, recipient, action, comment }) => {
+export const sendAssetResponseEmail = async ({ asset, actor, recipient, action, comment, assignedToType, assignedCompany }) => {
     try {
         const recipientEmail = recipient.companyEmail || recipient.workEmail || recipient.email;
         if (!recipientEmail) {
@@ -29,23 +29,28 @@ export const sendAssetResponseEmail = async ({ asset, actor, recipient, action, 
         const actorName = `${actor.firstName || ""} ${actor.lastName || ""}`.trim();
         const assetName = asset.name;
 
-        const isSelfRecipient = recipient._id?.toString() === asset.assignedTo?._id?.toString();
-        const subjectRecipientPart = isSelfRecipient ? "Assigned to You" : `for ${asset.assignedTo?.firstName || "Employee"}`;
+        const subjectRecipientName = assignedToType === 'Company' ? (assignedCompany?.name || "Company") : (asset.assignedTo?.firstName || "Employee");
+        const isSelfRecipient = assignedToType === 'Employee' && recipient._id?.toString() === asset.assignedTo?._id?.toString();
+        const subjectRecipientPart = isSelfRecipient ? "Assigned to You" : `for ${subjectRecipientName}`;
+
+        let subject = "";
+        let actionDescription = "";
+        let color = "#3b82f6"; // blue default
 
         switch (action) {
             case 'Accept':
                 subject = `Asset Accepted: ${assetName} (${subjectRecipientPart})`;
-                actionDescription = `has <strong>ACCEPTED</strong> the assignment of asset <strong>${assetName}</strong> ${isSelfRecipient ? 'assigned to you' : (asset.assignedTo ? `for <strong>${asset.assignedTo.firstName}</strong>` : '')}.`;
+                actionDescription = `has <strong>ACCEPTED</strong> the assignment of asset <strong>${assetName}</strong> ${isSelfRecipient ? 'assigned to you' : (assignedToType === 'Company' ? `for <strong>${subjectRecipientName}</strong>` : `for <strong>${asset.assignedTo?.firstName || "Employee"}</strong>`)}.`;
                 color = "#10b981"; // emerald
                 break;
             case 'Reject':
                 subject = `Asset Rejected: ${assetName} (${subjectRecipientPart})`;
-                actionDescription = `has <strong>REJECTED</strong> the assignment of asset <strong>${assetName}</strong> ${isSelfRecipient ? 'assigned to you' : (asset.assignedTo ? `for <strong>${asset.assignedTo.firstName}</strong>` : '')}.`;
+                actionDescription = `has <strong>REJECTED</strong> the assignment of asset <strong>${assetName}</strong> ${isSelfRecipient ? 'assigned to you' : (assignedToType === 'Company' ? `for <strong>${subjectRecipientName}</strong>` : `for <strong>${asset.assignedTo?.firstName || "Employee"}</strong>`)}.`;
                 color = "#ef4444"; // red
                 break;
             case 'AcceptWithComments':
                 subject = `Asset Response: ${assetName} (${subjectRecipientPart})`;
-                actionDescription = `has sent a <strong>response/comment</strong> regarding the assignment of <strong>${assetName}</strong> ${isSelfRecipient ? 'assigned to you' : (asset.assignedTo ? `for <strong>${asset.assignedTo.firstName}</strong>` : '')}.`;
+                actionDescription = `has sent a <strong>response/comment</strong> regarding the assignment of <strong>${assetName}</strong> ${isSelfRecipient ? 'assigned to you' : (assignedToType === 'Company' ? `for <strong>${subjectRecipientName}</strong>` : `for <strong>${asset.assignedTo?.firstName || "Employee"}</strong>`)}.`;
                 color = "#3b82f6"; // blue
                 break;
         }

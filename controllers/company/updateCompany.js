@@ -1,4 +1,10 @@
 import Company from "../../models/Company.js";
+import EmployeeBasic from "../../models/EmployeeBasic.js";
+import User from "../../models/User.js";
+import DashboardAction from "../../models/DashboardAction.js";
+import { sendResponsibilityApprovalEmail } from "../../utils/sendResponsibilityApprovalEmail.js";
+import AssetItem from "../../models/AssetItem.js";
+import { getSignedFileUrl } from "../../utils/s3Upload.js";
 
 export const updateCompany = async (req, res) => {
     try {
@@ -17,27 +23,45 @@ export const updateCompany = async (req, res) => {
         const updateData = req.body;
 
         if (updateData.responsibilities && Array.isArray(updateData.responsibilities)) {
-            const EmployeeBasic = (await import("../../models/EmployeeBasic.js")).default;
-            const User = (await import("../../models/User.js")).default;
-
             const existingResps = company.responsibilities || [];
+
+            const isGlobal = updateData.isGlobalFlowUpdate === true;
+            const categoriesToHandle = ['hr', 'accounts', 'assetcontroller', 'management', 'admincontroller'];
+
+            for (const cat of categoriesToHandle) {
+                const existingActive = existingResps.find(r => r.category === cat && r.status === 'Active');
+                const newAssignee = updateData.responsibilities.find(r => r.category === cat && (!r.status || r.status === 'Pending' || r.status === 'Active'));
+
+                if (newAssignee && (!existingActive || existingActive.employeeId !== newAssignee.employeeId)) {
+                    // Force status to Pending for new assignments to ensure employee approval flow
+                    newAssignee.status = 'Pending';
+
+                    // If there was an existing one, we KEEP it as Active for continuity until approval
+                    if (existingActive && existingActive.employeeId !== newAssignee.employeeId) {
+                        const isOldInNew = updateData.responsibilities.some(r => r.employeeId === existingActive.employeeId && r.category === cat && r.status === 'Active');
+                        if (!isOldInNew) {
+                            const oldObj = existingActive.toObject ? existingActive.toObject() : existingActive;
+                            updateData.responsibilities.push({
+                                ...oldObj,
+                                status: 'Active'
+                            });
+                        }
+                    }
+                }
+            }
 
             for (const resp of updateData.responsibilities) {
                 if (!resp.employeeId) continue;
 
-                // Check if this specific assignment already exists to allow simple removals or non-responsibility updates
-                const isExisting = existingResps.some(er =>
-                    er.employeeId === resp.employeeId &&
-                    er.category === resp.category
-                );
-
-                if (isExisting) continue;
-
                 // Check employee exists and has company email
-                const employee = await EmployeeBasic.findOne({ employeeId: resp.employeeId });
+                const employee = await EmployeeBasic.findOne({
+                    employeeId: { $regex: new RegExp(`^${resp.employeeId}$`, 'i') }
+                });
                 if (!employee) {
                     return res.status(400).json({ message: `Employee ${resp.employeeId} not found` });
                 }
+
+                resp.empObjectId = employee._id;
 
                 if (!employee.companyEmail) {
                     return res.status(400).json({
@@ -46,11 +70,65 @@ export const updateCompany = async (req, res) => {
                 }
 
                 // Check if employee is also a user
-                const user = await User.findOne({ employeeId: resp.employeeId });
-                if (!user) {
+                const linkedUser = await User.findOne({ employeeId: resp.employeeId });
+                if (!linkedUser) {
                     return res.status(400).json({
                         message: `Employee ${employee.firstName} ${employee.lastName} (${resp.employeeId}) cannot be assigned a responsibility because they are not registered as a system user.`
                     });
+                }
+
+                // Trigger notifications for ANY pending responsibility
+                if (resp.status === 'Pending') {
+                    // Check if we already have a pending dashboard action for this specific role and employee
+                    const existingAction = await DashboardAction.findOne({
+                        assignedTo: employee._id,
+                        requestType: 'Responsibility Approval',
+                        status: 'Pending',
+                        extra1: resp.category
+                    });
+
+                    if (!existingAction) {
+                        try {
+                            const newAction = await DashboardAction.create({
+                                assignedTo: employee._id,
+                                assignedToEmpId: employee.employeeId,
+                                requestId: company._id,
+                                requestType: 'Responsibility Approval',
+                                subjectEmployeeId: employee.employeeId,
+                                subjectName: `${employee.firstName} ${employee.lastName}`,
+                                requestedByName: req.user.name || 'Admin',
+                                extra1: resp.category,
+                                extra2: isGlobal ? 'All Companies' : company.name,
+                                status: 'Pending',
+                                isGlobal: isGlobal
+                            });
+
+                            // Role label for email
+                            const roleLabels = {
+                                'hr': 'HR Admin',
+                                'accounts': 'Financial Controller',
+                                'assetcontroller': 'Asset Controller',
+                                'management': 'General Management',
+                                'admincontroller': 'System Admin'
+                            };
+
+                            // Fetch unassigned assets ONLY for assetcontroller
+                            let unassignedAssets = [];
+                            if (resp.category === 'assetcontroller') {
+                                unassignedAssets = await AssetItem.find({ status: 'Unassigned' }).select('assetId name');
+                            }
+
+                            await sendResponsibilityApprovalEmail({
+                                employee: employee,
+                                companyName: isGlobal ? 'All Companies' : company.name,
+                                category: roleLabels[resp.category] || resp.category,
+                                requestId: newAction._id,
+                                unassignedAssets: unassignedAssets
+                            });
+                        } catch (err) {
+                            console.error(`Error creating responsibility approval action/email for ${resp.category}:`, err);
+                        }
+                    }
                 }
             }
         }
@@ -63,7 +141,6 @@ export const updateCompany = async (req, res) => {
 
         // Generate signed URLs for updated documents
         const companyObj = updatedCompany.toObject();
-        const { getSignedFileUrl } = await import("../../utils/s3Upload.js");
 
         // Core Documents
         if (companyObj.tradeLicenseAttachment) {
