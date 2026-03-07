@@ -1,6 +1,7 @@
 import AssetType from '../models/AssetType.js';
 import AssetCategory from '../models/AssetCategory.js';
 import AssetItem from '../models/AssetItem.js';
+import AssetHistory from '../models/AssetHistory.js';
 import DashboardAction from '../models/DashboardAction.js';
 import { getDepartmentHOD } from '../utils/getDepartmentHOD.js';
 import mongoose from 'mongoose';
@@ -237,6 +238,24 @@ export const createAssetType = async (req, res) => {
 
                 const newAsset = await AssetItem.create(assetData);
                 createdAssets.push(newAsset.toObject());
+
+                // Create asset creation history entry
+                await AssetHistory.create({
+                    assetId: newAsset._id,
+                    action: 'Created',
+                    performedBy: req.user.employeeObjectId,
+                    details: {
+                        purchaseDate: purchaseDate || null,
+                        invoiceNumber: invoiceNumber || null,
+                        invoiceFile: invoiceFile || null,
+                        invoiceStatus: invoiceFile ? 'Received' : 'Pending',
+                        assetName: name,
+                        assetValue: Number(assetValue),
+                        createdBy: req.user.name || 'System User',
+                        creationStatus: initialStatus
+                    },
+                    date: new Date()
+                });
             }
 
             // Notification Logic (Batch-level)

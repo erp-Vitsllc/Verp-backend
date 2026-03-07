@@ -23,11 +23,11 @@ const requireAssetControllerOrAdmin = async (req, res, next) => {
 const router = express.Router();
 
 router.route('/')
-    .post(protect, requireAssetControllerOrAdmin, createAssetType)
+    .post(protect, createAssetType)
     .get(protect, getAssetTypes);
 
 router.route('/upload')
-    .post(protect, requireAssetControllerOrAdmin, uploadInvoice);
+    .post(protect, uploadInvoice);
 
 router.route('/:id')
     .delete(protect, requireAssetControllerOrAdmin, deleteAssetType)

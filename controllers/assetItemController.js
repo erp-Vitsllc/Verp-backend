@@ -1717,6 +1717,7 @@ export const getAssetHistory = async (req, res) => {
             if (recordObj.details) {
                 const d = recordObj.details;
                 if (d.invoice) d.invoice = await getSignedFileUrl(d.invoice);
+                if (d.invoiceFile) d.invoiceFile = await getSignedFileUrl(d.invoiceFile);
 
                 // Sign assignedBy signature inside snapshot
                 if (d.assignedBy?.signature?.url) {
@@ -1758,6 +1759,11 @@ export const getHistoryRecord = async (req, res) => {
         const recordObj = record.toObject();
         if (recordObj.file) {
             recordObj.file = await getSignedFileUrl(recordObj.file);
+        }
+        if (recordObj.details) {
+            const d = recordObj.details;
+            if (d.invoice) d.invoice = await getSignedFileUrl(d.invoice);
+            if (d.invoiceFile) d.invoiceFile = await getSignedFileUrl(d.invoiceFile);
         }
 
         res.status(200).json(recordObj);

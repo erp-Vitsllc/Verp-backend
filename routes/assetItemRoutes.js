@@ -69,7 +69,7 @@ const requireAssetFullAccess = async (req, res, next) => {
 const router = express.Router();
 
 router.route('/')
-    .post(protect, requireAssetControllerOrAdmin, createAssetItem);
+    .post(protect, createAssetItem);
 
 router.get('/assigned/all', protect, getAllAssignedAssets);
 router.get('/unassigned/controller/:employeeId', protect, getUnassignedAssetsForEmployee);
