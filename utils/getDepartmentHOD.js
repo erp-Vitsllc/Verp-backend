@@ -1,14 +1,13 @@
 // getDepartmentHOD.js
 import EmployeeBasic from "../models/EmployeeBasic.js";
-import Company from "../models/Company.js"; // Import at top level
+import Company from "../models/Company.js";
 
 /**
- * Retrieves the HOD (Head of Department) from Company Responsibilities ONLY.
- * @param {string} departmentType The department type ('hr', 'accounts', 'finance').
- * @param {string} identifier  Optional: The companyId (String ID) or employee's ObjectId/String ID to find their company.
+ * Retrieves the HOD (Head of Department) from the primary ERP Main Flowchart (EST-001) ONLY.
+ * @param {string} departmentType The department type ('hr', 'accounts', 'finance', 'assetcontroller').
  * @returns {Promise<Object|null>} The HOD employee object or null if not found.
  */
-export const getDepartmentHOD = async (departmentType, identifier = null) => {
+export const getDepartmentHOD = async (departmentType) => {
     try {
         const type = departmentType.toLowerCase();
         let category = type;
@@ -18,66 +17,23 @@ export const getDepartmentHOD = async (departmentType, identifier = null) => {
             category = 'accounts';
         }
 
-        let targetCompanyId = null;
+        // ERP MAIN FLOWCHART: Always take from the master company EST-001.
+        // This ensures one universal management structure for all assets and employees.
+        const mainCompany = await Company.findOne({ companyId: "EST-001" });
 
-        // 1. Resolve Company ID
-        if (identifier) {
-            const idStr = String(identifier);
-            if (idStr.match(/^[0-9a-fA-F]{24}$/)) {
-                // Could be Company _id or Employee _id
-                const directComp = await Company.findById(identifier).select('_id');
-                if (directComp) {
-                    targetCompanyId = directComp._id;
-                } else {
-                    const emp = await EmployeeBasic.findById(identifier).select('company');
-                    if (emp && emp.company) targetCompanyId = emp.company;
-                }
-            } else {
-                // Try companyId (e.g. EST-001)
-                const comp = await Company.findOne({ companyId: identifier }).select('_id');
-                if (comp) {
-                    targetCompanyId = comp._id;
-                } else {
-                    const emp = await EmployeeBasic.findOne({ employeeId: identifier }).select('company');
-                    if (emp && emp.company) targetCompanyId = emp.company;
-                }
-            }
-        }
-
-        // 2. Try Specific Company first
-        if (targetCompanyId) {
-            const company = await Company.findById(targetCompanyId);
-            if (company) {
-                const responsibility = company.responsibilities?.find(r =>
-                    r.category && r.category.toLowerCase() === category && r.status === 'Active'
-                );
-                if (responsibility && responsibility.empObjectId) {
-                    const delegatedEmp = await EmployeeBasic.findById(responsibility.empObjectId)
-                        .select('employeeId firstName lastName companyEmail email designation department profileStatus signature');
-                    if (delegatedEmp) return delegatedEmp;
-                }
-            }
-        }
-
-        // 3. Centralized Fallback:
-        // If not found in specific company, find the first active responsibility of this category anywhere.
-        // The user says "entire erp npt depends omn a or any company"
-        const allCompanies = await Company.find({ 'responsibilities.category': category, 'responsibilities.status': 'Active' });
-        for (const comp of allCompanies) {
-            const responsibility = comp.responsibilities.find(r => r.category.toLowerCase() === category && r.status === 'Active');
+        if (mainCompany) {
+            const responsibility = mainCompany.responsibilities?.find(r =>
+                r.category && r.category.toLowerCase() === category && r.status === 'Active'
+            );
             if (responsibility && responsibility.empObjectId) {
-                const delegatedEmp = await EmployeeBasic.findById(responsibility.empObjectId)
+                return await EmployeeBasic.findById(responsibility.empObjectId)
                     .select('employeeId firstName lastName companyEmail email designation department profileStatus signature');
-                if (delegatedEmp) return delegatedEmp;
             }
         }
 
-        console.warn(`[getDepartmentHOD] No responsibility defined for ${category} anywhere in the system.`);
         return null;
-
     } catch (error) {
-        console.error(`[getDepartmentHOD] Error finding HOD for ${departmentType}:`, error);
+        console.error(`[getDepartmentHOD] Fatal:`, error);
         return null;
     }
 };
-

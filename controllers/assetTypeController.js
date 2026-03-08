@@ -151,6 +151,13 @@ export const createAssetType = async (req, res) => {
 
             // Approval Logic: Check if creator is Asset Controller or Admin
             const assetController = await getDepartmentHOD('assetcontroller', req.user.employeeObjectId);
+
+            if (!assetController) {
+                return res.status(403).json({
+                    message: "Asset creation denied: No Asset Controller has been assigned in the organization flow. Please assign an Asset Controller in Settings > Flowchart before performing this operation."
+                });
+            }
+
             const isAdmin = req.user.isAdmin === true || req.user.isAdministrator === true;
             const isAssetController = assetController && assetController._id.toString() === req.user.employeeObjectId?.toString();
 
@@ -164,6 +171,7 @@ export const createAssetType = async (req, res) => {
                 actionRequiredBy = assetController._id;
                 console.log(`[Asset creation (Bulk/Type)] Created as Draft by regular user ${req.user.employeeId}. Action required by Asset Controller ${assetController.employeeId}`);
             } else {
+                // This block should technically be unreachable now due to the 403 check above
                 initialStatus = 'Draft';
                 console.log(`[Asset creation (Bulk/Type)] Created as Draft by regular user ${req.user.employeeId}. NOTE: No Asset Controller found to process approval.`);
             }
@@ -497,8 +505,14 @@ export const updateAssetItem = async (req, res) => {
         const { id } = req.params;
         const updates = req.body;
 
-        // Determine what we are updating. For now assuming AssetItem as that's where accessories are.
-        // We can add logic for Type/Category if needed later.
+        // Approval Logic: Check if creator is Asset Controller or Admin
+        const assetController = await getDepartmentHOD('assetcontroller', req.user.employeeObjectId);
+
+        if (!assetController) {
+            return res.status(403).json({
+                message: "Asset update denied: No Asset Controller has been assigned in the organization flow. Please assign an Asset Controller in Settings > Flowchart before performing this operation."
+            });
+        }
 
         let asset = await AssetItem.findById(id);
         if (!asset) {
