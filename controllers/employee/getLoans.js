@@ -19,14 +19,19 @@ export const getLoans = async (req, res) => {
         // Transform data if needed
         const formattedLoans = loans.map(loan => ({
             id: loan._id,
+            _id: loan._id, // Include _id for compatibility
             loanId: loan.loanId, // Expose the sequential ID
             employeeId: loan.employeeId,
             employeeName: loan.employeeObjectId ? `${loan.employeeObjectId.firstName} ${loan.employeeObjectId.lastName}` : 'N/A',
             type: loan.type,
             amount: loan.amount,
+            duration: loan.duration, // Include duration for payment modal
+            monthStart: loan.monthStart, // Include monthStart for payment modal
+            paidAmount: loan.paidAmount || 0, // Include paidAmount for payment tracking
             status: loan.status, // Using 'status' field from model but user distincts 'advance Status' vs 'Application Status'.
             // Based on model 'status' and 'approvalStatus' are both Pending/Approved/Rejected.
             // I'll return both.
+            approvalStatus: loan.approvalStatus || loan.status, // Include approvalStatus for compatibility
             applicationStatus: loan.approvalStatus || loan.status,
             activeStatus: (loan.approvalStatus === 'Approved' || loan.status === 'Approved') ? 'Open' :
                 (loan.approvalStatus === 'Rejected' || loan.status === 'Rejected') ? 'Closed' : 'Pending',

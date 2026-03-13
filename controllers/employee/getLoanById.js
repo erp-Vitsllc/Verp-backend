@@ -76,6 +76,8 @@ export const getLoanById = async (req, res) => {
             amount: loan.amount,
             reason: loan.reason,
             duration: loan.duration,
+            monthStart: loan.monthStart, // Include monthStart for payment modal
+            paidAmount: loan.paidAmount || 0, // Include paidAmount for payment tracking
             type: loan.type,
             appliedDate: loan.appliedDate,
             status: loan.status,

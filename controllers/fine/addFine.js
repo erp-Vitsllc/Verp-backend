@@ -124,6 +124,22 @@ export const addFine = async (req, res) => {
 
         const { isBulk, employees, ...commonData } = req.body;
 
+        // VALIDATION: Check if HR HOD is assigned in Flowchart (required for all fines)
+        // This check applies before processing to prevent creating incomplete requests
+        const { getDepartmentHOD } = await import('../../utils/getDepartmentHOD.js');
+        let hrHOD = null;
+
+        // Only validate if not Draft status
+        const fineStatusToCheck = commonData.fineStatus || req.body.fineStatus;
+        if (fineStatusToCheck !== 'Draft') {
+            hrHOD = await getDepartmentHOD('hr');
+            if (!hrHOD) {
+                return res.status(400).json({
+                    message: "Cannot proceed. HR Admin designation is not assigned in Flowchart. Please assign HR Admin designation in Settings > FlowChart before creating a fine request."
+                });
+            }
+        }
+
         // --- BULK CREATION LOGIC ---
         // Support various array names: employees (new std), assignedEmployees (Project Damage), selectedEmployees (Other Damage)
         const bulkList = employees || commonData.assignedEmployees || commonData.selectedEmployees;
@@ -263,22 +279,18 @@ export const addFine = async (req, res) => {
                 };
 
                 // BULK: Route directly to HR (no reportee step)
-                if (finePayload.fineStatus !== 'Draft') {
+                if (finePayload.fineStatus !== 'Draft' && hrHOD) {
                     try {
-                        const { getDepartmentHOD } = await import('../../utils/getDepartmentHOD.js');
-                        const hrHOD = await getDepartmentHOD('hr', empData.employeeId);
-                        if (hrHOD) {
-                            const hrUser = await User.findOne({ employeeId: hrHOD.employeeId });
-                            if (hrUser) {
-                                finePayload.submittedTo = hrUser._id;
-                                finePayload.fineStatus = 'Pending HR';
-                                finePayload.workflow = [{
-                                    role: 'HR',
-                                    assignedTo: hrUser._id,
-                                    status: 'Pending',
-                                    assignedAt: new Date()
-                                }];
-                            }
+                        const hrUser = await User.findOne({ employeeId: hrHOD.employeeId });
+                        if (hrUser) {
+                            finePayload.submittedTo = hrUser._id;
+                            finePayload.fineStatus = 'Pending HR';
+                            finePayload.workflow = [{
+                                role: 'HR',
+                                assignedTo: hrUser._id,
+                                status: 'Pending',
+                                assignedAt: new Date()
+                            }];
                         }
                     } catch (snapErr) {
                         console.error('[AddFine] Error resolving HR for:', empData.employeeId, snapErr);
@@ -479,8 +491,7 @@ export const addFine = async (req, res) => {
 
             if (targetEmpId && targetEmpId !== 'PENDING') {
                 try {
-                    const { getDepartmentHOD } = await import('../../utils/getDepartmentHOD.js');
-                    const hrHOD = await getDepartmentHOD('hr', targetEmpId);
+                    // hrHOD already validated above
                     if (hrHOD) {
                         const hrUser = await User.findOne({ employeeId: hrHOD.employeeId });
                         if (hrUser) {

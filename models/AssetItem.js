@@ -86,7 +86,7 @@ const assetItemSchema = new mongoose.Schema({
     },
     status: {
         type: String,
-        enum: ['Assigned', 'Unassigned', 'Maintenance', 'On Service', 'Service', 'Lost', 'Returned', 'Pending', 'End of Life', 'Out of Service', 'Draft', 'Rejected'],
+        enum: ['Assigned', 'Unassigned', 'Maintenance', 'On Service', 'Service', 'Lost', 'Returned', 'Pending', 'End of Life', 'Out of Service', 'Draft', 'Rejected', 'On Leave'],
         default: 'Unassigned'
     },
     assignmentType: {
@@ -110,11 +110,23 @@ const assetItemSchema = new mongoose.Schema({
     },
     pendingAction: {
         type: String,
-        enum: ['End of Life', 'Loss and Damage', null],
+        enum: ['End of Life', 'Loss and Damage', 'Leave', 'Asset Transfer', null],
         default: null
     },
     pendingActionDetails: {
         type: mongoose.Schema.Types.Mixed,
+        default: null
+    },
+    onLeaveStartDate: {
+        type: Date,
+        default: null
+    },
+    onLeaveEndDate: {
+        type: Date,
+        default: null
+    },
+    onLeaveDuration: {
+        type: Number, // Duration in days
         default: null
     },
     acceptedBy: {

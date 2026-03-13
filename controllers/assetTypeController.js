@@ -3,7 +3,7 @@ import AssetCategory from '../models/AssetCategory.js';
 import AssetItem from '../models/AssetItem.js';
 import AssetHistory from '../models/AssetHistory.js';
 import DashboardAction from '../models/DashboardAction.js';
-import { getDepartmentHOD } from '../utils/getDepartmentHOD.js';
+import { getDepartmentHOD, isUserInFlowchart } from '../utils/getDepartmentHOD.js';
 import mongoose from 'mongoose';
 import { uploadDocumentToS3, getSignedFileUrl } from '../utils/s3Upload.js';
 import { sendAssetCreationApprovalEmail } from '../utils/sendAssetCreationApprovalEmail.js';
@@ -159,7 +159,7 @@ export const createAssetType = async (req, res) => {
             }
 
             const isAdmin = req.user.isAdmin === true || req.user.isAdministrator === true;
-            const isAssetController = assetController && assetController._id.toString() === req.user.employeeObjectId?.toString();
+            const isAssetController = await isUserInFlowchart(req.user, 'assetcontroller');
 
             let initialStatus = 'Draft';
             let actionRequiredBy = null;
@@ -171,9 +171,10 @@ export const createAssetType = async (req, res) => {
                 actionRequiredBy = assetController._id;
                 console.log(`[Asset creation (Bulk/Type)] Created as Draft by regular user ${req.user.employeeId}. Action required by Asset Controller ${assetController.employeeId}`);
             } else {
-                // This block should technically be unreachable now due to the 403 check above
-                initialStatus = 'Draft';
-                console.log(`[Asset creation (Bulk/Type)] Created as Draft by regular user ${req.user.employeeId}. NOTE: No Asset Controller found to process approval.`);
+                // No asset controller defined & user is not admin
+                return res.status(403).json({
+                    message: "Asset creation denied: No Asset Controller has been assigned in the organization flow. Please assign an Asset Controller in Settings > Flowchart before performing this operation."
+                });
             }
 
             const qty = Math.max(1, Number(quantity) || 1);
@@ -505,19 +506,23 @@ export const updateAssetItem = async (req, res) => {
         const { id } = req.params;
         const updates = req.body;
 
-        // Approval Logic: Check if creator is Asset Controller or Admin
-        const assetController = await getDepartmentHOD('assetcontroller', req.user.employeeObjectId);
-
-        if (!assetController) {
-            return res.status(403).json({
-                message: "Asset update denied: No Asset Controller has been assigned in the organization flow. Please assign an Asset Controller in Settings > Flowchart before performing this operation."
-            });
-        }
+        const isAdmin = req.user.isAdmin || req.user.role === 'Admin' || req.user.role === 'ROOT';
+        const isAssetController = await isUserInFlowchart(req.user, 'assetcontroller');
 
         let asset = await AssetItem.findById(id);
         if (!asset) {
-            // Fallback to check if it's a Type or Category if we expand this
             return res.status(404).json({ message: 'Asset not found' });
+        }
+
+        // Permission logic: Creator can edit if Draft or Pending
+        const currentUserId = req.user._id?.toString() || req.user.id?.toString();
+        const isCreator = asset.createdBy?.toString() === currentUserId;
+        const isAwaitingApproval = asset.status === 'Draft' || asset.status === 'Pending';
+
+        if (!isAdmin && !isAssetController) {
+            if (!(isCreator && isAwaitingApproval)) {
+                return res.status(403).json({ message: "Only Asset Controller or Admin can update assets after approval." });
+            }
         }
 
         // Apply updates
@@ -553,6 +558,19 @@ export const updateAssetItem = async (req, res) => {
         }
 
         await asset.save();
+
+        // Log to history
+        try {
+            await AssetHistory.create({
+                assetId: asset._id,
+                action: 'Update',
+                performedBy: req.user.employeeObjectId || req.user._id,
+                comments: 'Asset details updated via Edit modal.',
+                details: asset.toObject()
+            });
+        } catch (historyErr) {
+            console.error('History log failed during updateAssetItem:', historyErr);
+        }
 
         // Convert to object and sign the invoice URL before returning
         const assetObj = asset.toObject();

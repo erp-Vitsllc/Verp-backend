@@ -1,4 +1,4 @@
-﻿import mongoose from "mongoose";
+import mongoose from "mongoose";
 import EmployeeBasic from "../models/EmployeeBasic.js";
 import EmployeeContact from "../models/EmployeeContact.js";
 import EmployeePersonal from "../models/EmployeePersonal.js";
@@ -43,6 +43,7 @@ export const getCompleteEmployee = async (id) => {
                 .lean();
         } else {
             // It's an employeeId (string)
+            // Try exact match first
             employeeBasic = await EmployeeBasic.findOne({ employeeId: id }, null, queryOptions)
                 .select('-documents.document.data -trainingDetails.certificate.data')
                 .populate('reportingAuthority', 'firstName lastName employeeId email workEmail companyEmail')
@@ -50,6 +51,21 @@ export const getCompleteEmployee = async (id) => {
                 .populate('secondaryReportee', 'firstName lastName employeeId email workEmail companyEmail')
                 .populate('company', 'name companyId logo')
                 .lean();
+
+            // If not found, try case-insensitive match
+            if (!employeeBasic) {
+                employeeBasic = await EmployeeBasic.findOne(
+                    { employeeId: { $regex: new RegExp(`^${id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') } }, 
+                    null, 
+                    queryOptions
+                )
+                    .select('-documents.document.data -trainingDetails.certificate.data')
+                    .populate('reportingAuthority', 'firstName lastName employeeId email workEmail companyEmail')
+                    .populate('primaryReportee', 'firstName lastName employeeId email workEmail companyEmail')
+                    .populate('secondaryReportee', 'firstName lastName employeeId email workEmail companyEmail')
+                    .populate('company', 'name companyId logo')
+                    .lean();
+            }
 
             // Support for legacy ID format (VEGA - XXXXX) during transition
             if (!employeeBasic && typeof id === 'string' && id.startsWith('VEGA - ') && !id.includes('-HR-')) {
@@ -73,10 +89,104 @@ export const getCompleteEmployee = async (id) => {
         employeeBasic = await checkAndUpdateProbationStatus(employeeBasic);
 
         const employeeId = employeeBasic.employeeId;
+        
+        // Log the employeeId we're using for salary query
+        console.log(`[getCompleteEmployee] ====== STARTING SALARY QUERY ======`);
+        console.log(`[getCompleteEmployee] EmployeeBasic found with employeeId: "${employeeId}" (type: ${typeof employeeId}, length: ${employeeId?.length})`);
 
-        // Fetch all related data in parallel with optimized field selection
-        // Exclude large base64 document fields from initial queries to improve performance
-        // Use Promise.allSettled to prevent one failure from breaking the entire request
+        // SIMPLIFIED SALARY QUERY - Run it directly and handle results properly
+        const selectFields = '-__v -offerLetter.data -salaryHistory.attachment.data -salaryHistory.offerLetter.data';
+        let salary = null;
+        
+        try {
+            console.log(`[getCompleteEmployee] 🔍 Querying EmployeeSalary for: "${employeeId}"`);
+            
+            // Strategy 1: EXACT MATCH (should work for "VEGA -HR- 00003")
+            salary = await EmployeeSalary.findOne({ employeeId: employeeId }, null, queryOptions)
+                .select(selectFields).lean();
+            
+            if (salary) {
+                console.log(`[getCompleteEmployee] ✅ SUCCESS - Salary found via EXACT MATCH for "${employeeId}"`);
+                console.log(`[getCompleteEmployee] Salary data: basic=${salary.basic}, monthlySalary=${salary.monthlySalary}, historyCount=${salary.salaryHistory?.length || 0}`);
+            } else {
+                console.log(`[getCompleteEmployee] Strategy 1 (exact) failed for "${employeeId}"`);
+                
+                // Strategy 2: Try normalized (trim + single space)
+                const normalizedId = employeeId.trim().replace(/\s+/g, ' ');
+                if (normalizedId !== employeeId) {
+                    console.log(`[getCompleteEmployee] Trying Strategy 2 (normalized): "${normalizedId}"`);
+                    salary = await EmployeeSalary.findOne({ employeeId: normalizedId }, null, queryOptions)
+                        .select(selectFields).lean();
+                    if (salary) {
+                        console.log(`[getCompleteEmployee] ✅ SUCCESS - Salary found via Strategy 2 (normalized) for "${employeeId}"`);
+                    }
+                }
+                
+                // Strategy 3: Case-insensitive
+                if (!salary) {
+                    console.log(`[getCompleteEmployee] Trying Strategy 3 (case-insensitive)`);
+                    const escapedId = employeeId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                    salary = await EmployeeSalary.findOne(
+                        { employeeId: { $regex: new RegExp(`^${escapedId}$`, 'i') } }, 
+                        null, 
+                        queryOptions
+                    ).select(selectFields).lean();
+                    if (salary) {
+                        console.log(`[getCompleteEmployee] ✅ SUCCESS - Salary found via Strategy 3 (case-insensitive) for "${employeeId}"`);
+                    }
+                }
+                
+                // Strategy 4: Flexible spaces regex
+                if (!salary) {
+                    console.log(`[getCompleteEmployee] Trying Strategy 4 (flexible spaces)`);
+                    const escapedId = employeeId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                    const flexibleRegex = escapedId.replace(/\s+/g, '\\s*');
+                    salary = await EmployeeSalary.findOne(
+                        { employeeId: { $regex: new RegExp(`^${flexibleRegex}$`, 'i') } }, 
+                        null, 
+                        queryOptions
+                    ).select(selectFields).lean();
+                    if (salary) {
+                        console.log(`[getCompleteEmployee] ✅ SUCCESS - Salary found via Strategy 4 (flexible spaces) for "${employeeId}"`);
+                    }
+                }
+                
+                // Strategy 5: No spaces
+                if (!salary) {
+                    const noSpacesId = employeeId.replace(/\s+/g, '');
+                    if (noSpacesId !== employeeId) {
+                        console.log(`[getCompleteEmployee] Trying Strategy 5 (no spaces): "${noSpacesId}"`);
+                        salary = await EmployeeSalary.findOne({ employeeId: noSpacesId }, null, queryOptions)
+                            .select(selectFields).lean();
+                        if (salary) {
+                            console.log(`[getCompleteEmployee] ✅ SUCCESS - Salary found via Strategy 5 (no spaces) for "${employeeId}"`);
+                        }
+                    }
+                }
+            }
+            
+            if (!salary) {
+                console.warn(`[getCompleteEmployee] ❌ NO SALARY FOUND for "${employeeId}" after all strategies`);
+                // Show sample IDs for debugging
+                try {
+                    const samples = await EmployeeSalary.find({}, 'employeeId').limit(10).lean();
+                    if (samples.length > 0) {
+                        console.warn(`[getCompleteEmployee] Sample EmployeeSalary IDs:`, samples.map(s => `"${s.employeeId}"`).join(', '));
+                    }
+                } catch (e) {}
+            }
+            
+        } catch (error) {
+            console.error(`[getCompleteEmployee] ❌ SALARY QUERY EXCEPTION for "${employeeId}":`, error.message);
+            console.error(`[getCompleteEmployee] Error:`, error);
+            salary = null;
+        }
+        
+        console.log(`[getCompleteEmployee] ====== SALARY QUERY COMPLETE ======`);
+        
+        // Wrap salary result for Promise.allSettled compatibility
+        const salaryQueryPromise = Promise.resolve({ status: 'fulfilled', value: salary });
+        
         const [
             contactResult,
             personalResult,
@@ -102,7 +212,7 @@ export const getCompleteEmployee = async (id) => {
             EmployeeLabourCard.findOne({ employeeId }, null, queryOptions).select('-__v -labourCard.document.data').lean(),
             EmployeeMedicalInsurance.findOne({ employeeId }, null, queryOptions).select('-__v -medicalInsurance.document.data').lean(),
             EmployeeDrivingLicense.findOne({ employeeId }, null, queryOptions).select('-__v -drivingLicenceDetails.document.data').lean(),
-            EmployeeSalary.findOne({ employeeId }, null, queryOptions).select('-__v -offerLetter.data -salaryHistory.attachment.data -salaryHistory.offerLetter.data').lean(),
+            salaryQueryPromise,
             EmployeeBank.findOne({ employeeId }, null, queryOptions).select('-__v -bankAttachment.data').lean(),
             EmployeeEducation.findOne({ employeeId }, null, queryOptions).select('-__v -educationDetails.certificate.data').lean(),
             EmployeeExperience.findOne({ employeeId }, null, queryOptions).select('-__v -experienceDetails.certificate.data').lean(),
@@ -120,7 +230,19 @@ export const getCompleteEmployee = async (id) => {
         const labourCard = labourCardResult.status === 'fulfilled' ? labourCardResult.value : null;
         const medicalInsurance = medicalInsuranceResult.status === 'fulfilled' ? medicalInsuranceResult.value : null;
         const drivingLicense = drivingLicenseResult.status === 'fulfilled' ? drivingLicenseResult.value : null;
-        const salary = salaryResult.status === 'fulfilled' ? salaryResult.value : null;
+        // Use salary from the query we ran above (not from Promise.allSettled since we ran it synchronously)
+        // But also check salaryResult in case there's a timing issue - UPDATE existing salary variable, don't redeclare
+        if (!salary && salaryResult.status === 'fulfilled') {
+            salary = salaryResult.value;
+        }
+        
+        // Log final salary status
+        if (salary) {
+            console.log(`[getCompleteEmployee] ✅ FINAL: Salary data WILL BE INCLUDED in response for "${employeeId}"`);
+            console.log(`[getCompleteEmployee] Salary fields: basic=${salary.basic}, monthlySalary=${salary.monthlySalary}, totalSalary=${salary.totalSalary}`);
+        } else {
+            console.warn(`[getCompleteEmployee] ⚠ FINAL: Salary data WILL NOT BE INCLUDED in response for "${employeeId}"`);
+        }
         const bank = bankResult.status === 'fulfilled' ? bankResult.value : null;
         const education = educationResult.status === 'fulfilled' ? educationResult.value : null;
         const experience = experienceResult.status === 'fulfilled' ? experienceResult.value : null;
@@ -165,6 +287,39 @@ export const getCompleteEmployee = async (id) => {
             console.warn(`[getCompleteEmployee] Some queries failed for employee ${employeeId}:`,
                 failedQueries.map(q => `${q.name}: ${q.result.reason?.message || 'Unknown error'}`)
             );
+        }
+
+        // Log salary query results with detailed debugging
+        if (salaryResult.status === 'fulfilled' && !salaryResult.value) {
+            // Try to find similar employeeIds in EmployeeSalary collection for debugging (only if no salary found)
+            try {
+                const similarIds = await EmployeeSalary.find({}, 'employeeId').limit(20).lean();
+                console.warn(`[getCompleteEmployee] ⚠ No salary record found for employee "${employeeId}"`);
+                if (similarIds.length > 0) {
+                    const sampleIds = similarIds.map(s => `"${s.employeeId}"`).join(', ');
+                    console.warn(`[getCompleteEmployee] Sample employeeIds in EmployeeSalary collection (first 20): ${sampleIds}`);
+                    // Check if there's a close match (ignoring spaces and case)
+                    const normalizedRequested = employeeId.replace(/\s+/g, '').toLowerCase();
+                    const closeMatch = similarIds.find(s => 
+                        s.employeeId.replace(/\s+/g, '').toLowerCase() === normalizedRequested
+                    );
+                    if (closeMatch) {
+                        console.warn(`[getCompleteEmployee] ⚠ Found close match: "${closeMatch.employeeId}" (requested: "${employeeId}") - employeeId format mismatch!`);
+                    }
+                } else {
+                    console.warn(`[getCompleteEmployee] ⚠ EmployeeSalary collection appears to be empty`);
+                }
+            } catch (debugError) {
+                // Ignore debug query errors
+            }
+        } else if (salaryResult.status === 'rejected') {
+            console.error(`[getCompleteEmployee] ❌ Salary query failed for employee ${employeeId}:`, salaryResult.reason?.message || 'Unknown error');
+        } else if (salaryResult.status === 'fulfilled' && salaryResult.value) {
+            console.log(`[getCompleteEmployee] ✓ Salary data found for employee ${employeeId}: monthlySalary=${salaryResult.value.monthlySalary}, totalSalary=${salaryResult.value.totalSalary}, basic=${salaryResult.value.basic}`);
+            // Log the actual employeeId from salary record to verify match
+            if (salaryResult.value.employeeId && salaryResult.value.employeeId !== employeeId) {
+                console.log(`[getCompleteEmployee] ℹ Salary record employeeId="${salaryResult.value.employeeId}" (requested: "${employeeId}") - matched via fallback strategy`);
+            }
         }
 
         // Combine all data into a single object
@@ -379,41 +534,42 @@ export const getCompleteEmployee = async (id) => {
                     lastUpdated: drivingLicense.drivingLicenceDetails.lastUpdated,
                 } : undefined,
             }),
-            // Salary details
-            ...(salary && {
-                monthlySalary: salary.monthlySalary,
-                totalSalary: salary.totalSalary || salary.monthlySalary,
-                basic: salary.basic,
-                basicPercentage: salary.basicPercentage,
-                houseRentAllowance: salary.houseRentAllowance,
-                houseRentPercentage: salary.houseRentPercentage,
-                otherAllowance: salary.otherAllowance,
-                otherAllowancePercentage: salary.otherAllowancePercentage,
+            // Salary details - ALWAYS CHECK AND INCLUDE IF FOUND
+            ...(salary ? {
+                monthlySalary: salary.monthlySalary || 0,
+                totalSalary: salary.totalSalary || salary.monthlySalary || 0,
+                basic: salary.basic || 0,
+                basicPercentage: salary.basicPercentage || 60,
+                houseRentAllowance: salary.houseRentAllowance || 0,
+                houseRentPercentage: salary.houseRentPercentage || 20,
+                otherAllowance: salary.otherAllowance || 0,
+                otherAllowancePercentage: salary.otherAllowancePercentage || 20,
                 additionalAllowances: salary.additionalAllowances || [],
                 // Exclude large attachment/offerLetter.data from salary history (but include URLs)
+                // NOTE: EmployeeSalary schema doesn't have publicId field, only url/data/name/mimeType
                 salaryHistory: salary.salaryHistory ? salary.salaryHistory.map(entry => ({
                     ...entry,
-                    attachment: entry.attachment ? {
+                    attachment: entry.attachment && entry.attachment.url ? {
                         url: entry.attachment.url,
-                        publicId: entry.attachment.publicId,
                         name: entry.attachment.name,
                         mimeType: entry.attachment.mimeType,
+                        // publicId will be extracted from URL during signing
                     } : undefined,
-                    offerLetter: entry.offerLetter ? {
+                    offerLetter: entry.offerLetter && entry.offerLetter.url ? {
                         url: entry.offerLetter.url,
-                        publicId: entry.offerLetter.publicId,
                         name: entry.offerLetter.name,
                         mimeType: entry.offerLetter.mimeType,
+                        // publicId will be extracted from URL during signing
                     } : undefined,
                 })) : [],
                 // Exclude offerLetter.data - fetch separately if needed (but include URL)
-                offerLetter: salary.offerLetter ? {
+                offerLetter: salary.offerLetter && salary.offerLetter.url ? {
                     url: salary.offerLetter.url,
-                    publicId: salary.offerLetter.publicId,
                     name: salary.offerLetter.name,
                     mimeType: salary.offerLetter.mimeType,
+                    // publicId will be extracted from URL during signing
                 } : undefined,
-            }),
+            } : {}),
             // Bank details - exclude large bankAttachment.data
             ...(bank && {
                 bankName: bank.bankName,
@@ -477,42 +633,69 @@ export const getCompleteEmployee = async (id) => {
 
         // --- POST-PROCESSING: Signed URL Generation ---
         const signUrl = async (obj, context = 'unknown') => {
-            if (!obj) return;
+            if (!obj || !obj.url) return;
 
             let keyToSign = obj?.publicId;
 
-            // Fallback: If no publicId, try to extract key from legacy URL
-            if (!keyToSign && obj?.url && typeof obj.url === 'string' && obj.url.includes('idrivee2.com')) {
+            // Fallback: If no publicId, try to extract key from URL (handles both signed and unsigned URLs)
+            if (!keyToSign && obj?.url && typeof obj.url === 'string') {
                 try {
-                    // Legacy URL format: https://[endpoint]/[bucket]/[key]
-                    // or https://[bucket].[endpoint]/[key]
-
-                    // Robust Legacy Key Extraction
-                    const urlObj = new URL(obj.url);
-                    let path = urlObj.pathname; // e.g. "/key" or "/bucket/key"
-
-                    // Remove leading slash
-                    if (path.startsWith('/')) path = path.substring(1);
-
-                    // Check if path starts with bucket name (Path Style)
-                    const bucketPrefix = `${process.env.IDRIVE_BUCKET_NAME}/`;
-                    if (path.startsWith(bucketPrefix)) {
-                        path = path.substring(bucketPrefix.length);
+                    // Check if it's an S3/iDrive URL
+                    if (obj.url.includes('idrivee2.com') || obj.url.includes('s3.')) {
+                        const urlObj = new URL(obj.url);
+                        let path = urlObj.pathname; // e.g. "/key" or "/bucket/key"
+                        
+                        // Remove leading slash
+                        if (path.startsWith('/')) path = path.substring(1);
+                        
+                        // Handle Virtual Hosted Style URLs (bucket.s3.region.amazonaws.com/key)
+                        // or Path Style URLs (s3.region.amazonaws.com/bucket/key)
+                        const bucketName = process.env.IDRIVE_BUCKET_NAME || 'verp-storage';
+                        
+                        // Check if path starts with bucket name (Path Style: s3...com/bucket/key)
+                        const bucketPrefix = `${bucketName}/`;
+                        if (path.startsWith(bucketPrefix)) {
+                            path = path.substring(bucketPrefix.length);
+                        }
+                        
+                        // For Virtual Hosted Style, the bucket is in the hostname, not path
+                        // So path should already be the key
+                        
+                        // Decode URI component - handle double encoding (e.g., %2520 -> %20 -> space)
+                        let decodedPath = path;
+                        try {
+                            decodedPath = decodeURIComponent(decodeURIComponent(path));
+                        } catch {
+                            try {
+                                decodedPath = decodeURIComponent(path);
+                            } catch {
+                                decodedPath = path; // If decoding fails, use as-is
+                            }
+                        }
+                        
+                        keyToSign = decodedPath;
+                        
+                        console.log(`[getCompleteEmployee] Extracted key for ${context}: "${keyToSign}"`);
+                        console.log(`[getCompleteEmployee]   Original path: "${path}"`);
+                        console.log(`[getCompleteEmployee]   From URL: ${obj.url.substring(0, 150)}...`);
+                    } else {
+                        console.warn(`[getCompleteEmployee] ⚠ URL for ${context} is not an S3/iDrive URL: ${obj.url?.substring(0, 100)}...`);
                     }
-
-                    // Decode URI component (e.g. %20 -> space) to get actual key
-                    keyToSign = decodeURIComponent(path);
-
-                    // console.log(`[DEBUG] Extracted legacy key for ${context}:`, keyToSign);
                 } catch (err) {
-                    console.error(`[DEBUG] Error parsing legacy URL for ${context}:`, err);
+                    console.error(`[getCompleteEmployee] ❌ Error parsing URL for ${context}:`, err.message);
+                    console.error(`[getCompleteEmployee]   URL was:`, obj.url);
+                    console.error(`[getCompleteEmployee]   Error stack:`, err.stack);
                 }
             }
 
             if (keyToSign) {
                 try {
-                    // Sanitize Key
-                    keyToSign = decodeURIComponent(keyToSign);
+                    // Sanitize Key - handle double encoding
+                    try {
+                        keyToSign = decodeURIComponent(decodeURIComponent(keyToSign));
+                    } catch {
+                        keyToSign = decodeURIComponent(keyToSign);
+                    }
 
                     // Remove leading slash
                     if (keyToSign.startsWith('/')) keyToSign = keyToSign.substring(1);
@@ -523,30 +706,37 @@ export const getCompleteEmployee = async (id) => {
                         keyToSign = keyToSign.substring(bucketName.length + 1);
                     }
 
-                    // Specific fix for malformed keys containing bucket name in middle (as reported)
-                    // If key contains bucketName that is NOT at start, it might be a concatenation error
+                    // Specific fix for malformed keys containing bucket name in middle
                     if (keyToSign.includes(bucketName)) {
-                        // Example error: path/to/fileverp-storage/path/to/file
-                        // We'll try to extract the clean path.
-                        // Assuming path starts with 'employee-documents/'
                         const match = keyToSign.match(/^(employee-documents\/.*?)(?:verp-storage|$)/);
                         if (match && match[1]) {
                             keyToSign = match[1];
                         } else {
-                            // Fallback: simple replace
                             keyToSign = keyToSign.replace(bucketName, '').replace('//', '/');
                         }
                     }
 
+                    console.log(`[getCompleteEmployee] Signing URL for ${context} with key: "${keyToSign}"`);
                     const signedUrl = await getSignedFileUrl(keyToSign);
                     if (signedUrl) {
+                        const oldUrl = obj.url;
                         obj.url = signedUrl;
-                    } else if (context === 'profilePicture') {
-                        // console.error(`[DEBUG] Profile Picture Signing Returned Null (Key: ${keyToSign})`);
+                        console.log(`[getCompleteEmployee] ✓ Successfully signed URL for ${context}`);
+                        console.log(`[getCompleteEmployee]   Old URL: ${oldUrl?.substring(0, 100)}...`);
+                        console.log(`[getCompleteEmployee]   New URL: ${signedUrl?.substring(0, 100)}...`);
+                    } else {
+                        console.warn(`[getCompleteEmployee] ⚠ Failed to sign URL for ${context} - getSignedFileUrl returned null/undefined`);
+                        console.warn(`[getCompleteEmployee]   Key was: "${keyToSign}"`);
+                        console.warn(`[getCompleteEmployee]   Original URL: ${obj.url}`);
                     }
                 } catch (e) {
-                    console.error(`[DEBUG] Failed to sign URL for ${context}:`, e.message);
+                    console.error(`[getCompleteEmployee] ❌ Exception signing URL for ${context}:`, e.message);
+                    console.error(`[getCompleteEmployee]   Key was: "${keyToSign}"`);
+                    console.error(`[getCompleteEmployee]   Error:`, e);
                 }
+            } else {
+                console.warn(`[getCompleteEmployee] ⚠ No key found to sign for ${context}`);
+                console.warn(`[getCompleteEmployee]   Object:`, { url: obj.url, publicId: obj.publicId, name: obj.name });
             }
         };
 
@@ -629,15 +819,19 @@ export const getCompleteEmployee = async (id) => {
         if (completeEmployee.drivingLicenceDetails?.document) {
             signingPromises.push(signUrl(completeEmployee.drivingLicenceDetails.document));
         }
-        // Salary
-        if (completeEmployee.salaryHistory) {
-            completeEmployee.salaryHistory.forEach(entry => {
-                if (entry.attachment) signingPromises.push(signUrl(entry.attachment));
-                if (entry.offerLetter) signingPromises.push(signUrl(entry.offerLetter));
+        // Salary - Sign URLs for salary history attachments and offer letters
+        if (completeEmployee.salaryHistory && Array.isArray(completeEmployee.salaryHistory)) {
+            completeEmployee.salaryHistory.forEach((entry, idx) => {
+                if (entry.attachment) {
+                    signingPromises.push(signUrl(entry.attachment, `salaryHistory[${idx}].attachment`));
+                }
+                if (entry.offerLetter) {
+                    signingPromises.push(signUrl(entry.offerLetter, `salaryHistory[${idx}].offerLetter`));
+                }
             });
         }
         if (completeEmployee.offerLetter) {
-            signingPromises.push(signUrl(completeEmployee.offerLetter));
+            signingPromises.push(signUrl(completeEmployee.offerLetter, 'salary.offerLetter'));
         }
         // Bank
         if (completeEmployee.bankAttachment) {
@@ -676,6 +870,28 @@ export const getCompleteEmployee = async (id) => {
 
         // Wait for all URLs to be signed
         await Promise.all(signingPromises);
+
+        // Final verification: Log if salary data is included in response
+        if (completeEmployee.basic !== undefined || completeEmployee.monthlySalary !== undefined) {
+            console.log(`[getCompleteEmployee] ✓ Salary data included in response for ${employeeId}: basic=${completeEmployee.basic}, monthlySalary=${completeEmployee.monthlySalary}, salaryHistory.length=${completeEmployee.salaryHistory?.length || 0}`);
+            
+            // Log salary attachment URLs status
+            if (completeEmployee.salaryHistory && Array.isArray(completeEmployee.salaryHistory)) {
+                completeEmployee.salaryHistory.forEach((entry, idx) => {
+                    if (entry.offerLetter?.url) {
+                        console.log(`[getCompleteEmployee] ✓ SalaryHistory[${idx}].offerLetter URL: ${entry.offerLetter.url.substring(0, 100)}...`);
+                    }
+                    if (entry.attachment?.url) {
+                        console.log(`[getCompleteEmployee] ✓ SalaryHistory[${idx}].attachment URL: ${entry.attachment.url.substring(0, 100)}...`);
+                    }
+                });
+            }
+            if (completeEmployee.offerLetter?.url) {
+                console.log(`[getCompleteEmployee] ✓ Main offerLetter URL: ${completeEmployee.offerLetter.url.substring(0, 100)}...`);
+            }
+        } else {
+            console.warn(`[getCompleteEmployee] ⚠ Salary data NOT included in response for ${employeeId} - salary object was:`, salary ? 'found but not spread' : 'null/undefined');
+        }
 
         return completeEmployee;
     } catch (error) {

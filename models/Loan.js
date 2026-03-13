@@ -24,6 +24,10 @@ const loanSchema = new mongoose.Schema({
         type: Number,
         required: true
     },
+    paidAmount: {
+        type: Number,
+        default: 0
+    },
     duration: {
         type: Number,
         required: true // in months
@@ -39,12 +43,12 @@ const loanSchema = new mongoose.Schema({
     },
     status: {
         type: String,
-        enum: ['Draft', 'Pending', 'Pending HR', 'Pending Accounts', 'Pending Authorization', 'Approved', 'Rejected', 'Cancelled'],
+        enum: ['Draft', 'Pending', 'Pending HR', 'Pending Accounts', 'Pending Authorization', 'Approved', 'Rejected', 'Cancelled', 'Paid'],
         default: 'Draft'
     },
     approvalStatus: {
         type: String,
-        enum: ['Draft', 'Pending', 'Pending HR', 'Pending Accounts', 'Pending Authorization', 'Approved', 'Rejected', 'Cancelled'],
+        enum: ['Draft', 'Pending', 'Pending HR', 'Pending Accounts', 'Pending Authorization', 'Approved', 'Rejected', 'Cancelled', 'Paid'],
         default: 'Draft'
     },
     appliedDate: {

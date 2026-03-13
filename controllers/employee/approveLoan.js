@@ -7,7 +7,6 @@ import { getManagementHOD } from "../../utils/getManagementHOD.js";
 import { sendHODAuthorizationEmail } from "../../utils/sendHODAuthorizationEmail.js";
 import { getDepartmentHOD } from "../../utils/getDepartmentHOD.js";
 import { getCompleteEmployee } from "../../services/employeeService.js";
-import Company from "../../models/Company.js";
 
 export const approveLoan = async (req, res) => {
     try {
@@ -81,25 +80,31 @@ export const approveLoan = async (req, res) => {
             }
 
             const applicant = await getCompleteEmployee(loan.employeeId);
-            let hrResp = null;
-            if (applicant?.company?._id) {
-                const applicantCompany = await Company.findById(applicant.company._id);
-                hrResp = applicantCompany?.responsibilities?.find(r => r.category === 'hr' && r.status === 'Active');
-            }
+            // VALIDATION: Check if required designations are assigned in Flowchart
+            const hrHOD = await getDepartmentHOD('hr');
+            const accountsHOD = await getDepartmentHOD('accounts');
+            const managementHOD = await getManagementHOD();
 
-            if (!hrResp) {
-                return res.status(400).json({ message: "HR Admin not assigned for your company. Please wait until an HR is assigned." });
+            const missingDesignations = [];
+            if (!hrHOD) missingDesignations.push('HR Admin');
+            if (!accountsHOD) missingDesignations.push('Accounts/Finance');
+            if (!managementHOD) missingDesignations.push('Management/CEO');
+
+            if (missingDesignations.length > 0) {
+                return res.status(400).json({
+                    message: `Cannot submit for approval. The following designations are not assigned in Flowchart: ${missingDesignations.join(', ')}. Please assign these designations in Settings > FlowChart before submitting this loan request.`
+                });
             }
 
             publicStatus = 'Pending';
             nextStage = 'Pending HR';
 
             let hrUser = null;
-            if (hrResp.employeeId) {
-                hrUser = await User.findOne({ employeeId: hrResp.employeeId });
+            if (hrHOD.employeeId) {
+                hrUser = await User.findOne({ employeeId: hrHOD.employeeId });
             }
-            const nextAssignmentId = hrUser ? hrUser._id : hrResp.empObjectId;
-            nextApprover = await EmployeeBasic.findById(hrResp.empObjectId);
+            const nextAssignmentId = hrUser ? hrUser._id : hrHOD._id;
+            nextApprover = hrHOD;
 
             emailSubject = "New Loan/Advance Request for Review";
             emailType = "HR";
@@ -112,7 +117,7 @@ export const approveLoan = async (req, res) => {
                 assignedAt: new Date()
             }];
 
-            console.log(`[ApproveLoan] Draft -> Pending HR transition. Assigned to: ${hrResp.employeeId}`);
+            console.log(`[ApproveLoan] Draft -> Pending HR transition. Assigned to: ${hrHOD.employeeId}`);
         }
         else if (status === 'Approved') {
             // APPROVAL LOGIC
@@ -127,11 +132,19 @@ export const approveLoan = async (req, res) => {
                     const isAssignedHR = loan.submittedTo && (String(loan.submittedTo) === String(requestingUserId) || String(loan.submittedTo) === String(approverBasic._id));
 
                     if (isHR || isAssignedHR || isAdmin) {
+                        // VALIDATION: Check if Accounts HOD is assigned before proceeding
+                        const accountsHOD = await getDepartmentHOD('finance');
+                        if (!accountsHOD) {
+                            return res.status(400).json({
+                                message: "Cannot proceed. Accounts/Finance designation is not assigned in Flowchart. Please assign Accounts/Finance designation in Settings > FlowChart before approving this loan."
+                            });
+                        }
+
                         nextStage = 'Pending Accounts';
                         publicStatus = 'Pending'; // Keep visible status as Pending for Accounts
 
                         loan.hrApprovedBy = approverBasic._id;
-                        nextApprover = await getDepartmentHOD('finance', loan.employeeObjectId);
+                        nextApprover = accountsHOD;
                         console.log('[Loan]', loan.loanId, 'HR Approved. Next Finance Approver:', nextApprover ? `${nextApprover.firstName} ${nextApprover.lastName}` : 'NOT FOUND');
                         emailSubject = "Loan Pending Finance Approval";
                         emailType = "Accounts";
@@ -145,11 +158,19 @@ export const approveLoan = async (req, res) => {
                     const isAssignedFinance = loan.submittedTo && (String(loan.submittedTo) === String(requestingUserId) || String(loan.submittedTo) === String(approverBasic._id));
 
                     if (isFinance || isAssignedFinance || isAdmin) {
+                        // VALIDATION: Check if Management HOD is assigned before proceeding
+                        const managementHOD = await getManagementHOD();
+                        if (!managementHOD) {
+                            return res.status(400).json({
+                                message: "Cannot proceed. Management/CEO designation is not assigned in Flowchart. Please assign Management designation in Settings > FlowChart before approving this loan."
+                            });
+                        }
+
                         nextStage = 'Pending Authorization';
                         publicStatus = 'Pending'; // Keep visible status as Pending for CEO
 
                         loan.accountsApprovedBy = approverBasic._id;
-                        nextApprover = await getManagementHOD(loan.employeeObjectId);
+                        nextApprover = managementHOD;
                         console.log('[Loan]', loan.loanId, 'Finance Approved. Next Management:', nextApprover ? `${nextApprover.firstName} ${nextApprover.lastName}` : 'NOT FOUND');
                         emailSubject = "Loan Pending Final Authorization";
                         emailType = "Management";

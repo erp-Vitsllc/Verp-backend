@@ -9,7 +9,7 @@ const assetHistorySchema = mongoose.Schema({
     action: {
         type: String,
         required: true,
-        enum: ['Created', 'Assigned', 'Accepted', 'Rejected', 'Returned', 'Unassigned', 'Comment', 'Service', 'Restored', 'Live', 'End of Life', 'Out of Service', 'Service Send', 'Service Receive']
+        enum: ['Created', 'Assigned', 'Accepted', 'Rejected', 'Returned', 'Unassigned', 'Comment', 'Service', 'Restored', 'Live', 'End of Life', 'Out of Service', 'Service Send', 'Service Receive', 'Transfer', 'On Leave']
     },
     assignedTo: {
         type: mongoose.Schema.Types.ObjectId,

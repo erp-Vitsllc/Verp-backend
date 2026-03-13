@@ -3,8 +3,9 @@ import EmployeeBasic from "../../models/EmployeeBasic.js";
 import Loan from "../../models/Loan.js";
 import EmployeeSalary from "../../models/EmployeeSalary.js";
 import User from "../../models/User.js";
-import Company from "../../models/Company.js";
 import { getCompleteEmployee } from "../../services/employeeService.js";
+import { getDepartmentHOD } from "../../utils/getDepartmentHOD.js";
+import { getManagementHOD } from "../../utils/getManagementHOD.js";
 
 
 /**
@@ -66,16 +67,24 @@ export const requestLoan = async (req, res) => {
             return res.status(400).json({ message: "Employee is not linked to any company. Cannot proceed." });
         }
 
-        let hrResp = null;
-        if (employeeBasic.company?._id) {
-            const applicantCompany = await Company.findById(employeeBasic.company._id);
-            hrResp = applicantCompany?.responsibilities?.find(r => r.category === 'hr' && r.status === 'Active');
-        }
-        const targetStatus = status === 'Pending' ? 'Pending HR' : (status || 'Draft');
+        // VALIDATION: Check if required designations are assigned in Flowchart
+        // This check applies even for Draft status to prevent creating incomplete requests
+        const hrHOD = await getDepartmentHOD('hr');
+        const accountsHOD = await getDepartmentHOD('accounts');
+        const managementHOD = await getManagementHOD();
 
-        if (status === 'Pending' && !hrResp) {
-            return res.status(400).json({ message: "HR Admin not assigned for your company. Please wait until an HR is assigned." });
+        const missingDesignations = [];
+        if (!hrHOD) missingDesignations.push('HR Admin');
+        if (!accountsHOD) missingDesignations.push('Accounts/Finance');
+        if (!managementHOD) missingDesignations.push('Management/CEO');
+
+        if (missingDesignations.length > 0) {
+            return res.status(400).json({
+                message: `Cannot proceed. The following designations are not assigned in Flowchart: ${missingDesignations.join(', ')}. Please assign these designations in Settings > FlowChart before creating a ${type || 'loan/advance'} request.`
+            });
         }
+
+        const targetStatus = status === 'Pending' ? 'Pending HR' : (status || 'Draft');
 
         // --- VALIDATION: Existing Loan Check ---
         // Block if employee already has an Approved or In-Progress loan/advance
@@ -162,33 +171,35 @@ export const requestLoan = async (req, res) => {
         if (targetStatus === 'Pending HR') {
             let hrUser = null;
 
-            if (hrResp.employeeId) {
-                hrUser = await User.findOne({ employeeId: hrResp.employeeId });
+            if (hrHOD && hrHOD.employeeId) {
+                hrUser = await User.findOne({ employeeId: hrHOD.employeeId });
             }
 
-            const assignmentId = hrUser ? hrUser._id : hrResp.empObjectId;
+            const assignmentId = hrUser ? hrUser._id : (hrHOD ? hrHOD._id : null);
 
-            loanData.submittedTo = assignmentId;
-            loanData.workflow = [{
-                role: 'HR Admin',
-                assignedTo: assignmentId,
-                status: 'Pending',
-                assignedAt: new Date()
-            }];
+            if (assignmentId) {
+                loanData.submittedTo = assignmentId;
+                loanData.workflow = [{
+                    role: 'HR Admin',
+                    assignedTo: assignmentId,
+                    status: 'Pending',
+                    assignedAt: new Date()
+                }];
 
-            console.log(`[RequestLoan] Loan Pushed for HR: ${hrResp.employeeId} (Account: ${hrUser ? 'Found' : 'Missing'})`);
+                console.log(`[RequestLoan] Loan Pushed for HR: ${hrHOD.employeeId} (Account: ${hrUser ? 'Found' : 'Missing'})`);
+            }
         }
 
         const newLoan = new Loan(loanData);
         const savedLoan = await newLoan.save();
 
         // 3. Sync with Dashboard Action Table
-        if (targetStatus === 'Pending HR') {
+        if (targetStatus === 'Pending HR' && hrHOD) {
             const { syncDashboardAction } = await import("../../utils/syncDashboard.js");
             await syncDashboardAction({
                 requestId: savedLoan._id,
                 requestType: 'Loan',
-                assignedTo: hrResp.empObjectId, // Use Employee Object ID for assignment
+                assignedTo: hrHOD._id, // Use Employee Object ID for assignment
                 status: 'Pending',
                 subjectEmployee: employeeBasic,
                 extra1: `AED ${amount}`,
@@ -197,10 +208,9 @@ export const requestLoan = async (req, res) => {
         }
 
         // 4. Send Email ONLY if Submit for Approval
-        if (targetStatus === 'Pending HR' && hrResp) {
-            // Find HR employee basic to get their email
-            const hrEmployee = await EmployeeBasic.findById(hrResp.empObjectId);
-            const reporteeEmail = hrEmployee?.companyEmail || hrEmployee?.workEmail || hrEmployee?.email || hrResp.email || 'hr@vitsllc.com';
+        if (targetStatus === 'Pending HR' && hrHOD) {
+            // Get HR email from HOD object
+            const reporteeEmail = hrHOD.companyEmail || hrHOD.email || hrHOD.workEmail || 'hr@vitsllc.com';
 
             if (reporteeEmail) {
                 const emailUser = process.env.EMAIL_USER?.trim();
@@ -215,7 +225,7 @@ export const requestLoan = async (req, res) => {
                     });
 
                     const employeeName = `${employeeBasic.firstName || ""} ${employeeBasic.lastName || ""}`.trim();
-                    const reporteeName = hrEmployee ? `${hrEmployee.firstName || ""} ${hrEmployee.lastName || ""}`.trim() : 'HR Administrator';
+                    const reporteeName = hrHOD ? `${hrHOD.firstName || ""} ${hrHOD.lastName || ""}`.trim() : 'HR Administrator';
                     const subject = `[NEW] ${type} Application: ${employeeName}`;
 
                     // Dynamic URL

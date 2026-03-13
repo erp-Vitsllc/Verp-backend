@@ -1,60 +1,56 @@
 import EmployeeBasic from "../models/EmployeeBasic.js";
-import Company from "../models/Company.js"; // Import at top level
+import Flowchart from "../models/Flowchart.js";
 
 /**
- * Retrieves the CEO (Management HOD) for final approval.
- * Priority: Company Responsibilities > Department/Designation Search.
- * @param {string} identifier Optional: The companyId (String ID) or employee's ObjectId/String ID to find their company.
- * @returns {Promise<Object|null>} The CEO employee object or null if not found.
+ * Retrieves the CEO (Management HOD) for final approval from Flowchart database.
+ * All companies now share the same flowchart, so we use the global Flowchart collection.
+ * @param {string} identifier Optional: Ignored - kept for backward compatibility. Flowchart is global.
+ * @returns {Promise<Object|null>} The Management HOD employee object or null if not found.
  */
 export const getManagementHOD = async (identifier = null) => {
     try {
-        let targetCompanyId = null;
+        // Look for active Management HOD in Flowchart collection
+        // All companies share the same flowchart now
+        const responsibility = await Flowchart.findOne({
+            category: 'management',
+            status: 'Active'
+        }).populate('empObjectId', 'employeeId firstName lastName companyEmail email designation department profileStatus signature');
 
-        // 1. Resolve Company ID
-        if (identifier) {
-            const directCompany = await Company.findOne({ companyId: identifier });
-            if (directCompany) {
-                targetCompanyId = directCompany._id;
-            } else {
-                let empQuery = {};
-                const idStr = String(identifier);
-                if (idStr.match(/^[0-9a-fA-F]{24}$/)) {
-                    empQuery = { _id: identifier };
-                } else {
-                    empQuery = { employeeId: identifier };
-                }
-                const emp = await EmployeeBasic.findOne(empQuery).select('company');
-                if (emp && emp.company) {
-                    targetCompanyId = emp.company;
-                }
+        if (responsibility) {
+            if (responsibility.empObjectId) {
+                return responsibility.empObjectId;
             }
+
+            // Fallback: If empObjectId is missing, try to find the employee by employeeId
+            const employee = await EmployeeBasic.findOne({
+                employeeId: { $regex: new RegExp(`^${responsibility.employeeId.replace(/\s+/g, '\\s*')}$`, 'i') }
+            }).select('employeeId firstName lastName companyEmail email designation department profileStatus signature');
+
+            if (employee) {
+                // Auto-repair the flowchart entry for next time
+                responsibility.empObjectId = employee._id;
+                await responsibility.save().catch(err => console.error('[getManagementHOD] Auto-repair failed:', err));
+                return employee;
+            }
+
+            // Final Fallback: Return a partial object from Flowchart data
+            // This allows the system to at least know who the person is even if record is missing
+            return {
+                _id: null,
+                firstName: responsibility.employeeName?.split(' ')[0] || 'Unknown',
+                lastName: responsibility.employeeName?.split(' ').slice(1).join(' ') || '',
+                employeeId: responsibility.employeeId,
+                designation: responsibility.designation,
+                email: responsibility.email || responsibility.companyEmail,
+                isFlowchartOnly: true
+            };
         }
 
-        // 2. Try Specific Company first
-        if (targetCompanyId) {
-            const company = await Company.findById(targetCompanyId);
-            if (company) {
-                const responsibility = company.responsibilities?.find(r =>
-                    r.category && (r.category.toLowerCase() === 'management' || r.category.toLowerCase() === 'ceo')
-                );
-
-                if (responsibility && responsibility.empObjectId) {
-                    const delegatedEmp = await EmployeeBasic.findById(responsibility.empObjectId)
-                        .select('employeeId firstName lastName companyEmail email designation department profileStatus');
-                    if (delegatedEmp) return delegatedEmp;
-                }
-            }
-        }
-
-        // 3. Removed Centralized Fallback:
-        // Responsibilities must now be defined explicitly per company.
-
-        console.warn('[getManagementHOD] No Management HOD defined in target company.');
+        console.warn('[getManagementHOD] No Management HOD defined in Flowchart.');
         return null;
 
     } catch (error) {
-        console.error('[getManagementHOD] Error finding CEO:', error);
+        console.error('[getManagementHOD] Error finding Management HOD:', error);
         return null;
     }
 };

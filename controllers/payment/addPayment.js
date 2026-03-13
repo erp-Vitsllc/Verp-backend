@@ -1,0 +1,260 @@
+import Payment from "../../models/Payment.js";
+import EmployeeBasic from "../../models/EmployeeBasic.js";
+import Fine from "../../models/Fine.js";
+import Loan from "../../models/Loan.js";
+
+export const addPayment = async (req, res) => {
+    try {
+        const {
+            paymentType,
+            paidBy, // Can be employeeId string or ObjectId
+            amount,
+            status = 'Pending',
+            paymentDate,
+            description,
+            referenceId,
+            relatedEntityType,
+            relatedEntityId,
+            remarks
+        } = req.body;
+
+        // Validate required fields
+        if (!paymentType || !paidBy || !amount) {
+            return res.status(400).json({
+                success: false,
+                message: 'Payment type, paid by, and amount are required'
+            });
+        }
+
+        // Find employee by employeeId or ObjectId
+        let employee;
+        if (typeof paidBy === 'string') {
+            // Try to find by employeeId first
+            employee = await EmployeeBasic.findOne({ employeeId: paidBy });
+            if (!employee) {
+                // Try as ObjectId
+                employee = await EmployeeBasic.findById(paidBy);
+            }
+        } else {
+            employee = await EmployeeBasic.findById(paidBy);
+        }
+
+        if (!employee) {
+            return res.status(404).json({
+                success: false,
+                message: 'Employee not found'
+            });
+        }
+
+        // Generate paymentId before creating payment
+        const paymentCount = await Payment.countDocuments();
+        const paymentId = `PAY-${String(paymentCount + 1).padStart(6, '0')}`;
+
+        // Create payment
+        const payment = new Payment({
+            paymentId,
+            paymentType,
+            paidBy: employee._id,
+            paidByName: `${employee.firstName || ''} ${employee.lastName || ''}`.trim(),
+            amount: parseFloat(amount),
+            status,
+            paymentDate: paymentDate ? new Date(paymentDate) : new Date(),
+            description: description || '',
+            referenceId: referenceId || null,
+            relatedEntityType: relatedEntityType || null,
+            relatedEntityId: relatedEntityId || null,
+            createdBy: req.user._id,
+            remarks: remarks || ''
+        });
+
+        await payment.save();
+
+        // Helper function to calculate employee share (similar to frontend getEmpShare)
+        const calculateEmployeeShare = (fine) => {
+            if (!fine) return 0;
+            const isCompany = (fine.responsibleFor || '').toLowerCase() === 'company';
+            if (isCompany) return 0;
+
+            // Filter out company employees (VEGA-HR-0000) from assignedEmployees
+            const realEmployees = (fine.assignedEmployees || []).filter(emp => 
+                emp.employeeId !== 'VEGA-HR-0000' && 
+                emp.employeeId !== 'VEGA_INTERNAL' &&
+                emp.employeeName !== 'Vega Digital IT Solutions'
+            );
+            
+            const companyAmount = parseFloat(fine.companyAmount || 0);
+            const fineAmount = parseFloat(fine.fineAmount || 0);
+            const employeeAmount = parseFloat(fine.employeeAmount || 0);
+            
+            // PRIORITY: If there's only one real employee and no company share, 
+            // employee should pay the full fineAmount
+            if (realEmployees.length === 1 && companyAmount === 0) {
+                return fineAmount;
+            }
+            
+            // If employeeAmount is explicitly set and seems correct, use it (for multiple employees)
+            if (employeeAmount > 0 && employeeAmount <= fineAmount && realEmployees.length > 1) {
+                return employeeAmount / realEmployees.length;
+            }
+            
+            // For single employee with employeeAmount set (but companyAmount > 0), use employeeAmount
+            if (realEmployees.length === 1 && employeeAmount > 0 && employeeAmount <= fineAmount) {
+                return employeeAmount;
+            }
+            
+            // Fallback: calculate from fineAmount - companyAmount
+            const calculatedEmpAmount = fineAmount - companyAmount;
+            if (realEmployees.length > 1) {
+                return calculatedEmpAmount / realEmployees.length;
+            }
+            
+            return calculatedEmpAmount;
+        };
+
+        // Update fine/loan status after payment is created (but don't reduce the total amount)
+        // Total amount should remain constant - only track payments separately
+        if (relatedEntityType && relatedEntityId && status === 'Completed') {
+            if (relatedEntityType === 'Fine') {
+                // Find fine by _id or fineId (referenceId)
+                let fine = await Fine.findById(relatedEntityId);
+                if (!fine && referenceId) {
+                    fine = await Fine.findOne({ fineId: referenceId });
+                }
+                
+                if (fine) {
+                    // Calculate total paid from all payments (check both by _id and fineId)
+                    const paymentQuery = {
+                        relatedEntityType: 'Fine',
+                        status: 'Completed'
+                    };
+                    
+                    // Try to find payments by relatedEntityId or referenceId
+                    const paymentsById = await Payment.find({
+                        ...paymentQuery,
+                        relatedEntityId: fine._id
+                    });
+                    
+                    const paymentsByRefId = referenceId ? await Payment.find({
+                        ...paymentQuery,
+                        referenceId: fine.fineId
+                    }) : [];
+                    
+                    // Combine and deduplicate payments
+                    const allPaymentIds = new Set();
+                    const allPayments = [];
+                    [...paymentsById, ...paymentsByRefId].forEach(p => {
+                        if (!allPaymentIds.has(p._id.toString())) {
+                            allPaymentIds.add(p._id.toString());
+                            allPayments.push(p);
+                        }
+                    });
+                    
+                    const totalPaid = allPayments.reduce((sum, p) => sum + parseFloat(p.amount || 0), 0);
+                    
+                    // Update fine's paidAmount field
+                    fine.paidAmount = totalPaid;
+                    
+                    // Calculate employee's share (what they actually owe)
+                    const employeeShare = calculateEmployeeShare(fine);
+                    
+                    // If fully paid (remaining amount is 0 or less), update fine status to 'Paid'
+                    const remainingAmount = employeeShare - totalPaid;
+                    if (remainingAmount <= 0.01) { // Small tolerance for floating point
+                        fine.fineStatus = 'Paid';
+                    }
+                    
+                    await fine.save();
+                }
+            } else if (relatedEntityType === 'Loan') {
+                // Find loan by _id or loanId (referenceId)
+                let loan = await Loan.findById(relatedEntityId);
+                if (!loan && referenceId) {
+                    loan = await Loan.findOne({ loanId: referenceId });
+                }
+                
+                if (loan) {
+                    // Calculate total paid from all payments (check both by _id and loanId)
+                    const paymentQuery = {
+                        relatedEntityType: 'Loan',
+                        status: 'Completed'
+                    };
+                    
+                    // Try to find payments by relatedEntityId or referenceId
+                    const paymentsById = await Payment.find({
+                        ...paymentQuery,
+                        relatedEntityId: loan._id
+                    });
+                    
+                    const paymentsByRefId = referenceId ? await Payment.find({
+                        ...paymentQuery,
+                        referenceId: loan.loanId
+                    }) : [];
+                    
+                    // Combine and deduplicate payments
+                    const allPaymentIds = new Set();
+                    const allPayments = [];
+                    [...paymentsById, ...paymentsByRefId].forEach(p => {
+                        if (!allPaymentIds.has(p._id.toString())) {
+                            allPaymentIds.add(p._id.toString());
+                            allPayments.push(p);
+                        }
+                    });
+                    
+                    const totalPaid = allPayments.reduce((sum, p) => sum + parseFloat(p.amount || 0), 0);
+                    
+                    // Update loan's paidAmount field
+                    loan.paidAmount = totalPaid;
+                    
+                    const totalAmount = parseFloat(loan.amount || 0);
+                    const remainingAmount = totalAmount - totalPaid;
+                    
+                    // If fully paid (remaining amount is 0 or less), update loan status to 'Paid'
+                    if (remainingAmount <= 0.01) { // Small tolerance for floating point
+                        loan.status = 'Paid';
+                        loan.approvalStatus = 'Paid';
+                    }
+                    
+                    await loan.save();
+                }
+            }
+        }
+
+        // Send Invoice Email if payment is completed
+        if (status === 'Completed' || payment.status === 'Completed') {
+            try {
+                const { sendPaymentInvoiceEmail } = await import("../../utils/sendPaymentInvoiceEmail.js");
+                
+                // Get the updated related entity to pass along
+                let finalRelatedEntity = null;
+                if (relatedEntityType === 'Fine') {
+                    finalRelatedEntity = await Fine.findById(relatedEntityId) || await Fine.findOne({ fineId: referenceId });
+                } else if (relatedEntityType === 'Loan') {
+                    finalRelatedEntity = await Loan.findById(relatedEntityId) || await Loan.findOne({ loanId: referenceId });
+                }
+
+                // We don't await this to avoid slowing down the response
+                sendPaymentInvoiceEmail(payment, finalRelatedEntity).catch(err => 
+                    console.error('[AddPayment] Failed to send invoice email:', err)
+                );
+            } catch (emailErr) {
+                console.error('[AddPayment] Error initializing invoice email:', emailErr);
+            }
+        }
+
+        // Populate for response
+        await payment.populate('paidBy', 'employeeId firstName lastName');
+        await payment.populate('createdBy', 'firstName lastName');
+
+        res.status(201).json({
+            success: true,
+            message: 'Payment created successfully',
+            payment
+        });
+    } catch (error) {
+        console.error('Error creating payment:', error);
+        res.status(500).json({
+            success: false,
+            message: error.message || 'Failed to create payment'
+        });
+    }
+};

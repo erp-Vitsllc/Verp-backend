@@ -7,7 +7,7 @@ const dashboardActionSchema = new mongoose.Schema({
     requestType: {
         type: String,
         required: true,
-        enum: ['Loan', 'Reward', 'Fine', 'Profile Activation', 'Notice Request', 'Asset', 'Asset Overdue', 'Asset Approval', 'Asset Assignment', 'Asset Transfer', 'Asset Loss Damage', 'Asset End of Life', 'Asset Accessory', 'Responsibility Approval']
+        enum: ['Loan', 'Reward', 'Fine', 'Profile Activation', 'Notice Request', 'Asset', 'Asset Overdue', 'Asset Approval', 'Asset Assignment', 'Asset Transfer', 'Asset Loss Damage', 'Asset End of Life', 'Asset Accessory', 'Responsibility Approval', 'Asset Leave', 'Asset Bulk Action']
     },
     status: {
         type: String,
@@ -24,6 +24,7 @@ const dashboardActionSchema = new mongoose.Schema({
     // Metadata for dashboard display
     extra1: { type: String },
     extra2: { type: String },
+    extra3: { type: String }, // For bulk transfer info (JSON string)
     isGlobal: { type: Boolean, default: false }
 }, { timestamps: true });
 

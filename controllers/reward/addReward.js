@@ -151,6 +151,29 @@ export const addReward = async (req, res) => {
             }
         }
 
+        // VALIDATION: Check if required designations are assigned in Flowchart
+        const isCashOrGift = rewardType === 'Cash Reward' || rewardType === 'Gift Reward';
+        const managementHOD = await getManagementHOD();
+        const missingDesignations = [];
+
+        if (!managementHOD) {
+            missingDesignations.push('Management/CEO');
+        }
+
+        // For Cash/Gift rewards, also need Accounts HOD
+        if (isCashOrGift) {
+            const accountsHOD = await getDepartmentHOD('accounts');
+            if (!accountsHOD) {
+                missingDesignations.push('Accounts/Finance');
+            }
+        }
+
+        if (missingDesignations.length > 0) {
+            return res.status(400).json({
+                message: `Cannot proceed. The following designations are not assigned in Flowchart: ${missingDesignations.join(', ')}. Please assign these designations in Settings > FlowChart before creating a ${rewardType} request.`
+            });
+        }
+
         // Validate fields based on reward type
         if (rewardType === 'Cash Reward') {
             // Cash Reward: amount required
