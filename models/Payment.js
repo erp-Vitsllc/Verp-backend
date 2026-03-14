@@ -35,7 +35,7 @@ const paymentSchema = new mongoose.Schema(
         status: {
             type: String,
             required: true,
-            enum: ['Pending', 'Processing', 'Completed', 'Paid', 'Failed', 'Cancelled'],
+            enum: ['Pending', 'Processing', 'Completed', 'Paid', 'Failed', 'Cancelled', 'Rejected'],
             default: 'Pending'
         },
         paymentDate: {
@@ -72,6 +72,13 @@ const paymentSchema = new mongoose.Schema(
         remarks: {
             type: String,
             default: ''
+        },
+        attachment: {
+            url: { type: String },
+            publicId: { type: String },
+            data: { type: String },
+            name: { type: String },
+            mimeType: { type: String }
         }
     },
     {

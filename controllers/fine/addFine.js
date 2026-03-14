@@ -1,6 +1,7 @@
 import Fine from "../../models/Fine.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import User from "../../models/User.js";
+import Company from "../../models/Company.js";
 import { uploadDocumentToS3 } from "../../utils/s3Upload.js";
 import { sendFineApprovalEmail } from "../../utils/sendFineApprovalEmail.js";
 
@@ -85,11 +86,23 @@ export const addFine = async (req, res) => {
         if (compLiability > 0) {
             console.log(`[AddFine] Transforming Company Share (${compLiability}) into VEGA-HR-0000 record.`);
 
+            // Resolve Company Name
+            let compName = 'Vega Digital IT Solutions';
+            try {
+                const compId = req.body.company || commonData?.company;
+                if (compId) {
+                    const comp = await Company.findById(compId);
+                    if (comp) compName = comp.name;
+                }
+            } catch (err) {
+                console.warn("[AddFine] Could not resolve company name for placeholder:", err.message);
+            }
+
             // Create Company "Employee" Record
             // Insert at HEAD to ensure it gets Suffix 'A'
             workingEmployees.unshift({
                 employeeId: 'VEGA-HR-0000',
-                employeeName: 'Vega Digital IT Solutions',
+                employeeName: compName,
                 fineAmount: compLiability,     // Total Amount for this record
                 employeeAmount: compLiability, // It is their liability
                 companyAmount: 0,              // Zero out field so it doesn't look like a shared fine
@@ -163,13 +176,7 @@ export const addFine = async (req, res) => {
                     });
                 }
 
-                // NEW: Ensure all belong to the SAME COMPANY
-                const companyIds = [...new Set(employeesWithCompany.map(e => String(e.company?._id || e.company)))];
-                if (companyIds.length > 1) {
-                    return res.status(400).json({
-                        message: "All employees in a group fine must belong to the same company."
-                    });
-                }
+                // Same company validation removed per user request
             }
 
             const baseFineId = await generateFineIdInternal(); // e.g. VEGA-FNE-0001
@@ -264,8 +271,12 @@ export const addFine = async (req, res) => {
                     attachment: attachmentData,
                     category: commonData.category || 'Other',
                     subCategory: commonData.subCategory || '',
-                    company: employeesWithCompany.find(e => e.employeeId === empData.employeeId)?.company?._id || (employeesWithCompany.length > 0 ? employeesWithCompany[0].company?._id : null),
-                    companyName: employeesWithCompany.find(e => e.employeeId === empData.employeeId)?.company?.name || (employeesWithCompany.length > 0 ? employeesWithCompany[0].company?.name : ''),
+                    company: (empData.employeeId === 'VEGA-HR-0000' && commonData.company) 
+                        ? commonData.company 
+                        : (employeesWithCompany.find(e => e.employeeId === empData.employeeId)?.company?._id || (employeesWithCompany.length > 0 ? employeesWithCompany[0].company?._id : (commonData.company || null))),
+                    companyName: (empData.employeeId === 'VEGA-HR-0000' && commonData.companyName)
+                        ? commonData.companyName
+                        : (employeesWithCompany.find(e => e.employeeId === empData.employeeId)?.company?.name || (employeesWithCompany.length > 0 ? employeesWithCompany[0].company?.name : '')),
                     vehicleId: commonData.vehicleId || null,
                     assetId: commonData.assetId || null,
                     assetName: commonData.assetName || '',

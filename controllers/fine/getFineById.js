@@ -65,6 +65,8 @@ export const getFineById = async (req, res) => {
             .populate('hrApprovedBy', 'firstName lastName email department designation employeeId')
             .populate('accountsApprovedBy', 'firstName lastName email department designation employeeId')
             .populate('approvedBy', 'firstName lastName email department designation employeeId')
+            .populate('rejectedBy', 'firstName lastName email department designation')
+            .populate('submittedTo', 'firstName lastName email department designation')
             .populate('workflow.assignedTo', 'firstName lastName employeeId')
             .sort({ fineId: 1 })
             .lean();
@@ -81,20 +83,41 @@ export const getFineById = async (req, res) => {
 
             relatedFines.forEach(rf => {
                 if (rf.assignedEmployees) {
-                    allAssigned.push(...rf.assignedEmployees);
+                    // Enrich each entry with its specific record fineId for correct matching on frontend
+                    const enriched = rf.assignedEmployees.map(e => ({
+                        ...e,
+                        fineId: rf.fineId,
+                        fineStatus: rf.fineStatus,
+                        individualAmount: e.individualAmount || rf.employeeAmount,
+                        fineAmount: e.fineAmount || rf.fineAmount
+                    }));
+                    allAssigned.push(...enriched);
                 }
+
+                // FIX: If this record is the company's portion (VEGA-HR-0000), 
+                // its employeeAmount IS the company liability.
+                const hasCompanyPlaceholder = rf.assignedEmployees?.some(e => e.employeeId === 'VEGA-HR-0000');
+                
+                if (hasCompanyPlaceholder) {
+                    totalCompAmt += parseFloat(rf.employeeAmount) || 0;
+                } else {
+                    totalEmpAmt += parseFloat(rf.employeeAmount) || 0;
+                    totalCompAmt += parseFloat(rf.companyAmount) || 0;
+                }
+                
                 totalFineAmt += parseFloat(rf.fineAmount) || 0;
-                totalEmpAmt += parseFloat(rf.employeeAmount) || 0;
-                totalCompAmt += parseFloat(rf.companyAmount) || 0;
+                
+                // Ensure company ID is preserved
+                if (rf.company && !fine.company) fine.company = rf.company;
             });
 
             // Update synthesized fields
             fine.fineId = baseIdToUse; // use base ID
             fine.isGroupView = true;
             fine.assignedEmployees = allAssigned;
-            fine.fineAmount = totalFineAmt;
-            fine.employeeAmount = totalEmpAmt;
-            fine.companyAmount = totalCompAmt;
+            fine.fineAmount = totalFineAmt.toFixed(2);
+            fine.employeeAmount = totalEmpAmt.toFixed(2);
+            fine.companyAmount = totalCompAmt.toFixed(2);
         } else if (relatedFines.length === 1 && !fine) {
             fine = relatedFines[0];
         }

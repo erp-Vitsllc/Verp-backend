@@ -55,6 +55,7 @@ export const updateFine = async (req, res) => {
 
         const oldStatus = fine.fineStatus;
         let shouldSendApprovalEmail = false;
+        let statusHandled = false;
 
         // 1. Explicitly Define Allowed Fields (Fix Mass Assignment)
         const allowedUpdates = [
@@ -62,7 +63,7 @@ export const updateFine = async (req, res) => {
             'attachment', 'category', 'subCategory', 'vehicleId', 'assetId', 'assetName',
             'projectId', 'projectName', 'engineerName', 'responsibleFor',
             'employeeAmount', 'companyAmount', 'payableDuration', 'monthStart',
-            'employees' // handled below
+            'employees', 'totalEmployeeFineAmount', 'company', 'companyName'
         ];
 
         // 2. Perform submission logic from Draft -> Pending
@@ -105,6 +106,7 @@ export const updateFine = async (req, res) => {
                                 await f.save();
                             }
                             shouldSendApprovalEmail = true;
+                            statusHandled = true;
                             console.log(`[UpdateFine] ${fines.length} Fines routed directly to HR: ${hrUser._id}`);
                         }
                     }
@@ -133,26 +135,80 @@ export const updateFine = async (req, res) => {
                 }
             }
             shouldSendApprovalEmail = true;
+            statusHandled = true;
             console.log(`[UpdateFine] Resubmitted group of ${fines.length} fines.`);
+        }
+
+        if (updates.company && typeof updates.company === 'string') {
+            try {
+                const CompanyModel = (await import("../../models/Company.js")).default;
+                const comp = await CompanyModel.findById(updates.company);
+                if (comp) updates.companyName = comp.name;
+            } catch (err) {
+                console.warn("[UpdateFine] Could not resolve company name:", err.message);
+            }
         }
 
         // 3. Apply updates only for allowed fields (Loop all for bulk update)
         for (const f of fines) {
+            // Find specific data for this employee if it's a group update
+            const targetEmployeeId = f.assignedEmployees?.[0]?.employeeId;
+            const empUpdate = (updates.employees && Array.isArray(updates.employees))
+                ? updates.employees.find(e => e.employeeId === targetEmployeeId)
+                : null;
+
             allowedUpdates.forEach(key => {
                 if (updates[key] !== undefined) {
-                    if (key === 'employees' && Array.isArray(updates.employees)) {
-                        // Skip bulk employee list update for individual suffix records unless specified
+                    if (key === 'employees') {
+                        // handled via specificUpdate logic
                     } else if (key === 'attachment') {
                         if (updates.attachment && updates.attachment.url && !isValidStorageUrl(updates.attachment.url)) {
                             console.warn("[UpdateFine] Invalid URL. Skipping.");
                         } else {
                             f.attachment = updates.attachment;
                         }
-                    } else if (key !== 'employees') {
-                        f[key] = updates[key];
+                    } else if (key === 'fineStatus' && statusHandled) {
+                        // Already handled by Draft -> Pending or Resubmit logic
+                    } else {
+                        const isCompanyRecord = targetEmployeeId === 'VEGA-HR-0000';
+
+                        if (isCompanyRecord && (key === 'employeeAmount' || key === 'fineAmount')) {
+                            // The company's liability is stored in its employeeAmount/fineAmount fields
+                            f[key] = parseFloat(updates.companyAmount) || 0;
+                        } else if (isCompanyRecord && key === 'companyAmount') {
+                            f[key] = 0; // Company share of company record is 0
+                        } else if (empUpdate && ['fineAmount', 'employeeAmount', 'companyAmount', 'payableDuration'].includes(key) && empUpdate[key] !== undefined) {
+                            f[key] = parseFloat(empUpdate[key]);
+                        } else {
+                            f[key] = updates[key];
+                        }
+                        
+                        // If manually reverting to Draft, clear routing info
+                        if (key === 'fineStatus' && updates[key] === 'Draft') {
+                            f.submittedTo = null;
+                            f.workflow = [];
+                        }
                     }
                 }
             });
+
+            // Sync individualAmount within the specific record for consistency
+            if (f.assignedEmployees && f.assignedEmployees.length > 0) {
+                // employeeAmount at the root of a group record is the individual's portion
+                f.assignedEmployees[0].individualAmount = f.employeeAmount;
+                
+                // Sync company name if it's the company record
+                if (f.assignedEmployees[0].employeeId === 'VEGA-HR-0000' && updates.companyName) {
+                    f.assignedEmployees[0].employeeName = updates.companyName;
+                }
+                
+                // Extra sync for specific amount fields inside the object if they were provided
+                if (empUpdate) {
+                    if (empUpdate.fineAmount !== undefined) f.assignedEmployees[0].fineAmount = parseFloat(empUpdate.fineAmount);
+                    if (empUpdate.individualAmount !== undefined) f.assignedEmployees[0].individualAmount = parseFloat(empUpdate.individualAmount);
+                }
+            }
+
             await f.save();
         }
 

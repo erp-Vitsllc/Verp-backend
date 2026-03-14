@@ -2,6 +2,10 @@ import Payment from "../../models/Payment.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import Fine from "../../models/Fine.js";
 import Loan from "../../models/Loan.js";
+import { getDepartmentHOD, isUserInFlowchart } from "../../utils/getDepartmentHOD.js";
+import { syncDashboardAction } from "../../utils/syncDashboard.js";
+import { sendPaymentApprovalEmail } from "../../utils/sendPaymentApprovalEmail.js";
+import { sendPaymentNotificationEmail } from "../../utils/sendCombinedPaymentEmail.js";
 
 export const addPayment = async (req, res) => {
     try {
@@ -15,8 +19,20 @@ export const addPayment = async (req, res) => {
             referenceId,
             relatedEntityType,
             relatedEntityId,
-            remarks
+            remarks,
+            attachment
         } = req.body;
+        
+        // CHECK IF CREATOR IS ACCOUNTS PERSON
+        const isAccountsUser = await isUserInFlowchart(req.user, 'accounts');
+        
+        // DEFAULT STATUS logic:
+        // If Accounts user creates it, it can be 'Completed' immediately
+        // Otherwise it must be 'Processing' (or Pending) and needs approval
+        let finalStatus = status;
+        if (!isAccountsUser) {
+            finalStatus = 'Processing';
+        }
 
         // Validate required fields
         if (!paymentType || !paidBy || !amount) {
@@ -57,14 +73,15 @@ export const addPayment = async (req, res) => {
             paidBy: employee._id,
             paidByName: `${employee.firstName || ''} ${employee.lastName || ''}`.trim(),
             amount: parseFloat(amount),
-            status,
+            status: finalStatus,
             paymentDate: paymentDate ? new Date(paymentDate) : new Date(),
             description: description || '',
             referenceId: referenceId || null,
             relatedEntityType: relatedEntityType || null,
             relatedEntityId: relatedEntityId || null,
             createdBy: req.user._id,
-            remarks: remarks || ''
+            remarks: remarks || '',
+            attachment: attachment || null
         });
 
         await payment.save();
@@ -81,6 +98,11 @@ export const addPayment = async (req, res) => {
                 emp.employeeId !== 'VEGA_INTERNAL' &&
                 emp.employeeName !== 'Vega Digital IT Solutions'
             );
+
+            // PRIORITY: Check for individual amount first
+            if (realEmployees.length === 1 && realEmployees[0].individualAmount > 0) {
+                return realEmployees[0].individualAmount;
+            }
             
             const companyAmount = parseFloat(fine.companyAmount || 0);
             const fineAmount = parseFloat(fine.fineAmount || 0);
@@ -219,25 +241,42 @@ export const addPayment = async (req, res) => {
             }
         }
 
-        // Send Invoice Email if payment is completed
-        if (status === 'Completed' || payment.status === 'Completed') {
+        // Send Combined Status & Invoice Email if payment is completed immediately (by Accounts)
+        if (payment.status === 'Completed') {
             try {
-                const { sendPaymentInvoiceEmail } = await import("../../utils/sendPaymentInvoiceEmail.js");
-                
-                // Get the updated related entity to pass along
-                let finalRelatedEntity = null;
-                if (relatedEntityType === 'Fine') {
-                    finalRelatedEntity = await Fine.findById(relatedEntityId) || await Fine.findOne({ fineId: referenceId });
-                } else if (relatedEntityType === 'Loan') {
-                    finalRelatedEntity = await Loan.findById(relatedEntityId) || await Loan.findOne({ loanId: referenceId });
-                }
-
                 // We don't await this to avoid slowing down the response
-                sendPaymentInvoiceEmail(payment, finalRelatedEntity).catch(err => 
-                    console.error('[AddPayment] Failed to send invoice email:', err)
+                sendPaymentNotificationEmail(payment, 'Completed').catch(err => 
+                    console.error('[AddPayment] Failed to send notification email:', err)
                 );
             } catch (emailErr) {
-                console.error('[AddPayment] Error initializing invoice email:', emailErr);
+                console.error('[AddPayment] Error initializing notification email:', emailErr);
+            }
+        }
+
+        // TRIGGER APPROVAL FLOW FOR ACCOUNTS
+        // Only if NOT already completed (i.e. not raised by Accounts)
+        if (payment.status !== 'Completed') {
+            try {
+                const accountsHOD = await getDepartmentHOD('accounts');
+                if (accountsHOD) {
+                    // 1. Sync to Dashboard
+                    await syncDashboardAction({
+                        requestId: payment._id,
+                        requestType: 'Payment Approval',
+                        assignedTo: accountsHOD._id,
+                        status: 'Pending',
+                        subjectEmployee: employee,
+                        extra1: payment.paymentType,
+                        extra2: `Amount: AED ${payment.amount.toLocaleString()}`
+                    });
+    
+                    // 2. Send Approval Email
+                    sendPaymentApprovalEmail(payment, accountsHOD).catch(err => 
+                        console.error('[AddPayment] Failed to send payment approval email:', err)
+                    );
+                }
+            } catch (approvalErr) {
+                console.error('[AddPayment] Error in approval flow trigger:', approvalErr);
             }
         }
 

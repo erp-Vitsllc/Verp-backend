@@ -99,7 +99,7 @@ export const addFlowchartResponsibility = async (req, res) => {
                         });
 
                         if (!existingAction) {
-                            await DashboardAction.create({
+                            const newAction = await DashboardAction.create({
                                 assignedTo: employee._id,
                                 assignedToEmpId: employee.employeeId,
                                 requestId: responsibility._id,
@@ -113,6 +113,23 @@ export const addFlowchartResponsibility = async (req, res) => {
                             });
 
                             console.log(`[Flowchart] Created responsibility approval action for ${category}: ${employee.employeeId}`);
+
+                            // Send approval email
+                            const roleLabels = {
+                                'hr': 'HR Admin',
+                                'accounts': 'Financial Controller',
+                                'assetcontroller': 'Asset Controller',
+                                'management': 'General Management',
+                                'admincontroller': 'System Admin'
+                            };
+
+                            await sendResponsibilityApprovalEmail({
+                                employee: employee,
+                                companyName: 'Main ERP', // Global flowchart is for the whole system
+                                category: roleLabels[category] || category,
+                                requestId: newAction._id,
+                                unassignedAssets: [] // We'll let them see unassigned on approval
+                            });
                         }
                     }
                 } catch (err) {
@@ -169,9 +186,10 @@ export const respondToResponsibility = async (req, res) => {
 
         // Also update any dashboard action if it exists
         const dashboardAction = await DashboardAction.findOne({
-            requestType: 'Responsibility Approval',
-            status: 'Pending',
-            extra1: category
+            $or: [
+                { requestId: responsibility._id, requestType: 'Responsibility Approval', status: 'Pending' },
+                { extra1: category, requestType: 'Responsibility Approval', status: 'Pending' }
+            ]
         });
 
         if (dashboardAction) {

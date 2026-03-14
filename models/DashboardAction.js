@@ -7,7 +7,7 @@ const dashboardActionSchema = new mongoose.Schema({
     requestType: {
         type: String,
         required: true,
-        enum: ['Loan', 'Reward', 'Fine', 'Profile Activation', 'Notice Request', 'Asset', 'Asset Overdue', 'Asset Approval', 'Asset Assignment', 'Asset Transfer', 'Asset Loss Damage', 'Asset End of Life', 'Asset Accessory', 'Responsibility Approval', 'Asset Leave', 'Asset Bulk Action']
+        enum: ['Loan', 'Reward', 'Fine', 'Group Fine Request', 'Profile Activation', 'Notice Request', 'Asset', 'Asset Overdue', 'Asset Approval', 'Asset Assignment', 'Asset Transfer', 'Asset Loss Damage', 'Asset End of Life', 'Asset Accessory', 'Responsibility Approval', 'Asset Leave', 'Asset Bulk Action', 'Payment Approval']
     },
     status: {
         type: String,
