@@ -41,6 +41,14 @@ export const getRewardById = async (req, res) => {
             return res.status(404).json({ message: "Reward not found" });
         }
 
+        // Visibility: Draft - only creator sees; Admin sees all
+        const { isUserAdministrator } = await import('../../services/permissionService.js');
+        const isAdmin = await isUserAdministrator(req.user?.id);
+        const isCreator = reward.createdBy && (reward.createdBy._id?.toString() || reward.createdBy.toString()) === req.user?.id;
+        if (!isAdmin && reward.rewardStatus === 'Draft' && !isCreator) {
+            return res.status(403).json({ message: "Access denied. Draft rewards are visible only to the creator." });
+        }
+
         // Fetch HODs with context (Pass employeeId to resolve company)
         const hrHOD = await getDepartmentHOD('hr', reward.employeeId);
         const accountsHOD = await getDepartmentHOD('finance', reward.employeeId);

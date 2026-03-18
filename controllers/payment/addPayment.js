@@ -147,45 +147,51 @@ export const addPayment = async (req, res) => {
                     // Calculate total paid from all payments (check both by _id and fineId)
                     const paymentQuery = {
                         relatedEntityType: 'Fine',
-                        status: 'Completed'
+                        status: 'Completed',
+                        $or: []
                     };
                     
-                    // Try to find payments by relatedEntityId or referenceId
-                    const paymentsById = await Payment.find({
-                        ...paymentQuery,
-                        relatedEntityId: fine._id
-                    });
-                    
-                    const paymentsByRefId = referenceId ? await Payment.find({
-                        ...paymentQuery,
-                        referenceId: fine.fineId
-                    }) : [];
-                    
-                    // Combine and deduplicate payments
-                    const allPaymentIds = new Set();
-                    const allPayments = [];
-                    [...paymentsById, ...paymentsByRefId].forEach(p => {
-                        if (!allPaymentIds.has(p._id.toString())) {
-                            allPaymentIds.add(p._id.toString());
-                            allPayments.push(p);
-                        }
-                    });
-                    
-                    const totalPaid = allPayments.reduce((sum, p) => sum + parseFloat(p.amount || 0), 0);
-                    
-                    // Update fine's paidAmount field
-                    fine.paidAmount = totalPaid;
-                    
-                    // Calculate employee's share (what they actually owe)
-                    const employeeShare = calculateEmployeeShare(fine);
-                    
-                    // If fully paid (remaining amount is 0 or less), update fine status to 'Paid'
-                    const remainingAmount = employeeShare - totalPaid;
-                    if (remainingAmount <= 0.01) { // Small tolerance for floating point
-                        fine.fineStatus = 'Paid';
+                    // Add conditions for finding payments
+                    if (fine._id) {
+                        paymentQuery.$or.push({ relatedEntityId: fine._id });
+                    }
+                    if (fine.fineId) {
+                        paymentQuery.$or.push({ referenceId: fine.fineId });
                     }
                     
-                    await fine.save();
+                    // If no $or conditions, skip query
+                    if (paymentQuery.$or.length === 0) {
+                        console.error('[AddPayment] Fine found but no valid ID for payment lookup:', fine._id, fine.fineId);
+                    } else {
+                        const allPayments = await Payment.find(paymentQuery);
+                        const totalPaid = allPayments.reduce((sum, p) => sum + parseFloat(p.amount || 0), 0);
+                        
+                        // Update fine's paidAmount field
+                        fine.paidAmount = totalPaid;
+                        
+                        // Calculate employee's share (what they actually owe)
+                        const employeeShare = calculateEmployeeShare(fine);
+                        
+                        // If fully paid (remaining amount is 0 or less), update fine status to 'Paid'
+                        const remainingAmount = employeeShare - totalPaid;
+                        
+                        console.log('[AddPayment] Fine payment check:', {
+                            fineId: fine.fineId,
+                            employeeShare,
+                            totalPaid,
+                            remainingAmount,
+                            currentStatus: fine.fineStatus
+                        });
+                        
+                        if (remainingAmount <= 0.01) { // Small tolerance for floating point
+                            fine.fineStatus = 'Paid';
+                            console.log('[AddPayment] Fine status updated to Paid:', fine.fineId);
+                        }
+                        
+                        await fine.save();
+                    }
+                } else {
+                    console.error('[AddPayment] Fine not found:', { relatedEntityId, referenceId });
                 }
             } else if (relatedEntityType === 'Loan') {
                 // Find loan by _id or loanId (referenceId)
@@ -266,6 +272,7 @@ export const addPayment = async (req, res) => {
                         assignedTo: accountsHOD._id,
                         status: 'Pending',
                         subjectEmployee: employee,
+                        requestedByName: req.user.name || '',
                         extra1: payment.paymentType,
                         extra2: `Amount: AED ${payment.amount.toLocaleString()}`
                     });

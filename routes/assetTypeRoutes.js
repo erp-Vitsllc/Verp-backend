@@ -14,7 +14,6 @@ const requireAssetControllerOrAdmin = async (req, res, next) => {
 
         if (isAssetController) return next();
 
-        // If not admin or controller, allow creator for Draft/Pending assets
         const { id } = req.params;
         if (id && mongoose.Types.ObjectId.isValid(id)) {
             const AssetItem = (await import('../models/AssetItem.js')).default;
@@ -25,7 +24,15 @@ const requireAssetControllerOrAdmin = async (req, res, next) => {
                 const isCreator = asset.createdBy?.toString() === currentUserId;
                 const isAwaitingApproval = asset.status === 'Draft' || asset.status === 'Pending';
 
+                // Allow creator for Draft/Pending assets
                 if (isCreator && isAwaitingApproval) {
+                    return next();
+                }
+
+                // Allow assigned user to update accessories on their assigned asset (PUT with accessories)
+                const isAssignedUser = asset.assignedTo && asset.assignedTo.toString() === req.user.employeeObjectId?.toString();
+                const isAccessoriesOnlyUpdate = req.method === 'PUT' && req.body && Object.keys(req.body).every(k => k === 'accessories' || k === 'accessoriesAttachment');
+                if (isAssignedUser && isAccessoriesOnlyUpdate) {
                     return next();
                 }
             }

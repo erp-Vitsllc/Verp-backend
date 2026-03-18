@@ -1,10 +1,13 @@
 import nodemailer from "nodemailer";
+import { resolveEmployeeEmail, getFallbackEmailNote } from "./resolveEmployeeEmail.js";
 
-export const sendAssetAssignmentEmail = async ({ asset, employee, recipient, isBulk = false, assetCount = 1 }) => {
+export const sendAssetAssignmentEmail = async ({ asset, assets = [], employee, recipient, isBulk = false, assetCount = 1 }) => {
     try {
-        const recipientEmail = recipient.companyEmail || recipient.workEmail || recipient.email;
+        // Use resolveEmployeeEmail: when recipient (employee) has no email, fallback to primaryReportee
+        const recipientForResolve = recipient?.primaryReportee ? recipient : { ...recipient, primaryReportee: employee?.primaryReportee };
+        const { email: recipientEmail, isFallbackToReportee, employeeName: fallbackEmployeeName, reporteeName } = resolveEmployeeEmail(recipientForResolve);
         if (!recipientEmail) {
-            console.warn(`[Email Warning] No email found for recipient ${recipient.employeeId || recipient._id}`);
+            console.warn(`[Email Warning] No email found for recipient ${recipient?.employeeId || recipient?._id}`);
             return;
         }
 
@@ -46,7 +49,8 @@ export const sendAssetAssignmentEmail = async ({ asset, employee, recipient, isB
 
         console.log(`[Email Debug] Generating button URL: ${buttonUrl}`);
 
-        const recipientName = recipient.firstName || "User";
+        const recipientName = isFallbackToReportee ? reporteeName : (recipient.firstName || "User");
+        const fallbackNote = isFallbackToReportee ? getFallbackEmailNote(fallbackEmployeeName, reporteeName) : '';
 
         const html = `
             <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; color: #1e293b; line-height: 1.6; max-width: 600px; margin: 0 auto; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden; background-color: #ffffff;">
@@ -54,13 +58,31 @@ export const sendAssetAssignmentEmail = async ({ asset, employee, recipient, isB
                     <h1 style="margin: 0; font-size: 24px;">Asset ${employee?.isCompany ? 'Allocation' : 'Assignment'}</h1>
                 </div>
                 <div style="padding: 40px;">
+                    ${fallbackNote}
                     <p style="font-size: 16px;">Hello ${recipientName},</p>
                     
                     <p>A new ${isBulk ? 'batch of assets has' : 'asset has'} been ${employee?.isCompany ? 'allocated' : 'assigned'} to <strong>${isSelfAssignment ? 'you' : employeeName}</strong>.</p>
                     
                     <div style="background-color: #f8fafc; padding: 25px; border-radius: 8px; margin: 25px 0; border: 1px solid #e2e8f0;">
                         <table style="width: 100%; border-collapse: collapse;">
-                            ${!isBulk ? `
+                            ${assets && assets.length > 0 ? `
+                            <thead>
+                                <tr>
+                                    <th style="padding: 10px 5px; text-align: left; color: #64748b; font-size: 11px; text-transform: uppercase;">Asset ID</th>
+                                    <th style="padding: 10px 5px; text-align: left; color: #64748b; font-size: 11px; text-transform: uppercase;">Name</th>
+                                    <th style="padding: 10px 5px; text-align: left; color: #64748b; font-size: 11px; text-transform: uppercase;">Category</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                ${assets.map(a => `
+                                <tr>
+                                    <td style="padding: 8px 5px; border-top: 1px solid #e2e8f0; font-size: 13px;">${a.assetId || 'N/A'}</td>
+                                    <td style="padding: 8px 5px; border-top: 1px solid #e2e8f0; font-size: 13px;">${a.name}</td>
+                                    <td style="padding: 8px 5px; border-top: 1px solid #e2e8f0; font-size: 13px; color: #64748b;">${a.categoryId?.name || a.category || 'Asset'}</td>
+                                </tr>
+                                `).join('')}
+                            </tbody>
+                            ` : (!isBulk ? `
                             <tr>
                                 <td style="padding: 8px 0; color: #64748b; font-size: 13px; text-transform: uppercase; font-weight: bold;">Asset ID</td>
                                 <td style="padding: 8px 0; font-weight: bold;">${assetIdDisplay}</td>
@@ -69,16 +91,16 @@ export const sendAssetAssignmentEmail = async ({ asset, employee, recipient, isB
                                 <td style="padding: 8px 0; color: #64748b; font-size: 13px; text-transform: uppercase; font-weight: bold;">Asset Name</td>
                                 <td style="padding: 8px 0; font-weight: bold;">${assetName}</td>
                             </tr>
+                            <tr>
+                                <td style="padding: 8px 0; color: #64748b; font-size: 13px; text-transform: uppercase; font-weight: bold;">Category</td>
+                                <td style="padding: 8px 0; font-weight: bold;">${asset.categoryId?.name || asset.category || 'Asset'}</td>
+                            </tr>
                             ` : `
                             <tr>
                                 <td style="padding: 8px 0; color: #64748b; font-size: 13px; text-transform: uppercase; font-weight: bold;">Batch Size</td>
                                 <td style="padding: 8px 0; font-weight: bold;">${assetCount} Items</td>
                             </tr>
-                            `}
-                            <tr>
-                                <td style="padding: 8px 0; color: #64748b; font-size: 13px; text-transform: uppercase; font-weight: bold;">Category</td>
-                                <td style="padding: 8px 0; font-weight: bold;">${asset.categoryId?.name || asset.category || 'Asset'}</td>
-                            </tr>
+                            `)}
                         </table>
                     </div>
 

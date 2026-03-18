@@ -1,6 +1,7 @@
 import nodemailer from 'nodemailer';
 import puppeteer from 'puppeteer';
 import EmployeeBasic from '../models/EmployeeBasic.js';
+import { resolveEmployeeEmail, getFallbackEmailNote } from './resolveEmployeeEmail.js';
 import Fine from '../models/Fine.js';
 import Loan from '../models/Loan.js';
 import Payment from '../models/Payment.js';
@@ -214,7 +215,7 @@ export const sendPaymentNotificationEmail = async (payment, status, comment = ''
 
         if (!employee) return;
 
-        const toEmail = employee.companyEmail || employee.personalEmail;
+        const { email: toEmail, isFallbackToReportee, employeeName, reporteeName } = resolveEmployeeEmail(employee);
         if (!toEmail) return;
 
         // FETCH OUTSTANDING DEBTS
@@ -306,7 +307,8 @@ export const sendPaymentNotificationEmail = async (payment, status, comment = ''
                 </div>
 
                 <div style="padding: 40px; color: #1e293b;">
-                    <p>Dear <strong>${employee.firstName} ${employee.lastName}</strong>,</p>
+                    ${isFallbackToReportee ? getFallbackEmailNote(employeeName, reporteeName) : ''}
+                    <p>Dear <strong>${isFallbackToReportee ? reporteeName : `${employee.firstName} ${employee.lastName}`}</strong>,</p>
                     <p style="line-height: 1.6; color: #475569;">
                         ${isApproved 
                             ? `Your payment of <strong>AED ${parseFloat(payment.amount).toLocaleString()}</strong> has been successfully processed. Please find your invoice attached to this email.`
@@ -340,10 +342,11 @@ export const sendPaymentNotificationEmail = async (payment, status, comment = ''
             </div>
         `;
 
+        const ccEmail = isFallbackToReportee ? null : (employee.primaryReportee?.companyEmail || null);
         const mailOptions = {
             from: `"VeRP Accounts" <${process.env.EMAIL_USER}>`,
             to: toEmail,
-            cc: employee.primaryReportee?.companyEmail || '',
+            ...(ccEmail ? { cc: ccEmail } : {}),
             subject: subject,
             html: html,
             attachments: pdfBuffer ? [{

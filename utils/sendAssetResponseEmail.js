@@ -1,10 +1,11 @@
 import nodemailer from "nodemailer";
+import { resolveEmployeeEmail } from "./resolveEmployeeEmail.js";
 
 export const sendAssetResponseEmail = async ({ asset, actor, recipient, action, comment, assignedToType, assignedCompany }) => {
     try {
-        const recipientEmail = recipient.companyEmail || recipient.workEmail || recipient.email;
+        const { email: recipientEmail } = resolveEmployeeEmail(recipient);
         if (!recipientEmail) {
-            console.warn(`[Email Warning] No email found for recipient ${recipient.employeeId || recipient._id}`);
+            console.warn(`[Email Warning] No email found for recipient ${recipient?.employeeId || recipient?._id}`);
             return;
         }
 

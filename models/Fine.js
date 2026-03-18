@@ -138,6 +138,14 @@ const fineSchema = new mongoose.Schema(
             type: Number,
             required: true
         },
+        totalFineAmount: {
+            type: Number,
+            default: 0
+        },
+        serviceCharge: {
+            type: Number,
+            default: 0
+        },
         paidAmount: {
             type: Number,
             default: 0

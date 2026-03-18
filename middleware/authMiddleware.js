@@ -42,6 +42,7 @@ export const protect = async (req, res, next) => {
         req.user = {
             id: user._id.toString(),
             _id: user._id,
+            name: user.name,
             email: user.email,
             isAdmin: user.isAdmin,
             companyEmail: user.companyEmail,

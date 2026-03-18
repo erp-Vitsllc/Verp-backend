@@ -32,42 +32,83 @@ export const respondToPayment = async (req, res) => {
 
             if (relatedEntityType && (relatedEntityId || referenceId)) {
                 if (relatedEntityType === 'Fine') {
-                    let fine = await Fine.findById(relatedEntityId) || await Fine.findOne({ fineId: referenceId });
+                    // Fix: Properly handle fine lookup with null checks
+                    let fine = null;
+                    if (relatedEntityId) {
+                        fine = await Fine.findById(relatedEntityId);
+                    }
+                    if (!fine && referenceId) {
+                        fine = await Fine.findOne({ fineId: referenceId });
+                    }
+                    
                     if (fine) {
-                        // Recalculate total paid
-                        const allPayments = await Payment.find({
-                            $or: [{ relatedEntityId: fine._id }, { referenceId: fine.fineId }],
-                            status: 'Completed'
-                        });
-                        const totalPaid = allPayments.reduce((sum, p) => sum + parseFloat(p.amount || 0), 0);
-                        fine.paidAmount = totalPaid;
-
-                        // Check if fully paid
-                        const calculateEmployeeShare = (f) => {
-                            if (!f) return 0;
-                            const isCo = (f.responsibleFor || '').toLowerCase() === 'company';
-                            if (isCo) return 0;
-                            const realEmps = (f.assignedEmployees || []).filter(e => !['VEGA-HR-0000', 'VEGA_INTERNAL'].includes(e.employeeId));
-
-                            // PRIORITY: Individual Amount
-                            if (realEmps.length === 1 && realEmps[0].individualAmount > 0) {
-                                return realEmps[0].individualAmount;
-                            }
-
-                            const coAmt = parseFloat(f.companyAmount || 0);
-                            const fAmt = parseFloat(f.fineAmount || 0);
-                            const eAmt = parseFloat(f.employeeAmount || 0);
-                            if (realEmps.length === 1 && coAmt === 0) return fAmt;
-                            if (eAmt > 0 && eAmt <= fAmt && realEmps.length > 1) return eAmt / realEmps.length;
-                            if (realEmps.length === 1 && eAmt > 0 && eAmt <= fAmt) return eAmt;
-                            return (fAmt - coAmt) / (realEmps.length || 1);
+                        // Recalculate total paid - Fix: Add relatedEntityType filter to avoid mixing with other entity types
+                        const paymentQuery = {
+                            relatedEntityType: 'Fine',
+                            status: 'Completed',
+                            $or: []
                         };
-
-                        const empShare = calculateEmployeeShare(fine);
-                        if (empShare - totalPaid <= 0.01) {
-                            fine.fineStatus = 'Paid';
+                        
+                        if (fine._id) {
+                            paymentQuery.$or.push({ relatedEntityId: fine._id });
                         }
-                        await fine.save();
+                        if (fine.fineId) {
+                            paymentQuery.$or.push({ referenceId: fine.fineId });
+                        }
+                        
+                        // If no $or conditions, skip query
+                        if (paymentQuery.$or.length === 0) {
+                            console.error('[RespondToPayment] Fine found but no valid ID for payment lookup:', fine._id, fine.fineId);
+                        } else {
+                            const allPayments = await Payment.find(paymentQuery);
+                            const totalPaid = allPayments.reduce((sum, p) => sum + parseFloat(p.amount || 0), 0);
+                            fine.paidAmount = totalPaid;
+
+                            // Check if fully paid
+                            const calculateEmployeeShare = (f) => {
+                                if (!f) return 0;
+                                const isCo = (f.responsibleFor || '').toLowerCase() === 'company';
+                                if (isCo) return 0;
+                                const realEmps = (f.assignedEmployees || []).filter(e => 
+                                    e.employeeId !== 'VEGA-HR-0000' && 
+                                    e.employeeId !== 'VEGA_INTERNAL' &&
+                                    e.employeeName !== 'Vega Digital IT Solutions'
+                                );
+
+                                // PRIORITY: Individual Amount
+                                if (realEmps.length === 1 && realEmps[0].individualAmount > 0) {
+                                    return realEmps[0].individualAmount;
+                                }
+
+                                const coAmt = parseFloat(f.companyAmount || 0);
+                                const fAmt = parseFloat(f.fineAmount || 0);
+                                const eAmt = parseFloat(f.employeeAmount || 0);
+                                if (realEmps.length === 1 && coAmt === 0) return fAmt;
+                                if (eAmt > 0 && eAmt <= fAmt && realEmps.length > 1) return eAmt / realEmps.length;
+                                if (realEmps.length === 1 && eAmt > 0 && eAmt <= fAmt) return eAmt;
+                                return (fAmt - coAmt) / (realEmps.length || 1);
+                            };
+
+                            const empShare = calculateEmployeeShare(fine);
+                            const remainingAmount = empShare - totalPaid;
+                            
+                            console.log('[RespondToPayment] Fine payment check:', {
+                                fineId: fine.fineId,
+                                empShare,
+                                totalPaid,
+                                remainingAmount,
+                                currentStatus: fine.fineStatus
+                            });
+                            
+                            // Fix: Update status to 'Paid' if fully paid (with tolerance for floating point)
+                            if (remainingAmount <= 0.01) {
+                                fine.fineStatus = 'Paid';
+                                console.log('[RespondToPayment] Fine status updated to Paid:', fine.fineId);
+                            }
+                            await fine.save();
+                        }
+                    } else {
+                        console.error('[RespondToPayment] Fine not found:', { relatedEntityId, referenceId });
                     }
                 } else if (relatedEntityType === 'Loan') {
                     let loan = await Loan.findById(relatedEntityId) || await Loan.findOne({ loanId: referenceId });

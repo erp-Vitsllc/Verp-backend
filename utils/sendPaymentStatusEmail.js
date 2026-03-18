@@ -1,5 +1,6 @@
 import nodemailer from 'nodemailer';
 import EmployeeBasic from '../models/EmployeeBasic.js';
+import { resolveEmployeeEmail, getFallbackEmailNote } from './resolveEmployeeEmail.js';
 
 /**
  * Sends a notification email to the employee about their payment status (Approved/Rejected).
@@ -14,14 +15,16 @@ export const sendPaymentStatusEmail = async (payment, status, comment = '') => {
 
         // 1. Fetch Employee Details
         const employeeId = payment.paidBy._id || payment.paidBy;
-        const employee = await EmployeeBasic.findById(employeeId).select('firstName lastName companyEmail personalEmail');
+        const employee = await EmployeeBasic.findById(employeeId)
+            .select('firstName lastName companyEmail personalEmail primaryReportee')
+            .populate('primaryReportee', 'companyEmail personalEmail');
 
         if (!employee) {
             console.warn(`[PaymentStatusEmail] Employee not found: ${employeeId}`);
             return;
         }
 
-        const toEmail = employee.companyEmail || employee.personalEmail;
+        const { email: toEmail } = resolveEmployeeEmail(employee);
         if (!toEmail) {
             console.warn(`[PaymentStatusEmail] No email found for employee.`);
             return;

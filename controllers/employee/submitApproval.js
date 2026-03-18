@@ -49,6 +49,7 @@ export const submitApproval = async (req, res) => {
                 assignedTo: updated.profileSubmittedTo,
                 status: 'Pending',
                 subjectEmployee: updated,
+                requestedByName: req.user.name || '',
                 extra1: 'New Profile Submission',
                 extra2: updated.designation || ''
             });

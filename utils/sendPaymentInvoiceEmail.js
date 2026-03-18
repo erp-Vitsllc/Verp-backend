@@ -1,5 +1,6 @@
 import nodemailer from 'nodemailer';
 import EmployeeBasic from '../models/EmployeeBasic.js';
+import { resolveEmployeeEmail, getFallbackEmailNote } from './resolveEmployeeEmail.js';
 
 /**
  * Sends a neat invoice email after a payment is made.
@@ -25,16 +26,16 @@ export const sendPaymentInvoiceEmail = async (payment, relatedEntity = null) => 
         const toEmails = new Set();
         const ccEmails = new Set();
 
-        // Applicant (Employee who paid)
-        const employeeEmail = employee.companyEmail || employee.personalEmail;
+        // Applicant (Employee who paid) - fallback to primaryReportee when emp has no email
+        const { email: employeeEmail, isFallbackToReportee, employeeName, reporteeName } = resolveEmployeeEmail(employee);
         if (employeeEmail) {
             toEmails.add(employeeEmail);
         }
 
-        // Primary Reportee (Supervisor/Manager)
+        // Primary Reportee (Supervisor/Manager) - only add if not already in toEmails (from fallback)
         if (employee.primaryReportee) {
             const reporteeEmail = employee.primaryReportee.companyEmail || employee.primaryReportee.personalEmail;
-            if (reporteeEmail) {
+            if (reporteeEmail && !toEmails.has(reporteeEmail)) {
                 ccEmails.add(reporteeEmail);
             }
         }

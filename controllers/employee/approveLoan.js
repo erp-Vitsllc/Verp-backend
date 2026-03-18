@@ -7,6 +7,7 @@ import { getManagementHOD } from "../../utils/getManagementHOD.js";
 import { sendHODAuthorizationEmail } from "../../utils/sendHODAuthorizationEmail.js";
 import { getDepartmentHOD } from "../../utils/getDepartmentHOD.js";
 import { getCompleteEmployee } from "../../services/employeeService.js";
+import { resolveEmployeeEmail, getFallbackEmailNote } from "../../utils/resolveEmployeeEmail.js";
 
 export const approveLoan = async (req, res) => {
     try {
@@ -341,7 +342,8 @@ export const approveLoan = async (req, res) => {
             // Specifically clear the acting user's task
             assignedTo: isFinalStatus ? null : req.user?._id,
             status: isFinalStatus ? finalStatus : 'Approved',
-            subjectEmployee: applicant
+            subjectEmployee: applicant,
+            requestedByName: req.user.name
         });
 
         // B. If there's a next approver, create a new pending action for them
@@ -352,6 +354,7 @@ export const approveLoan = async (req, res) => {
                 assignedTo: nextApprover._id,
                 status: 'Pending',
                 subjectEmployee: applicant,
+                requestedByName: req.user.name,
                 extra1: `AED ${loan.amount}`,
                 extra2: `${loan.duration} Months`
             });
@@ -501,14 +504,14 @@ export const approveLoan = async (req, res) => {
                         const toEmails = new Set();
                         const ccEmails = new Set();
 
-                        // 1. Applicant Email
-                        const appEmail = applicant.companyEmail || applicant.email;
+                        // 1. Applicant Email (fallback to primaryReportee when applicant has no email)
+                        const { email: appEmail, isFallbackToReportee, employeeName, reporteeName } = resolveEmployeeEmail(applicant);
                         if (appEmail) toEmails.add(appEmail);
 
-                        // 2. Manager Email (His Reportee/Supervisor)
+                        // 2. Manager Email (His Reportee/Supervisor) - only if not already added from fallback
                         if (applicant.primaryReportee) {
                             const managerEmail = applicant.primaryReportee.companyEmail || applicant.primaryReportee.email;
-                            if (managerEmail) ccEmails.add(managerEmail);
+                            if (managerEmail && !toEmails.has(managerEmail)) ccEmails.add(managerEmail);
                         }
 
                         // 3. Creator Email
@@ -573,6 +576,7 @@ export const approveLoan = async (req, res) => {
                                              <h2 style="margin: 0;">Congratulations!</h2>
                                          </div>
                                          <div style="padding: 30px; background-color: #ffffff;">
+                                             ${isFallbackToReportee ? getFallbackEmailNote(employeeName, reporteeName) : ''}
                                              <p>Dear All,</p>
                                              <p>We are pleased to inform you that the loan application for <strong>${applicant.firstName} ${applicant.lastName}</strong> has been <strong>fully approved</strong>.</p>
                                              
@@ -660,14 +664,14 @@ export const approveLoan = async (req, res) => {
                     if (applicant) {
                         const recipientEmails = new Set();
 
-                        // 1. Add Applicant
-                        const appEmail = applicant.companyEmail || applicant.email;
+                        // 1. Add Applicant (fallback to primaryReportee when applicant has no email)
+                        const { email: appEmail } = resolveEmployeeEmail(applicant);
                         if (appEmail) recipientEmails.add(appEmail);
 
-                        // 2. Add Manager Email
+                        // 2. Add Manager Email - only if not already added from fallback
                         if (applicant.primaryReportee) {
                             const managerEmail = applicant.primaryReportee.companyEmail || applicant.primaryReportee.email;
-                            if (managerEmail) recipientEmails.add(managerEmail);
+                            if (managerEmail && !recipientEmails.has(managerEmail)) recipientEmails.add(managerEmail);
                         }
 
                         // 3. Add Previous Approvers & Requester

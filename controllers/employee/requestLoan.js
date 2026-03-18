@@ -202,6 +202,7 @@ export const requestLoan = async (req, res) => {
                 assignedTo: hrHOD._id, // Use Employee Object ID for assignment
                 status: 'Pending',
                 subjectEmployee: employeeBasic,
+                requestedByName: req.user.name || '',
                 extra1: `AED ${amount}`,
                 extra2: `${duration} Months`
             });

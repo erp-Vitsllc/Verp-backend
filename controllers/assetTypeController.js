@@ -4,9 +4,13 @@ import AssetItem from '../models/AssetItem.js';
 import AssetHistory from '../models/AssetHistory.js';
 import DashboardAction from '../models/DashboardAction.js';
 import { getDepartmentHOD, isUserInFlowchart } from '../utils/getDepartmentHOD.js';
+import { isUserAdministrator } from '../services/permissionService.js';
 import mongoose from 'mongoose';
 import { uploadDocumentToS3, getSignedFileUrl } from '../utils/s3Upload.js';
 import { sendAssetCreationApprovalEmail } from '../utils/sendAssetCreationApprovalEmail.js';
+import { sendAssetActionApprovalEmail } from '../utils/sendAssetActionApprovalEmail.js';
+import EmployeeBasic from '../models/EmployeeBasic.js';
+import User from '../models/User.js';
 
 // @desc    Create a new asset type
 // @route   POST /api/AssetType
@@ -276,8 +280,8 @@ export const createAssetType = async (req, res) => {
                         requestId: createdAssets[0]._id,
                         requestType: 'Asset Approval',
                         subjectEmployeeId: req.user.employeeId,
-                        subjectName: req.user.name,
-                        requestedByName: req.user.name,
+                        subjectName: req.user.name || 'System',
+                        requestedByName: req.user.name || 'System',
                         extra1: `${createdAssets[0].assetId}${qty > 1 ? ` (Batch of ${qty})` : ''} - ${name}`,
                         extra2: 'New Asset Creation Approval Request',
                         status: 'Pending'
@@ -331,7 +335,18 @@ export const getAssetTypes = async (req, res) => {
         // We aggregate all 3 collections into a unified list for the frontend
         const categories = await AssetCategory.find({ isActive: true }).populate('typeId');
         const types = await AssetType.find({ isActive: true });
-        const assets = await AssetItem.find()
+
+        // Visibility: Admin sees all; Asset Controller sees all; Creator sees their created assets; others see nothing
+        const isAdmin = await isUserAdministrator(req.user?.id);
+        const assetController = await getDepartmentHOD('assetcontroller');
+        const isAssetController = assetController && req.user?.employeeObjectId && assetController._id?.toString() === req.user.employeeObjectId.toString();
+
+        const assetQuery = {};
+        if (!isAdmin && !isAssetController && req.user?.id) {
+            assetQuery.createdBy = new mongoose.Types.ObjectId(req.user.id);
+        }
+
+        const assets = await AssetItem.find(assetQuery)
             .populate('typeId')
             .populate('categoryId')
             .populate('actionRequiredBy', 'firstName lastName')
@@ -514,13 +529,15 @@ export const updateAssetItem = async (req, res) => {
             return res.status(404).json({ message: 'Asset not found' });
         }
 
-        // Permission logic: Creator can edit if Draft or Pending
+        // Permission logic: Creator can edit if Draft or Pending; Assigned user can update accessories
         const currentUserId = req.user._id?.toString() || req.user.id?.toString();
         const isCreator = asset.createdBy?.toString() === currentUserId;
         const isAwaitingApproval = asset.status === 'Draft' || asset.status === 'Pending';
+        const isAssignedUser = asset.assignedTo && asset.assignedTo.toString() === (req.user.employeeObjectId?.toString() || req.user._id?.toString());
+        const isAccessoriesOnlyUpdate = updates && Object.keys(updates).every(k => k === 'accessories' || k === 'accessoriesAttachment');
 
         if (!isAdmin && !isAssetController) {
-            if (!(isCreator && isAwaitingApproval)) {
+            if (!(isCreator && isAwaitingApproval) && !(isAssignedUser && isAccessoriesOnlyUpdate)) {
                 return res.status(403).json({ message: "Only Asset Controller or Admin can update assets after approval." });
             }
         }
@@ -530,11 +547,138 @@ export const updateAssetItem = async (req, res) => {
             // Prevent updating immutable fields
             if (key !== '_id' && key !== 'assetId') {
                 if (key === 'accessories' && Array.isArray(updates[key])) {
-                    // Re-calculate accessory IDs based on position
-                    asset[key] = updates[key].map((acc, index) => ({
-                        ...acc,
-                        accessoryId: generateAccessoryId(asset.assetId, index)
-                    }));
+                    const isAssigned = asset.status === 'Assigned' && asset.assignedTo;
+                    const isOwner = isAssigned && asset.assignedTo.toString() === (req.user.employeeObjectId?.toString() || req.user._id?.toString());
+                    const oldAccessories = asset.accessories || [];
+                    const newAccessoriesList = [];
+                    let hasNewPending = false;
+                    let hasEditsByOthers = false;
+
+                    for (let i = 0; i < updates[key].length; i++) {
+                        const acc = updates[key][i];
+                        const existing = oldAccessories.find(oa => 
+                            (oa._id && acc._id && oa._id.toString() === acc._id.toString()) || 
+                            (oa.accessoryId && acc.accessoryId && oa.accessoryId === acc.accessoryId)
+                        );
+
+                        if (existing) {
+                            // Detect edits by others
+                            if (isAssigned && !isOwner) {
+                                const hasChanged = (acc.name && existing.name !== acc.name) || 
+                                                   (acc.amount !== undefined && existing.amount !== acc.amount);
+                                if (hasChanged) hasEditsByOthers = true;
+                            }
+                            // Keep existing accessory
+                            newAccessoriesList.push({
+                                ...existing.toObject(),
+                                ...acc,
+                                accessoryId: generateAccessoryId(asset.assetId, i)
+                            });
+                        } else {
+                            // NEW Accessory
+                            const newAcc = {
+                                ...acc,
+                                accessoryId: generateAccessoryId(asset.assetId, i)
+                            };
+
+                            if (isAssigned && !isOwner) {
+                                // Approval needed when Asset Controller/Admin adds to assigned asset
+                                newAcc.status = 'Pending';
+                                newAcc.pendingAction = 'Add';
+                                newAcc.pendingActionDetails = {
+                                    requestedBy: req.user.employeeObjectId || req.user._id,
+                                    requestedAt: new Date()
+                                };
+                                hasNewPending = true;
+                            } else {
+                                // Directly attach: unassigned asset, or assigned user adding to their own asset
+                                newAcc.status = 'Attached';
+                            }
+                            newAccessoriesList.push(newAcc);
+                        }
+                    }
+                    asset.accessories = newAccessoriesList;
+
+                    // If new accessories were added to an assigned asset, create notification
+                    if (hasNewPending && isAssigned) {
+                        try {
+                            const employee = await EmployeeBasic.findById(asset.assignedTo);
+                            if (employee) {
+                                const requesterName = req.user.name || 'System';
+                                asset.actionRequiredBy = employee._id;
+
+                                // Create Dashboard Action
+                                await DashboardAction.create({
+                                    assignedTo: employee._id,
+                                    assignedToEmpId: employee.employeeId,
+                                    requestId: asset._id,
+                                    requestType: 'Asset Accessory Approval',
+                                    status: 'Pending',
+                                    subjectEmployeeId: employee.employeeId,
+                                    subjectName: `${employee.firstName} ${employee.lastName}`,
+                                    requestedByName: requesterName,
+                                    extra1: `${asset.assetId} — Accessory: Adding New`,
+                                    extra2: 'Add'
+                                });
+
+                                // Send Email
+                                let emailRecipient = employee;
+                                const linkedUser = await User.findOne({ employeeId: employee.employeeId, status: 'Active' });
+                                const hasAccess = !!(linkedUser && linkedUser.enablePortalAccess && employee.companyEmail);
+
+                                if (!hasAccess && employee.primaryReportee) {
+                                    const managerId = employee.primaryReportee._id || employee.primaryReportee;
+                                    const manager = await EmployeeBasic.findById(managerId);
+                                    if (manager) {
+                                        emailRecipient = manager;
+                                        asset.actionRequiredBy = manager._id;
+                                        // Update Dashboard assignedTo too
+                                        await DashboardAction.findOneAndUpdate(
+                                            { requestId: asset._id, requestType: 'Asset Accessory Approval', status: 'Pending' },
+                                            { assignedTo: manager._id, assignedToEmpId: manager.employeeId }
+                                        );
+                                    }
+                                }
+
+                                await sendAssetActionApprovalEmail(
+                                    { ...asset.toObject(), assetId: asset.assetId },
+                                    'Add Accessory',
+                                    emailRecipient,
+                                    { name: requesterName },
+                                    'New accessories are being added to your assigned asset. Please review and approve.'
+                                );
+                            }
+                        } catch (err) {
+                            console.error('[AddAccessory Notification] Error:', err);
+                        }
+                    } else if (hasEditsByOthers && isAssigned && !isOwner) {
+                        // Notify if edited by someone else but no NEW ones (which would require approval anyway)
+                        try {
+                            const employee = await EmployeeBasic.findById(asset.assignedTo);
+                            if (employee) {
+                                const requesterName = req.user.name || 'System';
+                                let emailRecipient = employee;
+                                const linkedUser = await User.findOne({ employeeId: employee.employeeId, status: 'Active' });
+                                const hasAccess = !!(linkedUser && linkedUser.enablePortalAccess && employee.companyEmail);
+
+                                if (!hasAccess && employee.primaryReportee) {
+                                    const managerId = employee.primaryReportee._id || employee.primaryReportee;
+                                    const manager = await EmployeeBasic.findById(managerId);
+                                    if (manager) emailRecipient = manager;
+                                }
+
+                                await sendAssetActionApprovalEmail(
+                                    { ...asset.toObject(), assetId: asset.assetId },
+                                    'Update Accessory',
+                                    emailRecipient,
+                                    { name: requesterName },
+                                    'Existing accessories on your assigned asset have been updated. Please review the changes.'
+                                );
+                            }
+                        } catch (err) {
+                            console.error('[UpdateAccessory Notification] Error:', err);
+                        }
+                    }
                 } else if ((key === 'photo' || key === 'imagePreview') && updates[key] && updates[key].startsWith('data:image')) {
                     // Handle Image Upload to S3
                     try {

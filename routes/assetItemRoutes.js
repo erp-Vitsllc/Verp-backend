@@ -1,5 +1,5 @@
 import express from 'express';
-import { createAssetItem, getAssetItems, getAllAssignedAssets, getUnassignedAssetsForEmployee, getHRCompanyAssets, getOnLeaveAssetsForEmployee, handleOnLeaveAction, getAssetItemDetail, assignAssetItem, bulkAssignAssetItems, downloadHandoverPdf, downloadHistoryHandoverPdf, respondToAssignment, getAssetHistory, getHistoryRecord, returnAssetItem, updateAssetStatus, addAssetDocument, updateAssetDocument, deleteAssetDocument, addAssetService, addAssetImage, deleteAssetImage, transferAssetAccessory, manageAccessoryStatus, updateAssetItem, endOfLifeAsset, requestAssetAction, bulkRequestAssetAction, handleAssetActionApproval, finalizeAssetAction, uploadAccessoriesAttachment, requestAccessoryAction, respondAccessoryAction, finalizeAccessoryAction, respondToAssetCreation, transferAsset } from '../controllers/assetItemController.js';
+import { createAssetItem, getAssetItems, getAllAssignedAssets, getUnassignedAssetsForEmployee, getHRCompanyAssets, getOnLeaveAssetsForEmployee, handleOnLeaveAction, bulkHandleOnLeaveAction, getAssetItemDetail, assignAssetItem, bulkAssignAssetItems, downloadHandoverPdf, downloadHistoryHandoverPdf, respondToAssignment, bulkRespondToAssignment, getAssetHistory, getHistoryRecord, returnAssetItem, updateAssetStatus, addAssetDocument, updateAssetDocument, deleteAssetDocument, addAssetService, addAssetImage, deleteAssetImage, transferAssetAccessory, manageAccessoryStatus, updateAssetItem, endOfLifeAsset, requestAssetAction, bulkRequestAssetAction, handleAssetActionApproval, finalizeAssetAction, uploadAccessoriesAttachment, requestAccessoryAction, respondAccessoryAction, finalizeAccessoryAction, respondToAssetCreation, transferAsset } from '../controllers/assetItemController.js';
 import { protect } from '../middleware/authMiddleware.js';
 import { getDepartmentHOD } from '../utils/getDepartmentHOD.js';
 
@@ -9,53 +9,51 @@ import { getDepartmentHOD } from '../utils/getDepartmentHOD.js';
  */
 const requireAssetControllerOrAdmin = async (req, res, next) => {
     try {
-        const isAdmin = req.user?.isAdmin === true || req.user?.role === 'Admin' || req.user?.role === 'ROOT';
-        if (isAdmin) return next();
-
+        const isSuperAdmin = req.user?.isAdmin === true || req.user?.role === 'ROOT';
         const assetController = await getDepartmentHOD('assetcontroller');
-        const isAssetControllerRole = req.user?.role === 'Asset Controller' || req.user?.role === 'AssetController' || req.user?.groupName?.includes('Asset') || req.user?.groupName?.includes('Controller');
         const isAssetControllerFlow = assetController && (assetController._id?.toString() === req.user?.employeeObjectId?.toString() || assetController.employeeId === req.user?.employeeId);
 
-        if (!isAssetControllerFlow && !isAssetControllerRole) {
-            // For transfer/request-action, also allow if the user is the assigned user of the asset(s)
-            const { id } = req.params;
-            const { fromId, assetId: bodyAssetId, assetIds } = req.body;
+        // Allow if Super Admin or the Designated Asset Controller in Flowchart
+        if (isSuperAdmin || isAssetControllerFlow) return next();
 
-            // Check individual asset
-            const targetId = id || fromId || bodyAssetId;
-            if (targetId) {
-                const AssetItem = (await import('../models/AssetItem.js')).default;
-                const asset = await AssetItem.findById(targetId);
-                const currentEmpId = req.user?.employeeObjectId?.toString();
-                const currentUserId = req.user?._id?.toString();
+        // If not controller, check if they are the assigned user (for certain operations like transfer request)
+        const { id } = req.params;
+        const { fromId, assetId: bodyAssetId, assetIds } = req.body;
+        const targetId = id || fromId || bodyAssetId;
 
-                // 1. Allow if Assigned User
-                if (asset && asset.assignedTo && asset.assignedTo.toString() === currentEmpId) {
-                    return next();
-                }
-
-                // 2. Allow if Creator + Draft/Pending
-                if (asset && asset.createdBy?.toString() === currentUserId && (asset.status === 'Draft' || asset.status === 'Pending')) {
-                    return next();
-                }
+        if (targetId) {
+            const AssetItem = (await import('../models/AssetItem.js')).default;
+            const asset = await AssetItem.findById(targetId);
+            const currentEmpId = req.user?.employeeObjectId?.toString();
+            
+            // Allow if seeking to manage their own assigned asset
+            if (asset && asset.assignedTo && asset.assignedTo.toString() === currentEmpId) {
+                return next();
             }
 
-            // Check bulk assets (allow only if user owns ALL of them)
-            if (assetIds && Array.isArray(assetIds) && assetIds.length > 0) {
-                const AssetItem = (await import('../models/AssetItem.js')).default;
-                const assets = await AssetItem.find({ _id: { $in: assetIds } });
-                const currentEmpId = req.user?.employeeObjectId?.toString();
-                if (currentEmpId && assets.length > 0) {
-                    const allOwned = assets.every(a => a.assignedTo?.toString() === currentEmpId);
-                    if (allOwned && assets.length === assetIds.length) {
-                        return next();
-                    }
-                }
+            // Allow if they are the creator of a Draft/Pending item
+            const currentUserId = req.user?._id?.toString();
+            if (asset && asset.createdBy?.toString() === currentUserId && (asset.status === 'Draft' || asset.status === 'Pending')) {
+                return next();
             }
-
-            return res.status(403).json({ message: 'Access denied. Only Asset Controller, Admin, or the assigned user can perform this operation.' });
         }
-        next();
+
+        // Bulk check
+        if (assetIds && Array.isArray(assetIds) && assetIds.length > 0) {
+            const AssetItem = (await import('../models/AssetItem.js')).default;
+            const assets = await AssetItem.find({ _id: { $in: assetIds } });
+            const currentEmpId = req.user?.employeeObjectId?.toString();
+            if (currentEmpId && assets.length > 0) {
+                const allOwned = assets.every(a => a.assignedTo?.toString() === currentEmpId);
+                if (allOwned && assets.length === assetIds.length) {
+                    return next();
+                }
+            }
+        }
+
+        return res.status(403).json({ 
+            message: 'Access denied. Only the Designated Asset Controller or the assigned employee can perform this operation.' 
+        });
     } catch (error) {
         next(error);
     }
@@ -69,66 +67,48 @@ const requireAssetControllerOrAdmin = async (req, res, next) => {
 const requireAssetFullAccess = async (req, res, next) => {
     try {
         const { id } = req.params;
-        const isAdmin = req.user?.isAdmin === true || req.user?.role === 'Admin' || req.user?.role === 'ROOT';
+        const isSuperAdmin = req.user?.isAdmin === true || req.user?.role === 'ROOT';
         const assetController = await getDepartmentHOD('assetcontroller');
-        const isAssetControllerRole = req.user?.role === 'Asset Controller' || req.user?.role === 'AssetController' || req.user?.groupName?.includes('Asset') || req.user?.groupName?.includes('Controller');
         const isAssetControllerFlow = assetController && (assetController._id?.toString() === req.user?.employeeObjectId?.toString() || assetController.employeeId === req.user?.employeeId);
 
-        // Admin & Asset Controller always have full access
-        if (isAdmin || isAssetControllerFlow || isAssetControllerRole) return next();
+        // Super Admin & Designated Asset Controller always have access
+        if (isSuperAdmin || isAssetControllerFlow) return next();
 
-        // Specific Asset Access (Individual)
+        // Check for specific employee permissions (Assigned User or Action Required By)
+        const currentEmpId = req.user?.employeeObjectId?.toString();
+        const currentUserId = req.user?._id?.toString();
+
         if (id) {
             const AssetItem = (await import('../models/AssetItem.js')).default;
-            const asset = await AssetItem.findById(id).select('assignedTo status actionRequiredBy assignedCompany');
+            const asset = await AssetItem.findById(id).select('assignedTo status actionRequiredBy createdBy');
             if (asset) {
-                const currentEmpId = req.user?.employeeObjectId?.toString();
-                const currentUserId = req.user?._id?.toString();
-
                 // 1. Allow if Assigned User
-                const isAssignedUser = asset.assignedTo && asset.assignedTo.toString() === currentEmpId;
-                if (isAssignedUser) {
-                    return next();
-                }
+                if (asset.assignedTo && asset.assignedTo.toString() === currentEmpId) return next();
 
-                // 2. Allow if Action Required By Me
-                const isActionRequiredByMe = (asset.actionRequiredBy && (asset.actionRequiredBy.toString() === currentEmpId || asset.actionRequiredBy.toString() === currentUserId));
-                if (isActionRequiredByMe) {
-                    return next();
-                }
+                // 2. Allow if Action Required By Me (Approver/Recipient)
+                if (asset.actionRequiredBy && (asset.actionRequiredBy.toString() === currentEmpId || asset.actionRequiredBy.toString() === currentUserId)) return next();
 
-                // 3. Allow if Creator + Draft/Pending (Awaiting creation approval)
-                const isCreator = asset.createdBy?.toString() === currentUserId;
-                const isAwaitingApproval = asset.status === 'Draft' || asset.status === 'Pending';
-                if (isCreator && isAwaitingApproval) {
-                    return next();
-                }
+                // 3. Allow if Creator + Draft/Pending
+                if (asset.createdBy?.toString() === currentUserId && (asset.status === 'Draft' || asset.status === 'Pending')) return next();
             }
         }
 
-        // Specific Asset Access (Bulk)
         const { assetIds } = req.body;
         if (assetIds && Array.isArray(assetIds) && assetIds.length > 0) {
             const AssetItem = (await import('../models/AssetItem.js')).default;
             const assets = await AssetItem.find({ _id: { $in: assetIds } }).select('assignedTo status actionRequiredBy');
-            const currentEmpId = req.user?.employeeObjectId?.toString();
-            const currentUserId = req.user?._id?.toString();
-
+            
             const allPermitted = assets.every(a => {
                 const isAssignedUser = a.assignedTo && a.assignedTo.toString() === currentEmpId;
                 const isActionRequiredByMe = a.actionRequiredBy && (a.actionRequiredBy.toString() === currentEmpId || a.actionRequiredBy.toString() === currentUserId);
                 return isAssignedUser || isActionRequiredByMe;
             });
 
-            if (allPermitted && assets.length === assetIds.length) {
-                return next();
-            }
+            if (allPermitted && assets.length === assetIds.length) return next();
         }
 
-        console.log(`[Full Access Fail] Admin: ${isAdmin}, Flow: ${isAssetControllerFlow}, Role: ${isAssetControllerRole}, User: ${req.user?.name}, ID: ${req.user?.employeeId}, AssetID: ${id}`);
         return res.status(403).json({
-            message: 'Access denied. You do not have permission to access or modify this asset.',
-            debug: { user: req.user?.name, id: req.user?.employeeId, role: req.user?.role, group: req.user?.groupName }
+            message: 'Access denied. Only the Designated Asset Controller or the assigned employee can perform this action.'
         });
     } catch (error) {
         next(error);
@@ -151,12 +131,20 @@ router.get('/history-record/:historyId', protect, getHistoryRecord);
 router.get('/handover-pdf/:id', protect, downloadHandoverPdf);
 router.get('/history-handover-pdf/:historyId', protect, downloadHistoryHandoverPdf);
 router.put('/bulk/assign', protect, requireAssetControllerOrAdmin, bulkAssignAssetItems);
+router.put('/bulk/on-leave-action', protect, requireAssetControllerOrAdmin, (req, res, next) => {
+    console.log('[Route] PUT /bulk/on-leave-action hit. Body:', JSON.stringify(req.body));
+    bulkHandleOnLeaveAction(req, res, next);
+});
 router.put('/:id/assign', protect, requireAssetControllerOrAdmin, assignAssetItem);
 router.put('/:id/respond', protect, requireAssetFullAccess, respondToAssignment);
+router.put('/bulk/respond', protect, requireAssetFullAccess, bulkRespondToAssignment);
 router.post('/transfer', protect, requireAssetControllerOrAdmin, transferAsset);
 router.put('/:id/approve-creation', protect, requireAssetControllerOrAdmin, respondToAssetCreation);
 router.put('/:id/return', protect, requireAssetControllerOrAdmin, returnAssetItem);
-router.put('/:id/on-leave-action', protect, requireAssetControllerOrAdmin, handleOnLeaveAction);
+router.put('/:id/on-leave-action', protect, requireAssetControllerOrAdmin, (req, res, next) => {
+    console.log(`[Route] PUT /${req.params.id}/on-leave-action hit`);
+    handleOnLeaveAction(req, res, next);
+});
 router.put('/:id/status', protect, requireAssetFullAccess, updateAssetStatus);
 router.post('/:id/document', protect, requireAssetFullAccess, addAssetDocument);
 router.put('/:id/document/:docId', protect, requireAssetFullAccess, updateAssetDocument);

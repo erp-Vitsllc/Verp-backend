@@ -43,7 +43,8 @@ export const approveProfile = async (req, res) => {
                 requestId: updated._id,
                 requestType: 'Profile Activation',
                 status: 'Approved',
-                subjectEmployee: updated
+                subjectEmployee: updated,
+                requestedByName: req.user.name
             });
         } catch (syncErr) {
             console.error("[ApproveProfile] Dashboard Sync Error:", syncErr);

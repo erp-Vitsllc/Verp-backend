@@ -51,6 +51,7 @@ export const rejectProfile = async (req, res) => {
                 status: 'Rejected',
                 subjectEmployee: updated,
                 actionedBy: req.user?._id,
+                requestedByName: req.user.name,
                 comment: reason
             });
         } catch (syncErr) {

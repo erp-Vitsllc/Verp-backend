@@ -32,7 +32,7 @@ export const approveFine = async (req, res) => {
                     ? targetFine.fineId.split('-').slice(0, 3).join('-')
                     : targetFine.fineId;
                 const baseIdRegex = new RegExp(`^${baseId}(-[A-Z0-9]+)?$`, 'i');
-                fines = await Fine.find({ fineId: baseIdRegex });
+                fines = await Fine.find({ fineId: baseIdRegex }).populate('createdBy', 'name');
             }
         }
 
@@ -40,7 +40,7 @@ export const approveFine = async (req, res) => {
             // Try searching by fineId as a base
             const baseId = id.split('-').length > 3 ? id.split('-').slice(0, 3).join('-') : id;
             const baseIdRegex = new RegExp(`^${baseId}(-[A-Z0-9]+)?$`, 'i');
-            fines = await Fine.find({ fineId: baseIdRegex });
+            fines = await Fine.find({ fineId: baseIdRegex }).populate('createdBy', 'name');
         }
 
         if (fines.length === 0) {
@@ -316,7 +316,8 @@ export const approveFine = async (req, res) => {
                 assignedTo: isFinalStatus ? null : req.user?._id,
                 status: isFinalStatus ? fine.fineStatus : 'Approved',
                 subjectEmployee: subjectEmp,
-                subjectName: subjectName
+                subjectName: subjectName,
+                requestedByName: fine.createdBy?.name || ''
             });
 
             const nextPendingStep = fine.workflow?.find(w => w.status === 'Pending');
@@ -328,6 +329,7 @@ export const approveFine = async (req, res) => {
                     status: 'Pending',
                     subjectEmployee: subjectEmp,
                     subjectName: subjectName,
+                    requestedByName: fine.createdBy?.name || '',
                     extra1: fine.fineType,
                     extra2: `Total: AED ${fines.reduce((sum, f) => sum + (f.fineAmount || 0), 0)}` // total for group
                 });

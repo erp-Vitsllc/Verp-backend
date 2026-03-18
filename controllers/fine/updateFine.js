@@ -10,6 +10,8 @@ import { getManagementHOD } from "../../utils/getManagementHOD.js";
 
 export const updateFine = async (req, res) => {
     try {
+        console.log("hi");
+        
         let { id } = req.params;
         const updates = req.body;
 
@@ -37,14 +39,14 @@ export const updateFine = async (req, res) => {
                     ? targetFine.fineId.split('-').slice(0, 3).join('-')
                     : targetFine.fineId;
                 const baseIdRegex = new RegExp(`^${baseId}(-[A-Z0-9]+)?$`, 'i');
-                fines = await Fine.find({ fineId: baseIdRegex });
+                fines = await Fine.find({ fineId: baseIdRegex }).populate('createdBy', 'name');
             }
         }
 
         if (fines.length === 0) {
             const baseId = id.split('-').length > 3 ? id.split('-').slice(0, 3).join('-') : id;
             const baseIdRegex = new RegExp(`^${baseId}(-[A-Z0-9]+)?$`, 'i');
-            fines = await Fine.find({ fineId: baseIdRegex });
+            fines = await Fine.find({ fineId: baseIdRegex }).populate('createdBy', 'name');
         }
 
         if (fines.length === 0) {
@@ -62,7 +64,7 @@ export const updateFine = async (req, res) => {
             'fineStatus', 'description', 'awardedDate', 'remarks',
             'attachment', 'category', 'subCategory', 'vehicleId', 'assetId', 'assetName',
             'projectId', 'projectName', 'engineerName', 'responsibleFor',
-            'employeeAmount', 'companyAmount', 'payableDuration', 'monthStart',
+            'fineAmount', 'employeeAmount', 'companyAmount', 'serviceCharge', 'payableDuration', 'monthStart',
             'employees', 'totalEmployeeFineAmount', 'company', 'companyName'
         ];
 
@@ -149,13 +151,28 @@ export const updateFine = async (req, res) => {
             }
         }
 
+        // Handle service charge distribution for group fines BEFORE the loop
+        let serviceChargePerParty = 0;
+        if (updates.serviceCharge !== undefined && fines.length > 1) {
+            // For group fines, distribute service charge equally among all participating party records
+            const partiesCount = fines.length;
+            const totalServiceCharge = parseFloat(updates.serviceCharge) || 0;
+            serviceChargePerParty = partiesCount > 0 ? (totalServiceCharge / partiesCount) : 0;
+        }
+
         // 3. Apply updates only for allowed fields (Loop all for bulk update)
         for (const f of fines) {
             // Find specific data for this employee if it's a group update
             const targetEmployeeId = f.assignedEmployees?.[0]?.employeeId;
+            const isCompanyRecord = targetEmployeeId === 'VEGA-HR-0000';
             const empUpdate = (updates.employees && Array.isArray(updates.employees))
                 ? updates.employees.find(e => e.employeeId === targetEmployeeId)
                 : null;
+
+            // Calculate base fine amount (before service charge)
+            const baseFineAmount = parseFloat(f.fineAmount) || 0;
+            const currentServiceCharge = parseFloat(f.serviceCharge) || 0;
+            const currentBaseFine = baseFineAmount - currentServiceCharge; // Extract base fine
 
             allowedUpdates.forEach(key => {
                 if (updates[key] !== undefined) {
@@ -170,15 +187,29 @@ export const updateFine = async (req, res) => {
                     } else if (key === 'fineStatus' && statusHandled) {
                         // Already handled by Draft -> Pending or Resubmit logic
                     } else {
-                        const isCompanyRecord = targetEmployeeId === 'VEGA-HR-0000';
-
-                        if (isCompanyRecord && (key === 'employeeAmount' || key === 'fineAmount')) {
-                            // The company's liability is stored in its employeeAmount/fineAmount fields
-                            f[key] = parseFloat(updates.companyAmount) || 0;
-                        } else if (isCompanyRecord && key === 'companyAmount') {
+                        if (isCompanyRecord && key === 'companyAmount') {
                             f[key] = 0; // Company share of company record is 0
+                        } else if (isCompanyRecord && (key === 'employeeAmount' || key === 'fineAmount')) {
+                            // The company's base liability is stored in its employeeAmount field
+                            f.employeeAmount = parseFloat(updates.companyAmount || updates.employeeAmount || 0);
                         } else if (empUpdate && ['fineAmount', 'employeeAmount', 'companyAmount', 'payableDuration'].includes(key) && empUpdate[key] !== undefined) {
                             f[key] = parseFloat(empUpdate[key]);
+                        } else if (key === 'serviceCharge') {
+                            // For group fines, distribute service charge equally among all parties
+                            if (fines.length > 1) {
+                                f.serviceCharge = serviceChargePerParty;
+                            } else {
+                                f.serviceCharge = parseFloat(updates[key]) || 0;
+                            }
+                            // Update total balances
+                            const baseFine = (parseFloat(f.employeeAmount) || 0) + (parseFloat(f.companyAmount) || 0);
+                            f.fineAmount = baseFine + f.serviceCharge;
+                            f.totalFineAmount = f.fineAmount;
+                        } else if (key === 'fineAmount') {
+                            // fineAmount in updates is treated as the BASE fine amount
+                            f.fineAmount = parseFloat(updates[key]) || 0;
+                        } else if (key === 'employeeAmount' || key === 'companyAmount') {
+                            f[key] = parseFloat(updates[key]) || 0;
                         } else {
                             f[key] = updates[key];
                         }
@@ -192,10 +223,19 @@ export const updateFine = async (req, res) => {
                 }
             });
 
+            // Recalculate totalFineAmount from components (employeeAmount + companyAmount + serviceCharge)
+            const empAmt = parseFloat(f.employeeAmount) || 0;
+            const compAmt = parseFloat(f.companyAmount) || 0;
+            const servCharge = parseFloat(f.serviceCharge) || 0;
+            f.totalFineAmount = empAmt + compAmt + servCharge; // Store total fine amount calculated in backend
+            f.fineAmount = f.totalFineAmount; // Synchronize fineAmount with totalFineAmount
+            
             // Sync individualAmount within the specific record for consistency
             if (f.assignedEmployees && f.assignedEmployees.length > 0) {
                 // employeeAmount at the root of a group record is the individual's portion
-                f.assignedEmployees[0].individualAmount = f.employeeAmount;
+                // Include service charge in individualAmount
+                const serviceChargeForThisEmployee = isCompanyRecord ? 0 : (fines.length > 1 ? serviceChargePerParty : (parseFloat(f.serviceCharge) || 0));
+                f.assignedEmployees[0].individualAmount = (parseFloat(f.employeeAmount) || 0) + serviceChargeForThisEmployee;
                 
                 // Sync company name if it's the company record
                 if (f.assignedEmployees[0].employeeId === 'VEGA-HR-0000' && updates.companyName) {
@@ -276,6 +316,7 @@ export const updateFine = async (req, res) => {
                 status: updatedFine.fineStatus,
                 subjectEmployee: subjectEmp,
                 subjectName: subjectName,
+                requestedByName: updatedFine.createdBy?.name || '',
                 actionedBy: req.user?._id,
                 comment: updatedFine.rejectionReason
             });
@@ -290,6 +331,7 @@ export const updateFine = async (req, res) => {
                     status: 'Pending',
                     subjectEmployee: subjectEmp,
                     subjectName: subjectName,
+                    requestedByName: updatedFine.createdBy?.name || '',
                     extra1: updatedFine.fineType,
                     extra2: isGroup 
                         ? `Total: AED ${fines.reduce((sum, f) => sum + (f.fineAmount || 0), 0)}`
@@ -303,6 +345,18 @@ export const updateFine = async (req, res) => {
         if (shouldSendApprovalEmail) {
             const allAssigned = fines.flatMap(f => f.assignedEmployees);
             sendFineApprovalEmail(updatedFine, allAssigned).catch(err => console.error("[UpdateFine] Failed to send approval email:", err));
+        }
+
+        // If newly approved, send confirmation email with attachments
+        if (oldStatus !== 'Approved' && updates.fineStatus === 'Approved') {
+            try {
+                const { sendFineConfirmedEmail } = await import("../../utils/sendFineConfirmedEmail.js");
+                const allAssigned = fines.flatMap(f => f.assignedEmployees);
+                await sendFineConfirmedEmail(updatedFine, allAssigned, req);
+                console.log(`[UpdateFine] Confirmed email sent for fine ${updatedFine.fineId}`);
+            } catch (err) {
+                console.error("[UpdateFine] Failed to send confirmed email:", err);
+            }
         }
 
         // If newly rejected, send notification

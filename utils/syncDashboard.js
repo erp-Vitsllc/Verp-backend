@@ -16,7 +16,7 @@ import EmployeeBasic from "../models/EmployeeBasic.js";
  */
 export const syncDashboardAction = async (data) => {
     try {
-        const { requestId, requestType, assignedTo, status, subjectEmployee, extra1, extra2, actionedBy, comment } = data;
+        const { requestId, requestType, assignedTo, status, subjectEmployee, extra1, extra2, actionedBy, comment, requestedByName } = data;
 
         // 1. If status is NOT pending, find and update any existing pending actions for this request
         if (status !== 'Pending') {
@@ -77,6 +77,7 @@ export const syncDashboardAction = async (data) => {
                 status: 'Pending',
                 subjectEmployeeId: subjectEmployee?.employeeId,
                 subjectName: subjectEmployee ? `${subjectEmployee.firstName} ${subjectEmployee.lastName}` : (data.subjectName || ''),
+                requestedByName: requestedByName || '',
                 requestedDate: new Date(),
                 extra1: extra1,
                 extra2: extra2

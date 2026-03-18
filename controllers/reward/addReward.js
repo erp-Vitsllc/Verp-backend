@@ -419,6 +419,7 @@ ${rewardData.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.padEnd(12)} As
                         assignedTo: managerStep.assignedTo,
                         status: 'Pending',
                         subjectEmployee: employee, // This is the employee object fetched earlier
+                        requestedByName: req.user.name || '',
                         extra1: savedReward.rewardType,
                         extra2: savedReward.amount ? `AED ${savedReward.amount}` : savedReward.title
                     });

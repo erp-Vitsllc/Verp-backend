@@ -1,4 +1,6 @@
 import Loan from "../../models/Loan.js";
+import mongoose from "mongoose";
+import { isUserAdministrator } from "../../services/permissionService.js";
 
 export const getLoans = async (req, res) => {
     try {
@@ -9,6 +11,18 @@ export const getLoans = async (req, res) => {
         }
         if (employeeId) {
             query.employeeId = employeeId;
+        }
+
+        // Visibility: Draft - only creator sees; Pending+ - everyone. Admin sees all.
+        const isAdmin = await isUserAdministrator(req.user?.id);
+        if (!isAdmin && req.user?.id) {
+            query.$and = query.$and || [];
+            query.$and.push({
+                $or: [
+                    { status: { $ne: 'Draft' } },
+                    { createdBy: new mongoose.Types.ObjectId(req.user.id) }
+                ]
+            });
         }
 
         const loans = await Loan.find(query)

@@ -3,6 +3,7 @@ import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { getSignedFileUrl } from "../../utils/s3Upload.js";
 import { getDepartmentHOD } from "../../utils/getDepartmentHOD.js";
 import { getManagementHOD } from "../../utils/getManagementHOD.js";
+import { isUserAdministrator } from "../../services/permissionService.js";
 
 export const getFineById = async (req, res) => {
     try {
@@ -39,6 +40,7 @@ export const getFineById = async (req, res) => {
                 .populate('rejectedBy', 'firstName lastName email department designation')
                 .populate('submittedTo', 'firstName lastName email department designation')
                 .populate('workflow.assignedTo', 'firstName lastName employeeId')
+                .populate('company', 'companyId _id name') // Populate company to get companyId and name
                 .lean();
         } else {
             fine = await Fine.findOne({ fineId: id })
@@ -47,6 +49,7 @@ export const getFineById = async (req, res) => {
                 .populate('accountsApprovedBy', 'firstName lastName email department designation employeeId')
                 .populate('approvedBy', 'firstName lastName email department designation employeeId')
                 .populate('workflow.assignedTo', 'firstName lastName employeeId')
+                .populate('company', 'companyId _id name') // Populate company to get companyId and name
                 .lean();
         }
 
@@ -68,6 +71,7 @@ export const getFineById = async (req, res) => {
             .populate('rejectedBy', 'firstName lastName email department designation')
             .populate('submittedTo', 'firstName lastName email department designation')
             .populate('workflow.assignedTo', 'firstName lastName employeeId')
+            .populate('company', 'companyId _id name') // Populate company to get companyId and name
             .sort({ fineId: 1 })
             .lean();
 
@@ -80,17 +84,30 @@ export const getFineById = async (req, res) => {
             let totalFineAmt = 0;
             let totalEmpAmt = 0;
             let totalCompAmt = 0;
+            let totalServiceCharge = 0;
 
             relatedFines.forEach(rf => {
                 if (rf.assignedEmployees) {
-                    // Enrich each entry with its specific record fineId for correct matching on frontend
-                    const enriched = rf.assignedEmployees.map(e => ({
-                        ...e,
-                        fineId: rf.fineId,
-                        fineStatus: rf.fineStatus,
-                        individualAmount: e.individualAmount || rf.employeeAmount,
-                        fineAmount: e.fineAmount || rf.fineAmount
-                    }));
+                    // Enrich each entry with its specific record fineId and amounts for edit modal
+                    const enriched = rf.assignedEmployees.map(e => {
+                        const isCompanyRecord = e.employeeId === 'VEGA-HR-0000';
+                        // individualAmount = total (base + service charge) for display
+                        let individualAmt = e.individualAmount;
+                        if (!individualAmt) {
+                            individualAmt = (parseFloat(rf.employeeAmount) || 0) + (parseFloat(rf.companyAmount) || 0) + (parseFloat(rf.serviceCharge) || 0);
+                        }
+                        // Base amount (without service charge) - for edit form per-person input
+                        const baseAmount = parseFloat(rf.employeeAmount) || 0;
+                        return {
+                            ...e,
+                            fineId: rf.fineId,
+                            fineStatus: rf.fineStatus,
+                            individualAmount: individualAmt,
+                            fineAmount: baseAmount, // Base amount for edit form input
+                            employeeAmount: baseAmount, // Explicit base for edit modal
+                            payableDuration: rf.payableDuration || e.payableDuration
+                        };
+                    });
                     allAssigned.push(...enriched);
                 }
 
@@ -105,25 +122,68 @@ export const getFineById = async (req, res) => {
                     totalCompAmt += parseFloat(rf.companyAmount) || 0;
                 }
                 
+                // Sum service charge from all records (it's already distributed per employee)
+                totalServiceCharge += parseFloat(rf.serviceCharge) || 0;
+                
+                // fineAmount already includes service charge per record, so sum it up
                 totalFineAmt += parseFloat(rf.fineAmount) || 0;
                 
-                // Ensure company ID is preserved
-                if (rf.company && !fine.company) fine.company = rf.company;
+                // Ensure company ID and details are preserved
+                if (rf.company && !fine.company) {
+                    fine.company = rf.company;
+                } else if (rf.company && fine.company && !fine.company.companyId && rf.company.companyId) {
+                    // Merge company details if missing
+                    fine.company = { ...fine.company, ...rf.company };
+                }
             });
 
             // Update synthesized fields
             fine.fineId = baseIdToUse; // use base ID
             fine.isGroupView = true;
             fine.assignedEmployees = allAssigned;
-            fine.fineAmount = totalFineAmt.toFixed(2);
+            fine.fineAmount = totalFineAmt.toFixed(2); // Total includes service charge (sum of all rf.fineAmount)
             fine.employeeAmount = totalEmpAmt.toFixed(2);
             fine.companyAmount = totalCompAmt.toFixed(2);
+            fine.serviceCharge = totalServiceCharge.toFixed(2); // Total service charge for the group
+            // Calculate totalFineAmount from components: employeeAmount + companyAmount + serviceCharge
+            fine.totalFineAmount = (totalEmpAmt + totalCompAmt + totalServiceCharge).toFixed(2);
         } else if (relatedFines.length === 1 && !fine) {
             fine = relatedFines[0];
+            // Ensure totalFineAmount is set for single fines too
+            if (!fine.totalFineAmount) {
+                const empAmt = parseFloat(fine.employeeAmount || 0);
+                const compAmt = parseFloat(fine.companyAmount || 0);
+                const servCharge = parseFloat(fine.serviceCharge || 0);
+                fine.totalFineAmount = (empAmt + compAmt + servCharge).toFixed(2);
+            }
+            // Enrich assignedEmployees for edit: add employeeAmount (base) per person
+            if (fine.assignedEmployees && fine.assignedEmployees.length > 0) {
+                fine.assignedEmployees = fine.assignedEmployees.map(e => ({
+                    ...e,
+                    employeeAmount: e.employeeAmount ?? fine.employeeAmount,
+                    fineAmount: (e.employeeAmount ?? fine.employeeAmount) ?? e.fineAmount,
+                    payableDuration: e.payableDuration ?? fine.payableDuration
+                }));
+            }
         }
 
         if (!fine) {
             return res.status(404).json({ message: "Fine not found" });
+        }
+
+        // Visibility: Draft - only creator sees; Admin sees all
+        const isAdmin = await isUserAdministrator(req.user?.id);
+        const isCreator = fine.createdBy && (fine.createdBy._id?.toString() || fine.createdBy.toString()) === req.user?.id;
+        if (!isAdmin && fine.fineStatus === 'Draft' && !isCreator) {
+            return res.status(403).json({ message: "Access denied. Draft fines are visible only to the creator." });
+        }
+
+        // Ensure totalFineAmount is always set (fallback for any edge cases)
+        if (!fine.totalFineAmount) {
+            const empAmt = parseFloat(fine.employeeAmount || 0);
+            const compAmt = parseFloat(fine.companyAmount || 0);
+            const servCharge = parseFloat(fine.serviceCharge || 0);
+            fine.totalFineAmount = (empAmt + compAmt + servCharge).toFixed(2);
         }
 
         // Generate signed URL if attachment exists

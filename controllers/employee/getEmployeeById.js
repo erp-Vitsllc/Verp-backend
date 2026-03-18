@@ -76,10 +76,11 @@ export const getEmployeeById = async (req, res) => {
                 status: "Approved"
             }).sort({ createdAt: -1 }).lean();
 
-            // Fetch Assigned Assets (Accepted, Pending, or Returned to this user)
+            // Fetch Assigned Assets (Included assets where user needs to take action, e.g., HR handover)
             let assets = await AssetItem.find({
                 $or: [
                     { assignedTo: employee._id, acceptanceStatus: { $in: ['Accepted', 'Pending'] } },
+                    { actionRequiredBy: employee._id, status: 'Pending' }, 
                     { assignedBy: employee._id, status: 'Returned' }
                 ]
             }).populate('typeId categoryId assignedTo assignedBy acceptedBy').lean();

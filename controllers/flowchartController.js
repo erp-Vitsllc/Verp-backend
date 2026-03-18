@@ -4,6 +4,8 @@ import EmployeeBasic from "../models/EmployeeBasic.js";
 import User from "../models/User.js";
 import DashboardAction from "../models/DashboardAction.js";
 import { sendResponsibilityApprovalEmail } from "../utils/sendResponsibilityApprovalEmail.js";
+import AssetItem from "../models/AssetItem.js";
+import { sendAssetAssignmentEmail } from "../utils/sendAssetAssignmentEmail.js";
 
 // @desc    Get all flowchart responsibilities
 // @route   GET /api/flowchart
@@ -54,11 +56,12 @@ export const addFlowchartResponsibility = async (req, res) => {
         const existing = await Flowchart.findOne({ category });
 
         if (existing) {
-            // Update existing
+            const employeeChanged = existing.empObjectId?.toString() !== resolvedEmpObjectId?.toString();
+            
             existing.employeeId = employeeId;
             existing.employeeName = employeeName;
             existing.designation = designation;
-            existing.empObjectId = resolvedEmpObjectId; // Make sure this is updated
+            existing.empObjectId = resolvedEmpObjectId; 
             existing.status = status || 'Active';
             existing.department = department;
             existing.companyEmail = companyEmail;
@@ -66,7 +69,48 @@ export const addFlowchartResponsibility = async (req, res) => {
             existing.updatedBy = req.user._id;
 
             await existing.save();
-            res.status(200).json({ message: 'Responsibility updated successfully', responsibility: existing });
+
+            // Trigger approval if reassigned and Pending
+            if (employeeChanged && status === 'Pending' && resolvedEmpObjectId) {
+                try {
+                    const employee = await EmployeeBasic.findById(resolvedEmpObjectId);
+                    if (employee) {
+                        const existingDashboardAction = await DashboardAction.findOne({
+                            assignedTo: employee._id,
+                            requestType: 'Responsibility Approval',
+                            status: 'Pending',
+                            extra1: category
+                        });
+
+                        if (!existingDashboardAction) {
+                            const newAction = await DashboardAction.create({
+                                assignedTo: employee._id,
+                                assignedToEmpId: employee.employeeId,
+                                requestId: existing._id,
+                                requestType: 'Responsibility Approval',
+                                subjectEmployeeId: employee.employeeId,
+                                subjectName: `${employee.firstName} ${employee.lastName}`,
+                                requestedByName: req.user.name || 'Admin',
+                                extra1: category,
+                                extra2: `${category} Responsibility Approval (Reassigned)`,
+                                status: 'Pending'
+                            });
+
+                            const roleLabels = { 'hr': 'HR Admin', 'accounts': 'Financial Controller', 'assetcontroller': 'Asset Controller' };
+                            await sendResponsibilityApprovalEmail({
+                                employee: employee,
+                                companyName: 'Main ERP', 
+                                category: roleLabels[category] || category,
+                                requestId: newAction._id,
+                                unassignedAssets: []
+                            });
+                        }
+                    }
+                } catch (err) {
+                    console.error(`[Flowchart Reassign Error] Trigger failed:`, err);
+                }
+            }
+            return res.status(200).json({ message: 'Responsibility updated successfully', responsibility: existing });
         } else {
             // Create new
             const responsibility = new Flowchart({
@@ -197,6 +241,80 @@ export const respondToResponsibility = async (req, res) => {
             dashboardAction.resolvedAt = new Date();
             dashboardAction.resolvedBy = req.user._id;
             await dashboardAction.save();
+        }
+
+        // Trigger asset handover if HR responsibility approved
+        if (action === 'Approve' && category === 'hr') {
+            try {
+                const targetHREmpId = responsibility.empObjectId;
+                const newHR = await EmployeeBasic.findById(targetHREmpId).select('_id employeeId firstName lastName');
+
+                if (newHR) {
+                    // Find assets of other HRs (similar logic as company response)
+                    const otherHRsWithAssets = await AssetItem.find({
+                        assignedTo: { $ne: targetHREmpId, $ne: null }
+                    }).distinct('assignedTo');
+
+                    for (const potentialOldHRId of otherHRsWithAssets) {
+                        const potentialOldHR = await EmployeeBasic.findById(potentialOldHRId);
+                        if (potentialOldHR && (potentialOldHR.designation?.toLowerCase().includes('hr') || potentialOldHR.department?.toLowerCase().includes('hr'))) {
+                            const assetsToTransfer = await AssetItem.find({ assignedTo: potentialOldHRId });
+
+                            if (assetsToTransfer.length > 0) {
+                                await AssetItem.updateMany(
+                                    { assignedTo: potentialOldHRId },
+                                    {
+                                        $set: {
+                                            actionRequiredBy: targetHREmpId,
+                                            status: 'Pending',
+                                            acceptanceStatus: 'Pending',
+                                            pendingAction: 'Asset Transfer',
+                                            pendingActionDetails: {
+                                                transferFrom: potentialOldHRId,
+                                                type: 'HR_Handover',
+                                                oldHRName: `${potentialOldHR.firstName} ${potentialOldHR.lastName}`
+                                            }
+                                        }
+                                    }
+                                );
+
+                                // Create Dashboard Actions for each
+                                const dashboardActions = assetsToTransfer.map(asset => ({
+                                    assignedTo: targetHREmpId,
+                                    assignedToEmpId: newHR.employeeId,
+                                    requestId: asset._id,
+                                    requestType: 'Asset Transfer',
+                                    subjectEmployeeId: potentialOldHR.employeeId,
+                                    subjectName: `${potentialOldHR.firstName} ${potentialOldHR.lastName}`,
+                                    requestedByName: 'System (Global HR Handover)',
+                                    extra1: `${asset.assetId} - ${asset.name}`,
+                                    extra2: 'Global Responsibility Handover',
+                                    status: 'Pending'
+                                }));
+                                await DashboardAction.insertMany(dashboardActions);
+                                
+                                // Send single email notification to new HR
+                                try {
+                                    await sendAssetAssignmentEmail({
+                                        asset: assetsToTransfer[0], 
+                                        assets: assetsToTransfer,
+                                        employee: newHR,
+                                        recipient: newHR,
+                                        isBulk: assetsToTransfer.length > 1,
+                                        assetCount: assetsToTransfer.length
+                                    });
+                                } catch (emailErr) {
+                                    console.error(`[Email Error] Global handover notification failed:`, emailErr);
+                                }
+ 
+                                console.log(`[Flowchart Handover] Triggered handover of ${assetsToTransfer.length} assets from ${potentialOldHR.employeeId} to ${newHR.employeeId}`);
+                            }
+                        }
+                    }
+                }
+            } catch (err) {
+                console.error("[Flowchart Handover Error] HR Asset handover failed:", err);
+            }
         }
 
         res.status(200).json({ message: `Responsibility ${action}ed successfully` });

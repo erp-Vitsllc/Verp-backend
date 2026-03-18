@@ -84,39 +84,43 @@ export const addFine = async (req, res) => {
         }
 
         if (compLiability > 0) {
-            console.log(`[AddFine] Transforming Company Share (${compLiability}) into VEGA-HR-0000 record.`);
+            // Only add company record if frontend did NOT already send it (e.g. from AddSafetyFineModal bulk payload)
+            const hasCompanyInWorking = workingEmployees.some(e => e.employeeId === 'VEGA-HR-0000');
+            if (!hasCompanyInWorking) {
+                console.log(`[AddFine] Transforming Company Share (${compLiability}) into VEGA-HR-0000 record.`);
 
-            // Resolve Company Name
-            let compName = 'Vega Digital IT Solutions';
-            try {
-                const compId = req.body.company || commonData?.company;
-                if (compId) {
-                    const comp = await Company.findById(compId);
-                    if (comp) compName = comp.name;
+                // Resolve Company Name
+                let compName = 'Vega Digital IT Solutions';
+                try {
+                    const compId = req.body.company;
+                    if (compId) {
+                        const comp = await Company.findById(compId);
+                        if (comp) compName = comp.name;
+                    }
+                } catch (err) {
+                    console.warn("[AddFine] Could not resolve company name for placeholder:", err.message);
                 }
-            } catch (err) {
-                console.warn("[AddFine] Could not resolve company name for placeholder:", err.message);
+
+                // Create Company "Employee" Record - Insert at HEAD to ensure it gets Suffix 'A'
+                workingEmployees.unshift({
+                    employeeId: 'VEGA-HR-0000',
+                    employeeName: compName,
+                    fineAmount: compLiability,
+                    employeeAmount: compLiability,
+                    companyAmount: 0,
+                    individualAmount: compLiability, // Will get service charge added in bulk loop
+                    responsibleFor: 'Employee',
+                    daysWorked: 0
+                });
+
+                // Update Request Body to reflect transformation
+                req.body.isBulk = true;
+                req.body.employees = workingEmployees;
+
+                // Clear companyAmount only when WE added the company - bulk logic uses commonData
+                req.body.companyAmount = 0;
             }
-
-            // Create Company "Employee" Record
-            // Insert at HEAD to ensure it gets Suffix 'A'
-            workingEmployees.unshift({
-                employeeId: 'VEGA-HR-0000',
-                employeeName: compName,
-                fineAmount: compLiability,     // Total Amount for this record
-                employeeAmount: compLiability, // It is their liability
-                companyAmount: 0,              // Zero out field so it doesn't look like a shared fine
-                responsibleFor: 'Employee',    // Treat as individual liability
-                daysWorked: 0
-            });
-
-            // Update Request Body to reflect transformation
-            req.body.isBulk = true;
-            req.body.employees = workingEmployees;
-
-            // IMPORTANT: Clear the global companyAmount so the Bulk Logic doesn't 
-            // try to distribute it across the other employees again.
-            req.body.companyAmount = 0;
+            // If frontend already sent company, keep req.body.employees and companyAmount as-is
         } else {
             // If no company liability but we resolved a Single request into workingEmployees array
             // we should consistency-check if we need to set isBulk=true (e.g. if we want to use the loop logic)
@@ -210,15 +214,35 @@ export const addFine = async (req, res) => {
                 }
             }
 
-            // Pre-calculate shares
-            const count = bulkList.length;
-            const totalFine = parseFloat(commonData.fineAmount) || 0;
+            // Pre-calculate totals
+            const totalServiceCharge = parseFloat(commonData.serviceCharge) || 0;
             const totalEmp = parseFloat(commonData.employeeAmount) || 0;
             const totalComp = parseFloat(commonData.companyAmount) || 0;
 
+            // 222: Inject company record if company is responsible and not already present in bulkList
+            const hasCompanyInList = bulkList.some(e => e.employeeId === 'VEGA-HR-0000');
+            if (totalComp > 0 && !hasCompanyInList) {
+                bulkList.push({
+                    employeeId: 'VEGA-HR-0000',
+                    employeeName: commonData.companyName || 'Vega Digital IT Solutions',
+                    employeeAmount: totalComp,
+                    companyAmount: 0,
+                    daysWorked: 0
+                });
+            }
+
+            // Recalculate count after potential injection
+            const count = bulkList.length;
+
+            // Use fineAmount exactly as sent from frontend (already includes service charge)
+            const totalFine = parseFloat(commonData.fineAmount) || (totalEmp + totalComp + totalServiceCharge);
+
+            // Divide service charge equally among ALL parties in the bulkList (including company record if present)
+            const serviceChargePerParty = count > 0 ? (totalServiceCharge / count) : 0;
+
             // If we are splitting into individual records, we need to split the AMOUNTS too.
             // Assuming the input amounts are TOTALs for the whole group.
-            const fineShare = count > 0 ? (totalFine / count) : 0;
+            // Calculate base shares for distribution if not specifically provided
             const empShare = count > 0 ? (totalEmp / count) : 0;
             const compShare = count > 0 ? (totalComp / count) : 0;
 
@@ -243,27 +267,47 @@ export const addFine = async (req, res) => {
                 // If count > 1, append suffix. If count == 1, use base ID.
                 const uniqueFineId = (count > 1) ? `${baseFineId}${getSuffix(i)}` : baseFineId;
 
-                // Use individual amounts if provided by frontend, otherwise fallback to equal distribution
-                const individualFineAmount = (empData.fineAmount !== undefined && empData.fineAmount !== null) ? parseFloat(empData.fineAmount) : fineShare;
-                const individualEmpAmount = (empData.employeeAmount !== undefined && empData.employeeAmount !== null) ? parseFloat(empData.employeeAmount) : empShare;
-                const individualCompAmount = (empData.companyAmount !== undefined && empData.companyAmount !== null) ? parseFloat(empData.companyAmount) : compShare;
+                // Use individual amounts exactly as provided by frontend - don't recalculate
+                // For company (VEGA-HR-0000): employeeAmount holds company base. For employees: use employeeAmount, else fineAmount (from assignedEmployees), else empShare
+                const isCompanyRecord = empData.employeeId === 'VEGA-HR-0000';
+                let individualEmpAmount = empShare;
+                if (empData.employeeAmount !== undefined && empData.employeeAmount !== null && empData.employeeAmount !== '') {
+                    individualEmpAmount = parseFloat(empData.employeeAmount);
+                } else if (!isCompanyRecord && empData.fineAmount !== undefined && empData.fineAmount !== null && empData.fineAmount !== '') {
+                    // assignedEmployees/selectedEmployees send per-person base in fineAmount
+                    individualEmpAmount = parseFloat(empData.fineAmount);
+                }
+                const individualCompAmount = (empData.companyAmount !== undefined && empData.companyAmount !== null && empData.companyAmount !== '') ? parseFloat(empData.companyAmount) : compShare;
+                
+                // Service charge: Divide equally among all parties
+                const individualServiceCharge = serviceChargePerParty;
+                
+                // Individual total = use frontend value if provided (individualAmount or fineAmount), else calculate
+                // When we used fineAmount as base fallback (assignedEmployees format), fineAmount is base-only - use calculated total
+                const usedFineAmountAsBaseFallback = !isCompanyRecord && (empData.employeeAmount === undefined || empData.employeeAmount === null || empData.employeeAmount === '') && (empData.fineAmount !== undefined && empData.fineAmount !== null && empData.fineAmount !== '');
+                const individualAmountFromData = empData.individualAmount ?? empData.fineAmount;
+                const totalFineAmountPerPerson = (!usedFineAmountAsBaseFallback && individualAmountFromData !== undefined && individualAmountFromData !== null && individualAmountFromData !== '') ? 
+                    parseFloat(individualAmountFromData) : 
+                    (individualEmpAmount + individualCompAmount + individualServiceCharge);
 
                 const finePayload = {
                     fineId: uniqueFineId,
-                    // Store as single assigned employee
+                    // Store as single assigned employee - use totalFineAmountPerPerson (from frontend or calculated)
                     assignedEmployees: [{
                         employeeId: empData.employeeId,
                         employeeName: eName || 'Unknown',
                         daysWorked: empData.daysWorked || 0,
-                        individualAmount: individualEmpAmount // Store individual amount here too
+                        individualAmount: totalFineAmountPerPerson
                     }],
                     fineType: commonData.fineType || 'Other',
                     fineStatus: (commonData.fineStatus === 'Pending' || !commonData.fineStatus) ? 'Pending HR' : commonData.fineStatus,
 
-                    // Use Individual Amounts
-                    fineAmount: individualFineAmount,
-                    employeeAmount: individualEmpAmount,
-                    companyAmount: individualCompAmount,
+                    // Store exact amounts as provided
+                    fineAmount: totalFineAmountPerPerson, // Individual total fine amount
+                    totalFineAmount: totalFineAmountPerPerson, // Store total fine amount exactly
+                    employeeAmount: individualEmpAmount, // Store exact employee amount
+                    companyAmount: individualCompAmount, // Store exact company amount
+                    serviceCharge: individualServiceCharge, // Store service charge share (divided equally among employees)
 
                     description: commonData.description || '',
                     awardedDate: commonData.awardedDate ? new Date(commonData.awardedDate) : new Date(),
@@ -336,6 +380,7 @@ export const addFine = async (req, res) => {
                             assignedTo: reporteeStep.assignedTo,
                             status: 'Pending',
                             subjectName: `Group Fine - ${createdFines.length} Employees`,
+                            requestedByName: req.user.name || '',
                             extra1: firstFine.fineType,
                             extra2: `Total: AED ${totalFine}`
                         });
@@ -378,6 +423,7 @@ export const addFine = async (req, res) => {
             responsibleFor,
             employeeAmount,
             companyAmount,
+            serviceCharge,
             payableDuration,
             monthStart
         } = req.body;
@@ -458,13 +504,22 @@ export const addFine = async (req, res) => {
             }
         }
 
+        // Store exact values as entered by user - don't recalculate
+        const serviceChargeAmount = parseFloat(serviceCharge) || 0;
+        const employeeAmt = parseFloat(employeeAmount) || 0;
+        const companyAmt = parseFloat(companyAmount) || 0;
+        // Use fineAmount exactly as entered (already includes service charge from validation)
+        // If fineAmount is not provided, calculate from components
+        const totalFineAmount = parseFloat(fineAmount) || (employeeAmt + companyAmt + serviceChargeAmount);
+
         const fineData = {
             fineId,
             // employeeId, // REMOVED
             // employeeName, // REMOVED
             fineType: subCategory || fineType || 'Other',
             fineStatus: (fineStatus === 'Pending' || !fineStatus) ? 'Pending HR' : fineStatus,
-            fineAmount: parseFloat(fineAmount) || 0, // Allow 0
+            fineAmount: totalFineAmount, // Total = base fine + service charge
+            totalFineAmount: totalFineAmount, // Store total fine amount (employeeAmount + companyAmount + serviceCharge)
             description: description || '',
             awardedDate: awardedDate ? new Date(awardedDate) : new Date(),
             remarks: remarks || '',
@@ -483,12 +538,14 @@ export const addFine = async (req, res) => {
             assignedEmployees: (assignedEmployees && assignedEmployees.length > 0) ? assignedEmployees : [{
                 employeeId,
                 employeeName,
-                daysWorked: 0
+                daysWorked: 0,
+                // Individual amount = employeeAmount + serviceCharge (for single employee)
+                individualAmount: employeeAmt + serviceChargeAmount
             }],
             responsibleFor: responsibleFor || null,
-            fineAmount: parseFloat(fineAmount) || (parseFloat(employeeAmount) || 0) + (parseFloat(companyAmount) || 0),
-            employeeAmount: parseFloat(employeeAmount) || 0,
-            companyAmount: parseFloat(companyAmount) || 0,
+            employeeAmount: employeeAmt, // Store exact employee amount
+            companyAmount: companyAmt, // Store exact company amount
+            serviceCharge: serviceChargeAmount, // Store exact service charge
             payableDuration: parseInt(payableDuration) || null,
             monthStart: monthStart || '',
             createdBy: req.user._id // Add Creator
@@ -541,6 +598,7 @@ export const addFine = async (req, res) => {
                     assignedTo: reporteeStep.assignedTo,
                     status: 'Pending',
                     subjectEmployee: subjectEmp,
+                    requestedByName: req.user.name || '',
                     extra1: savedFine.fineType,
                     extra2: `AED ${savedFine.fineAmount}`
                 });

@@ -1,6 +1,7 @@
 import nodemailer from 'nodemailer';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import axios from 'axios';
+import { resolveEmployeeEmail, getFallbackEmailNote } from './resolveEmployeeEmail.js';
 
 /**
  * Sends a confirmation email to assigned employees when a fine is fully approved.
@@ -16,8 +17,10 @@ export const sendFineConfirmedEmail = async (fine, assignedEmployees, req = null
         // 1. Fetch Employee Emails and their Managers
         const employeeIds = assignedEmployees.map(e => e.employeeId);
         const fullEmployees = await EmployeeBasic.find({ employeeId: { $in: employeeIds } })
-            .select('employeeId firstName lastName companyEmail personalEmail primaryReportee')
-            .populate('primaryReportee', 'companyEmail personalEmail');
+            .select('employeeId firstName lastName companyEmail personalEmail primaryReportee secondaryReportee reportingAuthority')
+            .populate('primaryReportee', 'companyEmail personalEmail')
+            .populate('secondaryReportee', 'companyEmail personalEmail')
+            .populate('reportingAuthority', 'companyEmail personalEmail');
 
         // Fetch Creator Email (Need User model)
         const User = await import("../models/User.js").then(m => m.default);
@@ -26,16 +29,21 @@ export const sendFineConfirmedEmail = async (fine, assignedEmployees, req = null
         const toEmails = new Set();
         const ccEmails = new Set();
 
-        // 1. Add Employee Emails
+        // 1. Add Employee Emails (with fallback to primaryReportee when emp has no email)
         fullEmployees.forEach(emp => {
-            const mail = emp.companyEmail || emp.personalEmail;
-            if (mail) toEmails.add(mail);
+            const { email } = resolveEmployeeEmail(emp);
+            if (email) toEmails.add(email);
 
             // 2. Add Manager Emails (His Reportee/Supervisor)
-            if (emp.primaryReportee) {
-                const managerMail = emp.primaryReportee.companyEmail || emp.primaryReportee.personalEmail;
-                if (managerMail) ccEmails.add(managerMail);
-            }
+            const addCC = (m) => {
+                if (!m) return;
+                const mail = m.companyEmail || m.personalEmail;
+                if (mail) ccEmails.add(mail);
+            };
+
+            addCC(emp.primaryReportee);
+            addCC(emp.secondaryReportee);
+            addCC(emp.reportingAuthority);
         });
 
         // 3. Add Creator Email
@@ -85,19 +93,22 @@ export const sendFineConfirmedEmail = async (fine, assignedEmployees, req = null
 
         // 3. Prepare Built-in PDF Attachment (System Generated Fine Form)
         const attachments = [];
+        
+        // 3a. Add System Generated Fine Form (PDF)
         if (req) {
             try {
                 const { generatePdf } = await import("./generatePdf.js");
                 let pdfBuffer = null;
 
                 if (req.body && req.body.finePdf) {
-                    console.log(`[FineConfirmedEmail] Received frontend-generated Base64 Fine Form PDF. Length: ${req.body.finePdf.length}`);
+                    console.log(`[FineConfirmedEmail] Using frontend-provided Base64 Fine Form PDF. Length: ${req.body.finePdf.length}`);
                     let base64Data = req.body.finePdf;
                     if (base64Data.includes(',')) {
                         base64Data = base64Data.split(',')[1];
                     }
                     pdfBuffer = Buffer.from(base64Data, 'base64');
                 } else {
+                    console.log(`[FineConfirmedEmail] Attempting to generate PDF via Puppeteer...`);
                     const origin = req.headers.origin || (req.headers.referer ? new URL(req.headers.referer).origin : null);
                     const baseUrl = origin || process.env.FRONTEND_URL || "http://localhost:3000";
                     const printUrl = `${baseUrl}/print/fine/${fine._id || fine.fineId}`;
@@ -112,15 +123,49 @@ export const sendFineConfirmedEmail = async (fine, assignedEmployees, req = null
                     pdfBuffer = await generatePdf(printUrl, token, userPayload, permissions, selector);
                 }
 
-                if (pdfBuffer && pdfBuffer.length > 1000) {
+                if (pdfBuffer && pdfBuffer.length > 500) { // Lowered threshold slightly to be safe
                     attachments.push({
                         filename: `FineForm-${fine.fineId || fine._id}.pdf`,
                         content: pdfBuffer,
                         contentType: 'application/pdf'
                     });
+                    console.log(`[FineConfirmedEmail] Attached fine form PDF. Size: ${pdfBuffer.length} bytes`);
+                } else {
+                    console.warn(`[FineConfirmedEmail] PDF buffer too small or null: ${pdfBuffer ? pdfBuffer.length : 'null'}`);
                 }
             } catch (pdfErr) {
                 console.error("[FineConfirmedEmail] PDF Generation Error:", pdfErr.message);
+            }
+        }
+
+        // 3b. Add User-Uploaded Attachment (if any)
+        if (fine.attachment && (fine.attachment.url || fine.attachment.data)) {
+            try {
+                let buffer = null;
+                let filename = fine.attachment.name || `Attachment-${fine.fineId || fine._id}`;
+                let contentType = fine.attachment.mimeType || 'application/octet-stream';
+
+                if (fine.attachment.url) {
+                    console.log(`[FineConfirmedEmail] Attempting to attach uploaded file from URL: ${fine.attachment.url}`);
+                    const response = await axios.get(fine.attachment.url, { responseType: 'arraybuffer' });
+                    buffer = Buffer.from(response.data);
+                } else if (fine.attachment.data) {
+                    console.log(`[FineConfirmedEmail] Using Base64 attachment data.`);
+                    let base64Data = fine.attachment.data;
+                    if (base64Data.includes(',')) base64Data = base64Data.split(',')[1];
+                    buffer = Buffer.from(base64Data, 'base64');
+                }
+                
+                if (buffer && buffer.length > 0) {
+                    attachments.push({
+                        filename: filename,
+                        content: buffer,
+                        contentType: contentType
+                    });
+                    console.log(`[FineConfirmedEmail] Attached uploaded file: ${filename}. Size: ${buffer.length} bytes`);
+                }
+            } catch (attachErr) {
+                console.warn("[FineConfirmedEmail] Could not attach external file:", attachErr.message);
             }
         }
 
@@ -129,16 +174,18 @@ export const sendFineConfirmedEmail = async (fine, assignedEmployees, req = null
             const empDetails = fullEmployees.find(e => e.employeeId === assigned.employeeId);
             if (!empDetails) continue;
 
-            const toMail = empDetails.companyEmail || empDetails.personalEmail;
+            const { email: toMail, isFallbackToReportee, employeeName, reporteeName } = resolveEmployeeEmail(empDetails);
             if (!toMail) continue;
 
             const subject = `Fine Notification: #${fine.fineId} Approved`;
+            const greetingName = isFallbackToReportee ? reporteeName : (assigned.employeeName || empDetails.firstName);
+            const fallbackNote = isFallbackToReportee ? getFallbackEmailNote(employeeName, reporteeName) : '';
 
             const html = `
                 <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #eee; border-radius: 8px;">
                     <h2 style="color: #d9534f; margin-bottom: 20px;">Fine Notification</h2>
-                    
-                    <p>Dear ${assigned.employeeName || empDetails.firstName},</p>
+                    ${fallbackNote}
+                    <p>Dear ${greetingName},</p>
                     
                     <p>This is to inform you that a fine assigned to you has been <strong>approved</strong> and processed.</p>
                     
@@ -172,7 +219,7 @@ export const sendFineConfirmedEmail = async (fine, assignedEmployees, req = null
                         </table>
                     </div>
 
-                    <p>The system generated fine form is attached to this email for your reference.</p>
+                    <p>The system generated fine form and any associated attachments are included with this email for your reference.</p>
                     
                     <p style="font-size: 12px; color: #999; margin-top: 30px; border-top: 1px solid #eee; padding-top: 10px;">
                         This is an automated message from the VERP System.

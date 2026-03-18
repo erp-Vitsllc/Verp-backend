@@ -89,6 +89,10 @@ const assetItemSchema = new mongoose.Schema({
         enum: ['Assigned', 'Unassigned', 'Maintenance', 'On Service', 'Service', 'Lost', 'Returned', 'Pending', 'End of Life', 'Out of Service', 'Draft', 'Rejected', 'On Leave'],
         default: 'Unassigned'
     },
+    ownership: {
+        type: String,
+        default: 'Unassigned'
+    },
     assignmentType: {
         type: String,
         enum: ['Permanent', 'Temporary', null],
@@ -96,6 +100,10 @@ const assetItemSchema = new mongoose.Schema({
     },
     assignedDays: {
         type: Number,
+        default: null
+    },
+    assignedDate: {
+        type: Date,
         default: null
     },
     acceptanceStatus: {
@@ -110,7 +118,7 @@ const assetItemSchema = new mongoose.Schema({
     },
     pendingAction: {
         type: String,
-        enum: ['End of Life', 'Loss and Damage', 'Leave', 'Asset Transfer', null],
+        enum: ['End of Life', 'Loss and Damage', 'Leave', 'Asset Transfer', 'Retention Confirmation', null],
         default: null
     },
     pendingActionDetails: {
@@ -158,14 +166,20 @@ const assetItemSchema = new mongoose.Schema({
         attachment: { type: String, default: null },
         status: {
             type: String,
-            enum: ['Attached', 'Transfered', 'Lost', 'Damaged', 'End of Life'],
+            enum: ['Attached', 'Transfered', 'Lost', 'Damaged', 'End of Life', 'Pending'],
             default: 'Attached'
         },
         // Pending approval workflow for accessory-level actions
         pendingAction: {
             type: String,
-            enum: ['Transfer', 'Loss and Damage', 'End of Life', null],
-            default: null
+            default: null,
+            validate: {
+                validator: function (v) {
+                    if (v == null || v === "" || v === "null") return true;
+                    return ['Transfer', 'Loss and Damage', 'End of Life', 'Add'].includes(v);
+                },
+                message: 'Invalid pending action'
+            }
         },
         pendingActionDetails: {
             targetAssetId: { type: mongoose.Schema.Types.ObjectId, ref: 'AssetItem', default: null },
@@ -214,7 +228,7 @@ const assetItemSchema = new mongoose.Schema({
     timestamps: true
 });
 
-// Middleware to auto-generate accessory IDs if missing
+// Middleware to auto-generate accessory IDs if missing and normalize accessory pendingAction
 assetItemSchema.pre('save', function (next) {
     if (this.accessories && this.accessories.length > 0) {
         this.accessories.forEach((acc, index) => {
@@ -223,7 +237,26 @@ assetItemSchema.pre('save', function (next) {
                 const suffixNum = Math.floor(index / 26) > 0 ? String(Math.floor(index / 26)) : '';
                 acc.accessoryId = `${this.assetId}${String.fromCharCode(charCode)}${suffixNum}`;
             }
+            // Normalize pendingAction: string 'null' or empty string -> actual null
+            if (acc.pendingAction === 'null' || acc.pendingAction === '') {
+                acc.pendingAction = null;
+            }
         });
+    }
+    next();
+});
+
+assetItemSchema.pre('save', async function (next) {
+    if (this.isModified('assignedTo') || this.isModified('assignedCompany') || this.isModified('status')) {
+        if (!this.assignedTo && !this.assignedCompany) {
+            this.ownership = 'Unassigned';
+        } else if (this.assignedToType === 'Company' && this.assignedCompany) {
+            const comp = await mongoose.model('Company').findById(this.assignedCompany).select('name');
+            this.ownership = comp ? comp.name : 'Unknown Company';
+        } else if (this.assignedTo) {
+            const emp = await mongoose.model('EmployeeBasic').findById(this.assignedTo).select('firstName lastName');
+            this.ownership = emp ? `${emp.firstName || ''} ${emp.lastName || ''}`.trim() : 'Unknown Employee';
+        }
     }
     next();
 });

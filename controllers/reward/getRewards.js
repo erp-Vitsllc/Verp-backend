@@ -3,6 +3,7 @@ import EmployeeBasic from "../../models/EmployeeBasic.js";
 import mongoose from "mongoose";
 import { getSignedFileUrl } from "../../utils/s3Upload.js";
 import { escapeRegex } from "../../utils/regexHelper.js";
+import { isUserAdministrator } from "../../services/permissionService.js";
 
 export const getRewards = async (req, res) => {
     // Check database connection first
@@ -76,6 +77,18 @@ export const getRewards = async (req, res) => {
                 { employeeName: regex },
                 { description: regex }
             ];
+        }
+
+        // Visibility: Draft - only creator sees; Pending+ - everyone. Admin sees all.
+        const isAdmin = await isUserAdministrator(req.user?.id);
+        if (!isAdmin && req.user?.id) {
+            filters.$and = filters.$and || [];
+            filters.$and.push({
+                $or: [
+                    { rewardStatus: { $ne: 'Draft' } },
+                    { createdBy: new mongoose.Types.ObjectId(req.user.id) }
+                ]
+            });
         }
 
         const queryOptions = { maxTimeMS: 20000 }; // 20 seconds max query time

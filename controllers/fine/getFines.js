@@ -1,5 +1,7 @@
 import Fine from "../../models/Fine.js";
+import mongoose from "mongoose";
 import { getSignedFileUrl } from "../../utils/s3Upload.js";
+import { isUserAdministrator } from "../../services/permissionService.js";
 
 export const getFines = async (req, res) => {
     try {
@@ -13,19 +15,56 @@ export const getFines = async (req, res) => {
             endDate,
             employeeId,
             vehicleId,
-            assetId
+            assetId,
+            companyId
         } = req.query;
 
         const query = {};
 
         // Search by employee name or fine ID
+        const searchConditions = [];
         if (search) {
-            query.$or = [
+            searchConditions.push(
                 { fineId: { $regex: search, $options: 'i' } },
-                // Search inside assigned employees
                 { 'assignedEmployees.employeeName': { $regex: search, $options: 'i' } },
                 { 'assignedEmployees.employeeId': { $regex: search, $options: 'i' } }
+            );
+        }
+
+        // Filter by Company ID: Show ONLY approved/paid company-responsible fines (not employee fines)
+        // Company fines are identified by:
+        // 1. assignedEmployees contains VEGA-HR-0000 (company record)
+        // 2. OR responsibleFor === 'Company' AND company matches
+        // 3. AND status must be Approved, Active, Completed, or Paid
+        const companyConditions = [];
+        if (companyId) {
+            const approvedStatuses = ['Approved', 'Active', 'Completed', 'Paid'];
+            companyConditions.push(
+                // Company record (VEGA-HR-0000) - this is the company's fine record
+                { 
+                    'assignedEmployees.employeeId': 'VEGA-HR-0000', 
+                    company: companyId,
+                    fineStatus: { $in: approvedStatuses }
+                },
+                // Direct company responsibility
+                { 
+                    responsibleFor: 'Company', 
+                    company: companyId,
+                    fineStatus: { $in: approvedStatuses }
+                }
+            );
+        }
+
+        // Combine search and company conditions
+        if (searchConditions.length > 0 && companyConditions.length > 0) {
+            query.$and = [
+                { $or: searchConditions },
+                { $or: companyConditions }
             ];
+        } else if (searchConditions.length > 0) {
+            query.$or = searchConditions;
+        } else if (companyConditions.length > 0) {
+            query.$or = companyConditions;
         }
 
         if (status) query.fineStatus = status;
@@ -44,9 +83,22 @@ export const getFines = async (req, res) => {
             if (endDate) query.awardedDate.$lte = new Date(endDate);
         }
 
+        // Visibility: Draft - only creator sees; Pending+ - everyone. Admin sees all.
+        const isAdmin = await isUserAdministrator(req.user?.id);
+        if (!isAdmin && req.user?.id) {
+            query.$and = query.$and || [];
+            query.$and.push({
+                $or: [
+                    { fineStatus: { $ne: 'Draft' } },
+                    { createdBy: new mongoose.Types.ObjectId(req.user.id) }
+                ]
+            });
+        }
+
         const skip = (parseInt(page) - 1) * parseInt(limit);
 
         const fines = await Fine.find(query)
+            .populate('company', 'companyId _id name') // Populate company to get companyId string
             .sort({ createdAt: -1 })
             .skip(skip)
             .limit(parseInt(limit))

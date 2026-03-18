@@ -54,6 +54,14 @@ export const getLoanById = async (req, res) => {
             return res.status(404).json({ message: "Loan request not found" });
         }
 
+        // Visibility: Draft - only creator sees; Admin sees all
+        const { isUserAdministrator } = await import('../../services/permissionService.js');
+        const isAdmin = await isUserAdministrator(req.user?.id);
+        const isCreator = loan.createdBy && (loan.createdBy._id?.toString() || loan.createdBy.toString()) === req.user?.id;
+        if (!isAdmin && loan.status === 'Draft' && !isCreator) {
+            return res.status(403).json({ message: "Access denied. Draft loans are visible only to the creator." });
+        }
+
         // Format response
         const employee = loan.employeeObjectId || {};
         const hod = employee.primaryReportee || {};

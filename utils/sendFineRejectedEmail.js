@@ -2,6 +2,7 @@ import nodemailer from 'nodemailer';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import User from '../models/User.js';
 import axios from 'axios';
+import { resolveEmployeeEmail } from './resolveEmployeeEmail.js';
 
 /**
  * Sends a rejection email to assigned employees when a fine is rejected by CEO/Admin.
@@ -35,10 +36,10 @@ export const sendFineRejectedEmail = async (fine, assignedEmployees) => {
 
         const recipientEmails = new Set();
 
-        // Add Target Employees & Managers
+        // Add Target Employees (fallback to primaryReportee when emp has no email)
         fullEmployees.forEach(emp => {
-            const mail = emp.companyEmail || emp.personalEmail;
-            if (mail) recipientEmails.add(mail);
+            const { email } = resolveEmployeeEmail(emp);
+            if (email) recipientEmails.add(email);
 
             if (emp.primaryReportee) {
                 const managerMail = emp.primaryReportee.companyEmail || emp.primaryReportee.personalEmail;

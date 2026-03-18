@@ -8,6 +8,7 @@ import { getDepartmentHOD } from "../../utils/getDepartmentHOD.js";
 import { sendHODAuthorizationEmail } from "../../utils/sendHODAuthorizationEmail.js";
 import { generatePdf } from "../../utils/generatePdf.js";
 import { uploadDocumentToS3 } from "../../utils/s3Upload.js";
+import { resolveEmployeeEmail, getFallbackEmailNote } from "../../utils/resolveEmployeeEmail.js";
 
 export const updateReward = async (req, res) => {
     try {
@@ -689,14 +690,14 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
                         const toEmails = new Set();
                         const ccEmails = new Set();
 
-                        // 1. Employee Email
-                        const empEmail = employeeForEmail.companyEmail || employeeForEmail.email;
+                        // 1. Employee Email (fallback to primaryReportee when emp has no email)
+                        const { email: empEmail, isFallbackToReportee, employeeName, reporteeName } = resolveEmployeeEmail(employeeForEmail);
                         if (empEmail) toEmails.add(empEmail);
 
                         // 2. Manager Email (His Reportee/Supervisor)
                         if (employeeForEmail.primaryReportee) {
                             const managerEmail = employeeForEmail.primaryReportee.companyEmail || employeeForEmail.primaryReportee.email;
-                            if (managerEmail) ccEmails.add(managerEmail);
+                            if (managerEmail && !toEmails.has(managerEmail)) ccEmails.add(managerEmail);
                         }
 
                         // 3. Creator Email
@@ -753,6 +754,7 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
                                 const html = `
                                     <div style="font-family: Arial, sans-serif; color: #333; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #eee; border-radius: 10px;">
                                         <h2 style="color: #2e7d32; text-align: center;">Reward Approved</h2>
+                                        ${isFallbackToReportee ? getFallbackEmailNote(employeeName, reporteeName) : ''}
                                         <p>Dear All,</p>
                                         <p>We are pleased to inform you that the reward request for <strong>${employeeForEmail.firstName} ${employeeForEmail.lastName}</strong> regarding <strong>${reward.rewardType}</strong> (${reward.title}) has been <strong>Approved</strong>.</p>
                                         <p>Please find the reward certificate ${reward.attachment && (reward.attachment.url || reward.attachment.publicId) ? 'and original documentation' : ''} attached to this email.</p>
@@ -1038,6 +1040,7 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
                 assignedTo: isFinalStatus ? null : req.user?._id,
                 status: isFinalStatus ? reward.rewardStatus : 'Approved',
                 subjectEmployee: employee,
+                requestedByName: req.user.name,
                 actionedBy: req.user?._id,
                 comment: remarks
             });
@@ -1052,6 +1055,7 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
                     assignedTo: nextPendingStep.assignedTo,
                     status: 'Pending',
                     subjectEmployee: employee,
+                    requestedByName: req.user.name,
                     extra1: reward.rewardType,
                     extra2: reward.amount ? `AED ${reward.amount}` : reward.title
                 });

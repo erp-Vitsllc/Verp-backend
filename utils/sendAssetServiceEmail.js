@@ -1,4 +1,5 @@
 import nodemailer from "nodemailer";
+import { resolveEmployeeEmail } from "./resolveEmployeeEmail.js";
 
 /**
  * Sends email notifications for asset service events.
@@ -10,9 +11,9 @@ import nodemailer from "nodemailer";
  */
 export const sendAssetServiceEmail = async ({ asset, recipient, type, details, sender }) => {
     try {
-        const recipientEmail = recipient.companyEmail || recipient.workEmail || recipient.email;
+        const { email: recipientEmail } = resolveEmployeeEmail(recipient);
         if (!recipientEmail) {
-            console.warn(`[Email Warning] No email found for recipient ${recipient.firstName} ${recipient.lastName}`);
+            console.warn(`[Email Warning] No email found for recipient ${recipient?.firstName || ''} ${recipient?.lastName || ''}`);
             return;
         }
 

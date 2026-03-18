@@ -46,11 +46,14 @@ export const getUserActivityStats = async (req, res) => {
                     ...(currentUser.employeeId ? [{ employeeId: currentUser.employeeId }] : [])
                 ]
             });
-
-            if (!manager) {
+        }
+        if (!manager) {
+            if (!isAdmin) {
                 console.warn(`[getUserActivityStats] No Employee record found for User: ${currentUser.email}`);
                 return res.status(200).json({ pending: 0, approved: 0, rejected: 0, total: 0, items: [] });
             }
+            // For Admins without Employee record, create a dummy manager object to avoid crashes
+            manager = { _id: currentUser._id, employeeId: currentUser.employeeId || 'ADMIN', department: 'Administration', designation: 'Admin' };
         }
 
         let targetUser;
@@ -112,7 +115,7 @@ export const getUserActivityStats = async (req, res) => {
         const DashboardAction = await import("../../models/DashboardAction.js").then(m => m.default);
         const isAdmin = ['Admin', 'CEO', 'Director', 'General Manager'].includes(currentUser.role) || currentUser.isAdmin;
 
-        const allAssetTypes = ['Asset', 'Asset Approval', 'Asset Assignment', 'Asset Transfer', 'Asset Loss Damage', 'Asset End of Life', 'Asset Accessory'];
+        const allAssetTypes = ['Asset', 'Asset Approval', 'Asset Assignment', 'Asset Transfer', 'Asset Loss Damage', 'Asset End of Life', 'Asset Accessory', 'Asset Accessory Approval'];
 
         const dashboardPendingItems = await DashboardAction.find({
             $or: [
@@ -129,6 +132,7 @@ export const getUserActivityStats = async (req, res) => {
             EmployeeBasic.find({
                 $or: [
                     { profileSubmittedTo: { $in: relevantIds }, profileApprovalStatus: 'submitted' },
+                    ...(isAdmin ? [{ profileApprovalStatus: 'submitted' }] : []),
                     { profileSubmittedTo: null, primaryReportee: manager._id, profileApprovalStatus: 'submitted' }
                 ]
             }),
@@ -137,6 +141,7 @@ export const getUserActivityStats = async (req, res) => {
                 "noticeRequest.requestedAt": { $exists: true },
                 $or: [
                     { 'noticeRequest.submittedTo': { $in: relevantIds }, 'noticeRequest.status': 'Pending' },
+                    ...(isAdmin ? [{ 'noticeRequest.status': 'Pending' }] : []),
                     { 'noticeRequest.submittedTo': null, primaryReportee: manager._id, 'noticeRequest.status': 'Pending' }
                 ]
             }),
@@ -144,25 +149,34 @@ export const getUserActivityStats = async (req, res) => {
             Loan.find({
                 $or: [
                     { submittedTo: { $in: relevantIds }, status: 'Pending' },
-                    { submittedTo: null, employeeObjectId: { $in: relevantIds }, status: 'Pending' }
+                    { submittedTo: null, employeeObjectId: { $in: relevantIds }, status: 'Pending' },
+                    ...(isHR ? [{ approvalStatus: 'Pending HR', status: 'Pending' }] : []),
+                    ...(isAccounts ? [{ approvalStatus: 'Pending Accounts', status: 'Pending' }] : []),
+                    ...(isCEO ? [{ approvalStatus: 'Pending Authorization', status: 'Pending' }] : []),
+                    ...(isAdmin ? [{ status: 'Pending' }] : [])
                 ]
-            }),
+            }).populate('createdBy', 'name'),
             // Pending Rewards
             Reward.find({
                 $or: [
-                    { submittedTo: { $in: relevantIds }, rewardStatus: 'Pending' },
+                    { submittedTo: { $in: relevantIds }, rewardStatus: { $in: ['Pending', 'Pending HR', 'Pending Accounts', 'Pending Authorization'] } },
+                    ...(isHR ? [{ rewardStatus: 'Pending HR' }] : []),
+                    ...(isAccounts ? [{ rewardStatus: 'Pending Accounts' }] : []),
+                    ...(isCEO ? [{ rewardStatus: 'Pending Authorization' }] : []),
+                    ...(isAdmin ? [{ rewardStatus: 'Pending' }] : []),
                     { submittedTo: null, employeeId: targetEmployeeId, rewardStatus: 'Pending' }
                 ]
-            }),
+            }).populate('createdBy', 'name'),
             // Pending Fines
             Fine.find({
                 $or: [
                     { submittedTo: { $in: relevantIds }, fineStatus: { $in: ['Pending', 'Pending HR', 'Pending Accounts', 'Pending Authorization'] } },
                     ...(isHR ? [{ fineStatus: 'Pending HR' }] : []),
                     ...(isAccounts ? [{ fineStatus: 'Pending Accounts' }] : []),
-                    ...(isCEO ? [{ fineStatus: 'Pending Authorization' }] : [])
+                    ...(isCEO ? [{ fineStatus: 'Pending Authorization' }] : []),
+                    ...(isAdmin ? [{ fineStatus: { $in: ['Pending', 'Pending HR', 'Pending Accounts', 'Pending Authorization'] } }] : [])
                 ]
-            })
+            }).populate('createdBy', 'name')
         ];
 
         // Queries for "MY OWN REQUESTS"
@@ -178,7 +192,13 @@ export const getUserActivityStats = async (req, res) => {
                 .sort({ createdAt: -1 }).limit(15),
             // Outgoing Assets (Assigned by me)
             import("../../models/AssetItem.js").then(m => m.default).then(Model =>
-                Model.find({ assignedBy: { $in: relevantIds } }).sort({ createdAt: -1 }).limit(15)
+                Model.find({ 
+                    $or: [
+                        { assignedBy: { $in: relevantIds } },
+                        { createdBy: currentUser?._id },
+                        { "pendingActionDetails.requestedBy": { $in: relevantIds } }
+                    ] 
+                }).sort({ createdAt: -1 }).limit(15)
             )
         ];
 
@@ -193,8 +213,16 @@ export const getUserActivityStats = async (req, res) => {
 
         dashboardPendingItems.forEach(item => {
             const reqIdStr = item.requestId?.toString();
+            
+            // For Fines, try to use fineId for cleaner URLs
+            let displayId = reqIdStr;
+            if (item.requestType === 'Fine' || item.requestType === 'Group Fine Request') {
+                const fine = pendingFines.find(f => f._id.toString() === reqIdStr);
+                if (fine) displayId = fine.fineId;
+            }
+
             activityList.push({
-                id: reqIdStr,
+                id: displayId,
                 actionId: item._id.toString(),
                 type: item.requestType,
                 requestedBy: item.requestedByName || item.subjectName || 'Unknown',
@@ -240,7 +268,7 @@ export const getUserActivityStats = async (req, res) => {
             const reqIdStr = l._id.toString();
             if (!seenRequests.has(reqIdStr)) {
                 activityList.push({
-                    id: l._id.toString(), type: l.type || 'Loan/Advance', requestedBy: l.employeeName || 'Employee',
+                    id: l._id.toString(), type: l.type || 'Loan/Advance', requestedBy: l.createdBy?.name || l.employeeName || 'Employee',
                     requestedDate: l.createdAt, actionedDate: null, status: 'Pending',
                     extra1: `AED ${l.amount}`, extra2: `${l.duration} Months`, targetEmployeeId: l.employeeId,
                     scope: 'inbox'
@@ -253,7 +281,7 @@ export const getUserActivityStats = async (req, res) => {
             const reqIdStr = r._id.toString();
             if (!seenRequests.has(reqIdStr)) {
                 activityList.push({
-                    id: r._id.toString(), type: 'Reward', requestedBy: r.employeeName,
+                    id: r._id.toString(), type: 'Reward', requestedBy: r.createdBy?.name || r.employeeName,
                     requestedDate: r.createdAt, actionedDate: null, status: 'Pending',
                     extra1: r.rewardType, extra2: `AED ${r.amount}`, targetEmployeeId: r.employeeId,
                     scope: 'inbox'
@@ -331,24 +359,24 @@ export const getUserActivityStats = async (req, res) => {
                     if (targetCompanyId) {
                         if (f.fineStatus === 'Pending HR') {
                             if (isDesignatedHR) isVisible = true;
-                            else if (belongsToMyCompany && isHR) isVisible = true;
+                            else if ((belongsToMyCompany || isAdmin) && isHR) isVisible = true;
                         }
                         if (f.fineStatus === 'Pending Accounts') {
                             if (isDesignatedAccounts) isVisible = true;
-                            else if (belongsToMyCompany && isAccounts) isVisible = true;
+                            else if ((belongsToMyCompany || isAdmin) && isAccounts) isVisible = true;
                         }
                         if (f.fineStatus === 'Pending Authorization') {
-                            if (belongsToMyCompany && isCEO) isVisible = true;
+                            if ((belongsToMyCompany || isAdmin) && isCEO) isVisible = true;
                         }
                     }
                 }
 
                 if (isVisible) {
                     activityList.push({
-                        id: f._id.toString(), type: 'Fine', requestedBy: f.assignedEmployees?.[0]?.employeeName || 'Employee',
+                        id: f.fineId, type: 'Fine', requestedBy: f.createdBy?.name || f.assignedEmployees?.[0]?.employeeName || 'Employee',
                         requestedDate: f.createdAt, actionedDate: null, status: 'Pending',
                         extra1: f.category, extra2: `AED ${f.fineAmount}`,
-                        targetEmployeeId: f.assignedEmployees?.[0]?.employeeId || targetEmployeeId,
+                        targetEmployeeId: f.assignedEmployees?.[0]?.employeeId || targetCompanyId,
                         scope: 'inbox'
                     });
                     seenRequests.set(reqIdStr, 'Pending');
@@ -404,7 +432,7 @@ export const getUserActivityStats = async (req, res) => {
                 const creatorName = (f.createdBy && f.createdBy.name) ? f.createdBy.name : 'System';
 
                 activityList.push({
-                    id: f._id, type: 'Fine', requestedBy: isCreatedByMe ? 'Me' : creatorName,
+                    id: f.fineId, type: 'Fine', requestedBy: isCreatedByMe ? 'Me' : creatorName,
                     requestedDate: f.createdAt,
                     actionedDate: ['Approved', 'Rejected', 'Completed'].includes(f.fineStatus) ? f.updatedAt : null,
                     status: ['Pending', 'Pending HR', 'Pending Accounts', 'Pending Authorization', 'Draft'].includes(f.fineStatus) ? 'Pending' : f.fineStatus,
@@ -497,25 +525,20 @@ export const getUserActivityStats = async (req, res) => {
         // 6. Actioned History (Items this user approved/rejected)
         // Already calculated relevantIds above
 
-        const myActionedLoans = await Loan.find({
-            workflow: {
-                $elemMatch: {
-                    $or: [
-                        { assignedTo: { $in: relevantIds } },
-                        ...(isCEO ? [{ role: 'CEO' }] : []),
-                        ...(isHR ? [{ role: 'HR' }] : []),
-                        ...(isAccounts ? [{ role: 'Accounts' }] : [])
-                    ],
-                    status: { $in: ['Approved', 'Rejected'] }
+        const [myActionedLoans, myActionedRewards, myActionedFines] = await Promise.all([
+            Loan.find({
+                workflow: {
+                    $elemMatch: {
+                        $or: [
+                            { assignedTo: { $in: relevantIds } },
+                            ...(isCEO ? [{ role: 'CEO' }] : []),
+                            ...(isHR ? [{ role: 'HR' }] : []),
+                            ...(isAccounts ? [{ role: 'Accounts' }] : [])
+                        ],
+                        status: { $in: ['Approved', 'Rejected'] }
+                    }
                 }
-            }
-        }).sort({ updatedAt: -1 }).limit(20);
-
-        let myActionedRewards = [];
-        let myActionedFines = [];
-
-        // Always fetch rewards/fines, using relevantIds
-        [myActionedRewards, myActionedFines] = await Promise.all([
+            }).populate('createdBy', 'name').sort({ updatedAt: -1 }).limit(20),
             Reward.find({
                 $or: [
                     {
@@ -531,7 +554,7 @@ export const getUserActivityStats = async (req, res) => {
                     },
                     ...(isCEO ? [{ approvedBy: { $in: relevantIds } }] : [])
                 ]
-            }).sort({ updatedAt: -1 }).limit(20),
+            }).sort({ updatedAt: -1 }).limit(20).populate('createdBy', 'name'),
             Fine.find({
                 workflow: {
                     $elemMatch: {
@@ -544,7 +567,7 @@ export const getUserActivityStats = async (req, res) => {
                         status: { $in: ['Approved', 'Rejected'] }
                     }
                 }
-            }).sort({ updatedAt: -1 }).limit(20)
+            }).populate('createdBy', 'name').sort({ updatedAt: -1 }).limit(20)
         ]);
 
         // 6b. GET ACTIONED PROFILES (History)
@@ -635,7 +658,7 @@ export const getUserActivityStats = async (req, res) => {
             const status = (myStep?.status === 'Rejected' || l.status === 'Rejected') ? 'Rejected' : 'Approved';
 
             const activityItem = {
-                id: l._id, type: l.type, requestedBy: l.employeeName || 'Employee',
+                id: l._id, type: l.type, requestedBy: l.createdBy?.name || l.employeeName || 'Employee',
                 requestedDate: l.createdAt,
                 actionedDate: myStep ? myStep.actionedAt : (l.approvedDate || l.updatedAt),
                 status: status,
@@ -669,7 +692,7 @@ export const getUserActivityStats = async (req, res) => {
 
             const status = (myStep?.status === 'Rejected' || r.rewardStatus === 'Rejected') ? 'Rejected' : 'Approved';
             const activityItem = {
-                id: r._id, type: 'Reward', requestedBy: r.employeeName,
+                id: r._id, type: 'Reward', requestedBy: r.createdBy?.name || r.employeeName || 'Employee',
                 requestedDate: r.createdAt,
                 actionedDate: myStep ? myStep.actionedAt : (r.approvedDate || r.updatedAt),
                 status: status,
@@ -705,7 +728,7 @@ export const getUserActivityStats = async (req, res) => {
 
             const status = (myEntry?.status === 'Rejected' || legacyEntry?.approvalStatus === 'Rejected') ? 'Rejected' : 'Approved';
             const activityItem = {
-                id: f._id, type: 'Fine', requestedBy: legacyEntry?.employeeName || 'Employee',
+                id: f._id, type: 'Fine', requestedBy: f.createdBy?.name || legacyEntry?.employeeName || 'Employee',
                 requestedDate: f.createdAt,
                 actionedDate: myEntry ? myEntry.actionedAt : (legacyEntry?.approvedAt || f.updatedAt),
                 status: status,

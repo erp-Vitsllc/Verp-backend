@@ -81,6 +81,7 @@ export const requestNotice = async (req, res) => {
                     assignedTo: reporteeInit._id,
                     status: 'Pending',
                     subjectEmployee: employee,
+                    requestedByName: req.user.name || '',
                     extra1: reason,
                     extra2: duration
                 });
@@ -232,6 +233,7 @@ export const updateNoticeStatus = async (req, res) => {
                 requestType: 'Notice Request',
                 status: status, // Approved or Rejected
                 subjectEmployee: employee,
+                requestedByName: req.user.name,
                 actionedBy: resolvedApproverId,
                 comment: status === 'Rejected' ? rejectionReason : undefined
             });
