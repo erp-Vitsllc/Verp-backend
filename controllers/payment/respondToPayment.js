@@ -26,6 +26,9 @@ export const respondToPayment = async (req, res) => {
         payment.remarks = comment || payment.remarks;
         payment.updatedBy = req.user._id;
 
+        // Persist payment status first so subsequent paid-total queries include this payment.
+        await payment.save();
+
         // If approved (Completed), update the related entity (Fine or Loan)
         if (status === 'Completed') {
             const { relatedEntityType, relatedEntityId, referenceId } = payment;
@@ -129,8 +132,6 @@ export const respondToPayment = async (req, res) => {
                 }
             }
         }
-
-        await payment.save();
 
         // Update Dashboard Action
 

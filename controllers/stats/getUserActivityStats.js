@@ -83,6 +83,7 @@ export const getUserActivityStats = async (req, res) => {
         let isDesignatedHR = false;
         let isDesignatedAccounts = false;
         let isDesignatedCEO = false;
+        let isDesignatedAssetController = false;
 
         responsibleCompanies.forEach(c => {
             if (c.responsibilities) {
@@ -92,6 +93,7 @@ export const getUserActivityStats = async (req, res) => {
                         if (cat.includes('hr') || cat.includes('human')) isDesignatedHR = true;
                         if (cat.includes('account') || cat.includes('finance')) isDesignatedAccounts = true;
                         if (cat.includes('management') || cat.includes('ceo')) isDesignatedCEO = true;
+                        if (cat.includes('asset')) isDesignatedAssetController = true;
                     }
                 });
             }
@@ -105,12 +107,12 @@ export const getUserActivityStats = async (req, res) => {
 
         const isHR = isDesignatedHR || (dept.includes('hr') || dept.includes('human resource'));
         const isAccounts = isDesignatedAccounts || (dept.includes('finance') || dept.includes('account'));
+        const isAssetController = isDesignatedAssetController;
 
         // 2. Find Reportees
         const reportees = await EmployeeBasic.find({ primaryReportee: manager._id });
         const reporteeCustomIds = reportees.map(r => r.employeeId);
 
-        // 3. Define Queries for "Needs Action"
         // 3. Define Queries for "Needs Action"
         const DashboardAction = await import("../../models/DashboardAction.js").then(m => m.default);
         const isAdmin = ['Admin', 'CEO', 'Director', 'General Manager'].includes(currentUser.role) || currentUser.isAdmin;
@@ -121,7 +123,8 @@ export const getUserActivityStats = async (req, res) => {
             $or: [
                 { assignedTo: { $in: relevantIds } },
                 { assignedToEmpId: targetEmployeeId },
-                ...(isAdmin ? [{ requestType: 'Responsibility Approval' }] : [])
+                ...(isAdmin ? [{ requestType: 'Responsibility Approval' }] : []),
+                ...(isAssetController ? [{ requestType: { $in: allAssetTypes } }] : [])
             ],
             status: 'Pending'
         }).lean();

@@ -10,9 +10,11 @@
 export const resolveEmployeeEmail = (emp) => {
     if (!emp) return { email: null, isFallbackToReportee: false };
 
-    const empEmail = (emp.companyEmail || emp.workEmail || emp.personalEmail || emp.email || '').trim();
-    if (empEmail) {
-        return { email: empEmail, isFallbackToReportee: false };
+    // Business rule: if employee has NO `companyEmail`, notify their primaryReportee instead.
+    // (Even if they have `email`/workEmail/personalEmail, we still route based on companyEmail.)
+    const empCompanyEmail = (emp.companyEmail || '').trim();
+    if (empCompanyEmail) {
+        return { email: empCompanyEmail, isFallbackToReportee: false };
     }
 
     const reportee = emp.primaryReportee;
@@ -26,6 +28,12 @@ export const resolveEmployeeEmail = (emp) => {
             employeeName,
             reporteeName
         };
+    }
+
+    // Last resort: if reportee has no email either, fall back to any available employee email.
+    const fallbackEmpEmail = (emp.workEmail || emp.personalEmail || emp.email || '').trim();
+    if (fallbackEmpEmail) {
+        return { email: fallbackEmpEmail, isFallbackToReportee: false };
     }
 
     return { email: null, isFallbackToReportee: false };

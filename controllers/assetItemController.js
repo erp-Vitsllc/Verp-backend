@@ -20,6 +20,7 @@ import { getDepartmentHOD, isUserInFlowchart } from '../utils/getDepartmentHOD.j
 import { sendAssetCreationApprovalEmail } from '../utils/sendAssetCreationApprovalEmail.js';
 import { isUserAdministrator } from '../services/permissionService.js';
 import { sendAssetServiceEmail } from '../utils/sendAssetServiceEmail.js';
+import { resolveAssetControllerEmployee, getAssetRequesterDisplayName } from '../utils/assetApprovalHelpers.js';
 
 const generateFineIdInternal = async () => {
     try {
@@ -42,6 +43,77 @@ const generateFineIdInternal = async () => {
     }
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Permission helper: full access for assigned actors
+// - Admin + Asset Controller: always allowed
+// - Assignee: allowed
+// - Assigner (asset.assignedBy): allowed with full permissions
+// - If assignee has NO `companyEmail` OR no portal/login access: allow primaryReportee as delegate
+// ─────────────────────────────────────────────────────────────────────────────
+const getActorPermissionFlagsForAsset = async (reqUser, asset) => {
+    const currentEmpObjectId = reqUser?.employeeObjectId?.toString?.() || null;
+    const isAdmin = reqUser?.isAdmin === true || reqUser?.role === 'Admin' || reqUser?.role === 'ROOT';
+    const isAssetController = await isUserInFlowchart(reqUser, 'assetcontroller').catch(() => false);
+
+    const toIdString = (v) => {
+        if (!v) return null;
+        if (typeof v === 'string') return v;
+        if (v._id) return v._id.toString();
+        if (v.toString) return v.toString();
+        return null;
+    };
+
+    const assignedById = toIdString(asset?.assignedBy);
+    const isAssigner = !!(currentEmpObjectId && assignedById && assignedById === currentEmpObjectId);
+
+    let isAssignee = false;
+    let isPrimaryReporteeDelegate = false;
+
+    if (asset?.assignedToType === 'Employee' && asset?.assignedTo && currentEmpObjectId) {
+        const assigneeId = toIdString(asset.assignedTo);
+        isAssignee = !!(assigneeId && assigneeId === currentEmpObjectId);
+
+        let assigneeDoc =
+            (typeof asset.assignedTo === 'object' && (asset.assignedTo.employeeId || asset.assignedTo.companyEmail !== undefined || asset.assignedTo.primaryReportee))
+                ? asset.assignedTo
+                : await EmployeeBasic.findById(assigneeId)
+                    .select('companyEmail primaryReportee employeeId')
+                    .lean()
+                    .catch(() => null);
+
+        // If we didn't receive employeeId in the populated document, fetch it so we can check portal access safely.
+        if (assigneeDoc && !assigneeDoc.employeeId) {
+            assigneeDoc = await EmployeeBasic.findById(assigneeId)
+                .select('companyEmail primaryReportee employeeId')
+                .lean()
+                .catch(() => assigneeDoc);
+        }
+
+        const hasCompanyEmail = !!(assigneeDoc?.companyEmail && String(assigneeDoc.companyEmail).trim().length > 0);
+        const primaryReporteeId = toIdString(assigneeDoc?.primaryReportee);
+
+        // Portal access check (ERP login-enabled user)
+        let hasPortalAccess = null;
+        const assigneeEmpId = assigneeDoc?.employeeId ? String(assigneeDoc.employeeId) : null;
+        if (assigneeEmpId) {
+            const linkedUser = await User.findOne({ employeeId: assigneeEmpId, status: 'Active' })
+                .select('enablePortalAccess')
+                .lean()
+                .catch(() => null);
+            hasPortalAccess = !!(linkedUser && linkedUser.enablePortalAccess);
+        }
+
+        isPrimaryReporteeDelegate = !!(
+            primaryReporteeId &&
+            primaryReporteeId === currentEmpObjectId &&
+            (!hasCompanyEmail || hasPortalAccess === false)
+        );
+    }
+
+    const canAct = isAdmin || isAssetController || isAssigner || isAssignee || isPrimaryReporteeDelegate;
+    return { canAct, isAdmin, isAssetController, isAssigner, isAssignee, isPrimaryReporteeDelegate };
+};
+
 
 export const getAssetItems = async (req, res) => {
     try {
@@ -53,12 +125,21 @@ export const getAssetItems = async (req, res) => {
             query.status = status;
         }
 
-        // Visibility: Admin and Asset Controller see all; Creator sees their created assets
+        // Visibility:
+        // 1. Admins and Asset Controllers see ALL assets (Flowchart; same as approve-creation).
+        // 2. Regular users see ALL non-Draft assets (Assigned, Unassigned, etc.).
+        // 3. Regular users see ONLY their own Draft assets.
         const isAdmin = await isUserAdministrator(req.user?.id);
-        const assetController = await getDepartmentHOD('assetcontroller');
-        const isAssetController = assetController && req.user?.employeeObjectId && assetController._id?.toString() === req.user.employeeObjectId.toString();
-        if (!isAdmin && !isAssetController && req.user?.id) {
-            query.createdBy = new mongoose.Types.ObjectId(req.user.id);
+        const isAssetController = await isUserInFlowchart(req.user, 'assetcontroller');
+
+        if (!isAdmin && !isAssetController) {
+            query.$and = query.$and || [];
+            query.$and.push({
+                $or: [
+                    { status: { $ne: 'Draft' } },
+                    { createdBy: req.user._id || req.user.id }
+                ]
+            });
         }
 
         const items = await AssetItem.find(query)
@@ -97,9 +178,9 @@ export const getAllAssignedAssets = async (req, res) => {
         const { companyId, status } = req.query;
 
         let query = {};
-        
+
         const normalizedStatus = status?.toLowerCase();
-        
+
         // Handle status filter
         if (status && normalizedStatus !== 'all') {
             query.status = status;
@@ -122,12 +203,26 @@ export const getAllAssignedAssets = async (req, res) => {
             ];
         }
 
-        // Visibility: Admin and Asset Controller see all; Creator sees their created assets
+        // Visibility:
+        // 1. Admins and Asset Controllers see ALL assets (Flowchart-based, same as approve-creation).
+        // 2. Regular users see ALL non-Draft assets (Assigned, Unassigned, etc.).
+        // 3. Regular users see ONLY their own Draft assets.
         const isAdmin = await isUserAdministrator(req.user?.id);
-        const assetController = await getDepartmentHOD('assetcontroller');
-        const isAssetController = assetController && req.user?.employeeObjectId && assetController._id?.toString() === req.user.employeeObjectId.toString();
-        if (!isAdmin && !isAssetController && req.user?.id) {
-            query.createdBy = new mongoose.Types.ObjectId(req.user.id);
+        const isAssetController = await isUserInFlowchart(req.user, 'assetcontroller');
+
+        if (!isAdmin && !isAssetController) {
+            const visibilityFilter = {
+                $or: [
+                    { status: { $ne: 'Draft' } },
+                    { createdBy: req.user._id || req.user.id }
+                ]
+            };
+
+            if (query.$or) {
+                query = { $and: [query, visibilityFilter] };
+            } else {
+                Object.assign(query, visibilityFilter);
+            }
         }
 
         const items = await AssetItem.find(query)
@@ -187,9 +282,10 @@ export const getUnassignedAssetsForEmployee = async (req, res) => {
         console.log(`[getUnassignedAssetsForEmployee] Initial admin check: ${isAuthorized}`);
 
         if (!isAuthorized) {
+            // Must match getOnLeaveAssetsForEmployee: authorize the logged-in user, not the :employeeId row
             const userForCheck = {
-                employeeObjectId: employeeObjectId,
-                employeeId: employeeId
+                employeeObjectId: req.user?.employeeObjectId,
+                employeeId: req.user?.employeeId
             };
 
             try {
@@ -208,7 +304,7 @@ export const getUnassignedAssetsForEmployee = async (req, res) => {
         if (!isAuthorized) {
             const isPending = await Flowchart.findOne({
                 category: 'assetcontroller',
-                empObjectId: employeeObjectId,
+                empObjectId: req.user?.employeeObjectId,
                 status: 'Pending'
             });
             if (isPending) isAuthorized = true;
@@ -235,7 +331,7 @@ export const getUnassignedAssetsForEmployee = async (req, res) => {
 
         const filteredItems = items.filter(item => {
             const status = item.status?.toString().trim();
-        
+
             return status === 'Unassigned' || status === 'Returned' || status === 'Draft' || status === 'Pending';
         });
 
@@ -437,7 +533,7 @@ export const handleOnLeaveAction = async (req, res) => {
                 const endDate = new Date();
                 endDate.setDate(endDate.getDate() + originalDuration);
                 item.onLeaveEndDate = endDate; // When duration will complete
-                
+
                 console.log(`[On Duty] Duration tracking started: ${originalDuration} days. End date: ${endDate.toISOString()}. Email will be sent after duration completes.`);
             } else {
                 // No duration set, clear any existing duration fields
@@ -454,11 +550,11 @@ export const handleOnLeaveAction = async (req, res) => {
                 performedBy: req.user.employeeObjectId,
                 comments: `Asset status changed from On Leave to Assigned (On Duty) by Asset Controller${originalDuration ? `. Duration tracking started: ${originalDuration} day(s)` : ''}`,
                 date: new Date(),
-                details: { 
+                details: {
                     previousStatus: statusSnapshot.status,
-                    duration: originalDuration, 
-                    onDutyStartDate: item.onLeaveStartDate, 
-                    onDutyEndDate: item.onLeaveEndDate 
+                    duration: originalDuration,
+                    onDutyStartDate: item.onLeaveStartDate,
+                    onDutyEndDate: item.onLeaveEndDate
                 }
             });
         } else if (action === 'Extend') {
@@ -500,10 +596,10 @@ export const handleOnLeaveAction = async (req, res) => {
     } catch (error) {
         console.error('Error handling on-leave action stack:', error.stack);
         console.error('Error handling on-leave action message:', error.message);
-        res.status(500).json({ 
-            message: 'Server Error', 
+        res.status(500).json({
+            message: 'Server Error',
             error: error.message,
-            stack: process.env.NODE_ENV === 'development' ? error.stack : undefined 
+            stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
         });
     }
 };
@@ -614,7 +710,7 @@ export const bulkHandleOnLeaveAction = async (req, res) => {
         });
     } catch (error) {
         console.error('Error handling bulk on-leave action stack:', error.stack);
-        res.status(500).json({ 
+        res.status(500).json({
             message: 'Internal server error',
             error: error.message,
             stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
@@ -669,7 +765,7 @@ export const getHRCompanyAssets = async (req, res) => {
 
         // Get company IDs from designated companies
         const designatedCompanyIds = designatedCompanies.map(c => c._id);
-        
+
         // If employee has a company and it's not in designated list, add it
         if (employee.company && !designatedCompanyIds.some(id => id.toString() === employee.company.toString())) {
             designatedCompanyIds.push(employee.company);
@@ -736,35 +832,33 @@ export const createAssetItem = async (req, res) => {
         }
 
         // Approval Logic: Check if creator is Asset Controller or Admin
-        const assetController = await getDepartmentHOD('assetcontroller');
+        const assetControllerRaw = await getDepartmentHOD('assetcontroller');
+        const assetController = assetControllerRaw ? await resolveAssetControllerEmployee(assetControllerRaw) : null;
 
-        const isAdmin = req.user.isAdmin === true || req.user.isAdministrator === true;
+        const isJwtAdmin = req.user.isAdmin === true || req.user.role === 'Admin' || req.user.role === 'ROOT';
+        const isSysAdmin = await isUserAdministrator(req.user?.id);
         const isAssetController = await isUserInFlowchart(req.user, 'assetcontroller');
 
         let initialStatus = 'Draft';
         let actionRequiredBy = null;
 
-        if (isAdmin || isAssetController) {
+        if (isJwtAdmin || isSysAdmin || isAssetController) {
             initialStatus = 'Unassigned';
-            console.log(`[Asset creation] Created directly as Unassigned by ${isAdmin ? 'Admin' : 'Asset Controller'}`);
-        } else if (assetController) {
-            // Find the User record linked to the Asset Controller
-            const assetControllerUser = await User.findOne({ employeeId: assetController.employeeId });
-
-            if (assetControllerUser) {
-                // Use User._id for actionRequiredBy to match frontend comparison
-                actionRequiredBy = assetControllerUser._id;
-            } else if (assetController) {
-                // Fallback to EmployeeBasic._id if no User found
-                actionRequiredBy = assetController._id;
-            }
+            console.log(`[Asset creation] Created directly as Unassigned by ${isJwtAdmin || isSysAdmin ? 'Admin' : 'Asset Controller'}`);
+        } else if (assetController?._id) {
+            actionRequiredBy = assetController._id;
             console.log(`[Asset creation] Created as Draft by regular user ${req.user.employeeId}. Action required by Asset Controller ${assetController.employeeId}`);
+        } else if (assetControllerRaw) {
+            return res.status(403).json({
+                message: 'Asset creation denied: Asset Controller in Flowchart must be linked to an employee record. Update Settings > Flowchart or fix the employee ID.'
+            });
         } else {
-            // No asset controller defined & user is not admin
             return res.status(403).json({
                 message: "Asset creation denied: No Asset Controller has been assigned in the organization flow. Please assign an Asset Controller in Settings > Flowchart before performing this operation."
             });
         }
+
+        const requesterDisplayName = await getAssetRequesterDisplayName(req);
 
         // Handle Photo Upload
         let photoS3Key = photo;
@@ -836,22 +930,26 @@ export const createAssetItem = async (req, res) => {
             console.error(`[History Error] Failed to create creation history for ${newItemId}:`, histErr.message);
         }
 
-        // Create Dashboard Action for Asset Controller
+        // Create Dashboard Action for Asset Controller (inbox + click-through to asset detail)
         if (initialStatus === 'Draft' && actionRequiredBy) {
             try {
-                await DashboardAction.create({
-                    assignedTo: actionRequiredBy,
-                    assignedToEmpId: assetController.employeeId,
-                    requestId: newItem._id, // This will be used for redirecting
-                    requestType: 'Asset Approval',
-                    subjectEmployeeId: req.user.employeeId,
-                    subjectName: req.user.name || 'System',
-                    requestedByName: req.user.name || 'System',
-                    extra1: `${newItem.assetId} - ${newItem.name}`,
-                    extra2: 'New Asset Creation Approval Request',
-                    status: 'Pending'
-                });
-                console.log(`[Dashboard] Created asset approval action for ${assetController.employeeId}`);
+                await DashboardAction.findOneAndUpdate(
+                    { requestId: newItem._id, requestType: 'Asset Approval', status: 'Pending' },
+                    {
+                        assignedTo: actionRequiredBy,
+                        assignedToEmpId: assetController.employeeId,
+                        requestId: newItem._id,
+                        requestType: 'Asset Approval',
+                        subjectEmployeeId: req.user.employeeId,
+                        subjectName: requesterDisplayName,
+                        requestedByName: requesterDisplayName,
+                        extra1: `${newItem.assetId} — ${newItem.name}`,
+                        extra2: `Asset creation — requested by ${requesterDisplayName}`,
+                        status: 'Pending'
+                    },
+                    { upsert: true, new: true, setDefaultsOnInsert: true }
+                );
+                console.log(`[Dashboard] Synced asset creation approval for ${assetController.employeeId}`);
             } catch (err) {
                 console.error(`[Dashboard Error] Failed to create asset approval action:`, err);
             }
@@ -865,7 +963,7 @@ export const createAssetItem = async (req, res) => {
             await sendAssetCreationApprovalEmail({
                 asset: newItem,
                 recipient: assetController,
-                creatorName: req.user.name || 'System User'
+                creatorName: requesterDisplayName
             });
         }
 
@@ -893,16 +991,49 @@ export const respondToAssetCreation = async (req, res) => {
             return res.status(404).json({ message: 'Asset not found' });
         }
 
-        if (item.status !== 'Draft') {
-            return res.status(400).json({ message: 'Asset is not in Draft status.' });
+        if (!(item.status === 'Draft' || item.status === 'Pending')) {
+            return res.status(400).json({ message: 'Asset is not awaiting creation approval.' });
         }
 
-        const assetController = await getDepartmentHOD('assetcontroller');
-        const isAdmin = req.user.isAdmin || req.user.role === 'Admin' || req.user.role === 'ROOT';
-        const isAssetController = await isUserInFlowchart(req.user, 'assetcontroller');
+        const isJwtAdmin = req.user.isAdmin || req.user.role === 'Admin' || req.user.role === 'ROOT';
+        const isSysAdmin = await isUserAdministrator(req.user?.id);
 
-        if (!isAdmin && !isAssetController) {
-            return res.status(403).json({ message: 'Only Asset Controller or Admin can approve asset creation.' });
+        const normEmp = (s) => (s || '').toString().toLowerCase().replace(/\s+/g, '');
+        let isDesignatedApprover = false;
+        if (item.actionRequiredBy) {
+            const aid = item.actionRequiredBy.toString();
+            if (req.user?.employeeObjectId && aid === req.user.employeeObjectId.toString()) {
+                isDesignatedApprover = true;
+            } else if (req.user?.employeeId) {
+                const appr = await EmployeeBasic.findById(item.actionRequiredBy).select('employeeId').lean();
+                if (appr?.employeeId && normEmp(appr.employeeId) === normEmp(req.user.employeeId)) {
+                    isDesignatedApprover = true;
+                }
+            }
+        }
+
+        let isDeptAssetControllerFallback = false;
+        if (!item.actionRequiredBy && item.status === 'Draft') {
+            const assetController = await getDepartmentHOD('assetcontroller');
+            if (assetController?._id && req.user?.employeeObjectId) {
+                if (assetController._id.toString() === req.user.employeeObjectId.toString()) {
+                    isDeptAssetControllerFallback = true;
+                }
+            }
+            if (
+                !isDeptAssetControllerFallback &&
+                assetController?.employeeId &&
+                req.user?.employeeId
+            ) {
+                if (normEmp(assetController.employeeId) === normEmp(req.user.employeeId)) {
+                    isDeptAssetControllerFallback = true;
+                }
+            }
+        }
+
+        // Designated approver, department asset controller (draft with no actionRequiredBy), or admin
+        if (!isJwtAdmin && !isSysAdmin && !isDesignatedApprover && !isDeptAssetControllerFallback) {
+            return res.status(403).json({ message: 'Only the designated approver or an administrator can approve this asset.' });
         }
 
         if (action === 'Approve') {
@@ -929,7 +1060,7 @@ export const respondToAssetCreation = async (req, res) => {
                 assetId: item._id,
                 action: action === 'Approve' ? 'Accepted' : 'Rejected',
                 performedBy: req.user.employeeObjectId,
-                comments: `Asset creation ${action === 'Approve' ? 'Approved' : 'Rejected'} by ${isAssetController ? 'Asset Controller' : 'Admin'}.`,
+                comments: `Asset creation ${action === 'Approve' ? 'Approved' : 'Rejected'} by ${isDesignatedApprover ? 'Designated approver' : isDeptAssetControllerFallback ? 'Asset controller' : 'Administrator'}.`,
                 details: {
                     ...snapshotItem.toObject(),
                     approvalAction: action
@@ -974,6 +1105,10 @@ export const updateAssetItem = async (req, res) => {
             return res.status(404).json({ message: 'Asset not found' });
         }
 
+        const currentEmpId = req.user?.employeeObjectId?.toString();
+        const isAssignedToUser =
+            !!(currentEmpId && item.assignedTo && item.assignedTo.toString() === currentEmpId);
+
         // Check if current user is the creator
         const currentUserId = req.user._id?.toString() || req.user.id?.toString();
         const isCreator = item.createdBy?.toString() === currentUserId;
@@ -982,6 +1117,12 @@ export const updateAssetItem = async (req, res) => {
 
         // Check if asset is awaiting creation approval (has actionRequiredBy set and status is Draft or Pending)
         const isAwaitingCreationApproval = (isDraft || isPending) && item.actionRequiredBy !== null;
+
+        // Full permissions for employee-assigned assets:
+        // - Assignee
+        // - Assigner (assignedBy) with full AC/Admin privileges
+        // - If assignee has no companyEmail, assignee.primaryReportee is also allowed
+        const actorFlags = isAwaitingCreationApproval ? null : await getActorPermissionFlagsForAsset(req.user, item);
 
         // Permission logic:
         // - If Draft or Pending (awaiting creation approval): Creator + Asset Controller + Admin can edit
@@ -993,8 +1134,9 @@ export const updateAssetItem = async (req, res) => {
             }
         } else {
             // Not awaiting approval: Only Asset Controller + Admin can edit
-            if (!isAdmin && !isAssetController) {
-                return res.status(403).json({ message: "Only Asset Controller or Admin can update assets after approval." });
+            // For employee-assigned assets, allow the assignee, assigner, and (companyEmail-missing) primary reportee.
+            if (!actorFlags?.canAct) {
+                return res.status(403).json({ message: "Access denied. Only Asset Controller/Admin, assigner, assigned user, or (if assignee has no company email) primary reportee can update this asset." });
             }
         }
 
@@ -1081,15 +1223,91 @@ export const getAssetItemDetail = async (req, res) => {
             return res.status(404).json({ message: 'Asset not found' });
         }
 
-        // Visibility: Admin and Asset Controller see all; Creator sees their created assets
+        // Populate sometimes leaves a bare ObjectId; load EmployeeBasic so UI + canApprove match correctly
+        if (item.actionRequiredBy) {
+            const arRaw = item.actionRequiredBy;
+            const hasApproverFields = arRaw.firstName || arRaw.lastName || arRaw.employeeId;
+            if (!hasApproverFields) {
+                const rid = arRaw._id || arRaw;
+                const arEmp = await EmployeeBasic.findById(rid).select('firstName lastName employeeId').lean();
+                if (arEmp) {
+                    item.actionRequiredBy = arEmp;
+                }
+            }
+        }
+
+        // Visibility: system admin (env username) / portal Admin+ROOT / Flowchart asset controller / dept AC HOD /
+        // creator / assignee / person who must act (draft approval, accept assignment, etc.)
         const isAdmin = await isUserAdministrator(req.user?.id);
+        const isPortalAdmin =
+            req.user?.isAdmin === true || req.user?.role === 'Admin' || req.user?.role === 'ROOT';
+        const isAssetController = await isUserInFlowchart(req.user, 'assetcontroller');
         const assetController = await getDepartmentHOD('assetcontroller');
-        const isAssetController = assetController && req.user?.employeeObjectId && assetController._id?.toString() === req.user.employeeObjectId.toString();
         const creatorId = item.createdBy?._id?.toString() || item.createdBy?.toString();
         const isCreator = creatorId && creatorId === (req.user?._id?.toString() || req.user?.id);
-        if (!isAdmin && !isAssetController && !isCreator) {
-            return res.status(403).json({ message: 'Access denied. Only Admin, Asset Controller, or the creator can view this asset.' });
+
+        const currentEmpId = req.user?.employeeObjectId?.toString();
+        const normEmpView = (s) => (s || '').toString().toLowerCase().replace(/\s+/g, '');
+        let currentEmployeeIdNorm = normEmpView(req.user?.employeeId);
+        // If employeeObjectId exists but employeeId string is missing, resolve it
+        if (!currentEmployeeIdNorm && currentEmpId) {
+            const curEmp = await EmployeeBasic.findById(currentEmpId).select('employeeId').lean().catch(() => null);
+            if (curEmp?.employeeId) currentEmployeeIdNorm = normEmpView(curEmp.employeeId);
         }
+
+        const assigneeRef = item.assignedTo;
+        const assigneeEmpObjectId = assigneeRef
+            ? assigneeRef._id
+                ? assigneeRef._id.toString()
+                : assigneeRef.toString()
+            : null;
+        // Assigned user visibility:
+        // - primary match by EmployeeBasic ObjectId (fast)
+        // - fallback match by employeeId string (handles missing/partial populate + spacing differences)
+        let isAssignedToUser = !!(assigneeEmpObjectId && currentEmpId && assigneeEmpObjectId === currentEmpId);
+
+        let assigneeEmployeeIdNorm = null;
+        if (typeof assigneeRef === 'object' && assigneeRef?.employeeId) {
+            assigneeEmployeeIdNorm = normEmpView(assigneeRef.employeeId);
+        } else if (assigneeEmpObjectId) {
+            const assigneeEmp = await EmployeeBasic.findById(assigneeEmpObjectId).select('employeeId').lean().catch(() => null);
+            if (assigneeEmp?.employeeId) assigneeEmployeeIdNorm = normEmpView(assigneeEmp.employeeId);
+        }
+
+        if (!isAssignedToUser && assigneeEmployeeIdNorm && currentEmployeeIdNorm) {
+            isAssignedToUser = assigneeEmployeeIdNorm === currentEmployeeIdNorm;
+        }
+
+        let isActionRequiredByUser = false;
+        // actionRequiredBy: match by EmployeeBasic ObjectId and/or employeeId string
+        if (item.actionRequiredBy && currentEmpId) {
+            const arId = item.actionRequiredBy._id?.toString() || item.actionRequiredBy.toString();
+            if (arId === currentEmpId) isActionRequiredByUser = true;
+        }
+        if (!isActionRequiredByUser && item.actionRequiredBy && currentEmployeeIdNorm) {
+            const arRef = item.actionRequiredBy;
+            let arEmployeeIdNorm = null;
+            if (typeof arRef === 'object' && arRef?.employeeId) {
+                arEmployeeIdNorm = normEmpView(arRef.employeeId);
+            } else {
+                const arObjId = arRef?._id?.toString?.() || arRef?.toString?.() || null;
+                if (arObjId) {
+                    const arEmp = await EmployeeBasic.findById(arObjId).select('employeeId').lean().catch(() => null);
+                    if (arEmp?.employeeId) arEmployeeIdNorm = normEmpView(arEmp.employeeId);
+                }
+            }
+            if (arEmployeeIdNorm && arEmployeeIdNorm === currentEmployeeIdNorm) {
+                isActionRequiredByUser = true;
+            }
+        }
+
+        const isDeptAssetController =
+            assetController?._id &&
+            currentEmpId &&
+            assetController._id.toString() === currentEmpId;
+
+        // NOTE: Per your request, we do not block viewing asset details by role/assignment.
+        // Buttons/actions are still protected in other endpoints.
 
         const itemObj = item.toObject();
 
@@ -1180,6 +1398,61 @@ export const getAssetItemDetail = async (req, res) => {
             itemObj.assetControllerId = `flowchart_${assetController.category}`;
         }
 
+        // Authoritative UI flag (same rules as PUT approve-creation) — avoids client-only isAssetController drift
+        const isAssignmentAcknowledgmentOnly =
+            item.acceptanceStatus === 'Pending' &&
+            !item.pendingAction &&
+            (item.status === 'Pending' || item.status === 'Assigned') &&
+            item.assignedTo;
+
+        const isAwaitingCreationApproval =
+            item.status === 'Draft' ||
+            (item.actionRequiredBy != null &&
+                item.status === 'Pending' &&
+                !isAssignmentAcknowledgmentOnly);
+
+        // Flowchart check can miss valid approvers; creation flow stores the real approver on actionRequiredBy
+        const normEmp = (s) => (s || '').toString().toLowerCase().replace(/\s+/g, '');
+        const actionById =
+            item.actionRequiredBy?._id?.toString?.() ||
+            item.actionRequiredBy?.toString?.() ||
+            null;
+        const reqEmpObj = req.user?.employeeObjectId?.toString?.() || null;
+        const matchesActionByObjectId = !!(actionById && reqEmpObj && actionById === reqEmpObj);
+        const arEmployeeId = item.actionRequiredBy?.employeeId;
+        const reqUserEmployeeId = req.user?.employeeId;
+        const matchesActionByEmployeeId = !!(
+            arEmployeeId &&
+            reqUserEmployeeId &&
+            normEmp(arEmployeeId) === normEmp(reqUserEmployeeId)
+        );
+        const isDesignatedCreationApprover = matchesActionByObjectId || matchesActionByEmployeeId;
+
+        const isDraftWithoutDesignatedApprover =
+            item.status === 'Draft' &&
+            (item.actionRequiredBy == null || item.actionRequiredBy === undefined);
+        let canApproveAsDeptAssetController = false;
+        if (isDraftWithoutDesignatedApprover && itemObj.assetControllerId) {
+            const acIdStr = String(itemObj.assetControllerId);
+            if (!acIdStr.startsWith('flowchart_') && reqEmpObj && acIdStr === reqEmpObj) {
+                canApproveAsDeptAssetController = true;
+            } else if (itemObj.assetController?.employeeId && reqUserEmployeeId) {
+                if (normEmp(itemObj.assetController.employeeId) === normEmp(reqUserEmployeeId)) {
+                    canApproveAsDeptAssetController = true;
+                }
+            }
+        }
+
+        itemObj.canApproveAssetCreation = !!(
+            isAwaitingCreationApproval &&
+            (isAdmin ||
+                isPortalAdmin ||
+                isAssetController ||
+                isDeptAssetController ||
+                isDesignatedCreationApprover ||
+                canApproveAsDeptAssetController)
+        );
+
         res.status(200).json(itemObj);
     } catch (error) {
         console.error('Error fetching asset item detail:', error);
@@ -1225,23 +1498,43 @@ export const assignAssetItem = async (req, res) => {
         }
 
         // Check if assigner (current user) has authorization
-        if (!req.user.employeeObjectId) {
-            return res.status(403).json({ message: "You are not linked to an employee profile." });
-        }
+        // Use both ObjectId match and employeeId match (employeeId can have spacing differences).
+        const norm = (s) => (s || '').toString().toLowerCase().replace(/\s+/g, '');
+        const actingEmpObjectId = req.user.employeeObjectId?.toString?.() || null;
+        const actingEmployeeId = req.user.employeeId ? norm(req.user.employeeId) : '';
 
         const isAdmin = req.user.isAdmin || req.user.role === 'Admin' || req.user.role === 'ROOT';
-        const isAssignedUser = item.assignedTo?.toString() === req.user.employeeObjectId.toString();
+
+        const assignedToId =
+            (item.assignedTo?._id ? item.assignedTo._id : item.assignedTo)?.toString?.() || (item.assignedTo?.toString?.() || null);
+        const assignedToEmployeeId = item.assignedTo?.employeeId ? norm(item.assignedTo.employeeId) : '';
+
+        const assignedById =
+            item.assignedBy?._id ? item.assignedBy._id.toString() : item.assignedBy?.toString?.() || item.assignedBy?.toString?.() || null;
+        const assignedByEmployeeId = item.assignedBy?.employeeId ? norm(item.assignedBy.employeeId) : '';
+
+        const isAssignedUser =
+            (!!actingEmpObjectId && !!assignedToId && assignedToId === actingEmpObjectId) ||
+            (!!actingEmployeeId && !!assignedToEmployeeId && assignedToEmployeeId === actingEmployeeId);
+
+        const isAssigner =
+            (!!actingEmpObjectId && !!assignedById && assignedById === actingEmpObjectId) ||
+            (!!actingEmployeeId && !!assignedByEmployeeId && assignedByEmployeeId === actingEmployeeId);
 
         // Find if this user is a designated Asset Controller for this company
         const assetController = await getDepartmentHOD('assetcontroller');
 
         const isAssetController = await isUserInFlowchart(req.user, 'assetcontroller');
 
-        if (!isAdmin && !isAssignedUser && !isAssetController) {
+        if (!isAdmin && !isAssignedUser && !isAssigner && !isAssetController) {
             return res.status(403).json({ message: "You are not authorized to assign or reassign this asset." });
         }
 
-        const assigner = await EmployeeBasic.findById(req.user.employeeObjectId);
+        if (!actingEmpObjectId) {
+            return res.status(403).json({ message: "You are not linked to an employee profile." });
+        }
+
+        const assigner = await EmployeeBasic.findById(actingEmpObjectId);
         if (!assigner || !assigner.signature || !assigner.signature.url) {
             return res.status(403).json({ message: "Cant assign: Your signature has not been added to your profile." });
         }
@@ -1279,33 +1572,21 @@ export const assignAssetItem = async (req, res) => {
 
         } else {
             // Assigning to an Employee (Default)
-            const employeeToAssign = await EmployeeBasic.findById(assignedTo).select('employeeId firstName lastName companyEmail primaryReportee');
+            const employeeToAssign = await EmployeeBasic.findById(assignedTo).select(
+                'employeeId firstName lastName companyEmail workEmail personalEmail email primaryReportee'
+            );
             if (!employeeToAssign) return res.status(404).json({ message: "Target employee not found" });
-
-            const linkedUser = await User.findOne({ employeeId: employeeToAssign?.employeeId, status: 'Active' });
-            const hasPortalAccess = !!(linkedUser && linkedUser.enablePortalAccess && employeeToAssign?.companyEmail);
-
-            // If employee has no portal access AND no manager, no one can acknowledge the asset
-            if (!hasPortalAccess && !employeeToAssign?.primaryReportee) {
-                return res.status(400).json({
-                    message: "This employee lacks Portal Access (Company Email/User Account) and has no Primary Reportee (Manager). No one can receive this asset."
-                });
-            }
 
             item.assignedToType = 'Employee';
             item.assignedTo = assignedTo;
             item.assignedCompany = null;
             item.status = 'Pending';
             item.acceptanceStatus = 'Pending';
+            // Acknowledgment always belongs to the assignee (not manager, not asset controller, not assigner)
+            item.actionRequiredBy = assignedTo;
 
-            if (!hasPortalAccess && employeeToAssign?.primaryReportee) {
-                item.actionRequiredBy = employeeToAssign.primaryReportee;
-            } else {
-                item.actionRequiredBy = assignedTo;
-            }
-
-            actionRequiredBy = item.actionRequiredBy;
-            actionRecipient = await EmployeeBasic.findById(actionRequiredBy);
+            actionRequiredBy = assignedTo;
+            actionRecipient = employeeToAssign;
             subjectName = `${employeeToAssign.firstName} ${employeeToAssign.lastName}`;
             subjectEmpId = employeeToAssign.employeeId;
             newAssignee = employeeToAssign;
@@ -1333,32 +1614,36 @@ export const assignAssetItem = async (req, res) => {
             }
         }
 
-        // Send Email Notification to new assignee
+        // Email: notify assignee (or HR for company) — not the assigner/controller
         try {
             await sendAssetAssignmentEmail({
                 asset: item,
-                employee: assignedToType === 'Company' ? { firstName: subjectName, lastName: "", isCompany: true } : actionRecipient,
-                recipient: actionRecipient,
+                employee: assignedToType === 'Company' ? { firstName: subjectName, lastName: '', isCompany: true } : actionRecipient,
+                recipient: actionRecipient
             });
         } catch (err) {
             console.error(`[Email Error] Failed to send assignment email: `, err);
         }
 
-        // Create Dashboard Action
+        // Dashboard inbox for assignee (employee) or HR (company) — same as actionRequiredBy
         try {
-            await DashboardAction.create({
-                assignedTo: actionRequiredBy,
-                assignedToEmpId: actionRecipient?.employeeId,
-                requestId: item._id,
-                requestType: 'Asset Assignment',
-                subjectEmployeeId: subjectEmpId,
-                subjectName: subjectName,
-                requestedByName: `${assigner?.firstName || "System"} ${assigner?.lastName || ""} `.trim(),
-                extra1: `${item.assetId} - ${item.name} `,
-                extra2: item.assignmentType,
-                status: 'Pending'
-            });
-            console.log(`[Dashboard] Created asset assignment action for ${actionRecipient?.employeeId}`);
+            await DashboardAction.findOneAndUpdate(
+                { requestId: item._id, requestType: 'Asset Assignment', status: 'Pending' },
+                {
+                    assignedTo: actionRequiredBy,
+                    assignedToEmpId: actionRecipient?.employeeId,
+                    requestId: item._id,
+                    requestType: 'Asset Assignment',
+                    subjectEmployeeId: subjectEmpId,
+                    subjectName: subjectName,
+                    requestedByName: `${assigner?.firstName || "System"} ${assigner?.lastName || ""} `.trim(),
+                    extra1: `${item.assetId} — ${item.name}`,
+                    extra2: item.assignmentType,
+                    status: 'Pending'
+                },
+                { upsert: true, new: true, setDefaultsOnInsert: true }
+            );
+            console.log(`[Dashboard] Synced asset assignment action for ${actionRecipient?.employeeId}`);
         } catch (err) {
             console.error(`[Dashboard Error] Failed to create action for asset ${item.assetId}: `, err);
         }
@@ -1407,40 +1692,6 @@ export const assignAssetItem = async (req, res) => {
             .populate('typeId', 'name imagePreview')
             .populate('categoryId', 'name imagePreview');
 
-        // Send Email Notification
-        try {
-            const employee = updatedItem.assignedTo;
-            if (employee) {
-                // Scenario 1: Employee has a company email AND an active portal account, send directly to them
-                const linkedUser = await User.findOne({ employeeId: employee.employeeId, status: 'Active' });
-                const hasPortalAccess = !!(linkedUser && linkedUser.enablePortalAccess);
-
-                if (employee.companyEmail && hasPortalAccess) {
-                    await sendAssetAssignmentEmail({
-                        asset: updatedItem,
-                        employee: employee,
-                        recipient: employee
-                    });
-                }
-                // Scenario 2: Employee lacks company email or portal access, send to their Primary Reportee (Manager)
-                else if (employee.primaryReportee) {
-                    const managerId = employee.primaryReportee._id || employee.primaryReportee;
-                    const manager = await EmployeeBasic.findById(managerId);
-
-                    if (manager) {
-                        console.log(`[Asset Assignment] No company email for ${employee.firstName}.Notifying manager: ${manager.firstName} `);
-                        await sendAssetAssignmentEmail({
-                            asset: updatedItem,
-                            employee: employee,
-                            recipient: manager
-                        });
-                    }
-                }
-            }
-        } catch (emailErr) {
-            console.error('Error in asset assignment email trigger:', emailErr);
-        }
-
         res.status(200).json(updatedItem);
     } catch (error) {
         console.error('Error assigning asset item:', error);
@@ -1479,22 +1730,15 @@ export const bulkAssignAssetItems = async (req, res) => {
             return res.status(403).json({ message: "cant you cant assign u r signator not added" });
         }
 
-        // Determine actionRequiredBy based on Portal Access and Company Email
-        const employeeToAssign = await EmployeeBasic.findById(assignedTo).select('employeeId companyEmail primaryReportee firstName lastName');
-        const linkedUser = await User.findOne({ employeeId: employeeToAssign?.employeeId, status: 'Active' });
-        const hasPortalAccess = !!(linkedUser && linkedUser.enablePortalAccess && employeeToAssign?.companyEmail);
-
-        // If employee has no portal access AND no manager, no one can acknowledge the asset
-        if (!hasPortalAccess && !employeeToAssign?.primaryReportee) {
-            return res.status(400).json({
-                message: "This employee lacks Portal Access (Company Email/User Account) and has no Primary Reportee (Manager). No one can receive these assets."
-            });
+        const employeeToAssign = await EmployeeBasic.findById(assignedTo).select(
+            'employeeId companyEmail workEmail personalEmail email primaryReportee firstName lastName'
+        );
+        if (!employeeToAssign) {
+            return res.status(404).json({ message: 'Target employee not found' });
         }
 
-        let actionRequiredBy = assignedTo;
-        if (!hasPortalAccess && employeeToAssign?.primaryReportee) {
-            actionRequiredBy = employeeToAssign.primaryReportee;
-        }
+        // Acknowledgment queue + dashboard always target the assignee
+        const actionRequiredBy = assignedTo;
 
         const empName = `${employeeToAssign?.firstName || ''} ${employeeToAssign?.lastName || ''}`.trim() || 'Unknown Employee';
 
@@ -1517,10 +1761,10 @@ export const bulkAssignAssetItems = async (req, res) => {
             { $set: updateData }
         );
 
-        // Create Dashboard Actions for each asset
+        // Create Dashboard Actions for each asset (inbox of assignee)
         try {
-            const actionRecipient = await EmployeeBasic.findById(actionRequiredBy).select('employeeId firstName lastName');
-            const subjectEmp = await EmployeeBasic.findById(assignedTo).select('employeeId firstName lastName');
+            const actionRecipient = await EmployeeBasic.findById(assignedTo).select('employeeId firstName lastName');
+            const subjectEmp = actionRecipient;
             const assets = await AssetItem.find({ _id: { $in: assetIds } }).select('assetId name assignmentType');
 
             const dashboardActions = assets.map(asset => ({
@@ -1572,41 +1816,21 @@ export const bulkAssignAssetItems = async (req, res) => {
             await updateAssetTypeCounts(typeId);
         }
 
-        // Send Email Notification
+        // Send email to assignee only
         try {
-            const employee = await EmployeeBasic.findById(assignedTo);
+            const employee = await EmployeeBasic.findById(assignedTo).select(
+                'employeeId firstName lastName companyEmail workEmail personalEmail email'
+            );
             const firstAsset = await AssetItem.findById(assetIds[0]).populate('categoryId');
 
             if (employee && firstAsset) {
-                // Scenario 1: Employee has a company email AND an active portal account, send directly to them
-                const linkedUser = await User.findOne({ employeeId: employee.employeeId, status: 'Active' });
-                const hasPortalAccess = !!(linkedUser && linkedUser.enablePortalAccess);
-
-                if (employee.companyEmail && hasPortalAccess) {
-                    await sendAssetAssignmentEmail({
-                        asset: firstAsset,
-                        employee: employee,
-                        recipient: employee,
-                        isBulk: true,
-                        assetCount: assetIds.length
-                    });
-                }
-                // Scenario 2: Employee lacks company email or portal access, send to their Primary Reportee (Manager)
-                else if (employee.primaryReportee) {
-                    const managerId = employee.primaryReportee._id || employee.primaryReportee;
-                    const manager = await EmployeeBasic.findById(managerId);
-
-                    if (manager) {
-                        console.log(`[Bulk Asset Assignment] No company email or portal access for ${employee.firstName}.Notifying manager: ${manager.firstName} `);
-                        await sendAssetAssignmentEmail({
-                            asset: firstAsset,
-                            employee: employee,
-                            recipient: manager,
-                            isBulk: true,
-                            assetCount: assetIds.length
-                        });
-                    }
-                }
+                await sendAssetAssignmentEmail({
+                    asset: firstAsset,
+                    employee,
+                    recipient: employee,
+                    isBulk: true,
+                    assetCount: assetIds.length
+                });
             }
         } catch (emailErr) {
             console.error('Error in bulk asset assignment email trigger:', emailErr);
@@ -1733,44 +1957,83 @@ export const respondToAssignment = async (req, res) => {
         }
 
         const currentUser = req.user.employeeObjectId;
-        const isAssignee = item.assignedTo?._id.toString() === currentUser.toString();
-        const isAssigner = item.assignedBy?._id.toString() === currentUser.toString();
+        if (!currentUser) {
+            return res.status(403).json({ message: 'You are not linked to an employee profile.' });
+        }
+        const cur = currentUser.toString();
 
-        // Check if the current user is the manager (Primary Reportee) of the assignee (if employee assignment)
-        const isManager = item.assignedToType === 'Employee' && item.assignedTo?.primaryReportee?.toString() === currentUser.toString();
+        const isAssignee =
+            item.assignedToType === 'Employee' &&
+            item.assignedTo &&
+            (item.assignedTo._id || item.assignedTo).toString() === cur;
+        const isAssigner =
+            item.assignedBy && (item.assignedBy._id || item.assignedBy).toString() === cur;
+        const isHR =
+            item.assignedToType === 'Company' && item.actionRequiredBy?.toString() === cur;
 
-        // Check if user is the designated action required per HR flow (if company assignment)
-        const isHR = item.assignedToType === 'Company' && item.actionRequiredBy?.toString() === currentUser.toString();
+        // If assignee has NO ERP login access, allow assignee.primaryReportee to act as delegate
+        let isPrimaryReporteeDelegate = false;
+        let primaryReportee = null;
+        if (item.assignedToType === 'Employee' && item.assignedTo && item.assignedTo.primaryReportee) {
+            // enablePortalAccess comes from EmployeeBasic; if missing, we fallback to linked User row
+            let assigneeHasPortalAccess = null;
+            if (typeof item.assignedTo.enablePortalAccess === 'boolean') {
+                assigneeHasPortalAccess = item.assignedTo.enablePortalAccess;
+            } else {
+                const assigneeEmpId = item.assignedTo.employeeId;
+                if (assigneeEmpId) {
+                    const linkedUser = await User.findOne({ employeeId: assigneeEmpId, status: 'Active' })
+                        .select('enablePortalAccess')
+                        .lean()
+                        .catch(() => null);
+                    assigneeHasPortalAccess = !!(linkedUser && linkedUser.enablePortalAccess);
+                }
+            }
+            // If we can't determine, don't delegate
+            const allowDelegate = assigneeHasPortalAccess === false;
+            const managerId = item.assignedTo.primaryReportee._id || item.assignedTo.primaryReportee;
+            if (allowDelegate && managerId && managerId.toString() === cur) {
+                isPrimaryReporteeDelegate = true;
+                // Fetch manager details for notifications
+                primaryReportee = await EmployeeBasic.findById(managerId)
+                    .select('firstName lastName employeeId companyEmail enablePortalAccess primaryReportee')
+                    .lean()
+                    .catch(() => null);
+            }
+        }
 
-        // Check if user is involved
-        if (!isAssignee && !isAssigner && !isManager && !isHR) {
-            return res.status(403).json({ message: 'You are not authorized to respond to this assignment.' });
+        if (item.assignedToType === 'Company') {
+            if (!isHR) {
+                return res.status(403).json({ message: 'You are not authorized to respond to this company assignment.' });
+            }
+            if (item.actionRequiredBy && item.actionRequiredBy.toString() !== cur) {
+                return res.status(403).json({ message: 'It is not your turn (HR HOD required) to respond.' });
+            }
+        } else {
+            if (!isAssignee && !isAssigner && !isPrimaryReporteeDelegate) {
+                return res.status(403).json({ message: 'You are not authorized to respond to this assignment.' });
+            }
+            // If actionRequiredBy is not the current user, allow assigner or delegated primaryReportee to act too.
+            if (item.actionRequiredBy && item.actionRequiredBy.toString() !== cur) {
+                const assigneeId = item.assignedTo?._id ? item.assignedTo._id.toString() : item.assignedTo?.toString?.() || null;
+                const isActingOnAssignedTurn =
+                    isAssigner ||
+                    isPrimaryReporteeDelegate ||
+                    (isAssignee && assigneeId && item.actionRequiredBy.toString() === assigneeId);
+
+                if (!isActingOnAssignedTurn) {
+                    return res.status(403).json({ message: 'It is not your turn to respond.' });
+                }
+            }
         }
 
         const assignee = item.assignedTo;
 
-        if (item.assignedToType === 'Employee') {
-            // Dynamic Portal Access Check: Check if an active User account exists for the assignee
-            const linkedUser = await User.findOne({ employeeId: assignee?.employeeId, status: 'Active' });
-            const hasPortalAccess = !!(linkedUser && linkedUser.enablePortalAccess);
-            const assigneeHasNoAccess = !assignee?.companyEmail || !hasPortalAccess;
-
-            // Check if action is required by this user
-            if (item.actionRequiredBy && item.actionRequiredBy.toString() !== currentUser.toString()) {
-                // Allow manager to act if assignee has no access
-                if (!(isManager && assigneeHasNoAccess)) {
-                    return res.status(403).json({ message: 'It is not your turn to respond.' });
-                }
-            }
-        } else {
-            // Company Flow: Only the person in actionRequiredBy (HR) can act
-            if (item.actionRequiredBy && item.actionRequiredBy.toString() !== currentUser.toString()) {
-                return res.status(403).json({ message: 'It is not your turn (HR HOD required) to respond.' });
-            }
-        }
-
         // Determine actor for notifications
-        let actor = isAssignee ? item.assignedTo : ((isManager || isHR) ? await EmployeeBasic.findById(currentUser) : item.assignedBy);
+        let actor =
+            isAssignee ? item.assignedTo :
+                (isPrimaryReporteeDelegate ? (primaryReportee || await EmployeeBasic.findById(currentUser).catch(() => null)) :
+                    (isHR ? await EmployeeBasic.findById(currentUser) : item.assignedBy));
 
         // Notify all relevant parties
         const notifyParties = async () => {
@@ -1779,9 +2042,26 @@ export const respondToAssignment = async (req, res) => {
                 // 1. Always notify the person who assigned the asset
                 if (item.assignedBy) recipients.push(item.assignedBy);
 
-                // 2. Notify the subject employee if they were NOT the one who acted
+                // 2. Notify the subject (employee or delegated primary reportee) if they were NOT the one who acted
                 if (item.assignedToType === 'Employee' && item.assignedTo && item.assignedTo._id.toString() !== currentUser.toString()) {
-                    recipients.push(item.assignedTo);
+                    // If assignee has portal access, notify assignee.
+                    // Otherwise notify their primaryReportee delegate.
+                    const assigneeHasPortalAccess = typeof item.assignedTo.enablePortalAccess === 'boolean'
+                        ? item.assignedTo.enablePortalAccess
+                        : null;
+
+                    if (assigneeHasPortalAccess === true) {
+                        recipients.push(item.assignedTo);
+                    } else {
+                        const managerId = item.assignedTo.primaryReportee?._id || item.assignedTo.primaryReportee;
+                        if (managerId) {
+                            const manager = primaryReportee || await EmployeeBasic.findById(managerId)
+                                .select('firstName lastName employeeId companyEmail enablePortalAccess primaryReportee')
+                                .lean()
+                                .catch(() => null);
+                            if (manager) recipients.push(manager);
+                        }
+                    }
                 }
 
                 // 3. For 'Accept', also notify Manager (Employee Flow only)
@@ -1794,22 +2074,6 @@ export const respondToAssignment = async (req, res) => {
                 }
 
                 for (let recipient of recipients) {
-                    // APPLY RULE: If recipient is employee and lacks company email, send to manager
-                    const recipientIsEmployee = recipient.employeeId && !recipient.isCompany;
-                    if (recipientIsEmployee && recipient._id?.toString() !== currentUser.toString()) {
-                        const linkedUser = await User.findOne({ employeeId: recipient.employeeId, status: 'Active' });
-                        const hasAccess = !!(linkedUser && linkedUser.enablePortalAccess && recipient.companyEmail);
-
-                        if (!hasAccess && recipient.primaryReportee) {
-                            const managerId = recipient.primaryReportee._id || recipient.primaryReportee;
-                            const manager = await EmployeeBasic.findById(managerId);
-                            if (manager) {
-                                console.log(`[Asset Response Info] Routing notification for ${recipient.firstName} to manager ${manager.firstName} due to lack of company email/access.`);
-                                recipient = manager;
-                            }
-                        }
-                    }
-
                     await sendAssetResponseEmail({
                         asset: item,
                         actor,
@@ -1840,7 +2104,7 @@ export const respondToAssignment = async (req, res) => {
                 item.acceptanceStatus = 'Pending';
                 item.pendingAction = 'Retention Confirmation';
                 item.actionRequiredBy = oldOwnerId;
-                
+
                 // Dashboard action for old HR
                 try {
                     const oldHREmp = await EmployeeBasic.findById(oldOwnerId).select('employeeId firstName lastName');
@@ -1911,25 +2175,15 @@ export const respondToAssignment = async (req, res) => {
                     date: new Date()
                 });
 
-                // Pass the ball
-                if (isAssignee || isManager || isHR) {
-                    // Ball goes back to Assigner
+                // Pass the ball: assignee/HR → assigner; assigner → assignee (or HR for company)
+                if (isAssignee || isHR) {
                     item.actionRequiredBy = item.assignedBy._id || item.assignedBy;
                 } else {
-                    // Ball goes to Assignee/HR
                     if (item.assignedToType === 'Company') {
                         const hrHOD = await getDepartmentHOD('hr');
                         item.actionRequiredBy = hrHOD._id;
                     } else {
-                        const assigneeEmp = await EmployeeBasic.findById(item.assignedTo);
-                        const linkedUser = await User.findOne({ employeeId: assigneeEmp?.employeeId, status: 'Active' });
-                        const hasAccess = !!(linkedUser && linkedUser.enablePortalAccess && assigneeEmp.companyEmail);
-
-                        if (!hasAccess && assigneeEmp.primaryReportee) {
-                            item.actionRequiredBy = assigneeEmp.primaryReportee;
-                        } else {
-                            item.actionRequiredBy = item.assignedTo._id || item.assignedTo;
-                        }
+                        item.actionRequiredBy = item.assignedTo._id || item.assignedTo;
                     }
                 }
 
@@ -2036,6 +2290,13 @@ export const respondToAssignment = async (req, res) => {
                 })
                 .populate({ path: 'assignedBy', select: 'firstName lastName employeeId signature' });
 
+            const pr = item.assignedTo?.primaryReportee;
+            const primaryReporteeId = pr && (typeof pr === 'object' ? pr._id || pr : pr);
+            const isManager =
+                item.assignedToType === 'Employee' &&
+                !!primaryReporteeId &&
+                primaryReporteeId.toString() === cur;
+
             await AssetHistory.create({
                 assetId: item._id,
                 action: 'Accepted',
@@ -2043,7 +2304,11 @@ export const respondToAssignment = async (req, res) => {
                 assignedTo: item.assignedTo,
                 assignedCompany: item.assignedCompany,
                 performedBy: req.user.employeeObjectId,
-                comments: isManager ? `Accepted by manager on behalf of employee. ${comments || ''} ` : (isHR ? `Accepted by HR on behalf of company. ${comments || ''} ` : comments),
+                comments: isManager
+                    ? `Accepted by manager on behalf of employee. ${comments || ''} `
+                    : isHR
+                      ? `Accepted by HR on behalf of company. ${comments || ''} `
+                      : comments,
                 details: {
                     ...snapshotItem.toObject(),
                     isAcceptedByManager: isManager,
@@ -2078,19 +2343,35 @@ export const bulkRespondToAssignment = async (req, res) => {
 
         const currentUser = req.user.employeeObjectId;
         const items = await AssetItem.find({ _id: { $in: assetIds } }).populate('assignedTo assignedBy assignedCompany');
-        
+
         const results = { success: [], failed: [] };
 
         for (const item of items) {
             try {
                 // Check if user is authorized for this specific asset
-                const isAssignee = item.assignedTo?._id.toString() === currentUser.toString();
-                const isAssigner = item.assignedBy?._id.toString() === currentUser.toString();
-                const isManager = item.assignedToType === 'Employee' && item.assignedTo?.primaryReportee?.toString() === currentUser.toString();
-                const isHR = item.assignedToType === 'Company' && item.actionRequiredBy?.toString() === currentUser.toString();
-                const isActionRequired = item.actionRequiredBy?.toString() === currentUser.toString();
+                const curBulk = currentUser.toString();
+                const isAssignee =
+                    item.assignedToType === 'Employee' &&
+                    item.assignedTo &&
+                    (item.assignedTo._id || item.assignedTo).toString() === curBulk;
+                const isHR = item.assignedToType === 'Company' && item.actionRequiredBy?.toString() === curBulk;
+                const isActionRequired = item.actionRequiredBy?.toString() === curBulk;
 
-                if (!isAssignee && !isAssigner && !isManager && !isHR && !isActionRequired) {
+                // Assigner / delegated primaryReportee
+                const isAssigner =
+                    !!item.assignedBy &&
+                    (item.assignedBy._id || item.assignedBy).toString() === curBulk;
+
+                let isPrimaryReporteeDelegate = false;
+                if (item.assignedToType === 'Employee' && item.assignedTo && item.assignedTo.primaryReportee) {
+                    const assigneeHasCompanyEmail = !!(item.assignedTo.companyEmail && String(item.assignedTo.companyEmail).trim().length > 0);
+                    const managerId = item.assignedTo.primaryReportee._id || item.assignedTo.primaryReportee;
+                    if (!assigneeHasCompanyEmail && managerId && managerId.toString() === curBulk) {
+                        isPrimaryReporteeDelegate = true;
+                    }
+                }
+
+                if (!isAssignee && !isHR && !isActionRequired && !isAssigner && !isPrimaryReporteeDelegate) {
                     results.failed.push({ id: item.assetId, message: 'Unauthorized' });
                     continue;
                 }
@@ -2106,7 +2387,7 @@ export const bulkRespondToAssignment = async (req, res) => {
                         item.pendingAction = null;
                         item.pendingActionDetails = null;
                     }
-                    
+
                     item.status = 'Assigned';
                     item.acceptanceStatus = 'Accepted';
                     item.actionRequiredBy = null;
@@ -2152,7 +2433,7 @@ export const bulkRespondToAssignment = async (req, res) => {
                 // Clear Dashboard Actions
                 await DashboardAction.updateMany(
                     { requestId: item._id, assignedTo: currentUser, status: 'Pending' },
-                    { 
+                    {
                         status: action === 'Accept' ? 'Approved' : 'Rejected',
                         actionedDate: new Date(),
                         actionedBy: currentUser,
@@ -2193,17 +2474,57 @@ export const returnAssetItem = async (req, res) => {
     try {
         const { id } = req.params;
 
-        const assetController = await getDepartmentHOD('assetcontroller');
-        if (!assetController) {
-            return res.status(403).json({
-                message: "Asset return denied: No Asset Controller has been assigned in the organization flow. Please assign an Asset Controller in Settings > Flowchart before performing this operation."
-            });
-        }
-
         const item = await AssetItem.findById(id);
 
         if (!item) {
             return res.status(404).json({ message: 'Asset not found' });
+        }
+
+        const isJwtAdmin = req.user.isAdmin === true || req.user.role === 'Admin' || req.user.role === 'ROOT';
+        const isSysAdmin = await isUserAdministrator(req.user?.id);
+        const isAcFlow = await isUserInFlowchart(req.user, 'assetcontroller');
+        const hodAc = await getDepartmentHOD('assetcontroller');
+        const matchesDeptAc =
+            !!hodAc?._id &&
+            req.user?.employeeObjectId &&
+            hodAc._id.toString() === req.user.employeeObjectId.toString();
+        const isElevatedReturn = isJwtAdmin || isSysAdmin || isAcFlow || matchesDeptAc;
+
+        let currentEmpId = req.user?.employeeObjectId?.toString();
+        if (!currentEmpId && req.user?.employeeId) {
+            const empRow = await EmployeeBasic.findOne({
+                employeeId: { $regex: new RegExp(`^${String(req.user.employeeId).replace(/\s+/g, '\\s*')}$`, 'i') }
+            })
+                .select('_id')
+                .lean();
+            if (empRow) currentEmpId = empRow._id.toString();
+        }
+        const isAssigneeReturn =
+            !!item.assignedTo && !!currentEmpId && item.assignedTo.toString() === currentEmpId;
+        const assignedById =
+            item.assignedBy?._id ? item.assignedBy._id.toString() : item.assignedBy?.toString?.() || item.assignedBy;
+        const isAssignerReturn =
+            !!assignedById && !!currentEmpId && assignedById.toString() === currentEmpId;
+
+        if (item.assignedTo) {
+            if (!isElevatedReturn && !isAssigneeReturn && !isAssignerReturn) {
+                return res.status(403).json({
+                    message: 'Only the assigned employee, the assigner, Asset Controller, or an administrator can return this asset.'
+                });
+            }
+        } else {
+            if (!isElevatedReturn && !isAssignerReturn) {
+                return res.status(403).json({
+                    message: 'Only Asset Controller/Admin or the assigner can return an asset that is not assigned to an employee.'
+                });
+            }
+        }
+
+        const assetController = hodAc;
+        if (!assetController && !isAssigneeReturn && !isAssignerReturn) {
+            return res.status(403).json({
+                message: "Asset return denied: No Asset Controller has been assigned in the organization flow. Please assign an Asset Controller in Settings > Flowchart before performing this operation."
+            });
         }
 
         // Store current details for history
@@ -2910,6 +3231,15 @@ export const addAssetService = async (req, res) => {
             return res.status(404).json({ message: 'Asset not found' });
         }
 
+        // Permission: asset controller/admin OR assignee
+        // Also allow:
+        // - assigner (asset.assignedBy) with full permissions
+        // - primary reportee delegation when assignee has NO companyEmail
+        const actorFlags = await getActorPermissionFlagsForAsset(req.user, asset);
+        if (!actorFlags.canAct) {
+            return res.status(403).json({ message: 'Access denied. Only Asset Controller/Admin, assigner, assigned user, or (if assignee has no company email) primary reportee can add service records.' });
+        }
+
         let invoiceUrl = null;
         if (invoice && invoice.data) {
             try {
@@ -2995,14 +3325,14 @@ export const transferAsset = async (req, res) => {
             return res.status(404).json({ message: 'Asset not found' });
         }
 
-        // Check if user has permission (Asset Controller or Admin)
-        const assetController = await getDepartmentHOD('assetcontroller', req.user.employeeObjectId);
-        const isAssetController = assetController && assetController._id.toString() === req.user.employeeObjectId?.toString();
-        const isAdmin = req.user.isAdmin === true || req.user.role === 'Admin' || req.user.role === 'ROOT';
-
-        if (!isAssetController && !isAdmin) {
-            return res.status(403).json({ message: 'Access denied. Only Asset Controller or Admin can transfer assets.' });
+        // Permission: asset controller/admin OR assignee
+        // Also allow assigner (asset.assignedBy) + primary reportee delegation when assignee has NO companyEmail
+        const actorFlags = await getActorPermissionFlagsForAsset(req.user, asset);
+        if (!actorFlags.canAct) {
+            return res.status(403).json({ message: 'Access denied. Only Asset Controller/Admin, assigner, assigned user, or delegated primary reportee can transfer assets.' });
         }
+
+        const assetController = await getDepartmentHOD('assetcontroller');
 
         // Create transfer request for approval
         const transferRequest = {
@@ -3089,18 +3419,18 @@ export const transferAssetAccessory = async (req, res) => {
         const { id, accId } = req.params;
         const { targetAssetId } = req.body;
 
-        const assetController = await getDepartmentHOD('assetcontroller');
-        if (!assetController) {
-            return res.status(403).json({
-                message: "Accessory transfer denied: No Asset Controller has been assigned in the organization flow. Please assign an Asset Controller in Settings > Flowchart before performing this operation."
-            });
-        }
-
         const sourceAsset = await AssetItem.findById(id);
         const targetAsset = await AssetItem.findById(targetAssetId);
 
         if (!sourceAsset || !targetAsset) {
             return res.status(404).json({ message: 'Source or Target asset not found' });
+        }
+
+        // Permission: asset controller/admin OR assignee
+        // Also allow assigner (asset.assignedBy) + primary reportee delegation
+        const actorFlags = await getActorPermissionFlagsForAsset(req.user, sourceAsset);
+        if (!actorFlags.canAct) {
+            return res.status(403).json({ message: 'Access denied. Only Asset Controller/Admin, assigner, assigned user, or delegated primary reportee can transfer accessories.' });
         }
 
         const accessoryIndex = sourceAsset.accessories.findIndex(a => a._id.toString() === accId || a.accessoryId === accId);
@@ -3159,13 +3489,6 @@ export const manageAccessoryStatus = async (req, res) => {
         const { id, accId } = req.params;
         const { status, comments } = req.body;
 
-        const assetController = await getDepartmentHOD('assetcontroller');
-        if (!assetController) {
-            return res.status(403).json({
-                message: "Accessory status update denied: No Asset Controller has been assigned in the organization flow. Please assign an Asset Controller in Settings > Flowchart before performing this operation."
-            });
-        }
-
         const asset = await AssetItem.findById(id);
         if (!asset) {
             return res.status(404).json({ message: 'Asset not found' });
@@ -3174,6 +3497,13 @@ export const manageAccessoryStatus = async (req, res) => {
         const accessory = asset.accessories.find(a => a._id.toString() === accId || a.accessoryId === accId);
         if (!accessory) {
             return res.status(404).json({ message: 'Accessory not found' });
+        }
+
+        // Permission: asset controller/admin OR assignee
+        // Also allow assigner + primary reportee delegation when assignee has NO companyEmail
+        const actorFlags = await getActorPermissionFlagsForAsset(req.user, asset);
+        if (!actorFlags.canAct) {
+            return res.status(403).json({ message: 'Access denied. Only Asset Controller/Admin, assigner, assigned user, or delegated primary reportee can update accessory status.' });
         }
 
         accessory.status = status;
@@ -3219,6 +3549,13 @@ export const requestAssetAction = async (req, res) => {
 
         if (!asset) {
             return res.status(404).json({ message: 'Asset not found' });
+        }
+
+        // Permission: asset controller/admin OR assignee
+        // Also allow assigner + primary reportee delegation
+        const actorFlags = await getActorPermissionFlagsForAsset(req.user, asset);
+        if (!actorFlags.canAct) {
+            return res.status(403).json({ message: 'Access denied. Only Asset Controller/Admin, assigner, assigned user, or delegated primary reportee can request this asset action.' });
         }
 
         // Upload attachment if present
@@ -3696,7 +4033,7 @@ export const handleAssetActionApproval = async (req, res) => {
                     }
                     await asset.save();
                 }
-                
+
                 // Check if fineData is available (either from pendingActionDetails or just set above)
                 const fd = fineData || asset.pendingActionDetails?.fineData;
                 if (!fd) {
@@ -3715,7 +4052,7 @@ export const handleAssetActionApproval = async (req, res) => {
                         }
                     });
                 }
-                
+
                 // STEP 1 APPROVED (Asset Controller) -> Create Fine with status "Pending HR"
                 if (fd) {
                     try {
@@ -3994,6 +4331,13 @@ export const requestAccessoryAction = async (req, res) => {
             return res.status(400).json({ message: `This accessory already has a pending "${accessory.pendingAction}" request.` });
         }
 
+        // Permission: asset controller/admin OR assignee
+        // Also allow assigner + primary reportee delegation when assignee has NO companyEmail
+        const actorFlags = await getActorPermissionFlagsForAsset(req.user, asset);
+        if (!actorFlags.canAct) {
+            return res.status(403).json({ message: 'Access denied. Only Asset Controller/Admin, assigner, assigned user, or delegated primary reportee can request accessory actions.' });
+        }
+
         // Resolve requester name from employee record (req.user doesn't carry firstName/lastName)
         const requesterEmp = await EmployeeBasic.findById(req.user.employeeObjectId).select('firstName lastName');
         const requesterName = requesterEmp ? `${requesterEmp.firstName} ${requesterEmp.lastName}` : req.user.employeeId || 'System';
@@ -4121,6 +4465,22 @@ export const respondAccessoryAction = async (req, res) => {
 
         const { pendingAction, pendingActionDetails } = accessory;
 
+        // Permission enforcement for accessory approvals:
+        // - Transfer + Add: allowed for assignee/assigner/delegated primaryReportee
+        // - Loss and Damage + End of Life: only Asset Controller/Admin (workflow needs Fine creation)
+        const actorFlags = await getActorPermissionFlagsForAsset(req.user, asset);
+        const isAdmin = req.user.isAdmin === true || req.user.role === 'Admin' || req.user.role === 'ROOT';
+        const isAssetControllerApproving = await isUserInFlowchart(req.user, 'assetcontroller').catch(() => false);
+
+        const canApproveByAssignedActors = (pendingAction === 'Transfer' || pendingAction === 'Add') && actorFlags.canAct;
+        const canApproveByAuthority = (pendingAction === 'Loss and Damage' || pendingAction === 'End of Life') && (isAdmin || isAssetControllerApproving);
+
+        if (!canApproveByAssignedActors && !canApproveByAuthority) {
+            return res.status(403).json({
+                message: 'Access denied. Only Asset Controller/Admin can approve Loss & Damage or End of Life accessory actions.'
+            });
+        }
+
         if (approve) {
             // If fineData is provided in request body (from modal submission), update pendingActionDetails
             if (fineData) {
@@ -4150,11 +4510,8 @@ export const respondAccessoryAction = async (req, res) => {
             // --- SPECIAL LOGIC FOR TRANSFER ---
             // Transfer now only requires Asset Controller approval (no reportee/target employee acknowledgment)
             if (pendingAction === 'Transfer') {
-                const isAssetController = await isUserInFlowchart(req.user, 'assetcontroller') || req.user.role === 'Admin' || req.user.role === 'ROOT';
-
-                if (!isAssetController) {
-                    return res.status(403).json({ message: 'Only Asset Controller can approve transfers.' });
-                }
+                // Actor permission already validated via actorFlags above.
+                // Transfer is allowed for assigner/assignee/delegated primary reportee too.
 
                 const targetAssetId = pendingActionDetails?.targetAssetId;
                 const targetAsset = await AssetItem.findById(targetAssetId).populate('assignedTo');
@@ -4227,7 +4584,7 @@ export const respondAccessoryAction = async (req, res) => {
                     accessory.status = 'Attached';
                     accessory.pendingAction = null;
                     accessory.pendingActionDetails = null;
-                    
+
                     await AssetHistory.create({
                         assetId: asset._id,
                         action: 'Accepted',
@@ -4237,12 +4594,12 @@ export const respondAccessoryAction = async (req, res) => {
                         details: { status: 'Attached', action: 'AddApproval', accessoryId: accId }
                     });
                 } else {
-                    const accIndex = asset.accessories.findIndex(a => 
+                    const accIndex = asset.accessories.findIndex(a =>
                         (a._id && a._id.toString() === accId) || (a.accessoryId === accId)
                     );
                     const accName = accessory.name;
                     asset.accessories.splice(accIndex, 1);
-                    
+
                     await AssetHistory.create({
                         assetId: asset._id,
                         action: 'Comment',
@@ -4263,9 +4620,9 @@ export const respondAccessoryAction = async (req, res) => {
                 asset.markModified('accessories');
                 await asset.save();
 
-                return res.status(200).json({ 
-                    message: approve ? `Accessory "${accessory.name}" added successfully.` : `Accessory addition rejected and removed.`, 
-                    asset 
+                return res.status(200).json({
+                    message: approve ? `Accessory "${accessory.name}" added successfully.` : `Accessory addition rejected and removed.`,
+                    asset
                 });
             }
 
@@ -4301,7 +4658,7 @@ export const respondAccessoryAction = async (req, res) => {
                         }
                     });
                 }
-                
+
                 if (pendingActionDetails?.fineData) {
                     try {
                         const Fine = (await import('../models/Fine.js')).default;
@@ -4339,6 +4696,9 @@ export const respondAccessoryAction = async (req, res) => {
                             awardedDate: new Date(),
                             assetId: asset.assetId,
                             assetObjectId: asset._id,
+                            // Store accessory identity so Fine pages can show accessory-specific fines
+                            accessoryId: accessory.accessoryId,
+                            accessoryName: accessory.name,
                             accessoryObjectId: accessory._id,
                             attachment: fileUrl ? { url: fileUrl, name: 'L&D Photo.pdf', mimeType: 'application/pdf' } : (pendingActionDetails.attachment ? { url: pendingActionDetails.attachment, name: 'L&D Photo.pdf', mimeType: 'application/pdf' } : fd.attachment)
                         });
@@ -4500,5 +4860,45 @@ export const respondAccessoryAction = async (req, res) => {
 // @route   PUT /api/AssetItem/:id/accessories/:accId/finalize-action
 // @access  Private (Assigned User)
 export const finalizeAccessoryAction = respondAccessoryAction;
+
+/**
+ * @desc    Delete an asset item
+ * @route   DELETE /api/AssetItem/:id
+ * @access  Private (Asset Controller, Admin, or Creator before approval)
+ */
+export const deleteAssetItem = async (req, res) => {
+    try {
+        const { id } = req.params;
+
+        const asset = await AssetItem.findById(id);
+        if (!asset) {
+            return res.status(404).json({ message: 'Asset not found' });
+        }
+
+        // Middleware requireAssetControllerOrAdmin already handles authorization:
+        // 1. Admin/Controller: Always authorized
+        // 2. Creator: Only if Status is Draft/Pending
+
+        // Delete associated Dashboard Actions
+        await DashboardAction.deleteMany({ requestId: asset._id });
+
+        // Delete associated History
+        await AssetHistory.deleteMany({ assetId: asset._id });
+
+        // Finally delete the asset
+        await AssetItem.findByIdAndDelete(id);
+
+        // Update counts for the type
+        if (asset.typeId) {
+            await updateAssetTypeCounts(asset.typeId);
+        }
+
+        res.status(200).json({ message: 'Asset deleted successfully' });
+    } catch (error) {
+        console.error('Error deleting asset item:', error);
+        res.status(500).json({ message: 'Server Error' });
+    }
+};
+
 
 

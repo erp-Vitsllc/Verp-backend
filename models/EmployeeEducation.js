@@ -14,7 +14,9 @@ const educationDetailSchema = new mongoose.Schema(
         certificate: {
             data: { type: String },
             name: { type: String },
-            mimeType: { type: String }
+            mimeType: { type: String },
+            url: { type: String },
+            publicId: { type: String }
         }
     },
     { _id: true }

@@ -1,13 +1,58 @@
 import nodemailer from "nodemailer";
-import { resolveEmployeeEmail, getFallbackEmailNote } from "./resolveEmployeeEmail.js";
+import User from "../models/User.js";
+import EmployeeBasic from "../models/EmployeeBasic.js";
+
+/** Email only the targeted employee (assignee or HR); never substitute the manager. */
+async function resolveEmailForAssignee(recipient) {
+    if (!recipient) return null;
+
+    // Business rule: if employee has NO companyEmail, notify their primaryReportee instead.
+    const empCompanyEmail = (recipient.companyEmail || "").trim();
+    if (empCompanyEmail) return empCompanyEmail;
+
+    const empId = recipient.employeeId;
+
+    // Try manager (primaryReportee) first when companyEmail is missing
+    const reporteeId = recipient.primaryReportee?._id
+        ? recipient.primaryReportee._id
+        : recipient.primaryReportee || null;
+
+    if (reporteeId) {
+        const manager = await EmployeeBasic.findById(reporteeId)
+            .select("companyEmail workEmail personalEmail email employeeId primaryReportee")
+            .lean()
+            .catch(() => null);
+
+        const managerCompanyEmail = (manager?.companyEmail || "").trim();
+        if (managerCompanyEmail) return managerCompanyEmail;
+
+        const managerEmpId = manager?.employeeId;
+        if (managerEmpId) {
+            const u = await User.findOne({ employeeId: managerEmpId, status: "Active" }).select("email companyEmail").lean();
+            return (u?.email || u?.companyEmail || "").trim() || null;
+        }
+    }
+
+    // Last resort: if there's an email on the employee record, use it.
+    const fallbackEmpEmail = (
+        recipient.workEmail ||
+        recipient.personalEmail ||
+        recipient.email ||
+        ""
+    ).trim();
+    if (fallbackEmpEmail) return fallbackEmpEmail;
+
+    if (!empId) return null;
+    const u = await User.findOne({ employeeId: empId, status: "Active" }).select("email companyEmail").lean();
+    if (!u) return null;
+    return (u.email || u.companyEmail || "").trim() || null;
+}
 
 export const sendAssetAssignmentEmail = async ({ asset, assets = [], employee, recipient, isBulk = false, assetCount = 1 }) => {
     try {
-        // Use resolveEmployeeEmail: when recipient (employee) has no email, fallback to primaryReportee
-        const recipientForResolve = recipient?.primaryReportee ? recipient : { ...recipient, primaryReportee: employee?.primaryReportee };
-        const { email: recipientEmail, isFallbackToReportee, employeeName: fallbackEmployeeName, reporteeName } = resolveEmployeeEmail(recipientForResolve);
+        const recipientEmail = await resolveEmailForAssignee(recipient);
         if (!recipientEmail) {
-            console.warn(`[Email Warning] No email found for recipient ${recipient?.employeeId || recipient?._id}`);
+            console.warn(`[Email Warning] No email for assignee ${recipient?.employeeId || recipient?._id} (employee record or portal user)`);
             return;
         }
 
@@ -33,7 +78,8 @@ export const sendAssetAssignmentEmail = async ({ asset, assets = [], employee, r
         const assetName = isBulk ? `${assetCount} Assets` : asset.name;
         const assetIdDisplay = isBulk ? "Multiple Assets" : asset.assetId;
 
-        const isSelfAssignment = !employee?.isCompany && recipient._id?.toString() === employee?._id?.toString();
+        const isSelfAssignment =
+            !employee?.isCompany && recipient?._id?.toString() === employee?._id?.toString();
 
         const subject = employee?.isCompany
             ? (isBulk ? `Asset Allocation for ${employeeName}: ${assetCount} Items` : `Asset Allocated to ${employeeName}: ${asset.name} (${asset.assetId})`)
@@ -49,8 +95,8 @@ export const sendAssetAssignmentEmail = async ({ asset, assets = [], employee, r
 
         console.log(`[Email Debug] Generating button URL: ${buttonUrl}`);
 
-        const recipientName = isFallbackToReportee ? reporteeName : (recipient.firstName || "User");
-        const fallbackNote = isFallbackToReportee ? getFallbackEmailNote(fallbackEmployeeName, reporteeName) : '';
+        const recipientName = `${recipient?.firstName || ""} ${recipient?.lastName || ""}`.trim() || recipient?.employeeId || "User";
+        const fallbackNote = "";
 
         const html = `
             <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; color: #1e293b; line-height: 1.6; max-width: 600px; margin: 0 auto; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden; background-color: #ffffff;">

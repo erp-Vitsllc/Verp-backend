@@ -1,10 +1,34 @@
 import nodemailer from 'nodemailer';
 import puppeteer from 'puppeteer';
 import EmployeeBasic from '../models/EmployeeBasic.js';
-import { resolveEmployeeEmail, getFallbackEmailNote } from './resolveEmployeeEmail.js';
 import Fine from '../models/Fine.js';
 import Loan from '../models/Loan.js';
 import Payment from '../models/Payment.js';
+
+// Payment recipient rule:
+// 1) companyEmail (preferred)
+// 2) personalEmail fallback
+// 3) workEmail/email as last resort
+const resolvePaymentRecipientEmail = (employee) => {
+    const isUsableEmail = (value) => {
+        const v = String(value || '').trim().toLowerCase();
+        if (!v) return false;
+        if (v === 'n/a@company.com' || v === 'na@company.com') return false;
+        if (v === 'n/a' || v === 'na' || v === '-') return false;
+        return true;
+    };
+
+    if (!employee) return null;
+    const company = (employee.companyEmail || '').trim();
+    if (isUsableEmail(company)) return company;
+    const personal = (employee.personalEmail || '').trim();
+    if (isUsableEmail(personal)) return personal;
+    const work = (employee.workEmail || '').trim();
+    if (isUsableEmail(work)) return work;
+    const email = (employee.email || '').trim();
+    if (isUsableEmail(email)) return email;
+    return null;
+};
 
 /**
  * Calculates the share for a specific employee in a fine.
@@ -41,12 +65,40 @@ const calculateEmployeeShare = (fine, targetEmployeeId) => {
     return realEmployees.length > 0 ? calculatedEmpAmount / realEmployees.length : calculatedEmpAmount;
 };
 
+const SUCCESS_STATUSES = ['Completed', 'Paid', 'Success', 'Approved', 'Active'];
+
+const computeHistoricalPaidForEmployee = ({ payments, currentPayment }) => {
+    const currentRefTime = new Date(
+        currentPayment.paymentDate || currentPayment.createdAt || new Date()
+    ).getTime();
+    const currentId = (currentPayment._id || currentPayment.paymentId || '').toString();
+    const paidNow = parseFloat(currentPayment.amount || 0);
+
+    const historical = (payments || []).filter((p) => {
+        const pStatus = String(p.status || p.approvalStatus || '').toLowerCase();
+        const isOk = SUCCESS_STATUSES.map((s) => s.toLowerCase()).includes(pStatus);
+        if (!isOk) return false;
+
+        const pTime = new Date(p.paymentDate || p.createdAt || 0).getTime();
+        if (pTime < currentRefTime) return true;
+        if (pTime === currentRefTime) {
+            const pId = (p._id || p.paymentId || '').toString();
+            return pId === currentId;
+        }
+        return false;
+    });
+
+    const totalPaidAtTime = historical.reduce((sum, p) => sum + parseFloat(p.amount || 0), 0);
+    const paidEarlierAtTime = Math.max(0, totalPaidAtTime - paidNow);
+    return { totalPaidAtTime, paidEarlierAtTime };
+};
+
 /**
  * Generates a PDF Buffer of the invoice.
  */
 const generateInvoicePDF = async (data) => {
     const { 
-        payment, employee, currentShare, paidEarlier, paidNow, balance, totalRemainingAll, otherDebts, currentItem 
+        payment, employee, currentShare, paidEarlier, paidNow, balance, totalRemainingAll, otherDebts, currentItem, recipientEmail
     } = data;
 
     const browser = await puppeteer.launch({
@@ -109,7 +161,7 @@ const generateInvoicePDF = async (data) => {
                     <h3>Bill To</h3>
                     <p class="val">${employee.firstName} ${employee.lastName}</p>
                     <p>Employee ID: ${employee.employeeId}</p>
-                    <p style="color: #0056b3; text-decoration: underline;">${employee.companyEmail || employee.personalEmail}</p>
+                    <p style="color: #0056b3; text-decoration: underline;">${recipientEmail || ''}</p>
                 </div>
                 <div style="text-align: right;">
                     <h3>Details</h3>
@@ -210,12 +262,12 @@ export const sendPaymentNotificationEmail = async (payment, status, comment = ''
         const employeeId = payment.paidBy._id || payment.paidBy;
         
         const employee = await EmployeeBasic.findById(employeeId)
-            .select('employeeId firstName lastName companyEmail personalEmail primaryReportee')
+            .select('employeeId firstName lastName companyEmail personalEmail workEmail email primaryReportee')
             .populate('primaryReportee', 'firstName lastName companyEmail personalEmail');
 
         if (!employee) return;
 
-        const { email: toEmail, isFallbackToReportee, employeeName, reporteeName } = resolveEmployeeEmail(employee);
+        const toEmail = resolvePaymentRecipientEmail(employee);
         if (!toEmail) return;
 
         // FETCH OUTSTANDING DEBTS
@@ -266,23 +318,43 @@ export const sendPaymentNotificationEmail = async (payment, status, comment = ''
         let pdfBuffer = null;
 
         if (isApproved) {
+            let itemPayments = [];
             if (payment.relatedEntityType === 'Fine') {
                 currentItem = await Fine.findById(payment.relatedEntityId) || await Fine.findOne({ fineId: payment.referenceId });
                 currentShare = calculateEmployeeShare(currentItem, employee.employeeId);
+                if (currentItem) {
+                    itemPayments = await Payment.find({
+                        relatedEntityType: 'Fine',
+                        paidBy: employee._id,
+                        status: { $in: SUCCESS_STATUSES },
+                        $or: [{ relatedEntityId: currentItem._id }, { referenceId: currentItem.fineId }]
+                    }).lean();
+                }
             } else if (payment.relatedEntityType === 'Loan') {
                 currentItem = await Loan.findById(payment.relatedEntityId) || await Loan.findOne({ loanId: payment.referenceId });
                 currentShare = currentItem?.amount || 0;
+                if (currentItem) {
+                    itemPayments = await Payment.find({
+                        relatedEntityType: 'Loan',
+                        paidBy: employee._id,
+                        status: { $in: SUCCESS_STATUSES },
+                        $or: [{ relatedEntityId: currentItem._id }, { referenceId: currentItem.loanId }]
+                    }).lean();
+                }
             }
 
             const paidNow = parseFloat(payment.amount || 0);
-            const totalPaidIncludingNow = parseFloat(currentItem?.paidAmount || 0);
-            paidEarlier = Math.max(0, totalPaidIncludingNow - paidNow);
-            balance = Math.max(0, currentShare - totalPaidIncludingNow);
+            const { totalPaidAtTime, paidEarlierAtTime } = computeHistoricalPaidForEmployee({
+                payments: itemPayments,
+                currentPayment: payment
+            });
+            paidEarlier = paidEarlierAtTime;
+            balance = Math.max(0, currentShare - totalPaidAtTime);
 
             // Generate PDF
             try {
                 pdfBuffer = await generateInvoicePDF({
-                    payment, employee, currentShare, paidEarlier, paidNow, balance, totalRemainingAll, otherDebts, currentItem
+                    payment, employee, currentShare, paidEarlier, paidNow, balance, totalRemainingAll, otherDebts, currentItem, recipientEmail: toEmail
                 });
             } catch (pdfErr) {
                 console.error('[PaymentNotification] PDF Gen Error:', pdfErr);
@@ -307,8 +379,7 @@ export const sendPaymentNotificationEmail = async (payment, status, comment = ''
                 </div>
 
                 <div style="padding: 40px; color: #1e293b;">
-                    ${isFallbackToReportee ? getFallbackEmailNote(employeeName, reporteeName) : ''}
-                    <p>Dear <strong>${isFallbackToReportee ? reporteeName : `${employee.firstName} ${employee.lastName}`}</strong>,</p>
+                    <p>Dear <strong>${employee.firstName} ${employee.lastName}</strong>,</p>
                     <p style="line-height: 1.6; color: #475569;">
                         ${isApproved 
                             ? `Your payment of <strong>AED ${parseFloat(payment.amount).toLocaleString()}</strong> has been successfully processed. Please find your invoice attached to this email.`
@@ -342,11 +413,9 @@ export const sendPaymentNotificationEmail = async (payment, status, comment = ''
             </div>
         `;
 
-        const ccEmail = isFallbackToReportee ? null : (employee.primaryReportee?.companyEmail || null);
         const mailOptions = {
             from: `"VeRP Accounts" <${process.env.EMAIL_USER}>`,
             to: toEmail,
-            ...(ccEmail ? { cc: ccEmail } : {}),
             subject: subject,
             html: html,
             attachments: pdfBuffer ? [{

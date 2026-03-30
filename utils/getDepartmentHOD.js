@@ -9,17 +9,22 @@ import Flowchart from "../models/Flowchart.js";
  */
 export const getDepartmentHOD = async (departmentType) => {
     try {
-        const type = departmentType.toLowerCase();
+        const type = (departmentType || '').toLowerCase().replace(/\s+/g, '');
         let category = type;
-        if (type === 'hr' || type === 'human resource' || type === 'human resources') {
+        
+        // Handle common aliases/formatting
+        if (type === 'hr' || type === 'humanresource' || type === 'humanresources') {
             category = 'hr';
         } else if (type === 'finance' || type === 'accounts' || type === 'accounting') {
             category = 'accounts';
+        } else if (type === 'assetcontroller') {
+            category = 'assetcontroller';
         }
 
-        // Look for active HOD in Flowchart collection
+        // Look for active HOD in Flowchart collection with regex to handle spaces in DB
+        const categoryRegex = new RegExp(`^${category.split('').join('\\s*')}$`, 'i');
         const responsibility = await Flowchart.findOne({
-            category: category,
+            category: { $regex: categoryRegex },
             status: 'Active'
         }).populate('empObjectId', 'employeeId firstName lastName companyEmail email designation department profileStatus signature');
 
@@ -70,8 +75,11 @@ export const isUserInFlowchart = async (user, category) => {
     try {
         if (!user) return false;
 
+        const normalizedCategory = (category || '').toLowerCase().replace(/\s+/g, '');
+        const categoryRegex = new RegExp(`^${normalizedCategory.split('').join('\\s*')}$`, 'i');
+
         const query = {
-            category: category.toLowerCase(),
+            category: { $regex: categoryRegex },
             status: { $in: ['Active', 'Pending'] }, // Allow both Active and Pending
             $or: []
         };

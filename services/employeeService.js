@@ -214,8 +214,8 @@ export const getCompleteEmployee = async (id) => {
             EmployeeDrivingLicense.findOne({ employeeId }, null, queryOptions).select('-__v -drivingLicenceDetails.document.data').lean(),
             salaryQueryPromise,
             EmployeeBank.findOne({ employeeId }, null, queryOptions).select('-__v -bankAttachment.data').lean(),
-            EmployeeEducation.findOne({ employeeId }, null, queryOptions).select('-__v -educationDetails.certificate.data').lean(),
-            EmployeeExperience.findOne({ employeeId }, null, queryOptions).select('-__v -experienceDetails.certificate.data').lean(),
+            EmployeeEducation.findOne({ employeeId }, null, queryOptions).select('-__v').lean(),
+            EmployeeExperience.findOne({ employeeId }, null, queryOptions).select('-__v').lean(),
             EmployeeEmergencyContact.findOne({ employeeId }, null, queryOptions).select('-__v').lean(),
             EmployeeTraining.findOne({ employeeId }, null, queryOptions).select('-__v -trainingDetails.certificate.data').lean(),
             User.findOne({ employeeId, status: 'Active' }, 'enablePortalAccess', queryOptions).lean()
@@ -352,7 +352,10 @@ export const getCompleteEmployee = async (id) => {
             // Ensure signature is properly mapped and ready for signing
             signature: employeeBasic.signature ? {
                 url: employeeBasic.signature.url,
-                publicId: employeeBasic.signature.url, // Store Key as publicId for signUrl helper
+                publicId: employeeBasic.signature.publicId || employeeBasic.signature.url, // Keep backward compatibility
+                name: employeeBasic.signature.name,
+                mimeType: employeeBasic.signature.mimeType,
+                format: employeeBasic.signature.format,
                 signedAt: employeeBasic.signature.signedAt,
                 ipAddress: employeeBasic.signature.ipAddress
             } : undefined,
@@ -586,7 +589,7 @@ export const getCompleteEmployee = async (id) => {
                     publicId: bank.bankAttachment.publicId
                 } : undefined,
             }),
-            // Education details - exclude large certificate.data fields
+            // Education details
             ...(education && {
                 educationDetails: education.educationDetails ? education.educationDetails.map(edu => ({
                     ...edu,
@@ -594,11 +597,13 @@ export const getCompleteEmployee = async (id) => {
                         name: edu.certificate.name,
                         mimeType: edu.certificate.mimeType,
                         url: edu.certificate.url,
-                        publicId: edu.certificate.publicId
+                        publicId: edu.certificate.publicId,
+                        // Legacy fallback for older records stored with base64-only certificate
+                        data: (!edu.certificate.url && edu.certificate.data) ? edu.certificate.data : undefined
                     } : undefined,
                 })) : [],
             }),
-            // Experience details - exclude large certificate.data fields
+            // Experience details
             ...(experience && {
                 experienceDetails: experience.experienceDetails ? experience.experienceDetails.map(exp => ({
                     ...exp,
@@ -606,7 +611,9 @@ export const getCompleteEmployee = async (id) => {
                         name: exp.certificate.name,
                         mimeType: exp.certificate.mimeType,
                         url: exp.certificate.url,
-                        publicId: exp.certificate.publicId
+                        publicId: exp.certificate.publicId,
+                        // Legacy fallback for older records stored with base64-only certificate
+                        data: (!exp.certificate.url && exp.certificate.data) ? exp.certificate.data : undefined
                     } : undefined,
                 })) : [],
             }),

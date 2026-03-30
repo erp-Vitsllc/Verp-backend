@@ -1,5 +1,6 @@
 import EmployeeExperience from "../../models/EmployeeExperience.js";
 import { getCompleteEmployee, resolveEmployeeId } from "../../services/employeeService.js";
+import { uploadDocumentToS3 } from "../../utils/s3Upload.js";
 
 export const addExperience = async (req, res) => {
     const { id } = req.params;
@@ -30,16 +31,37 @@ export const addExperience = async (req, res) => {
 
         const employeeId = employee.employeeId;
 
+        let certificateData;
+        if (certificate) {
+            if (certificate.data && typeof certificate.data === 'string') {
+                const folderPath = `employee-documents/${employeeId}/experience`;
+                const uploadResult = await uploadDocumentToS3(
+                    certificate.data,
+                    folderPath,
+                    certificate.name || 'experience-certificate'
+                );
+                certificateData = {
+                    name: certificate.name || '',
+                    mimeType: certificate.mimeType || 'application/pdf',
+                    url: uploadResult.url,
+                    publicId: uploadResult.publicId
+                };
+            } else if (certificate.url) {
+                certificateData = {
+                    name: certificate.name || '',
+                    mimeType: certificate.mimeType || 'application/pdf',
+                    url: certificate.url,
+                    publicId: certificate.publicId
+                };
+            }
+        }
+
         const experienceData = {
             company: company.trim(),
             designation: designation.trim(),
             startDate: new Date(startDate),
             endDate: endDate ? new Date(endDate) : null,
-            certificate: certificate && certificate.data ? {
-                data: certificate.data,
-                name: certificate.name || '',
-                mimeType: certificate.mimeType || 'application/pdf'
-            } : undefined
+            certificate: certificateData
         };
 
         // Update or create experience record

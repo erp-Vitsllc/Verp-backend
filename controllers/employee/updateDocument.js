@@ -28,7 +28,22 @@ export const updateDocument = async (req, res) => {
             return res.status(400).json({ message: "Invalid document index" });
         }
 
-        // Update fields if provided
+        // Archive current version before replacing/editing
+        const currentDoc = employee.documents[docIndex];
+        if (currentDoc) {
+            if (!employee.oldDocuments) employee.oldDocuments = [];
+            employee.oldDocuments.push({
+                type: currentDoc.type || '',
+                description: currentDoc.description || '',
+                expiryDate: currentDoc.expiryDate || null,
+                createdAt: currentDoc.createdAt || null,
+                archivedAt: new Date(),
+                archiveReason: 'Replaced',
+                document: currentDoc.document || null
+            });
+        }
+
+        // Update fields on live document
         if (type) employee.documents[docIndex].type = type;
         if (description) employee.documents[docIndex].description = description;
         if (expiryDate !== undefined) employee.documents[docIndex].expiryDate = expiryDate;

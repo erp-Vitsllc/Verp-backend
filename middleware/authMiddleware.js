@@ -31,10 +31,30 @@ export const protect = async (req, res, next) => {
             return res.status(401).json({ message: "Portal access is disabled for this user" });
         }
 
-        // Find linked employee record if available
+        // Find linked employee record if available (exact match, then space/case-tolerant match)
         let employeeObjectId = null;
         if (user.employeeId) {
-            const emp = await EmployeeBasic.findOne({ employeeId: user.employeeId }).select('_id');
+            let emp = await EmployeeBasic.findOne({ employeeId: user.employeeId }).select('_id');
+            if (!emp) {
+                const norm = (s) => (s || '').toString().toLowerCase().replace(/\s+/g, '');
+                const userNorm = norm(user.employeeId);
+                if (userNorm) {
+                    emp = await EmployeeBasic.findOne({
+                        $expr: {
+                            $eq: [
+                                {
+                                    $replaceAll: {
+                                        input: { $toLower: { $ifNull: ['$employeeId', ''] } },
+                                        find: ' ',
+                                        replacement: ''
+                                    }
+                                },
+                                userNorm
+                            ]
+                        }
+                    }).select('_id');
+                }
+            }
             if (emp) employeeObjectId = emp._id;
         }
 

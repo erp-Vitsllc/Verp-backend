@@ -1,18 +1,27 @@
 import EmployeeEducation from "../../models/EmployeeEducation.js";
 import { getCompleteEmployee, resolveEmployeeId } from "../../services/employeeService.js";
+import { uploadDocumentToS3 } from "../../utils/s3Upload.js";
 
 export const addEducation = async (req, res) => {
     const { id } = req.params;
     const { universityOrBoard, collegeOrInstitute, course, fieldOfStudy, completedYear, certificate } = req.body;
 
-    // Validate required fields and types
-    if (typeof universityOrBoard !== 'string' || !universityOrBoard.trim() ||
-        typeof collegeOrInstitute !== 'string' || !collegeOrInstitute.trim() ||
-        typeof course !== 'string' || !course.trim() ||
+    // Required: course, fieldOfStudy, completedYear
+    if (typeof course !== 'string' || !course.trim() ||
         typeof fieldOfStudy !== 'string' || !fieldOfStudy.trim() ||
         typeof completedYear !== 'string' || !completedYear.trim()) {
         return res.status(400).json({
-            message: "University, College, Course, Field of Study, and Completed Year are required and must be strings"
+            message: "Course, Field of Study, and Completed Year are required and must be strings"
+        });
+    }
+
+    // Optional: universityOrBoard, collegeOrInstitute (must be string if provided)
+    if (
+        (universityOrBoard !== undefined && typeof universityOrBoard !== 'string') ||
+        (collegeOrInstitute !== undefined && typeof collegeOrInstitute !== 'string')
+    ) {
+        return res.status(400).json({
+            message: "University and College must be valid strings when provided"
         });
     }
 
@@ -25,17 +34,38 @@ export const addEducation = async (req, res) => {
 
         const employeeId = employee.employeeId;
 
+        let certificateData;
+        if (certificate) {
+            if (certificate.data && typeof certificate.data === 'string') {
+                const folderPath = `employee-documents/${employeeId}/education`;
+                const uploadResult = await uploadDocumentToS3(
+                    certificate.data,
+                    folderPath,
+                    certificate.name || 'education-certificate'
+                );
+                certificateData = {
+                    name: certificate.name || '',
+                    mimeType: certificate.mimeType || 'application/pdf',
+                    url: uploadResult.url,
+                    publicId: uploadResult.publicId
+                };
+            } else if (certificate.url) {
+                certificateData = {
+                    name: certificate.name || '',
+                    mimeType: certificate.mimeType || 'application/pdf',
+                    url: certificate.url,
+                    publicId: certificate.publicId
+                };
+            }
+        }
+
         const educationData = {
-            universityOrBoard: universityOrBoard.trim(),
-            collegeOrInstitute: collegeOrInstitute.trim(),
+            universityOrBoard: (universityOrBoard || '').trim(),
+            collegeOrInstitute: (collegeOrInstitute || '').trim(),
             course: course.trim(),
             fieldOfStudy: fieldOfStudy.trim(),
             completedYear: completedYear.trim(),
-            certificate: certificate && certificate.data ? {
-                data: certificate.data,
-                name: certificate.name || '',
-                mimeType: certificate.mimeType || 'application/pdf'
-            } : undefined
+            certificate: certificateData
         };
 
         // Update or create education record

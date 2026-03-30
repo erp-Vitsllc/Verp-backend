@@ -68,6 +68,10 @@ const employeeBasicSchema = new mongoose.Schema(
         // SIGNATURE
         signature: {
             url: { type: String }, // Storage URL (IDrive/S3)
+            publicId: { type: String }, // Storage object key
+            name: { type: String },
+            mimeType: { type: String },
+            format: { type: String },
             signedAt: { type: Date },
             ipAddress: { type: String }
         },
@@ -82,6 +86,24 @@ const employeeBasicSchema = new mongoose.Schema(
                 document: {
                     url: { type: String }, // Storage URL (preferred)
                     data: { type: String }, // Base64 data (legacy/fallback)
+                    name: { type: String },
+                    mimeType: { type: String }
+                }
+            }
+        ],
+
+        // Archived versions of manual documents (replaced/deleted)
+        oldDocuments: [
+            {
+                type: { type: String },
+                description: { type: String },
+                expiryDate: { type: Date },
+                createdAt: { type: Date },
+                archivedAt: { type: Date, default: Date.now },
+                archiveReason: { type: String, enum: ['Replaced', 'Deleted'], default: 'Replaced' },
+                document: {
+                    url: { type: String },
+                    data: { type: String },
                     name: { type: String },
                     mimeType: { type: String }
                 }

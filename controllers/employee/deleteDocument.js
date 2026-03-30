@@ -26,8 +26,20 @@ export const deleteDocument = async (req, res) => {
             return res.status(400).json({ message: "Invalid document index" });
         }
 
-        // Get document to be deleted (optional: for logging or cleanup)
-        // const documentToDelete = employee.documents[docIndex];
+        // Archive document before deleting from live list
+        const documentToDelete = employee.documents[docIndex];
+        if (documentToDelete) {
+            if (!employee.oldDocuments) employee.oldDocuments = [];
+            employee.oldDocuments.push({
+                type: documentToDelete.type || '',
+                description: documentToDelete.description || '',
+                expiryDate: documentToDelete.expiryDate || null,
+                createdAt: documentToDelete.createdAt || null,
+                archivedAt: new Date(),
+                archiveReason: 'Deleted',
+                document: documentToDelete.document || null
+            });
+        }
 
         // Remove document from array
         employee.documents.splice(docIndex, 1);

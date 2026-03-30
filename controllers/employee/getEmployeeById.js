@@ -62,7 +62,7 @@ export const getEmployeeById = async (req, res) => {
         try {
             const fines = await Fine.find({
                 "assignedEmployees.employeeId": employee.employeeId,
-                fineStatus: { $in: ["Approved", "Completed", "Active"] } // Include Active/Completed as per request implies "Approved" in broad sense or final state
+                fineStatus: { $in: ["Approved", "Paid"] }
             }).sort({ createdAt: -1 }).lean();
 
             const rewards = await Reward.find({
@@ -73,7 +73,7 @@ export const getEmployeeById = async (req, res) => {
             // Fetch Approved Loans and Advances
             const loans = await Loan.find({
                 employeeId: employee.employeeId,
-                status: "Approved"
+                status: { $in: ["Approved", "Paid"] }
             }).sort({ createdAt: -1 }).lean();
 
             // Fetch Assigned Assets (Included assets where user needs to take action, e.g., HR handover)

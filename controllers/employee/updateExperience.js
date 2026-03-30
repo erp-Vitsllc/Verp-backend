@@ -1,5 +1,6 @@
 import EmployeeExperience from "../../models/EmployeeExperience.js";
 import { getCompleteEmployee, resolveEmployeeId } from "../../services/employeeService.js";
+import { uploadDocumentToS3 } from "../../utils/s3Upload.js";
 
 export const updateExperience = async (req, res) => {
     const { id, experienceId } = req.params;
@@ -54,10 +55,24 @@ export const updateExperience = async (req, res) => {
 
         // Update certificate if provided
         if (certificate && certificate.data) {
+            const folderPath = `employee-documents/${employeeId}/experience`;
+            const uploadResult = await uploadDocumentToS3(
+                certificate.data,
+                folderPath,
+                certificate.name || 'experience-certificate'
+            );
             experience.certificate = {
-                data: certificate.data,
                 name: certificate.name || '',
-                mimeType: certificate.mimeType || 'application/pdf'
+                mimeType: certificate.mimeType || 'application/pdf',
+                url: uploadResult.url,
+                publicId: uploadResult.publicId
+            };
+        } else if (certificate && certificate.url) {
+            experience.certificate = {
+                name: certificate.name || '',
+                mimeType: certificate.mimeType || 'application/pdf',
+                url: certificate.url,
+                publicId: certificate.publicId
             };
         } else if (certificate === null) {
             // Allow clearing the certificate
