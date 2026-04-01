@@ -1,8 +1,7 @@
 import express from "express";
 import cors from "cors";
 import compression from "compression";
-import dotenv from "dotenv";
-import { connectDB } from "./config/db.js"; // <-- Import DB connection
+// import { connectDB } from "./config/db.js"; // <-- Import DB connection
 import loginRoute from "./routes/loginRoutes.js"; // <-- Add routes
 import employeeRoute from "./routes/employeeRoutes.js"; // <-- Add employee routes
 import documentAIRoute from "./routes/documentAIRoutes.js";
@@ -15,14 +14,30 @@ import designationRoute from "./routes/designationRoutes.js";
 import companyRoute from "./routes/companyRoutes.js";
 import assetTypeRoute from "./routes/assetTypeRoutes.js";
 import assetItemRoute from "./routes/assetItemRoutes.js"; // <-- Add asset item routes
+import assetAccessoryCatalogRoute from "./routes/assetAccessoryCatalogRoutes.js";
 import flowchartRoute from "./routes/flowchartRoutes.js"; // <-- Add flowchart routes
 import { commonLimiter } from "./middleware/rateLimitMiddleware.js";
+import dotenv from "dotenv";
+import { connectDB } from "./config/db.js";
+import dns from "dns";
+import { processParkingAssets } from "./utils/processParkingAssets.js";
+
+dotenv.config();
+
+// Set DNS before DB connection
+dns.setServers(["8.8.8.8"]);
+
+connectDB(); // Now Atlas hostname will resolve correctly
 
 dotenv.config();
 connectDB(); // <-- Call DB connection
 
 const app = express();
 app.disable("x-powered-by");
+
+// Run parking lifecycle checks (reminders + auto-unassign) periodically.
+setTimeout(() => { processParkingAssets(); }, 30 * 1000);
+setInterval(() => { processParkingAssets(); }, 6 * 60 * 60 * 1000);
 
 // CORS Configuration - MUST BE FIRST
 app.use(cors({
@@ -69,6 +84,7 @@ app.use("/api/Designation", designationRoute);
 app.use("/api/Company", companyRoute);
 app.use("/api/AssetType", assetTypeRoute);
 app.use("/api/AssetItem", assetItemRoute);
+app.use("/api/AssetAccessoryCatalog", assetAccessoryCatalogRoute);
 app.use("/api/Flowchart", flowchartRoute);
 
 const PORT = process.env.PORT || 5000;

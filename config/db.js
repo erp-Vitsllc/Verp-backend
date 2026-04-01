@@ -5,12 +5,13 @@ import { getAllPermissions } from "../services/permissionService.js";
 export const connectDB = async () => {
     try {
         await mongoose.connect(process.env.MONGO_URI, {
+            // authSource: "VERP",
             serverSelectionTimeoutMS: 10000, // Timeout after 10 seconds if server selection fails
             socketTimeoutMS: 45000, // Close sockets after 45 seconds of inactivity
             connectTimeoutMS: 10000, // Give up initial connection after 10 seconds
         });
         console.log("MongoDB Connected Successfully");
-        
+
         // Initialize default Admin group
         await initializeAdminGroup();
     } catch (error) {

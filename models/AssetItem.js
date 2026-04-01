@@ -137,6 +137,14 @@ const assetItemSchema = new mongoose.Schema({
         type: Number, // Duration in days
         default: null
     },
+    parkingExtendedDays: {
+        type: Number,
+        default: 0
+    },
+    parkingReminderSentAt: {
+        type: Date,
+        default: null
+    },
     acceptedBy: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'EmployeeBasic',
@@ -163,6 +171,7 @@ const assetItemSchema = new mongoose.Schema({
         accessoryId: { type: String },
         name: { type: String, required: true },
         amount: { type: Number, default: 0 },
+        description: { type: String, default: '', trim: true },
         attachment: { type: String, default: null },
         status: {
             type: String,
@@ -183,6 +192,7 @@ const assetItemSchema = new mongoose.Schema({
         },
         pendingActionDetails: {
             targetAssetId: { type: mongoose.Schema.Types.ObjectId, ref: 'AssetItem', default: null },
+            catalogItemId: { type: mongoose.Schema.Types.ObjectId, ref: 'AssetAccessoryCatalog', default: null },
             reason: { type: String, default: null },
             attachment: { type: String, default: null },
             fineData: { type: mongoose.Schema.Types.Mixed, default: null },

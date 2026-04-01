@@ -26,7 +26,7 @@ export const getDepartmentHOD = async (departmentType) => {
         const responsibility = await Flowchart.findOne({
             category: { $regex: categoryRegex },
             status: 'Active'
-        }).populate('empObjectId', 'employeeId firstName lastName companyEmail email designation department profileStatus signature');
+        }).populate('empObjectId', 'employeeId firstName lastName companyEmail workEmail personalEmail email designation department profileStatus signature');
 
         if (responsibility) {
             if (responsibility.empObjectId) {
@@ -34,9 +34,12 @@ export const getDepartmentHOD = async (departmentType) => {
             }
 
             // Fallback: If empObjectId is missing, try to find the employee by employeeId
-            const employee = await EmployeeBasic.findOne({
-                employeeId: { $regex: new RegExp(`^${responsibility.employeeId.replace(/\s+/g, '\\s*')}$`, 'i') }
-            }).select('employeeId firstName lastName companyEmail email designation department profileStatus signature');
+            const safeEmployeeIdRegex = buildWhitespaceAgnosticExactRegex(responsibility.employeeId);
+            const employee = safeEmployeeIdRegex
+                ? await EmployeeBasic.findOne({
+                    employeeId: { $regex: safeEmployeeIdRegex }
+                }).select('employeeId firstName lastName companyEmail workEmail personalEmail email designation department profileStatus signature')
+                : null;
 
             if (employee) {
                 // Auto-repair the flowchart entry for next time
@@ -65,6 +68,22 @@ export const getDepartmentHOD = async (departmentType) => {
     }
 };
 
+const escapeRegExp = (value) => {
+    return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+};
+
+// Build an "exact match ignoring whitespace" regex for employeeId.
+// - Escapes regex metacharacters (so employeeId like "A.123" won't match wrongly)
+// - Allows different whitespace inside the string
+const buildWhitespaceAgnosticExactRegex = (value) => {
+    const raw = String(value ?? '').trim();
+    if (!raw) return null;
+    const parts = raw.split(/\s+/).filter(Boolean);
+    if (parts.length === 0) return null;
+    const pattern = parts.map(p => escapeRegExp(p)).join('\\s*');
+    return new RegExp(`^${pattern}$`, 'i');
+};
+
 /**
  * Checks if a specific user is assigned to a category in the Flowchart.
  * @param {Object} user The user object (usually from req.user)
@@ -85,7 +104,10 @@ export const isUserInFlowchart = async (user, category) => {
         };
 
         if (user.employeeObjectId) query.$or.push({ empObjectId: user.employeeObjectId });
-        if (user.employeeId) query.$or.push({ employeeId: { $regex: new RegExp(`^${user.employeeId.replace(/\s+/g, '\\s*')}$`, 'i') } });
+        if (user.employeeId) {
+            const safeEmployeeIdRegex = buildWhitespaceAgnosticExactRegex(user.employeeId);
+            if (safeEmployeeIdRegex) query.$or.push({ employeeId: { $regex: safeEmployeeIdRegex } });
+        }
 
         if (query.$or.length === 0) return false;
 

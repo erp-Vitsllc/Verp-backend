@@ -80,6 +80,11 @@ export const sendAssetAssignmentEmail = async ({ asset, assets = [], employee, r
 
         const isSelfAssignment =
             !employee?.isCompany && recipient?._id?.toString() === employee?._id?.toString();
+        const isPrimaryReporteeRecipient =
+            !employee?.isCompany &&
+            !!recipient?._id &&
+            !!employee?._id &&
+            recipient._id?.toString() !== employee._id?.toString();
 
         const subject = employee?.isCompany
             ? (isBulk ? `Asset Allocation for ${employeeName}: ${assetCount} Items` : `Asset Allocated to ${employeeName}: ${asset.name} (${asset.assetId})`)
@@ -96,7 +101,16 @@ export const sendAssetAssignmentEmail = async ({ asset, assets = [], employee, r
         console.log(`[Email Debug] Generating button URL: ${buttonUrl}`);
 
         const recipientName = `${recipient?.firstName || ""} ${recipient?.lastName || ""}`.trim() || recipient?.employeeId || "User";
-        const fallbackNote = "";
+        const fallbackNote = isPrimaryReporteeRecipient
+            ? `
+                <div style="background-color: #fffbeb; border: 1px solid #f59e0b; color: #92400e; padding: 12px; border-radius: 8px; margin-bottom: 18px; font-size: 13px;">
+                    <strong>Primary Reportee Notice:</strong> This asset is assigned under your reportee
+                    <strong> ${employeeName}</strong>${employee?.employeeId ? ` (${employee.employeeId})` : ''}.
+                    You are receiving this request because the assignee does not have active portal/login access.
+                    This is your under employee's asset request.
+                </div>
+            `
+            : "";
 
         const html = `
             <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; color: #1e293b; line-height: 1.6; max-width: 600px; margin: 0 auto; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden; background-color: #ffffff;">
@@ -107,7 +121,11 @@ export const sendAssetAssignmentEmail = async ({ asset, assets = [], employee, r
                     ${fallbackNote}
                     <p style="font-size: 16px;">Hello ${recipientName},</p>
                     
-                    <p>A new ${isBulk ? 'batch of assets has' : 'asset has'} been ${employee?.isCompany ? 'allocated' : 'assigned'} to <strong>${isSelfAssignment ? 'you' : employeeName}</strong>.</p>
+                    <p>
+                        A new ${isBulk ? 'batch of assets has' : 'asset has'} been ${employee?.isCompany ? 'allocated' : 'assigned'}
+                        to <strong>${isSelfAssignment ? 'you' : employeeName}</strong>.
+                        ${isPrimaryReporteeRecipient ? 'Please review and respond on behalf of your reportee.' : ''}
+                    </p>
                     
                     <div style="background-color: #f8fafc; padding: 25px; border-radius: 8px; margin: 25px 0; border: 1px solid #e2e8f0;">
                         <table style="width: 100%; border-collapse: collapse;">

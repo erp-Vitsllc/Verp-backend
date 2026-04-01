@@ -3,12 +3,17 @@ import mongoose from 'mongoose';
 import { createAssetType, getAssetTypes, deleteAssetType, getAssetTypeById, uploadInvoice, updateAssetItem, submitAssetForApproval } from '../controllers/assetTypeController.js';
 import { protect } from '../middleware/authMiddleware.js';
 import { isUserInFlowchart } from '../utils/getDepartmentHOD.js';
+import { isUserAdministrator } from '../services/permissionService.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import User from '../models/User.js';
 
 const requireAssetControllerOrAdmin = async (req, res, next) => {
     try {
-        const isAdmin = req.user.isAdmin === true || req.user.role === 'Admin' || req.user.role === 'ROOT';
+        const isAdmin =
+            req.user.isAdmin === true ||
+            req.user.role === 'Admin' ||
+            req.user.role === 'ROOT' ||
+            await isUserAdministrator(req.user?.id);
         if (isAdmin) return next();
 
         if (await isUserInFlowchart(req.user, 'assetcontroller')) return next();
@@ -21,10 +26,10 @@ const requireAssetControllerOrAdmin = async (req, res, next) => {
             if (asset) {
                 const currentUserId = req.user._id?.toString() || req.user.id?.toString();
                 const isCreator = asset.createdBy?.toString() === currentUserId;
-                const isEditableDraft = asset.status === 'Draft' && !asset.actionRequiredBy;
+                const isAwaitingCreationApproval = asset.status === 'Draft' || asset.status === 'Pending';
 
-                // Allow creator only for editable Draft (before submission)
-                if (isCreator && isEditableDraft) {
+                // Allow creator before creation approval is finalized
+                if (isCreator && isAwaitingCreationApproval) {
                     return next();
                 }
 

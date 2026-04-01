@@ -195,12 +195,12 @@ export const getUserActivityStats = async (req, res) => {
                 .sort({ createdAt: -1 }).limit(15),
             // Outgoing Assets (Assigned by me)
             import("../../models/AssetItem.js").then(m => m.default).then(Model =>
-                Model.find({ 
+                Model.find({
                     $or: [
                         { assignedBy: { $in: relevantIds } },
                         { createdBy: currentUser?._id },
                         { "pendingActionDetails.requestedBy": { $in: relevantIds } }
-                    ] 
+                    ]
                 }).sort({ createdAt: -1 }).limit(15)
             )
         ];
@@ -214,15 +214,26 @@ export const getUserActivityStats = async (req, res) => {
         const activityList = [];
         const seenRequests = new Map(); // requestId -> status to track and deduplicate
 
+        const normEmpId = (s) => (s || '').toString().toLowerCase().replace(/\s+/g, '');
+        const targetEmpNorm = normEmpId(targetEmployeeId);
+
         dashboardPendingItems.forEach(item => {
             const reqIdStr = item.requestId?.toString();
-            
+
             // For Fines, try to use fineId for cleaner URLs
             let displayId = reqIdStr;
             if (item.requestType === 'Fine' || item.requestType === 'Group Fine Request') {
                 const fine = pendingFines.find(f => f._id.toString() === reqIdStr);
                 if (fine) displayId = fine.fineId;
             }
+
+            // Scope correction:
+            // - Asset creation approval is an "outgoing" request for the creator (subject employee)
+            // - It remains "inbox" for assigned approvers (asset controller/admin)
+            const isCreatorSideAssetApproval =
+                item.requestType === 'Asset Approval' &&
+                targetEmpNorm &&
+                normEmpId(item.subjectEmployeeId) === targetEmpNorm;
 
             activityList.push({
                 id: displayId,
@@ -235,7 +246,7 @@ export const getUserActivityStats = async (req, res) => {
                 extra1: item.extra1,
                 extra2: item.extra2,
                 targetEmployeeId: item.subjectEmployeeId?.toString(),
-                scope: 'inbox'
+                scope: isCreatorSideAssetApproval ? 'outgoing' : 'inbox'
             });
             if (reqIdStr) seenRequests.set(reqIdStr, 'Pending');
         });

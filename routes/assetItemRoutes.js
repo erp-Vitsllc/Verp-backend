@@ -48,11 +48,22 @@ const requireAssetControllerOrAdmin = async (req, res, next) => {
 
         if (targetId) {
             const AssetItem = (await import('../models/AssetItem.js')).default;
-            const asset = await AssetItem.findById(targetId);
-            const currentEmpId = req.user?.employeeObjectId?.toString();
+            const asset = await AssetItem.findById(targetId).select('assignedTo assignedBy createdBy status');
+            let currentEmpId = req.user?.employeeObjectId?.toString();
+            if (!currentEmpId && req.user?.employeeId) {
+                const me = await EmployeeBasic.findOne({
+                    employeeId: { $regex: new RegExp(`^${String(req.user.employeeId).replace(/\s+/g, '\\s*')}$`, 'i') }
+                }).select('_id').lean().catch(() => null);
+                if (me?._id) currentEmpId = me._id.toString();
+            }
 
             // Allow if seeking to manage their own assigned asset
             if (asset && asset.assignedTo && asset.assignedTo.toString() === currentEmpId) {
+                return next();
+            }
+
+            // Allow current assigner to reassign/manage this asset
+            if (asset && asset.assignedBy && asset.assignedBy.toString() === currentEmpId) {
                 return next();
             }
 
@@ -95,18 +106,62 @@ const requireAssetFullAccess = async (req, res, next) => {
         const isAdminUser = await isAdminForAssetRoutes(req.user);
         const isAssetControllerUser = await isDesignatedAssetController(req.user);
 
+        // Admin / designated Asset Controller always have full access.
+        if (isAdminUser || isAssetControllerUser) return next();
+
         // Check for specific employee permissions (Assigned User or Action Required By)
-        const currentEmpId = req.user?.employeeObjectId?.toString();
+        let currentEmpId = req.user?.employeeObjectId?.toString();
         const currentUserId = req.user?._id?.toString();
+        if (!currentEmpId && req.user?.employeeId) {
+            const me = await EmployeeBasic.findOne({
+                employeeId: { $regex: new RegExp(`^${String(req.user.employeeId).replace(/\s+/g, '\\s*')}$`, 'i') }
+            }).select('_id').lean().catch(() => null);
+            if (me?._id) currentEmpId = me._id.toString();
+        }
 
         if (id) {
             const AssetItem = (await import('../models/AssetItem.js')).default;
-            const asset = await AssetItem.findById(id).select('assignedTo status actionRequiredBy createdBy');
+            const asset = await AssetItem.findById(id).select('assignedTo status actionRequiredBy createdBy accessories');
             if (asset) {
                 const assignedToEmpId = asset.assignedTo ? asset.assignedTo.toString() : null;
+                const actionRequiredById = asset.actionRequiredBy ? asset.actionRequiredBy.toString() : null;
+                const accId = req.params?.accId?.toString?.();
+
+                // For assignment response flow, allow the designated responder first.
+                // Reassignment keeps old holder in assignedTo until acceptance, so this is required.
+                if (req.originalUrl?.includes('/respond') && actionRequiredById && actionRequiredById === currentEmpId) {
+                    return next();
+                }
 
                 // Employee assignment: STRICTLY allow only assigned employee or (if no ERP access) their primaryReportee.
                 if (assignedToEmpId) {
+                    // Special case: accessory transfer approval can be actioned by workflow participants
+                    // (target assigned employee and source assigner/holder), even if they are not source-assigned user.
+                    if (accId) {
+                        const pendingAccessory = (asset.accessories || []).find(a =>
+                            (a?._id?.toString?.() === accId) || (a?.accessoryId?.toString?.() === accId)
+                        );
+                        if (pendingAccessory?.pendingAction === 'Transfer') {
+                            // For transfer response/finalization, do not hard-block in middleware.
+                            // Controller-level logic performs the final approver authorization.
+                            if (
+                                req.originalUrl?.includes('/respond-action') ||
+                                req.originalUrl?.includes('/finalize-action')
+                            ) {
+                                return next();
+                            }
+
+                            const transferTargetApproverId = pendingAccessory.pendingActionDetails?.targetApproverId?.toString?.() || pendingAccessory.pendingActionDetails?.targetApproverId;
+                            const transferSourceApproverId = pendingAccessory.pendingActionDetails?.sourceApproverId?.toString?.() || pendingAccessory.pendingActionDetails?.sourceApproverId;
+                            if (
+                                (transferTargetApproverId && transferTargetApproverId.toString() === currentEmpId) ||
+                                (transferSourceApproverId && transferSourceApproverId.toString() === currentEmpId)
+                            ) {
+                                return next();
+                            }
+                        }
+                    }
+
                     if (assignedToEmpId === currentEmpId) return next();
 
                     // Delegate allowed only when the assigned employee has NO ERP portal access
@@ -219,6 +274,42 @@ const requireReturnAssetAccess = async (req, res, next) => {
     }
 };
 
+/**
+ * Parking actions: only assigned employee of that parked asset, Asset Controller, or Admin.
+ */
+const requireParkingAssetAccess = async (req, res, next) => {
+    try {
+        const isAdminUser = await isAdminForAssetRoutes(req.user);
+        const isAssetControllerUser = await isDesignatedAssetController(req.user);
+        if (isAdminUser || isAssetControllerUser) return next();
+
+        const { id } = req.params;
+        let currentEmpId = req.user?.employeeObjectId?.toString();
+        if (!currentEmpId && req.user?.employeeId) {
+            const emp = await EmployeeBasic.findOne({
+                employeeId: { $regex: new RegExp(`^${String(req.user.employeeId).replace(/\s+/g, '\\s*')}$`, 'i') }
+            }).select('_id').lean().catch(() => null);
+            if (emp?._id) currentEmpId = emp._id.toString();
+        }
+
+        if (!id || !currentEmpId) {
+            return res.status(403).json({ message: 'Access denied. Only assigned user, Asset Controller, or Admin can perform parking actions.' });
+        }
+
+        const AssetItem = (await import('../models/AssetItem.js')).default;
+        const asset = await AssetItem.findById(id).select('assignedTo status');
+        if (!asset) return res.status(404).json({ message: 'Asset not found' });
+
+        const isOnLeave = String(asset.status || '').toLowerCase().trim() === 'on leave';
+        const isAssignedUser = asset.assignedTo && asset.assignedTo.toString() === currentEmpId;
+        if (isOnLeave && isAssignedUser) return next();
+
+        return res.status(403).json({ message: 'Access denied. Only assigned user, Asset Controller, or Admin can perform parking actions.' });
+    } catch (error) {
+        next(error);
+    }
+};
+
 const router = express.Router();
 
 router.route('/')
@@ -240,12 +331,12 @@ router.put('/bulk/on-leave-action', protect, requireAssetControllerOrAdmin, (req
     bulkHandleOnLeaveAction(req, res, next);
 });
 router.put('/:id/assign', protect, requireAssetControllerOrAdmin, assignAssetItem);
-router.put('/:id/respond', protect, requireAssetFullAccess, respondToAssignment);
-router.put('/bulk/respond', protect, requireAssetFullAccess, bulkRespondToAssignment);
+router.put('/:id/respond', protect, respondToAssignment);
+router.put('/bulk/respond', protect, bulkRespondToAssignment);
 router.post('/transfer', protect, requireAssetControllerOrAdmin, transferAsset);
 router.put('/:id/approve-creation', protect, requireAssetControllerOrAdmin, respondToAssetCreation);
 router.put('/:id/return', protect, requireReturnAssetAccess, returnAssetItem);
-router.put('/:id/on-leave-action', protect, requireAssetControllerOrAdmin, (req, res, next) => {
+router.put('/:id/on-leave-action', protect, requireParkingAssetAccess, (req, res, next) => {
     console.log(`[Route] PUT /${req.params.id}/on-leave-action hit`);
     handleOnLeaveAction(req, res, next);
 });
@@ -272,8 +363,9 @@ router.put('/:id/accessories/:accId/transfer', protect, requireAssetControllerOr
 router.put('/:id/accessories/:accId/status', protect, requireAssetFullAccess, manageAccessoryStatus);
 router.put('/:id/accessories-attachment', protect, requireAssetFullAccess, uploadAccessoriesAttachment);
 router.put('/:id/accessories/:accId/request-action', protect, requireAssetFullAccess, requestAccessoryAction);
+// Accessory approval response: Asset Controller/Admin must always be able to act.
 router.put('/:id/accessories/:accId/respond-action', protect, requireAssetFullAccess, respondAccessoryAction);
-router.put('/:id/accessories/:accId/finalize-action', protect, requireAssetControllerOrAdmin, finalizeAccessoryAction);
+router.put('/:id/accessories/:accId/finalize-action', protect, requireAssetFullAccess, finalizeAccessoryAction);
 
 router.route('/:typeId')
     .get(protect, getAssetItems);
