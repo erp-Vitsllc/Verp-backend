@@ -4,6 +4,7 @@ import { isUserInFlowchart } from '../utils/getDepartmentHOD.js';
 import { isUserAdministrator } from '../services/permissionService.js';
 import {
     getAccessoryCatalog,
+    getAccessoryCatalogHistory,
     createAccessoryCatalog,
     updateAccessoryCatalog,
     deleteAccessoryCatalog,
@@ -26,6 +27,8 @@ const requireAssetControllerOrAdmin = async (req, res, next) => {
 };
 
 const router = express.Router();
+
+router.get('/:id/history', protect, getAccessoryCatalogHistory);
 
 router.route('/')
     .get(protect, getAccessoryCatalog)

@@ -28,7 +28,18 @@ const assetAccessoryCatalogSchema = new mongoose.Schema({
     isActive: {
         type: Boolean,
         default: true
-    }
+    },
+    history: [{
+        at: { type: Date, default: Date.now },
+        action: {
+            type: String,
+            enum: ['created', 'attach_requested', 'attach_rejected', 'attached', 'unattached', 'updated', 'removed']
+        },
+        message: { type: String, required: true, trim: true },
+        assetId: { type: String, trim: true },
+        assetName: { type: String, trim: true },
+        assetObjectId: { type: mongoose.Schema.Types.ObjectId, ref: 'AssetItem', default: null }
+    }]
 }, {
     timestamps: true
 });

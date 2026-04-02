@@ -96,6 +96,95 @@ const requireAssetControllerOrAdmin = async (req, res, next) => {
 };
 
 /**
+ * Allows approval when the logged-in user is:
+ * - Admin or designated Asset Controller, OR
+ * - The designated approver stored in `asset.actionRequiredBy` (e.g., HR HOD for company allocations).
+ *
+ * This is required because `respondToAssetCreation` already enforces the real authorization,
+ * but this route was previously blocked by `requireAssetControllerOrAdmin`.
+ */
+const requireAssetCreationApprover = async (req, res, next) => {
+    try {
+        const isAdminUser = await isAdminForAssetRoutes(req.user);
+        const isAssetControllerUser = await isDesignatedAssetController(req.user);
+
+        if (isAdminUser || isAssetControllerUser) return next();
+
+        const { id } = req.params;
+        if (!id) {
+            return res.status(400).json({ message: 'Asset id is required' });
+        }
+
+        const AssetItem = (await import('../models/AssetItem.js')).default;
+        const asset = await AssetItem.findById(id).select('status actionRequiredBy createdBy').lean();
+        if (!asset) return res.status(404).json({ message: 'Asset not found' });
+
+        // If there is no actionRequiredBy, only asset controller/admin should approve drafts.
+        if (!asset.actionRequiredBy) return res.status(403).json({ message: 'Access denied' });
+
+        const currentEmpObjId = req.user?.employeeObjectId?.toString?.() || null;
+        const currentEmpId = req.user?.employeeId || null;
+
+        // Match by EmployeeBasic _id (actionRequiredBy stores EmployeeBasic._id)
+        if (currentEmpObjId && asset.actionRequiredBy.toString() === currentEmpObjId) {
+            return next();
+        }
+
+        // Match by employeeId string (controller uses this fallback too)
+        if (currentEmpId) {
+            const approverEmp = await EmployeeBasic.findById(asset.actionRequiredBy)
+                .select('employeeId')
+                .lean()
+                .catch(() => null);
+
+            if (approverEmp?.employeeId && normEmp(approverEmp.employeeId) === normEmp(currentEmpId)) {
+                return next();
+            }
+        }
+
+        return res.status(403).json({ message: 'Access denied. Only the designated approver can approve this asset.' });
+    } catch (error) {
+        next(error);
+    }
+};
+
+/**
+ * Middleware for Asset Action Approval (Loss & Damage / End of Life / Leave).
+ * - Admin / designated Asset Controller always allowed.
+ * - Otherwise allow the actual workflow approver in `asset.actionRequiredBy`.
+ * - Additionally allow HR for Loss & Damage approvals (controller logic already checks this).
+ */
+const requireAssetActionApprover = async (req, res, next) => {
+    try {
+        const isAdminUser = await isAdminForAssetRoutes(req.user);
+        const isAssetControllerUser = await isDesignatedAssetController(req.user);
+        if (isAdminUser || isAssetControllerUser) return next();
+
+        const { id } = req.params;
+        if (!id) return res.status(400).json({ message: 'Asset id is required' });
+
+        const AssetItem = (await import('../models/AssetItem.js')).default;
+        const asset = await AssetItem.findById(id).select('actionRequiredBy pendingAction assignedToType assignedCompany').lean();
+        if (!asset) return res.status(404).json({ message: 'Asset not found' });
+
+        const currentEmpObjId = req.user?.employeeObjectId?.toString?.() || null;
+        const currentUserId = req.user?._id?.toString?.() || null;
+
+        if (asset.actionRequiredBy && currentEmpObjId && asset.actionRequiredBy.toString() === currentEmpObjId) return next();
+        if (asset.actionRequiredBy && currentUserId && asset.actionRequiredBy.toString() === currentUserId) return next();
+
+        const isHR = await isUserInFlowchart(req.user, 'hr').catch(() => false);
+        const actionType = asset.pendingAction;
+
+        if (isHR && actionType === 'Loss and Damage') return next();
+
+        return res.status(403).json({ message: 'Access denied. Only designated approver can approve this asset action.' });
+    } catch (error) {
+        next(error);
+    }
+};
+
+/**
  * Middleware for granular asset CRUD operations.
  * 1. If asset is UNASSIGNED: Only Asset Controller or Admin.
  * 2. If asset is ASSIGNED: Asset Controller, Admin, or the ASSIGNED USER.
@@ -121,11 +210,54 @@ const requireAssetFullAccess = async (req, res, next) => {
 
         if (id) {
             const AssetItem = (await import('../models/AssetItem.js')).default;
-            const asset = await AssetItem.findById(id).select('assignedTo status actionRequiredBy createdBy accessories');
+            const asset = await AssetItem.findById(id).select('assignedTo assignedToType assignedCompany status actionRequiredBy createdBy actionRequiredBy accessories');
             if (asset) {
                 const assignedToEmpId = asset.assignedTo ? asset.assignedTo.toString() : null;
                 const actionRequiredById = asset.actionRequiredBy ? asset.actionRequiredBy.toString() : null;
                 const accId = req.params?.accId?.toString?.();
+
+                // Company-assigned assets: HR should have the same actions as the assigned employee
+                // (for those companies HR is responsible for).
+                if (asset.assignedToType === 'Company') {
+                    const currentEmployeeObjectId = req.user?.employeeObjectId?.toString?.() || null;
+                    const currentEmployeeId = req.user?.employeeId || null;
+
+                    const isHRFlowchart = await isUserInFlowchart(req.user, 'hr').catch(() => false);
+                    const hrHOD = await getDepartmentHOD('hr').catch(() => null);
+                    const isHrHod =
+                        !!(hrHOD?._id && currentEmployeeObjectId && hrHOD._id.toString() === currentEmployeeObjectId);
+
+                    if (isHRFlowchart || isHrHod) return next();
+
+                    // If not global HR, allow only when HR has an active responsibility for this company.
+                    if (asset.assignedCompany && (currentEmployeeObjectId || currentEmployeeId)) {
+                        const Company = (await import('../models/Company.js')).default;
+                        const escapeRegExp = (v) => String(v).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                        const employeeIdPattern = currentEmployeeId
+                            ? new RegExp(`^${escapeRegExp(String(currentEmployeeId).trim()).replace(/\s+/g, '\\s*')}$`, 'i')
+                            : null;
+
+                        const hrOr = [];
+                        if (currentEmployeeObjectId) hrOr.push({ empObjectId: currentEmployeeObjectId });
+                        if (employeeIdPattern) hrOr.push({ employeeId: { $regex: employeeIdPattern } });
+
+                        const hasHrResponsibility =
+                            hrOr.length > 0
+                                ? await Company.exists({
+                                    _id: asset.assignedCompany,
+                                    responsibilities: {
+                                        $elemMatch: {
+                                            category: { $regex: /hr|human/i },
+                                            status: 'Active',
+                                            $or: hrOr
+                                        }
+                                    }
+                                }).catch(() => false)
+                                : false;
+
+                        if (hasHrResponsibility) return next();
+                    }
+                }
 
                 // For assignment response flow, allow the designated responder first.
                 // Reassignment keeps old holder in assignedTo until acceptance, so this is required.
@@ -334,7 +466,7 @@ router.put('/:id/assign', protect, requireAssetControllerOrAdmin, assignAssetIte
 router.put('/:id/respond', protect, respondToAssignment);
 router.put('/bulk/respond', protect, bulkRespondToAssignment);
 router.post('/transfer', protect, requireAssetControllerOrAdmin, transferAsset);
-router.put('/:id/approve-creation', protect, requireAssetControllerOrAdmin, respondToAssetCreation);
+router.put('/:id/approve-creation', protect, requireAssetCreationApprover, respondToAssetCreation);
 router.put('/:id/return', protect, requireReturnAssetAccess, returnAssetItem);
 router.put('/:id/on-leave-action', protect, requireParkingAssetAccess, (req, res, next) => {
     console.log(`[Route] PUT /${req.params.id}/on-leave-action hit`);
@@ -355,7 +487,7 @@ router.route('/:id')
 router.put('/:id/end-of-life', protect, requireAssetFullAccess, endOfLifeAsset);
 router.put('/bulk/request-action', protect, requireAssetFullAccess, bulkRequestAssetAction);
 router.put('/:id/request-action', protect, requireAssetFullAccess, requestAssetAction);
-router.put('/:id/approve-action', protect, requireAssetControllerOrAdmin, handleAssetActionApproval);
+router.put('/:id/approve-action', protect, requireAssetActionApprover, handleAssetActionApproval);
 router.put('/:id/finalize-action', protect, requireAssetControllerOrAdmin, finalizeAssetAction);
 
 // Accessories

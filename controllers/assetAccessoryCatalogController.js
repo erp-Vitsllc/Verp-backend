@@ -21,6 +21,43 @@ const generateAccessoryCatalogId = async () => {
     return `${prefix}${String(nextNum).padStart(3, '0')}`;
 };
 
+export const getAccessoryCatalogHistory = async (req, res) => {
+    try {
+        const doc = await AssetAccessoryCatalog.findById(req.params.id).lean();
+        if (!doc) {
+            return res.status(404).json({ message: 'Accessory not found' });
+        }
+
+        const raw = Array.isArray(doc.history) ? [...doc.history] : [];
+        raw.sort((a, b) => new Date(a.at) - new Date(b.at));
+        if (raw.length === 0 && doc.createdAt) {
+            raw.push({
+                at: doc.createdAt,
+                action: 'created',
+                message: `Catalog entry "${doc.name}" (${doc.accessoryCatalogId})`
+            });
+        }
+
+        const events = raw.map((e) => ({
+            at: e.at,
+            action: e.action,
+            message: e.message,
+            assetId: e.assetId || null,
+            assetName: e.assetName || null,
+            assetObjectId: e.assetObjectId || null
+        }));
+
+        res.json({
+            accessoryCatalogId: doc.accessoryCatalogId,
+            name: doc.name,
+            events
+        });
+    } catch (error) {
+        console.error('getAccessoryCatalogHistory:', error);
+        res.status(500).json({ message: 'Failed to load accessory history' });
+    }
+};
+
 export const getAccessoryCatalog = async (req, res) => {
     try {
         const list = await AssetAccessoryCatalog.find({ isActive: true })
@@ -40,12 +77,18 @@ export const createAccessoryCatalog = async (req, res) => {
             return res.status(400).json({ message: 'Name is required' });
         }
         const accessoryCatalogId = await generateAccessoryCatalogId();
+        const trimmedName = String(name).trim();
         const doc = await AssetAccessoryCatalog.create({
             accessoryCatalogId,
-            name: String(name).trim(),
+            name: trimmedName,
             price: price != null && price !== '' ? Number(price) : 0,
             description: description != null ? String(description).trim() : '',
-            status: 'Unattached'
+            status: 'Unattached',
+            history: [{
+                at: new Date(),
+                action: 'created',
+                message: `Accessory "${trimmedName}" created in catalog (${accessoryCatalogId})`
+            }]
         });
         res.status(201).json(doc);
     } catch (error) {
@@ -62,12 +105,29 @@ export const updateAccessoryCatalog = async (req, res) => {
         if (!doc || !doc.isActive) {
             return res.status(404).json({ message: 'Accessory not found' });
         }
+        const changed = [];
         if (name !== undefined) {
             if (!String(name).trim()) return res.status(400).json({ message: 'Name is required' });
             doc.name = String(name).trim();
+            changed.push('name');
         }
-        if (price !== undefined) doc.price = price !== '' && price != null ? Number(price) : 0;
-        if (description !== undefined) doc.description = String(description ?? '').trim();
+        if (price !== undefined) {
+            doc.price = price !== '' && price != null ? Number(price) : 0;
+            changed.push('price');
+        }
+        if (description !== undefined) {
+            doc.description = String(description ?? '').trim();
+            changed.push('description');
+        }
+        if (changed.length) {
+            doc.history = doc.history || [];
+            doc.history.push({
+                at: new Date(),
+                action: 'updated',
+                message: `Catalog entry updated (${changed.join(', ')})`
+            });
+            doc.markModified('history');
+        }
         await doc.save();
         res.json(doc);
     } catch (error) {
@@ -81,6 +141,13 @@ export const deleteAccessoryCatalog = async (req, res) => {
         const { id } = req.params;
         const doc = await AssetAccessoryCatalog.findById(id);
         if (!doc) return res.status(404).json({ message: 'Accessory not found' });
+        doc.history = doc.history || [];
+        doc.history.push({
+            at: new Date(),
+            action: 'removed',
+            message: `Accessory removed from catalog (${doc.accessoryCatalogId})`
+        });
+        doc.markModified('history');
         doc.isActive = false;
         await doc.save();
         res.json({ message: 'Accessory removed' });
@@ -135,6 +202,16 @@ export const requestAttachAccessoryCatalog = async (req, res) => {
         targetDoc.markModified('accessories');
         await targetDoc.save();
         catalog.status = 'Pending';
+        catalog.history = catalog.history || [];
+        catalog.history.push({
+            at: new Date(),
+            action: 'attach_requested',
+            message: `Attach requested to asset ${targetDoc.assetId} — ${targetDoc.name}`,
+            assetId: targetDoc.assetId,
+            assetName: targetDoc.name,
+            assetObjectId: targetDoc._id
+        });
+        catalog.markModified('history');
         await catalog.save();
 
         await DashboardAction.create({

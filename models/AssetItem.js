@@ -106,6 +106,18 @@ const assetItemSchema = new mongoose.Schema({
         type: Date,
         default: null
     },
+    temporaryEndDate: {
+        type: Date,
+        default: null
+    },
+    temporaryReminderSentAt: {
+        type: Date,
+        default: null
+    },
+    temporaryExpiredSentAt: {
+        type: Date,
+        default: null
+    },
     acceptanceStatus: {
         type: String,
         enum: ['Pending', 'Accepted', 'Rejected'],
@@ -118,7 +130,7 @@ const assetItemSchema = new mongoose.Schema({
     },
     pendingAction: {
         type: String,
-        enum: ['End of Life', 'Loss and Damage', 'Leave', 'Asset Transfer', 'Retention Confirmation', null],
+        enum: ['End of Life', 'Loss and Damage', 'Leave', 'Return Asset', 'Asset Transfer', 'Retention Confirmation', null],
         default: null
     },
     pendingActionDetails: {
@@ -185,7 +197,7 @@ const assetItemSchema = new mongoose.Schema({
             validate: {
                 validator: function (v) {
                     if (v == null || v === "" || v === "null") return true;
-                    return ['Transfer', 'Loss and Damage', 'End of Life', 'Add'].includes(v);
+                    return ['Transfer', 'Loss and Damage', 'End of Life', 'Add', 'Unattach'].includes(v);
                 },
                 message: 'Invalid pending action'
             }

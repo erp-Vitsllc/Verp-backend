@@ -27,6 +27,22 @@ import { sendAssignedEmployeeActionEmail } from '../utils/sendAssignedEmployeeAc
 import { processParkingAssets } from '../utils/processParkingAssets.js';
 import { sendParkingReassignAcceptedEmail } from '../utils/sendParkingReassignAcceptedEmail.js';
 
+const generateAccessoryCatalogId = async () => {
+    const prefix = 'asset-acc-cat-';
+    const regex = new RegExp(`^${prefix}\\d+$`);
+    const item = await AssetAccessoryCatalog.findOne({
+        accessoryCatalogId: { $regex: regex }
+    }).sort({ accessoryCatalogId: -1 });
+
+    if (!item?.accessoryCatalogId) return `${prefix}001`;
+
+    const idStr = item.accessoryCatalogId;
+    const numberStr = idStr.substring(prefix.length);
+    const numericPart = parseInt(numberStr, 10);
+    const nextNum = Number.isNaN(numericPart) ? 1 : numericPart + 1;
+    return `${prefix}${String(nextNum).padStart(3, '0')}`;
+};
+
 const generateFineIdInternal = async () => {
     try {
         const fines = await Fine.find({ fineId: /VEGA-(FINE|FNE)-(\d+)/i }).select('fineId').lean();
@@ -72,12 +88,86 @@ const notifyAssignedEmployeeIfController = async (req, assetDoc, action, details
     try {
         const isAssetControllerUser = await isUserInFlowchart(req.user, 'assetcontroller');
         if (!isAssetControllerUser) return;
+
+        if (!assetDoc) return;
+
+        const mapActionToDashboardRequestType = (actionString) => {
+            if (!actionString) return null;
+            const a = String(actionString).toLowerCase();
+            if (a.includes('loss') || a.includes('loss and damage')) return 'Asset Loss Damage';
+            if (a.includes('end of life')) return 'Asset End of Life';
+            if (a.includes('transfer')) return 'Asset Transfer';
+            if (a.includes('assign') || a.includes('reassign')) return 'Asset Assignment';
+            if (a.includes('leave') || a.includes('on leave')) return 'Asset Leave';
+            return 'Asset Approval';
+        };
+
+        let companyDoc = null;
+        if (assetDoc?.assignedCompany) {
+            if (typeof assetDoc.assignedCompany === 'object') {
+                companyDoc = assetDoc.assignedCompany;
+            } else {
+                const compId = assetDoc.assignedCompany;
+                companyDoc = await Company.findById(compId).select('name companyId nickName').lean().catch(() => null);
+            }
+        }
+
+        const appendCompanyToDetails = (msg) => {
+            if (!msg) msg = '';
+            if (assetDoc?.assignedToType === 'Company') {
+                const name = companyDoc?.name || assetDoc?.assignedCompany?.name || '';
+                if (name) return `${msg}${msg ? ' ' : ''}(Company: ${name})`;
+            }
+            return msg;
+        };
+
+        // Company-assigned assets: email/dashboard HR instead of an employee.
+        if (assetDoc?.assignedToType === 'Company') {
+            const hrHOD = await getDepartmentHOD('hr');
+            if (!hrHOD) return;
+
+            const requestType = mapActionToDashboardRequestType(action);
+            const companyName = companyDoc?.name || '';
+            const companyId = companyDoc?.companyId || '';
+            const subjectName = companyName || 'Company allocation';
+            const subjectEmployeeId = companyId || 'UNASSIGNED';
+
+            await sendAssignedEmployeeActionEmail({
+                asset: assetDoc,
+                employee: hrHOD,
+                action,
+                performedBy: req.user.employeeId || 'Asset Controller',
+                details: appendCompanyToDetails(details)
+            });
+
+            // Also create an HR dashboard entry so HR sees the same "last write" context.
+            if (requestType) {
+                await DashboardAction.create({
+                    assignedTo: hrHOD._id,
+                    assignedToEmpId: hrHOD.employeeId,
+                    requestId: assetDoc._id,
+                    requestType,
+                    status: 'Approved',
+                    subjectEmployeeId,
+                    subjectName,
+                    requestedByName: req.user.name || req.user.employeeId || 'Asset Controller',
+                    actionedDate: new Date(),
+                    actionedBy: req.user.employeeObjectId || req.user.id || null,
+                    extra1: `${assetDoc.assetId} — ${assetDoc.name || ''}`,
+                    extra2: appendCompanyToDetails(action || '')
+                });
+            }
+            return;
+        }
+
+        // Employee-assigned assets: email the assigned employee.
         if (!assetDoc?.assignedTo) return;
         const employee = await EmployeeBasic.findById(assetDoc.assignedTo)
             .select('firstName lastName employeeId companyEmail workEmail personalEmail email primaryReportee')
             .populate('primaryReportee', 'firstName lastName companyEmail workEmail personalEmail email')
             .lean();
         if (!employee) return;
+
         await sendAssignedEmployeeActionEmail({
             asset: assetDoc,
             employee,
@@ -325,19 +415,32 @@ export const getUnassignedAssetsForEmployee = async (req, res) => {
         const employeeObjectId = employee._id;
         console.log(`[getUnassignedAssetsForEmployee] Employee ObjectId: ${employeeObjectId}`);
 
-        let isAuthorized = req.user?.isAdmin === true || req.user?.role === 'Admin' || req.user?.role === 'ROOT';
-        console.log(`[getUnassignedAssetsForEmployee] Initial admin check: ${isAuthorized}`);
-
-        if (!isAuthorized) {
-            // Must match getOnLeaveAssetsForEmployee: authorize the logged-in user, not the :employeeId row
-            const userForCheck = {
-                employeeObjectId: req.user?.employeeObjectId,
-                employeeId: req.user?.employeeId
-            };
-
+        // IMPORTANT:
+        // This endpoint is used to show tabs when someone opens the PROFILE of employeeId.
+        // So authorization must be based on the *profile employee* being an asset controller,
+        // not on the currently logged-in viewer.
+        const normEmp = (s) => (s || '').toString().toLowerCase().replace(/\s+/g, '');
+        const isProfileAssetController = (() => {
+            // Department fallback: if :employeeId matches the configured AC.
             try {
-                isAuthorized = await isUserInFlowchart(userForCheck, 'assetcontroller');
-                console.log(`[getUnassignedAssetsForEmployee] Flowchart authorization result: ${isAuthorized}`);
+                if (assetController?._id && assetController._id.toString() === employeeObjectId.toString()) return true;
+                if (assetController?.employeeId && normEmp(assetController.employeeId) === normEmp(employee.employeeId)) return true;
+            } catch {
+                // ignore
+            }
+            return false;
+        })();
+
+        let isAuthorized = isProfileAssetController;
+        if (!isAuthorized) {
+            // Flowchart: check whether the profile employee is in the assetcontroller flowchart.
+            try {
+                const profileUserForCheck = {
+                    employeeObjectId,
+                    employeeId: employee.employeeId
+                };
+                isAuthorized = await isUserInFlowchart(profileUserForCheck, 'assetcontroller');
+                console.log(`[getUnassignedAssetsForEmployee] Flowchart authorization result for profile: ${isAuthorized}`);
             } catch (flowchartError) {
                 console.error('[getUnassignedAssetsForEmployee] Flowchart error:', flowchartError);
                 return res.status(403).json({
@@ -349,17 +452,18 @@ export const getUnassignedAssetsForEmployee = async (req, res) => {
         }
 
         if (!isAuthorized) {
+            // Allow AC if they are pending in the flowchart.
             const isPending = await Flowchart.findOne({
                 category: 'assetcontroller',
-                empObjectId: req.user?.employeeObjectId,
+                empObjectId: employeeObjectId,
                 status: 'Pending'
             });
             if (isPending) isAuthorized = true;
-            console.log(`[getUnassignedAssetsForEmployee] Pending check result: ${!!isPending}`);
+            console.log(`[getUnassignedAssetsForEmployee] Pending check result for profile: ${!!isPending}`);
         }
 
         if (!isAuthorized) {
-            console.log(`[getUnassignedAssetsForEmployee] ACCESS DENIED for employee: ${employeeId}`);
+            console.log(`[getUnassignedAssetsForEmployee] ACCESS DENIED for profile employee: ${employeeId}`);
             return res.status(403).json({
                 message: 'Access denied. Only Asset Controllers can view unassigned assets.',
                 code: 'ASSET_CONTROLLER_REQUIRED',
@@ -431,22 +535,32 @@ export const getOnLeaveAssetsForEmployee = async (req, res) => {
         const employeeObjectId = employee._id;
         console.log(`[getOnLeaveAssetsForEmployee] Employee ObjectId: ${employeeObjectId}`);
 
-        let isAuthorized = req.user?.isAdmin === true || req.user?.role === 'Admin' || req.user?.role === 'ROOT';
-        console.log(`[getOnLeaveAssetsForEmployee] Initial admin check: ${isAuthorized}`);
-
-        if (!isAuthorized) {
-            // Check if the LOGGED IN user is an asset controller or admin
-            const userForCheck = {
-                employeeObjectId: req.user.employeeObjectId,
-                employeeId: req.user.employeeId
-            };
-
+        // IMPORTANT:
+        // This endpoint is used to show Parking tabs when someone opens the PROFILE of :employeeId.
+        // So authorization must be based on the *profile employee* being an asset controller,
+        // not based on currently logged-in viewer.
+        const normEmp = (s) => (s || '').toString().toLowerCase().replace(/\s+/g, '');
+        const isProfileAssetController = (() => {
             try {
-                isAuthorized = await isUserInFlowchart(userForCheck, 'assetcontroller');
-                console.log(`[getOnLeaveAssetsForEmployee] Flowchart authorization result for ${req.user.employeeId}: ${isAuthorized}`);
+                if (assetController?._id && assetController._id.toString() === employeeObjectId.toString()) return true;
+                if (assetController?.employeeId && normEmp(assetController.employeeId) === normEmp(employee.employeeId)) return true;
+            } catch {
+                // ignore
+            }
+            return false;
+        })();
+
+        let isAuthorized = isProfileAssetController;
+        if (!isAuthorized) {
+            // Check profile employee in the flowchart
+            try {
+                isAuthorized = await isUserInFlowchart(
+                    { employeeObjectId, employeeId: employee.employeeId },
+                    'assetcontroller'
+                );
+                console.log(`[getOnLeaveAssetsForEmployee] Flowchart authorization result for profile: ${isAuthorized}`);
             } catch (flowchartError) {
                 console.error('[getOnLeaveAssetsForEmployee] Flowchart error:', flowchartError);
-                // If Flowchart is not available, deny access
                 return res.status(403).json({
                     message: 'Access denied. Only Asset Controllers can view on-leave assets.',
                     code: 'ASSET_CONTROLLER_REQUIRED',
@@ -456,41 +570,26 @@ export const getOnLeaveAssetsForEmployee = async (req, res) => {
         }
 
         if (!isAuthorized) {
-            // Check if THEY (logged in user) are a PENDING asset controller
+            // Allow AC if they are pending in the flowchart.
             const isPending = await Flowchart.findOne({
                 category: 'assetcontroller',
-                empObjectId: req.user.employeeObjectId,
+                empObjectId: employeeObjectId,
                 status: 'Pending'
             });
             if (isPending) isAuthorized = true;
-            console.log(`[getOnLeaveAssetsForEmployee] Pending check result for ${req.user.employeeId}: ${!!isPending}`);
         }
 
-        let selfAccess = false;
         if (!isAuthorized) {
-            // Allow employee to view only their own parked assets
-            selfAccess =
-                (req.user.employeeObjectId && employeeObjectId.toString() === req.user.employeeObjectId.toString()) ||
-                ((req.user.employeeId || '').toString().replace(/\s+/g, '').toLowerCase() === (employee.employeeId || '').toString().replace(/\s+/g, '').toLowerCase());
-
-            if (!selfAccess) {
-                console.log(`[getOnLeaveAssetsForEmployee] ACCESS DENIED for employee: ${employeeId}`);
-                return res.status(403).json({
-                    message: 'Access denied. Only assigned employee, Asset Controller, or Admin can view parking assets.',
-                    code: 'PARKING_ACCESS_REQUIRED',
-                    employeeId: employeeId
-                });
-            }
+            return res.status(403).json({
+                message: 'Access denied. Only Asset Controllers can view on-leave assets.',
+                code: 'ASSET_CONTROLLER_REQUIRED',
+                employeeId
+            });
         }
 
         console.log(`[getOnLeaveAssetsForEmployee] ACCESS GRANTED, fetching assets...`);
         // Fetch assets with "On Leave" status (case-insensitive match)
-        const onLeaveQuery = {
-            status: { $regex: /^on\s+leave$/i }
-        };
-        if (!isAuthorized && selfAccess) {
-            onLeaveQuery.assignedTo = employeeObjectId;
-        }
+        const onLeaveQuery = { status: { $regex: /^on\s+leave$/i } };
         const items = await AssetItem.find(onLeaveQuery)
             .select('assetId name assetValue status purchaseDate invoiceFile typeId categoryId assignedTo assignedDate onLeaveStartDate onLeaveEndDate onLeaveDuration')
             .populate('typeId', 'name type')
@@ -853,22 +952,21 @@ export const getHRCompanyAssets = async (req, res) => {
 
         console.log(`[getHRCompanyAssets] Employee ${employeeId} - Querying assets for company IDs:`, designatedCompanyIds.map(id => id.toString()));
 
-        // Fetch assets assigned to Company (filtered by designated companies)
-        // Also include assets where the action is required by this HR (pending company assignments)
+        // Fetch assets assigned to Company.
+        // - If this HR user is in the HR flowchart: show ALL company allocations.
+        // - Otherwise: show only company allocations whose company is in designatedCompanyIds.
+        // Also include assets where the action is required by this HR (pending company assignments).
         const query = {
             $or: [
-                { assignedToType: 'Company', assignedCompany: { $in: designatedCompanyIds } },
+                {
+                    assignedToType: 'Company',
+                    ...(isHRFlowchart
+                        ? {}
+                        : { assignedCompany: { $in: designatedCompanyIds } })
+                },
                 { actionRequiredBy: employeeObjectId, status: 'Pending' }
             ]
         };
-
-        // If no designated companies but is HR HOD, fetch all company assets
-        if (designatedCompanyIds.length === 0 && isHRFlowchart) {
-            query.$or = [
-                { assignedToType: 'Company' },
-                { actionRequiredBy: employeeObjectId, status: 'Pending' }
-            ];
-        }
 
         const items = await AssetItem.find(query)
             .populate('assignedCompany', 'name companyId nickName')
@@ -1131,8 +1229,18 @@ export const respondToAssetCreation = async (req, res) => {
             item.actionRequiredBy = null;
         }
 
+        // This endpoint is "asset creation approval" (draft/pending). However, the asset
+        // record may already carry assignment intent (reassign vs initial assign). We use
+        // presence of assigned targets to decide notification wording.
+        const isReassignment = !!(item.assignedTo || item.assignedCompany);
+
         await item.save();
-        await notifyAssignedEmployeeIfController(req, item, isReassignment ? 'Reassign Asset' : 'Assign Asset', isReassignment ? 'Asset was reassigned by Asset Controller.' : 'Asset assignment was updated by Asset Controller.');
+        await notifyAssignedEmployeeIfController(
+            req,
+            item,
+            isReassignment ? 'Reassign Asset' : 'Assign Asset',
+            isReassignment ? 'Asset was reassigned by Asset Controller.' : 'Asset assignment was updated by Asset Controller.'
+        );
 
         // Record History
         try {
@@ -1471,7 +1579,9 @@ export const getAssetItemDetail = async (req, res) => {
             item.acceptanceStatus === 'Pending' &&
             !item.pendingAction &&
             (item.status === 'Pending' || item.status === 'Assigned') &&
-            item.assignedTo;
+            // For employee assignments, `assignedTo` exists.
+            // For company allocations, `assignedCompany` exists.
+            (item.assignedTo || item.assignedCompany);
 
         const isAwaitingCreationApproval =
             item.status === 'Draft' ||
@@ -1511,12 +1621,15 @@ export const getAssetItemDetail = async (req, res) => {
             }
         }
 
+        // Important: "awaiting creation approval" must be shown/approved only by the actual
+        // designated approver (stored in `actionRequiredBy`), not by anyone who happens to be
+        // an Asset Controller. This prevents HR-only company flows from appearing on AC UI.
         itemObj.canApproveAssetCreation = !!(
             isAwaitingCreationApproval &&
             (isAdmin ||
                 isPortalAdmin ||
-                isAssetController ||
-                isDeptAssetController ||
+                // Dept asset controller fallback only when there is no designated approver (draft without actionRequiredBy)
+                (isDeptAssetController && isDraftWithoutDesignatedApprover) ||
                 isDesignatedCreationApprover ||
                 canApproveAsDeptAssetController)
         );
@@ -1575,7 +1688,11 @@ export const assignAssetItem = async (req, res) => {
                     oldAssignedTo: oldAssignedToId,
                     oldAssignedBy: (item.assignedBy?._id || item.assignedBy)?.toString?.() || null,
                     oldAssignmentType: item.assignmentType || null,
-                    oldAssignedDays: item.assignedDays ?? null
+                        oldAssignedDays: item.assignedDays ?? null,
+                        oldAssignedDate: item.assignedDate || null,
+                        oldTemporaryEndDate: item.temporaryEndDate || null,
+                        oldTemporaryReminderSentAt: item.temporaryReminderSentAt || null,
+                        oldTemporaryExpiredSentAt: item.temporaryExpiredSentAt || null
                 }
             };
         }
@@ -1682,7 +1799,24 @@ export const assignAssetItem = async (req, res) => {
 
         item.assignedBy = req.user.employeeObjectId;
         item.assignmentType = assignmentType;
-        item.assignedDays = assignmentType === 'Temporary' ? assignedDays : null;
+        if (assignmentType === 'Temporary') {
+            const parsedDays = Number(assignedDays);
+            if (!Number.isInteger(parsedDays) || parsedDays < 1 || parsedDays > 60) {
+                return res.status(400).json({ message: 'Temporary duration must be an integer between 1 and 60 days.' });
+            }
+            item.assignedDays = parsedDays;
+            // Start the duration when the assignment is accepted (status becomes "Assigned").
+            item.assignedDate = null;
+            item.temporaryEndDate = null;
+            item.temporaryReminderSentAt = null;
+            item.temporaryExpiredSentAt = null;
+        } else {
+            item.assignedDays = null;
+            item.assignedDate = null;
+            item.temporaryEndDate = null;
+            item.temporaryReminderSentAt = null;
+            item.temporaryExpiredSentAt = null;
+        }
         item.negotiationHistory = [];
 
         await item.save();
@@ -1835,13 +1969,28 @@ export const bulkAssignAssetItems = async (req, res) => {
             assignedTo,
             assignedBy: req.user.employeeObjectId,
             assignmentType,
-            assignedDays: assignmentType === 'Temporary' ? assignedDays : null,
+            assignedDays: null,
+            assignedDate: null,
+            temporaryEndDate: null,
+            temporaryReminderSentAt: null,
+            temporaryExpiredSentAt: null,
             status: 'Pending',
             acceptanceStatus: 'Pending',
             actionRequiredBy,
             ownership: empName,
             negotiationHistory: []
         };
+
+        if (assignmentType === 'Temporary') {
+            const parsedDays = Number(assignedDays);
+            if (!Number.isInteger(parsedDays) || parsedDays < 1 || parsedDays > 60) {
+                return res.status(400).json({ message: 'Temporary duration must be an integer between 1 and 60 days.' });
+            }
+            updateData.assignedDays = parsedDays;
+            // Start the duration when the assignment is accepted (status becomes "Assigned").
+            updateData.assignedDate = null;
+            updateData.temporaryEndDate = null;
+        }
 
 
         await AssetItem.updateMany(
@@ -2222,6 +2371,10 @@ export const respondToAssignment = async (req, res) => {
                 item.assignedBy = parkingCtx.oldAssignedBy || item.assignedBy;
                 item.assignmentType = parkingCtx.oldAssignmentType || item.assignmentType;
                 item.assignedDays = parkingCtx.oldAssignedDays ?? item.assignedDays;
+                item.assignedDate = parkingCtx.oldAssignedDate ?? item.assignedDate;
+                item.temporaryEndDate = parkingCtx.oldTemporaryEndDate ?? item.temporaryEndDate;
+                item.temporaryReminderSentAt = parkingCtx.oldTemporaryReminderSentAt ?? item.temporaryReminderSentAt;
+                item.temporaryExpiredSentAt = parkingCtx.oldTemporaryExpiredSentAt ?? item.temporaryExpiredSentAt;
                 item.acceptanceStatus = 'Accepted';
                 item.actionRequiredBy = null;
                 item.negotiationHistory = [];
@@ -2236,6 +2389,10 @@ export const respondToAssignment = async (req, res) => {
                 item.assignedBy = null;
                 item.assignmentType = null;
                 item.assignedDays = null;
+                item.assignedDate = null;
+                item.temporaryEndDate = null;
+                item.temporaryReminderSentAt = null;
+                item.temporaryExpiredSentAt = null;
                 item.acceptanceStatus = 'Rejected';
                 item.actionRequiredBy = null;
                 item.negotiationHistory = [];
@@ -2256,10 +2413,39 @@ export const respondToAssignment = async (req, res) => {
             }
 
             if (action === 'Accept') {
-                item.status = 'Assigned';
+                // When accepting a parking (On Leave) reassignment, the asset must stay in "On Leave".
+                item.status = parkingCtx?.isParkingReassign ? 'On Leave' : 'Assigned';
                 item.acceptanceStatus = 'Accepted';
                 item.actionRequiredBy = null;
                 item.acceptedBy = req.user.employeeObjectId;
+
+                // Temporary assignment expiration applies only to normal "Assigned" assets,
+                // not parking reassignment (On Leave) assets.
+                if (!parkingCtx?.isParkingReassign) {
+                    if (item.assignmentType === 'Temporary' && item.assignedDays) {
+                        const parsedDays = Number(item.assignedDays);
+                        const start = item.assignedDate ? new Date(item.assignedDate) : new Date();
+                        const end = new Date(start);
+                        end.setDate(end.getDate() + parsedDays);
+                        item.assignedDate = start;
+                        item.temporaryEndDate = end;
+                        if (!item.temporaryReminderSentAt) item.temporaryReminderSentAt = null;
+                        if (!item.temporaryExpiredSentAt) item.temporaryExpiredSentAt = null;
+                    } else {
+                        item.assignedDate = null;
+                        item.temporaryEndDate = null;
+                        item.temporaryReminderSentAt = null;
+                        item.temporaryExpiredSentAt = null;
+                    }
+                } else {
+                    // Clear temporary-assignment fields when the asset is staying "On Leave".
+                    item.assignmentType = null;
+                    item.assignedDays = null;
+                    item.assignedDate = null;
+                    item.temporaryEndDate = null;
+                    item.temporaryReminderSentAt = null;
+                    item.temporaryExpiredSentAt = null;
+                }
 
                 // Parking reassignment accepted: notify old assignee.
                 if (parkingCtx?.isParkingReassign && parkingCtx?.oldAssignedTo && item.assignedToType === 'Employee') {
@@ -2529,6 +2715,23 @@ export const bulkRespondToAssignment = async (req, res) => {
                     item.acceptanceStatus = 'Accepted';
                     item.actionRequiredBy = null;
                     item.acceptedBy = currentUser;
+
+                    // Temporary assignment: ensure end date is set for reminder + auto unassign.
+                    if (item.assignmentType === 'Temporary' && item.assignedDays) {
+                        const parsedDays = Number(item.assignedDays);
+                        const start = item.assignedDate ? new Date(item.assignedDate) : new Date();
+                        const end = new Date(start);
+                        end.setDate(end.getDate() + parsedDays);
+                        item.assignedDate = start;
+                        item.temporaryEndDate = end;
+                        if (!item.temporaryReminderSentAt) item.temporaryReminderSentAt = null;
+                        if (!item.temporaryExpiredSentAt) item.temporaryExpiredSentAt = null;
+                    } else {
+                        item.assignedDate = null;
+                        item.temporaryEndDate = null;
+                        item.temporaryReminderSentAt = null;
+                        item.temporaryExpiredSentAt = null;
+                    }
                 } else {
                     // Rejection
                     if (item.pendingAction === 'Asset Transfer') {
@@ -2563,6 +2766,14 @@ export const bulkRespondToAssignment = async (req, res) => {
                         item.acceptanceStatus = 'Rejected';
                         item.actionRequiredBy = null;
                     }
+
+                    // Clear temporary assignment fields on rejection
+                    item.assignmentType = null;
+                    item.assignedDays = null;
+                    item.assignedDate = null;
+                    item.temporaryEndDate = null;
+                    item.temporaryReminderSentAt = null;
+                    item.temporaryExpiredSentAt = null;
                 }
 
                 await item.save();
@@ -2661,6 +2872,57 @@ export const returnAssetItem = async (req, res) => {
         if (!assetController && !isAssigneeReturn && !isAssignerReturn) {
             return res.status(403).json({
                 message: "Asset return denied: No Asset Controller has been assigned in the organization flow. Please assign an Asset Controller in Settings > Flowchart before performing this operation."
+            });
+        }
+
+        // If an assigned employee requests return (non-elevated), route it to Asset Controller for approval
+        // with dashboard + email, instead of immediately unassigning.
+        if (isAssigneeReturn && !isElevatedReturn) {
+            if (!assetController?._id) {
+                return res.status(400).json({ message: 'Asset Controller not found. Cannot request return approval.' });
+            }
+
+            if (item.pendingAction) {
+                return res.status(400).json({ message: `This asset already has a pending "${item.pendingAction}" request.` });
+            }
+
+            const requesterEmp = await EmployeeBasic.findById(req.user.employeeObjectId).select('firstName lastName employeeId').lean().catch(() => null);
+            const requesterName = requesterEmp ? `${requesterEmp.firstName || ''} ${requesterEmp.lastName || ''}`.trim() : (req.user.name || req.user.employeeId || 'User');
+
+            item.pendingAction = 'Return Asset';
+            item.pendingActionDetails = {
+                reason: req.body?.reason || 'Return requested by assigned employee',
+                requestedBy: req.user.employeeObjectId || req.user._id,
+                requestedAt: new Date()
+            };
+            item.actionRequiredBy = assetController._id; // EmployeeBasic
+            item.status = 'Pending';
+
+            await item.save();
+
+            await DashboardAction.create({
+                assignedTo: assetController._id,
+                assignedToEmpId: assetController.employeeId,
+                requestId: item._id,
+                requestType: 'Asset Return',
+                status: 'Pending',
+                subjectEmployeeId: req.user.employeeId || (requesterEmp?.employeeId || 'UNASSIGNED'),
+                subjectName: requesterName || 'Employee',
+                requestedByName: requesterName,
+                extra1: `${item.assetId} — ${item.name || ''}`,
+                extra2: 'Return Asset'
+            });
+
+            // Email Asset Controller for approval (reuse existing approval email template)
+            try {
+                await sendAssetActionApprovalEmail(item, 'Return Asset', assetController, { name: requesterName }, item.pendingActionDetails?.reason || '');
+            } catch (e) {
+                // non-fatal
+            }
+
+            return res.status(200).json({
+                message: 'Return request sent to Asset Controller for approval',
+                asset: item
             });
         }
 
@@ -2812,6 +3074,28 @@ export const returnAssetItem = async (req, res) => {
             performedBy: req.user._id,
             details: returnSnapshot
         });
+
+        // If Asset Controller/Admin returned it, notify the previously assigned employee by email.
+        if (isElevatedReturn && prevAssignedTo) {
+            try {
+                const employee = await EmployeeBasic.findById(prevAssignedTo)
+                    .select('firstName lastName employeeId companyEmail workEmail personalEmail email primaryReportee')
+                    .populate('primaryReportee', 'firstName lastName companyEmail workEmail personalEmail email')
+                    .lean()
+                    .catch(() => null);
+                if (employee) {
+                    await sendAssignedEmployeeActionEmail({
+                        asset: item,
+                        employee,
+                        action: 'Return Asset',
+                        performedBy: req.user.employeeId || 'Asset Controller',
+                        details: 'Your asset was returned to store by Asset Controller/Admin.'
+                    });
+                }
+            } catch (e) {
+                // non-fatal
+            }
+        }
 
         await updateAssetTypeCounts(item.typeId);
 
@@ -3650,7 +3934,12 @@ export const manageAccessoryStatus = async (req, res) => {
 
         accessory.status = status;
         await asset.save();
-        await notifyAssignedEmployeeIfController(req, asset, actionType, `Asset ${actionType} request was raised by Asset Controller.`);
+        await notifyAssignedEmployeeIfController(
+            req,
+            asset,
+            `${status} Accessory`,
+            `Accessory "${accessory.name}" was marked as ${status} by Asset Controller.`
+        );
 
         // Log History
         await AssetHistory.create({
@@ -3683,11 +3972,14 @@ export const requestAssetAction = async (req, res) => {
         if (!['End of Life', 'End of Services', 'Loss and Damage', 'Leave'].includes(actionType)) {
             return res.status(400).json({ message: 'Invalid action type' });
         }
-        if (actionType === 'End of Services') actionType = 'End of Life'; // Normalize for backend processing
+        const originalActionType = actionType;
+        // Normalize only for the "pendingAction" field, which uses the enum 'End of Life'
+        // Keep `originalActionType` so we can differentiate "End of Services" => Unassigned.
+        const pendingActionType = originalActionType === 'End of Services' ? 'End of Life' : originalActionType;
         const { duration, leaveDuration } = req.body; // Duration in days for Leave action
         const leaveDaysRaw = duration ?? leaveDuration;
         const leaveDays = leaveDaysRaw != null && leaveDaysRaw !== '' ? Number(leaveDaysRaw) : null;
-        if (actionType === 'Leave') {
+        if (originalActionType === 'Leave') {
             if (!Number.isInteger(leaveDays) || leaveDays < 1 || leaveDays > 30) {
                 return res.status(400).json({ message: 'Leave duration must be between 1 and 30 days.' });
             }
@@ -3724,14 +4016,96 @@ export const requestAssetAction = async (req, res) => {
             return res.status(400).json({ message: 'Asset Controller not found. Cannot request approval.' });
         }
 
+        // If the requester IS the Asset Controller, execute directly (no approval step).
+        // This is specifically for controller-raised Leave / End of Services.
+        const isAssetControllerRequester = await isUserInFlowchart(req.user, 'assetcontroller').catch(() => false);
+        if (isAssetControllerRequester && (originalActionType === 'Leave' || originalActionType === 'End of Services')) {
+            // Ensure duration is present for Leave
+            if (originalActionType === 'Leave') {
+                if (!leaveDays) {
+                    return res.status(400).json({ message: 'Leave duration is required.' });
+                }
+                const start = new Date();
+                const end = new Date(start);
+                end.setDate(end.getDate() + leaveDays);
+
+                asset.status = 'On Leave';
+                asset.acceptanceStatus = 'Accepted';
+                asset.onLeaveStartDate = start;
+                asset.onLeaveDuration = leaveDays;
+                asset.onLeaveEndDate = end;
+                asset.parkingExtendedDays = 0;
+                asset.parkingReminderSentAt = null;
+
+                // Clear any pending request fields (if present)
+                asset.pendingAction = null;
+                asset.pendingActionDetails = null;
+                asset.actionRequiredBy = null;
+                asset.negotiationHistory = [];
+
+                await asset.save();
+                await notifyAssignedEmployeeIfController(req, asset, 'Leave', 'Asset placed on leave by Asset Controller (direct transfer).');
+                await AssetHistory.create({
+                    assetId: asset._id,
+                    action: 'On Leave',
+                    performedBy: req.user.employeeObjectId || req.user._id,
+                    comments: 'Asset Controller executed Leave directly (no approval step).',
+                    date: new Date(),
+                    details: { status: 'ApprovedAndFinalized', originalAction: originalActionType }
+                });
+                return res.status(200).json({ message: 'Leave executed directly by Asset Controller (no approval)', asset });
+            }
+
+            if (originalActionType === 'End of Services') {
+                // Direct transfer to store: mark Unassigned (NOT Lost).
+                asset.status = 'Unassigned';
+                asset.acceptanceStatus = 'Accepted';
+                await notifyAssignedEmployeeIfController(req, asset, 'Return Asset', 'Asset returned to store by Asset Controller (End of Services direct transfer).');
+
+                asset.assignedTo = null;
+                asset.assignedCompany = null;
+                asset.assignedToType = null;
+                asset.assignmentType = null;
+                asset.assignedDays = null;
+                asset.assignedDate = null;
+                asset.temporaryEndDate = null;
+                asset.temporaryReminderSentAt = null;
+                asset.temporaryExpiredSentAt = null;
+                asset.pendingAction = null;
+                asset.pendingActionDetails = null;
+                asset.actionRequiredBy = null;
+                asset.negotiationHistory = [];
+                asset.onLeaveStartDate = null;
+                asset.onLeaveEndDate = null;
+                asset.onLeaveDuration = null;
+                asset.parkingExtendedDays = 0;
+                asset.parkingReminderSentAt = null;
+
+                await asset.save();
+
+                // Asset history (minimal)
+                await AssetHistory.create({
+                    assetId: asset._id,
+                    action: 'Unassigned',
+                    performedBy: req.user.employeeObjectId || req.user._id,
+                    comments: 'Asset Controller returned asset to store directly (End of Services).',
+                    date: new Date(),
+                    details: { status: 'Unassigned', originalActionType }
+                });
+
+                return res.status(200).json({ message: 'End of Services executed directly by Asset Controller (unassigned)', asset });
+            }
+        }
+
         // Store pending request in asset
-        asset.pendingAction = actionType;
+        asset.pendingAction = pendingActionType;
         asset.pendingActionDetails = {
             reason: reason,
             attachment: fileUrl,
             fineData: fineData || null, // Store full fine payload
             duration: leaveDays || null, // Store duration for Leave action
-            leaveDuration: leaveDays || null // Alias for clarity
+            leaveDuration: leaveDays || null, // Alias for clarity
+            originalActionType
         };
 
         // Always route to Asset Controller - no reportee approval
@@ -3745,8 +4119,8 @@ export const requestAssetAction = async (req, res) => {
         await asset.save();
 
         // Create Dashboard Action
-        const dashboardRequestType = actionType === 'End of Life' ? 'Asset End of Life' :
-            actionType === 'Leave' ? 'Asset Leave' : 'Asset Loss Damage';
+        const dashboardRequestType = pendingActionType === 'End of Life' ? 'Asset End of Life' :
+            pendingActionType === 'Leave' ? 'Asset Leave' : 'Asset Loss Damage';
         await DashboardAction.create({
             assignedTo: nextApprover._id, // actionRequiredBy references EmployeeBasic
             requestId: asset._id,
@@ -3756,7 +4130,7 @@ export const requestAssetAction = async (req, res) => {
             subjectName: asset.assignedTo ? `${asset.assignedTo.firstName} ${asset.assignedTo.lastName}` : (asset.assignedCompany ? asset.assignedCompany.name : 'Unassigned Asset'),
             requestedByName: req.user.name || 'System',
             extra1: `${asset.assetId} — ${asset.name}`,
-            extra2: actionType
+            extra2: pendingActionType
         });
 
         // Create history log for the request
@@ -3774,16 +4148,18 @@ export const requestAssetAction = async (req, res) => {
 
         await sendAssetActionApprovalEmail(
             asset,
-            actionType,
+            pendingActionType,
             nextApprover,
             { name: requesterName },
             reason
         );
 
-        res.status(200).json({ message: `${actionType} request sent to Asset Controller for approval`, asset });
+        res.status(200).json({ message: `${pendingActionType} request sent to Asset Controller for approval`, asset });
     } catch (error) {
         console.error('Error requesting asset action:', error);
-        const msg = process.env.NODE_ENV === 'development' ? (error.message || 'Internal server error') : 'Internal server error';
+        // Return the real message to help frontend/debug quickly (avoids generic 500).
+        // (In production you can later hide details behind NODE_ENV if you prefer.)
+        const msg = error?.message || 'Internal server error';
         res.status(500).json({ message: msg });
     }
 };
@@ -3802,10 +4178,11 @@ export const bulkRequestAssetAction = async (req, res) => {
         if (!['End of Life', 'End of Services', 'Loss and Damage', 'Leave'].includes(actionType)) {
             return res.status(400).json({ message: 'Invalid action type' });
         }
-        if (actionType === 'End of Services') actionType = 'End of Life'; // Normalize for backend processing
+        const originalActionType = actionType;
+        if (actionType === 'End of Services') actionType = 'End of Life'; // Normalize for backend processing (pendingAction enum)
         const leaveDaysRaw = duration ?? leaveDuration;
         const leaveDays = leaveDaysRaw != null && leaveDaysRaw !== '' ? Number(leaveDaysRaw) : null;
-        if (actionType === 'Leave') {
+        if (originalActionType === 'Leave') {
             if (!Number.isInteger(leaveDays) || leaveDays < 1 || leaveDays > 30) {
                 return res.status(400).json({ message: 'Leave duration must be between 1 and 30 days.' });
             }
@@ -3826,6 +4203,91 @@ export const bulkRequestAssetAction = async (req, res) => {
         }
         if (!assetController._id) {
             return res.status(400).json({ message: 'Asset Controller is not properly linked to an employee record. Please update Settings > Flowchart.' });
+        }
+
+        // If requester is the Asset Controller, execute directly (no approval step) for Leave / End of Services.
+        const isAssetControllerRequester = await isUserInFlowchart(req.user, 'assetcontroller').catch(() => false);
+        if (isAssetControllerRequester && (originalActionType === 'Leave' || originalActionType === 'End of Services')) {
+            const processed = [];
+            for (const currentAsset of assets) {
+                if (!currentAsset) continue;
+
+                if (originalActionType === 'Leave') {
+                    if (!leaveDays) {
+                        return res.status(400).json({ message: 'Leave duration is required.' });
+                    }
+                    const start = new Date();
+                    const end = new Date(start);
+                    end.setDate(end.getDate() + leaveDays);
+
+                    currentAsset.status = 'On Leave';
+                    currentAsset.acceptanceStatus = 'Accepted';
+                    currentAsset.onLeaveStartDate = start;
+                    currentAsset.onLeaveDuration = leaveDays;
+                    currentAsset.onLeaveEndDate = end;
+                    currentAsset.parkingExtendedDays = 0;
+                    currentAsset.parkingReminderSentAt = null;
+
+                    currentAsset.pendingAction = null;
+                    currentAsset.pendingActionDetails = null;
+                    currentAsset.actionRequiredBy = null;
+                    currentAsset.negotiationHistory = [];
+
+                    await notifyAssignedEmployeeIfController(req, currentAsset, 'Leave', 'Assets placed on leave by Asset Controller (direct transfer).');
+                    await currentAsset.save();
+                    await AssetHistory.create({
+                        assetId: currentAsset._id,
+                        action: 'On Leave',
+                        performedBy: req.user.employeeObjectId || req.user._id,
+                        comments: 'Bulk Leave executed directly by Asset Controller.',
+                        date: new Date(),
+                        details: { status: 'ApprovedAndFinalized', originalActionType }
+                    });
+                } else if (originalActionType === 'End of Services') {
+                    // Direct transfer to store: mark Unassigned (NOT Lost)
+                    currentAsset.status = 'Unassigned';
+                    currentAsset.acceptanceStatus = 'Accepted';
+                    await notifyAssignedEmployeeIfController(req, currentAsset, 'Return Asset', 'Assets returned to store by Asset Controller (End of Services direct transfer).');
+
+                    currentAsset.assignedTo = null;
+                    currentAsset.assignedCompany = null;
+                    currentAsset.assignedToType = null;
+                    currentAsset.assignmentType = null;
+                    currentAsset.assignedDays = null;
+                    currentAsset.assignedDate = null;
+                    currentAsset.temporaryEndDate = null;
+                    currentAsset.temporaryReminderSentAt = null;
+                    currentAsset.temporaryExpiredSentAt = null;
+                    currentAsset.onLeaveStartDate = null;
+                    currentAsset.onLeaveEndDate = null;
+                    currentAsset.onLeaveDuration = null;
+                    currentAsset.parkingExtendedDays = 0;
+                    currentAsset.parkingReminderSentAt = null;
+
+                    currentAsset.pendingAction = null;
+                    currentAsset.pendingActionDetails = null;
+                    currentAsset.actionRequiredBy = null;
+                    currentAsset.negotiationHistory = [];
+
+                    await currentAsset.save();
+                    await AssetHistory.create({
+                        assetId: currentAsset._id,
+                        action: 'Unassigned',
+                        performedBy: req.user.employeeObjectId || req.user._id,
+                        comments: 'Bulk End of Services returned assets to store directly by Asset Controller.',
+                        date: new Date(),
+                        details: { status: 'Unassigned', originalActionType }
+                    });
+                }
+
+                processed.push(currentAsset._id);
+            }
+
+            return res.status(200).json({
+                message: `Bulk ${originalActionType} executed directly by Asset Controller (no approval)`,
+                processedCount: processed.length,
+                assetIds: processed
+            });
         }
 
         // HR is required only for Loss and Damage bulk flow.
@@ -3867,7 +4329,8 @@ export const bulkRequestAssetAction = async (req, res) => {
                     bulkAssetIds: assetIds, // Store all asset IDs for bulk tracking
                     fineData: null,
                     duration: leaveDur || null,
-                    leaveDuration: leaveDur || null
+                    leaveDuration: leaveDur || null,
+                    originalActionType
                 };
 
                 // actionRequiredBy references EmployeeBasic, so use EmployeeBasic._id
@@ -3959,7 +4422,7 @@ export const bulkRequestAssetAction = async (req, res) => {
 export const handleAssetActionApproval = async (req, res) => {
     try {
         const { id } = req.params;
-        const { approve, comment, fineData } = req.body; // fineData can be provided when Asset Controller fills modal
+        const { approve, comment, fineData, bulkAssetIdsToProcess } = req.body; // fineData can be provided when Asset Controller fills modal
 
         const asset = await AssetItem.findById(id).populate({
             path: 'assignedTo',
@@ -4031,19 +4494,82 @@ export const handleAssetActionApproval = async (req, res) => {
             const hrHOD = await getDepartmentHOD('hr');
             const isAssetControllerApprowing = await isUserInFlowchart(req.user, 'assetcontroller');
 
-            // Handle "Leave" and "End of Life" - Asset Controller can approve directly (single step)
-            if ((actionType === 'Leave' || actionType === 'End of Life') && isAssetControllerApprowing) {
+            // Handle "Leave" and "End of Life" and "Return Asset" - Asset Controller can approve directly (single step)
+            if ((actionType === 'Leave' || actionType === 'End of Life' || actionType === 'Return Asset') && isAssetControllerApprowing) {
                 // Get Asset Controller employee record for email
                 const assetControllerEmp = await EmployeeBasic.findById(req.user.employeeObjectId).select('firstName lastName companyEmail');
 
                 // Check if this is a bulk transfer
                 const isBulkTransfer = asset.pendingActionDetails?.isBulk === true;
                 const bulkAssetIds = asset.pendingActionDetails?.bulkAssetIds || [];
+                const hasRequestedSubset = Array.isArray(bulkAssetIdsToProcess) && bulkAssetIdsToProcess.length > 0;
+                const effectiveBulkAssetIds = (hasRequestedSubset ? bulkAssetIdsToProcess : bulkAssetIds)
+                    .map(String)
+                    .filter(Boolean);
+
+                // Always ensure current asset is included in processing.
+                const currentIdStr = asset._id?.toString();
+                if (currentIdStr && !effectiveBulkAssetIds.includes(currentIdStr)) {
+                    effectiveBulkAssetIds.unshift(currentIdStr);
+                }
+
+                const otherAssetIds = effectiveBulkAssetIds.filter((x) => x !== currentIdStr);
 
                 // Process current asset
                 const processAsset = async (currentAsset) => {
+                    // Process "Return Asset" action
+                    if (actionType === 'Return Asset') {
+                        const prevAssignedTo = currentAsset.assignedTo;
+
+                        currentAsset.status = 'Unassigned';
+                        currentAsset.assignedTo = null;
+                        currentAsset.assignedCompany = null;
+                        currentAsset.assignedToType = null;
+                        currentAsset.assignmentType = null;
+                        currentAsset.assignedDays = null;
+                        currentAsset.assignedDate = null;
+                        currentAsset.acceptanceStatus = 'Accepted';
+                        currentAsset.negotiationHistory = [];
+                        currentAsset.onLeaveStartDate = null;
+                        currentAsset.onLeaveEndDate = null;
+                        currentAsset.onLeaveDuration = null;
+                        currentAsset.parkingExtendedDays = 0;
+                        currentAsset.parkingReminderSentAt = null;
+
+                        await AssetHistory.create({
+                            assetId: currentAsset._id,
+                            action: 'Returned',
+                            assignedTo: prevAssignedTo || undefined,
+                            performedBy: req.user._id,
+                            comments: `Asset Controller approved "${actionType}"${isBulkTransfer ? ' (Bulk Transfer)' : ''}. Asset returned to store. ${comment || ''}`,
+                            date: new Date(),
+                            details: { status: 'ApprovedAndFinalized', originalAction: actionType, isBulk: isBulkTransfer }
+                        });
+
+                        // Notify the previously assigned employee (or their delegate) that AC returned it.
+                        if (prevAssignedTo) {
+                            try {
+                                const employee = await EmployeeBasic.findById(prevAssignedTo)
+                                    .select('firstName lastName employeeId companyEmail workEmail personalEmail email primaryReportee')
+                                    .populate('primaryReportee', 'firstName lastName companyEmail workEmail personalEmail email')
+                                    .lean()
+                                    .catch(() => null);
+                                if (employee) {
+                                    await sendAssignedEmployeeActionEmail({
+                                        asset: currentAsset,
+                                        employee,
+                                        action: 'Return Asset',
+                                        performedBy: req.user.employeeId || 'Asset Controller',
+                                        details: 'Your asset was returned to store by Asset Controller/Admin.'
+                                    });
+                                }
+                            } catch {
+                                /* non-fatal */
+                            }
+                        }
+                    }
                     // Process "Leave" action
-                    if (actionType === 'Leave') {
+                    else if (actionType === 'Leave') {
                         currentAsset.status = 'On Leave';
                         // Keep assignedTo as is (don't remove it)
 
@@ -4070,7 +4596,34 @@ export const handleAssetActionApproval = async (req, res) => {
                     }
                     // Process "End of Life" action
                     else if (actionType === 'End of Life') {
-                        currentAsset.status = 'Unassigned';
+                        const originalActionType = currentAsset.pendingActionDetails?.originalActionType;
+                        const isEndOfServices = originalActionType === 'End of Services';
+                        // For company allocations, HR needs notification, but End of Life clears assignment fields.
+                        const wasCompanyAllocation = currentAsset.assignedToType === 'Company';
+                        let companyNameForNotification =
+                            (currentAsset.assignedCompany && typeof currentAsset.assignedCompany === 'object' ? currentAsset.assignedCompany.name : null) || null;
+                        let companyIdForNotification =
+                            (currentAsset.assignedCompany && typeof currentAsset.assignedCompany === 'object' ? currentAsset.assignedCompany.companyId : null) || null;
+
+                        if (wasCompanyAllocation && (!companyNameForNotification || !companyIdForNotification) && typeof currentAsset.assignedCompany === 'string') {
+                            const comp = await Company.findById(currentAsset.assignedCompany).select('name companyId nickName').lean().catch(() => null);
+                            companyNameForNotification = companyNameForNotification || comp?.name || null;
+                            companyIdForNotification = companyIdForNotification || comp?.companyId || null;
+                        }
+
+                        // End of Services => Unassigned (return to store)
+                        if (isEndOfServices) {
+                            await notifyAssignedEmployeeIfController(
+                                req,
+                                currentAsset,
+                                'Return Asset',
+                                'Asset returned to store after End of Services approval by Asset Controller.'
+                            );
+                            currentAsset.status = 'Unassigned';
+                        } else {
+                            currentAsset.status = 'Unassigned';
+                        }
+
                         currentAsset.assignedTo = null;
                         currentAsset.assignedCompany = null;
                         currentAsset.assignedToType = null;
@@ -4081,10 +4634,44 @@ export const handleAssetActionApproval = async (req, res) => {
                             assetId: currentAsset._id,
                             action: 'Unassigned',
                             performedBy: req.user._id,
-                            comments: `Asset Controller approved "${actionType}"${isBulkTransfer ? ' (Bulk Transfer)' : ''}. Asset marked as End of Life and unassigned. ${comment || ''}`,
+                            comments: isEndOfServices
+                                ? `Asset Controller approved "${actionType}" (original: End of Services)${isBulkTransfer ? ' (Bulk Transfer)' : ''}. Asset returned to store (Unassigned). ${comment || ''}`
+                                : `Asset Controller approved "${actionType}"${isBulkTransfer ? ' (Bulk Transfer)' : ''}. Asset marked as End of Life and unassigned. ${comment || ''}`,
                             date: new Date(),
                             details: { status: 'ApprovedAndFinalized', originalAction: actionType, isBulk: isBulkTransfer }
                         });
+
+                        // HR notification for company allocations.
+                        if (wasCompanyAllocation) {
+                            try {
+                                await sendAssignedEmployeeActionEmail({
+                                    asset: currentAsset,
+                                    employee: hrHOD,
+                                    action,
+                                    performedBy: req.user.employeeId || 'Asset Controller',
+                                    details: isEndOfServices
+                                        ? `End of Services was approved by Asset Controller. Asset returned to store (Unassigned). (Company: ${companyNameForNotification || 'Company allocation'})`
+                                        : `End of Life was approved by Asset Controller. (Company: ${companyNameForNotification || 'Company allocation'})`
+                                });
+
+                                await DashboardAction.create({
+                                    assignedTo: hrHOD._id,
+                                    assignedToEmpId: hrHOD.employeeId,
+                                    requestId: currentAsset._id,
+                                    requestType: 'Asset End of Life',
+                                    status: 'Approved',
+                                    subjectEmployeeId: companyIdForNotification || 'UNASSIGNED',
+                                    subjectName: companyNameForNotification || 'Company allocation',
+                                    requestedByName: req.user.name || req.user.employeeId || 'Asset Controller',
+                                    actionedDate: new Date(),
+                                    actionedBy: req.user.employeeObjectId || req.user.id || null,
+                                    extra1: `${currentAsset.assetId} — ${currentAsset.name || ''}`,
+                                    extra2: 'End of Life (Company allocation)'
+                                });
+                            } catch (mailErr) {
+                                console.error('[EndOfLife Company Notification] Non-fatal:', mailErr?.message || mailErr);
+                            }
+                        }
                     }
 
                     // Clean up pending action
@@ -4098,13 +4685,14 @@ export const handleAssetActionApproval = async (req, res) => {
                     await DashboardAction.deleteMany({ requestId: currentAsset._id });
                 };
 
-                // Process current asset
-                await processAsset(asset);
+                // Process current asset (only if it is included in the effective selection)
+                if (currentIdStr && effectiveBulkAssetIds.includes(currentIdStr)) {
+                    await processAsset(asset);
+                }
 
                 // If bulk transfer, process all other assets in the bulk
-                const processedAssets = [asset];
-                if (isBulkTransfer && bulkAssetIds.length > 1) {
-                    const otherAssetIds = bulkAssetIds.filter(id => id.toString() !== asset._id.toString());
+                const processedAssets = effectiveBulkAssetIds.includes(currentIdStr) ? [asset] : [];
+                if (isBulkTransfer && otherAssetIds.length > 0) {
                     const otherAssets = await AssetItem.find({
                         _id: { $in: otherAssetIds },
                         pendingAction: actionType,
@@ -4177,6 +4765,7 @@ export const handleAssetActionApproval = async (req, res) => {
                 for (const processedAsset of processedAssets) {
                     await notifyAssignedEmployeeIfController(req, processedAsset, actionType, `${actionType} was approved by Asset Controller.`);
                 }
+
                 return res.status(200).json({
                     message: bulkMessage,
                     asset,
@@ -4340,7 +4929,89 @@ export const handleAssetActionApproval = async (req, res) => {
 
         } else {
             // Rejected
-            asset.status = asset.assignedTo ? 'Assigned' : 'Unassigned';
+            const isBulkTransfer = asset.pendingActionDetails?.isBulk === true;
+            const bulkAssetIds = asset.pendingActionDetails?.bulkAssetIds || [];
+
+            // Bulk subset rejection (Leave / End of Life) - Asset Controller authority.
+            if (
+                isBulkTransfer &&
+                (isAssetController || isAdmin) &&
+                (actionType === 'Leave' || actionType === 'End of Life')
+            ) {
+                const hasRequestedSubset = Array.isArray(bulkAssetIdsToProcess) && bulkAssetIdsToProcess.length > 0;
+                const effectiveBulkAssetIds = (hasRequestedSubset ? bulkAssetIdsToProcess : bulkAssetIds)
+                    .map(String)
+                    .filter(Boolean);
+
+                const currentIdStr = asset._id?.toString();
+                if (currentIdStr && !effectiveBulkAssetIds.includes(currentIdStr)) {
+                    effectiveBulkAssetIds.unshift(currentIdStr);
+                }
+
+                const assetIdSet = new Set(effectiveBulkAssetIds);
+                const orderedIds = [...new Set(effectiveBulkAssetIds)].filter((x) => assetIdSet.has(x));
+
+                const assetsToReject = await AssetItem.find({
+                    _id: { $in: orderedIds },
+                    pendingAction: actionType,
+                    'pendingActionDetails.isBulk': true
+                });
+
+                const byId = new Map(assetsToReject.map((a) => [a._id.toString(), a]));
+
+                for (const rid of orderedIds) {
+                    const currentAsset = byId.get(rid);
+                    if (!currentAsset) continue;
+
+                    currentAsset.status = currentAsset.assignedTo ? 'Assigned' : 'Unassigned';
+                    currentAsset.pendingAction = null;
+                    currentAsset.pendingActionDetails = null;
+                    currentAsset.actionRequiredBy = null;
+
+                    await AssetHistory.create({
+                        assetId: currentAsset._id,
+                        action: 'Comment',
+                        performedBy: req.user._id,
+                        comments: `Action "${actionType}" rejected/cancelled by authority (${req.user.employeeId || 'unknown'}). Reason: ${comment || 'N/A'}`,
+                        date: new Date(),
+                        details: { status: 'RejectedByAuthority', originalAction: actionType }
+                    });
+
+                    // Delete Dashboard Action
+                    await DashboardAction.deleteMany({ requestId: currentAsset._id, requestType: 'Asset' });
+                    await currentAsset.save();
+                }
+
+                // Notify (non-fatal)
+                try {
+                    for (const rid of orderedIds) {
+                        const currentAsset = byId.get(rid);
+                        if (!currentAsset) continue;
+                        await notifyAssignedEmployeeIfController(
+                            req,
+                            currentAsset,
+                            actionType,
+                            `${actionType} request was rejected by authority.`
+                        );
+                    }
+                } catch (e) {
+                    // non-fatal
+                }
+
+                return res.status(200).json({
+                    message: `Bulk ${actionType} request rejected`,
+                    asset,
+                    processedCount: orderedIds.length,
+                    isBulk: true
+                });
+            }
+
+            if (actionType === 'Return Asset') {
+                // Return request rejected: restore to Assigned (assignee remains the same).
+                asset.status = asset.assignedTo ? 'Assigned' : 'Unassigned';
+            } else {
+                asset.status = asset.assignedTo ? 'Assigned' : 'Unassigned';
+            }
             asset.pendingAction = null;
             asset.pendingActionDetails = null;
             asset.actionRequiredBy = null;
@@ -4355,7 +5026,7 @@ export const handleAssetActionApproval = async (req, res) => {
             });
 
             // Delete Dashboard Action
-            await DashboardAction.deleteMany({ requestId: asset._id, requestType: 'Asset' });
+            await DashboardAction.deleteMany({ requestId: asset._id });
         }
 
         await asset.save();
@@ -4486,7 +5157,7 @@ export const requestAccessoryAction = async (req, res) => {
         const { id, accId } = req.params;
         const { actionType, reason, attachment, targetAssetId, fineData } = req.body;
 
-        if (!['Transfer', 'Loss and Damage', 'End of Life'].includes(actionType)) {
+        if (!['Transfer', 'Loss and Damage', 'End of Life', 'Unattach'].includes(actionType)) {
             return res.status(400).json({ message: 'Invalid accessory action type' });
         }
 
@@ -4503,10 +5174,21 @@ export const requestAccessoryAction = async (req, res) => {
             return res.status(400).json({ message: `This accessory already has a pending "${accessory.pendingAction}" request.` });
         }
 
-        // Permission: asset controller/admin OR assignee
-        // Also allow assigner + primary reportee delegation when assignee has NO companyEmail
         const actorFlags = await getActorPermissionFlagsForAsset(req.user, asset);
-        if (!actorFlags.canAct) {
+
+        // Unattach: only assigned employee, Asset Controller, or Admin (not assigner / delegated reportee).
+        if (actionType === 'Unattach') {
+            const currentEmpId = req.user.employeeObjectId?.toString();
+            const assigneeId = asset.assignedToType === 'Employee' && asset.assignedTo
+                ? (typeof asset.assignedTo === 'object' ? asset.assignedTo._id?.toString() : String(asset.assignedTo))
+                : null;
+            const isAssignee = !!(assigneeId && currentEmpId && assigneeId === currentEmpId);
+            const isAdm = req.user.isAdmin === true || req.user.role === 'Admin' || req.user.role === 'ROOT';
+            const isAC = await isUserInFlowchart(req.user, 'assetcontroller').catch(() => false);
+            if (!isAssignee && !isAC && !isAdm) {
+                return res.status(403).json({ message: 'Access denied. Only assigned user, Asset Controller, or Admin can request unattach.' });
+            }
+        } else if (!actorFlags.canAct) {
             return res.status(403).json({ message: 'Access denied. Only Asset Controller/Admin, assigner, assigned user, or delegated primary reportee can request accessory actions.' });
         }
 
@@ -4531,12 +5213,61 @@ export const requestAccessoryAction = async (req, res) => {
         const requesterId = (req.user.employeeObjectId || req.user._id).toString();
         const isControllerOrAdmin = requesterId === assetController?._id?.toString() || req.user.role === 'Admin' || req.user.role === 'ROOT';
 
+        // Asset Controller/Admin can directly unattach without approval workflow.
+        if (actionType === 'Unattach' && isControllerOrAdmin) {
+            const accIndex = asset.accessories.findIndex(a => a._id.toString() === accId || a.accessoryId === accId);
+            if (accIndex < 0) return res.status(404).json({ message: 'Accessory not found' });
+
+            const accToMove = asset.accessories[accIndex].toObject();
+            asset.accessories.splice(accIndex, 1);
+
+            const catalogId = await generateAccessoryCatalogId();
+            await AssetAccessoryCatalog.create({
+                accessoryCatalogId: catalogId,
+                name: accToMove.name,
+                price: accToMove.amount || 0,
+                description: accToMove.description || '',
+                status: 'Unattached',
+                isActive: true,
+                history: [{
+                    at: new Date(),
+                    action: 'unattached',
+                    message: `Returned to catalog from asset ${asset.assetId} — ${asset.name}`,
+                    assetId: asset.assetId,
+                    assetName: asset.name,
+                    assetObjectId: asset._id
+                }]
+            });
+
+            asset.actionRequiredBy = null;
+            asset.markModified('accessories');
+            await asset.save();
+
+            await AssetHistory.create({
+                assetId: asset._id,
+                action: 'Accepted',
+                performedBy: req.user.employeeObjectId || req.user._id,
+                comments: `Accessory "${accToMove.name}" (${accToMove.accessoryId}) directly detached by Asset Controller/Admin and returned to catalog (${catalogId}). ${reason || ''}`,
+                date: new Date(),
+                details: { status: 'UnattachedDirect', accessoryId: accToMove.accessoryId, catalogId }
+            });
+            await removeAccessoryFromHistorySnapshots(asset._id, accToMove._id || accToMove.accessoryId);
+            await notifyAssignedEmployeeIfController(req, asset, 'Unattach Accessory', `Accessory "${accToMove.name}" was directly detached by Asset Controller/Admin.`);
+
+            return res.status(200).json({
+                message: `Accessory "${accToMove.name}" detached and returned to catalog.`,
+                asset
+            });
+        }
+
         // Flow:
         // - End of Life / Transfer -> Asset Controller approval
         // - Loss and Damage -> company assets to HR, others to Asset Controller first
 
         let finalApprover;
-        if (actionType === 'Loss and Damage' && asset.assignedToType === 'Company' && asset.assignedCompany) {
+        if (actionType === 'Unattach') {
+            finalApprover = assetController;
+        } else if (actionType === 'Loss and Damage' && asset.assignedToType === 'Company' && asset.assignedCompany) {
             // Company-assigned assets: Route directly to HR
             finalApprover = hrHOD;
         } else {
@@ -4568,11 +5299,13 @@ export const requestAccessoryAction = async (req, res) => {
         asset.actionRequiredBy = finalApprover._id;
         asset.markModified('accessories');
         await asset.save();
-        await notifyAssignedEmployeeIfController(req, asset, `${actionType} Accessory`, `Accessory "${accessory.name}" ${actionType} request was raised by Asset Controller.`);
+        await notifyAssignedEmployeeIfController(req, asset, `${actionType} Accessory`, `Accessory "${accessory.name}" ${actionType} request is pending approval.`);
 
         // Create Dashboard Action
         const accDashType = actionType === 'Transfer' ? 'Asset Transfer' :
-            actionType === 'End of Life' ? 'Asset End of Life' : 'Asset Loss Damage';
+            actionType === 'End of Life' ? 'Asset End of Life' :
+            actionType === 'Unattach' ? 'Asset Accessory Unattach' :
+            'Asset Loss Damage';
         await DashboardAction.create({
             assignedTo: finalApprover._id, // actionRequiredBy references EmployeeBasic
             requestId: asset._id,
@@ -4596,10 +5329,11 @@ export const requestAccessoryAction = async (req, res) => {
         });
 
         // Send email (non-blocking — errors here won't crash the response)
+        const emailActionLabel = actionType === 'Unattach' ? 'Unattach Accessory' : actionType;
         try {
             await sendAssetActionApprovalEmail(
                 { ...asset.toObject(), assetId: asset.assetId, name: `${asset.name} - Accessory: ${accessory.name} (${accessory.accessoryId})` },
-                actionType,
+                emailActionLabel,
                 finalApprover,
                 { name: requesterName },
                 reason || 'No reason provided'
@@ -4652,11 +5386,11 @@ export const respondAccessoryAction = async (req, res) => {
         const isAssetControllerApproving = await isUserInFlowchart(req.user, 'assetcontroller').catch(() => false);
 
         const canApproveByAssignedActors = (pendingAction === 'Transfer' || pendingAction === 'Add') && actorFlags.canAct;
-        const canApproveByAuthority = (pendingAction === 'Loss and Damage' || pendingAction === 'End of Life') && (isAdmin || isAssetControllerApproving);
+        const canApproveByAuthority = (pendingAction === 'Loss and Damage' || pendingAction === 'End of Life' || pendingAction === 'Unattach') && (isAdmin || isAssetControllerApproving);
 
         if (!canApproveByAssignedActors && !canApproveByAuthority) {
             return res.status(403).json({
-                message: 'Access denied. Only Asset Controller/Admin can approve Loss & Damage or End of Life accessory actions.'
+                message: 'Access denied. Only Asset Controller/Admin can approve or reject this accessory action.'
             });
         }
 
@@ -4757,6 +5491,52 @@ export const respondAccessoryAction = async (req, res) => {
                 return res.status(200).json({ message: `Transfer approved and finalized by Asset Controller. Accessory assigned to ${targetAsset.assetId}.`, asset });
             }
 
+            // --- UNATTACH (Asset Controller / Admin): remove from asset, return row to catalog ---
+            if (pendingAction === 'Unattach') {
+                const accIndex = asset.accessories.findIndex(a => a._id.toString() === accId || a.accessoryId === accId);
+                const accToMove = asset.accessories[accIndex].toObject();
+                asset.accessories.splice(accIndex, 1);
+
+                const catalogId = await generateAccessoryCatalogId();
+                await AssetAccessoryCatalog.create({
+                    accessoryCatalogId: catalogId,
+                    name: accToMove.name,
+                    price: accToMove.amount || 0,
+                    description: accToMove.description || '',
+                    status: 'Unattached',
+                    isActive: true,
+                    history: [{
+                        at: new Date(),
+                        action: 'unattached',
+                        message: `Returned to catalog from asset ${asset.assetId} — ${asset.name}`,
+                        assetId: asset.assetId,
+                        assetName: asset.name,
+                        assetObjectId: asset._id
+                    }]
+                });
+
+                await AssetHistory.create({
+                    assetId: asset._id,
+                    action: 'Accepted',
+                    performedBy: req.user.employeeObjectId,
+                    comments: `Accessory "${accToMove.name}" (${accToMove.accessoryId}) detached and returned to accessories catalog (${catalogId}). ${comment || ''}`,
+                    date: new Date(),
+                    details: { status: 'UnattachedToCatalog', accessoryId: accToMove.accessoryId, catalogId }
+                });
+
+                await removeAccessoryFromHistorySnapshots(asset._id, accToMove._id || accToMove.accessoryId);
+                asset.actionRequiredBy = null;
+                await DashboardAction.deleteMany({ requestId: asset._id, requestType: 'Asset Accessory Unattach' });
+                asset.markModified('accessories');
+                await asset.save();
+                await notifyAssignedEmployeeIfController(req, asset, 'Unattach Accessory', `Accessory "${accToMove.name}" was detached and added to the accessories catalog.`);
+
+                return res.status(200).json({
+                    message: `Accessory "${accToMove.name}" detached and returned to the accessories catalog.`,
+                    asset
+                });
+            }
+
             // --- SPECIAL LOGIC FOR ADD APPROVAL (Employee) ---
             if (pendingAction === 'Add') {
                 const catalogItemId = accessory?.pendingActionDetails?.catalogItemId;
@@ -4776,7 +5556,19 @@ export const respondAccessoryAction = async (req, res) => {
                     if (catalogItemId) {
                         await AssetAccessoryCatalog.findByIdAndUpdate(
                             catalogItemId,
-                            { $set: { isActive: false, status: 'Attached' } }
+                            {
+                                $set: { isActive: false, status: 'Attached' },
+                                $push: {
+                                    history: {
+                                        at: new Date(),
+                                        action: 'attached',
+                                        message: `Attached to asset ${asset.assetId} — ${asset.name}`,
+                                        assetId: asset.assetId,
+                                        assetName: asset.name,
+                                        assetObjectId: asset._id
+                                    }
+                                }
+                            }
                         ).catch(() => null);
                     }
                 } else {
@@ -4797,7 +5589,19 @@ export const respondAccessoryAction = async (req, res) => {
                     if (catalogItemId) {
                         await AssetAccessoryCatalog.findByIdAndUpdate(
                             catalogItemId,
-                            { $set: { status: 'Unattached' } }
+                            {
+                                $set: { status: 'Unattached' },
+                                $push: {
+                                    history: {
+                                        at: new Date(),
+                                        action: 'attach_rejected',
+                                        message: `Attach request rejected (asset ${asset.assetId} — ${asset.name})`,
+                                        assetId: asset.assetId,
+                                        assetName: asset.name,
+                                        assetObjectId: asset._id
+                                    }
+                                }
+                            }
                         ).catch(() => null);
                     }
                 }
@@ -5028,7 +5832,19 @@ export const respondAccessoryAction = async (req, res) => {
             accessory.pendingAction = null;
             accessory.pendingActionDetails = null;
             asset.actionRequiredBy = null;
-            await DashboardAction.deleteMany({ requestId: asset._id, requestType: 'Asset' });
+            const dashTypeByPending = {
+                Transfer: 'Asset Transfer',
+                'Loss and Damage': 'Asset Loss Damage',
+                'End of Life': 'Asset End of Life',
+                Unattach: 'Asset Accessory Unattach',
+                Add: 'Asset Accessory Approval'
+            };
+            const rt = dashTypeByPending[pendingAction];
+            if (rt) {
+                await DashboardAction.deleteMany({ requestId: asset._id, requestType: rt });
+            } else {
+                await DashboardAction.deleteMany({ requestId: asset._id });
+            }
 
             await AssetHistory.create({
                 assetId: asset._id,

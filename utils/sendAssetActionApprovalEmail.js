@@ -37,16 +37,20 @@ export const sendAssetActionApprovalEmail = async (asset, actionType, manager, r
         });
 
         const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
-        const link = `${frontendUrl}/HRM/Asset/details/${asset._id}?authAction=${
-            actionType === 'End of Life' ? 'eol' : 
-            actionType === 'Transfer' ? 'transfer' : 
-            actionType === 'Add Accessory' || actionType === 'Update Accessory' ? 'accessory' : 'damage'
-        }`;
+        const authAction =
+            actionType === 'End of Life' ? 'eol' :
+            actionType === 'Transfer' ? 'transfer' :
+            actionType === 'Add Accessory' || actionType === 'Update Accessory' || actionType === 'Unattach Accessory' ? 'accessory' :
+            'damage';
+        const tabParam = (actionType === 'Unattach Accessory' || actionType === 'Add Accessory' || actionType === 'Update Accessory')
+            ? '&tab=accessories'
+            : '';
+        const link = `${frontendUrl}/HRM/Asset/details/${asset._id}?authAction=${authAction}${tabParam}`;
 
         const htmlContent = `
             <div style="font-family: Arial, sans-serif; color: #333; max-width: 600px; margin: 0 auto; border: 1px solid #eaeaea; border-radius: 8px; overflow: hidden;">
                 <div style="background-color: #f8f9fa; padding: 20px; border-bottom: 1px solid #eaeaea;">
-                    <h2 style="color: ${['Transfer', 'Add Accessory', 'Update Accessory'].includes(actionType) ? '#2563eb' : '#dc3545'}; margin: 0;">Asset Action Notification</h2>
+                    <h2 style="color: ${['Transfer', 'Add Accessory', 'Update Accessory', 'Unattach Accessory'].includes(actionType) ? '#2563eb' : '#dc3545'}; margin: 0;">Asset Action Notification</h2>
                     <p style="margin: 5px 0 0; color: #666;">Asset: <strong>${asset.assetId} - ${asset.name}</strong></p>
                 </div>
                 
