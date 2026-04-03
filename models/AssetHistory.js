@@ -27,7 +27,8 @@ const assetHistorySchema = mongoose.Schema({
             'Service Receive',
             'Transfer',
             'On Leave',
-            'Extend'
+            'Extend',
+            'Update'
         ]
     },
     assignedTo: {

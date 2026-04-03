@@ -10,6 +10,7 @@ import { uploadDocumentToS3, getSignedFileUrl } from '../utils/s3Upload.js';
 import { sendAssetCreationApprovalEmail } from '../utils/sendAssetCreationApprovalEmail.js';
 import { sendAssetCreatedByAdminInfoEmail } from '../utils/sendAssetCreationDecisionEmail.js';
 import { sendAssetActionApprovalEmail } from '../utils/sendAssetActionApprovalEmail.js';
+import { sendAssignedEmployeeActionEmail } from '../utils/sendAssignedEmployeeActionEmail.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import User from '../models/User.js';
 import { resolveAssetControllerEmployee, getAssetRequesterDisplayName } from '../utils/assetApprovalHelpers.js';
@@ -280,33 +281,6 @@ export const createAssetType = async (req, res) => {
                     date: new Date()
                 });
 
-                // Create dashboard + email immediately for Draft creation approval
-                // (so asset controller inbox shows Asset Approval right after user creates asset).
-                if (!isDirectUnassignedCreate && actionRequiredBy && assetController?._id) {
-                    await DashboardAction.findOneAndUpdate(
-                        { requestId: newAsset._id, requestType: 'Asset Approval', status: 'Pending' },
-                        {
-                            assignedTo: actionRequiredBy,
-                            assignedToEmpId: assetController.employeeId,
-                            requestId: newAsset._id,
-                            requestType: 'Asset Approval',
-                            subjectEmployeeId: req.user.employeeId,
-                            subjectName: requesterDisplayName,
-                            requestedByName: requesterDisplayName,
-                            extra1: `${newAsset.assetId} — ${newAsset.name}`,
-                            extra2: `Asset creation — requested by ${requesterDisplayName}`,
-                            status: 'Pending'
-                        },
-                        { upsert: true, new: true, setDefaultsOnInsert: true }
-                    );
-
-                    await sendAssetCreationApprovalEmail({
-                        asset: newAsset,
-                        recipient: assetController,
-                        creatorName: requesterDisplayName
-                    });
-                }
-
                 // If admin created directly as Unassigned, notify asset controller (info email).
                 if (isDirectUnassignedCreate && (isJwtAdmin || isSysAdmin) && assetController?._id) {
                     await sendAssetCreatedByAdminInfoEmail({
@@ -317,7 +291,46 @@ export const createAssetType = async (req, res) => {
                 }
             }
 
-            // Notifications are handled above during creation.
+            // Draft creation approval (single or bulk): create one dashboard request and one email.
+            if (!isDirectUnassignedCreate && actionRequiredBy && assetController?._id && createdAssets.length > 0) {
+                const first = createdAssets[0];
+                const createdObjectIds = createdAssets.map((a) => a._id?.toString()).filter(Boolean);
+                const createdCodes = createdAssets.map((a) => a.assetId).filter(Boolean);
+                const isBulkCreation = createdAssets.length > 1;
+
+                await DashboardAction.findOneAndUpdate(
+                    { requestId: first._id, requestType: 'Asset Approval', status: 'Pending' },
+                    {
+                        assignedTo: actionRequiredBy,
+                        assignedToEmpId: assetController.employeeId,
+                        requestId: first._id,
+                        requestType: 'Asset Approval',
+                        subjectEmployeeId: req.user.employeeId,
+                        subjectName: requesterDisplayName,
+                        requestedByName: requesterDisplayName,
+                        extra1: isBulkCreation
+                            ? `Bulk creation (${createdAssets.length}) — ${name}`
+                            : `${first.assetId} — ${first.name}`,
+                        extra2: `Asset creation — requested by ${requesterDisplayName}`,
+                        extra3: JSON.stringify({
+                            isBulkCreation,
+                            bulkAssetIds: createdObjectIds,
+                            bulkAssetCodes: createdCodes
+                        }),
+                        status: 'Pending'
+                    },
+                    { upsert: true, new: true, setDefaultsOnInsert: true }
+                );
+
+                await sendAssetCreationApprovalEmail({
+                    asset: first,
+                    recipient: assetController,
+                    creatorName: requesterDisplayName,
+                    isBulk: isBulkCreation,
+                    assetCount: createdAssets.length,
+                    bulkAssetIds: createdObjectIds
+                });
+            }
 
             // Prepare first asset for response
             const assetObj = createdAssets[0];
@@ -694,6 +707,7 @@ export const updateAssetItem = async (req, res) => {
                     const newAccessoriesList = [];
                     let hasNewPending = false;
                     let hasEditsByOthers = false;
+                    const addedAccessoryNames = [];
 
                     for (let i = 0; i < updates[key].length; i++) {
                         const acc = updates[key][i];
@@ -725,6 +739,7 @@ export const updateAssetItem = async (req, res) => {
                                 ...acc,
                                 accessoryId: generateAccessoryId(asset.assetId, i)
                             };
+                            addedAccessoryNames.push(newAcc.name || newAcc.accessoryId || `Accessory ${i + 1}`);
 
                             if (!actorIsControllerOrAdmin) {
                                 // Any non-authority addition needs Asset Controller approval.
@@ -839,6 +854,36 @@ export const updateAssetItem = async (req, res) => {
                             });
                         } catch (err) {
                             console.error('[UpdateAccessory Notification] Error:', err);
+                        }
+                    } else if (addedAccessoryNames.length > 0 && isAssigned && actorIsControllerOrAdmin) {
+                        // Asset Controller/Admin directly added accessories on an assigned asset:
+                        // notify assigned employee (or delegated primary reportee when no portal access).
+                        try {
+                            const employee = await EmployeeBasic.findById(asset.assignedTo);
+                            if (employee) {
+                                let emailRecipient = employee;
+                                const linkedUser = await User.findOne({ employeeId: employee.employeeId, status: 'Active' })
+                                    .select('enablePortalAccess')
+                                    .lean()
+                                    .catch(() => null);
+                                const hasAccess = !!(linkedUser && linkedUser.enablePortalAccess);
+                                if (!hasAccess && employee.primaryReportee) {
+                                    const managerId = employee.primaryReportee._id || employee.primaryReportee;
+                                    const manager = await EmployeeBasic.findById(managerId);
+                                    if (manager) emailRecipient = manager;
+                                }
+
+                                const actorName = req.user.name || req.user.employeeId || 'Asset Controller';
+                                await sendAssignedEmployeeActionEmail({
+                                    asset,
+                                    employee: emailRecipient,
+                                    action: 'Add Accessory',
+                                    performedBy: actorName,
+                                    details: `Added accessories: ${addedAccessoryNames.join(', ')}`
+                                });
+                            }
+                        } catch (err) {
+                            console.error('[AddAccessory Assigned Email] Error:', err);
                         }
                     }
                 } else if ((key === 'photo' || key === 'imagePreview') && updates[key] && updates[key].startsWith('data:image')) {

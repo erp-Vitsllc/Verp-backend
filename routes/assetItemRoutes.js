@@ -1,7 +1,7 @@
 import express from 'express';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import User from '../models/User.js';
-import { createAssetItem, getAssetItems, getAllAssignedAssets, getUnassignedAssetsForEmployee, getHRCompanyAssets, getOnLeaveAssetsForEmployee, handleOnLeaveAction, bulkHandleOnLeaveAction, getAssetItemDetail, assignAssetItem, bulkAssignAssetItems, downloadHandoverPdf, downloadHistoryHandoverPdf, respondToAssignment, bulkRespondToAssignment, getAssetHistory, getHistoryRecord, returnAssetItem, updateAssetStatus, addAssetDocument, updateAssetDocument, deleteAssetDocument, addAssetService, addAssetImage, deleteAssetImage, transferAssetAccessory, manageAccessoryStatus, updateAssetItem, deleteAssetItem, endOfLifeAsset, requestAssetAction, bulkRequestAssetAction, handleAssetActionApproval, finalizeAssetAction, uploadAccessoriesAttachment, requestAccessoryAction, respondAccessoryAction, finalizeAccessoryAction, respondToAssetCreation, transferAsset } from '../controllers/assetItemController.js';
+import { createAssetItem, getAssetItems, getAllAssignedAssets, getMyAssignedAssetsForReturn, getUnassignedAssetsForEmployee, getHRCompanyAssets, getOnLeaveAssetsForEmployee, handleOnLeaveAction, bulkHandleOnLeaveAction, getAssetItemDetail, assignAssetItem, bulkAssignAssetItems, downloadHandoverPdf, downloadHistoryHandoverPdf, respondToAssignment, bulkRespondToAssignment, getAssetHistory, getHistoryRecord, returnAssetItem, updateAssetStatus, addAssetDocument, updateAssetDocument, deleteAssetDocument, addAssetService, addAssetImage, deleteAssetImage, transferAssetAccessory, manageAccessoryStatus, updateAssetItem, deleteAssetItem, endOfLifeAsset, requestAssetAction, bulkRequestAssetAction, handleAssetActionApproval, finalizeAssetAction, uploadAccessoriesAttachment, requestAccessoryAction, respondAccessoryAction, finalizeAccessoryAction, respondToAssetCreation, bulkRespondToAssetCreation, getBulkAssetDetails, transferAsset } from '../controllers/assetItemController.js';
 import { protect } from '../middleware/authMiddleware.js';
 import { isUserInFlowchart, getDepartmentHOD } from '../utils/getDepartmentHOD.js';
 import { isUserAdministrator } from '../services/permissionService.js';
@@ -448,11 +448,13 @@ router.route('/')
     .post(protect, createAssetItem);
 
 router.get('/assigned/all', protect, getAllAssignedAssets);
+router.get('/assigned/me-for-return', protect, getMyAssignedAssetsForReturn);
 router.get('/unassigned/controller/:employeeId', protect, getUnassignedAssetsForEmployee);
 router.get('/on-leave/controller/:employeeId', protect, getOnLeaveAssetsForEmployee);
 router.get('/company-assets/hr/:employeeId', protect, getHRCompanyAssets);
 
 router.get('/detail/:id', protect, getAssetItemDetail);
+router.get('/bulk/details', protect, getBulkAssetDetails);
 router.get('/:id/history', protect, getAssetHistory);
 router.get('/history-record/:historyId', protect, getHistoryRecord);
 router.get('/handover-pdf/:id', protect, downloadHandoverPdf);
@@ -466,6 +468,7 @@ router.put('/:id/assign', protect, requireAssetControllerOrAdmin, assignAssetIte
 router.put('/:id/respond', protect, respondToAssignment);
 router.put('/bulk/respond', protect, bulkRespondToAssignment);
 router.post('/transfer', protect, requireAssetControllerOrAdmin, transferAsset);
+router.put('/bulk/approve-creation', protect, requireAssetControllerOrAdmin, bulkRespondToAssetCreation);
 router.put('/:id/approve-creation', protect, requireAssetCreationApprover, respondToAssetCreation);
 router.put('/:id/return', protect, requireReturnAssetAccess, returnAssetItem);
 router.put('/:id/on-leave-action', protect, requireParkingAssetAccess, (req, res, next) => {

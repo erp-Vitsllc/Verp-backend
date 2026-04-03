@@ -117,7 +117,7 @@ export const getUserActivityStats = async (req, res) => {
         const DashboardAction = await import("../../models/DashboardAction.js").then(m => m.default);
         const isAdmin = ['Admin', 'CEO', 'Director', 'General Manager'].includes(currentUser.role) || currentUser.isAdmin;
 
-        const allAssetTypes = ['Asset', 'Asset Approval', 'Asset Assignment', 'Asset Transfer', 'Asset Loss Damage', 'Asset End of Life', 'Asset Accessory', 'Asset Accessory Approval'];
+        const allAssetTypes = ['Asset', 'Asset Approval', 'Asset Assignment', 'Asset Transfer', 'Asset Loss Damage', 'Asset End of Life', 'Asset Accessory', 'Asset Accessory Approval', 'Asset Accessory Unattach'];
 
         const dashboardPendingItems = await DashboardAction.find({
             $or: [
@@ -245,6 +245,7 @@ export const getUserActivityStats = async (req, res) => {
                 status: 'Pending',
                 extra1: item.extra1,
                 extra2: item.extra2,
+                extra3: item.extra3,
                 targetEmployeeId: item.subjectEmployeeId?.toString(),
                 scope: isCreatorSideAssetApproval ? 'outgoing' : 'inbox'
             });
@@ -626,6 +627,7 @@ export const getUserActivityStats = async (req, res) => {
                 status: action.status,
                 extra1: action.extra1,
                 extra2: action.extra2,
+                extra3: action.extra3,
                 targetEmployeeId: action.subjectEmployeeId,
                 scope: 'inbox'
             };

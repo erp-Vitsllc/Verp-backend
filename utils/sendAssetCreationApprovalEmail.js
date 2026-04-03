@@ -1,7 +1,7 @@
 import nodemailer from "nodemailer";
 import { resolveEmployeeEmail } from "./resolveEmployeeEmail.js";
 
-export const sendAssetCreationApprovalEmail = async ({ asset, recipient, creatorName, isBulk = false, assetCount = 1 }) => {
+export const sendAssetCreationApprovalEmail = async ({ asset, recipient, creatorName, isBulk = false, assetCount = 1, bulkAssetIds = [] }) => {
     try {
         const { email: recipientEmail } = resolveEmployeeEmail(recipient);
         if (!recipientEmail) {
@@ -33,8 +33,11 @@ export const sendAssetCreationApprovalEmail = async ({ asset, recipient, creator
         const frontendUrl = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/'/g, "");
         const assetId = asset._id?.toString() || asset.id?.toString();
 
-        // Redirection button to asset details page
-        const buttonUrl = `${frontendUrl}/HRM/Asset/details/${assetId}`;
+        // Redirection button: for bulk creation, deep-link with selected IDs.
+        const bulkIds = Array.isArray(bulkAssetIds) ? bulkAssetIds.filter(Boolean).map(String) : [];
+        const buttonUrl = isBulk && bulkIds.length > 0
+            ? `${frontendUrl}/HRM/Asset/details/${assetId}?bulkCreation=1&bulkAssetIds=${encodeURIComponent(bulkIds.join(','))}`
+            : `${frontendUrl}/HRM/Asset/details/${assetId}`;
 
         const recipientName = recipient.firstName || "Asset Controller";
 

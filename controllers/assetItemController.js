@@ -26,6 +26,7 @@ import AssetAccessoryCatalog from '../models/AssetAccessoryCatalog.js';
 import { sendAssignedEmployeeActionEmail } from '../utils/sendAssignedEmployeeActionEmail.js';
 import { processParkingAssets } from '../utils/processParkingAssets.js';
 import { sendParkingReassignAcceptedEmail } from '../utils/sendParkingReassignAcceptedEmail.js';
+import { notifyAssetControllerReassignmentAcceptedWithHandover } from '../utils/notifyAssetControllerReassignmentAcceptedWithHandover.js';
 
 const generateAccessoryCatalogId = async () => {
     const prefix = 'asset-acc-cat-';
@@ -390,6 +391,42 @@ export const getAllAssignedAssets = async (req, res) => {
         res.status(200).json(signedItems);
     } catch (error) {
         console.error('Error fetching assigned assets:', error);
+        res.status(500).json({ message: 'Server Error' });
+    }
+};
+
+// @desc    List current user's assigned assets eligible for return (no pending action)
+// @route   GET /api/AssetItem/assigned/me-for-return
+// @access  Private
+export const getMyAssignedAssetsForReturn = async (req, res) => {
+    try {
+        let currentEmpId = req.user?.employeeObjectId?.toString();
+        if (!currentEmpId && req.user?.employeeId) {
+            const empRow = await EmployeeBasic.findOne({
+                employeeId: { $regex: new RegExp(`^${String(req.user.employeeId).replace(/\s+/g, '\\s*')}$`, 'i') }
+            })
+                .select('_id')
+                .lean();
+            if (empRow) currentEmpId = empRow._id.toString();
+        }
+        if (!currentEmpId) {
+            return res.status(400).json({ message: 'Employee profile not linked to your account.' });
+        }
+
+        const items = await AssetItem.find({
+            assignedTo: currentEmpId,
+            status: 'Assigned',
+            $or: [{ pendingAction: null }, { pendingAction: { $exists: false } }]
+        })
+            .select('assetId name typeId categoryId')
+            .populate('typeId', 'name')
+            .populate('categoryId', 'name')
+            .sort({ name: 1 })
+            .lean();
+
+        res.status(200).json({ items });
+    } catch (error) {
+        console.error('Error in getMyAssignedAssetsForReturn:', error);
         res.status(500).json({ message: 'Server Error' });
     }
 };
@@ -1280,6 +1317,139 @@ export const respondToAssetCreation = async (req, res) => {
     }
 };
 
+// @desc    Bulk respond to asset creation approval (Approve/Reject)
+// @route   PUT /api/AssetItem/bulk/approve-creation
+// @access  Private (Asset Controller or Admin)
+export const bulkRespondToAssetCreation = async (req, res) => {
+    try {
+        const { assetIds, action } = req.body;
+        if (!Array.isArray(assetIds) || assetIds.length === 0) {
+            return res.status(400).json({ message: 'assetIds is required.' });
+        }
+        if (!['Approve', 'Reject'].includes(action)) {
+            return res.status(400).json({ message: 'Invalid action.' });
+        }
+
+        const isJwtAdmin = req.user.isAdmin || req.user.role === 'Admin' || req.user.role === 'ROOT';
+        const isSysAdmin = await isUserAdministrator(req.user?.id);
+        const isAdmin = isJwtAdmin || isSysAdmin;
+
+        const normEmp = (s) => (s || '').toString().toLowerCase().replace(/\s+/g, '');
+        const currentEmpId = req.user?.employeeObjectId?.toString?.() || null;
+        const currentEmpCode = req.user?.employeeId || null;
+        const assetController = await getDepartmentHOD('assetcontroller');
+        const isDeptAssetControllerFallback =
+            !!(
+                assetController &&
+                (
+                    (assetController?._id && currentEmpId && assetController._id.toString() === currentEmpId) ||
+                    (assetController?.employeeId && currentEmpCode && normEmp(assetController.employeeId) === normEmp(currentEmpCode))
+                )
+            );
+
+        if (!isAdmin && !isDeptAssetControllerFallback) {
+            return res.status(403).json({ message: 'Only Asset Controller or Admin can approve bulk creation.' });
+        }
+
+        const uniqueIds = [...new Set(assetIds.map(String).filter(Boolean))];
+        const items = await AssetItem.find({ _id: { $in: uniqueIds } });
+        const byId = new Map(items.map((it) => [it._id.toString(), it]));
+
+        const approvedIds = [];
+        const rejectedIds = [];
+        const skipped = [];
+
+        for (const id of uniqueIds) {
+            const item = byId.get(id);
+            if (!item) {
+                skipped.push({ id, reason: 'Not found' });
+                continue;
+            }
+            if (!(item.status === 'Draft' || item.status === 'Pending')) {
+                skipped.push({ id, reason: `Status is ${item.status}` });
+                continue;
+            }
+
+            if (!isAdmin && item.actionRequiredBy) {
+                let isDesignatedApprover = false;
+                const aid = item.actionRequiredBy.toString();
+                if (currentEmpId && aid === currentEmpId) {
+                    isDesignatedApprover = true;
+                } else if (currentEmpCode) {
+                    const appr = await EmployeeBasic.findById(item.actionRequiredBy).select('employeeId').lean();
+                    if (appr?.employeeId && normEmp(appr.employeeId) === normEmp(currentEmpCode)) {
+                        isDesignatedApprover = true;
+                    }
+                }
+                if (!isDesignatedApprover) {
+                    skipped.push({ id, reason: 'Not designated approver' });
+                    continue;
+                }
+            }
+
+            item.status = action === 'Approve' ? 'Unassigned' : 'Rejected';
+            item.actionRequiredBy = null;
+            await item.save();
+
+            await DashboardAction.findOneAndUpdate(
+                { requestId: item._id, requestType: 'Asset Approval', status: 'Pending' },
+                { status: action === 'Approve' ? 'Approved' : 'Rejected' }
+            );
+
+            await AssetHistory.create({
+                assetId: item._id,
+                action: action === 'Approve' ? 'Accepted' : 'Rejected',
+                performedBy: req.user.employeeObjectId || req.user._id,
+                comments: `Bulk asset creation ${action === 'Approve' ? 'approved' : 'rejected'} by Asset Controller/Admin.`,
+                details: { approvalAction: action, mode: 'BulkCreationApproval' },
+                date: new Date()
+            });
+
+            if (action === 'Approve') approvedIds.push(item._id.toString());
+            else rejectedIds.push(item._id.toString());
+        }
+
+        res.status(200).json({
+            message: `Bulk creation ${action.toLowerCase()} completed.`,
+            approvedCount: approvedIds.length,
+            rejectedCount: rejectedIds.length,
+            skippedCount: skipped.length,
+            approvedIds,
+            rejectedIds,
+            skipped
+        });
+    } catch (error) {
+        console.error('Error in bulkRespondToAssetCreation:', error);
+        res.status(500).json({ message: 'Server Error' });
+    }
+};
+
+// @desc    Fetch bulk asset details for creation approval modal
+// @route   GET /api/AssetItem/bulk/details?ids=a,b,c
+// @access  Private
+export const getBulkAssetDetails = async (req, res) => {
+    try {
+        const idsParam = req.query.ids;
+        if (!idsParam) return res.status(400).json({ message: 'ids query param is required.' });
+        const ids = String(idsParam)
+            .split(',')
+            .map((x) => x.trim())
+            .filter(Boolean);
+        if (ids.length === 0) return res.status(400).json({ message: 'No valid IDs provided.' });
+
+        const assets = await AssetItem.find({ _id: { $in: ids } })
+            .select('assetId name status accessories actionRequiredBy')
+            .populate('actionRequiredBy', 'firstName lastName employeeId')
+            .lean();
+        const order = new Map(ids.map((v, i) => [v, i]));
+        assets.sort((a, b) => (order.get(a._id.toString()) ?? 0) - (order.get(b._id.toString()) ?? 0));
+        res.status(200).json({ items: assets });
+    } catch (error) {
+        console.error('Error in getBulkAssetDetails:', error);
+        res.status(500).json({ message: 'Server Error' });
+    }
+};
+
 // @desc    Update an existing asset item
 // @route   PUT /api/AssetItem/:id
 // @access  Private
@@ -1408,6 +1578,19 @@ export const getAssetItemDetail = async (req, res) => {
                 const arEmp = await EmployeeBasic.findById(rid).select('firstName lastName employeeId').lean();
                 if (arEmp) {
                     item.actionRequiredBy = arEmp;
+                }
+            }
+        }
+
+        // acceptedBy (e.g. HR who acknowledged company allocation): ensure names + signature for handover form
+        if (item.acceptedBy) {
+            const abRaw = item.acceptedBy;
+            const hasName = abRaw.firstName || abRaw.lastName;
+            if (!hasName) {
+                const rid = abRaw._id || abRaw;
+                const abEmp = await EmployeeBasic.findById(rid).select('firstName lastName employeeId signature').lean();
+                if (abEmp) {
+                    item.acceptedBy = abEmp;
                 }
             }
         }
@@ -2142,9 +2325,9 @@ export const downloadHandoverPdf = async (req, res) => {
         // URL to the frontend print page we created
         const origin = req.headers.origin || (req.headers.referer ? new URL(req.headers.referer).origin : null);
         const baseUrl = origin || process.env.FRONTEND_URL || 'http://localhost:3000';
-        const printUrl = `${baseUrl} /print/asset - handover / ${id} `;
+        const printUrl = `${baseUrl}/print/asset-handover/${id}`;
 
-        console.log(`Generating Asset Handover PDF from: ${printUrl} `);
+        console.log(`Generating Asset Handover PDF from: ${printUrl}`);
 
         const token = req.headers.authorization?.split(' ')[1] || '';
 
@@ -2588,6 +2771,11 @@ export const respondToAssignment = async (req, res) => {
             console.error(`[Dashboard Error] Failed to update action for asset ${item.assetId}: `, err);
         }
 
+        const priorAcceptedCountForReassign =
+            action === 'Accept'
+                ? await AssetHistory.countDocuments({ assetId: item._id, action: 'Accepted' })
+                : 0;
+
         // Log final actions
         if (action === 'Reject') {
             await AssetHistory.create({
@@ -2638,6 +2826,10 @@ export const respondToAssignment = async (req, res) => {
                     isAcceptedByHR: isHR
                 }
             });
+
+            if (priorAcceptedCountForReassign >= 1) {
+                void notifyAssetControllerReassignmentAcceptedWithHandover(req, { assetMongoId: item._id });
+            }
         }
 
         res.status(200).json(item);
@@ -2789,6 +2981,11 @@ export const bulkRespondToAssignment = async (req, res) => {
                     }
                 );
 
+                const priorAcceptedCountForReassign =
+                    action === 'Accept'
+                        ? await AssetHistory.countDocuments({ assetId: item._id, action: 'Accepted' })
+                        : 0;
+
                 // Log History
                 await AssetHistory.create({
                     assetId: item._id,
@@ -2797,6 +2994,10 @@ export const bulkRespondToAssignment = async (req, res) => {
                     comments: `Bulk ${action}ed. ${comments || ''}`,
                     date: new Date()
                 });
+
+                if (action === 'Accept' && priorAcceptedCountForReassign >= 1) {
+                    void notifyAssetControllerReassignmentAcceptedWithHandover(req, { assetMongoId: item._id });
+                }
 
                 results.success.push(item.assetId);
 
@@ -2882,47 +3083,144 @@ export const returnAssetItem = async (req, res) => {
                 return res.status(400).json({ message: 'Asset Controller not found. Cannot request return approval.' });
             }
 
-            if (item.pendingAction) {
-                return res.status(400).json({ message: `This asset already has a pending "${item.pendingAction}" request.` });
-            }
-
             const requesterEmp = await EmployeeBasic.findById(req.user.employeeObjectId).select('firstName lastName employeeId').lean().catch(() => null);
             const requesterName = requesterEmp ? `${requesterEmp.firstName || ''} ${requesterEmp.lastName || ''}`.trim() : (req.user.name || req.user.employeeId || 'User');
 
-            item.pendingAction = 'Return Asset';
-            item.pendingActionDetails = {
-                reason: req.body?.reason || 'Return requested by assigned employee',
-                requestedBy: req.user.employeeObjectId || req.user._id,
-                requestedAt: new Date()
-            };
-            item.actionRequiredBy = assetController._id; // EmployeeBasic
-            item.status = 'Pending';
+            const rawBulkIds = Array.isArray(req.body?.bulkAssetIds) ? req.body.bulkAssetIds.map((x) => String(x).trim()).filter(Boolean) : [];
+            const currentIdStr = item._id.toString();
+            const uniqueBulk = Array.from(new Set([currentIdStr, ...rawBulkIds]));
+            const isBulkReturn = uniqueBulk.length > 1;
 
-            await item.save();
+            if (!isBulkReturn) {
+                if (item.pendingAction) {
+                    return res.status(400).json({ message: `This asset already has a pending "${item.pendingAction}" request.` });
+                }
+
+                item.pendingAction = 'Return Asset';
+                item.pendingActionDetails = {
+                    reason: req.body?.reason || 'Return requested by assigned employee',
+                    requestedBy: req.user.employeeObjectId || req.user._id,
+                    requestedAt: new Date()
+                };
+                item.actionRequiredBy = assetController._id; // EmployeeBasic
+                item.status = 'Pending';
+
+                await item.save();
+
+                await DashboardAction.create({
+                    assignedTo: assetController._id,
+                    assignedToEmpId: assetController.employeeId,
+                    requestId: item._id,
+                    requestType: 'Asset Return',
+                    status: 'Pending',
+                    subjectEmployeeId: req.user.employeeId || (requesterEmp?.employeeId || 'UNASSIGNED'),
+                    subjectName: requesterName || 'Employee',
+                    requestedByName: requesterName,
+                    extra1: `${item.assetId} — ${item.name || ''}`,
+                    extra2: 'Return Asset'
+                });
+
+                try {
+                    await sendAssetActionApprovalEmail(item, 'Return Asset', assetController, { name: requesterName }, item.pendingActionDetails?.reason || '');
+                } catch (e) {
+                    // non-fatal
+                }
+
+                return res.status(200).json({
+                    message: 'Return request sent to Asset Controller for approval',
+                    asset: item
+                });
+            }
+
+            // Bulk return (same assignee): multiple assets, one dashboard row on primary (URL param asset).
+            const bulkAssets = await AssetItem.find({ _id: { $in: uniqueBulk } });
+            if (bulkAssets.length !== uniqueBulk.length) {
+                return res.status(404).json({ message: 'One or more assets not found' });
+            }
+
+            const requesterOid = req.user.employeeObjectId?.toString();
+            for (const a of bulkAssets) {
+                if (!a.assignedTo || a.assignedTo.toString() !== requesterOid) {
+                    return res.status(403).json({ message: 'All selected assets must be assigned to you.' });
+                }
+                if (a.pendingAction) {
+                    return res.status(400).json({ message: `Asset ${a.assetId} already has a pending "${a.pendingAction}" request.` });
+                }
+                if (a.status !== 'Assigned') {
+                    return res.status(400).json({ message: `Asset ${a.assetId} must be Assigned to request return.` });
+                }
+            }
+
+            const reason = req.body?.reason || 'Return requested by assigned employee';
+            const bulkAssetIdsOrdered = uniqueBulk;
+
+            for (const a of bulkAssets) {
+                a.pendingAction = 'Return Asset';
+                a.pendingActionDetails = {
+                    reason,
+                    requestedBy: req.user.employeeObjectId || req.user._id,
+                    requestedAt: new Date(),
+                    isBulk: true,
+                    bulkAssetIds: bulkAssetIdsOrdered
+                };
+                a.actionRequiredBy = assetController._id;
+                a.status = 'Pending';
+                await a.save();
+
+                await AssetHistory.create({
+                    assetId: a._id,
+                    action: 'Comment',
+                    performedBy: req.user._id,
+                    comments: `Bulk Return Asset request submitted. Reason: ${reason}`,
+                    date: new Date(),
+                    details: { type: 'BulkReturnRequest', action: 'Return Asset', bulkAssetIds: bulkAssetIdsOrdered }
+                });
+            }
+
+            const primaryAsset = bulkAssets.find((a) => a._id.toString() === currentIdStr) || bulkAssets[0];
+            const assetSummary = bulkAssets.map((a) => `${a.assetId} — ${a.name || ''}`).join('; ');
+            const extra1 =
+                bulkAssets.length > 1
+                    ? `Bulk Return (${bulkAssets.length} assets): ${assetSummary.substring(0, 200)}${assetSummary.length > 200 ? '...' : ''}`
+                    : `${primaryAsset.assetId} — ${primaryAsset.name || ''}`;
 
             await DashboardAction.create({
                 assignedTo: assetController._id,
                 assignedToEmpId: assetController.employeeId,
-                requestId: item._id,
+                requestId: primaryAsset._id,
                 requestType: 'Asset Return',
                 status: 'Pending',
                 subjectEmployeeId: req.user.employeeId || (requesterEmp?.employeeId || 'UNASSIGNED'),
                 subjectName: requesterName || 'Employee',
                 requestedByName: requesterName,
-                extra1: `${item.assetId} — ${item.name || ''}`,
-                extra2: 'Return Asset'
+                extra1,
+                extra2: 'Return Asset',
+                extra3:
+                    bulkAssets.length > 1
+                        ? JSON.stringify({
+                              isBulk: true,
+                              totalAssets: bulkAssets.length,
+                              assetIds: bulkAssetIdsOrdered
+                          })
+                        : null
             });
 
-            // Email Asset Controller for approval (reuse existing approval email template)
             try {
-                await sendAssetActionApprovalEmail(item, 'Return Asset', assetController, { name: requesterName }, item.pendingActionDetails?.reason || '');
+                await sendAssetActionApprovalEmail(
+                    { ...primaryAsset.toObject(), assetId: primaryAsset.assetId, name: `Bulk Return Asset (${bulkAssets.length} assets)` },
+                    'Return Asset',
+                    assetController,
+                    { name: requesterName },
+                    `Bulk return for ${bulkAssets.length} asset(s). ${reason}`
+                );
             } catch (e) {
                 // non-fatal
             }
 
             return res.status(200).json({
-                message: 'Return request sent to Asset Controller for approval',
-                asset: item
+                message: `Return request for ${bulkAssets.length} asset(s) sent to Asset Controller for approval`,
+                asset: primaryAsset,
+                bulkCount: bulkAssets.length
             });
         }
 
@@ -4932,11 +5230,11 @@ export const handleAssetActionApproval = async (req, res) => {
             const isBulkTransfer = asset.pendingActionDetails?.isBulk === true;
             const bulkAssetIds = asset.pendingActionDetails?.bulkAssetIds || [];
 
-            // Bulk subset rejection (Leave / End of Life) - Asset Controller authority.
+            // Bulk subset rejection (Leave / End of Life / Return Asset) - Asset Controller authority.
             if (
                 isBulkTransfer &&
                 (isAssetController || isAdmin) &&
-                (actionType === 'Leave' || actionType === 'End of Life')
+                (actionType === 'Leave' || actionType === 'End of Life' || actionType === 'Return Asset')
             ) {
                 const hasRequestedSubset = Array.isArray(bulkAssetIdsToProcess) && bulkAssetIdsToProcess.length > 0;
                 const effectiveBulkAssetIds = (hasRequestedSubset ? bulkAssetIdsToProcess : bulkAssetIds)
@@ -4977,8 +5275,8 @@ export const handleAssetActionApproval = async (req, res) => {
                         details: { status: 'RejectedByAuthority', originalAction: actionType }
                     });
 
-                    // Delete Dashboard Action
-                    await DashboardAction.deleteMany({ requestId: currentAsset._id, requestType: 'Asset' });
+                    // Delete Dashboard Action (primary row uses requestId on this asset)
+                    await DashboardAction.deleteMany({ requestId: currentAsset._id });
                     await currentAsset.save();
                 }
 
@@ -5031,8 +5329,14 @@ export const handleAssetActionApproval = async (req, res) => {
 
         await asset.save();
         await notifyAssignedEmployeeIfController(req, asset, actionType, approve ? `${actionType} was approved by authority.` : `${actionType} request was rejected by authority.`);
+        const successMessage = approve
+            ? (actionType === 'Return Asset'
+                ? 'Return request approved. Asset is now Unassigned.'
+                : 'Request approved and finalized.')
+            : `${actionType} request rejected`;
+
         res.status(200).json({
-            message: approve ? `Request approved and finalized. Asset marked as Out of Service.` : `${actionType} request rejected`,
+            message: successMessage,
             asset
         });
     } catch (error) {
