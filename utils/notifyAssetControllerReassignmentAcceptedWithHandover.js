@@ -1,9 +1,9 @@
 import nodemailer from 'nodemailer';
 import AssetItem from '../models/AssetItem.js';
-import User from '../models/User.js';
 import { getDepartmentHOD } from './getDepartmentHOD.js';
-import { resolveEmployeeEmail } from './resolveEmployeeEmail.js';
-import { generatePdf } from './generatePdf.js';
+import { resolveEmployeeEmailTargets } from './resolveEmployeeEmail.js';
+import { generateAssetHandoverEmailPdf } from './generateAssetHandoverEmailPdf.js';
+import { normalizePdfAttachments } from './normalizeEmailAttachments.js';
 
 /**
  * Emails the Asset Controller (flowchart HOD) with the updated asset handover PDF
@@ -33,22 +33,9 @@ export async function notifyAssetControllerReassignmentAcceptedWithHandover(req,
         const displayId = asset?.assetId || String(assetMongoId);
         const displayName = asset?.name || 'Asset';
 
-        const baseUrl = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/$/, '').replace(/'/g, '');
-        const printUrl = `${baseUrl}/print/asset-handover/${assetMongoId.toString()}`;
-        const token = req.headers.authorization?.split(' ')[1] || '';
-        const requestingUserId = req.user?.id;
-        const userObj = await User.findById(requestingUserId);
-        const userPayload = {
-            id: requestingUserId,
-            isAdmin: userObj?.isAdmin || userObj?.role === 'Admin' || userObj?.role === 'ROOT',
-            role: userObj?.role,
-            employeeId: userObj?.employeeId
-        };
-
-        const selector = '#asset-handover-container';
         let pdfBuffer = null;
         try {
-            pdfBuffer = await generatePdf(printUrl, token, userPayload, {}, selector);
+            pdfBuffer = await generateAssetHandoverEmailPdf(assetMongoId);
         } catch (pdfErr) {
             console.error('[AC Reassignment Handover] PDF generation failed:', pdfErr?.message || pdfErr);
         }
@@ -64,10 +51,11 @@ export async function notifyAssetControllerReassignmentAcceptedWithHandover(req,
         });
 
         const acFirst = ac.firstName || 'Asset Controller';
-        const hasPdf = Buffer.isBuffer(pdfBuffer) && pdfBuffer.length > 0;
-        const attachments = hasPdf
-            ? [{ filename: `Handover-${displayId.replace(/[^\w.-]+/g, '_')}.pdf`, content: pdfBuffer }]
-            : [];
+        const attachments = normalizePdfAttachments(
+            pdfBuffer?.length
+                ? [{ filename: `Handover-${displayId.replace(/[^\w.-]+/g, '_')}.pdf`, content: pdfBuffer }]
+                : []
+        );
 
         const html = `
             <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; color: #1e293b; line-height: 1.6; max-width: 600px; margin: 0 auto; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden; background-color: #ffffff;">
@@ -78,8 +66,8 @@ export async function notifyAssetControllerReassignmentAcceptedWithHandover(req,
                     <p style="font-size: 15px;">Hello ${acFirst},</p>
                     <p>The new assignee has <strong>accepted</strong> the reassignment for asset <strong>${displayName}</strong> (ID: <strong>${displayId}</strong>).</p>
                     ${
-                        hasPdf
-                            ? '<p>The updated asset handover document is attached to this email.</p>'
+                        attachments.length
+                            ? '<p>The updated asset handover summary (PDF) is attached to this email.</p>'
                             : '<p><strong>Note:</strong> The handover PDF could not be generated automatically. Please open the asset in VeRP and download the handover document from there.</p>'
                     }
                 </div>
@@ -92,12 +80,15 @@ export async function notifyAssetControllerReassignmentAcceptedWithHandover(req,
         await transporter.sendMail({
             from: `"VeRP Asset Management" <${emailUser}>`,
             to: acEmail,
+            ...(acCc.length ? { cc: acCc } : {}),
             subject: `Reassignment accepted: ${displayName} (${displayId})`,
             html,
-            attachments
+            ...(attachments.length ? { attachments } : {})
         });
 
-        console.log(`[AC Reassignment Handover] Notification sent to ${acEmail} (${hasPdf ? 'with PDF' : 'no PDF'})`);
+        console.log(
+            `[AC Reassignment Handover] Notification sent to ${acEmail}${acCc.length ? ` (cc: ${acCc.join(', ')})` : ''} (${attachments.length ? 'with PDF' : 'no PDF'})`
+        );
     } catch (err) {
         console.error('[AC Reassignment Handover] Failed to notify Asset Controller:', err);
     }

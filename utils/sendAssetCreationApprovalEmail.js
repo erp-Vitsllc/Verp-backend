@@ -1,7 +1,8 @@
 import nodemailer from "nodemailer";
 import { resolveEmployeeEmail } from "./resolveEmployeeEmail.js";
+import { normalizePdfAttachments } from "./normalizeEmailAttachments.js";
 
-export const sendAssetCreationApprovalEmail = async ({ asset, recipient, creatorName, isBulk = false, assetCount = 1, bulkAssetIds = [] }) => {
+export const sendAssetCreationApprovalEmail = async ({ asset, recipient, creatorName, isBulk = false, assetCount = 1, bulkAssetIds = [], attachments = [] }) => {
     try {
         const { email: recipientEmail } = resolveEmployeeEmail(recipient);
         if (!recipientEmail) {
@@ -26,6 +27,8 @@ export const sendAssetCreationApprovalEmail = async ({ asset, recipient, creator
                 pass: emailPass
             }
         });
+
+        const att = normalizePdfAttachments(attachments);
 
         const assetName = isBulk ? `${assetCount} Assets` : asset.name;
         const subject = `New Asset Approval Required: ${assetName}`;
@@ -70,6 +73,8 @@ export const sendAssetCreationApprovalEmail = async ({ asset, recipient, creator
                         </table>
                     </div>
 
+                    ${att.length ? `<p style="font-size: 13px; color: #64748b; margin-bottom: 12px;">A PDF attachment lists the draft asset(s) in this request.</p>` : ''}
+
                     <p style="font-size: 14px; color: #64748b; margin-bottom: 30px;">
                         Please review the asset details to either approve or reject the creation request.
                     </p>
@@ -87,12 +92,21 @@ export const sendAssetCreationApprovalEmail = async ({ asset, recipient, creator
             </div>
         `;
 
-        await transporter.sendMail({
+        const mailOpts = {
             from: `"VeRP Asset Management" <${emailUser}>`,
             to: recipientEmail,
             subject,
-            html
-        });
+            html,
+            ...(att.length ? { attachments: att } : {})
+        };
+        if (att.length) {
+            const a = att[0];
+            console.log(
+                `[Email] Asset creation approval with attachment: ${a?.filename || 'file'} (${typeof a?.content === 'object' && a?.content?.length ? a.content.length : '?'} bytes) → ${recipientEmail}`
+            );
+        }
+
+        await transporter.sendMail(mailOpts);
 
         console.log(`[Email Success] Asset creation approval email sent to ${recipientEmail}`);
         return true;

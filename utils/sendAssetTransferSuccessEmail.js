@@ -1,4 +1,5 @@
 import nodemailer from 'nodemailer';
+import { normalizePdfAttachments } from './normalizeEmailAttachments.js';
 
 /**
  * Sends success email to Asset Controller after approving a transfer (Leave/End of Life)
@@ -8,8 +9,10 @@ import nodemailer from 'nodemailer';
  * @param {Object} assetController - The Asset Controller employee object
  * @param {Object} assignedUser - The assigned user (if exists)
  */
-export const sendAssetTransferSuccessEmail = async (asset, actionType, assetController, assignedUser) => {
+export const sendAssetTransferSuccessEmail = async (asset, actionType, assetController, assignedUser, attachments = []) => {
     try {
+        const att = normalizePdfAttachments(attachments);
+
         const controllerEmail = assetController.companyEmail || assetController.email;
         if (!controllerEmail) {
             console.warn('[TransferSuccessEmail] Asset Controller has no email, skipping.');
@@ -73,6 +76,8 @@ export const sendAssetTransferSuccessEmail = async (asset, actionType, assetCont
                         </table>
                     </div>
 
+                    ${att.length ? `<p style="font-size:13px;color:#64748b;margin:0 0 16px;">A PDF attachment lists the asset(s) processed in this approval.</p>` : ''}
+
                     <div style="text-align: center; margin-top: 40px;">
                         <a href="${link}" style="display: inline-block; background-color: #10b981; color: #ffffff; padding: 16px 32px; text-decoration: none; border-radius: 12px; font-weight: 800; font-size: 14px; text-transform: uppercase; letter-spacing: 0.05em; box-shadow: 0 10px 15px -3px rgba(16, 185, 129, 0.3);">View Asset Details</a>
                     </div>
@@ -88,7 +93,8 @@ export const sendAssetTransferSuccessEmail = async (asset, actionType, assetCont
             from: `"VeRP Asset Management" <${emailUser}>`,
             to: controllerEmail,
             subject: `Transfer Successful: Asset ${actionType} (${asset.assetId})`,
-            html: htmlContent
+            html: htmlContent,
+            ...(att.length ? { attachments: att } : {})
         });
 
         console.log(`[TransferSuccessEmail] Success notification sent to Asset Controller ${controllerEmail} for ${actionType} on ${asset.assetId}`);

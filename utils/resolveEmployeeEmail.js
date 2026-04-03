@@ -40,6 +40,29 @@ export const resolveEmployeeEmail = (emp) => {
 };
 
 /**
+ * Primary recipient (same rules as {@link resolveEmployeeEmail}) plus CC to other addresses on file
+ * for the same person (e.g. personal inbox when `companyEmail` is used as primary).
+ */
+export const resolveEmployeeEmailTargets = (emp) => {
+    const { email: primary } = resolveEmployeeEmail(emp);
+    if (!primary) return { to: null, cc: [] };
+    const primaryLower = primary.trim().toLowerCase();
+    const cc = [];
+    const pushIfDifferent = (addr) => {
+        const a = (addr || '').trim();
+        if (!a) return;
+        if (a.toLowerCase() === primaryLower) return;
+        if (!cc.some((x) => x.toLowerCase() === a.toLowerCase())) cc.push(a);
+    };
+    if (emp) {
+        pushIfDifferent(emp.email);
+        pushIfDifferent(emp.workEmail);
+        pushIfDifferent(emp.personalEmail);
+    }
+    return { to: primary, cc };
+};
+
+/**
  * Returns HTML snippet to add to email body when email was sent to reportee (manager) instead of employee.
  * @param {string} employeeName - Name of the employee who is the subject
  * @param {string} reporteeName - Name of the reportee receiving the email

@@ -4,8 +4,12 @@ import EmployeeBasic from "../models/EmployeeBasic.js";
 import User from "../models/User.js";
 import DashboardAction from "../models/DashboardAction.js";
 import { sendResponsibilityApprovalEmail } from "../utils/sendResponsibilityApprovalEmail.js";
+import { buildResponsibilityEmailData } from "../utils/flowchartResponsibilityEmailData.js";
 import AssetItem from "../models/AssetItem.js";
 import { sendAssetAssignmentEmail } from "../utils/sendAssetAssignmentEmail.js";
+import { buildBulkAssetInventoryPdfAttachment } from "../utils/generateBulkAssetInventoryPdf.js";
+import { sendFlowchartReassignmentResultEmail } from "../utils/sendFlowchartReassignmentResultEmail.js";
+import { isUserAdministrator } from "../services/permissionService.js";
 
 // @desc    Get all flowchart responsibilities
 // @route   GET /api/flowchart
@@ -56,12 +60,28 @@ export const addFlowchartResponsibility = async (req, res) => {
         const existing = await Flowchart.findOne({ category });
 
         if (existing) {
-            const employeeChanged = existing.empObjectId?.toString() !== resolvedEmpObjectId?.toString();
-            
+            const employeeChanged =
+                existing.empObjectId?.toString() !== resolvedEmpObjectId?.toString() ||
+                (existing.employeeId || '').trim() !== (employeeId || '').trim();
+            const wasActive = existing.status === 'Active';
+            const incomingPending = status === 'Pending';
+
+            if (employeeChanged && wasActive && incomingPending) {
+                existing.reassignmentSnapshot = {
+                    employeeId: existing.employeeId,
+                    employeeName: existing.employeeName,
+                    designation: existing.designation,
+                    empObjectId: existing.empObjectId,
+                    companyEmail: existing.companyEmail,
+                    email: existing.email,
+                    department: existing.department
+                };
+            }
+
             existing.employeeId = employeeId;
             existing.employeeName = employeeName;
             existing.designation = designation;
-            existing.empObjectId = resolvedEmpObjectId; 
+            existing.empObjectId = resolvedEmpObjectId;
             existing.status = status || 'Active';
             existing.department = department;
             existing.companyEmail = companyEmail;
@@ -96,13 +116,19 @@ export const addFlowchartResponsibility = async (req, res) => {
                                 status: 'Pending'
                             });
 
-                            const roleLabels = { 'hr': 'HR Admin', 'accounts': 'Financial Controller', 'assetcontroller': 'Asset Controller' };
+                            const roleLabels = {
+                                hr: 'HR Admin',
+                                accounts: 'Financial Controller',
+                                assetcontroller: 'Asset Controller'
+                            };
+                            const emailPayload = await buildResponsibilityEmailData(category);
                             await sendResponsibilityApprovalEmail({
                                 employee: employee,
-                                companyName: 'Main ERP', 
+                                companyName: 'Main ERP',
                                 category: roleLabels[category] || category,
                                 requestId: newAction._id,
-                                unassignedAssets: []
+                                unassignedAssets: [],
+                                emailData: { categoryKey: category, ...emailPayload }
                             });
                         }
                     }
@@ -167,12 +193,14 @@ export const addFlowchartResponsibility = async (req, res) => {
                                 'admincontroller': 'System Admin'
                             };
 
+                            const emailPayload = await buildResponsibilityEmailData(category);
                             await sendResponsibilityApprovalEmail({
                                 employee: employee,
                                 companyName: 'Main ERP', // Global flowchart is for the whole system
                                 category: roleLabels[category] || category,
                                 requestId: newAction._id,
-                                unassignedAssets: [] // We'll let them see unassigned on approval
+                                unassignedAssets: [],
+                                emailData: { categoryKey: category, ...emailPayload }
                             });
                         }
                     }
@@ -223,10 +251,40 @@ export const respondToResponsibility = async (req, res) => {
             return res.status(404).json({ message: 'Responsibility not found' });
         }
 
-        // Update the flowchart responsibility status
-        responsibility.status = action === 'Approve' ? 'Active' : 'Rejected';
-        responsibility.updatedBy = req.user._id;
-        await responsibility.save();
+        // Snapshot of previous active holder (used for notifying old responsible on accept/reject)
+        const oldSnapshot = responsibility.reassignmentSnapshot
+            ? {
+                employeeId: responsibility.reassignmentSnapshot.employeeId,
+                employeeName: responsibility.reassignmentSnapshot.employeeName,
+                designation: responsibility.reassignmentSnapshot.designation,
+                empObjectId: responsibility.reassignmentSnapshot.empObjectId,
+                companyEmail: responsibility.reassignmentSnapshot.companyEmail,
+                email: responsibility.reassignmentSnapshot.email,
+                department: responsibility.reassignmentSnapshot.department
+            }
+            : null;
+
+        if (action === 'Reject' && responsibility.reassignmentSnapshot) {
+            const s = responsibility.reassignmentSnapshot;
+            responsibility.employeeId = s.employeeId;
+            responsibility.employeeName = s.employeeName;
+            responsibility.designation = s.designation;
+            responsibility.empObjectId = s.empObjectId;
+            responsibility.companyEmail = s.companyEmail;
+            responsibility.email = s.email;
+            responsibility.department = s.department;
+            responsibility.status = 'Active';
+            responsibility.reassignmentSnapshot = null;
+            responsibility.updatedBy = req.user._id;
+            await responsibility.save();
+        } else {
+            responsibility.status = action === 'Approve' ? 'Active' : 'Rejected';
+            if (action === 'Approve') {
+                responsibility.reassignmentSnapshot = null;
+            }
+            responsibility.updatedBy = req.user._id;
+            await responsibility.save();
+        }
 
         // Also update any dashboard action if it exists
         const dashboardAction = await DashboardAction.findOne({
@@ -295,13 +353,23 @@ export const respondToResponsibility = async (req, res) => {
                                 
                                 // Send single email notification to new HR
                                 try {
+                                    let handoverPdf = [];
+                                    try {
+                                        const hid = assetsToTransfer.map((a) => a._id.toString()).filter(Boolean);
+                                        if (hid.length) {
+                                            handoverPdf = await buildBulkAssetInventoryPdfAttachment(req, hid, 'hr-global-handover-inventory');
+                                        }
+                                    } catch (pdfErr) {
+                                        console.error('[Flowchart Handover] PDF attachment failed (non-fatal):', pdfErr?.message || pdfErr);
+                                    }
                                     await sendAssetAssignmentEmail({
-                                        asset: assetsToTransfer[0], 
+                                        asset: assetsToTransfer[0],
                                         assets: assetsToTransfer,
                                         employee: newHR,
                                         recipient: newHR,
                                         isBulk: assetsToTransfer.length > 1,
-                                        assetCount: assetsToTransfer.length
+                                        assetCount: assetsToTransfer.length,
+                                        attachments: handoverPdf
                                     });
                                 } catch (emailErr) {
                                     console.error(`[Email Error] Global handover notification failed:`, emailErr);
@@ -314,6 +382,19 @@ export const respondToResponsibility = async (req, res) => {
                 }
             } catch (err) {
                 console.error("[Flowchart Handover Error] HR Asset handover failed:", err);
+            }
+        }
+
+        // Notify previous/old holder (accept or reject)
+        if (oldSnapshot) {
+            try {
+                await sendFlowchartReassignmentResultEmail(req, {
+                    category,
+                    action,
+                    oldSnapshot
+                });
+            } catch (mailErr) {
+                console.error("[Flowchart Result Email] Non-fatal:", mailErr?.message || mailErr);
             }
         }
 
@@ -330,26 +411,87 @@ export const respondToResponsibility = async (req, res) => {
 // @access  Private
 export const deleteFlowchartResponsibility = async (req, res) => {
     try {
-        const { id } = req.params;
-        const { category } = req.params;
-
-        let responsibility;
-
-        if (category) {
-            // Delete by category
-            responsibility = await Flowchart.findOneAndDelete({ category });
-        } else {
-            // Delete by ID
-            responsibility = await Flowchart.findByIdAndDelete(id);
-        }
-
-        if (!responsibility) {
-            return res.status(404).json({ message: 'Responsibility not found' });
-        }
-
-        res.status(200).json({ message: 'Responsibility deleted successfully' });
+        return res.status(403).json({
+            message: 'Removing flowchart assignments is disabled. Use Reassign in Settings → Flowchart to change the holder.'
+        });
     } catch (error) {
         console.error('Error deleting flowchart responsibility:', error);
+        res.status(500).json({ message: 'Server Error' });
+    }
+};
+
+// @desc    Summary lists for Flowchart position view (Settings)
+// @route   GET /api/flowchart/position-summary/:category
+// @access  Private
+export const getFlowchartPositionSummary = async (req, res) => {
+    try {
+        const { category } = req.params;
+        const cat = (category || '').toLowerCase().replace(/\s+/g, '');
+
+        // When generating PDFs/emails, we may need to preview inventory "as" a different employee.
+        // Frontend print pages can pass ?previewAs=<employeeObjectId>.
+        const previewAs = req.query?.previewAs ? String(req.query.previewAs) : null;
+
+        const empId = previewAs || req.user?.employeeObjectId?.toString?.() || null;
+        const isJwtAdmin =
+            req.user?.isAdmin === true || req.user?.role === 'Admin' || req.user?.role === 'ROOT';
+        let isSysAdmin = false;
+        try {
+            isSysAdmin = await isUserAdministrator(req.user?.id);
+        } catch {
+            isSysAdmin = false;
+        }
+        const privileged = isJwtAdmin || isSysAdmin;
+
+        const flow = await Flowchart.findOne({ category: cat });
+        let canViewInventory = true;
+        let viewerNote = null;
+
+        if (cat === 'assetcontroller' || cat === 'hr') {
+            if (!flow) {
+                canViewInventory = false;
+                viewerNote = 'This position is not configured in the flowchart.';
+            } else {
+                const holderMatch = flow.empObjectId && empId && flow.empObjectId.toString() === empId;
+                if (flow.status === 'Pending') {
+                    if (!holderMatch && !privileged) {
+                        canViewInventory = false;
+                        viewerNote =
+                            'This inventory is available after your responsibility request is sent. Only the invited assignee (and administrators) can open the full preview until it is approved.';
+                    }
+                } else if (flow.status === 'Active') {
+                    if (!holderMatch && !privileged) {
+                        canViewInventory = false;
+                        viewerNote =
+                            'Only the current role holder and administrators can view this inventory preview.';
+                    }
+                }
+            }
+        }
+
+        const data = await buildResponsibilityEmailData(category);
+
+        if (!canViewInventory) {
+            return res.status(200).json({
+                category,
+                canViewInventory: false,
+                viewerNote,
+                hrBullets: data.hrBullets || [],
+                companyAssets: [],
+                unassignedAssets: [],
+                parkingAssets: [],
+                accessorySummaryLines: []
+            });
+        }
+
+        res.status(200).json({
+            category,
+            canViewInventory: true,
+            viewerNote,
+            ...data
+        });
+    } catch (error) {
+        console.error('Error building position summary:', error);
         res.status(500).json({ message: 'Server Error' });
     }
 };

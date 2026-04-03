@@ -118,3 +118,36 @@ export const isUserInFlowchart = async (user, category) => {
         return false;
     }
 };
+
+/**
+ * Same as isUserInFlowchart but only Active assignments (excludes Pending flowchart rows).
+ * Use when deciding role-based UI (e.g. HR company assets tab) so invited-but-not-approved holders are not treated as HR.
+ */
+export const isUserActiveInFlowchart = async (user, category) => {
+    try {
+        if (!user) return false;
+
+        const normalizedCategory = (category || '').toLowerCase().replace(/\s+/g, '');
+        const categoryRegex = new RegExp(`^${normalizedCategory.split('').join('\\s*')}$`, 'i');
+
+        const query = {
+            category: { $regex: categoryRegex },
+            status: 'Active',
+            $or: []
+        };
+
+        if (user.employeeObjectId) query.$or.push({ empObjectId: user.employeeObjectId });
+        if (user.employeeId) {
+            const safeEmployeeIdRegex = buildWhitespaceAgnosticExactRegex(user.employeeId);
+            if (safeEmployeeIdRegex) query.$or.push({ employeeId: { $regex: safeEmployeeIdRegex } });
+        }
+
+        if (query.$or.length === 0) return false;
+
+        const exists = await Flowchart.exists(query);
+        return !!exists;
+    } catch (error) {
+        console.error(`[isUserActiveInFlowchart] Error:`, error);
+        return false;
+    }
+};

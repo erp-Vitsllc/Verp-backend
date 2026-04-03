@@ -1,5 +1,6 @@
 import nodemailer from 'nodemailer';
-import { resolveEmployeeEmail } from './resolveEmployeeEmail.js';
+import { resolveEmployeeEmailTargets } from './resolveEmployeeEmail.js';
+import { normalizePdfAttachments } from './normalizeEmailAttachments.js';
 
 /**
  * Sends an email to the Reporting Authority requesting approval for Asset End of Life or Loss & Damage.
@@ -10,9 +11,9 @@ import { resolveEmployeeEmail } from './resolveEmployeeEmail.js';
  * @param {Object} requester - The person requesting (Assigned User)
  * @param {string} reason - The reason provided
  */
-export const sendAssetActionApprovalEmail = async (asset, actionType, manager, requester, reason) => {
+export const sendAssetActionApprovalEmail = async (asset, actionType, manager, requester, reason, attachments = []) => {
     try {
-        const { email: managerEmail } = resolveEmployeeEmail(manager);
+        const { to: managerEmail, cc: managerCc } = resolveEmployeeEmailTargets(manager);
         if (!managerEmail) {
             console.warn('[AssetEmail] Manager has no email, skipping.');
             return;
@@ -47,6 +48,8 @@ export const sendAssetActionApprovalEmail = async (asset, actionType, manager, r
             : '';
         const link = `${frontendUrl}/HRM/Asset/details/${asset._id}?authAction=${authAction}${tabParam}`;
 
+        const att = normalizePdfAttachments(attachments);
+
         const htmlContent = `
             <div style="font-family: Arial, sans-serif; color: #333; max-width: 600px; margin: 0 auto; border: 1px solid #eaeaea; border-radius: 8px; overflow: hidden;">
                 <div style="background-color: #f8f9fa; padding: 20px; border-bottom: 1px solid #eaeaea;">
@@ -67,6 +70,8 @@ export const sendAssetActionApprovalEmail = async (asset, actionType, manager, r
 
                     <p>Action Item Details for review:</p>
 
+                    ${att.length ? `<p style="font-size: 13px; color: #64748b;">A PDF attachment lists the assets included in this request.</p>` : ''}
+
                     <div style="text-align: center; margin-top: 30px;">
                         <a href="${link}" style="background-color: #2563eb; color: #fff; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold;">Review & Details</a>
                     </div>
@@ -81,11 +86,15 @@ export const sendAssetActionApprovalEmail = async (asset, actionType, manager, r
         await transporter.sendMail({
             from: `"VeRP Asset Management" <${emailUser}>`,
             to: managerEmail,
+            ...(managerCc.length ? { cc: managerCc } : {}),
             subject: `Approval Required: ${actionType} Request for ${asset.assetId}`,
-            html: htmlContent
+            html: htmlContent,
+            ...(att.length ? { attachments: att } : {})
         });
 
-        console.log(`[AssetEmail] Approval email sent to ${managerEmail} for ${actionType} on ${asset.assetId}`);
+        console.log(
+            `[AssetEmail] Approval email sent to ${managerEmail}${managerCc.length ? ` (cc: ${managerCc.join(', ')})` : ''} for ${actionType} on ${asset.assetId}`
+        );
 
     } catch (error) {
         console.error('[AssetEmail] Error sending email:', error);

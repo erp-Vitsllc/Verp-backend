@@ -1,5 +1,6 @@
 import nodemailer from 'nodemailer';
 import { resolveEmployeeEmail } from './resolveEmployeeEmail.js';
+import { normalizePdfAttachments } from './normalizeEmailAttachments.js';
 
 /**
  * Sends an email to the Employee and their Reporting Authority after an Asset Action (Leave/End of Life) is approved.
@@ -10,9 +11,21 @@ import { resolveEmployeeEmail } from './resolveEmployeeEmail.js';
  * @param {Object} reportee - The primary reportee of the employee
  * @param {Object} approver - The Asset Controller who approved it
  */
-export const sendAssetActionApprovedEmail = async (asset, actionType, employee, reportee, approver) => {
+function approvedOutcomeDescription(actionType, asset) {
+    if (actionType === 'Leave') return 'placed On Leave';
+    if (actionType === 'End of Life') {
+        const o = asset?.pendingActionDetails?.originalActionType;
+        if (o === 'End of Services') return 'returned to store (End of Services)';
+        return 'marked as End of Life (Unassigned)';
+    }
+    return 'processed';
+}
+
+export const sendAssetActionApprovedEmail = async (asset, actionType, employee, reportee, approver, attachments = []) => {
     try {
         if (!employee) return;
+
+        const att = normalizePdfAttachments(attachments);
 
         const employeeEmail = employee.companyEmail || employee.email;
         const reporteeEmail = reportee?.companyEmail || reportee?.email;
@@ -47,7 +60,7 @@ export const sendAssetActionApprovedEmail = async (asset, actionType, employee, 
         const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
         const link = `${frontendUrl}/HRM/Asset/details/${asset._id || asset.id}`;
 
-        const actionText = actionType === 'Leave' ? 'placed On Leave' : 'marked as End of Life (Unassigned)';
+        const actionText = approvedOutcomeDescription(actionType, asset);
 
         const htmlContent = `
             <div style="font-family: 'Segoe UI', Arial, sans-serif; color: #334155; max-width: 600px; margin: 0 auto; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1);">
@@ -82,6 +95,8 @@ export const sendAssetActionApprovedEmail = async (asset, actionType, employee, 
                         </table>
                     </div>
 
+                    ${att.length ? `<p style="font-size:13px;color:#64748b;margin:0 0 16px;">A PDF attachment lists the asset(s) included in this approval.</p>` : ''}
+
                     <div style="text-align: center; margin-top: 40px;">
                         <a href="${link}" style="display: inline-block; background-color: #10b981; color: #ffffff; padding: 16px 32px; text-decoration: none; border-radius: 12px; font-weight: 800; font-size: 14px; text-transform: uppercase; letter-spacing: 0.05em; box-shadow: 0 10px 15px -3px rgba(16, 185, 129, 0.3);">View Asset Details</a>
                     </div>
@@ -97,7 +112,8 @@ export const sendAssetActionApprovedEmail = async (asset, actionType, employee, 
             from: `"VeRP Asset Management" <${emailUser}>`,
             to: toEmails.join(','),
             subject: `Approved: Asset ${actionType} (${asset.assetId})`,
-            html: htmlContent
+            html: htmlContent,
+            ...(att.length ? { attachments: att } : {})
         });
 
         console.log(`[AssetEmail] Approved notification sent to ${toEmails.join(', ')} for ${actionType} on ${asset.assetId}`);
@@ -117,9 +133,11 @@ export const sendAssetActionApprovedEmail = async (asset, actionType, employee, 
  * @param {Object} reportee - The primary reportee of the employee
  * @param {Object} approver - The Asset Controller who approved it
  */
-export const sendAssetBulkActionApprovedEmail = async (assets, actionType, employee, reportee, approver) => {
+export const sendAssetBulkActionApprovedEmail = async (assets, actionType, employee, reportee, approver, attachments = []) => {
     try {
         if (!employee || !assets?.length) return;
+
+        const att = normalizePdfAttachments(attachments);
 
         const { email: employeeEmail } = resolveEmployeeEmail({ ...employee, primaryReportee: employee.primaryReportee || reportee });
         const reporteeEmail = reportee ? resolveEmployeeEmail(reportee).email : null;
@@ -152,7 +170,7 @@ export const sendAssetBulkActionApprovedEmail = async (assets, actionType, emplo
         });
 
         const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
-        const actionText = actionType === 'Leave' ? 'placed On Leave' : 'marked as End of Life (Unassigned)';
+        const actionText = approvedOutcomeDescription(actionType, assets[0]);
 
         const assetRows = assets.map((a) => {
             const link = `${frontendUrl}/HRM/Asset/details/${a._id || a.id}`;
@@ -190,6 +208,8 @@ export const sendAssetBulkActionApprovedEmail = async (assets, actionType, emplo
                         <p style="margin: 16px 0 0; color: #64748b; font-size: 12px;">Approved by: <strong>${approver ? `${approver.firstName} ${approver.lastName}` : 'Asset Controller'}</strong></p>
                     </div>
 
+                    ${att.length ? `<p style="font-size:13px;color:#64748b;margin:16px 0 0;">A PDF attachment lists all assets included in this bulk approval.</p>` : ''}
+
                     <div style="text-align: center; margin-top: 40px;">
                         <a href="${frontendUrl}/HRM/Asset" style="display: inline-block; background-color: #10b981; color: #ffffff; padding: 16px 32px; text-decoration: none; border-radius: 12px; font-weight: 800; font-size: 14px; text-transform: uppercase; letter-spacing: 0.05em; box-shadow: 0 10px 15px -3px rgba(16, 185, 129, 0.3);">View Assets</a>
                     </div>
@@ -206,7 +226,8 @@ export const sendAssetBulkActionApprovedEmail = async (assets, actionType, emplo
             from: `"VeRP Asset Management" <${emailUser}>`,
             to: toEmails.join(','),
             subject: `Approved: Bulk ${actionType} (${assets.length} assets) - ${assetIds}`,
-            html: htmlContent
+            html: htmlContent,
+            ...(att.length ? { attachments: att } : {})
         });
 
         console.log(`[AssetEmail] Bulk approved notification sent to ${toEmails.join(', ')} for ${actionType} on ${assets.length} asset(s)`);

@@ -1,5 +1,20 @@
 import puppeteer from 'puppeteer';
 
+/** Puppeteer 24+ may return Uint8Array; nodemailer needs a Buffer. */
+export function pdfOutputToBuffer(pdf) {
+    if (pdf == null) return null;
+    if (Buffer.isBuffer(pdf)) return pdf;
+    if (pdf instanceof Uint8Array) return Buffer.from(pdf);
+    if (ArrayBuffer.isView(pdf)) {
+        return Buffer.from(pdf.buffer, pdf.byteOffset, pdf.byteLength);
+    }
+    try {
+        return Buffer.from(pdf);
+    } catch {
+        return null;
+    }
+}
+
 export const generatePdf = async (url, token, user, permissions = {}, selector = '#loan-form-container') => {
     let browser = null;
     let page = null;
@@ -114,10 +129,97 @@ export const generatePdf = async (url, token, user, permissions = {}, selector =
             }
         });
 
-        return pdfBuffer;
+        return pdfOutputToBuffer(pdfBuffer);
 
     } catch (error) {
         console.error("Puppeteer PDF Generation Error:", error);
+        throw error;
+    } finally {
+        if (browser) {
+            await browser.close();
+        }
+    }
+};
+
+/**
+ * Renders a full HTML document in Puppeteer (no external URL).
+ * Use for server-side PDFs when the frontend print route may be unavailable (e.g. stale deploy).
+ */
+export const generatePdfFromHtml = async (html, selector) => {
+    let browser = null;
+    let page = null;
+    try {
+        browser = await puppeteer.launch({
+            headless: 'new',
+            args: ['--no-sandbox', '--disable-setuid-sandbox']
+        });
+
+        console.log(`[generatePdfFromHtml] Rendering with selector: ${selector}`);
+        page = await browser.newPage();
+        await page.setViewport({ width: 1200, height: 800 });
+
+        await page.setContent(html, {
+            waitUntil: 'networkidle0',
+            timeout: 60000
+        });
+
+        await page.waitForSelector(selector, { timeout: 30000 });
+        await new Promise((resolve) => setTimeout(resolve, 500));
+
+        await page.evaluate((sel) => {
+            const form = document.querySelector(sel);
+            if (form) {
+                document.body.innerHTML = '';
+                document.body.appendChild(form);
+                document.body.style.backgroundColor = 'white';
+                document.body.style.display = 'flex';
+                document.body.style.justifyContent = 'center';
+                document.body.style.alignItems = 'flex-start';
+                document.body.style.margin = '0';
+                document.body.style.padding = '0';
+                form.style.margin = '0';
+                document.documentElement.style.backgroundColor = 'white';
+            }
+        }, selector);
+
+        await page.emulateMediaType('screen');
+        await page.addStyleTag({
+            content: `
+                .print\\:hidden { display: none !important; }
+                * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+                body::-webkit-scrollbar { display: none; }
+                body { -ms-overflow-style: none; scrollbar-width: none; }
+            `
+        });
+
+        const height = await page.evaluate((sel) => {
+            const el = document.querySelector(sel);
+            if (!el) return document.body.scrollHeight;
+            const r = el.getBoundingClientRect();
+            return Math.max(r.height, el.scrollHeight || 0, document.body.scrollHeight);
+        }, selector);
+
+        const pdfHeightPx = Math.max(400, Math.ceil(height) || 800);
+
+        const pdfBuffer = await page.pdf({
+            width: '210mm',
+            height: `${pdfHeightPx}px`,
+            printBackground: true,
+            margin: {
+                top: '0px',
+                right: '0px',
+                bottom: '0px',
+                left: '0px'
+            }
+        });
+
+        const out = pdfOutputToBuffer(pdfBuffer);
+        if (!out?.length) {
+            throw new Error('Puppeteer returned empty PDF buffer');
+        }
+        return out;
+    } catch (error) {
+        console.error('Puppeteer PDF From HTML Error:', error);
         throw error;
     } finally {
         if (browser) {

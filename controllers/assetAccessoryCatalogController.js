@@ -2,8 +2,9 @@ import AssetAccessoryCatalog from '../models/AssetAccessoryCatalog.js';
 import AssetItem from '../models/AssetItem.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import DashboardAction from '../models/DashboardAction.js';
-import { getDepartmentHOD } from '../utils/getDepartmentHOD.js';
+import { getDepartmentHOD, isUserInFlowchart } from '../utils/getDepartmentHOD.js';
 import { sendAssetActionApprovalEmail } from '../utils/sendAssetActionApprovalEmail.js';
+import { buildBulkAssetInventoryPdfAttachment } from '../utils/generateBulkAssetInventoryPdf.js';
 
 const generateAccessoryCatalogId = async () => {
     const prefix = 'asset-acc-cat-';
@@ -175,9 +176,26 @@ export const requestAttachAccessoryCatalog = async (req, res) => {
         if (!targetAsset) return res.status(404).json({ message: 'Target asset not found' });
         if (targetAsset.status === 'Draft') return res.status(400).json({ message: 'Draft assets cannot receive accessories' });
 
+        const requesterEmpId = req.user?.employeeObjectId?.toString?.() || null;
+        const assigneeOid = targetAsset.assignedTo?._id?.toString?.() || null;
+        const isAssigneeRequester = !!(requesterEmpId && assigneeOid && requesterEmpId === assigneeOid);
+        const isAdminRequester =
+            req.user?.isAdmin === true || req.user?.role === 'Admin' || req.user?.role === 'ROOT';
+        const isAcRequester = await isUserInFlowchart(req.user, 'assetcontroller').catch(() => false);
+
         let approver = null;
         if (targetAsset.assignedTo?._id) {
-            approver = await EmployeeBasic.findById(targetAsset.assignedTo._id).select('_id firstName lastName employeeId companyEmail').lean();
+            // Assignee (holder) requests → AC approves. AC/Admin requests → assignee approves. Anyone else (e.g. assigner) → AC approves.
+            if (isAssigneeRequester && !isAdminRequester) {
+                approver = await getDepartmentHOD('assetcontroller');
+            } else if (isAcRequester || isAdminRequester) {
+                approver = await EmployeeBasic.findById(targetAsset.assignedTo._id)
+                    .select('_id firstName lastName employeeId companyEmail workEmail personalEmail email primaryReportee')
+                    .populate('primaryReportee', 'firstName lastName companyEmail workEmail personalEmail email')
+                    .lean();
+            } else {
+                approver = await getDepartmentHOD('assetcontroller');
+            }
         }
         if (!approver?._id) {
             approver = await getDepartmentHOD('assetcontroller');
@@ -227,6 +245,12 @@ export const requestAttachAccessoryCatalog = async (req, res) => {
         });
 
         try {
+            let catAttachPdf = [];
+            try {
+                catAttachPdf = await buildBulkAssetInventoryPdfAttachment(req, [targetDoc._id.toString()], 'catalog-attach-request-inventory');
+            } catch (e) {
+                /* non-fatal */
+            }
             await sendAssetActionApprovalEmail(
                 {
                     ...targetDoc.toObject(),
@@ -236,7 +260,8 @@ export const requestAttachAccessoryCatalog = async (req, res) => {
                 `Attach catalog accessory "${catalog.name}"`,
                 approver,
                 { name: req.user.employeeId || 'System' },
-                null
+                'Catalog accessory attach request pending approval.',
+                catAttachPdf
             );
         } catch (emailErr) {
             console.error('[requestAttachAccessoryCatalog] Email send failed (non-fatal):', emailErr.message);

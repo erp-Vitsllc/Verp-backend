@@ -1,6 +1,7 @@
 import nodemailer from "nodemailer";
 import User from "../models/User.js";
 import EmployeeBasic from "../models/EmployeeBasic.js";
+import { normalizePdfAttachments } from "./normalizeEmailAttachments.js";
 
 /** Email only the targeted employee (assignee or HR); never substitute the manager. */
 async function resolveEmailForAssignee(recipient) {
@@ -48,7 +49,7 @@ async function resolveEmailForAssignee(recipient) {
     return (u.email || u.companyEmail || "").trim() || null;
 }
 
-export const sendAssetAssignmentEmail = async ({ asset, assets = [], employee, recipient, isBulk = false, assetCount = 1 }) => {
+export const sendAssetAssignmentEmail = async ({ asset, assets = [], employee, recipient, isBulk = false, assetCount = 1, attachments = [] }) => {
     try {
         const recipientEmail = await resolveEmailForAssignee(recipient);
         if (!recipientEmail) {
@@ -73,6 +74,8 @@ export const sendAssetAssignmentEmail = async ({ asset, assets = [], employee, r
                 pass: emailPass
             }
         });
+
+        const att = normalizePdfAttachments(attachments);
 
         const employeeName = employee?.isCompany ? employee.firstName : `${employee?.firstName || ""} ${employee?.lastName || ""}`.trim();
         const assetName = isBulk ? `${assetCount} Assets` : asset.name;
@@ -168,6 +171,8 @@ export const sendAssetAssignmentEmail = async ({ asset, assets = [], employee, r
                         </table>
                     </div>
 
+                    ${att.length ? `<p style="font-size: 13px; color: #64748b; margin-bottom: 12px;">A PDF attachment lists the assets included in this notification.</p>` : ''}
+
                     <p style="font-size: 14px; color: #64748b; margin-bottom: 30px;">
                         Please log in to the portal to view the details and confirm receipt.
                     </p>
@@ -198,7 +203,8 @@ export const sendAssetAssignmentEmail = async ({ asset, assets = [], employee, r
             from: `"VeRP Asset Management" <${emailUser}>`,
             to: recipientEmail,
             subject,
-            html
+            html,
+            ...(att.length ? { attachments: att } : {})
         });
 
         console.log(`[Email Success] Asset assignment notification sent to ${recipientEmail}`);

@@ -10,7 +10,7 @@ const flowchartSchema = new mongoose.Schema(
         category: {
             type: String,
             required: true,
-            enum: ["hr", "accounts", "finance", "assetcontroller", "management", "it", "admin"]
+            enum: ["hr", "accounts", "finance", "assetcontroller", "management", "it", "admin", "admincontroller"]
         },
 
         // Employee information
@@ -44,6 +44,12 @@ const flowchartSchema = new mongoose.Schema(
         department: { type: String },
         companyEmail: { type: String },
         email: { type: String },
+
+        /** When a new candidate is pending, previous Active assignee is stored for rollback on Reject */
+        reassignmentSnapshot: {
+            type: mongoose.Schema.Types.Mixed,
+            default: null
+        },
 
         // Audit fields
         createdBy: {

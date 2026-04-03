@@ -8,12 +8,31 @@ import { isUserAdministrator } from '../services/permissionService.js';
 import mongoose from 'mongoose';
 import { uploadDocumentToS3, getSignedFileUrl } from '../utils/s3Upload.js';
 import { sendAssetCreationApprovalEmail } from '../utils/sendAssetCreationApprovalEmail.js';
+import { buildBulkAssetInventoryPdfAttachment } from '../utils/generateBulkAssetInventoryPdf.js';
 import { sendAssetCreatedByAdminInfoEmail } from '../utils/sendAssetCreationDecisionEmail.js';
 import { sendAssetActionApprovalEmail } from '../utils/sendAssetActionApprovalEmail.js';
 import { sendAssignedEmployeeActionEmail } from '../utils/sendAssignedEmployeeActionEmail.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import User from '../models/User.js';
 import { resolveAssetControllerEmployee, getAssetRequesterDisplayName } from '../utils/assetApprovalHelpers.js';
+
+const isAdminUser = async (reqUser) => {
+    if (!reqUser) return false;
+    if (reqUser.isAdmin === true || reqUser.role === 'Admin' || reqUser.role === 'ROOT') return true;
+    return !!(await isUserAdministrator(reqUser?.id));
+};
+
+// @desc    Role flags for asset type/category UI (GET /api/AssetType/meta/role)
+export const getAssetTypeRoleMeta = async (req, res) => {
+    try {
+        const isAdmin = await isAdminUser(req.user);
+        const isAssetController = await isUserInFlowchart(req.user, 'assetcontroller').catch(() => false);
+        res.status(200).json({ isAdmin, isAssetController });
+    } catch (error) {
+        console.error('getAssetTypeRoleMeta:', error);
+        res.status(500).json({ message: 'Server Error' });
+    }
+};
 
 // @desc    Create a new asset type
 // @route   POST /api/AssetType
@@ -74,6 +93,12 @@ export const createAssetType = async (req, res) => {
                 return res.status(400).json({ message: 'Enter a valid UAE vehicle plate number' });
             }
             plateNumber = normalizePlate(plateNumber);
+        }
+
+        if (mode === 'category' || mode === 'type') {
+            if (!(await isAdminUser(req.user))) {
+                return res.status(403).json({ message: 'Only administrators can create asset types and categories.' });
+            }
         }
 
         if (mode === 'category') {
@@ -322,13 +347,20 @@ export const createAssetType = async (req, res) => {
                     { upsert: true, new: true, setDefaultsOnInsert: true }
                 );
 
+                let creationBulkAttachments = [];
+                try {
+                    creationBulkAttachments = await buildBulkAssetInventoryPdfAttachment(req, createdObjectIds, 'asset-creation-draft-inventory');
+                } catch (pdfErr) {
+                    console.error('[createAssetType] Bulk creation PDF attachment failed (non-fatal):', pdfErr?.message || pdfErr);
+                }
                 await sendAssetCreationApprovalEmail({
                     asset: first,
                     recipient: assetController,
                     creatorName: requesterDisplayName,
                     isBulk: isBulkCreation,
                     assetCount: createdAssets.length,
-                    bulkAssetIds: createdObjectIds
+                    bulkAssetIds: createdObjectIds,
+                    attachments: creationBulkAttachments
                 });
             }
 
@@ -393,6 +425,7 @@ export const getAssetTypes = async (req, res) => {
             .populate('typeId')
             .populate('categoryId')
             .populate('actionRequiredBy', 'firstName lastName employeeId')
+            .populate('assignedCompany', 'name companyId companyEmail')
             .populate({
                 path: 'assignedTo',
                 select: 'firstName lastName employeeId department primaryReportee reportingAuthority',
@@ -459,10 +492,13 @@ export const getAssetTypes = async (req, res) => {
                 imagePreview: await getSignedFileUrl(a.imagePreview),
                 photo: await getSignedFileUrl(a.photo),
                 status: a.status,
+                acceptanceStatus: a.acceptanceStatus,
+                assignedToType: a.assignedToType,
                 assigned: a.status === 'Assigned' ? 1 : 0,
                 unassigned: a.status === 'Unassigned' ? 1 : 0,
                 invoiceFile: await getSignedFileUrl(a.invoiceFile),
                 actionRequiredBy: a.actionRequiredBy,
+                assignedCompany: a.assignedCompany,
                 designatedAssetController,
                 pendingAction: a.pendingAction,
                 accessories: await Promise.all((a.accessories || []).map(async (acc) => {
@@ -499,10 +535,18 @@ export const getAssetTypes = async (req, res) => {
 export const getAssetTypeById = async (req, res) => {
     try {
         const assetType = await AssetType.findById(req.params.id);
-        if (!assetType) {
-            return res.status(404).json({ message: 'Asset Type not found' });
+        if (assetType) {
+            const o = assetType.toObject();
+            if (o.imagePreview) o.imagePreview = await getSignedFileUrl(o.imagePreview);
+            return res.status(200).json(o);
         }
-        res.status(200).json(assetType);
+        const category = await AssetCategory.findById(req.params.id).populate('typeId', 'name typeId');
+        if (category) {
+            const o = category.toObject();
+            if (o.imagePreview) o.imagePreview = await getSignedFileUrl(o.imagePreview);
+            return res.status(200).json(o);
+        }
+        return res.status(404).json({ message: 'Asset type or category not found' });
     } catch (error) {
         console.error('Error fetching asset type:', error);
         res.status(500).json({ message: 'Server Error' });
@@ -520,24 +564,40 @@ export const deleteAssetType = async (req, res) => {
             return res.status(400).json({ message: 'Invalid ID format for deletion.' });
         }
 
-        // Try Category first
-        let item = await AssetCategory.findById(id);
-        if (item) {
-            item.isActive = false;
-            await item.save();
+        const category = await AssetCategory.findById(id);
+        if (category) {
+            if (!(await isAdminUser(req.user))) {
+                return res.status(403).json({ message: 'Only administrators can delete asset types and categories.' });
+            }
+            const assetCount = await AssetItem.countDocuments({ categoryId: id });
+            if (assetCount > 0) {
+                return res.status(400).json({
+                    message: `Cannot delete category: ${assetCount} asset(s) still use this category.`
+                });
+            }
+            category.isActive = false;
+            await category.save();
             return res.status(200).json({ message: 'Category deleted successfully' });
         }
 
-        // Try AssetType
-        item = await AssetType.findById(id);
-        if (item) {
-            item.isActive = false;
-            await item.save();
+        const assetType = await AssetType.findById(id);
+        if (assetType) {
+            if (!(await isAdminUser(req.user))) {
+                return res.status(403).json({ message: 'Only administrators can delete asset types and categories.' });
+            }
+            const assetCount = await AssetItem.countDocuments({ typeId: id });
+            if (assetCount > 0) {
+                return res.status(400).json({
+                    message: `Cannot delete type: ${assetCount} asset(s) still use this type.`
+                });
+            }
+            assetType.isActive = false;
+            await assetType.save();
             return res.status(200).json({ message: 'Type deleted successfully' });
         }
 
         // Try AssetItem
-        item = await AssetItem.findById(id);
+        const item = await AssetItem.findById(id);
         if (item) {
             const isAdmin = req.user?.isAdmin === true || req.user?.role === 'Admin' || req.user?.role === 'ROOT';
             const isAssetController = await isUserInFlowchart(req.user, 'assetcontroller');
@@ -598,6 +658,60 @@ export const updateAssetItem = async (req, res) => {
             req.user.role === 'ROOT' ||
             await isUserAdministrator(req.user?.id);
         const isAssetController = await isUserInFlowchart(req.user, 'assetcontroller');
+
+        // Asset Category / Asset Type documents (not AssetItem): only Asset Controller may edit names and images
+        const categoryDoc = await AssetCategory.findById(id);
+        if (categoryDoc) {
+            if (!isAssetController && !isAdmin) {
+                return res.status(403).json({
+                    message: 'Only administrators and Asset Controller can edit asset categories and types (including images).'
+                });
+            }
+            const name = updates.category ?? updates.name;
+            if (name !== undefined && String(name).trim()) categoryDoc.name = String(name).trim();
+            const img = updates.imagePreview || updates.photo;
+            if (img && typeof img === 'string' && img.startsWith('data:image')) {
+                try {
+                    const uploadResult = await uploadDocumentToS3(img, 'asset-photos');
+                    categoryDoc.imagePreview = uploadResult.publicId;
+                } catch (e) {
+                    console.error('Category image upload failed:', e);
+                }
+            }
+            if (updates.type && typeof updates.type === 'string') {
+                const parentType = await AssetType.findOne({ name: updates.type.trim() });
+                if (parentType) categoryDoc.typeId = parentType._id;
+            }
+            await categoryDoc.save();
+            const out = categoryDoc.toObject();
+            if (out.imagePreview) out.imagePreview = await getSignedFileUrl(out.imagePreview);
+            return res.status(200).json(out);
+        }
+
+        const typeDoc = await AssetType.findById(id);
+        if (typeDoc) {
+            if (!isAssetController && !isAdmin) {
+                return res.status(403).json({
+                    message: 'Only administrators and Asset Controller can edit asset categories and types (including images).'
+                });
+            }
+            const name = updates.type ?? updates.name;
+            if (name !== undefined && String(name).trim()) typeDoc.name = String(name).trim();
+            if (updates.description !== undefined) typeDoc.description = updates.description;
+            const img = updates.imagePreview || updates.photo;
+            if (img && typeof img === 'string' && img.startsWith('data:image')) {
+                try {
+                    const uploadResult = await uploadDocumentToS3(img, 'asset-photos');
+                    typeDoc.imagePreview = uploadResult.publicId;
+                } catch (e) {
+                    console.error('Type image upload failed:', e);
+                }
+            }
+            await typeDoc.save();
+            const out = typeDoc.toObject();
+            if (out.imagePreview) out.imagePreview = await getSignedFileUrl(out.imagePreview);
+            return res.status(200).json(out);
+        }
 
         let asset = await AssetItem.findById(id);
         if (!asset) {
@@ -785,12 +899,19 @@ export const updateAssetItem = async (req, res) => {
                                     { upsert: true, new: true, setDefaultsOnInsert: true }
                                 );
 
+                                let addAccPdf = [];
+                                try {
+                                    addAccPdf = await buildBulkAssetInventoryPdfAttachment(req, [asset._id.toString()], 'accessory-add-request-inventory');
+                                } catch (e) {
+                                    /* non-fatal */
+                                }
                                 await sendAssetActionApprovalEmail(
                                     { ...asset.toObject(), assetId: asset.assetId },
                                     'Add Accessory',
                                     controller,
                                     { name: requesterName },
-                                    'Assigned user requested accessory addition. Please approve or reject.'
+                                    'Assigned user requested accessory addition. Please approve or reject.',
+                                    addAccPdf
                                 );
 
                                 await AssetHistory.create({
@@ -815,12 +936,19 @@ export const updateAssetItem = async (req, res) => {
                                 const controller = await getDepartmentHOD('assetcontroller');
                                 if (controller) {
                                     const requesterName = req.user.name || 'System';
+                                    let updAccPdf = [];
+                                    try {
+                                        updAccPdf = await buildBulkAssetInventoryPdfAttachment(req, [asset._id.toString()], 'accessory-update-ac-inventory');
+                                    } catch (e) {
+                                        /* non-fatal */
+                                    }
                                     await sendAssetActionApprovalEmail(
                                         { ...asset.toObject(), assetId: asset.assetId },
                                         'Update Accessory',
                                         controller,
                                         { name: requesterName },
-                                        'Existing accessories have been updated. Please review the changes.'
+                                        'Existing accessories have been updated. Please review the changes.',
+                                        updAccPdf
                                     );
                                 }
                             } else if (employee) {
@@ -836,12 +964,19 @@ export const updateAssetItem = async (req, res) => {
                                     if (manager) emailRecipient = manager;
                                 }
 
+                                let updEmpPdf = [];
+                                try {
+                                    updEmpPdf = await buildBulkAssetInventoryPdfAttachment(req, [asset._id.toString()], 'accessory-update-emp-inventory');
+                                } catch (e) {
+                                    /* non-fatal */
+                                }
                                 await sendAssetActionApprovalEmail(
                                     { ...asset.toObject(), assetId: asset.assetId },
                                     'Update Accessory',
                                     emailRecipient,
                                     { name: requesterName },
-                                    'Existing accessories on your assigned asset have been updated. Please review the changes.'
+                                    'Existing accessories on your assigned asset have been updated. Please review the changes.',
+                                    updEmpPdf
                                 );
                             }
                             await AssetHistory.create({
@@ -1012,10 +1147,17 @@ export const submitAssetForApproval = async (req, res) => {
                     { upsert: true, new: true, setDefaultsOnInsert: true }
                 );
 
+                let submitAttachments = [];
+                try {
+                    submitAttachments = await buildBulkAssetInventoryPdfAttachment(req, [asset._id.toString()], 'asset-creation-draft-inventory');
+                } catch (pdfErr) {
+                    console.error('[submitAssetForApproval] PDF attachment failed (non-fatal):', pdfErr?.message || pdfErr);
+                }
                 await sendAssetCreationApprovalEmail({
                     asset,
                     recipient: assetController,
-                    creatorName: requesterDisplayName
+                    creatorName: requesterDisplayName,
+                    attachments: submitAttachments
                 });
             } catch (err) {
                 console.error('[submitAssetForApproval] Notification error:', err);

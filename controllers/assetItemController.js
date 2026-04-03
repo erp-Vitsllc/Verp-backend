@@ -16,7 +16,7 @@ import { sendAssetActionFinalAcknowledgeEmail } from '../utils/sendAssetActionFi
 import Fine from '../models/Fine.js';
 import AssetCategory from '../models/AssetCategory.js';
 import Flowchart from '../models/Flowchart.js';
-import { getDepartmentHOD, isUserInFlowchart } from '../utils/getDepartmentHOD.js';
+import { getDepartmentHOD, isUserInFlowchart, isUserActiveInFlowchart } from '../utils/getDepartmentHOD.js';
 import { getManagementHOD } from '../utils/getManagementHOD.js';
 import { sendAssetCreationApprovalEmail } from '../utils/sendAssetCreationApprovalEmail.js';
 import { isUserAdministrator } from '../services/permissionService.js';
@@ -27,6 +27,9 @@ import { sendAssignedEmployeeActionEmail } from '../utils/sendAssignedEmployeeAc
 import { processParkingAssets } from '../utils/processParkingAssets.js';
 import { sendParkingReassignAcceptedEmail } from '../utils/sendParkingReassignAcceptedEmail.js';
 import { notifyAssetControllerReassignmentAcceptedWithHandover } from '../utils/notifyAssetControllerReassignmentAcceptedWithHandover.js';
+import { notifyPreviousAssigneeReassignmentAcceptedWithHandover } from '../utils/notifyPreviousAssigneeReassignmentAcceptedWithHandover.js';
+import { ASSET_HANDOVER_PDF_SELECTOR } from '../utils/assetHandoverPdfConstants.js';
+import { buildBulkAssetInventoryPdfAttachment } from '../utils/generateBulkAssetInventoryPdf.js';
 
 const generateAccessoryCatalogId = async () => {
     const prefix = 'asset-acc-cat-';
@@ -954,6 +957,11 @@ export const getHRCompanyAssets = async (req, res) => {
 
         // Check if this employee is HR-designated for companies
         // First check Company.responsibilities for HR designation (by empObjectId or employeeId)
+        // HR category only (avoid substring false positives e.g. "Three" matching /hr/)
+        const hrResponsibilityCategoryCond = {
+            $regex: /^\s*(hr|hrm|human(\s+resources?)?)\s*$/i
+        };
+
         const designatedCompanies = await Company.find({
             responsibilities: {
                 $elemMatch: {
@@ -961,7 +969,7 @@ export const getHRCompanyAssets = async (req, res) => {
                         { empObjectId: employeeObjectId },
                         { employeeId: { $regex: new RegExp(`^${employeeId}$`, 'i') } }
                     ],
-                    category: { $regex: /hr|human/i },
+                    category: hrResponsibilityCategoryCond,
                     status: 'Active'
                 }
             }
@@ -969,9 +977,9 @@ export const getHRCompanyAssets = async (req, res) => {
 
         console.log(`[getHRCompanyAssets] Employee ${employeeId} (${employeeObjectId}) - Found ${designatedCompanies.length} designated companies`);
 
-        // Also check if this employee is the HR HOD in the flowchart (fallback)
-        const isHRFlowchart = await isUserInFlowchart({ employeeObjectId, employeeId }, 'hr');
-        console.log(`[getHRCompanyAssets] Employee ${employeeId} - isHRFlowchart: ${isHRFlowchart}`);
+        // Active HR slot only — Pending invitees must not see the HR company-assets profile tab
+        const isHRFlowchart = await isUserActiveInFlowchart({ employeeObjectId, employeeId }, 'hr');
+        console.log(`[getHRCompanyAssets] Employee ${employeeId} - isHRFlowchart (Active): ${isHRFlowchart}`);
 
         // If not HR-designated for any company and not HR HOD, return empty
         if (designatedCompanies.length === 0 && !isHRFlowchart) {
@@ -1001,7 +1009,12 @@ export const getHRCompanyAssets = async (req, res) => {
                         ? {}
                         : { assignedCompany: { $in: designatedCompanyIds } })
                 },
-                { actionRequiredBy: employeeObjectId, status: 'Pending' }
+                // Pending company-assignment acceptance only (not employee assignment pending)
+                {
+                    actionRequiredBy: employeeObjectId,
+                    status: 'Pending',
+                    assignedToType: 'Company'
+                }
             ]
         };
 
@@ -1177,10 +1190,17 @@ export const createAssetItem = async (req, res) => {
 
         // Send email to Asset Controller
         if (initialStatus === 'Draft' && assetController) {
+            let creationAttachments = [];
+            try {
+                creationAttachments = await buildBulkAssetInventoryPdfAttachment(req, [newItem._id.toString()], 'asset-creation-draft-inventory');
+            } catch (pdfErr) {
+                console.error('Asset creation PDF attachment failed (non-fatal):', pdfErr?.message || pdfErr);
+            }
             await sendAssetCreationApprovalEmail({
                 asset: newItem,
                 recipient: assetController,
-                creatorName: requesterDisplayName
+                creatorName: requesterDisplayName,
+                attachments: creationAttachments
             });
         }
 
@@ -1446,6 +1466,48 @@ export const getBulkAssetDetails = async (req, res) => {
         res.status(200).json({ items: assets });
     } catch (error) {
         console.error('Error in getBulkAssetDetails:', error);
+        res.status(500).json({ message: 'Server Error' });
+    }
+};
+
+// @desc    Full asset rows for print/PDF inventory (category, type, accessories)
+// @route   GET /api/AssetItem/bulk/print-inventory?ids=a,b,c
+// @access  Private
+export const getBulkAssetInventoryForPrint = async (req, res) => {
+    try {
+        const idsParam = req.query.ids;
+        if (!idsParam) return res.status(400).json({ message: 'ids query param is required.' });
+        const ids = String(idsParam)
+            .split(',')
+            .map((x) => x.trim())
+            .filter(Boolean);
+        if (ids.length === 0) return res.status(400).json({ message: 'No valid IDs provided.' });
+
+        const assets = await AssetItem.find({ _id: { $in: ids } })
+            .select('assetId name status accessories')
+            .populate('categoryId', 'name')
+            .populate('typeId', 'name')
+            .lean();
+
+        const order = new Map(ids.map((v, i) => [v, i]));
+        assets.sort((a, b) => (order.get(a._id.toString()) ?? 0) - (order.get(b._id.toString()) ?? 0));
+
+        const items = assets.map((a) => ({
+            _id: a._id,
+            assetId: a.assetId,
+            name: a.name,
+            status: a.status,
+            categoryName: a.categoryId?.name || '—',
+            typeName: a.typeId?.name || '—',
+            accessories: (a.accessories || []).map((acc) => ({
+                name: acc.name || '—',
+                status: acc.status || '—'
+            }))
+        }));
+
+        res.status(200).json({ items });
+    } catch (error) {
+        console.error('Error in getBulkAssetInventoryForPrint:', error);
         res.status(500).json({ message: 'Server Error' });
     }
 };
@@ -2007,12 +2069,19 @@ export const assignAssetItem = async (req, res) => {
         // Send reassignment email to previous assignee if this is a reassignment
         if (isReassignment && previousAssignee && newAssignee) {
             try {
+                let reassignPdf = [];
+                try {
+                    reassignPdf = await buildBulkAssetInventoryPdfAttachment(req, [item._id.toString()], 'reassignment-inventory');
+                } catch (e) {
+                    /* non-fatal */
+                }
                 await sendAssetReassignmentEmail({
                     asset: item,
                     previousAssignee: previousAssignee,
                     newAssignee: newAssignee,
                     previousAssigneeType: previousAssigneeType,
-                    newAssigneeType: newAssigneeType
+                    newAssigneeType: newAssigneeType,
+                    attachments: reassignPdf
                 });
             } catch (err) {
                 console.error(`[Email Error] Failed to send reassignment email to previous assignee: `, err);
@@ -2021,10 +2090,18 @@ export const assignAssetItem = async (req, res) => {
 
         // Email: notify assignee (or HR for company) — not the assigner/controller
         try {
+            const itemForEmail = await AssetItem.findById(item._id).populate('categoryId', 'name');
+            let assignAttachments = [];
+            try {
+                assignAttachments = await buildBulkAssetInventoryPdfAttachment(req, [item._id.toString()], 'assignment-inventory');
+            } catch (pdfErr) {
+                console.error('Assignment PDF attachment failed (non-fatal):', pdfErr?.message || pdfErr);
+            }
             await sendAssetAssignmentEmail({
-                asset: item,
+                asset: itemForEmail || item,
                 employee: assignedToType === 'Company' ? { firstName: subjectName, lastName: '', isCompany: true } : actionRecipient,
-                recipient: actionRecipient
+                recipient: actionRecipient,
+                attachments: assignAttachments
             });
         } catch (err) {
             console.error(`[Email Error] Failed to send assignment email: `, err);
@@ -2236,20 +2313,34 @@ export const bulkAssignAssetItems = async (req, res) => {
             await updateAssetTypeCounts(typeId);
         }
 
-        // Send email to assignee only
+        // Send email to assignee only (HTML table + PDF inventory)
         try {
             const employee = await EmployeeBasic.findById(assignedTo).select(
                 'employeeId firstName lastName companyEmail workEmail personalEmail email'
             );
             const firstAsset = await AssetItem.findById(assetIds[0]).populate('categoryId');
+            const assetsForEmail = await AssetItem.find({ _id: { $in: assetIds } })
+                .populate('categoryId', 'name')
+                .lean();
+            const orderMap = new Map(assetIds.map((id, i) => [String(id), i]));
+            assetsForEmail.sort((a, b) => (orderMap.get(String(a._id)) ?? 0) - (orderMap.get(String(b._id)) ?? 0));
+
+            let attachments = [];
+            try {
+                attachments = await buildBulkAssetInventoryPdfAttachment(req, assetIds.map(String), 'bulk-assignment-inventory');
+            } catch (pdfErr) {
+                console.error('Bulk assignment PDF attachment failed (non-fatal):', pdfErr?.message || pdfErr);
+            }
 
             if (employee && firstAsset) {
                 await sendAssetAssignmentEmail({
                     asset: firstAsset,
+                    assets: assetsForEmail,
                     employee,
                     recipient: employee,
                     isBulk: true,
-                    assetCount: assetIds.length
+                    assetCount: assetIds.length,
+                    attachments
                 });
             }
         } catch (emailErr) {
@@ -2297,8 +2388,7 @@ export const downloadHistoryHandoverPdf = async (req, res) => {
             employeeId: userObj?.employeeId
         };
 
-        const selector = '#asset-handover-container';
-        const pdfBuffer = await generatePdf(printUrl, token, userPayload, {}, selector);
+        const pdfBuffer = await generatePdf(printUrl, token, userPayload, {}, ASSET_HANDOVER_PDF_SELECTOR);
 
         res.setHeader('Content-Type', 'application/pdf');
         res.setHeader('Content-Disposition', `attachment; filename="Historical-Handover-${assetSnapshot.assetId}.pdf"`);
@@ -2344,10 +2434,7 @@ export const downloadHandoverPdf = async (req, res) => {
 
         const permissions = {}; // Default permissions
 
-        // Use the specific selector in our print page
-        const selector = '#asset-handover-container';
-
-        const pdfBuffer = await generatePdf(printUrl, token, userPayload, permissions, selector);
+        const pdfBuffer = await generatePdf(printUrl, token, userPayload, permissions, ASSET_HANDOVER_PDF_SELECTOR);
 
         res.setHeader('Content-Type', 'application/pdf');
         res.setHeader('Content-Disposition', `attachment; filename = "HandoverForm-${asset.assetId}.pdf"`);
@@ -2493,6 +2580,13 @@ export const respondToAssignment = async (req, res) => {
                     }
                 }
 
+                let responseInvPdf = [];
+                try {
+                    responseInvPdf = await buildBulkAssetInventoryPdfAttachment(req, [item._id.toString()], 'assignment-response-inventory');
+                } catch (pdfErr) {
+                    console.error('[respondToAssignment] Response PDF failed (non-fatal):', pdfErr?.message || pdfErr);
+                }
+
                 for (let recipient of recipients) {
                     await sendAssetResponseEmail({
                         asset: item,
@@ -2501,7 +2595,8 @@ export const respondToAssignment = async (req, res) => {
                         action,
                         comment: comments,
                         assignedToType: item.assignedToType,
-                        assignedCompany: item.assignedCompany
+                        assignedCompany: item.assignedCompany,
+                        attachments: responseInvPdf
                     });
                 }
             } catch (err) {
@@ -2829,6 +2924,7 @@ export const respondToAssignment = async (req, res) => {
 
             if (priorAcceptedCountForReassign >= 1) {
                 void notifyAssetControllerReassignmentAcceptedWithHandover(req, { assetMongoId: item._id });
+                void notifyPreviousAssigneeReassignmentAcceptedWithHandover(req, { assetMongoId: item._id });
             }
         }
 
@@ -2997,6 +3093,7 @@ export const bulkRespondToAssignment = async (req, res) => {
 
                 if (action === 'Accept' && priorAcceptedCountForReassign >= 1) {
                     void notifyAssetControllerReassignmentAcceptedWithHandover(req, { assetMongoId: item._id });
+                    void notifyPreviousAssigneeReassignmentAcceptedWithHandover(req, { assetMongoId: item._id });
                 }
 
                 results.success.push(item.assetId);
@@ -3121,7 +3218,20 @@ export const returnAssetItem = async (req, res) => {
                 });
 
                 try {
-                    await sendAssetActionApprovalEmail(item, 'Return Asset', assetController, { name: requesterName }, item.pendingActionDetails?.reason || '');
+                    let singleReturnAttachments = [];
+                    try {
+                        singleReturnAttachments = await buildBulkAssetInventoryPdfAttachment(req, [item._id.toString()], 'return-inventory');
+                    } catch (pdfErr) {
+                        console.error('Return PDF attachment failed (non-fatal):', pdfErr?.message || pdfErr);
+                    }
+                    await sendAssetActionApprovalEmail(
+                        item,
+                        'Return Asset',
+                        assetController,
+                        { name: requesterName },
+                        item.pendingActionDetails?.reason || '',
+                        singleReturnAttachments
+                    );
                 } catch (e) {
                     // non-fatal
                 }
@@ -3206,12 +3316,19 @@ export const returnAssetItem = async (req, res) => {
             });
 
             try {
+                let attachments = [];
+                try {
+                    attachments = await buildBulkAssetInventoryPdfAttachment(req, bulkAssetIdsOrdered, 'bulk-return-inventory');
+                } catch (pdfErr) {
+                    console.error('Bulk return PDF attachment failed (non-fatal):', pdfErr?.message || pdfErr);
+                }
                 await sendAssetActionApprovalEmail(
                     { ...primaryAsset.toObject(), assetId: primaryAsset.assetId, name: `Bulk Return Asset (${bulkAssets.length} assets)` },
                     'Return Asset',
                     assetController,
                     { name: requesterName },
-                    `Bulk return for ${bulkAssets.length} asset(s). ${reason}`
+                    `Bulk return for ${bulkAssets.length} asset(s). ${reason}`,
+                    attachments
                 );
             } catch (e) {
                 // non-fatal
@@ -3311,12 +3428,20 @@ export const returnAssetItem = async (req, res) => {
                     });
 
                     // Send email to HR for company asset transfer
+                    const itemForHrEmail = await AssetItem.findById(item._id).populate('categoryId', 'name');
+                    let companyTransferAttachments = [];
+                    try {
+                        companyTransferAttachments = await buildBulkAssetInventoryPdfAttachment(req, [item._id.toString()], 'assignment-inventory');
+                    } catch (pdfErr) {
+                        console.error('Company transfer PDF attachment failed (non-fatal):', pdfErr?.message || pdfErr);
+                    }
                     await sendAssetAssignmentEmail({
-                        asset: item,
+                        asset: itemForHrEmail || item,
                         employee: assignedToType === 'Company'
                             ? { firstName: targetCompany?.name || 'Company', lastName: "", isCompany: true }
                             : targetEmployee,
                         recipient: hrHOD, // HR receives the email
+                        attachments: companyTransferAttachments
                     });
 
                     console.log(`[Dashboard] Created asset transfer action for HR (${hrHOD.employeeId}) for company asset ${item.assetId}`);
@@ -4444,12 +4569,20 @@ export const requestAssetAction = async (req, res) => {
 
         const requesterName = req.user.name || (req.user.firstName && req.user.lastName ? `${req.user.firstName} ${req.user.lastName}` : 'User');
 
+        let actionAttachments = [];
+        try {
+            actionAttachments = await buildBulkAssetInventoryPdfAttachment(req, [asset._id.toString()], 'asset-action-inventory');
+        } catch (pdfErr) {
+            console.error('Asset action PDF attachment failed (non-fatal):', pdfErr?.message || pdfErr);
+        }
+
         await sendAssetActionApprovalEmail(
             asset,
             pendingActionType,
             nextApprover,
             { name: requesterName },
-            reason
+            reason,
+            actionAttachments
         );
 
         res.status(200).json({ message: `${pendingActionType} request sent to Asset Controller for approval`, asset });
@@ -4681,19 +4814,37 @@ export const bulkRequestAssetAction = async (req, res) => {
             });
         }
 
-        // Send email notification to Asset Controller (using first asset as reference)
+        // Send email notification to the same approver role as per-asset routing (must not use HR for Leave/EOL when hrHOD was never loaded).
         if (results.length > 0 && assets.length > 0) {
             const requesterName = req.user.name || (req.user.firstName && req.user.lastName ? `${req.user.firstName} ${req.user.lastName}` : 'User');
             const primaryAsset = assets[0];
-            const approver = primaryAsset.assignedToType === 'Company' && primaryAsset.assignedCompany ? hrHOD : assetController;
+            const approver =
+                actionType === 'Loss and Damage' &&
+                primaryAsset.assignedToType === 'Company' &&
+                primaryAsset.assignedCompany &&
+                hrHOD?._id
+                    ? hrHOD
+                    : assetController;
 
             try {
+                const pdfIds = assetIds.map((id) => id.toString());
+                let bulkActionAttachments = [];
+                try {
+                    bulkActionAttachments = await buildBulkAssetInventoryPdfAttachment(
+                        req,
+                        pdfIds,
+                        `bulk-${String(actionType).replace(/\s+/g, '-')}-inventory`
+                    );
+                } catch (pdfErr) {
+                    console.error('[bulkRequestAssetAction] PDF attachment failed (non-fatal):', pdfErr?.message || pdfErr);
+                }
                 await sendAssetActionApprovalEmail(
                     { ...primaryAsset.toObject(), assetId: primaryAsset.assetId, name: `Bulk ${actionType} Request (${assets.length} assets)` },
                     actionType,
                     approver,
                     { name: requesterName },
-                    `Bulk ${actionType} request for ${assets.length} asset(s). Reason: ${reason || 'N/A'}`
+                    `Bulk ${actionType} request for ${assets.length} asset(s). Reason: ${reason || 'N/A'}`,
+                    bulkActionAttachments
                 );
             } catch (emailErr) {
                 console.error('[bulkRequestAssetAction] Email send failed (non-fatal):', emailErr.message);
@@ -4813,6 +4964,18 @@ export const handleAssetActionApproval = async (req, res) => {
 
                 const otherAssetIds = effectiveBulkAssetIds.filter((x) => x !== currentIdStr);
 
+                /** Before assignee fields are cleared (EOL/Return), for bulk employee emails + PDF */
+                let bulkEmailSnapshots = [];
+                if (effectiveBulkAssetIds.length > 0) {
+                    const preRows = await AssetItem.find({ _id: { $in: effectiveBulkAssetIds } })
+                        .populate('assignedTo')
+                        .populate('assignedCompany')
+                        .lean();
+                    const ord = new Map(effectiveBulkAssetIds.map((id, i) => [String(id), i]));
+                    preRows.sort((a, b) => (ord.get(String(a._id)) ?? 0) - (ord.get(String(b._id)) ?? 0));
+                    bulkEmailSnapshots = preRows;
+                }
+
                 // Process current asset
                 const processAsset = async (currentAsset) => {
                     // Process "Return Asset" action
@@ -4853,12 +5016,23 @@ export const handleAssetActionApproval = async (req, res) => {
                                     .lean()
                                     .catch(() => null);
                                 if (employee) {
+                                    let returnApprovedPdf = [];
+                                    try {
+                                        returnApprovedPdf = await buildBulkAssetInventoryPdfAttachment(
+                                            req,
+                                            [currentAsset._id.toString()],
+                                            'return-approved-inventory'
+                                        );
+                                    } catch (e) {
+                                        /* non-fatal */
+                                    }
                                     await sendAssignedEmployeeActionEmail({
                                         asset: currentAsset,
                                         employee,
                                         action: 'Return Asset',
                                         performedBy: req.user.employeeId || 'Asset Controller',
-                                        details: 'Your asset was returned to store by Asset Controller/Admin.'
+                                        details: 'Your asset was returned to store by Asset Controller/Admin.',
+                                        attachments: returnApprovedPdf
                                     });
                                 }
                             } catch {
@@ -4942,6 +5116,16 @@ export const handleAssetActionApproval = async (req, res) => {
                         // HR notification for company allocations.
                         if (wasCompanyAllocation) {
                             try {
+                                let eolHrPdf = [];
+                                try {
+                                    eolHrPdf = await buildBulkAssetInventoryPdfAttachment(
+                                        req,
+                                        [currentAsset._id.toString()],
+                                        'eol-company-approved-inventory'
+                                    );
+                                } catch (e) {
+                                    /* non-fatal */
+                                }
                                 await sendAssignedEmployeeActionEmail({
                                     asset: currentAsset,
                                     employee: hrHOD,
@@ -4949,7 +5133,8 @@ export const handleAssetActionApproval = async (req, res) => {
                                     performedBy: req.user.employeeId || 'Asset Controller',
                                     details: isEndOfServices
                                         ? `End of Services was approved by Asset Controller. Asset returned to store (Unassigned). (Company: ${companyNameForNotification || 'Company allocation'})`
-                                        : `End of Life was approved by Asset Controller. (Company: ${companyNameForNotification || 'Company allocation'})`
+                                        : `End of Life was approved by Asset Controller. (Company: ${companyNameForNotification || 'Company allocation'})`,
+                                    attachments: eolHrPdf
                                 });
 
                                 await DashboardAction.create({
@@ -5008,10 +5193,23 @@ export const handleAssetActionApproval = async (req, res) => {
                     const { sendAssetActionApprovedEmail, sendAssetBulkActionApprovedEmail } = await import('../utils/sendAssetActionApprovedEmail.js');
                     const { sendAssetTransferSuccessEmail } = await import('../utils/sendAssetTransferSuccessEmail.js');
 
-                    // Send to assigned users (if exists and action is Leave)
+                    const approvalIds = processedAssets.map((a) => a._id.toString()).filter(Boolean);
+                    let approvedInvPdf = [];
+                    try {
+                        if (approvalIds.length) {
+                            approvedInvPdf = await buildBulkAssetInventoryPdfAttachment(
+                                req,
+                                approvalIds,
+                                `approved-${String(actionType).replace(/\s+/g, '-')}-inventory`
+                            );
+                        }
+                    } catch (pdfErr) {
+                        console.error('[Asset Approval] Inventory PDF failed (non-fatal):', pdfErr?.message || pdfErr);
+                    }
+
+                    // Leave: processedAssets still have assignee. End of Life: use bulkEmailSnapshots (assignee cleared on save).
                     if (actionType === 'Leave') {
                         if (isBulkTransfer && processedAssets.length > 1) {
-                            // Bulk: one email to employee and reportee with all assets
                             const primaryAsset = processedAssets[0];
                             if (primaryAsset.assignedTo) {
                                 const assignedUser = await EmployeeBasic.findById(primaryAsset.assignedTo._id || primaryAsset.assignedTo).populate('primaryReportee');
@@ -5021,22 +5219,104 @@ export const handleAssetActionApproval = async (req, res) => {
                                         actionType,
                                         assignedUser,
                                         assignedUser.primaryReportee || null,
-                                        assetControllerEmp || { firstName: 'Asset', lastName: 'Controller' }
+                                        assetControllerEmp || { firstName: 'Asset', lastName: 'Controller' },
+                                        approvedInvPdf
                                     );
                                 }
                             }
                         } else {
-                            // Single asset: one email per asset
                             for (const processedAsset of processedAssets) {
                                 if (processedAsset.assignedTo) {
                                     const assignedUser = await EmployeeBasic.findById(processedAsset.assignedTo._id || processedAsset.assignedTo).populate('primaryReportee');
                                     if (assignedUser) {
+                                        let singleLeavePdf = [];
+                                        try {
+                                            singleLeavePdf = await buildBulkAssetInventoryPdfAttachment(
+                                                req,
+                                                [processedAsset._id.toString()],
+                                                `approved-${String(actionType).replace(/\s+/g, '-')}-inventory`
+                                            );
+                                        } catch (e) {
+                                            /* non-fatal */
+                                        }
                                         await sendAssetActionApprovedEmail(
                                             processedAsset,
                                             actionType,
                                             assignedUser,
                                             assignedUser.primaryReportee || null,
-                                            assetControllerEmp || { firstName: 'Asset', lastName: 'Controller' }
+                                            assetControllerEmp || { firstName: 'Asset', lastName: 'Controller' },
+                                            singleLeavePdf
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    } else if (actionType === 'End of Life') {
+                        const employeeRows = (bulkEmailSnapshots.length ? bulkEmailSnapshots : []).filter(
+                            (r) => r.assignedTo && r.assignedToType !== 'Company'
+                        );
+                        if (employeeRows.length > 0) {
+                            if (isBulkTransfer && employeeRows.length > 1) {
+                                const firstRef = employeeRows[0].assignedTo;
+                                const firstId = firstRef?._id?.toString() || firstRef?.toString?.();
+                                const sameEmp =
+                                    firstId &&
+                                    employeeRows.every((r) => {
+                                        const rid = r.assignedTo?._id?.toString() || r.assignedTo?.toString?.();
+                                        return rid === firstId;
+                                    });
+                                if (sameEmp) {
+                                    const assignedUser = await EmployeeBasic.findById(firstId).populate('primaryReportee');
+                                    if (assignedUser) {
+                                        await sendAssetBulkActionApprovedEmail(
+                                            employeeRows,
+                                            actionType,
+                                            assignedUser,
+                                            assignedUser.primaryReportee || null,
+                                            assetControllerEmp || { firstName: 'Asset', lastName: 'Controller' },
+                                            approvedInvPdf
+                                        );
+                                    }
+                                } else {
+                                    for (const row of employeeRows) {
+                                        const rid = row.assignedTo?._id || row.assignedTo;
+                                        const assignedUser = await EmployeeBasic.findById(rid).populate('primaryReportee');
+                                        if (assignedUser) {
+                                            let onePdf = [];
+                                            try {
+                                                onePdf = await buildBulkAssetInventoryPdfAttachment(req, [row._id.toString()], 'approved-eol-inventory');
+                                            } catch (e) {
+                                                /* non-fatal */
+                                            }
+                                            await sendAssetActionApprovedEmail(
+                                                row,
+                                                actionType,
+                                                assignedUser,
+                                                assignedUser.primaryReportee || null,
+                                                assetControllerEmp || { firstName: 'Asset', lastName: 'Controller' },
+                                                onePdf
+                                            );
+                                        }
+                                    }
+                                }
+                            } else {
+                                for (const row of employeeRows) {
+                                    const rid = row.assignedTo?._id || row.assignedTo;
+                                    const assignedUser = await EmployeeBasic.findById(rid).populate('primaryReportee');
+                                    if (assignedUser) {
+                                        let onePdf = [];
+                                        try {
+                                            onePdf = await buildBulkAssetInventoryPdfAttachment(req, [row._id.toString()], 'approved-eol-inventory');
+                                        } catch (e) {
+                                            /* non-fatal */
+                                        }
+                                        await sendAssetActionApprovedEmail(
+                                            row,
+                                            actionType,
+                                            assignedUser,
+                                            assignedUser.primaryReportee || null,
+                                            assetControllerEmp || { firstName: 'Asset', lastName: 'Controller' },
+                                            onePdf
                                         );
                                     }
                                 }
@@ -5052,7 +5332,8 @@ export const handleAssetActionApproval = async (req, res) => {
                             { ...primaryAsset.toObject(), assetId: primaryAsset.assetId, name: isBulkTransfer ? `Bulk ${actionType} (${processedAssets.length} assets)` : primaryAsset.name },
                             actionType,
                             assetControllerEmp,
-                            assignedUserObj
+                            assignedUserObj,
+                            approvedInvPdf
                         );
                     }
                 } catch (emailErr) {
@@ -5635,12 +5916,19 @@ export const requestAccessoryAction = async (req, res) => {
         // Send email (non-blocking — errors here won't crash the response)
         const emailActionLabel = actionType === 'Unattach' ? 'Unattach Accessory' : actionType;
         try {
+            let accAttachments = [];
+            try {
+                accAttachments = await buildBulkAssetInventoryPdfAttachment(req, [asset._id.toString()], 'asset-accessory-request-inventory');
+            } catch (pdfErr) {
+                console.error('[requestAccessoryAction] PDF attachment failed (non-fatal):', pdfErr?.message || pdfErr);
+            }
             await sendAssetActionApprovalEmail(
                 { ...asset.toObject(), assetId: asset.assetId, name: `${asset.name} - Accessory: ${accessory.name} (${accessory.accessoryId})` },
                 emailActionLabel,
                 finalApprover,
                 { name: requesterName },
-                reason || 'No reason provided'
+                reason || 'No reason provided',
+                accAttachments
             );
         } catch (emailErr) {
             console.error('[requestAccessoryAction] Email send failed (non-fatal):', emailErr.message);
@@ -5683,18 +5971,31 @@ export const respondAccessoryAction = async (req, res) => {
         const { pendingAction, pendingActionDetails } = accessory;
 
         // Permission enforcement for accessory approvals:
-        // - Transfer + Add: allowed for assignee/assigner/delegated primaryReportee
-        // - Loss and Damage + End of Life: only Asset Controller/Admin (workflow needs Fine creation)
+        // - Transfer: assignee/assigner/delegated primaryReportee (actorFlags.canAct)
+        // - Add (catalog): only the designated asset.actionRequiredBy (assignee or AC) or Admin
+        // - Loss and Damage + End of Life + Unattach: only Asset Controller/Admin (workflow needs Fine creation)
         const actorFlags = await getActorPermissionFlagsForAsset(req.user, asset);
         const isAdmin = req.user.isAdmin === true || req.user.role === 'Admin' || req.user.role === 'ROOT';
         const isAssetControllerApproving = await isUserInFlowchart(req.user, 'assetcontroller').catch(() => false);
+        const currentUserEmpIdEarly = req.user.employeeObjectId?.toString();
+        const actionRequiredById =
+            asset.actionRequiredBy?._id?.toString?.() || asset.actionRequiredBy?.toString?.() || null;
+        const isDesignatedApprover = !!(currentUserEmpIdEarly && actionRequiredById && actionRequiredById === currentUserEmpIdEarly);
 
-        const canApproveByAssignedActors = (pendingAction === 'Transfer' || pendingAction === 'Add') && actorFlags.canAct;
-        const canApproveByAuthority = (pendingAction === 'Loss and Damage' || pendingAction === 'End of Life' || pendingAction === 'Unattach') && (isAdmin || isAssetControllerApproving);
+        const canApproveTransfer = pendingAction === 'Transfer' && actorFlags.canAct;
+        const canApproveAddPending =
+            pendingAction === 'Add' &&
+            (isAdmin || (isDesignatedApprover && (isAssetControllerApproving || actorFlags.canAct)));
+        const canApproveByAuthority =
+            (pendingAction === 'Loss and Damage' || pendingAction === 'End of Life' || pendingAction === 'Unattach') &&
+            (isAdmin || isAssetControllerApproving);
 
-        if (!canApproveByAssignedActors && !canApproveByAuthority) {
+        if (!canApproveTransfer && !canApproveAddPending && !canApproveByAuthority) {
             return res.status(403).json({
-                message: 'Access denied. Only Asset Controller/Admin can approve or reject this accessory action.'
+                message:
+                    pendingAction === 'Add'
+                        ? 'Access denied. Only the designated approver (or an administrator) can approve or reject this accessory addition.'
+                        : 'Access denied. Only Asset Controller/Admin can approve or reject this accessory action.'
             });
         }
 
@@ -5720,7 +6021,7 @@ export const respondAccessoryAction = async (req, res) => {
 
             // Resolve current user's employee ObjectId and name
             // actionRequiredBy references EmployeeBasic, so use EmployeeBasic ObjectId for comparison
-            const currentUserEmpId = req.user.employeeObjectId?.toString();
+            const currentUserEmpId = currentUserEmpIdEarly;
             const actorEmp = await EmployeeBasic.findById(req.user.employeeObjectId).select('firstName lastName employeeId');
             const actorName = actorEmp ? `${actorEmp.firstName} ${actorEmp.lastName}` : req.user.employeeId || 'System';
 
@@ -5841,73 +6142,39 @@ export const respondAccessoryAction = async (req, res) => {
                 });
             }
 
-            // --- SPECIAL LOGIC FOR ADD APPROVAL (Employee) ---
+            // --- SPECIAL LOGIC FOR ADD APPROVAL (catalog attach) — approver is asset.actionRequiredBy (assignee or AC) ---
             if (pendingAction === 'Add') {
                 const catalogItemId = accessory?.pendingActionDetails?.catalogItemId;
-                if (approve) {
-                    accessory.status = 'Attached';
-                    accessory.pendingAction = null;
-                    accessory.pendingActionDetails = null;
+                accessory.status = 'Attached';
+                accessory.pendingAction = null;
+                accessory.pendingActionDetails = null;
 
-                    await AssetHistory.create({
-                        assetId: asset._id,
-                        action: 'Accepted',
-                        performedBy: req.user.employeeObjectId,
-                        comments: `New accessory "${accessory.name}" addition approved by assigned employee (${actorName}). ${comment || ''}`,
-                        date: new Date(),
-                        details: { status: 'Attached', action: 'AddApproval', accessoryId: accId }
-                    });
-                    if (catalogItemId) {
-                        await AssetAccessoryCatalog.findByIdAndUpdate(
-                            catalogItemId,
-                            {
-                                $set: { isActive: false, status: 'Attached' },
-                                $push: {
-                                    history: {
-                                        at: new Date(),
-                                        action: 'attached',
-                                        message: `Attached to asset ${asset.assetId} — ${asset.name}`,
-                                        assetId: asset.assetId,
-                                        assetName: asset.name,
-                                        assetObjectId: asset._id
-                                    }
+                const approvedByLabel = isAssetControllerApproving ? 'Asset Controller' : 'assigned employee';
+                await AssetHistory.create({
+                    assetId: asset._id,
+                    action: 'Accepted',
+                    performedBy: req.user.employeeObjectId,
+                    comments: `New accessory "${accessory.name}" addition approved by ${approvedByLabel} (${actorName}). ${comment || ''}`,
+                    date: new Date(),
+                    details: { status: 'Attached', action: 'AddApproval', accessoryId: accId }
+                });
+                if (catalogItemId) {
+                    await AssetAccessoryCatalog.findByIdAndUpdate(
+                        catalogItemId,
+                        {
+                            $set: { isActive: false, status: 'Attached' },
+                            $push: {
+                                history: {
+                                    at: new Date(),
+                                    action: 'attached',
+                                    message: `Attached to asset ${asset.assetId} — ${asset.name}`,
+                                    assetId: asset.assetId,
+                                    assetName: asset.name,
+                                    assetObjectId: asset._id
                                 }
                             }
-                        ).catch(() => null);
-                    }
-                } else {
-                    const accIndex = asset.accessories.findIndex(a =>
-                        (a._id && a._id.toString() === accId) || (a.accessoryId === accId)
-                    );
-                    const accName = accessory.name;
-                    asset.accessories.splice(accIndex, 1);
-
-                    await AssetHistory.create({
-                        assetId: asset._id,
-                        action: 'Comment',
-                        performedBy: req.user.employeeObjectId,
-                        comments: `New accessory "${accName}" addition rejected by assigned employee (${actorName}). Reason: ${comment || 'N/A'}`,
-                        date: new Date(),
-                        details: { action: 'AddRejection', accessoryId: accId }
-                    });
-                    if (catalogItemId) {
-                        await AssetAccessoryCatalog.findByIdAndUpdate(
-                            catalogItemId,
-                            {
-                                $set: { status: 'Unattached' },
-                                $push: {
-                                    history: {
-                                        at: new Date(),
-                                        action: 'attach_rejected',
-                                        message: `Attach request rejected (asset ${asset.assetId} — ${asset.name})`,
-                                        assetId: asset.assetId,
-                                        assetName: asset.name,
-                                        assetObjectId: asset._id
-                                    }
-                                }
-                            }
-                        ).catch(() => null);
-                    }
+                        }
+                    ).catch(() => null);
                 }
 
                 // Check if any other accessories on this asset still have 'Add' pending
@@ -5919,16 +6186,37 @@ export const respondAccessoryAction = async (req, res) => {
 
                 asset.markModified('accessories');
                 await asset.save();
-                await notifyAssignedEmployeeIfController(req, asset, 'Add Accessory', approve ? `Accessory "${accessory.name}" addition was approved.` : `Accessory "${accessory.name}" addition was rejected.`);
+
+                // Success email to assigned user (holder), regardless of who approved (AC or assignee)
+                if (asset.assignedTo) {
+                    try {
+                        const assigneeEmp = await EmployeeBasic.findById(asset.assignedTo._id || asset.assignedTo)
+                            .select('firstName lastName employeeId companyEmail workEmail personalEmail email primaryReportee')
+                            .populate('primaryReportee', 'firstName lastName companyEmail workEmail personalEmail email')
+                            .lean();
+                        if (assigneeEmp) {
+                            await sendAssignedEmployeeActionEmail({
+                                asset,
+                                employee: assigneeEmp,
+                                action: 'Add Accessory',
+                                performedBy: actorName,
+                                details: `Accessory "${accessory.name}" was added and is now attached.`,
+                                customIntro: 'The accessory addition was approved. Your asset was updated:'
+                            });
+                        }
+                    } catch (e) {
+                        console.error('[respondAccessoryAction Add] Assignee success email (non-fatal):', e?.message || e);
+                    }
+                }
 
                 return res.status(200).json({
-                    message: approve ? `Accessory "${accessory.name}" added successfully.` : `Accessory addition rejected and removed.`,
+                    message: `Accessory "${accessory.name}" added successfully.`,
                     asset
                 });
             }
 
             // --- EXISTING LOGIC FOR L&D / EOL ---
-            const isAssetControllerApproving = await isUserInFlowchart(req.user, 'assetcontroller');
+            // (isAssetControllerApproving is already resolved above; do not redeclare here — it shadows and TDZ-breaks the Add branch.)
             const isCompanyAsset = asset.assignedToType === 'Company' && asset.assignedCompany;
 
             // actionRequiredBy references EmployeeBasic, so compare with EmployeeBasic._id
@@ -6133,6 +6421,83 @@ export const respondAccessoryAction = async (req, res) => {
             }
         } else {
             // Rejected
+            if (pendingAction === 'Add') {
+                const catalogItemId = accessory?.pendingActionDetails?.catalogItemId;
+                const accIndex = asset.accessories.findIndex(
+                    (a) => (a._id && a._id.toString() === accId) || a.accessoryId === accId
+                );
+                const accName = accessory.name;
+                if (accIndex >= 0) {
+                    asset.accessories.splice(accIndex, 1);
+                }
+                if (catalogItemId) {
+                    await AssetAccessoryCatalog.findByIdAndUpdate(
+                        catalogItemId,
+                        {
+                            $set: { status: 'Unattached' },
+                            $push: {
+                                history: {
+                                    at: new Date(),
+                                    action: 'attach_rejected',
+                                    message: `Attach request rejected (asset ${asset.assetId} — ${asset.name})`,
+                                    assetId: asset.assetId,
+                                    assetName: asset.name,
+                                    assetObjectId: asset._id
+                                }
+                            }
+                        }
+                    ).catch(() => null);
+                }
+                const rejectByLabel = isAssetControllerApproving ? 'Asset Controller' : 'assigned employee';
+                await AssetHistory.create({
+                    assetId: asset._id,
+                    action: 'Comment',
+                    performedBy: req.user.employeeObjectId || req.user._id,
+                    comments: `New accessory "${accName}" addition rejected by ${rejectByLabel}. Reason: ${comment || 'N/A'}`,
+                    date: new Date(),
+                    details: { action: 'AddRejection', accessoryId: accId }
+                });
+                const otherPendingAdds = asset.accessories.some((a) => a.pendingAction === 'Add');
+                if (!otherPendingAdds) {
+                    asset.actionRequiredBy = null;
+                    await DashboardAction.deleteMany({ requestId: asset._id, requestType: 'Asset Accessory Approval' });
+                }
+                asset.markModified('accessories');
+                await asset.save();
+
+                if (asset.assignedTo) {
+                    try {
+                        const actorEmpReject = await EmployeeBasic.findById(req.user.employeeObjectId)
+                            .select('firstName lastName employeeId')
+                            .lean();
+                        const rejectActorName = actorEmpReject
+                            ? `${actorEmpReject.firstName || ''} ${actorEmpReject.lastName || ''}`.trim()
+                            : req.user.employeeId || 'System';
+                        const assigneeEmp = await EmployeeBasic.findById(asset.assignedTo._id || asset.assignedTo)
+                            .select('firstName lastName employeeId companyEmail workEmail personalEmail email primaryReportee')
+                            .populate('primaryReportee', 'firstName lastName companyEmail workEmail personalEmail email')
+                            .lean();
+                        if (assigneeEmp) {
+                            await sendAssignedEmployeeActionEmail({
+                                asset,
+                                employee: assigneeEmp,
+                                action: 'Add Accessory',
+                                performedBy: rejectActorName,
+                                details: `Accessory "${accName}" addition was rejected. Reason: ${comment || 'N/A'}`,
+                                customIntro: 'The accessory addition was not approved:'
+                            });
+                        }
+                    } catch (e) {
+                        console.error('[respondAccessoryAction Add reject] Email (non-fatal):', e?.message || e);
+                    }
+                }
+
+                return res.status(200).json({
+                    message: `Accessory addition rejected and removed.`,
+                    asset
+                });
+            }
+
             accessory.pendingAction = null;
             accessory.pendingActionDetails = null;
             asset.actionRequiredBy = null;

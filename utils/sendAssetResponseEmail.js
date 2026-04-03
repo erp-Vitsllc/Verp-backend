@@ -1,7 +1,8 @@
 import nodemailer from "nodemailer";
 import { resolveEmployeeEmail } from "./resolveEmployeeEmail.js";
+import { normalizePdfAttachments } from "./normalizeEmailAttachments.js";
 
-export const sendAssetResponseEmail = async ({ asset, actor, recipient, action, comment, assignedToType, assignedCompany }) => {
+export const sendAssetResponseEmail = async ({ asset, actor, recipient, action, comment, assignedToType, assignedCompany, attachments = [] }) => {
     try {
         const { email: recipientEmail } = resolveEmployeeEmail(recipient);
         if (!recipientEmail) {
@@ -26,6 +27,8 @@ export const sendAssetResponseEmail = async ({ asset, actor, recipient, action, 
                 pass: emailPass
             }
         });
+
+        const att = normalizePdfAttachments(attachments);
 
         const actorName = `${actor.firstName || ""} ${actor.lastName || ""}`.trim();
         const assetName = asset.name;
@@ -76,6 +79,8 @@ export const sendAssetResponseEmail = async ({ asset, actor, recipient, action, 
                     </div>
                     ` : ''}
 
+                    ${att.length ? `<p style="font-size: 13px; color: #64748b; margin: 0 0 12px;">A PDF attachment lists the asset(s) included in this update.</p>` : ''}
+
                     <div style="background-color: #f8fafc; padding: 25px; border-radius: 8px; margin: 25px 0; border: 1px solid #e2e8f0;">
                         <table style="width: 100%; border-collapse: collapse;">
                             <tr>
@@ -110,7 +115,8 @@ export const sendAssetResponseEmail = async ({ asset, actor, recipient, action, 
             from: `"VeRP Asset Management" <${emailUser}>`,
             to: recipientEmail,
             subject,
-            html
+            html,
+            ...(att.length ? { attachments: att } : {})
         });
 
         console.log(`[Email Success] Asset response notification sent to ${recipientEmail}`);

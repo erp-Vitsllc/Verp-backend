@@ -1,17 +1,21 @@
 import nodemailer from "nodemailer";
 import { resolveEmployeeEmail } from "./resolveEmployeeEmail.js";
+import { normalizePdfAttachments } from "./normalizeEmailAttachments.js";
 
 /**
- * Sends email notification to the previous assignee when an asset is reassigned
- * @param {Object} asset - The asset object
- * @param {Object} previousAssignee - The previous assignee (employee or company)
- * @param {Object} newAssignee - The new assignee (employee or company)
- * @param {String} previousAssigneeType - 'Employee' or 'Company'
- * @param {String} newAssigneeType - 'Employee' or 'Company'
+ * Sends email notification to the previous assignee when an asset is reassigned (at assign time).
+ * The updated handover PDF (with new assignee + acceptance) is sent after the new assignee accepts —
+ * see notifyPreviousAssigneeReassignmentAcceptedWithHandover.
  */
-export const sendAssetReassignmentEmail = async ({ asset, previousAssignee, newAssignee, previousAssigneeType, newAssigneeType }) => {
+export const sendAssetReassignmentEmail = async ({
+    asset,
+    previousAssignee,
+    newAssignee,
+    previousAssigneeType,
+    newAssigneeType,
+    attachments = []
+}) => {
     try {
-        // Determine recipient email based on previous assignee type
         let recipientEmail = null;
         let recipientName = '';
 
@@ -47,7 +51,8 @@ export const sendAssetReassignmentEmail = async ({ asset, previousAssignee, newA
             }
         });
 
-        // Determine new assignee name
+        const att = normalizePdfAttachments(attachments);
+
         let newAssigneeName = '';
         if (newAssigneeType === 'Company') {
             newAssigneeName = newAssignee?.name || 'Company';
@@ -88,8 +93,9 @@ export const sendAssetReassignmentEmail = async ({ asset, previousAssignee, newA
                         </table>
                     </div>
 
+                    ${att.length ? `<p style="font-size: 13px; color: #64748b; margin-bottom: 12px;">A PDF attachment lists the asset record at reassignment time.</p>` : ''}
                     <p style="font-size: 14px; color: #64748b; margin-bottom: 30px;">
-                        Please log in to the portal to view the asset details.
+                        When the new assignee accepts, you will receive a separate email with the updated Asset Handover form (PDF) for your records.
                     </p>
 
                     <div style="text-align: center; margin-top: 30px; margin-bottom: 20px;">
@@ -118,7 +124,8 @@ export const sendAssetReassignmentEmail = async ({ asset, previousAssignee, newA
             from: `"VeRP Asset Management" <${emailUser}>`,
             to: recipientEmail,
             subject,
-            html
+            html,
+            ...(att.length ? { attachments: att } : {})
         });
 
         console.log(`[Email Success] Asset reassignment notification sent to ${recipientEmail}`);
