@@ -74,6 +74,7 @@ export async function cleanupDashboardActionsForDeletedAsset(deletedId) {
         const isBulk =
             parsed.isBulk === true ||
             parsed.isBulkCreation === true ||
+            parsed.isBulkAssignment === true ||
             da.requestType === 'Asset Bulk Action';
 
         if (isBulk && maxLen <= 1) {

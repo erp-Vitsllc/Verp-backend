@@ -49,7 +49,16 @@ async function resolveEmailForAssignee(recipient) {
     return (u.email || u.companyEmail || "").trim() || null;
 }
 
-export const sendAssetAssignmentEmail = async ({ asset, assets = [], employee, recipient, isBulk = false, assetCount = 1, attachments = [] }) => {
+export const sendAssetAssignmentEmail = async ({
+    asset,
+    assets = [],
+    employee,
+    recipient,
+    isBulk = false,
+    assetCount = 1,
+    attachments = [],
+    bulkAssignmentGroupId = null
+}) => {
     try {
         const recipientEmail = await resolveEmailForAssignee(recipient);
         if (!recipientEmail) {
@@ -100,9 +109,12 @@ export const sendAssetAssignmentEmail = async ({ asset, assets = [], employee, r
 
         const frontendUrl = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/'/g, "");
         const assetId = asset._id?.toString() || asset.id?.toString();
-        const buttonUrl = isBulk
-            ? `${frontendUrl}/HRM/Asset`
-            : `${frontendUrl}/HRM/Asset/details/${assetId}`;
+        const buttonUrl =
+            isBulk && bulkAssignmentGroupId
+                ? `${frontendUrl}/HRM/Asset?bulkAssignmentGroup=${encodeURIComponent(String(bulkAssignmentGroupId))}`
+                : isBulk
+                  ? `${frontendUrl}/HRM/Asset`
+                  : `${frontendUrl}/HRM/Asset/details/${assetId}`;
 
         console.log(`[Email Debug] Generating button URL: ${buttonUrl}`);
 
@@ -177,7 +189,7 @@ export const sendAssetAssignmentEmail = async ({ asset, assets = [], employee, r
                     ${att.length ? `<p style="font-size: 13px; color: #64748b; margin-bottom: 12px;">A PDF attachment lists the assets included in this notification.</p>` : ''}
 
                     <p style="font-size: 14px; color: #64748b; margin-bottom: 30px;">
-                        Please log in to the portal to view the details and confirm receipt.
+                        ${isBulk && bulkAssignmentGroupId ? 'Use the button below to open the batch review: tick the assets you accept. Unticked assets are declined (returned to Unassigned, or to the prior assignee when applicable).' : 'Please log in to the portal to view the details and confirm receipt.'}
                     </p>
 
                     <div style="text-align: center; margin-top: 30px; margin-bottom: 20px;">

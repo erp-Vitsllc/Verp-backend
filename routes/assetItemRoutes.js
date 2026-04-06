@@ -1,7 +1,7 @@
 import express from 'express';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import User from '../models/User.js';
-import { createAssetItem, getAssetItems, getAllAssignedAssets, getMyAssignedAssetsForReturn, getUnassignedAssetsForEmployee, getHRCompanyAssets, getOnLeaveAssetsForEmployee, handleOnLeaveAction, bulkHandleOnLeaveAction, getAssetItemDetail, assignAssetItem, bulkAssignAssetItems, downloadHandoverPdf, downloadHistoryHandoverPdf, respondToAssignment, bulkRespondToAssignment, getAssetHistory, getHistoryRecord, returnAssetItem, updateAssetStatus, addAssetDocument, updateAssetDocument, deleteAssetDocument, addAssetService, addAssetImage, deleteAssetImage, transferAssetAccessory, manageAccessoryStatus, updateAssetItem, deleteAssetItem, endOfLifeAsset, requestAssetAction, bulkRequestAssetAction, handleAssetActionApproval, finalizeAssetAction, uploadAccessoriesAttachment, requestAccessoryAction, respondAccessoryAction, finalizeAccessoryAction, respondToAssetCreation, bulkRespondToAssetCreation, getBulkAssetDetails, getBulkAssetInventoryForPrint, transferAsset, submitDraftForCreationApproval, getPendingAssetDashboardInbox, deletePendingAssetDashboardInboxItem } from '../controllers/assetItemController.js';
+import { createAssetItem, getAssetItems, getAllAssignedAssets, getMyAssignedAssetsForReturn, getUnassignedAssetsForEmployee, getHRCompanyAssets, getOnLeaveAssetsForEmployee, handleOnLeaveAction, bulkHandleOnLeaveAction, getAssetItemDetail, assignAssetItem, bulkAssignAssetItems, downloadHandoverPdf, downloadHistoryHandoverPdf, respondToAssignment, bulkRespondToAssignment, getBulkAssignmentPendingGroup, respondBulkAssignmentGroup, getAssetHistory, getHistoryRecord, returnAssetItem, updateAssetStatus, addAssetDocument, updateAssetDocument, deleteAssetDocument, addAssetService, addAssetImage, deleteAssetImage, transferAssetAccessory, manageAccessoryStatus, updateAssetItem, deleteAssetItem, endOfLifeAsset, requestAssetAction, bulkRequestAssetAction, handleAssetActionApproval, finalizeAssetAction, uploadAccessoriesAttachment, requestAccessoryAction, respondAccessoryAction, finalizeAccessoryAction, respondToAssetCreation, bulkRespondToAssetCreation, getBulkAssetDetails, getBulkAssetInventoryForPrint, transferAsset, submitDraftForCreationApproval, getPendingAssetDashboardInbox, deletePendingAssetDashboardInboxItem } from '../controllers/assetItemController.js';
 import { protect } from '../middleware/authMiddleware.js';
 import {
     isUserInFlowchart,
@@ -13,15 +13,15 @@ import { isUserAdministrator } from '../services/permissionService.js';
 
 const normEmp = (s) => (s || '').toString().toLowerCase().replace(/\s+/g, '');
 
-/** JWT / env system admin — aligned with asset controllers (not only isAdmin boolean). */
+/** JWT / env system admin / Flowchart admincontroller — aligned with assetItemController.resolveIsPortalAdmin. */
 const isAdminForAssetRoutes = async (user) => {
     if (!user) return false;
     if (user.isAdmin === true || user.role === 'Admin' || user.role === 'ROOT') return true;
     if (user.id || user._id) {
         const uid = user.id || user._id;
-        return await isUserAdministrator(uid);
+        if (await isUserAdministrator(uid)) return true;
     }
-    return false;
+    return await isUserInFlowchart(user, 'admincontroller').catch(() => false);
 };
 
 /** Flowchart row match OR same employee as getDepartmentHOD('assetcontroller') (designated AC). */
@@ -481,6 +481,8 @@ router.get('/company-assets/hr/:employeeId', protect, getHRCompanyAssets);
 router.get('/detail/:id', protect, getAssetItemDetail);
 router.get('/bulk/details', protect, getBulkAssetDetails);
 router.get('/bulk/print-inventory', protect, getBulkAssetInventoryForPrint);
+router.get('/bulk-assignment-pending/:groupId', protect, getBulkAssignmentPendingGroup);
+router.put('/bulk-assignment-respond', protect, respondBulkAssignmentGroup);
 router.get('/:id/history', protect, getAssetHistory);
 router.get('/history-record/:historyId', protect, getHistoryRecord);
 router.get('/handover-pdf/:id', protect, downloadHandoverPdf);

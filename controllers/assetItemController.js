@@ -59,10 +59,25 @@ import {
 
 const generateAccessoryCatalogId = generateVegaAccessoryCatalogId;
 
+/**
+ * Portal "Admin" for asset permissions: DB/JWT admin flags, env system-admin username,
+ * or Flowchart `admincontroller` (org Admin slot). Aligned with assetItemRoutes `isAdminForAssetRoutes`.
+ */
+const resolveIsPortalAdmin = async (reqUser) => {
+    if (!reqUser) return false;
+    if (reqUser.isAdmin === true || reqUser.role === 'Admin' || reqUser.role === 'ROOT') {
+        return true;
+    }
+    const uid = reqUser.id || reqUser._id;
+    if (uid) {
+        const sys = await isUserAdministrator(uid).catch(() => false);
+        if (sys) return true;
+    }
+    return await isUserInFlowchart(reqUser, 'admincontroller').catch(() => false);
+};
+
 async function buildPendingAccessoryVisibilityCtx(req) {
-    const isSysAdmin = await isUserAdministrator(req.user?.id);
-    const isPortalAdmin =
-        req.user?.isAdmin === true || req.user?.role === 'Admin' || req.user?.role === 'ROOT';
+    const isPortalAdminWide = await resolveIsPortalAdmin(req.user);
     const isAssetController = await isUserInFlowchart(req.user, 'assetcontroller').catch(() => false);
     const assetController = await getDepartmentHOD('assetcontroller');
 
@@ -89,7 +104,7 @@ async function buildPendingAccessoryVisibilityCtx(req) {
         currentEmpId &&
         assetController._id.toString() === currentEmpId
     );
-    const canSeeAllPending = isSysAdmin || isPortalAdmin || isAssetController || isDeptAssetController;
+    const canSeeAllPending = isPortalAdminWide || isAssetController || isDeptAssetController;
     return {
         canSeeAllPending,
         currentEmpId: currentEmpId || null,
@@ -296,8 +311,10 @@ const notifyEmployeesGroupedControllerBulkDirect = async (req, employeeSnapshots
 // ─────────────────────────────────────────────────────────────────────────────
 const getActorPermissionFlagsForAsset = async (reqUser, asset) => {
     const currentEmpObjectId = reqUser?.employeeObjectId?.toString?.() || null;
-    const isAdmin = reqUser?.isAdmin === true || reqUser?.role === 'Admin' || reqUser?.role === 'ROOT';
-    const isAssetController = await isUserInFlowchart(reqUser, 'assetcontroller').catch(() => false);
+    const [isAdmin, isAssetController] = await Promise.all([
+        resolveIsPortalAdmin(reqUser),
+        isUserInFlowchart(reqUser, 'assetcontroller').catch(() => false)
+    ]);
 
     const toIdString = (v) => {
         if (!v) return null;
@@ -2208,7 +2225,7 @@ export const assignAssetItem = async (req, res) => {
         const actingEmpObjectId = req.user.employeeObjectId?.toString?.() || null;
         const actingEmployeeId = req.user.employeeId ? norm(req.user.employeeId) : '';
 
-        const isAdmin = req.user.isAdmin || req.user.role === 'Admin' || req.user.role === 'ROOT';
+        const isAdmin = await resolveIsPortalAdmin(req.user);
 
         const assignedToId =
             (item.assignedTo?._id ? item.assignedTo._id : item.assignedTo)?.toString?.() || (item.assignedTo?.toString?.() || null);
@@ -2546,32 +2563,90 @@ export const bulkAssignAssetItems = async (req, res) => {
             });
         }
 
-        await AssetItem.updateMany(
-            { _id: { $in: assetIds } },
-            { $set: updateData }
-        );
+        const bulkAssignmentGroupId = new mongoose.Types.ObjectId();
+        const assetIdStrings = assetIds.map((id) => String(id));
 
-        // Create Dashboard Actions for each asset (inbox of assignee)
+        for (const aid of assetIds) {
+            let revertToEmployeeId = null;
+            let revertToDisplayName = null;
+            const lastAssign = await AssetHistory.findOne({
+                assetId: aid,
+                action: { $in: ['Assigned', 'Accepted'] }
+            })
+                .sort({ date: -1 })
+                .select('assignedTo')
+                .lean();
+            if (
+                lastAssign?.assignedTo &&
+                String(lastAssign.assignedTo) !== String(assignedTo)
+            ) {
+                revertToEmployeeId = lastAssign.assignedTo;
+                const prevEmp = await EmployeeBasic.findById(revertToEmployeeId)
+                    .select('firstName lastName')
+                    .lean();
+                if (prevEmp) {
+                    revertToDisplayName = `${prevEmp.firstName || ''} ${prevEmp.lastName || ''}`.trim();
+                }
+            }
+
+            await AssetItem.updateOne(
+                { _id: aid },
+                {
+                    $set: {
+                        ...updateData,
+                        pendingActionDetails: {
+                            bulkAssignment: {
+                                groupId: bulkAssignmentGroupId.toString(),
+                                assetIds: assetIdStrings,
+                                revertToEmployeeId,
+                                revertToDisplayName
+                            }
+                        }
+                    }
+                }
+            );
+        }
+
+        // One dashboard / inbox row for the whole bulk batch (assignee acknowledges via bulk modal)
         try {
             const actionRecipient = await EmployeeBasic.findById(assignedTo).select('employeeId firstName lastName');
             const subjectEmp = actionRecipient;
             const assets = await AssetItem.find({ _id: { $in: assetIds } }).select('assetId name assignmentType');
 
-            const dashboardActions = assets.map(asset => ({
-                assignedTo: actionRequiredBy,
-                assignedToEmpId: actionRecipient?.employeeId,
-                requestId: asset._id,
-                requestType: 'Asset',
-                subjectEmployeeId: subjectEmp?.employeeId,
-                subjectName: `${subjectEmp?.firstName || ""} ${subjectEmp?.lastName || ""} `.trim(),
-                requestedByName: `${assigner?.firstName || "System"} ${assigner?.lastName || ""} `.trim(),
-                extra1: `${asset.assetId} - ${asset.name} `,
-                extra2: asset.assignmentType,
-                status: 'Pending'
-            }));
-
-            await DashboardAction.insertMany(dashboardActions);
-            console.log(`[Dashboard] Created ${dashboardActions.length} asset actions for ${actionRecipient?.employeeId}`);
+            if (assetIds.length > 1) {
+                await DashboardAction.create({
+                    assignedTo: actionRequiredBy,
+                    assignedToEmpId: actionRecipient?.employeeId,
+                    requestId: assetIds[0],
+                    requestType: 'Asset',
+                    subjectEmployeeId: subjectEmp?.employeeId,
+                    subjectName: `${subjectEmp?.firstName || ''} ${subjectEmp?.lastName || ''}`.trim(),
+                    requestedByName: `${assigner?.firstName || 'System'} ${assigner?.lastName || ''}`.trim(),
+                    extra1: `Bulk assignment (${assetIds.length} assets)`,
+                    extra2: assignmentType,
+                    extra3: JSON.stringify({
+                        isBulkAssignment: true,
+                        bulkAssignmentGroupId: bulkAssignmentGroupId.toString(),
+                        bulkAssetIds: assetIdStrings
+                    }),
+                    status: 'Pending'
+                });
+                console.log(`[Dashboard] Created 1 bulk assignment action (${assetIds.length} assets) for ${actionRecipient?.employeeId}`);
+            } else if (assets.length === 1) {
+                const one = assets[0];
+                await DashboardAction.create({
+                    assignedTo: actionRequiredBy,
+                    assignedToEmpId: actionRecipient?.employeeId,
+                    requestId: one._id,
+                    requestType: 'Asset',
+                    subjectEmployeeId: subjectEmp?.employeeId,
+                    subjectName: `${subjectEmp?.firstName || ''} ${subjectEmp?.lastName || ''}`.trim(),
+                    requestedByName: `${assigner?.firstName || 'System'} ${assigner?.lastName || ''}`.trim(),
+                    extra1: `${one.assetId} - ${one.name} `,
+                    extra2: one.assignmentType,
+                    status: 'Pending'
+                });
+            }
         } catch (err) {
             console.error(`[Dashboard Error] Failed to create bulk asset actions: `, err);
         }
@@ -2626,14 +2701,18 @@ export const bulkAssignAssetItems = async (req, res) => {
                     recipient: employee,
                     isBulk: true,
                     assetCount: assetIds.length,
-                    attachments: bulkAssignmentAttachments
+                    attachments: bulkAssignmentAttachments,
+                    bulkAssignmentGroupId: bulkAssignmentGroupId.toString()
                 });
             }
         } catch (emailErr) {
             console.error('Error in bulk asset assignment email trigger:', emailErr);
         }
 
-        res.status(200).json({ message: `${assetIds.length} assets assigned successfully` });
+        res.status(200).json({
+            message: `${assetIds.length} assets assigned successfully`,
+            bulkAssignmentGroupId: bulkAssignmentGroupId.toString()
+        });
     } catch (error) {
         console.error('Error bulk assigning assets:', error);
         res.status(500).json({ message: 'Server Error' });
@@ -2748,6 +2827,8 @@ export const respondToAssignment = async (req, res) => {
         if (!item) {
             return res.status(404).json({ message: 'Asset not found' });
         }
+
+        const assignmentBulkGroupId = item.pendingActionDetails?.bulkAssignment?.groupId || null;
 
         const currentUser = req.user.employeeObjectId;
         if (!currentUser) {
@@ -3158,6 +3239,14 @@ export const respondToAssignment = async (req, res) => {
             console.error(`[Dashboard Error] Failed to update action for asset ${item.assetId}: `, err);
         }
 
+        if (assignmentBulkGroupId) {
+            try {
+                await refreshBulkAssignmentDashboardIfGroupFullyResolved(assignmentBulkGroupId, currentUser);
+            } catch (dash2) {
+                console.error('[Dashboard] Bulk assignment inbox refresh:', dash2?.message || dash2);
+            }
+        }
+
         const priorAcceptedCountForReassign =
             action === 'Accept'
                 ? await AssetHistory.countDocuments({ assetId: item._id, action: 'Accepted' })
@@ -3250,6 +3339,7 @@ export const bulkRespondToAssignment = async (req, res) => {
         const results = { success: [], failed: [] };
 
         for (const item of items) {
+            const bulkAssignGroupId = item.pendingActionDetails?.bulkAssignment?.groupId || null;
             try {
                 // Check if user is authorized for this specific asset
                 const curBulk = currentUser.toString();
@@ -3370,6 +3460,14 @@ export const bulkRespondToAssignment = async (req, res) => {
                     }
                 );
 
+                if (bulkAssignGroupId) {
+                    try {
+                        await refreshBulkAssignmentDashboardIfGroupFullyResolved(bulkAssignGroupId, currentUser);
+                    } catch (bdash) {
+                        console.error('[Bulk respond] assignment inbox refresh:', bdash?.message || bdash);
+                    }
+                }
+
                 const priorAcceptedCountForReassign =
                     action === 'Accept'
                         ? await AssetHistory.countDocuments({ assetId: item._id, action: 'Accepted' })
@@ -3406,6 +3504,334 @@ export const bulkRespondToAssignment = async (req, res) => {
     }
 };
 
+const canUserActAsAssigneeForBulkItem = (currentUserStr, item) => {
+    const curBulk = currentUserStr;
+    const isAssignee =
+        item.assignedToType === 'Employee' &&
+        item.assignedTo &&
+        (item.assignedTo._id || item.assignedTo).toString() === curBulk;
+    let isPrimaryReporteeDelegate = false;
+    if (item.assignedToType === 'Employee' && item.assignedTo && item.assignedTo.primaryReportee) {
+        const assigneeHasCompanyEmail = !!(
+            item.assignedTo.companyEmail && String(item.assignedTo.companyEmail).trim().length > 0
+        );
+        const managerId = item.assignedTo.primaryReportee._id || item.assignedTo.primaryReportee;
+        if (!assigneeHasCompanyEmail && managerId && managerId.toString() === curBulk) {
+            isPrimaryReporteeDelegate = true;
+        }
+    }
+    return { isAssignee, isPrimaryReporteeDelegate };
+};
+
+/** Complete the single DashboardAction row created for AC bulk assignment (extra3.isBulkAssignment). */
+const markBulkAssignmentDashboardRowComplete = async (bulkGroupId, actionedBy, summaryComment) => {
+    if (!bulkGroupId) return;
+    const gid = String(bulkGroupId);
+    const rows = await DashboardAction.find({
+        status: 'Pending',
+        requestType: 'Asset',
+        extra3: { $exists: true, $nin: [null, ''] }
+    })
+        .select('_id extra3')
+        .lean();
+    for (const da of rows) {
+        let p;
+        try {
+            p = typeof da.extra3 === 'string' ? JSON.parse(da.extra3) : da.extra3;
+        } catch {
+            continue;
+        }
+        if (p?.isBulkAssignment === true && String(p.bulkAssignmentGroupId) === gid) {
+            await DashboardAction.findByIdAndUpdate(da._id, {
+                $set: {
+                    status: 'Approved',
+                    actionedDate: new Date(),
+                    actionedBy,
+                    comment: summaryComment
+                }
+            });
+            return;
+        }
+    }
+};
+
+/** If no assets in this bulk-assignment batch are still pending, complete the single inbox row. */
+const refreshBulkAssignmentDashboardIfGroupFullyResolved = async (groupId, actionedBy, comment = 'Bulk assignment completed.') => {
+    if (!groupId) return;
+    const gid = String(groupId);
+    const pendingLeft = await AssetItem.countDocuments({
+        'pendingActionDetails.bulkAssignment.groupId': gid,
+        status: 'Pending',
+        acceptanceStatus: 'Pending'
+    });
+    if (pendingLeft === 0) {
+        await markBulkAssignmentDashboardRowComplete(gid, actionedBy, comment);
+    }
+};
+
+// @desc    Pending bulk assignment (AC batch) — list assets for assignee review modal
+// @route   GET /api/AssetItem/bulk-assignment-pending/:groupId
+// @access  Private
+export const getBulkAssignmentPendingGroup = async (req, res) => {
+    try {
+        const { groupId } = req.params;
+        if (!groupId || !mongoose.Types.ObjectId.isValid(String(groupId))) {
+            return res.status(400).json({ message: 'Invalid group id' });
+        }
+        const gid = String(groupId);
+        const currentUser = req.user.employeeObjectId;
+        if (!currentUser) {
+            return res.status(403).json({ message: 'You are not linked to an employee profile.' });
+        }
+        const cur = currentUser.toString();
+
+        const allInGroup = await AssetItem.find({
+            'pendingActionDetails.bulkAssignment.groupId': gid,
+            status: 'Pending',
+            acceptanceStatus: 'Pending'
+        })
+            .populate('assignedTo', 'firstName lastName employeeId companyEmail primaryReportee')
+            .populate('categoryId', 'name')
+            .populate('assignedBy', 'firstName lastName employeeId')
+            .lean();
+
+        if (!allInGroup.length) {
+            return res.status(404).json({ message: 'No pending batch found for this link.' });
+        }
+
+        const firstAssigneeRef = allInGroup[0].assignedTo;
+        const targetAssigneeId = firstAssigneeRef?._id?.toString?.() || firstAssigneeRef?.toString?.();
+        const allSameAssignee = allInGroup.every((i) => {
+            const r = i.assignedTo;
+            const id = r?._id?.toString?.() || r?.toString?.();
+            return id === targetAssigneeId;
+        });
+        if (!allSameAssignee) {
+            return res.status(400).json({ message: 'Batch data is inconsistent.' });
+        }
+
+        const firstAsDoc = await AssetItem.findById(allInGroup[0]._id).populate({
+            path: 'assignedTo',
+            populate: { path: 'primaryReportee', select: '_id' }
+        });
+        const wrapItem = firstAsDoc ? firstAsDoc.toObject() : allInGroup[0];
+        const { isAssignee, isPrimaryReporteeDelegate } = canUserActAsAssigneeForBulkItem(cur, wrapItem);
+        if (!isAssignee && !isPrimaryReporteeDelegate) {
+            return res.status(403).json({ message: 'You are not authorized to review this batch.' });
+        }
+
+        return res.status(200).json({
+            groupId: gid,
+            items: allInGroup.map((row) => ({
+                _id: row._id,
+                assetId: row.assetId,
+                name: row.name,
+                status: row.status,
+                assignmentType: row.assignmentType,
+                assignedDays: row.assignedDays,
+                categoryId: row.categoryId,
+                assignedBy: row.assignedBy,
+                bulkAssignment: row.pendingActionDetails?.bulkAssignment || null
+            }))
+        });
+    } catch (e) {
+        console.error('getBulkAssignmentPendingGroup:', e);
+        res.status(500).json({ message: 'Server Error' });
+    }
+};
+
+// @desc    Respond to AC bulk assignment batch (per-asset accept/reject)
+// @route   PUT /api/AssetItem/bulk-assignment-respond
+// @access  Private
+export const respondBulkAssignmentGroup = async (req, res) => {
+    try {
+        const { groupId, acceptedAssetIds = [], rejectedAssetIds = [], comments = '' } = req.body;
+
+        if (!groupId || !mongoose.Types.ObjectId.isValid(String(groupId))) {
+            return res.status(400).json({ message: 'Invalid group id' });
+        }
+        const gid = String(groupId);
+        const accepted = [...new Set((acceptedAssetIds || []).map(String))];
+        const rejected = [...new Set((rejectedAssetIds || []).map(String))];
+        const overlap = accepted.filter((id) => rejected.includes(id));
+        if (overlap.length) {
+            return res.status(400).json({ message: 'An asset cannot be both accepted and rejected.' });
+        }
+        if (accepted.length + rejected.length === 0) {
+            return res.status(400).json({ message: 'Select at least one asset to accept or reject.' });
+        }
+
+        const currentUser = req.user.employeeObjectId;
+        if (!currentUser) {
+            return res.status(403).json({ message: 'You are not linked to an employee profile.' });
+        }
+        const cur = currentUser.toString();
+
+        const allInGroup = await AssetItem.find({
+            'pendingActionDetails.bulkAssignment.groupId': gid,
+            status: 'Pending',
+            acceptanceStatus: 'Pending'
+        }).populate({
+            path: 'assignedTo',
+            populate: { path: 'primaryReportee', select: '_id companyEmail' }
+        });
+
+        if (!allInGroup.length) {
+            return res.status(404).json({ message: 'No pending batch found.' });
+        }
+
+        const expectedIds = new Set(allInGroup.map((a) => a._id.toString()));
+        for (const id of [...accepted, ...rejected]) {
+            if (!expectedIds.has(id)) {
+                return res.status(400).json({ message: 'One or more asset ids are not part of this pending batch.' });
+            }
+        }
+        if (accepted.length + rejected.length !== expectedIds.size) {
+            return res.status(400).json({ message: 'You must respond to every asset in this batch (accept or reject each).' });
+        }
+
+        const first = allInGroup[0];
+        const { isAssignee, isPrimaryReporteeDelegate } = canUserActAsAssigneeForBulkItem(cur, first);
+        if (!isAssignee && !isPrimaryReporteeDelegate) {
+            return res.status(403).json({ message: 'You are not authorized to respond to this batch.' });
+        }
+
+        const byId = new Map(allInGroup.map((a) => [a._id.toString(), a]));
+        const results = { accepted: [], rejected: [] };
+
+        const applyTempDatesOnAccept = (item) => {
+            if (item.assignmentType === 'Temporary' && item.assignedDays) {
+                const parsedDays = Number(item.assignedDays);
+                const start = item.assignedDate ? new Date(item.assignedDate) : new Date();
+                const end = new Date(start);
+                end.setDate(end.getDate() + parsedDays);
+                item.assignedDate = start;
+                item.temporaryEndDate = end;
+                if (!item.temporaryReminderSentAt) item.temporaryReminderSentAt = null;
+                if (!item.temporaryExpiredSentAt) item.temporaryExpiredSentAt = null;
+            } else {
+                item.assignedDate = null;
+                item.temporaryEndDate = null;
+                item.temporaryReminderSentAt = null;
+                item.temporaryExpiredSentAt = null;
+            }
+        };
+
+        for (const idStr of accepted) {
+            const item = byId.get(idStr);
+            if (!item) continue;
+            item.status = 'Assigned';
+            item.acceptanceStatus = 'Accepted';
+            item.actionRequiredBy = null;
+            item.acceptedBy = currentUser;
+            item.pendingActionDetails = null;
+            applyTempDatesOnAccept(item);
+            await item.save();
+
+            const snapshotItem = await AssetItem.findById(item._id)
+                .populate('categoryId typeId acceptedBy accessories assignedCompany')
+                .populate({
+                    path: 'assignedTo',
+                    populate: [{ path: 'primaryReportee', select: 'firstName lastName employeeId' }]
+                })
+                .populate({ path: 'assignedBy', select: 'firstName lastName employeeId signature' });
+
+            await AssetHistory.create({
+                assetId: item._id,
+                action: 'Accepted',
+                assignedToType: item.assignedToType,
+                assignedTo: item.assignedTo,
+                assignedCompany: item.assignedCompany,
+                performedBy: currentUser,
+                comments: isPrimaryReporteeDelegate
+                    ? `Accepted by manager on behalf of employee (bulk). ${comments || ''}`
+                    : comments || 'Accepted (bulk batch)',
+                details: snapshotItem ? snapshotItem.toObject() : {}
+            });
+
+            const priorAcceptedCount = await AssetHistory.countDocuments({ assetId: item._id, action: 'Accepted' });
+            if (priorAcceptedCount >= 1) {
+                void notifyAssetControllerReassignmentAcceptedWithHandover(req, { assetMongoId: item._id });
+                void notifyPreviousAssigneeReassignmentAcceptedWithHandover(req, { assetMongoId: item._id });
+            }
+
+            await updateAssetTypeCounts(item.typeId);
+            results.accepted.push(item.assetId);
+        }
+
+        for (const idStr of rejected) {
+            const item = byId.get(idStr);
+            if (!item) continue;
+
+            const bulkMeta = item.pendingActionDetails?.bulkAssignment;
+            const revertTo = bulkMeta?.revertToEmployeeId;
+
+            if (revertTo) {
+                let ownershipLabel = bulkMeta?.revertToDisplayName || '';
+                if (!ownershipLabel) {
+                    const e = await EmployeeBasic.findById(revertTo).select('firstName lastName').lean();
+                    ownershipLabel = e ? `${e.firstName || ''} ${e.lastName || ''}`.trim() : '';
+                }
+                item.assignedTo = revertTo;
+                item.assignedToType = 'Employee';
+                item.status = 'Assigned';
+                item.acceptanceStatus = 'Accepted';
+                item.actionRequiredBy = null;
+                item.acceptedBy = null;
+                item.pendingActionDetails = null;
+                if (ownershipLabel) item.ownership = ownershipLabel;
+            } else {
+                item.status = 'Unassigned';
+                item.assignedTo = null;
+                item.assignedCompany = null;
+                item.assignedToType = null;
+                item.assignedBy = null;
+                item.assignmentType = null;
+                item.assignedDays = null;
+                item.assignedDate = null;
+                item.temporaryEndDate = null;
+                item.temporaryReminderSentAt = null;
+                item.temporaryExpiredSentAt = null;
+                item.acceptanceStatus = 'Rejected';
+                item.actionRequiredBy = null;
+                item.pendingActionDetails = null;
+                item.ownership = null;
+            }
+
+            item.negotiationHistory = [];
+            await item.save();
+
+            await AssetHistory.create({
+                assetId: item._id,
+                action: 'Rejected',
+                assignedToType: item.assignedToType,
+                assignedTo: revertTo || null,
+                assignedCompany: null,
+                performedBy: currentUser,
+                comments: comments || (revertTo ? 'Bulk assignment declined — returned to previous assignee.' : 'Bulk assignment declined — returned to unassigned.'),
+                details: { bulkBatchReject: true, revertTo: revertTo || null }
+            });
+
+            await updateAssetTypeCounts(item.typeId);
+            results.rejected.push(item.assetId);
+        }
+
+        await markBulkAssignmentDashboardRowComplete(
+            gid,
+            currentUser,
+            `Bulk assignment: ${results.accepted.length} accepted, ${results.rejected.length} declined.${comments ? ` ${comments}` : ''}`.trim()
+        );
+
+        return res.status(200).json({
+            message: `Batch processed: ${results.accepted.length} accepted, ${results.rejected.length} declined.`,
+            results
+        });
+    } catch (e) {
+        console.error('respondBulkAssignmentGroup:', e);
+        res.status(500).json({ message: 'Server Error' });
+    }
+};
+
 // @desc    Return an asset item (unassign)
 // @route   PUT /api/AssetItem/:id/return
 // @access  Private
@@ -3419,15 +3845,14 @@ export const returnAssetItem = async (req, res) => {
             return res.status(404).json({ message: 'Asset not found' });
         }
 
-        const isJwtAdmin = req.user.isAdmin === true || req.user.role === 'Admin' || req.user.role === 'ROOT';
-        const isSysAdmin = await isUserAdministrator(req.user?.id);
+        const isPortalAdmin = await resolveIsPortalAdmin(req.user);
         const isAcFlow = await isUserInFlowchart(req.user, 'assetcontroller');
         const hodAc = await getDepartmentHOD('assetcontroller');
         const matchesDeptAc =
             !!hodAc?._id &&
             req.user?.employeeObjectId &&
             hodAc._id.toString() === req.user.employeeObjectId.toString();
-        const isElevatedReturn = isJwtAdmin || isSysAdmin || isAcFlow || matchesDeptAc;
+        const isElevatedReturn = isPortalAdmin || isAcFlow || matchesDeptAc;
 
         let currentEmpId = req.user?.employeeObjectId?.toString();
         if (!currentEmpId && req.user?.employeeId) {
@@ -4876,6 +5301,7 @@ export const requestAssetAction = async (req, res) => {
         }
 
         // Store pending request in asset
+        const statusBeforePendingRequest = asset.status;
         asset.pendingAction = pendingActionType;
         asset.pendingActionDetails = {
             reason: reason,
@@ -4883,7 +5309,8 @@ export const requestAssetAction = async (req, res) => {
             fineData: fineData || null, // Store full fine payload
             duration: leaveDays || null, // Store duration for Leave action
             leaveDuration: leaveDays || null, // Alias for clarity
-            originalActionType
+            originalActionType,
+            preRequestStatus: statusBeforePendingRequest
         };
 
         // Always route to Asset Controller - no reportee approval
@@ -5165,6 +5592,7 @@ export const bulkRequestAssetAction = async (req, res) => {
                 // Store pending request in asset
                 asset.pendingAction = actionType;
                 const leaveDur = leaveDays;
+                const statusBeforeBulkPending = asset.status;
                 asset.pendingActionDetails = {
                     reason: reason,
                     attachment: fileUrl,
@@ -5173,7 +5601,8 @@ export const bulkRequestAssetAction = async (req, res) => {
                     fineData: null,
                     duration: leaveDur || null,
                     leaveDuration: leaveDur || null,
-                    originalActionType
+                    originalActionType,
+                    preRequestStatus: statusBeforeBulkPending
                 };
 
                 // actionRequiredBy references EmployeeBasic, so use EmployeeBasic._id
@@ -5266,6 +5695,15 @@ export const bulkRequestAssetAction = async (req, res) => {
         const msg = process.env.NODE_ENV === 'development' ? (error.message || 'Internal server error') : 'Internal server error';
         res.status(500).json({ message: msg });
     }
+};
+
+/** Restore status after approver rejects/cancels a pending action (company assets often have no assignedTo). */
+const resolveAssetStatusAfterPendingActionRejection = (asset) => {
+    const stored = asset.pendingActionDetails?.preRequestStatus;
+    if (stored && String(stored).trim()) return stored;
+    if (asset.assignedTo) return 'Assigned';
+    if (asset.assignedToType === 'Company' && (asset.assignedCompany?._id || asset.assignedCompany)) return 'Assigned';
+    return 'Unassigned';
 };
 
 // @desc    Handle Asset Action Approval/Rejection
@@ -5640,7 +6078,7 @@ export const handleAssetActionApproval = async (req, res) => {
                         for (const rid of rejectedFromBulk) {
                             const rejAsset = byIdRej.get(String(rid));
                             if (!rejAsset) continue;
-                            rejAsset.status = rejAsset.assignedTo ? 'Assigned' : 'Unassigned';
+                            rejAsset.status = resolveAssetStatusAfterPendingActionRejection(rejAsset);
                             rejAsset.pendingAction = null;
                             rejAsset.pendingActionDetails = null;
                             rejAsset.actionRequiredBy = null;
@@ -6184,7 +6622,7 @@ export const handleAssetActionApproval = async (req, res) => {
                     const currentAsset = byId.get(rid);
                     if (!currentAsset) continue;
 
-                    currentAsset.status = currentAsset.assignedTo ? 'Assigned' : 'Unassigned';
+                    currentAsset.status = resolveAssetStatusAfterPendingActionRejection(currentAsset);
                     currentAsset.pendingAction = null;
                     currentAsset.pendingActionDetails = null;
                     currentAsset.actionRequiredBy = null;
@@ -6227,12 +6665,7 @@ export const handleAssetActionApproval = async (req, res) => {
                 });
             }
 
-            if (actionType === 'Return Asset') {
-                // Return request rejected: restore to Assigned (assignee remains the same).
-                asset.status = asset.assignedTo ? 'Assigned' : 'Unassigned';
-            } else {
-                asset.status = asset.assignedTo ? 'Assigned' : 'Unassigned';
-            }
+            asset.status = resolveAssetStatusAfterPendingActionRejection(asset);
             asset.pendingAction = null;
             asset.pendingActionDetails = null;
             asset.actionRequiredBy = null;
@@ -6413,9 +6846,8 @@ export const requestAccessoryAction = async (req, res) => {
                 ? (typeof asset.assignedTo === 'object' ? asset.assignedTo._id?.toString() : String(asset.assignedTo))
                 : null;
             const isAssignee = !!(assigneeId && currentEmpId && assigneeId === currentEmpId);
-            const isAdm = req.user.isAdmin === true || req.user.role === 'Admin' || req.user.role === 'ROOT';
             const isAC = await isUserInFlowchart(req.user, 'assetcontroller').catch(() => false);
-            if (!isAssignee && !isAC && !isAdm) {
+            if (!isAssignee && !isAC && !actorFlags.isAdmin) {
                 return res.status(403).json({ message: 'Access denied. Only assigned user, Asset Controller, or Admin can request unattach.' });
             }
         } else if (!actorFlags.canAct) {
@@ -6442,8 +6874,11 @@ export const requestAccessoryAction = async (req, res) => {
             }
         }
 
-        const requesterId = (req.user.employeeObjectId || req.user._id).toString();
-        const isControllerOrAdmin = requesterId === assetController?._id?.toString() || req.user.role === 'Admin' || req.user.role === 'ROOT';
+        const isControllerOrAdmin =
+            actorFlags.isAdmin ||
+            actorFlags.isAssetController ||
+            (assetController?._id &&
+                req.user.employeeObjectId?.toString() === assetController._id.toString());
 
         // Asset Controller/Admin can directly unattach without approval workflow.
         if (actionType === 'Unattach' && isControllerOrAdmin) {
@@ -7532,6 +7967,13 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
         /** IDs listed on DashboardAction.extra3 only (used for first DB pass). */
         const resolveBulkIdsFromExtra3 = (da) => {
             const parsed = parseExtra3(da.extra3);
+            if (parsed?.isBulkAssignment === true && Array.isArray(parsed.bulkAssetIds) && parsed.bulkAssetIds.length > 1) {
+                return {
+                    isBulk: true,
+                    bulkKind: 'assignment',
+                    bulkAssetIds: [...new Set(parsed.bulkAssetIds.map((x) => oidStr(x)))].filter(validOid)
+                };
+            }
             if (parsed?.isBulkCreation && Array.isArray(parsed.bulkAssetIds) && parsed.bulkAssetIds.length > 1) {
                 return {
                     isBulk: true,
@@ -7601,6 +8043,12 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
         /** Canonical bulk list: prefer pendingActionDetails.bulkAssetIds on primary (DB) over extra3 JSON. */
         const resolveBulkForInboxItem = (da) => {
             const parsed = parseExtra3(da.extra3);
+            if (parsed?.isBulkAssignment === true && Array.isArray(parsed.bulkAssetIds) && parsed.bulkAssetIds.length > 1) {
+                const bulkAssetIds = [...new Set(parsed.bulkAssetIds.map((x) => oidStr(x)))].filter(validOid);
+                if (bulkAssetIds.length > 1) {
+                    return { isBulk: true, bulkKind: 'assignment', bulkAssetIds };
+                }
+            }
             if (parsed?.isBulkCreation && Array.isArray(parsed.bulkAssetIds) && parsed.bulkAssetIds.length > 1) {
                 const bulkAssetIds = [...new Set(parsed.bulkAssetIds.map((x) => oidStr(x)))].filter(validOid);
                 if (bulkAssetIds.length > 1) {
@@ -7646,6 +8094,7 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
                 status: asset.status,
                 pendingAction: asset.pendingAction,
                 assignedTo: asset.assignedTo,
+                bulkAssignmentGroupId: asset.pendingActionDetails?.bulkAssignment?.groupId || null,
                 accessories: accList.map((ac) => ({
                     _id: ac._id,
                     accessoryId: ac.accessoryId,

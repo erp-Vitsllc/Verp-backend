@@ -319,7 +319,7 @@ function buildAssigneeBulkDispositionHtmlDoc(processedRows, notProcessedRows) {
   <h1 style="font-size:20px;margin:0 0 6px 0;">Bulk request — Asset Controller decision</h1>
   <p style="font-size:12px;color:#64748b;margin:0 0 20px 0;">VeRP · <strong>${np}</strong> processed · <strong>${nr}</strong> not processed (remain as assigned)</p>
 
-  <h2 style="font-size:15px;margin:24px 0 8px 0;color:#0f172a;border-bottom:2px solid #86efac;padding-bottom:6px;">1. Processed (approved as requested or alternate outcome)</h2>
+  <h2 style="font-size:15px;margin:24px 0 8px 0;color:#0f172a;border-bottom:2px solid #86efac;padding-bottom:6px;">1. Processed</h2>
   <p style="font-size:12px;color:#475569;margin:0 0 10px 0;">These assets were updated by the Asset Controller.</p>
   ${tableBlock(processedRows)}
 
