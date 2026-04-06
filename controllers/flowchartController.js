@@ -10,6 +10,119 @@ import { sendAssetAssignmentEmail } from "../utils/sendAssetAssignmentEmail.js";
 import { buildBulkAssetInventoryPdfAttachment } from "../utils/generateBulkAssetInventoryPdf.js";
 import { sendFlowchartReassignmentResultEmail } from "../utils/sendFlowchartReassignmentResultEmail.js";
 import { isUserAdministrator } from "../services/permissionService.js";
+import AssetHistory from "../models/AssetHistory.js";
+
+/**
+ * On Asset Controller approval: checked assets (keepAssetIds) stay Unassigned / On Leave.
+ * Unchecked assets in the preview list are assigned to the previous controller (reassignment snapshot).
+ * If keepAssetIds is omitted, all preview assets are kept (no reassignments).
+ * Appends AssetHistory only (records are never removed).
+ */
+async function applyAssetControllerPoolSelectionOnApprove({
+    keepAssetIds,
+    previousControllerEmpObjectId,
+    performerEmpObjectId,
+    previousControllerLabel,
+    newControllerLabel
+}) {
+    if (!previousControllerEmpObjectId || !mongoose.Types.ObjectId.isValid(String(previousControllerEmpObjectId))) {
+        return { keptIds: [], reassignedIds: [] };
+    }
+    const emailData = await buildResponsibilityEmailData("assetcontroller");
+    const previewIds = [
+        ...(emailData.unassignedAssets || []).map((a) => String(a._id)),
+        ...(emailData.parkingAssets || []).map((a) => String(a._id))
+    ].filter((id) => mongoose.Types.ObjectId.isValid(id));
+    const previewSet = new Set(previewIds);
+
+    const keepSet =
+        keepAssetIds == null
+            ? previewSet
+            : new Set((keepAssetIds || []).map(String).filter((id) => mongoose.Types.ObjectId.isValid(id)));
+
+    const oldId = new mongoose.Types.ObjectId(String(previousControllerEmpObjectId));
+    const when = new Date();
+    const dateStr = when.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+
+    let performerLabel = "The new asset controller";
+    if (performerEmpObjectId && mongoose.Types.ObjectId.isValid(String(performerEmpObjectId))) {
+        const p = await EmployeeBasic.findById(performerEmpObjectId).select("firstName lastName").lean();
+        if (p) {
+            const n = `${p.firstName || ""} ${p.lastName || ""}`.trim();
+            if (n) performerLabel = n;
+        }
+    }
+    const prevLabel = (previousControllerLabel || "the previous asset controller").trim() || "the previous asset controller";
+    const newLabel = (newControllerLabel || "the new asset controller").trim() || "the new asset controller";
+
+    const keptIds = [];
+    const reassignedIds = [];
+
+    for (const idStr of previewSet) {
+        const asset = await AssetItem.findById(idStr).select("assetId name status").lean();
+        if (!asset) continue;
+
+        if (keepSet.has(idStr)) {
+            keptIds.push(idStr);
+            const st = (asset.status || "").toLowerCase();
+            const isLeave = st === "on leave";
+            const userStory = isLeave
+                ? `${performerLabel} accepted the role as ${newLabel} on ${dateStr}. This item stays on leave with the same person — nothing was moved.`
+                : `${performerLabel} accepted the role as ${newLabel} on ${dateStr}. This item is still open and not assigned to a person.`;
+            await AssetHistory.create({
+                assetId: idStr,
+                action: "ControllerHandover",
+                performedBy: performerEmpObjectId || undefined,
+                comments: userStory,
+                details: {
+                    userStory,
+                    variant: isLeave ? "kept_on_leave" : "kept_open",
+                    assetCode: asset.assetId,
+                    assetName: asset.name
+                },
+                date: when
+            });
+        } else {
+            reassignedIds.push(idStr);
+            await AssetItem.updateOne(
+                { _id: idStr, status: { $in: ["Unassigned", "On Leave"] } },
+                {
+                    $set: {
+                        assignedTo: oldId,
+                        assignedToType: "Employee",
+                        assignedCompany: null,
+                        status: "Assigned",
+                        acceptanceStatus: "Accepted",
+                        actionRequiredBy: null,
+                        pendingAction: null,
+                        pendingActionDetails: null,
+                        onLeaveStartDate: null,
+                        onLeaveEndDate: null,
+                        onLeaveDuration: null
+                    }
+                }
+            );
+            const userStory = `${performerLabel} accepted the role as ${newLabel} on ${dateStr}. This item was assigned to ${prevLabel} (who was the asset controller before).`;
+            await AssetHistory.create({
+                assetId: idStr,
+                action: "ControllerHandover",
+                assignedTo: oldId,
+                assignedToType: "Employee",
+                performedBy: performerEmpObjectId || undefined,
+                comments: userStory,
+                details: {
+                    userStory,
+                    variant: "returned_to_previous_controller",
+                    assetCode: asset.assetId,
+                    assetName: asset.name,
+                    assignedToName: prevLabel
+                },
+                date: when
+            });
+        }
+    }
+    return { keptIds, reassignedIds };
+}
 
 // @desc    Get all flowchart responsibilities
 // @route   GET /api/flowchart
@@ -127,6 +240,7 @@ export const addFlowchartResponsibility = async (req, res) => {
                                 companyName: 'Main ERP',
                                 category: roleLabels[category] || category,
                                 requestId: newAction._id,
+                                dashboardDeepLinkId: existing._id,
                                 unassignedAssets: [],
                                 emailData: { categoryKey: category, ...emailPayload }
                             });
@@ -199,6 +313,7 @@ export const addFlowchartResponsibility = async (req, res) => {
                                 companyName: 'Main ERP', // Global flowchart is for the whole system
                                 category: roleLabels[category] || category,
                                 requestId: newAction._id,
+                                dashboardDeepLinkId: responsibility._id,
                                 unassignedAssets: [],
                                 emailData: { categoryKey: category, ...emailPayload }
                             });
@@ -237,7 +352,8 @@ export const addFlowchartResponsibility = async (req, res) => {
 // @access  Private
 export const respondToResponsibility = async (req, res) => {
     try {
-        const { action, actionId, category } = req.body;
+        const { action, actionId, category, assetControllerHandover } = req.body;
+        const catNorm = (category || "").toLowerCase().replace(/\s+/g, "");
 
         // Find the responsibility by ID or category
         let responsibility;
@@ -251,6 +367,8 @@ export const respondToResponsibility = async (req, res) => {
             return res.status(404).json({ message: 'Responsibility not found' });
         }
 
+        const invitedCandidateName = `${responsibility.employeeName || ''}`.trim() || 'the invited person';
+
         // Snapshot of previous active holder (used for notifying old responsible on accept/reject)
         const oldSnapshot = responsibility.reassignmentSnapshot
             ? {
@@ -263,6 +381,8 @@ export const respondToResponsibility = async (req, res) => {
                 department: responsibility.reassignmentSnapshot.department
             }
             : null;
+
+        let assetControllerOutcome = null;
 
         if (action === 'Reject' && responsibility.reassignmentSnapshot) {
             const s = responsibility.reassignmentSnapshot;
@@ -278,6 +398,22 @@ export const respondToResponsibility = async (req, res) => {
             responsibility.updatedBy = req.user._id;
             await responsibility.save();
         } else {
+            if (action === 'Approve' && catNorm === 'assetcontroller' && oldSnapshot?.empObjectId) {
+                try {
+                    assetControllerOutcome = await applyAssetControllerPoolSelectionOnApprove({
+                        keepAssetIds: assetControllerHandover?.keepAssetIds,
+                        previousControllerEmpObjectId: oldSnapshot.empObjectId,
+                        performerEmpObjectId: req.user?.employeeObjectId,
+                        previousControllerLabel: oldSnapshot.employeeName,
+                        newControllerLabel: responsibility.employeeName
+                    });
+                } catch (acErr) {
+                    console.error('[Flowchart] Asset controller pool selection failed:', acErr);
+                    return res.status(500).json({
+                        message: 'Failed to apply asset pool selection. Flowchart was not updated.'
+                    });
+                }
+            }
             responsibility.status = action === 'Approve' ? 'Active' : 'Rejected';
             if (action === 'Approve') {
                 responsibility.reassignmentSnapshot = null;
@@ -391,7 +527,12 @@ export const respondToResponsibility = async (req, res) => {
                 await sendFlowchartReassignmentResultEmail(req, {
                     category,
                     action,
-                    oldSnapshot
+                    oldSnapshot,
+                    invitedCandidateName,
+                    assetControllerOutcome:
+                        action === 'Approve' && catNorm === 'assetcontroller' && assetControllerOutcome
+                            ? assetControllerOutcome
+                            : null
                 });
             } catch (mailErr) {
                 console.error("[Flowchart Result Email] Non-fatal:", mailErr?.message || mailErr);
@@ -447,7 +588,7 @@ export const getFlowchartPositionSummary = async (req, res) => {
         let canViewInventory = true;
         let viewerNote = null;
 
-        if (cat === 'assetcontroller' || cat === 'hr') {
+        if (cat === 'assetcontroller' || cat === 'hr' || cat === 'assigneduser' || cat === 'admincontroller') {
             if (!flow) {
                 canViewInventory = false;
                 viewerNote = 'This position is not configured in the flowchart.';

@@ -1,7 +1,12 @@
 import mongoose from 'mongoose';
 import AssetItem from '../models/AssetItem.js';
 import { generatePdfFromHtml, pdfOutputToBuffer } from './generatePdf.js';
-import { BULK_ASSET_INVENTORY_PDF_SELECTOR } from './assetHandoverPdfConstants.js';
+import {
+    BULK_ASSET_INVENTORY_PDF_SELECTOR,
+    ASSET_CONTROLLER_RESPONSIBILITY_PDF_SELECTOR,
+    ASSET_CONTROLLER_OUTCOME_PDF_SELECTOR,
+    BULK_ASSIGNEE_DISPOSITION_PDF_SELECTOR
+} from './assetHandoverPdfConstants.js';
 
 function escapeHtml(s) {
     if (s == null) return '';
@@ -94,6 +99,261 @@ function buildInventoryHtmlDoc(rows) {
 </div>
 </body>
 </html>`;
+}
+
+function inventoryRowsNestedAccessoryHtml(rows) {
+    if (!rows?.length) {
+        return `<tr><td colspan="5" style="padding:12px 8px;color:#64748b;">No assets in this section.</td></tr>`;
+    }
+    return rows
+        .map((row) => {
+            const accHtml =
+                row.accessories?.length > 0
+                    ? `<ul style="margin:4px 0 0 0;padding-left:18px;font-size:12px;">${row.accessories
+                          .map((acc) => {
+                              const showStatus =
+                                  acc.status && acc.status !== 'Attached' && acc.status !== '—';
+                              return `<li>${escapeHtml(acc.name)}${
+                                  showStatus
+                                      ? ` <span style="color:#64748b">(${escapeHtml(acc.status)})</span>`
+                                      : ''
+                              }</li>`;
+                          })
+                          .join('')}</ul>`
+                    : `<div style="font-size:11px;color:#94a3b8;margin-top:4px;">No accessories</div>`;
+            return `<tr style="border-bottom:1px solid #e2e8f0;vertical-align:top;">
+          <td style="padding:10px 8px;font-family:monospace;font-size:12px;">${escapeHtml(row.assetId)}</td>
+          <td style="padding:10px 8px;font-weight:600;">${escapeHtml(row.name)}</td>
+          <td style="padding:10px 8px;color:#475569;">${escapeHtml(row.categoryName)}</td>
+          <td style="padding:10px 8px;color:#475569;">${escapeHtml(row.typeName)}</td>
+          <td style="padding:10px 8px;">${escapeHtml(row.status)}</td>
+        </tr>
+        <tr style="border-bottom:1px solid #f1f5f9;background:#f8fafc;">
+          <td colspan="5" style="padding:6px 8px 12px 24px;font-size:12px;"><span style="font-size:10px;font-weight:700;color:#64748b;text-transform:uppercase;">Accessories</span>${accHtml}</td>
+        </tr>`;
+        })
+        .join('');
+}
+
+function buildAssetControllerResponsibilityHtmlDoc(parkingInventoryRows, unassignedInventoryRows) {
+    const unassignedCount = unassignedInventoryRows?.length || 0;
+    const parkingCount = parkingInventoryRows?.length || 0;
+    const theadCommon = `
+        <tr style="border-bottom:2px solid #cbd5e1;">
+          <th style="text-align:left;padding:8px;font-weight:600;">Asset ID</th>
+          <th style="text-align:left;padding:8px;font-weight:600;">Name</th>
+          <th style="text-align:left;padding:8px;font-weight:600;">Category</th>
+          <th style="text-align:left;padding:8px;font-weight:600;">Type</th>
+          <th style="text-align:left;padding:8px;font-weight:600;">Status</th>
+        </tr>`;
+
+    const tableParking = `
+    <h2 style="font-size:16px;margin:28px 0 8px 0;color:#0f172a;border-bottom:2px solid #fcd34d;padding-bottom:6px;">A. Parking — On Leave</h2>
+    <p style="font-size:12px;color:#64748b;margin:0 0 12px 0;">Assets parked while the assignee is on leave. Accessories are listed under each main asset.</p>
+    <table style="width:100%;border-collapse:collapse;font-size:13px;">
+      <thead>${theadCommon.replace('border-bottom:2px solid #cbd5e1;', 'border-bottom:2px solid #fcd34d;background:#fffbeb;')}</thead>
+      <tbody>${inventoryRowsNestedAccessoryHtml(parkingInventoryRows)}</tbody>
+    </table>`;
+
+    const tableUnassigned = `
+    <h2 style="font-size:16px;margin:28px 0 8px 0;color:#0f172a;border-bottom:2px solid #a7f3d0;padding-bottom:6px;">B. Unassigned Asset (available)</h2>
+    <p style="font-size:12px;color:#64748b;margin:0 0 12px 0;"></p>
+    <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:8px;">
+      <thead>${theadCommon.replace('border-bottom:2px solid #cbd5e1;', 'border-bottom:2px solid #a7f3d0;background:#ecfdf5;')}</thead>
+      <tbody>${inventoryRowsNestedAccessoryHtml(unassignedInventoryRows)}</tbody>
+    </table>`;
+
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<title>Asset Controller handover</title>
+</head>
+<body style="margin:0;background:#fff;">
+<div id="asset-controller-handover-pdf" data-inventory-ready="true" style="min-height:120px;padding:24px;font-family:Segoe UI,Tahoma,sans-serif;color:#1e293b;box-sizing:border-box;max-width:1000px;margin:0 auto;">
+  <h1 style="font-size:20px;margin:0 0 4px 0;">Asset Controller — Asset handover</h1>
+  <p style="font-size:13px;color:#64748b;margin:0 0 8px 0;">VERP</p>
+  <p style="font-size:12px;color:#475569;margin:0 0 16px 0;"><strong>${parkingCount}</strong> parked (on leave) · <strong>${unassignedCount}</strong> in unassigned pool</p>
+  ${tableParking}
+  ${tableUnassigned}
+</div>
+</body>
+</html>`;
+}
+
+/**
+ * PDF for Asset Controller flowchart handover: parking first, then unassigned pool; accessories under each asset.
+ */
+export async function generateAssetControllerResponsibilityPdfFromLean(unassignedLean, parkingLean) {
+    const uIds = (unassignedLean || []).map((a) => a._id?.toString()).filter(Boolean);
+    const pIds = (parkingLean || []).map((a) => a._id?.toString()).filter(Boolean);
+    for (const id of [...uIds, ...pIds]) {
+        if (!mongoose.Types.ObjectId.isValid(id)) {
+            console.warn('[generateAssetControllerResponsibilityPdfFromLean] Invalid id:', id);
+            return null;
+        }
+    }
+    try {
+        const uRows = uIds.length ? await loadInventoryRows(uIds) : [];
+        const pRows = pIds.length ? await loadInventoryRows(pIds) : [];
+        if (!uRows.length && !pRows.length) return null;
+        const html = buildAssetControllerResponsibilityHtmlDoc(pRows, uRows);
+        const raw = await generatePdfFromHtml(html, ASSET_CONTROLLER_RESPONSIBILITY_PDF_SELECTOR);
+        const buf = pdfOutputToBuffer(raw);
+        if (!buf?.length) return null;
+        return buf;
+    } catch (e) {
+        console.error('[generateAssetControllerResponsibilityPdfFromLean]', e?.message || e);
+        return null;
+    }
+}
+
+export async function buildAssetControllerResponsibilityPdfAttachment(unassignedLean, parkingLean) {
+    const buf = await generateAssetControllerResponsibilityPdfFromLean(unassignedLean, parkingLean);
+    if (!buf?.length) return [];
+    const n = (unassignedLean?.length || 0) + (parkingLean?.length || 0);
+    const safe = `asset-controller-handover-${n}.pdf`;
+    console.log(`[assetControllerHandoverPdf] ${safe} (${buf.length} bytes)`);
+    return [{ filename: safe, content: buf, contentType: 'application/pdf', contentDisposition: 'attachment' }];
+}
+
+function buildAssetControllerOutcomeHtmlDoc(keptRows, returnedRows) {
+    const thead = `
+        <tr style="border-bottom:2px solid #cbd5e1;background:#f8fafc;">
+          <th style="text-align:left;padding:8px;font-weight:600;">Asset ID</th>
+          <th style="text-align:left;padding:8px;font-weight:600;">Name</th>
+          <th style="text-align:left;padding:8px;font-weight:600;">Category</th>
+          <th style="text-align:left;padding:8px;font-weight:600;">Type</th>
+          <th style="text-align:left;padding:8px;font-weight:600;">Status</th>
+        </tr>`;
+
+    const tableBlock = (rows) => `
+    <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:4px;">
+      <thead>${thead}</thead>
+      <tbody>${inventoryRowsNestedAccessoryHtml(rows)}</tbody>
+    </table>`;
+
+    const nk = keptRows?.length || 0;
+    const nr = returnedRows?.length || 0;
+
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<title>Asset controller handover result</title>
+</head>
+<body style="margin:0;background:#fff;">
+<div id="asset-controller-outcome-pdf" data-inventory-ready="true" style="min-height:120px;padding:24px;font-family:Segoe UI,Tahoma,sans-serif;color:#1e293b;box-sizing:border-box;max-width:1000px;margin:0 auto;">
+  <h1 style="font-size:20px;margin:0 0 6px 0;">Asset Controller — handover result</h1>
+  <p style="font-size:12px;color:#64748b;margin:0 0 20px 0;">VeRP · ${nk} item(s) staying open or on leave · ${nr} item(s) assigned back to the previous controller</p>
+
+  <h2 style="font-size:15px;margin:24px 0 8px 0;color:#0f172a;border-bottom:2px solid #86efac;padding-bottom:6px;">1. Accepted by the new controller (stays open or on leave)</h2>
+  <p style="font-size:12px;color:#475569;margin:0 0 10px 0;">These items stay as they were. They are <strong>not</strong> moved onto the previous controller’s assignment list.</p>
+  ${tableBlock(keptRows)}
+
+  <h2 style="font-size:15px;margin:24px 0 8px 0;color:#0f172a;border-bottom:2px solid #fcd34d;padding-bottom:6px;">2. Returned to the previous controller’s list</h2>
+  <p style="font-size:12px;color:#475569;margin:0 0 10px 0;">The new controller chose to hand these back. They are now <strong>assigned</strong> to the previous Asset Controller to manage.</p>
+  ${tableBlock(returnedRows)}
+
+  <div style="margin-top:28px;padding:14px;background:#f1f5f9;border-radius:10px;border:1px solid #e2e8f0;">
+    <p style="margin:0;font-size:12px;color:#334155;line-height:1.55;"><strong>Summary:</strong> Section 1 lists items the new controller kept under their watch as open or on leave. Section 2 lists items that were put back on the previous controller’s assignment list before the role change was completed.</p>
+  </div>
+</div>
+</body>
+</html>`;
+}
+
+/**
+ * PDF for Asset Controller <strong>approval</strong> email: two sections — kept open/on leave vs assigned back to previous controller.
+ */
+export async function generateAssetControllerHandoverOutcomePdfFromIds(keptIds, reassignedIds) {
+    const k = [...new Set((keptIds || []).map(String).filter(Boolean))].filter((id) => mongoose.Types.ObjectId.isValid(id));
+    const r = [...new Set((reassignedIds || []).map(String).filter(Boolean))].filter((id) => mongoose.Types.ObjectId.isValid(id));
+    try {
+        const kRows = k.length ? await loadInventoryRows(k) : [];
+        const rRows = r.length ? await loadInventoryRows(r) : [];
+        const html = buildAssetControllerOutcomeHtmlDoc(kRows, rRows);
+        const raw = await generatePdfFromHtml(html, ASSET_CONTROLLER_OUTCOME_PDF_SELECTOR);
+        const buf = pdfOutputToBuffer(raw);
+        if (!buf?.length) return null;
+        return buf;
+    } catch (e) {
+        console.error('[generateAssetControllerHandoverOutcomePdfFromIds]', e?.message || e);
+        return null;
+    }
+}
+
+export async function buildAssetControllerHandoverOutcomePdfAttachment(keptIds, reassignedIds) {
+    const buf = await generateAssetControllerHandoverOutcomePdfFromIds(keptIds, reassignedIds);
+    if (!buf?.length) return [];
+    const n = (keptIds?.length || 0) + (reassignedIds?.length || 0);
+    const safe = `asset-controller-handover-outcome-${n}.pdf`;
+    console.log(`[assetControllerOutcomePdf] ${safe} (${buf.length} bytes)`);
+    return [{ filename: safe, content: buf, contentType: 'application/pdf', contentDisposition: 'attachment' }];
+}
+
+function buildAssigneeBulkDispositionHtmlDoc(processedRows, notProcessedRows) {
+    const thead = `
+        <tr style="border-bottom:2px solid #cbd5e1;background:#f8fafc;">
+          <th style="text-align:left;padding:8px;font-weight:600;">Asset ID</th>
+          <th style="text-align:left;padding:8px;font-weight:600;">Name</th>
+          <th style="text-align:left;padding:8px;font-weight:600;">Category</th>
+          <th style="text-align:left;padding:8px;font-weight:600;">Type</th>
+          <th style="text-align:left;padding:8px;font-weight:600;">Status</th>
+        </tr>`;
+    const tableBlock = (rows) => `
+    <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:4px;">
+      <thead>${thead}</thead>
+      <tbody>${inventoryRowsNestedAccessoryHtml(rows)}</tbody>
+    </table>`;
+    const np = processedRows?.length || 0;
+    const nr = notProcessedRows?.length || 0;
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<title>Bulk asset request result</title>
+</head>
+<body style="margin:0;background:#fff;">
+<div id="bulk-assignee-disposition-pdf" data-inventory-ready="true" style="min-height:120px;padding:24px;font-family:Segoe UI,Tahoma,sans-serif;color:#1e293b;box-sizing:border-box;max-width:1000px;margin:0 auto;">
+  <h1 style="font-size:20px;margin:0 0 6px 0;">Bulk request — Asset Controller decision</h1>
+  <p style="font-size:12px;color:#64748b;margin:0 0 20px 0;">VeRP · <strong>${np}</strong> processed · <strong>${nr}</strong> not processed (remain as assigned)</p>
+
+  <h2 style="font-size:15px;margin:24px 0 8px 0;color:#0f172a;border-bottom:2px solid #86efac;padding-bottom:6px;">1. Processed (approved as requested or alternate outcome)</h2>
+  <p style="font-size:12px;color:#475569;margin:0 0 10px 0;">These assets were updated by the Asset Controller.</p>
+  ${tableBlock(processedRows)}
+
+  <h2 style="font-size:15px;margin:24px 0 8px 0;color:#0f172a;border-bottom:2px solid #fecaca;padding-bottom:6px;">2. Not processed</h2>
+  <p style="font-size:12px;color:#475569;margin:0 0 10px 0;">These assets were not approved for change. They remain assigned to you with no pending request.</p>
+  ${tableBlock(notProcessedRows)}
+
+  <div style="margin-top:28px;padding:14px;background:#f1f5f9;border-radius:10px;border:1px solid #e2e8f0;">
+    <p style="margin:0;font-size:12px;color:#334155;line-height:1.55;"><strong>Summary:</strong> Section 1 lists assets that were actioned. Section 2 lists assets that stayed on your assignment list.</p>
+  </div>
+</div>
+</body>
+</html>`;
+}
+
+/**
+ * PDF for assignee email after bulk transfer/return decisions: processed vs not processed.
+ */
+export async function buildBulkAssigneeDispositionPdfAttachment(processedIds, notProcessedIds, filenameBase = 'bulk-assignee-outcome') {
+    const p = [...new Set((processedIds || []).map(String).filter(Boolean))].filter((id) => mongoose.Types.ObjectId.isValid(id));
+    const r = [...new Set((notProcessedIds || []).map(String).filter(Boolean))].filter((id) => mongoose.Types.ObjectId.isValid(id));
+    try {
+        const pRows = p.length ? await loadInventoryRows(p) : [];
+        const rRows = r.length ? await loadInventoryRows(r) : [];
+        const html = buildAssigneeBulkDispositionHtmlDoc(pRows, rRows);
+        const raw = await generatePdfFromHtml(html, BULK_ASSIGNEE_DISPOSITION_PDF_SELECTOR);
+        const buf = pdfOutputToBuffer(raw);
+        if (!buf?.length) return [];
+        const safe = `${String(filenameBase).replace(/[^a-zA-Z0-9._-]/g, '_')}-${p.length}-${r.length}.pdf`;
+        return [{ filename: safe, content: buf, contentType: 'application/pdf', contentDisposition: 'attachment' }];
+    } catch (e) {
+        console.error('[buildBulkAssigneeDispositionPdfAttachment]', e?.message || e);
+        return [];
+    }
 }
 
 /**

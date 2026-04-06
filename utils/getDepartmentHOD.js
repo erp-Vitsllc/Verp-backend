@@ -19,6 +19,10 @@ export const getDepartmentHOD = async (departmentType) => {
             category = 'accounts';
         } else if (type === 'assetcontroller') {
             category = 'assetcontroller';
+        } else if (type === 'admincontroller') {
+            category = 'admincontroller';
+        } else if (type === 'assigneduser') {
+            category = 'assigneduser';
         }
 
         // Look for active HOD in Flowchart collection with regex to handle spaces in DB
@@ -150,4 +154,35 @@ export const isUserActiveInFlowchart = async (user, category) => {
         console.error(`[isUserActiveInFlowchart] Error:`, error);
         return false;
     }
+};
+
+/**
+ * Employee who receives company-allocation emails/dashboard (Settings → Flowchart: Assigned User, else Admin).
+ * Replaces legacy HR-only routing for company-assigned assets.
+ */
+export const getCompanyAssetCoordinator = async () => {
+    const assigned = await getDepartmentHOD('assigneduser');
+    if (assigned?._id) return assigned;
+    const admin = await getDepartmentHOD('admincontroller');
+    if (admin?._id) return admin;
+    return null;
+};
+
+export const isUserCompanyAssetCoordinator = async (user) => {
+    if (!user) return false;
+    if (await isUserInFlowchart(user, 'assigneduser')) return true;
+    if (await isUserInFlowchart(user, 'admincontroller')) return true;
+    const coord = await getCompanyAssetCoordinator();
+    const eid = user.employeeObjectId?.toString?.();
+    if (coord?._id && eid && coord._id.toString() === eid) return true;
+    return false;
+};
+
+export const isUserActiveCompanyAssetCoordinator = async (employeeObjectId, employeeId) => {
+    const u = { employeeObjectId, employeeId };
+    if (await isUserActiveInFlowchart(u, 'assigneduser')) return true;
+    if (await isUserActiveInFlowchart(u, 'admincontroller')) return true;
+    const coord = await getCompanyAssetCoordinator();
+    if (coord?._id && employeeObjectId && coord._id.toString() === employeeObjectId.toString()) return true;
+    return false;
 };

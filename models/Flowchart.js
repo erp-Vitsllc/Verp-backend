@@ -10,7 +10,7 @@ const flowchartSchema = new mongoose.Schema(
         category: {
             type: String,
             required: true,
-            enum: ["hr", "accounts", "finance", "assetcontroller", "management", "it", "admin", "admincontroller"]
+            enum: ["hr", "accounts", "finance", "assetcontroller", "management", "it", "admin", "admincontroller", "assigneduser"]
         },
 
         // Employee information

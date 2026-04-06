@@ -617,6 +617,13 @@ export const getAssetTypes = async (req, res) => {
                 name: a.name,
                 type: a.typeId?.name || '-',
                 category: a.categoryId?.name || '-',
+                /** Required for bulk assign / filters: keys use id:${type|category} from catalog rows. */
+                typeId: a.typeId
+                    ? { _id: a.typeId._id, name: a.typeId.name }
+                    : null,
+                categoryId: a.categoryId
+                    ? { _id: a.categoryId._id, name: a.categoryId.name }
+                    : null,
                 assetValue: a.assetValue,
                 purchaseDate: a.purchaseDate,
                 quantity: a.quantity || 1,

@@ -3,7 +3,7 @@ import EmployeeBasic from "../../models/EmployeeBasic.js";
 import User from "../../models/User.js";
 import DashboardAction from "../../models/DashboardAction.js";
 import { sendResponsibilityApprovalEmail } from "../../utils/sendResponsibilityApprovalEmail.js";
-import AssetItem from "../../models/AssetItem.js";
+import { buildResponsibilityEmailData } from "../../utils/flowchartResponsibilityEmailData.js";
 import { getSignedFileUrl } from "../../utils/s3Upload.js";
 
 export const updateCompany = async (req, res) => {
@@ -112,18 +112,19 @@ export const updateCompany = async (req, res) => {
                                 'admincontroller': 'System Admin'
                             };
 
-                            // Fetch unassigned assets ONLY for assetcontroller
-                            let unassignedAssets = [];
-                            if (resp.category === 'assetcontroller') {
-                                unassignedAssets = await AssetItem.find({ status: 'Unassigned' }).select('assetId name');
-                            }
+                            const emailPayload =
+                                resp.category === 'assetcontroller'
+                                    ? await buildResponsibilityEmailData('assetcontroller')
+                                    : null;
 
                             await sendResponsibilityApprovalEmail({
                                 employee: employee,
                                 companyName: isGlobal ? 'All Companies' : company.name,
                                 category: roleLabels[resp.category] || resp.category,
                                 requestId: newAction._id,
-                                unassignedAssets: unassignedAssets
+                                dashboardDeepLinkId: company._id,
+                                unassignedAssets: [],
+                                emailData: emailPayload ? { categoryKey: resp.category, ...emailPayload } : null
                             });
                         } catch (err) {
                             console.error(`Error creating responsibility approval action/email for ${resp.category}:`, err);

@@ -3,7 +3,12 @@ import EmployeeBasic from '../models/EmployeeBasic.js';
 import User from '../models/User.js';
 import { createAssetItem, getAssetItems, getAllAssignedAssets, getMyAssignedAssetsForReturn, getUnassignedAssetsForEmployee, getHRCompanyAssets, getOnLeaveAssetsForEmployee, handleOnLeaveAction, bulkHandleOnLeaveAction, getAssetItemDetail, assignAssetItem, bulkAssignAssetItems, downloadHandoverPdf, downloadHistoryHandoverPdf, respondToAssignment, bulkRespondToAssignment, getAssetHistory, getHistoryRecord, returnAssetItem, updateAssetStatus, addAssetDocument, updateAssetDocument, deleteAssetDocument, addAssetService, addAssetImage, deleteAssetImage, transferAssetAccessory, manageAccessoryStatus, updateAssetItem, deleteAssetItem, endOfLifeAsset, requestAssetAction, bulkRequestAssetAction, handleAssetActionApproval, finalizeAssetAction, uploadAccessoriesAttachment, requestAccessoryAction, respondAccessoryAction, finalizeAccessoryAction, respondToAssetCreation, bulkRespondToAssetCreation, getBulkAssetDetails, getBulkAssetInventoryForPrint, transferAsset, submitDraftForCreationApproval, getPendingAssetDashboardInbox, deletePendingAssetDashboardInboxItem } from '../controllers/assetItemController.js';
 import { protect } from '../middleware/authMiddleware.js';
-import { isUserInFlowchart, getDepartmentHOD } from '../utils/getDepartmentHOD.js';
+import {
+    isUserInFlowchart,
+    getDepartmentHOD,
+    isUserActiveCompanyAssetCoordinator,
+    isUserCompanyAssetCoordinator
+} from '../utils/getDepartmentHOD.js';
 import { isUserAdministrator } from '../services/permissionService.js';
 
 const normEmp = (s) => (s || '').toString().toLowerCase().replace(/\s+/g, '');
@@ -156,7 +161,7 @@ const requireAssetCreationApprover = async (req, res, next) => {
  * Middleware for Asset Action Approval (Loss & Damage / End of Life / Leave).
  * - Admin / designated Asset Controller always allowed.
  * - Otherwise allow the actual workflow approver in `asset.actionRequiredBy`.
- * - Additionally allow HR for Loss & Damage approvals (controller logic already checks this).
+ * - Additionally allow flowchart HR for non-company Loss & Damage, and Assigned User/Admin for company assets.
  */
 const requireAssetActionApprover = async (req, res, next) => {
     try {
@@ -178,9 +183,12 @@ const requireAssetActionApprover = async (req, res, next) => {
         if (asset.actionRequiredBy && currentUserId && asset.actionRequiredBy.toString() === currentUserId) return next();
 
         const isHR = await isUserInFlowchart(req.user, 'hr').catch(() => false);
+        const isCompanyCoordinator = await isUserCompanyAssetCoordinator(req.user).catch(() => false);
+        const isCompanyAsset = asset.assignedToType === 'Company' && !!asset.assignedCompany;
         const actionType = asset.pendingAction;
 
-        if (isHR && actionType === 'Loss and Damage') return next();
+        if (isHR && actionType === 'Loss and Damage' && !isCompanyAsset) return next();
+        if (isCompanyCoordinator && actionType === 'Loss and Damage' && isCompanyAsset) return next();
 
         return res.status(403).json({ message: 'Access denied. Only designated approver can approve this asset action.' });
     } catch (error) {
@@ -220,11 +228,15 @@ const requireAssetFullAccess = async (req, res, next) => {
                 const actionRequiredById = asset.actionRequiredBy ? asset.actionRequiredBy.toString() : null;
                 const accId = req.params?.accId?.toString?.();
 
-                // Company-assigned assets: HR should have the same actions as the assigned employee
-                // (for those companies HR is responsible for).
                 if (asset.assignedToType === 'Company') {
                     const currentEmployeeObjectId = req.user?.employeeObjectId?.toString?.() || null;
                     const currentEmployeeId = req.user?.employeeId || null;
+
+                    const isCompanyCoordinatorActive = await isUserActiveCompanyAssetCoordinator(
+                        req.user?.employeeObjectId,
+                        req.user?.employeeId
+                    ).catch(() => false);
+                    if (isCompanyCoordinatorActive) return next();
 
                     const isHRFlowchart = await isUserInFlowchart(req.user, 'hr').catch(() => false);
                     const hrHOD = await getDepartmentHOD('hr').catch(() => null);
@@ -233,7 +245,6 @@ const requireAssetFullAccess = async (req, res, next) => {
 
                     if (isHRFlowchart || isHrHod) return next();
 
-                    // If not global HR, allow only when HR has an active responsibility for this company.
                     if (asset.assignedCompany && (currentEmployeeObjectId || currentEmployeeId)) {
                         const Company = (await import('../models/Company.js')).default;
                         const escapeRegExp = (v) => String(v).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -241,25 +252,28 @@ const requireAssetFullAccess = async (req, res, next) => {
                             ? new RegExp(`^${escapeRegExp(String(currentEmployeeId).trim()).replace(/\s+/g, '\\s*')}$`, 'i')
                             : null;
 
-                        const hrOr = [];
-                        if (currentEmployeeObjectId) hrOr.push({ empObjectId: currentEmployeeObjectId });
-                        if (employeeIdPattern) hrOr.push({ employeeId: { $regex: employeeIdPattern } });
+                        const respOr = [];
+                        if (currentEmployeeObjectId) respOr.push({ empObjectId: currentEmployeeObjectId });
+                        if (employeeIdPattern) respOr.push({ employeeId: { $regex: employeeIdPattern } });
 
-                        const hasHrResponsibility =
-                            hrOr.length > 0
+                        const hasCompanyResponsibility =
+                            respOr.length > 0
                                 ? await Company.exists({
                                     _id: asset.assignedCompany,
                                     responsibilities: {
                                         $elemMatch: {
-                                            category: { $regex: /hr|human/i },
+                                            category: {
+                                                $regex:
+                                                    /hr|human|assigned\s*user|assigneduser|admin\s*controller|admincontroller|^admin$/i
+                                            },
                                             status: 'Active',
-                                            $or: hrOr
+                                            $or: respOr
                                         }
                                     }
                                 }).catch(() => false)
                                 : false;
 
-                        if (hasHrResponsibility) return next();
+                        if (hasCompanyResponsibility) return next();
                     }
                 }
 

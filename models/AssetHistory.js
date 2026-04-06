@@ -28,7 +28,9 @@ const assetHistorySchema = mongoose.Schema({
             'Transfer',
             'On Leave',
             'Extend',
-            'Update'
+            'Update',
+            /** New asset controller accepted role; item stayed open or on leave (see details.userStory) */
+            'ControllerHandover'
         ]
     },
     assignedTo: {

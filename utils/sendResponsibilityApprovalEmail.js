@@ -1,4 +1,5 @@
 import nodemailer from "nodemailer";
+import { buildAssetControllerResponsibilityPdfAttachment } from "./generateBulkAssetInventoryPdf.js";
 
 function listHtml(title, items, mapLine) {
     if (!items || items.length === 0) {
@@ -19,6 +20,8 @@ export const sendResponsibilityApprovalEmail = async ({
     companyName,
     category,
     requestId,
+    /** Prefer this for dashboard deep links — matches `id` on `GET .../dashboard/user-stats` items (e.g. Flowchart or Company _id). */
+    dashboardDeepLinkId = null,
     unassignedAssets = [],
     emailData = null
 }) => {
@@ -49,7 +52,8 @@ export const sendResponsibilityApprovalEmail = async ({
 
         const subject = `New Responsibility Assigned: ${category} for ${companyName}`;
         const frontendUrl = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/'/g, "");
-        const buttonUrl = `${frontendUrl}/Dashboard?requestId=${requestId}`;
+        const dashId = dashboardDeepLinkId != null ? String(dashboardDeepLinkId) : String(requestId || "");
+        const buttonUrl = `${frontendUrl}/Dashboard?requestId=${encodeURIComponent(dashId)}`;
         const flowchartUrl = `${frontendUrl}/Settings/FlowChart`;
 
         const legacyUnassigned = listHtml(
@@ -100,10 +104,10 @@ export const sendResponsibilityApprovalEmail = async ({
                 roleSpecificHtml += `
                     <div style="margin-top:20px;padding:18px;background:#fffbeb;border-radius:8px;border:1px solid #fcd34d;">
                         <p style="font-weight:bold;margin:0 0 10px 0;color:#92400e;">Asset Controller — inventory preview</p>
-                        <p style="font-size:13px;margin:0;color:#78350f;">Accessories are listed under each main asset (unassigned pool vs parking are separate).</p>
+                        <p style="font-size:13px;margin:0;color:#78350f;">Accessories are listed under each main asset. A PDF with the full list is attached.</p>
                     </div>
-                    ${assetBlock("Unassigned / pool", ed.unassignedAssets || [], true)}
                     ${assetBlock("Parking / On Leave", ed.parkingAssets || [], false)}
+                    ${assetBlock("Unassigned / pool", ed.unassignedAssets || [], true)}
                 `;
             }
         }
@@ -133,7 +137,7 @@ export const sendResponsibilityApprovalEmail = async ({
                         </a>
                     </div>
                     <p style="text-align:center;font-size:13px;">
-                        <a href="${flowchartUrl}" style="color:#5174FF;">Open Flowchart & position overview</a>
+                        <a href="${flowchartUrl}" style="color:#5174FF;">Open Flowchart (inventory &amp; position overview)</a>
                     </p>
                 </div>
                 <div style="background-color: #f8fafc; padding: 20px; text-align: center; font-size: 12px; color: #64748b; border-top: 1px solid #e2e8f0;">
@@ -142,11 +146,28 @@ export const sendResponsibilityApprovalEmail = async ({
             </div>
         `;
 
+        const attachments = [];
+        if (ed) {
+            const catKey = (ed.categoryKey || "").toLowerCase();
+            if (catKey === "assetcontroller") {
+                try {
+                    const pdfAtt = await buildAssetControllerResponsibilityPdfAttachment(
+                        ed.unassignedAssets || [],
+                        ed.parkingAssets || []
+                    );
+                    attachments.push(...pdfAtt);
+                } catch (pdfErr) {
+                    console.error("[Responsibility Email] Asset controller PDF attachment failed:", pdfErr?.message || pdfErr);
+                }
+            }
+        }
+
         await transporter.sendMail({
             from: `"VeRP System" <${emailUser}>`,
             to: recipientEmail,
             subject,
-            html
+            html,
+            ...(attachments.length > 0 ? { attachments } : {})
         });
 
         console.log(`[Email Success] Responsibility approval email sent to ${recipientEmail}`);
