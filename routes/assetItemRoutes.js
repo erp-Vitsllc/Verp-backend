@@ -13,15 +13,15 @@ import { isUserAdministrator } from '../services/permissionService.js';
 
 const normEmp = (s) => (s || '').toString().toLowerCase().replace(/\s+/g, '');
 
-/** JWT / env system admin / Flowchart admincontroller — aligned with assetItemController.resolveIsPortalAdmin. */
+/** JWT / env system admin — aligned with asset controllers (not only isAdmin boolean). */
 const isAdminForAssetRoutes = async (user) => {
     if (!user) return false;
     if (user.isAdmin === true || user.role === 'Admin' || user.role === 'ROOT') return true;
     if (user.id || user._id) {
         const uid = user.id || user._id;
-        if (await isUserAdministrator(uid)) return true;
+        return await isUserAdministrator(uid);
     }
-    return await isUserInFlowchart(user, 'admincontroller').catch(() => false);
+    return false;
 };
 
 /** Flowchart row match OR same employee as getDepartmentHOD('assetcontroller') (designated AC). */

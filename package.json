@@ -28,7 +28,7 @@
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^8.20.0",
     "multer": "^2.0.2",
-    "nodemailer": "^7.0.11",
+    "nodemailer": "^8.0.4",
     "pdf-parse": "^2.4.5",
     "puppeteer": "^24.37.1"
   },

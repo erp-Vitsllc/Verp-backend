@@ -59,25 +59,10 @@ import {
 
 const generateAccessoryCatalogId = generateVegaAccessoryCatalogId;
 
-/**
- * Portal "Admin" for asset permissions: DB/JWT admin flags, env system-admin username,
- * or Flowchart `admincontroller` (org Admin slot). Aligned with assetItemRoutes `isAdminForAssetRoutes`.
- */
-const resolveIsPortalAdmin = async (reqUser) => {
-    if (!reqUser) return false;
-    if (reqUser.isAdmin === true || reqUser.role === 'Admin' || reqUser.role === 'ROOT') {
-        return true;
-    }
-    const uid = reqUser.id || reqUser._id;
-    if (uid) {
-        const sys = await isUserAdministrator(uid).catch(() => false);
-        if (sys) return true;
-    }
-    return await isUserInFlowchart(reqUser, 'admincontroller').catch(() => false);
-};
-
 async function buildPendingAccessoryVisibilityCtx(req) {
-    const isPortalAdminWide = await resolveIsPortalAdmin(req.user);
+    const isSysAdmin = await isUserAdministrator(req.user?.id);
+    const isPortalAdmin =
+        req.user?.isAdmin === true || req.user?.role === 'Admin' || req.user?.role === 'ROOT';
     const isAssetController = await isUserInFlowchart(req.user, 'assetcontroller').catch(() => false);
     const assetController = await getDepartmentHOD('assetcontroller');
 
@@ -104,7 +89,7 @@ async function buildPendingAccessoryVisibilityCtx(req) {
         currentEmpId &&
         assetController._id.toString() === currentEmpId
     );
-    const canSeeAllPending = isPortalAdminWide || isAssetController || isDeptAssetController;
+    const canSeeAllPending = isSysAdmin || isPortalAdmin || isAssetController || isDeptAssetController;
     return {
         canSeeAllPending,
         currentEmpId: currentEmpId || null,
@@ -311,10 +296,8 @@ const notifyEmployeesGroupedControllerBulkDirect = async (req, employeeSnapshots
 // ─────────────────────────────────────────────────────────────────────────────
 const getActorPermissionFlagsForAsset = async (reqUser, asset) => {
     const currentEmpObjectId = reqUser?.employeeObjectId?.toString?.() || null;
-    const [isAdmin, isAssetController] = await Promise.all([
-        resolveIsPortalAdmin(reqUser),
-        isUserInFlowchart(reqUser, 'assetcontroller').catch(() => false)
-    ]);
+    const isAdmin = reqUser?.isAdmin === true || reqUser?.role === 'Admin' || reqUser?.role === 'ROOT';
+    const isAssetController = await isUserInFlowchart(reqUser, 'assetcontroller').catch(() => false);
 
     const toIdString = (v) => {
         if (!v) return null;
@@ -2225,7 +2208,7 @@ export const assignAssetItem = async (req, res) => {
         const actingEmpObjectId = req.user.employeeObjectId?.toString?.() || null;
         const actingEmployeeId = req.user.employeeId ? norm(req.user.employeeId) : '';
 
-        const isAdmin = await resolveIsPortalAdmin(req.user);
+        const isAdmin = req.user.isAdmin || req.user.role === 'Admin' || req.user.role === 'ROOT';
 
         const assignedToId =
             (item.assignedTo?._id ? item.assignedTo._id : item.assignedTo)?.toString?.() || (item.assignedTo?.toString?.() || null);
@@ -3845,14 +3828,15 @@ export const returnAssetItem = async (req, res) => {
             return res.status(404).json({ message: 'Asset not found' });
         }
 
-        const isPortalAdmin = await resolveIsPortalAdmin(req.user);
+        const isJwtAdmin = req.user.isAdmin === true || req.user.role === 'Admin' || req.user.role === 'ROOT';
+        const isSysAdmin = await isUserAdministrator(req.user?.id);
         const isAcFlow = await isUserInFlowchart(req.user, 'assetcontroller');
         const hodAc = await getDepartmentHOD('assetcontroller');
         const matchesDeptAc =
             !!hodAc?._id &&
             req.user?.employeeObjectId &&
             hodAc._id.toString() === req.user.employeeObjectId.toString();
-        const isElevatedReturn = isPortalAdmin || isAcFlow || matchesDeptAc;
+        const isElevatedReturn = isJwtAdmin || isSysAdmin || isAcFlow || matchesDeptAc;
 
         let currentEmpId = req.user?.employeeObjectId?.toString();
         if (!currentEmpId && req.user?.employeeId) {
@@ -5301,7 +5285,6 @@ export const requestAssetAction = async (req, res) => {
         }
 
         // Store pending request in asset
-        const statusBeforePendingRequest = asset.status;
         asset.pendingAction = pendingActionType;
         asset.pendingActionDetails = {
             reason: reason,
@@ -5309,8 +5292,7 @@ export const requestAssetAction = async (req, res) => {
             fineData: fineData || null, // Store full fine payload
             duration: leaveDays || null, // Store duration for Leave action
             leaveDuration: leaveDays || null, // Alias for clarity
-            originalActionType,
-            preRequestStatus: statusBeforePendingRequest
+            originalActionType
         };
 
         // Always route to Asset Controller - no reportee approval
@@ -5592,7 +5574,6 @@ export const bulkRequestAssetAction = async (req, res) => {
                 // Store pending request in asset
                 asset.pendingAction = actionType;
                 const leaveDur = leaveDays;
-                const statusBeforeBulkPending = asset.status;
                 asset.pendingActionDetails = {
                     reason: reason,
                     attachment: fileUrl,
@@ -5601,8 +5582,7 @@ export const bulkRequestAssetAction = async (req, res) => {
                     fineData: null,
                     duration: leaveDur || null,
                     leaveDuration: leaveDur || null,
-                    originalActionType,
-                    preRequestStatus: statusBeforeBulkPending
+                    originalActionType
                 };
 
                 // actionRequiredBy references EmployeeBasic, so use EmployeeBasic._id
@@ -5695,15 +5675,6 @@ export const bulkRequestAssetAction = async (req, res) => {
         const msg = process.env.NODE_ENV === 'development' ? (error.message || 'Internal server error') : 'Internal server error';
         res.status(500).json({ message: msg });
     }
-};
-
-/** Restore status after approver rejects/cancels a pending action (company assets often have no assignedTo). */
-const resolveAssetStatusAfterPendingActionRejection = (asset) => {
-    const stored = asset.pendingActionDetails?.preRequestStatus;
-    if (stored && String(stored).trim()) return stored;
-    if (asset.assignedTo) return 'Assigned';
-    if (asset.assignedToType === 'Company' && (asset.assignedCompany?._id || asset.assignedCompany)) return 'Assigned';
-    return 'Unassigned';
 };
 
 // @desc    Handle Asset Action Approval/Rejection
@@ -6078,7 +6049,7 @@ export const handleAssetActionApproval = async (req, res) => {
                         for (const rid of rejectedFromBulk) {
                             const rejAsset = byIdRej.get(String(rid));
                             if (!rejAsset) continue;
-                            rejAsset.status = resolveAssetStatusAfterPendingActionRejection(rejAsset);
+                            rejAsset.status = rejAsset.assignedTo ? 'Assigned' : 'Unassigned';
                             rejAsset.pendingAction = null;
                             rejAsset.pendingActionDetails = null;
                             rejAsset.actionRequiredBy = null;
@@ -6622,7 +6593,7 @@ export const handleAssetActionApproval = async (req, res) => {
                     const currentAsset = byId.get(rid);
                     if (!currentAsset) continue;
 
-                    currentAsset.status = resolveAssetStatusAfterPendingActionRejection(currentAsset);
+                    currentAsset.status = currentAsset.assignedTo ? 'Assigned' : 'Unassigned';
                     currentAsset.pendingAction = null;
                     currentAsset.pendingActionDetails = null;
                     currentAsset.actionRequiredBy = null;
@@ -6665,7 +6636,12 @@ export const handleAssetActionApproval = async (req, res) => {
                 });
             }
 
-            asset.status = resolveAssetStatusAfterPendingActionRejection(asset);
+            if (actionType === 'Return Asset') {
+                // Return request rejected: restore to Assigned (assignee remains the same).
+                asset.status = asset.assignedTo ? 'Assigned' : 'Unassigned';
+            } else {
+                asset.status = asset.assignedTo ? 'Assigned' : 'Unassigned';
+            }
             asset.pendingAction = null;
             asset.pendingActionDetails = null;
             asset.actionRequiredBy = null;
@@ -6846,8 +6822,9 @@ export const requestAccessoryAction = async (req, res) => {
                 ? (typeof asset.assignedTo === 'object' ? asset.assignedTo._id?.toString() : String(asset.assignedTo))
                 : null;
             const isAssignee = !!(assigneeId && currentEmpId && assigneeId === currentEmpId);
+            const isAdm = req.user.isAdmin === true || req.user.role === 'Admin' || req.user.role === 'ROOT';
             const isAC = await isUserInFlowchart(req.user, 'assetcontroller').catch(() => false);
-            if (!isAssignee && !isAC && !actorFlags.isAdmin) {
+            if (!isAssignee && !isAC && !isAdm) {
                 return res.status(403).json({ message: 'Access denied. Only assigned user, Asset Controller, or Admin can request unattach.' });
             }
         } else if (!actorFlags.canAct) {
@@ -6874,11 +6851,8 @@ export const requestAccessoryAction = async (req, res) => {
             }
         }
 
-        const isControllerOrAdmin =
-            actorFlags.isAdmin ||
-            actorFlags.isAssetController ||
-            (assetController?._id &&
-                req.user.employeeObjectId?.toString() === assetController._id.toString());
+        const requesterId = (req.user.employeeObjectId || req.user._id).toString();
+        const isControllerOrAdmin = requesterId === assetController?._id?.toString() || req.user.role === 'Admin' || req.user.role === 'ROOT';
 
         // Asset Controller/Admin can directly unattach without approval workflow.
         if (actionType === 'Unattach' && isControllerOrAdmin) {
