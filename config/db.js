@@ -1,6 +1,7 @@
 import mongoose from "mongoose";
 import Group from "../models/Group.js";
 import { getAllPermissions } from "../services/permissionService.js";
+import { ensureAssetCategoryIndexes } from "../utils/ensureAssetCategoryIndexes.js";
 
 export const connectDB = async () => {
     try {
@@ -11,6 +12,8 @@ export const connectDB = async () => {
             connectTimeoutMS: 10000, // Give up initial connection after 10 seconds
         });
         console.log("MongoDB Connected Successfully");
+
+        await ensureAssetCategoryIndexes();
 
         // Initialize default Admin group
         await initializeAdminGroup();

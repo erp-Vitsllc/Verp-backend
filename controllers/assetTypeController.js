@@ -8,25 +8,86 @@ import { isUserAdministrator } from '../services/permissionService.js';
 import mongoose from 'mongoose';
 import { uploadDocumentToS3, getSignedFileUrl } from '../utils/s3Upload.js';
 import { sendAssetCreationApprovalEmail } from '../utils/sendAssetCreationApprovalEmail.js';
-import { buildBulkAssetInventoryPdfAttachment } from '../utils/generateBulkAssetInventoryPdf.js';
+import { buildBulkAssetInventoryPdfAttachment, requireBulkAssetInventoryPdfAttachment } from '../utils/generateBulkAssetInventoryPdf.js';
 import { sendAssetCreatedByAdminInfoEmail } from '../utils/sendAssetCreationDecisionEmail.js';
 import { sendAssetActionApprovalEmail } from '../utils/sendAssetActionApprovalEmail.js';
 import { sendAssignedEmployeeActionEmail } from '../utils/sendAssignedEmployeeActionEmail.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import User from '../models/User.js';
 import { resolveAssetControllerEmployee, getAssetRequesterDisplayName } from '../utils/assetApprovalHelpers.js';
+import {
+    notifyAdminDeletedAssetTypeOrCategory,
+    notifyAdminDeletedWholeAsset,
+    notifyAdminRemovedAccessoriesFromAssignedAsset
+} from '../utils/sendAdminDeletionNotificationEmails.js';
+import {
+    syncAllAccessoryInstancesForAsset,
+    markCatalogInstancesDetachedFromAsset
+} from '../utils/syncAssetAccessoryCatalog.js';
+import { cleanupDashboardActionsForDeletedAsset } from '../utils/cleanupAssetDashboardActions.js';
+
+/** Collapse duplicate accessory rows in a PUT payload (match by Mongo subdoc _id or accessoryId, not name). */
+function dedupeAccessoryPayloadById(arr) {
+    if (!Array.isArray(arr)) return arr;
+    const map = new Map();
+    let n = 0;
+    for (const acc of arr) {
+        const k =
+            acc._id != null && acc._id !== ''
+                ? String(acc._id)
+                : acc.accessoryId != null && acc.accessoryId !== ''
+                  ? String(acc.accessoryId)
+                  : `__new_${n++}`;
+        map.set(k, acc);
+    }
+    return Array.from(map.values());
+}
 
 const isAdminUser = async (reqUser) => {
     if (!reqUser) return false;
     if (reqUser.isAdmin === true || reqUser.role === 'Admin' || reqUser.role === 'ROOT') return true;
-    return !!(await isUserAdministrator(reqUser?.id));
+    const uid = reqUser.id || reqUser._id?.toString?.();
+    return uid ? !!(await isUserAdministrator(uid)) : false;
 };
 
 // @desc    Role flags for asset type/category UI (GET /api/AssetType/meta/role)
 export const getAssetTypeRoleMeta = async (req, res) => {
     try {
         const isAdmin = await isAdminUser(req.user);
-        const isAssetController = await isUserInFlowchart(req.user, 'assetcontroller').catch(() => false);
+        let isAssetController = await isUserInFlowchart(req.user, 'assetcontroller').catch(() => false);
+        const norm = (s) => (s || '').toString().toLowerCase().replace(/\s+/g, '');
+        let currentEmpObjectId = req.user?.employeeObjectId?.toString?.() || null;
+        if (!currentEmpObjectId && req.user?.employeeId) {
+            const userNorm = norm(req.user.employeeId);
+            if (userNorm) {
+                const empRow = await EmployeeBasic.findOne({
+                    $expr: {
+                        $eq: [
+                            {
+                                $replaceAll: {
+                                    input: { $toLower: { $ifNull: ['$employeeId', ''] } },
+                                    find: ' ',
+                                    replacement: ''
+                                }
+                            },
+                            userNorm
+                        ]
+                    }
+                })
+                    .select('_id')
+                    .lean();
+                if (empRow?._id) currentEmpObjectId = empRow._id.toString();
+            }
+        }
+        const acHodMeta = await getDepartmentHOD('assetcontroller');
+        let isDeptAssetControllerMeta = false;
+        if (acHodMeta?._id && currentEmpObjectId) {
+            isDeptAssetControllerMeta = acHodMeta._id.toString() === currentEmpObjectId;
+        }
+        if (!isDeptAssetControllerMeta && acHodMeta?.employeeId && req.user?.employeeId) {
+            isDeptAssetControllerMeta = norm(req.user.employeeId) === norm(acHodMeta.employeeId);
+        }
+        isAssetController = isAssetController || isDeptAssetControllerMeta;
         res.status(200).json({ isAdmin, isAssetController });
     } catch (error) {
         console.error('getAssetTypeRoleMeta:', error);
@@ -84,7 +145,8 @@ export const createAssetType = async (req, res) => {
         let {
             mode, category, type, name, assetValue, purchaseDate, quantity, warranty, warrantyYears, warrantyAttachment, invoiceNumber, imagePreview, description, invoiceFile, accessories,
             vehicleCode, plateNumber, modelYear, currentKilometer, registrationExpiryDate,
-            insuranceExpiryDate, oilChangeDate, gearOilDueDate, lastServiceDate, nextServiceDate
+            insuranceExpiryDate, oilChangeDate, gearOilDueDate, lastServiceDate, nextServiceDate,
+            creationIntent
         } = req.body;
 
         // UAE Plate Validation if provided (usually for vehicles)
@@ -105,8 +167,14 @@ export const createAssetType = async (req, res) => {
             if (!category) return res.status(400).json({ message: 'Category name is required' });
             if (!type) return res.status(400).json({ message: 'Parent Type is required for categories' });
 
-            const parentType = await AssetType.findOne({ name: type });
+            const parentType = await AssetType.findOne({ name: type, isActive: true });
             if (!parentType) return res.status(404).json({ message: 'Selected Type not found' });
+
+            const nameTrim = String(category).trim();
+            const existingActive = await AssetCategory.findOne({ name: nameTrim, isActive: true });
+            if (existingActive) {
+                return res.status(400).json({ message: 'A category with this name already exists.' });
+            }
 
             // Handle Image Upload
             let imageS3Key = imagePreview;
@@ -122,7 +190,7 @@ export const createAssetType = async (req, res) => {
             const categoryId = await generateGenericId(AssetCategory, 'asset-cat-', 'categoryId');
             const newCategory = await AssetCategory.create({
                 categoryId,
-                name: category,
+                name: nameTrim,
                 typeId: parentType._id,
                 imagePreview: imageS3Key
             });
@@ -130,6 +198,12 @@ export const createAssetType = async (req, res) => {
 
         } else if (mode === 'type') {
             if (!type) return res.status(400).json({ message: 'Type name is required' });
+
+            const typeNameTrim = String(type).trim();
+            const existingType = await AssetType.findOne({ name: typeNameTrim, isActive: true });
+            if (existingType) {
+                return res.status(400).json({ message: 'An asset type with this name already exists.' });
+            }
 
             // Handle Image Upload
             let imageS3Key = imagePreview;
@@ -145,7 +219,7 @@ export const createAssetType = async (req, res) => {
             const typeId = await generateGenericId(AssetType, 'asset-type-', 'typeId');
             const newType = await AssetType.create({
                 typeId,
-                name: type,
+                name: typeNameTrim,
                 imagePreview: imageS3Key,
                 description
             });
@@ -159,7 +233,7 @@ export const createAssetType = async (req, res) => {
             }
 
             // Find type or auto-create if missing
-            let t = await AssetType.findOne({ name: type });
+            let t = await AssetType.findOne({ name: type, isActive: true });
             if (!t) {
                 // Auto-create type if not found (e.g. for Car/Van/Pickup)
                 const typeId = await generateGenericId(AssetType, 'asset-type-', 'typeId');
@@ -173,7 +247,7 @@ export const createAssetType = async (req, res) => {
             // Find category provided in request
             let catId = null;
             if (category) {
-                const cat = await AssetCategory.findOne({ name: category });
+                const cat = await AssetCategory.findOne({ name: category, isActive: true });
                 if (cat) catId = cat._id;
             }
 
@@ -198,15 +272,50 @@ export const createAssetType = async (req, res) => {
             let initialStatus = 'Draft';
             let actionRequiredBy = null;
 
-            const isDirectUnassignedCreate = isJwtAdmin || isSysAdmin || isAssetController;
+            const isPrivilegedCreator = isJwtAdmin || isSysAdmin || isAssetController;
 
-            if (isDirectUnassignedCreate) {
-                initialStatus = 'Unassigned';
-                console.log(`[Asset creation (Bulk/Type)] Created directly as Unassigned by ${isJwtAdmin || isSysAdmin ? 'Admin' : 'Asset Controller'}`);
+            if (isPrivilegedCreator) {
+                if (creationIntent === 'saveDraft') {
+                    initialStatus = 'Draft';
+                    actionRequiredBy = null;
+                    console.log(
+                        `[Asset creation] Draft saved by privileged user (${isJwtAdmin || isSysAdmin ? 'Admin' : 'Asset Controller'})`
+                    );
+                } else if (creationIntent === 'submitForApproval') {
+                    initialStatus = 'Submitted for Approval';
+                    actionRequiredBy = assetController._id;
+                    console.log(
+                        `[Asset creation] Submitted for approval by privileged user → Asset Controller (${req.user.employeeId || ''})`
+                    );
+                } else if (
+                    creationIntent === 'createUnassigned' ||
+                    creationIntent === undefined ||
+                    creationIntent === null ||
+                    creationIntent === ''
+                ) {
+                    initialStatus = 'Unassigned';
+                    actionRequiredBy = null;
+                    console.log(
+                        `[Asset creation] Created as Unassigned by privileged user (${isJwtAdmin || isSysAdmin ? 'Admin' : 'Asset Controller'})`
+                    );
+                } else {
+                    return res.status(400).json({
+                        message:
+                            'Invalid creationIntent. Use saveDraft, submitForApproval, or createUnassigned (omit for direct Unassigned).'
+                    });
+                }
             } else if (assetController) {
-                // Regular creator: keep editable Draft until they explicitly submit for approval
-                actionRequiredBy = assetController._id;
-                console.log(`[Asset creation (Bulk/Type)] Created as Draft by regular user ${req.user.employeeId}. Approval requested to asset controller.`);
+                // Regular creator: saveDraft = Draft with no approver/email; submitForApproval = new status + AC workflow
+                const intent = creationIntent === 'saveDraft' ? 'saveDraft' : 'submitForApproval';
+                if (intent === 'saveDraft') {
+                    initialStatus = 'Draft';
+                    actionRequiredBy = null;
+                    console.log(`[Asset creation (Bulk/Type)] Saved as Draft (no AC notification) by ${req.user.employeeId}`);
+                } else {
+                    initialStatus = 'Submitted for Approval';
+                    actionRequiredBy = assetController._id;
+                    console.log(`[Asset creation (Bulk/Type)] Submitted for approval by ${req.user.employeeId} → Asset Controller`);
+                }
             } else {
                 // No asset controller defined & user is not admin
                 return res.status(403).json({
@@ -288,6 +397,12 @@ export const createAssetType = async (req, res) => {
                 const newAsset = await AssetItem.create(assetData);
                 createdAssets.push(newAsset.toObject());
 
+                try {
+                    await syncAllAccessoryInstancesForAsset(newAsset);
+                } catch (syncErr) {
+                    console.error('[createAssetType accessory catalog sync]', syncErr?.message || syncErr);
+                }
+
                 // Create asset creation history entry
                 await AssetHistory.create({
                     assetId: newAsset._id,
@@ -307,7 +422,7 @@ export const createAssetType = async (req, res) => {
                 });
 
                 // If admin created directly as Unassigned, notify asset controller (info email).
-                if (isDirectUnassignedCreate && (isJwtAdmin || isSysAdmin) && assetController?._id) {
+                if (initialStatus === 'Unassigned' && (isJwtAdmin || isSysAdmin) && assetController?._id) {
                     await sendAssetCreatedByAdminInfoEmail({
                         asset: newAsset,
                         recipient: assetController,
@@ -316,8 +431,8 @@ export const createAssetType = async (req, res) => {
                 }
             }
 
-            // Draft creation approval (single or bulk): create one dashboard request and one email.
-            if (!isDirectUnassignedCreate && actionRequiredBy && assetController?._id && createdAssets.length > 0) {
+            // Submitted for approval (single or bulk): create one dashboard request and one email. (Draft / Unassigned skip this.)
+            if (actionRequiredBy && assetController?._id && createdAssets.length > 0) {
                 const first = createdAssets[0];
                 const createdObjectIds = createdAssets.map((a) => a._id?.toString()).filter(Boolean);
                 const createdCodes = createdAssets.map((a) => a.assetId).filter(Boolean);
@@ -348,10 +463,33 @@ export const createAssetType = async (req, res) => {
                 );
 
                 let creationBulkAttachments = [];
-                try {
-                    creationBulkAttachments = await buildBulkAssetInventoryPdfAttachment(req, createdObjectIds, 'asset-creation-draft-inventory');
-                } catch (pdfErr) {
-                    console.error('[createAssetType] Bulk creation PDF attachment failed (non-fatal):', pdfErr?.message || pdfErr);
+                if (isBulkCreation) {
+                    try {
+                        creationBulkAttachments = await requireBulkAssetInventoryPdfAttachment(
+                            req,
+                            createdObjectIds,
+                            'asset-creation-draft-inventory'
+                        );
+                    } catch (pdfErr) {
+                        console.error('[createAssetType] Bulk creation PDF required:', pdfErr?.message || pdfErr);
+                        return res.status(503).json({
+                            message:
+                                pdfErr?.message ||
+                                'Assets were created but the asset list PDF could not be generated. Notify Asset Controller manually from the asset list.',
+                            createdAssetIds: createdObjectIds,
+                            createdCount: createdAssets.length
+                        });
+                    }
+                } else {
+                    try {
+                        creationBulkAttachments = await buildBulkAssetInventoryPdfAttachment(
+                            req,
+                            [first._id.toString()],
+                            'asset-creation-draft-inventory'
+                        );
+                    } catch (pdfErr) {
+                        console.error('[createAssetType] PDF attachment failed (non-fatal):', pdfErr?.message || pdfErr);
+                    }
                 }
                 await sendAssetCreationApprovalEmail({
                     asset: first,
@@ -406,19 +544,16 @@ export const getAssetTypes = async (req, res) => {
         const categories = await AssetCategory.find({ isActive: true }).populate('typeId');
         const types = await AssetType.find({ isActive: true });
 
-        // Visibility: Admin sees all; Asset Controller sees all (Flowchart, same as approve-creation); others only their own
-        const isAdmin = await isUserAdministrator(req.user?.id);
-        const isAssetController = await isUserInFlowchart(req.user, 'assetcontroller');
-
+        // Draft assets are visible only to the creating user (User id), for every role.
+        const uid = req.user?._id || req.user?.id;
         const assetQuery = {};
-        if (!isAdmin && !isAssetController && req.user?.id) {
-            // Visibility rule:
-            // - Regular users can see all NON-Draft assets (including Unassigned)
-            // - Draft assets are visible only to their creator
+        if (uid && mongoose.Types.ObjectId.isValid(String(uid))) {
             assetQuery.$or = [
                 { status: { $ne: 'Draft' } },
-                { createdBy: new mongoose.Types.ObjectId(req.user.id) }
+                { createdBy: new mongoose.Types.ObjectId(String(uid)) }
             ];
+        } else {
+            assetQuery.status = { $ne: 'Draft' };
         }
 
         const assets = await AssetItem.find(assetQuery)
@@ -553,7 +688,7 @@ export const getAssetTypeById = async (req, res) => {
     }
 };
 
-// @desc    Delete asset type (soft delete)
+// @desc    Delete asset type / category (hard delete when no assets reference them)
 // @route   DELETE /api/AssetType/:id
 // @access  Private
 export const deleteAssetType = async (req, res) => {
@@ -575,8 +710,14 @@ export const deleteAssetType = async (req, res) => {
                     message: `Cannot delete category: ${assetCount} asset(s) still use this category.`
                 });
             }
-            category.isActive = false;
-            await category.save();
+            const categoryName = category.name;
+            const performedBy = req.user?.name || req.user?.employeeId || 'Administrator';
+            await AssetCategory.findByIdAndDelete(id);
+            void notifyAdminDeletedAssetTypeOrCategory({
+                kind: 'Category',
+                name: categoryName,
+                performedBy
+            }).catch((e) => console.error('[notify category delete]', e?.message || e));
             return res.status(200).json({ message: 'Category deleted successfully' });
         }
 
@@ -591,22 +732,28 @@ export const deleteAssetType = async (req, res) => {
                     message: `Cannot delete type: ${assetCount} asset(s) still use this type.`
                 });
             }
-            assetType.isActive = false;
-            await assetType.save();
+            const typeName = assetType.name;
+            const performedBy = req.user?.name || req.user?.employeeId || 'Administrator';
+            await AssetType.findByIdAndDelete(id);
+            void notifyAdminDeletedAssetTypeOrCategory({
+                kind: 'Type',
+                name: typeName,
+                performedBy
+            }).catch((e) => console.error('[notify type delete]', e?.message || e));
             return res.status(200).json({ message: 'Type deleted successfully' });
         }
 
-        // Try AssetItem
+        // Try AssetItem (same ID path as types/categories — list UI often calls DELETE /AssetType/:id)
         const item = await AssetItem.findById(id);
         if (item) {
-            const isAdmin = req.user?.isAdmin === true || req.user?.role === 'Admin' || req.user?.role === 'ROOT';
+            const isAdmin = await isAdminUser(req.user);
             const isAssetController = await isUserInFlowchart(req.user, 'assetcontroller');
             const currentUserId = req.user?._id?.toString() || req.user?.id?.toString();
             const isCreator = item.createdBy?.toString() === currentUserId;
             const isEditableDraft = item.status === 'Draft' && !item.actionRequiredBy;
 
             if (!isAdmin) {
-                // Creator can delete only before submission
+                // Creator can delete only a save-only draft (not yet submitted for approval)
                 if (!(isCreator && isEditableDraft)) {
                     // Explicit business rule: controller cannot delete after approval
                     if (isAssetController && item.status === 'Unassigned') {
@@ -616,7 +763,39 @@ export const deleteAssetType = async (req, res) => {
                 }
             }
 
+            const typeIdForCounts = item.typeId;
+
+            if (isAdmin) {
+                const itemForEmail = await AssetItem.findById(id)
+                    .populate({
+                        path: 'assignedTo',
+                        select: 'firstName lastName employeeId companyEmail workEmail personalEmail email primaryReportee',
+                        populate: {
+                            path: 'primaryReportee',
+                            select: 'firstName lastName companyEmail workEmail personalEmail email'
+                        }
+                    })
+                    .populate('assignedCompany', 'name companyId')
+                    .lean();
+                if (itemForEmail) {
+                    void notifyAdminDeletedWholeAsset(req, itemForEmail).catch((e) =>
+                        console.error('[notify asset delete]', e?.message || e)
+                    );
+                }
+            }
+
+            await cleanupDashboardActionsForDeletedAsset(item._id);
+            await AssetHistory.deleteMany({ assetId: item._id });
             await AssetItem.findByIdAndDelete(id);
+
+            if (typeIdForCounts) {
+                const total = await AssetItem.countDocuments({ typeId: typeIdForCounts });
+                const assigned = await AssetItem.countDocuments({ typeId: typeIdForCounts, status: 'Assigned' });
+                const pending = await AssetItem.countDocuments({ typeId: typeIdForCounts, status: 'Pending' });
+                const unassigned = total - assigned - pending;
+                await AssetType.findByIdAndUpdate(typeIdForCounts, { total, assigned, unassigned });
+            }
+
             return res.status(200).json({ message: 'Asset deleted' });
         }
 
@@ -668,7 +847,18 @@ export const updateAssetItem = async (req, res) => {
                 });
             }
             const name = updates.category ?? updates.name;
-            if (name !== undefined && String(name).trim()) categoryDoc.name = String(name).trim();
+            if (name !== undefined && String(name).trim()) {
+                const n = String(name).trim();
+                const clash = await AssetCategory.findOne({
+                    name: n,
+                    isActive: true,
+                    _id: { $ne: categoryDoc._id }
+                });
+                if (clash) {
+                    return res.status(400).json({ message: 'A category with this name already exists.' });
+                }
+                categoryDoc.name = n;
+            }
             const img = updates.imagePreview || updates.photo;
             if (img && typeof img === 'string' && img.startsWith('data:image')) {
                 try {
@@ -679,7 +869,7 @@ export const updateAssetItem = async (req, res) => {
                 }
             }
             if (updates.type && typeof updates.type === 'string') {
-                const parentType = await AssetType.findOne({ name: updates.type.trim() });
+                const parentType = await AssetType.findOne({ name: updates.type.trim(), isActive: true });
                 if (parentType) categoryDoc.typeId = parentType._id;
             }
             await categoryDoc.save();
@@ -723,7 +913,10 @@ export const updateAssetItem = async (req, res) => {
         // - After approval flow: keep assigned-asset edit rules for assignee/assigner/delegate
         const currentUserId = req.user._id?.toString() || req.user.id?.toString();
         const isCreator = asset.createdBy?.toString() === currentUserId;
+        const isSubmittedForApproval = asset.status === 'Submitted for Approval';
         const isAwaitingCreationApproval = asset.status === 'Draft' || asset.status === 'Pending';
+        const isCreationRejected = asset.status === 'Rejected';
+        const initialAssetStatus = asset.status;
         const norm = (s) => (s || '').toString().toLowerCase().replace(/\s+/g, '');
         let currentEmpObjectId = req.user.employeeObjectId?.toString?.() || null;
         if (!currentEmpObjectId && req.user.employeeId) {
@@ -788,39 +981,119 @@ export const updateAssetItem = async (req, res) => {
 
         const isAssignedEditAllowed = isAssignedUser || isAssigner || isPrimaryReporteeDelegate; // assigned employee/assigner/delegated reportee can edit
 
-        if (isAwaitingCreationApproval) {
-            if (!isCreator && !isAdmin && !isAssetController) {
+        const acHodForAsset = await getDepartmentHOD('assetcontroller');
+        let isDeptAssetController = false;
+        if (acHodForAsset?._id && currentEmpObjectId) {
+            isDeptAssetController = acHodForAsset._id.toString() === currentEmpObjectId;
+        }
+        if (!isDeptAssetController && acHodForAsset?.employeeId && req.user?.employeeId) {
+            isDeptAssetController = norm(req.user.employeeId) === norm(acHodForAsset.employeeId);
+        }
+        const isAssetControllerEffective = isAssetController || isDeptAssetController;
+
+        if (isSubmittedForApproval) {
+            if (isCreator && !isAdmin) {
+                return res.status(403).json({
+                    message: 'This asset is awaiting approval. The creator cannot edit until it is approved or rejected.'
+                });
+            }
+            if (!isAdmin && !isAssetControllerEffective) {
+                return res.status(403).json({
+                    message: 'This asset is awaiting approval. Only Asset Controller or Admin can edit.'
+                });
+            }
+        } else if (isAwaitingCreationApproval) {
+            if (!isCreator && !isAdmin && !isAssetControllerEffective) {
                 return res.status(403).json({ message: "Only creator, Asset Controller, or Admin can edit before creation approval." });
             }
-        } else if (!isAdmin && !isAssetController && !isAssignedEditAllowed) {
+        } else if (isCreationRejected) {
+            if (!isCreator && !isAdmin && !isAssetControllerEffective) {
+                return res.status(403).json({
+                    message: 'Only the creator, Asset Controller, or Admin can edit a rejected asset.'
+                });
+            }
+        } else if (!isAdmin && !isAssetControllerEffective && !isAssignedEditAllowed) {
             return res.status(403).json({ message: "Access denied. Only Asset Controller/Admin or assigned owner/delegate can edit this asset." });
         }
+
+        /** @type {{ name?: string, accessoryId?: string }[] | null} */
+        let adminRemovedAccessoriesForNotify = null;
+        /** @type {{ name?: string, accessoryId?: string }[] | null} */
+        let detachedAccessoryRefsForCatalog = null;
+
+        const creatorDraftOrRejected =
+            isCreator &&
+            !isAdmin &&
+            !isAssetControllerEffective &&
+            (initialAssetStatus === 'Draft' || initialAssetStatus === 'Rejected');
 
         // Apply updates
         for (const key of Object.keys(updates)) {
             // Prevent updating immutable fields
             if (key !== '_id' && key !== 'assetId') {
+                if (key === 'status' && creatorDraftOrRejected) {
+                    continue;
+                }
                 // Security rule: only admin can edit asset value
                 if (key === 'assetValue' && !isAdmin) {
                     continue;
                 }
                 if (key === 'accessories' && Array.isArray(updates[key])) {
+                    updates[key] = dedupeAccessoryPayloadById(updates[key]);
                     const isAssigned = asset.status === 'Assigned' && asset.assignedTo;
-                    const actorId = req.user.employeeObjectId?.toString() || req.user._id?.toString();
-                    const actorIsControllerOrAdmin = isAdmin || isAssetController;
-                    // "Owner-like" actors for assigned assets:
-                    // - assignee
-                    // - assigner (asset.assignedBy)
-                    // - primaryReportee delegate when assignee has no companyEmail
-                    const isOwner = isAssigned && (
-                        asset.assignedTo.toString() === actorId ||
-                        isAssigner ||
-                        isPrimaryReporteeDelegate
-                    );
+                    const actorIsControllerOrAdmin = isAdmin || isAssetControllerEffective;
                     const oldAccessories = asset.accessories || [];
+                    const incomingAccessoryPayload = updates[key];
+                    const accessoryStillInPayload = (oa) =>
+                        incomingAccessoryPayload.some(
+                            (acc) =>
+                                (oa._id &&
+                                    acc._id &&
+                                    oa._id.toString() === acc._id.toString()) ||
+                                (oa.accessoryId &&
+                                    acc.accessoryId &&
+                                    oa.accessoryId === acc.accessoryId)
+                        );
+                    const removedAccessories = oldAccessories.filter((oa) => !accessoryStillInPayload(oa));
+                    const creatorMayTrimAccessories =
+                        removedAccessories.length > 0 &&
+                        isCreator &&
+                        !isAdmin &&
+                        !isAssetControllerEffective &&
+                        (initialAssetStatus === 'Draft' || initialAssetStatus === 'Rejected');
+                    if (
+                        removedAccessories.length > 0 &&
+                        !isAdmin &&
+                        !isAssetControllerEffective &&
+                        !creatorMayTrimAccessories
+                    ) {
+                        return res.status(403).json({
+                            message:
+                                'Only Asset Controller, administrators, or (for draft/rejected assets) the creator can remove accessories from an asset.'
+                        });
+                    }
+                    if (removedAccessories.length > 0 && isAdmin) {
+                        adminRemovedAccessoriesForNotify = removedAccessories.map((oa) => ({
+                            name: oa.name,
+                            accessoryId: oa.accessoryId
+                        }));
+                        detachedAccessoryRefsForCatalog = adminRemovedAccessoriesForNotify;
+                    } else if (creatorMayTrimAccessories) {
+                        detachedAccessoryRefsForCatalog = removedAccessories.map((oa) => ({
+                            name: oa.name,
+                            accessoryId: oa.accessoryId
+                        }));
+                    } else if (removedAccessories.length > 0 && isAssetControllerEffective) {
+                        detachedAccessoryRefsForCatalog = removedAccessories.map((oa) => ({
+                            name: oa.name,
+                            accessoryId: oa.accessoryId
+                        }));
+                    }
+
                     const newAccessoriesList = [];
                     let hasNewPending = false;
-                    let hasEditsByOthers = false;
+                    /** Admin/AC added new lines on an assigned asset — assignee must accept/reject. */
+                    let hasAssigneeAccessoryApproval = false;
                     const addedAccessoryNames = [];
 
                     for (let i = 0; i < updates[key].length; i++) {
@@ -831,11 +1104,16 @@ export const updateAssetItem = async (req, res) => {
                         );
 
                         if (existing) {
-                            // Detect edits by others
-                            if (isAssigned && !actorIsControllerOrAdmin) {
-                                const hasChanged = (acc.name && existing.name !== acc.name) ||
-                                    (acc.description !== undefined && (existing.description || '') !== (acc.description || ''));
-                                if (hasChanged) hasEditsByOthers = true;
+                            if (!actorIsControllerOrAdmin && !creatorDraftOrRejected) {
+                                const mergedName = acc.name !== undefined ? acc.name : existing.name;
+                                const mergedDesc = acc.description !== undefined ? acc.description : existing.description;
+                                const nameChanged = String(existing.name ?? '') !== String(mergedName ?? '');
+                                const descChanged = String(existing.description ?? '') !== String(mergedDesc ?? '');
+                                if (nameChanged || descChanged) {
+                                    return res.status(403).json({
+                                        message: 'Only Asset Controller or Admin can edit existing accessories.'
+                                    });
+                                }
                             }
                             // Keep existing accessory
                             const nextAmount = isAdmin
@@ -845,7 +1123,10 @@ export const updateAssetItem = async (req, res) => {
                                 ...existing.toObject(),
                                 ...acc,
                                 amount: nextAmount,
-                                accessoryId: generateAccessoryId(asset.assetId, i)
+                                accessoryId:
+                                    existing.accessoryId ||
+                                    acc.accessoryId ||
+                                    generateAccessoryId(asset.assetId, i)
                             });
                         } else {
                             // NEW Accessory
@@ -856,21 +1137,49 @@ export const updateAssetItem = async (req, res) => {
                             addedAccessoryNames.push(newAcc.name || newAcc.accessoryId || `Accessory ${i + 1}`);
 
                             if (!actorIsControllerOrAdmin) {
-                                // Any non-authority addition needs Asset Controller approval.
+                                // Assignee (or non-authority): Asset Controller approves.
                                 newAcc.status = 'Pending';
                                 newAcc.pendingAction = 'Add';
                                 newAcc.pendingActionDetails = {
                                     requestedBy: req.user.employeeObjectId || req.user._id,
-                                    requestedAt: new Date()
+                                    requestedAt: new Date(),
+                                    addApprovalKind: 'AssetController'
                                 };
                                 hasNewPending = true;
+                            } else if (isAssigned) {
+                                // Admin/AC on assigned asset: holder must approve before Attached.
+                                newAcc.status = 'Pending';
+                                newAcc.pendingAction = 'Add';
+                                newAcc.pendingActionDetails = {
+                                    requestedBy: req.user.employeeObjectId || req.user._id,
+                                    requestedAt: new Date(),
+                                    addApprovalKind: 'Assignee'
+                                };
+                                hasAssigneeAccessoryApproval = true;
                             } else {
-                                // Asset Controller/Admin additions are directly attached.
+                                // Unassigned (or no assignee): attach immediately.
                                 newAcc.status = 'Attached';
                             }
                             newAccessoriesList.push(newAcc);
                         }
                     }
+
+                    const pendingAddsBefore = oldAccessories.filter((a) => a.pendingAction === 'Add');
+                    const isAssigneeApprovalKind = (a) => String(a.pendingActionDetails?.addApprovalKind || '') === 'Assignee';
+                    const isAcSidePendingAdd = (a) => a.pendingAction === 'Add' && !isAssigneeApprovalKind(a);
+                    if (hasAssigneeAccessoryApproval && pendingAddsBefore.some(isAcSidePendingAdd)) {
+                        return res.status(409).json({
+                            message:
+                                'Resolve pending accessory additions awaiting Asset Controller before adding items that require assignee approval.'
+                        });
+                    }
+                    if (hasNewPending && pendingAddsBefore.some(isAssigneeApprovalKind)) {
+                        return res.status(409).json({
+                            message:
+                                'Resolve pending accessory additions awaiting the assigned user before submitting new add requests.'
+                        });
+                    }
+
                     asset.accessories = newAccessoriesList;
 
                     // If new accessories were added to an assigned asset, create notification
@@ -926,99 +1235,66 @@ export const updateAssetItem = async (req, res) => {
                         } catch (err) {
                             console.error('[AddAccessory Notification] Error:', err);
                         }
-                    } else if (hasEditsByOthers && isAssigned && !actorIsControllerOrAdmin) {
-                        // Notify if edited by someone else but no NEW ones (which would require approval anyway)
+                    } else if (hasAssigneeAccessoryApproval && isAssigned) {
+                        // Admin/AC added pending lines: assignee must approve (same inbox type as other accessory approvals).
                         try {
-                            const isUnassignedStage = String(asset?.acceptanceStatus || '').toLowerCase() !== 'accepted';
-                            const employee = await EmployeeBasic.findById(asset.assignedTo);
-                            if (isUnassignedStage) {
-                                // Unassigned/pending-acceptance stage: notify ONLY Asset Controller
-                                const controller = await getDepartmentHOD('assetcontroller');
-                                if (controller) {
-                                    const requesterName = req.user.name || 'System';
-                                    let updAccPdf = [];
-                                    try {
-                                        updAccPdf = await buildBulkAssetInventoryPdfAttachment(req, [asset._id.toString()], 'accessory-update-ac-inventory');
-                                    } catch (e) {
-                                        /* non-fatal */
-                                    }
-                                    await sendAssetActionApprovalEmail(
-                                        { ...asset.toObject(), assetId: asset.assetId },
-                                        'Update Accessory',
-                                        controller,
-                                        { name: requesterName },
-                                        'Existing accessories have been updated. Please review the changes.',
-                                        updAccPdf
-                                    );
-                                }
-                            } else if (employee) {
-                                const requesterName = req.user.name || 'System';
-                                let emailRecipient = employee;
-                                const linkedUser = await User.findOne({ employeeId: employee.employeeId, status: 'Active' });
-                                // Access is based on ERP portal access, not companyEmail
-                                const hasAccess = !!(linkedUser && linkedUser.enablePortalAccess);
+                            const assigneeEmp = await EmployeeBasic.findById(asset.assignedTo);
+                            if (assigneeEmp?._id) {
+                                asset.actionRequiredBy = assigneeEmp._id;
+                                const actorName =
+                                    (await getAssetRequesterDisplayName(req)) ||
+                                    req.user.name ||
+                                    req.user.employeeId ||
+                                    'Asset Controller';
 
-                                if (!hasAccess && employee.primaryReportee) {
-                                    const managerId = employee.primaryReportee._id || employee.primaryReportee;
-                                    const manager = await EmployeeBasic.findById(managerId);
-                                    if (manager) emailRecipient = manager;
-                                }
-
-                                let updEmpPdf = [];
+                                let assigneeApprovalPdf = [];
                                 try {
-                                    updEmpPdf = await buildBulkAssetInventoryPdfAttachment(req, [asset._id.toString()], 'accessory-update-emp-inventory');
+                                    assigneeApprovalPdf = await buildBulkAssetInventoryPdfAttachment(
+                                        req,
+                                        [asset._id.toString()],
+                                        'accessory-add-by-authority-assignee-approval'
+                                    );
                                 } catch (e) {
                                     /* non-fatal */
                                 }
+
                                 await sendAssetActionApprovalEmail(
                                     { ...asset.toObject(), assetId: asset.assetId },
-                                    'Update Accessory',
-                                    emailRecipient,
-                                    { name: requesterName },
-                                    'Existing accessories on your assigned asset have been updated. Please review the changes.',
-                                    updEmpPdf
+                                    'Add Accessory',
+                                    assigneeEmp,
+                                    { name: actorName },
+                                    'An administrator or Asset Controller added new accessories to your assigned asset. Please open the asset and accept or reject each pending addition in VeRP.',
+                                    assigneeApprovalPdf
                                 );
-                            }
-                            await AssetHistory.create({
-                                assetId: asset._id,
-                                action: 'Comment',
-                                performedBy: req.user.employeeObjectId || req.user._id,
-                                comments: `Accessory details updated and notification sent for review by ${req.user.name || 'System'}.`,
-                                date: new Date(),
-                                details: { type: 'AccessoryUpdateNotice' }
-                            });
-                        } catch (err) {
-                            console.error('[UpdateAccessory Notification] Error:', err);
-                        }
-                    } else if (addedAccessoryNames.length > 0 && isAssigned && actorIsControllerOrAdmin) {
-                        // Asset Controller/Admin directly added accessories on an assigned asset:
-                        // notify assigned employee (or delegated primary reportee when no portal access).
-                        try {
-                            const employee = await EmployeeBasic.findById(asset.assignedTo);
-                            if (employee) {
-                                let emailRecipient = employee;
-                                const linkedUser = await User.findOne({ employeeId: employee.employeeId, status: 'Active' })
-                                    .select('enablePortalAccess')
-                                    .lean()
-                                    .catch(() => null);
-                                const hasAccess = !!(linkedUser && linkedUser.enablePortalAccess);
-                                if (!hasAccess && employee.primaryReportee) {
-                                    const managerId = employee.primaryReportee._id || employee.primaryReportee;
-                                    const manager = await EmployeeBasic.findById(managerId);
-                                    if (manager) emailRecipient = manager;
-                                }
 
-                                const actorName = req.user.name || req.user.employeeId || 'Asset Controller';
-                                await sendAssignedEmployeeActionEmail({
-                                    asset,
-                                    employee: emailRecipient,
-                                    action: 'Add Accessory',
-                                    performedBy: actorName,
-                                    details: `Added accessories: ${addedAccessoryNames.join(', ')}`
-                                });
+                                await DashboardAction.findOneAndUpdate(
+                                    { requestId: asset._id, requestType: 'Asset Accessory Approval', status: 'Pending' },
+                                    {
+                                        assignedTo: assigneeEmp._id,
+                                        assignedToEmpId: assigneeEmp.employeeId,
+                                        requestId: asset._id,
+                                        requestType: 'Asset Accessory Approval',
+                                        status: 'Pending',
+                                        subjectEmployeeId: assigneeEmp.employeeId || '',
+                                        subjectName: `${assigneeEmp.firstName || ''} ${assigneeEmp.lastName || ''}`.trim(),
+                                        requestedByName: actorName,
+                                        extra1: `${asset.assetId} — Accessory: approval required (added by authority)`,
+                                        extra2: 'Add'
+                                    },
+                                    { upsert: true, new: true, setDefaultsOnInsert: true }
+                                );
+
+                                await AssetHistory.create({
+                                    assetId: asset._id,
+                                    action: 'Comment',
+                                    performedBy: req.user.employeeObjectId || req.user._id,
+                                    comments: `${actorName} added accessory(ies) pending assignee approval: ${addedAccessoryNames.join(', ')}.`,
+                                    date: new Date(),
+                                    details: { type: 'AuthorityAccessoryAddPendingAssignee', names: addedAccessoryNames }
+                                }).catch(() => {});
                             }
                         } catch (err) {
-                            console.error('[AddAccessory Assigned Email] Error:', err);
+                            console.error('[AddAccessory Assignee Approval Flow] Error:', err);
                         }
                     }
                 } else if ((key === 'photo' || key === 'imagePreview') && updates[key] && updates[key].startsWith('data:image')) {
@@ -1044,6 +1320,37 @@ export const updateAssetItem = async (req, res) => {
         }
 
         await asset.save();
+
+        try {
+            if (detachedAccessoryRefsForCatalog?.length) {
+                await markCatalogInstancesDetachedFromAsset(
+                    asset._id,
+                    detachedAccessoryRefsForCatalog.map((x) => x.accessoryId).filter(Boolean)
+                );
+            }
+            await syncAllAccessoryInstancesForAsset(asset);
+        } catch (syncErr) {
+            console.error('[updateAssetItem accessory catalog sync]', syncErr?.message || syncErr);
+        }
+
+        if (adminRemovedAccessoriesForNotify?.length) {
+            const assetForEmail = await AssetItem.findById(asset._id)
+                .populate({
+                    path: 'assignedTo',
+                    select: 'firstName lastName employeeId companyEmail workEmail personalEmail email primaryReportee',
+                    populate: {
+                        path: 'primaryReportee',
+                        select: 'firstName lastName companyEmail workEmail personalEmail email'
+                    }
+                })
+                .populate('assignedCompany', 'name companyId')
+                .lean();
+            if (assetForEmail) {
+                void notifyAdminRemovedAccessoriesFromAssignedAsset(req, assetForEmail, adminRemovedAccessoriesForNotify).catch(
+                    (e) => console.error('[notify accessory removal]', e?.message || e)
+                );
+            }
+        }
 
         // Log to history
         try {

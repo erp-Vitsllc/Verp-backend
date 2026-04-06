@@ -141,3 +141,17 @@ export async function buildBulkAssetInventoryPdfAttachment(req, assetIds, filena
         }
     ];
 }
+
+/**
+ * Same as buildBulkAssetInventoryPdfAttachment but throws if the PDF could not be produced.
+ * Use for bulk request emails so notifications always include the asset list PDF.
+ */
+export async function requireBulkAssetInventoryPdfAttachment(req, assetIds, filenameBase = 'asset-inventory') {
+    const att = await buildBulkAssetInventoryPdfAttachment(req, assetIds, filenameBase);
+    if (!Array.isArray(att) || att.length === 0) {
+        throw new Error(
+            'Asset list PDF could not be generated. Ensure asset IDs are valid and the PDF service is available.'
+        );
+    }
+    return att;
+}

@@ -1,7 +1,7 @@
 import express from 'express';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import User from '../models/User.js';
-import { createAssetItem, getAssetItems, getAllAssignedAssets, getMyAssignedAssetsForReturn, getUnassignedAssetsForEmployee, getHRCompanyAssets, getOnLeaveAssetsForEmployee, handleOnLeaveAction, bulkHandleOnLeaveAction, getAssetItemDetail, assignAssetItem, bulkAssignAssetItems, downloadHandoverPdf, downloadHistoryHandoverPdf, respondToAssignment, bulkRespondToAssignment, getAssetHistory, getHistoryRecord, returnAssetItem, updateAssetStatus, addAssetDocument, updateAssetDocument, deleteAssetDocument, addAssetService, addAssetImage, deleteAssetImage, transferAssetAccessory, manageAccessoryStatus, updateAssetItem, deleteAssetItem, endOfLifeAsset, requestAssetAction, bulkRequestAssetAction, handleAssetActionApproval, finalizeAssetAction, uploadAccessoriesAttachment, requestAccessoryAction, respondAccessoryAction, finalizeAccessoryAction, respondToAssetCreation, bulkRespondToAssetCreation, getBulkAssetDetails, getBulkAssetInventoryForPrint, transferAsset } from '../controllers/assetItemController.js';
+import { createAssetItem, getAssetItems, getAllAssignedAssets, getMyAssignedAssetsForReturn, getUnassignedAssetsForEmployee, getHRCompanyAssets, getOnLeaveAssetsForEmployee, handleOnLeaveAction, bulkHandleOnLeaveAction, getAssetItemDetail, assignAssetItem, bulkAssignAssetItems, downloadHandoverPdf, downloadHistoryHandoverPdf, respondToAssignment, bulkRespondToAssignment, getAssetHistory, getHistoryRecord, returnAssetItem, updateAssetStatus, addAssetDocument, updateAssetDocument, deleteAssetDocument, addAssetService, addAssetImage, deleteAssetImage, transferAssetAccessory, manageAccessoryStatus, updateAssetItem, deleteAssetItem, endOfLifeAsset, requestAssetAction, bulkRequestAssetAction, handleAssetActionApproval, finalizeAssetAction, uploadAccessoriesAttachment, requestAccessoryAction, respondAccessoryAction, finalizeAccessoryAction, respondToAssetCreation, bulkRespondToAssetCreation, getBulkAssetDetails, getBulkAssetInventoryForPrint, transferAsset, submitDraftForCreationApproval, getPendingAssetDashboardInbox, deletePendingAssetDashboardInboxItem } from '../controllers/assetItemController.js';
 import { protect } from '../middleware/authMiddleware.js';
 import { isUserInFlowchart, getDepartmentHOD } from '../utils/getDepartmentHOD.js';
 import { isUserAdministrator } from '../services/permissionService.js';
@@ -67,9 +67,13 @@ const requireAssetControllerOrAdmin = async (req, res, next) => {
                 return next();
             }
 
-            // Allow if they are the creator of a Draft/Pending item
+            // Allow if they are the creator of a Draft/Pending/Rejected (creation rework) item
             const currentUserId = req.user?._id?.toString();
-            if (asset && asset.createdBy?.toString() === currentUserId && (asset.status === 'Draft' || asset.status === 'Pending')) {
+            if (
+                asset &&
+                asset.createdBy?.toString() === currentUserId &&
+                (asset.status === 'Draft' || asset.status === 'Pending' || asset.status === 'Rejected')
+            ) {
                 return next();
             }
         }
@@ -332,8 +336,13 @@ const requireAssetFullAccess = async (req, res, next) => {
                 if (asset.actionRequiredBy && asset.actionRequiredBy.toString() === currentEmpId) return next();
                 if (asset.actionRequiredBy && asset.actionRequiredBy.toString() === currentUserId) return next();
 
-                // 2. Allow if Creator + Draft/Pending
-                if (asset.createdBy?.toString() === currentUserId && (asset.status === 'Draft' || asset.status === 'Pending')) return next();
+                // 2. Allow if Creator + Draft/Pending/Rejected (rework)
+                if (
+                    asset.createdBy?.toString() === currentUserId &&
+                    (asset.status === 'Draft' || asset.status === 'Pending' || asset.status === 'Rejected')
+                ) {
+                    return next();
+                }
 
                 // For company flows, allow asset controller/admin as before
                 if (isAdminUser || isAssetControllerUser) return next();
@@ -447,6 +456,8 @@ const router = express.Router();
 router.route('/')
     .post(protect, createAssetItem);
 
+router.get('/dashboard/pending-inbox', protect, getPendingAssetDashboardInbox);
+router.delete('/dashboard/pending-inbox/:id', protect, deletePendingAssetDashboardInboxItem);
 router.get('/assigned/all', protect, getAllAssignedAssets);
 router.get('/assigned/me-for-return', protect, getMyAssignedAssetsForReturn);
 router.get('/unassigned/controller/:employeeId', protect, getUnassignedAssetsForEmployee);
@@ -471,6 +482,7 @@ router.put('/bulk/respond', protect, bulkRespondToAssignment);
 router.post('/transfer', protect, requireAssetControllerOrAdmin, transferAsset);
 router.put('/bulk/approve-creation', protect, requireAssetControllerOrAdmin, bulkRespondToAssetCreation);
 router.put('/:id/approve-creation', protect, requireAssetCreationApprover, respondToAssetCreation);
+router.put('/:id/submit-creation', protect, submitDraftForCreationApproval);
 router.put('/:id/return', protect, requireReturnAssetAccess, returnAssetItem);
 router.put('/:id/on-leave-action', protect, requireParkingAssetAccess, (req, res, next) => {
     console.log(`[Route] PUT /${req.params.id}/on-leave-action hit`);

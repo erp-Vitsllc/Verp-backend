@@ -86,7 +86,7 @@ const assetItemSchema = new mongoose.Schema({
     },
     status: {
         type: String,
-        enum: ['Assigned', 'Unassigned', 'Maintenance', 'On Service', 'Service', 'Lost', 'Returned', 'Pending', 'End of Life', 'Out of Service', 'Draft', 'Rejected', 'On Leave'],
+        enum: ['Assigned', 'Unassigned', 'Maintenance', 'On Service', 'Service', 'Lost', 'Returned', 'Pending', 'End of Life', 'Out of Service', 'Draft', 'Rejected', 'On Leave', 'Submitted for Approval'],
         default: 'Unassigned'
     },
     ownership: {

@@ -5,22 +5,49 @@ import DashboardAction from '../models/DashboardAction.js';
 import { getDepartmentHOD, isUserInFlowchart } from '../utils/getDepartmentHOD.js';
 import { sendAssetActionApprovalEmail } from '../utils/sendAssetActionApprovalEmail.js';
 import { buildBulkAssetInventoryPdfAttachment } from '../utils/generateBulkAssetInventoryPdf.js';
+import { notifyAdminDeletedAccessoryCatalogEntry, isReqUserAdmin } from '../utils/sendAdminDeletionNotificationEmails.js';
+import { generateVegaAccessoryCatalogId, syncAllAccessoryInstancesForAsset } from '../utils/syncAssetAccessoryCatalog.js';
 
-const generateAccessoryCatalogId = async () => {
-    const prefix = 'asset-acc-cat-';
-    const regex = new RegExp(`^${prefix}\\d+$`);
-    const item = await AssetAccessoryCatalog.findOne({
-        accessoryCatalogId: { $regex: regex }
-    }).sort({ accessoryCatalogId: -1 });
+const generateAccessoryCatalogId = generateVegaAccessoryCatalogId;
 
-    if (!item?.accessoryCatalogId) return `${prefix}001`;
+function effectiveCatalogRowStatus(row) {
+    if (row?.status != null && String(row.status).trim() !== '') {
+        return String(row.status).trim();
+    }
+    if (row?.recordType === 'instance' && row?.assetItemId) {
+        return 'Attached';
+    }
+    return 'Unattached';
+}
 
-    const idStr = item.accessoryCatalogId;
-    const numberStr = idStr.substring(prefix.length);
-    const numericPart = parseInt(numberStr, 10);
-    const nextNum = Number.isNaN(numericPart) ? 1 : numericPart + 1;
-    return `${prefix}${String(nextNum).padStart(3, '0')}`;
-};
+function isTerminalCatalogRowStatus(st) {
+    return st === 'Lost' || st === 'EndOfLife' || st === 'End of Life';
+}
+
+function formatEmployeeDisplay(emp) {
+    if (!emp || typeof emp !== 'object') return '';
+    const fn = emp.firstName || '';
+    const ln = emp.lastName || '';
+    const full = `${fn} ${ln}`.trim();
+    if (full) return full;
+    return emp.employeeId ? String(emp.employeeId).trim() : '';
+}
+
+function formatAssetControllerDisplay(ac) {
+    if (!ac) return '';
+    if (ac.firstName || ac.lastName) {
+        return `${ac.firstName || ''} ${ac.lastName || ''}`.trim();
+    }
+    if (ac.employeeName) return String(ac.employeeName).trim();
+    return '';
+}
+
+function catalogRowAssetItemIdKey(row) {
+    const id = row?.assetItemId;
+    if (!id) return null;
+    if (typeof id === 'object' && id._id != null) return id._id.toString();
+    return id.toString();
+}
 
 export const getAccessoryCatalogHistory = async (req, res) => {
     try {
@@ -64,7 +91,66 @@ export const getAccessoryCatalog = async (req, res) => {
         const list = await AssetAccessoryCatalog.find({ isActive: true })
             .sort({ createdAt: -1 })
             .lean();
-        res.json(list);
+
+        const assetControllerHod = await getDepartmentHOD('assetcontroller');
+        const acDisplay = formatAssetControllerDisplay(assetControllerHod);
+
+        const assetIdsNeedingOwner = [
+            ...new Set(
+                list
+                    .filter((row) => {
+                        const st = effectiveCatalogRowStatus(row);
+                        if (isTerminalCatalogRowStatus(st)) return false;
+                        if (!catalogRowAssetItemIdKey(row)) return false;
+                        return st === 'Attached' || st === 'Pending';
+                    })
+                    .map((row) => catalogRowAssetItemIdKey(row))
+            )
+        ];
+
+        let assetMap = new Map();
+        if (assetIdsNeedingOwner.length > 0) {
+            const assets = await AssetItem.find({ _id: { $in: assetIdsNeedingOwner } })
+                .select('assignedTo assignedToType assignedCompany assetId')
+                .populate('assignedTo', 'firstName lastName employeeId')
+                .populate('assignedCompany', 'name companyId')
+                .lean();
+            assetMap = new Map(assets.map((a) => [a._id.toString(), a]));
+        }
+
+        const enriched = list.map((row) => {
+            const st = effectiveCatalogRowStatus(row);
+            let ownedByDisplay = '';
+
+            if (isTerminalCatalogRowStatus(st)) {
+                ownedByDisplay = '';
+            } else if (st === 'Unattached') {
+                ownedByDisplay = acDisplay;
+            } else if (st === 'Pending' && !catalogRowAssetItemIdKey(row)) {
+                ownedByDisplay = acDisplay;
+            } else if ((st === 'Attached' || st === 'Pending') && catalogRowAssetItemIdKey(row)) {
+                const asset = assetMap.get(catalogRowAssetItemIdKey(row));
+                if (!asset) {
+                    ownedByDisplay = acDisplay;
+                } else if (asset.assignedToType === 'Company' && asset.assignedCompany) {
+                    const companyName =
+                        typeof asset.assignedCompany === 'object'
+                            ? (asset.assignedCompany.name || '').trim()
+                            : '';
+                    ownedByDisplay = companyName || acDisplay;
+                } else if (asset.assignedTo) {
+                    ownedByDisplay = formatEmployeeDisplay(asset.assignedTo) || acDisplay;
+                } else {
+                    ownedByDisplay = acDisplay;
+                }
+            } else {
+                ownedByDisplay = acDisplay;
+            }
+
+            return { ...row, ownedByDisplay };
+        });
+
+        res.json(enriched);
     } catch (error) {
         console.error('getAccessoryCatalog:', error);
         res.status(500).json({ message: 'Failed to load accessories catalog' });
@@ -80,6 +166,7 @@ export const createAccessoryCatalog = async (req, res) => {
         const accessoryCatalogId = await generateAccessoryCatalogId();
         const trimmedName = String(name).trim();
         const doc = await AssetAccessoryCatalog.create({
+            recordType: 'catalog',
             accessoryCatalogId,
             name: trimmedName,
             price: price != null && price !== '' ? Number(price) : 0,
@@ -151,6 +238,14 @@ export const deleteAccessoryCatalog = async (req, res) => {
         doc.markModified('history');
         doc.isActive = false;
         await doc.save();
+        if (await isReqUserAdmin(req.user)) {
+            const performedBy = req.user?.name || req.user?.employeeId || 'Administrator';
+            void notifyAdminDeletedAccessoryCatalogEntry({
+                accessoryCatalogId: doc.accessoryCatalogId,
+                name: doc.name,
+                performedBy
+            }).catch((e) => console.error('[notify catalog accessory delete]', e?.message || e));
+        }
         res.json({ message: 'Accessory removed' });
     } catch (error) {
         console.error('deleteAccessoryCatalog:', error);
@@ -213,12 +308,18 @@ export const requestAttachAccessoryCatalog = async (req, res) => {
                 reason: `Attach catalog accessory "${catalog.name}" to asset ${targetDoc.assetId}`,
                 requestedBy: req.user.employeeObjectId || null,
                 requestedAt: new Date(),
-                catalogItemId: catalog._id
+                catalogItemId: catalog._id,
+                addApprovalKind: 'AssetController'
             }
         });
         targetDoc.actionRequiredBy = approver._id;
         targetDoc.markModified('accessories');
         await targetDoc.save();
+        try {
+            await syncAllAccessoryInstancesForAsset(targetDoc);
+        } catch (syncErr) {
+            console.error('[requestAttachAccessoryCatalog sync]', syncErr?.message || syncErr);
+        }
         catalog.status = 'Pending';
         catalog.history = catalog.history || [];
         catalog.history.push({

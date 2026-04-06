@@ -29,6 +29,9 @@ export const sendAssetCreationApprovalEmail = async ({ asset, recipient, creator
         });
 
         const att = normalizePdfAttachments(attachments);
+        if (isBulk && att.length === 0) {
+            throw new Error('Bulk asset creation approval email requires the asset list PDF attachment.');
+        }
 
         const assetName = isBulk ? `${assetCount} Assets` : asset.name;
         const subject = `New Asset Approval Required: ${assetName}`;

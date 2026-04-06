@@ -29,23 +29,72 @@ import { sendParkingReassignAcceptedEmail } from '../utils/sendParkingReassignAc
 import { notifyAssetControllerReassignmentAcceptedWithHandover } from '../utils/notifyAssetControllerReassignmentAcceptedWithHandover.js';
 import { notifyPreviousAssigneeReassignmentAcceptedWithHandover } from '../utils/notifyPreviousAssigneeReassignmentAcceptedWithHandover.js';
 import { ASSET_HANDOVER_PDF_SELECTOR } from '../utils/assetHandoverPdfConstants.js';
-import { buildBulkAssetInventoryPdfAttachment } from '../utils/generateBulkAssetInventoryPdf.js';
+import { buildBulkAssetInventoryPdfAttachment, requireBulkAssetInventoryPdfAttachment } from '../utils/generateBulkAssetInventoryPdf.js';
+import { notifyAdminDeletedWholeAsset, isReqUserAdmin } from '../utils/sendAdminDeletionNotificationEmails.js';
+import {
+    cleanupDashboardActionsForDeletedAsset,
+    ASSET_DASHBOARD_INBOX_TYPES
+} from '../utils/cleanupAssetDashboardActions.js';
+import {
+    generateVegaAccessoryCatalogId,
+    syncAllAccessoryInstancesForAsset,
+    markCatalogInstancesDetachedFromAsset
+} from '../utils/syncAssetAccessoryCatalog.js';
+import {
+    filterAccessoriesHidingPendingAdds,
+    computeCanSeePendingAddsForAsset
+} from '../utils/assetPendingAccessoryVisibility.js';
 
-const generateAccessoryCatalogId = async () => {
-    const prefix = 'asset-acc-cat-';
-    const regex = new RegExp(`^${prefix}\\d+$`);
-    const item = await AssetAccessoryCatalog.findOne({
-        accessoryCatalogId: { $regex: regex }
-    }).sort({ accessoryCatalogId: -1 });
+const generateAccessoryCatalogId = generateVegaAccessoryCatalogId;
 
-    if (!item?.accessoryCatalogId) return `${prefix}001`;
+async function buildPendingAccessoryVisibilityCtx(req) {
+    const isSysAdmin = await isUserAdministrator(req.user?.id);
+    const isPortalAdmin =
+        req.user?.isAdmin === true || req.user?.role === 'Admin' || req.user?.role === 'ROOT';
+    const isAssetController = await isUserInFlowchart(req.user, 'assetcontroller').catch(() => false);
+    const assetController = await getDepartmentHOD('assetcontroller');
 
-    const idStr = item.accessoryCatalogId;
-    const numberStr = idStr.substring(prefix.length);
-    const numericPart = parseInt(numberStr, 10);
-    const nextNum = Number.isNaN(numericPart) ? 1 : numericPart + 1;
-    return `${prefix}${String(nextNum).padStart(3, '0')}`;
-};
+    let currentEmpId = req.user?.employeeObjectId?.toString();
+    if (!currentEmpId && req.user?.employeeId) {
+        const empRow = await EmployeeBasic.findOne({
+            employeeId: { $regex: new RegExp(`^${String(req.user.employeeId).replace(/\s+/g, '\\s*')}$`, 'i') }
+        })
+            .select('_id')
+            .lean()
+            .catch(() => null);
+        if (empRow?._id) currentEmpId = empRow._id.toString();
+    }
+
+    const normEmpView = (s) => (s || '').toString().toLowerCase().replace(/\s+/g, '');
+    let currentEmployeeIdNorm = normEmpView(req.user?.employeeId);
+    if (!currentEmployeeIdNorm && currentEmpId) {
+        const curEmp = await EmployeeBasic.findById(currentEmpId).select('employeeId').lean().catch(() => null);
+        if (curEmp?.employeeId) currentEmployeeIdNorm = normEmpView(curEmp.employeeId);
+    }
+
+    const isDeptAssetController = !!(
+        assetController?._id &&
+        currentEmpId &&
+        assetController._id.toString() === currentEmpId
+    );
+    const canSeeAllPending = isSysAdmin || isPortalAdmin || isAssetController || isDeptAssetController;
+    return {
+        canSeeAllPending,
+        currentEmpId: currentEmpId || null,
+        currentEmployeeIdNorm: currentEmployeeIdNorm || null
+    };
+}
+
+/** Non-draft assets are visible to all authenticated users; Draft only to the creating User. */
+function buildDraftVisibilityQuery(reqUser) {
+    const uid = reqUser?._id || reqUser?.id;
+    if (uid && mongoose.Types.ObjectId.isValid(String(uid))) {
+        return {
+            $or: [{ status: { $ne: 'Draft' } }, { createdBy: new mongoose.Types.ObjectId(String(uid)) }]
+        };
+    }
+    return { status: { $ne: 'Draft' } };
+}
 
 const generateFineIdInternal = async () => {
     try {
@@ -266,22 +315,10 @@ export const getAssetItems = async (req, res) => {
             query.status = status;
         }
 
-        // Visibility:
-        // 1. Admins and Asset Controllers see ALL assets (Flowchart; same as approve-creation).
-        // 2. Regular users see ALL non-Draft assets (Assigned, Unassigned, etc.).
-        // 3. Regular users see ONLY their own Draft assets.
-        const isAdmin = await isUserAdministrator(req.user?.id);
-        const isAssetController = await isUserInFlowchart(req.user, 'assetcontroller');
+        query.$and = query.$and || [];
+        query.$and.push(buildDraftVisibilityQuery(req.user));
 
-        if (!isAdmin && !isAssetController) {
-            query.$and = query.$and || [];
-            query.$and.push({
-                $or: [
-                    { status: { $ne: 'Draft' } },
-                    { createdBy: req.user._id || req.user.id }
-                ]
-            });
-        }
+        const pendingAccessoryCtx = await buildPendingAccessoryVisibilityCtx(req);
 
         const items = await AssetItem.find(query)
             .populate({
@@ -292,11 +329,16 @@ export const getAssetItems = async (req, res) => {
                     { path: 'reportingAuthority', select: 'firstName lastName' }
                 ]
             })
+            .populate('actionRequiredBy', 'employeeId')
             .populate('acceptedBy', 'firstName lastName signature')
             .sort({ assetId: 1 });
 
         const signedItems = await Promise.all(items.map(async (item) => {
             const itemObj = item.toObject();
+            const canSeePending = computeCanSeePendingAddsForAsset(pendingAccessoryCtx, item);
+            if (itemObj.accessories?.length) {
+                itemObj.accessories = filterAccessoriesHidingPendingAdds(itemObj.accessories, canSeePending);
+            }
             if (itemObj.photo) {
                 itemObj.photo = await getSignedFileUrl(itemObj.photo);
             }
@@ -344,40 +386,32 @@ export const getAllAssignedAssets = async (req, res) => {
             ];
         }
 
-        // Visibility:
-        // 1. Admins and Asset Controllers see ALL assets (Flowchart-based, same as approve-creation).
-        // 2. Regular users see ALL non-Draft assets (Assigned, Unassigned, etc.).
-        // 3. Regular users see ONLY their own Draft assets.
-        const isAdmin = await isUserAdministrator(req.user?.id);
-        const isAssetController = await isUserInFlowchart(req.user, 'assetcontroller');
-
-        if (!isAdmin && !isAssetController) {
-            const visibilityFilter = {
-                $or: [
-                    { status: { $ne: 'Draft' } },
-                    { createdBy: req.user._id || req.user.id }
-                ]
-            };
-
-            if (query.$or) {
-                query = { $and: [query, visibilityFilter] };
-            } else {
-                Object.assign(query, visibilityFilter);
-            }
+        const draftVis = buildDraftVisibilityQuery(req.user);
+        if (query.$or) {
+            query = { $and: [query, draftVis] };
+        } else {
+            Object.assign(query, draftVis);
         }
 
+        const pendingAccessoryCtx = await buildPendingAccessoryVisibilityCtx(req);
+
         const items = await AssetItem.find(query)
-            .select('assetId name ownership assignedTo assignedCompany accessories assetValue status updatedAt typeId categoryId invoiceFile documents')
+            .select('assetId name ownership assignedTo assignedCompany accessories assetValue status updatedAt typeId categoryId invoiceFile documents actionRequiredBy')
             .populate({
                 path: 'assignedTo',
                 select: 'firstName lastName employeeId company'
             })
+            .populate('actionRequiredBy', 'employeeId')
             .populate('typeId', 'name')
             .populate('categoryId', 'name')
             .sort({ name: 1 });
 
         const signedItems = await Promise.all(items.map(async (item) => {
             const itemObj = item.toObject();
+            const canSeePending = computeCanSeePendingAddsForAsset(pendingAccessoryCtx, item);
+            if (itemObj.accessories?.length) {
+                itemObj.accessories = filterAccessoriesHidingPendingAdds(itemObj.accessories, canSeePending);
+            }
             if (itemObj.invoiceFile) {
                 itemObj.invoiceFile = await getSignedFileUrl(itemObj.invoiceFile);
             }
@@ -513,7 +547,7 @@ export const getUnassignedAssetsForEmployee = async (req, res) => {
 
         console.log(`[getUnassignedAssetsForEmployee] ACCESS GRANTED, fetching assets...`);
         const items = await AssetItem.find({
-            status: { $in: ['Unassigned', 'Returned', 'Draft', 'Pending'] }
+            status: { $in: ['Unassigned', 'Returned', 'Pending'] }
         })
             .select('assetId name assetValue status purchaseDate invoiceFile typeId categoryId')
             .populate('typeId', 'name type')
@@ -523,7 +557,7 @@ export const getUnassignedAssetsForEmployee = async (req, res) => {
         const filteredItems = items.filter(item => {
             const status = item.status?.toString().trim();
 
-            return status === 'Unassigned' || status === 'Returned' || status === 'Draft' || status === 'Pending';
+            return status === 'Unassigned' || status === 'Returned' || status === 'Pending';
         });
 
         let controllerStatus = 'Active';
@@ -1002,19 +1036,24 @@ export const getHRCompanyAssets = async (req, res) => {
         // - Otherwise: show only company allocations whose company is in designatedCompanyIds.
         // Also include assets where the action is required by this HR (pending company assignments).
         const query = {
-            $or: [
+            $and: [
                 {
-                    assignedToType: 'Company',
-                    ...(isHRFlowchart
-                        ? {}
-                        : { assignedCompany: { $in: designatedCompanyIds } })
+                    $or: [
+                        {
+                            assignedToType: 'Company',
+                            ...(isHRFlowchart
+                                ? {}
+                                : { assignedCompany: { $in: designatedCompanyIds } })
+                        },
+                        // Pending company-assignment acceptance only (not employee assignment pending)
+                        {
+                            actionRequiredBy: employeeObjectId,
+                            status: 'Pending',
+                            assignedToType: 'Company'
+                        }
+                    ]
                 },
-                // Pending company-assignment acceptance only (not employee assignment pending)
-                {
-                    actionRequiredBy: employeeObjectId,
-                    status: 'Pending',
-                    assignedToType: 'Company'
-                }
+                buildDraftVisibilityQuery(req.user)
             ]
         };
 
@@ -1053,7 +1092,7 @@ export const getHRCompanyAssets = async (req, res) => {
 // @access  Private
 export const createAssetItem = async (req, res) => {
     try {
-        let { assetTypeId, name, photo, status, categoryId, assetValue, purchaseDate, warrantyYears, lastServiceDate, accessories } = req.body;
+        let { assetTypeId, name, photo, status, categoryId, assetValue, purchaseDate, warrantyYears, lastServiceDate, accessories, creationIntent } = req.body;
 
         if (!assetTypeId || !name) {
             return res.status(400).json({ message: 'Asset Type and Name are required' });
@@ -1074,8 +1113,16 @@ export const createAssetItem = async (req, res) => {
             initialStatus = 'Unassigned';
             console.log(`[Asset creation] Created directly as Unassigned by ${isJwtAdmin || isSysAdmin ? 'Admin' : 'Asset Controller'}`);
         } else if (assetController?._id) {
-            actionRequiredBy = assetController._id;
-            console.log(`[Asset creation] Created as Draft by regular user ${req.user.employeeId}. Action required by Asset Controller ${assetController.employeeId}`);
+            const intent = creationIntent === 'saveDraft' ? 'saveDraft' : 'submitForApproval';
+            if (intent === 'saveDraft') {
+                initialStatus = 'Draft';
+                actionRequiredBy = null;
+                console.log(`[Asset creation] Saved as Draft (no AC notification) by ${req.user.employeeId}`);
+            } else {
+                initialStatus = 'Submitted for Approval';
+                actionRequiredBy = assetController._id;
+                console.log(`[Asset creation] Submitted for approval by ${req.user.employeeId} → Asset Controller`);
+            }
         } else if (assetControllerRaw) {
             return res.status(403).json({
                 message: 'Asset creation denied: Asset Controller in Flowchart must be linked to an employee record. Update Settings > Flowchart or fix the employee ID.'
@@ -1146,6 +1193,12 @@ export const createAssetItem = async (req, res) => {
             createdBy: req.user._id
         });
 
+        try {
+            await syncAllAccessoryInstancesForAsset(newItem);
+        } catch (syncErr) {
+            console.error('[createAssetItem accessory catalog sync]', syncErr?.message || syncErr);
+        }
+
         // Record Initial History
         try {
             await AssetHistory.create({
@@ -1160,8 +1213,8 @@ export const createAssetItem = async (req, res) => {
             console.error(`[History Error] Failed to create creation history for ${newItemId}:`, histErr.message);
         }
 
-        // Create Dashboard Action for Asset Controller (inbox + click-through to asset detail)
-        if (initialStatus === 'Draft' && actionRequiredBy) {
+        // Create Dashboard Action for Asset Controller when a submission requires approval (save-only Draft has no actionRequiredBy)
+        if (actionRequiredBy) {
             try {
                 await DashboardAction.findOneAndUpdate(
                     { requestId: newItem._id, requestType: 'Asset Approval', status: 'Pending' },
@@ -1188,8 +1241,8 @@ export const createAssetItem = async (req, res) => {
         // Update counts on AssetType
         await updateAssetTypeCounts(assetTypeId);
 
-        // Send email to Asset Controller
-        if (initialStatus === 'Draft' && assetController) {
+        // Send email to Asset Controller when a submission requires approval (not save-only Draft)
+        if (actionRequiredBy && assetController) {
             let creationAttachments = [];
             try {
                 creationAttachments = await buildBulkAssetInventoryPdfAttachment(req, [newItem._id.toString()], 'asset-creation-draft-inventory');
@@ -1217,10 +1270,12 @@ export const createAssetItem = async (req, res) => {
 export const respondToAssetCreation = async (req, res) => {
     try {
         const { id } = req.params;
-        const { action } = req.body; // 'Approve' or 'Reject'
+        const rawAction = req.body?.action;
+        const action = String(rawAction || '').trim();
+        const actionNorm = action.charAt(0).toUpperCase() + action.slice(1).toLowerCase();
 
-        if (!['Approve', 'Reject'].includes(action)) {
-            return res.status(400).json({ message: 'Invalid action.' });
+        if (!['Approve', 'Reject'].includes(actionNorm)) {
+            return res.status(400).json({ message: 'Invalid action. Use Approve or Reject.' });
         }
 
         const item = await AssetItem.findById(id);
@@ -1228,7 +1283,12 @@ export const respondToAssetCreation = async (req, res) => {
             return res.status(404).json({ message: 'Asset not found' });
         }
 
-        if (!(item.status === 'Draft' || item.status === 'Pending')) {
+        const awaitingCreation =
+            item.status === 'Submitted for Approval' ||
+            item.status === 'Pending' ||
+            (item.status === 'Draft' && item.actionRequiredBy);
+
+        if (!awaitingCreation) {
             return res.status(400).json({ message: 'Asset is not awaiting creation approval.' });
         }
 
@@ -1273,17 +1333,14 @@ export const respondToAssetCreation = async (req, res) => {
             return res.status(403).json({ message: 'Only the designated approver or an administrator can approve this asset.' });
         }
 
-        if (action === 'Approve') {
+        if (actionNorm === 'Approve') {
             item.status = 'Unassigned';
             item.actionRequiredBy = null;
-        } else if (action === 'Reject') {
-            // According to user: "else rejected and asset status unassigned" 
-            // Wait, I'll stick to a more standard flow: if rejected, status: Rejected.
-            // But if the user *really* wants it Unassigned, I'll do that.
-            // Actually, "else rejected and asset status unassigned" might mean "if approves, ok, else rejected". 
-            // Let's assume the status becomes Rejected.
+        } else {
             item.status = 'Rejected';
             item.actionRequiredBy = null;
+            item.pendingAction = null;
+            item.pendingActionDetails = null;
         }
 
         // This endpoint is "asset creation approval" (draft/pending). However, the asset
@@ -1306,15 +1363,15 @@ export const respondToAssetCreation = async (req, res) => {
 
             await AssetHistory.create({
                 assetId: item._id,
-                action: action === 'Approve' ? 'Accepted' : 'Rejected',
+                action: actionNorm === 'Approve' ? 'Accepted' : 'Rejected',
                 performedBy: req.user.employeeObjectId,
-                comments: `Asset creation ${action === 'Approve' ? 'Approved' : 'Rejected'} by ${isDesignatedApprover ? 'Designated approver' : isDeptAssetControllerFallback ? 'Asset controller' : 'Administrator'}.`,
+                comments: `Asset creation ${actionNorm === 'Approve' ? 'Approved' : 'Rejected'} by ${isDesignatedApprover ? 'Designated approver' : isDeptAssetControllerFallback ? 'Asset controller' : 'Administrator'}.`,
                 details: {
                     ...snapshotItem.toObject(),
-                    approvalAction: action
+                    approvalAction: actionNorm
                 }
             });
-            console.log(`[History] Recorded ${action} for asset creation ${item.assetId}`);
+            console.log(`[History] Recorded ${actionNorm} for asset creation ${item.assetId}`);
         } catch (histErr) {
             console.error(`[History Error] Failed to record creation response history for ${item.assetId}:`, histErr.message);
         }
@@ -1323,31 +1380,47 @@ export const respondToAssetCreation = async (req, res) => {
         try {
             await DashboardAction.findOneAndUpdate(
                 { requestId: item._id, requestType: 'Asset Approval', status: 'Pending' },
-                { status: action === 'Approve' ? 'Approved' : 'Rejected' }
+                { status: actionNorm === 'Approve' ? 'Approved' : 'Rejected' }
             );
-            console.log(`[Dashboard] Updated asset approval action to ${action === 'Approve' ? 'Approved' : 'Rejected'}`);
+            console.log(`[Dashboard] Updated asset approval action to ${actionNorm === 'Approve' ? 'Approved' : 'Rejected'}`);
         } catch (err) {
             console.error('[Dashboard Error] Failed to update asset approval action:', err);
         }
 
-        res.status(200).json(item);
+        const refreshed = await AssetItem.findById(item._id)
+            .populate('typeId')
+            .populate('categoryId')
+            .populate('actionRequiredBy', 'firstName lastName employeeId')
+            .populate('createdBy', '_id id employeeId firstName lastName');
+        res.status(200).json(refreshed || item);
     } catch (error) {
         console.error('Error responding to asset creation:', error);
         res.status(500).json({ message: 'Server Error' });
     }
 };
 
-// @desc    Bulk respond to asset creation approval (Approve/Reject)
+// @desc    Bulk respond to asset creation approval (Approve / Reject / Draft)
 // @route   PUT /api/AssetItem/bulk/approve-creation
 // @access  Private (Asset Controller or Admin)
+// Draft = return to creator as Draft (e.g. unchecked rows in bulk review); Reject = terminal Rejected status.
 export const bulkRespondToAssetCreation = async (req, res) => {
     try {
-        const { assetIds, action } = req.body;
+        const { assetIds, action: rawBulkAction } = req.body;
+        const rawBulkStr = String(rawBulkAction || '').trim();
+        const bulkLo = rawBulkStr.toLowerCase();
+        const bulkActionNorm =
+            rawBulkStr === 'Approve' || bulkLo === 'approve'
+                ? 'Approve'
+                : rawBulkStr === 'Reject' || bulkLo === 'reject'
+                  ? 'Reject'
+                  : rawBulkStr === 'Draft' || bulkLo === 'draft'
+                    ? 'Draft'
+                    : null;
         if (!Array.isArray(assetIds) || assetIds.length === 0) {
             return res.status(400).json({ message: 'assetIds is required.' });
         }
-        if (!['Approve', 'Reject'].includes(action)) {
-            return res.status(400).json({ message: 'Invalid action.' });
+        if (!bulkActionNorm) {
+            return res.status(400).json({ message: 'Invalid action. Use Approve, Reject, or Draft.' });
         }
 
         const isJwtAdmin = req.user.isAdmin || req.user.role === 'Admin' || req.user.role === 'ROOT';
@@ -1377,6 +1450,7 @@ export const bulkRespondToAssetCreation = async (req, res) => {
 
         const approvedIds = [];
         const rejectedIds = [];
+        const returnedToDraftIds = [];
         const skipped = [];
 
         for (const id of uniqueIds) {
@@ -1385,7 +1459,11 @@ export const bulkRespondToAssetCreation = async (req, res) => {
                 skipped.push({ id, reason: 'Not found' });
                 continue;
             }
-            if (!(item.status === 'Draft' || item.status === 'Pending')) {
+            const canBulkApprove =
+                item.status === 'Submitted for Approval' ||
+                item.status === 'Pending' ||
+                (item.status === 'Draft' && item.actionRequiredBy);
+            if (!canBulkApprove) {
                 skipped.push({ id, reason: `Status is ${item.status}` });
                 continue;
             }
@@ -1407,35 +1485,74 @@ export const bulkRespondToAssetCreation = async (req, res) => {
                 }
             }
 
-            item.status = action === 'Approve' ? 'Unassigned' : 'Rejected';
+            if (bulkActionNorm === 'Approve') {
+                item.status = 'Unassigned';
+            } else if (bulkActionNorm === 'Draft') {
+                item.status = 'Draft';
+            } else {
+                item.status = 'Rejected';
+            }
             item.actionRequiredBy = null;
+            if (bulkActionNorm === 'Reject' || bulkActionNorm === 'Draft') {
+                item.pendingAction = null;
+                item.pendingActionDetails = null;
+            }
             await item.save();
 
             await DashboardAction.findOneAndUpdate(
                 { requestId: item._id, requestType: 'Asset Approval', status: 'Pending' },
-                { status: action === 'Approve' ? 'Approved' : 'Rejected' }
+                { status: bulkActionNorm === 'Approve' ? 'Approved' : 'Rejected' }
             );
 
-            await AssetHistory.create({
-                assetId: item._id,
-                action: action === 'Approve' ? 'Accepted' : 'Rejected',
-                performedBy: req.user.employeeObjectId || req.user._id,
-                comments: `Bulk asset creation ${action === 'Approve' ? 'approved' : 'rejected'} by Asset Controller/Admin.`,
-                details: { approvalAction: action, mode: 'BulkCreationApproval' },
-                date: new Date()
-            });
-
-            if (action === 'Approve') approvedIds.push(item._id.toString());
-            else rejectedIds.push(item._id.toString());
+            if (bulkActionNorm === 'Approve') {
+                await AssetHistory.create({
+                    assetId: item._id,
+                    action: 'Accepted',
+                    performedBy: req.user.employeeObjectId || req.user._id,
+                    comments: 'Bulk asset creation approved by Asset Controller/Admin.',
+                    details: { approvalAction: 'Approve', mode: 'BulkCreationApproval' },
+                    date: new Date()
+                });
+                approvedIds.push(item._id.toString());
+            } else if (bulkActionNorm === 'Draft') {
+                await AssetHistory.create({
+                    assetId: item._id,
+                    action: 'Update',
+                    performedBy: req.user.employeeObjectId || req.user._id,
+                    comments: 'Bulk asset creation: not selected for approval — returned to Draft so the creator can edit and resubmit.',
+                    details: { approvalAction: 'Draft', mode: 'BulkCreationApproval' },
+                    date: new Date()
+                });
+                returnedToDraftIds.push(item._id.toString());
+            } else {
+                await AssetHistory.create({
+                    assetId: item._id,
+                    action: 'Rejected',
+                    performedBy: req.user.employeeObjectId || req.user._id,
+                    comments: 'Bulk asset creation rejected by Asset Controller/Admin.',
+                    details: { approvalAction: 'Reject', mode: 'BulkCreationApproval' },
+                    date: new Date()
+                });
+                rejectedIds.push(item._id.toString());
+            }
         }
 
+        const message =
+            bulkActionNorm === 'Approve'
+                ? 'Bulk creation approval completed.'
+                : bulkActionNorm === 'Draft'
+                  ? 'Bulk creation: assets returned to draft.'
+                  : 'Bulk creation rejection completed.';
+
         res.status(200).json({
-            message: `Bulk creation ${action.toLowerCase()} completed.`,
+            message,
             approvedCount: approvedIds.length,
             rejectedCount: rejectedIds.length,
+            returnedToDraftCount: returnedToDraftIds.length,
             skippedCount: skipped.length,
             approvedIds,
             rejectedIds,
+            returnedToDraftIds,
             skipped
         });
     } catch (error) {
@@ -1457,13 +1574,37 @@ export const getBulkAssetDetails = async (req, res) => {
             .filter(Boolean);
         if (ids.length === 0) return res.status(400).json({ message: 'No valid IDs provided.' });
 
+        const pendingAccessoryCtx = await buildPendingAccessoryVisibilityCtx(req);
+
         const assets = await AssetItem.find({ _id: { $in: ids } })
-            .select('assetId name status accessories actionRequiredBy')
+            .select('assetId name status pendingAction accessories actionRequiredBy createdBy assignedTo')
             .populate('actionRequiredBy', 'firstName lastName employeeId')
+            .populate('assignedTo', 'employeeId')
             .lean();
-        const order = new Map(ids.map((v, i) => [v, i]));
-        assets.sort((a, b) => (order.get(a._id.toString()) ?? 0) - (order.get(b._id.toString()) ?? 0));
-        res.status(200).json({ items: assets });
+        const byId = new Map(assets.map((a) => [a._id.toString(), a]));
+        const viewerIdBulk = req.user?._id?.toString() || req.user?.id?.toString();
+        const notFoundStub = (id) => ({
+            _id: id,
+            assetId: '—',
+            name: 'Asset not found',
+            status: null,
+            pendingAction: null,
+            accessories: []
+        });
+        const items = ids.map((id) => {
+            const a = byId.get(String(id));
+            if (!a) return notFoundStub(id);
+            if (String(a.status || '').trim() === 'Draft') {
+                const cid = a.createdBy?.toString?.();
+                if (!cid || cid !== viewerIdBulk) return notFoundStub(id);
+            }
+            const canSeePending = computeCanSeePendingAddsForAsset(pendingAccessoryCtx, a);
+            return {
+                ...a,
+                accessories: filterAccessoriesHidingPendingAdds(a.accessories || [], canSeePending)
+            };
+        });
+        res.status(200).json({ items });
     } catch (error) {
         console.error('Error in getBulkAssetDetails:', error);
         res.status(500).json({ message: 'Server Error' });
@@ -1483,27 +1624,50 @@ export const getBulkAssetInventoryForPrint = async (req, res) => {
             .filter(Boolean);
         if (ids.length === 0) return res.status(400).json({ message: 'No valid IDs provided.' });
 
+        const pendingAccessoryCtx = await buildPendingAccessoryVisibilityCtx(req);
+
         const assets = await AssetItem.find({ _id: { $in: ids } })
-            .select('assetId name status accessories')
+            .select('assetId name status accessories createdBy assignedTo actionRequiredBy')
             .populate('categoryId', 'name')
             .populate('typeId', 'name')
+            .populate('assignedTo', 'employeeId')
+            .populate('actionRequiredBy', 'employeeId')
             .lean();
 
         const order = new Map(ids.map((v, i) => [v, i]));
         assets.sort((a, b) => (order.get(a._id.toString()) ?? 0) - (order.get(b._id.toString()) ?? 0));
 
-        const items = assets.map((a) => ({
-            _id: a._id,
-            assetId: a.assetId,
-            name: a.name,
-            status: a.status,
-            categoryName: a.categoryId?.name || '—',
-            typeName: a.typeId?.name || '—',
-            accessories: (a.accessories || []).map((acc) => ({
-                name: acc.name || '—',
-                status: acc.status || '—'
-            }))
-        }));
+        const viewerIdPrint = req.user?._id?.toString() || req.user?.id?.toString();
+        const items = assets.map((a) => {
+            if (String(a.status || '').trim() === 'Draft') {
+                const cid = a.createdBy?.toString?.();
+                if (!cid || cid !== viewerIdPrint) {
+                    return {
+                        _id: a._id,
+                        assetId: '—',
+                        name: '—',
+                        status: null,
+                        categoryName: '—',
+                        typeName: '—',
+                        accessories: []
+                    };
+                }
+            }
+            const canSeePending = computeCanSeePendingAddsForAsset(pendingAccessoryCtx, a);
+            const accList = filterAccessoriesHidingPendingAdds(a.accessories || [], canSeePending);
+            return {
+                _id: a._id,
+                assetId: a.assetId,
+                name: a.name,
+                status: a.status,
+                categoryName: a.categoryId?.name || '—',
+                typeName: a.typeId?.name || '—',
+                accessories: accList.map((acc) => ({
+                    name: acc.name || '—',
+                    status: acc.status || '—'
+                }))
+            };
+        });
 
         res.status(200).json({ items });
     } catch (error) {
@@ -1520,7 +1684,9 @@ export const updateAssetItem = async (req, res) => {
         const { id } = req.params;
         let { name, photo, status, categoryId, assetValue, purchaseDate, warrantyYears, lastServiceDate } = req.body;
 
-        const isAdmin = req.user.isAdmin || req.user.role === 'Admin' || req.user.role === 'ROOT';
+        const isJwtAdmin = req.user.isAdmin || req.user.role === 'Admin' || req.user.role === 'ROOT';
+        const isSysAdmin = await isUserAdministrator(req.user?.id);
+        const isAdmin = isJwtAdmin || isSysAdmin;
         const isAssetController = await isUserInFlowchart(req.user, 'assetcontroller');
 
         const item = await AssetItem.findById(id);
@@ -1532,14 +1698,35 @@ export const updateAssetItem = async (req, res) => {
         const currentUserId = req.user._id?.toString() || req.user.id?.toString();
         const isCreator = item.createdBy?.toString() === currentUserId;
         const isDraft = item.status === 'Draft';
+        const isRejectedCreation = item.status === 'Rejected';
+        const isSubmittedForApproval = item.status === 'Submitted for Approval';
 
         // Strict edit permission:
-        // 1) Draft -> only creator can edit
-        // 2) Unassigned (non-draft) -> only Asset Controller/Admin can edit
-        // 3) Assigned/other statuses -> only Asset Controller/Admin can edit
-        if (isDraft) {
+        // 1) Submitted for approval -> creator cannot edit (even if they are Asset Controller); AC/Admin (non-creator) or system admin can edit
+        // 2) Draft -> only creator can edit
+        // 3) Rejected (creation declined) -> creator or Asset Controller/Admin can edit
+        // 4) Unassigned (non-draft) -> only Asset Controller/Admin can edit
+        // 5) Assigned/other statuses -> only Asset Controller/Admin can edit
+        if (isSubmittedForApproval) {
+            if (isCreator && !isAdmin) {
+                return res.status(403).json({
+                    message: 'This asset is awaiting approval. The creator cannot edit until it is approved or rejected.'
+                });
+            }
+            if (!isAdmin && !isAssetController) {
+                return res.status(403).json({
+                    message: 'This asset is awaiting approval. Only Asset Controller or Admin can edit.'
+                });
+            }
+        } else if (isDraft) {
             if (!isCreator) {
                 return res.status(403).json({ message: "Only the asset creator can edit draft assets." });
+            }
+        } else if (isRejectedCreation) {
+            if (!isCreator && !isAdmin && !isAssetController) {
+                return res.status(403).json({
+                    message: 'Only the asset creator, Asset Controller, or Admin can edit a rejected asset.'
+                });
             }
         } else {
             if (!isAdmin && !isAssetController) {
@@ -1552,7 +1739,11 @@ export const updateAssetItem = async (req, res) => {
         if (assetValue !== undefined) item.assetValue = assetValue || 0;
         if (purchaseDate !== undefined) item.purchaseDate = purchaseDate || null;
         if (warrantyYears !== undefined) item.warrantyYears = warrantyYears || 0;
-        if (status) item.status = status;
+        const creatorCannotSetStatusViaPut =
+            isCreator && !isAdmin && !isAssetController && (isDraft || isRejectedCreation);
+        if (status && !creatorCannotSetStatusViaPut) {
+            item.status = status;
+        }
         if (lastServiceDate !== undefined) item.lastServiceDate = lastServiceDate || null;
 
         // Handle Photo Upload if changed
@@ -1629,6 +1820,14 @@ export const getAssetItemDetail = async (req, res) => {
 
         if (!item) {
             return res.status(404).json({ message: 'Asset not found' });
+        }
+
+        const viewerUserIdEarly = req.user?._id?.toString() || req.user?.id?.toString();
+        const draftCreatorIdEarly = item.createdBy?._id?.toString() || item.createdBy?.toString();
+        if (String(item.status || '').trim() === 'Draft') {
+            if (!draftCreatorIdEarly || draftCreatorIdEarly !== viewerUserIdEarly) {
+                return res.status(404).json({ message: 'Asset not found' });
+            }
         }
 
         // Populate sometimes leaves a bare ObjectId; load EmployeeBasic so UI + canApprove match correctly
@@ -1727,10 +1926,25 @@ export const getAssetItemDetail = async (req, res) => {
             currentEmpId &&
             assetController._id.toString() === currentEmpId;
 
-        // NOTE: Per your request, we do not block viewing asset details by role/assignment.
-        // Buttons/actions are still protected in other endpoints.
+        // Draft detail access is enforced above (creator only). Other statuses: no blanket block by role here;
+        // mutations stay protected on their endpoints.
 
         const itemObj = item.toObject();
+
+        const canSeePendingAccessoryAdds =
+            isAdmin ||
+            isPortalAdmin ||
+            isAssetController ||
+            isDeptAssetController ||
+            isAssignedToUser ||
+            isActionRequiredByUser;
+
+        if (itemObj.accessories?.length) {
+            itemObj.accessories = filterAccessoriesHidingPendingAdds(
+                itemObj.accessories,
+                canSeePendingAccessoryAdds
+            );
+        }
 
         // Sign URLs
         if (itemObj.invoiceFile) {
@@ -1829,7 +2043,8 @@ export const getAssetItemDetail = async (req, res) => {
             (item.assignedTo || item.assignedCompany);
 
         const isAwaitingCreationApproval =
-            item.status === 'Draft' ||
+            item.status === 'Submitted for Approval' ||
+            (item.status === 'Draft' && item.actionRequiredBy) ||
             (item.actionRequiredBy != null &&
                 item.status === 'Pending' &&
                 !isAssignmentAcknowledgmentOnly);
@@ -1851,20 +2066,8 @@ export const getAssetItemDetail = async (req, res) => {
         );
         const isDesignatedCreationApprover = matchesActionByObjectId || matchesActionByEmployeeId;
 
-        const isDraftWithoutDesignatedApprover =
-            item.status === 'Draft' &&
-            (item.actionRequiredBy == null || item.actionRequiredBy === undefined);
+        // Save-only drafts (no actionRequiredBy) must be submitted for approval first — no direct AC approve via dept fallback.
         let canApproveAsDeptAssetController = false;
-        if (isDraftWithoutDesignatedApprover && itemObj.assetControllerId) {
-            const acIdStr = String(itemObj.assetControllerId);
-            if (!acIdStr.startsWith('flowchart_') && reqEmpObj && acIdStr === reqEmpObj) {
-                canApproveAsDeptAssetController = true;
-            } else if (itemObj.assetController?.employeeId && reqUserEmployeeId) {
-                if (normEmp(itemObj.assetController.employeeId) === normEmp(reqUserEmployeeId)) {
-                    canApproveAsDeptAssetController = true;
-                }
-            }
-        }
 
         // Important: "awaiting creation approval" must be shown/approved only by the actual
         // designated approver (stored in `actionRequiredBy`), not by anyone who happens to be
@@ -1873,8 +2076,6 @@ export const getAssetItemDetail = async (req, res) => {
             isAwaitingCreationApproval &&
             (isAdmin ||
                 isPortalAdmin ||
-                // Dept asset controller fallback only when there is no designated approver (draft without actionRequiredBy)
-                (isDeptAssetController && isDraftWithoutDesignatedApprover) ||
                 isDesignatedCreationApprover ||
                 canApproveAsDeptAssetController)
         );
@@ -1978,6 +2179,13 @@ export const assignAssetItem = async (req, res) => {
         // Unassigned inventory actions are restricted to Admin / Asset Controller only.
         if (['Unassigned', 'Returned', 'Draft'].includes(item.status) && !isAdmin && !isAssetController) {
             return res.status(403).json({ message: "Only Asset Controller or Admin can manage unassigned assets." });
+        }
+
+        // New assignments from the pool (not reassignment / parking handoff) must start from Unassigned only.
+        if (!isReassignment && !isParkingReassignment && item.status !== 'Unassigned') {
+            return res.status(400).json({
+                message: 'Assets can only be assigned from Unassigned status.'
+            });
         }
 
         if (!actingEmpObjectId) {
@@ -2252,6 +2460,33 @@ export const bulkAssignAssetItems = async (req, res) => {
             updateData.temporaryEndDate = null;
         }
 
+        let bulkAssignmentAttachments;
+        try {
+            bulkAssignmentAttachments = await requireBulkAssetInventoryPdfAttachment(
+                req,
+                assetIds.map(String),
+                'bulk-assignment-inventory'
+            );
+        } catch (pdfErr) {
+            console.error('[bulkAssignAssetItems] PDF required for email:', pdfErr?.message || pdfErr);
+            return res.status(503).json({
+                message:
+                    pdfErr?.message ||
+                    'Could not generate the asset list PDF. Assignment was not saved. Try again or contact support.'
+            });
+        }
+
+        const existingItems = await AssetItem.find({ _id: { $in: assetIds } }).select('status assetId');
+        if (existingItems.length !== assetIds.length) {
+            return res.status(400).json({ message: 'One or more assets were not found.' });
+        }
+        const notUnassigned = existingItems.filter((doc) => doc.status !== 'Unassigned');
+        if (notUnassigned.length > 0) {
+            const ids = notUnassigned.map((d) => d.assetId || d._id).join(', ');
+            return res.status(400).json({
+                message: `Bulk assign is only allowed for assets in Unassigned status. Not unassigned: ${ids}`
+            });
+        }
 
         await AssetItem.updateMany(
             { _id: { $in: assetIds } },
@@ -2325,13 +2560,6 @@ export const bulkAssignAssetItems = async (req, res) => {
             const orderMap = new Map(assetIds.map((id, i) => [String(id), i]));
             assetsForEmail.sort((a, b) => (orderMap.get(String(a._id)) ?? 0) - (orderMap.get(String(b._id)) ?? 0));
 
-            let attachments = [];
-            try {
-                attachments = await buildBulkAssetInventoryPdfAttachment(req, assetIds.map(String), 'bulk-assignment-inventory');
-            } catch (pdfErr) {
-                console.error('Bulk assignment PDF attachment failed (non-fatal):', pdfErr?.message || pdfErr);
-            }
-
             if (employee && firstAsset) {
                 await sendAssetAssignmentEmail({
                     asset: firstAsset,
@@ -2340,7 +2568,7 @@ export const bulkAssignAssetItems = async (req, res) => {
                     recipient: employee,
                     isBulk: true,
                     assetCount: assetIds.length,
-                    attachments
+                    attachments: bulkAssignmentAttachments
                 });
             }
         } catch (emailErr) {
@@ -3193,6 +3421,22 @@ export const returnAssetItem = async (req, res) => {
                     return res.status(400).json({ message: `This asset already has a pending "${item.pendingAction}" request.` });
                 }
 
+                let singleReturnAttachments;
+                try {
+                    singleReturnAttachments = await requireBulkAssetInventoryPdfAttachment(
+                        req,
+                        [item._id.toString()],
+                        'return-inventory'
+                    );
+                } catch (pdfErr) {
+                    console.error('[returnAssetItem] PDF required for email:', pdfErr?.message || pdfErr);
+                    return res.status(503).json({
+                        message:
+                            pdfErr?.message ||
+                            'Could not generate the asset list PDF. Return request was not submitted.'
+                    });
+                }
+
                 item.pendingAction = 'Return Asset';
                 item.pendingActionDetails = {
                     reason: req.body?.reason || 'Return requested by assigned employee',
@@ -3218,12 +3462,6 @@ export const returnAssetItem = async (req, res) => {
                 });
 
                 try {
-                    let singleReturnAttachments = [];
-                    try {
-                        singleReturnAttachments = await buildBulkAssetInventoryPdfAttachment(req, [item._id.toString()], 'return-inventory');
-                    } catch (pdfErr) {
-                        console.error('Return PDF attachment failed (non-fatal):', pdfErr?.message || pdfErr);
-                    }
                     await sendAssetActionApprovalEmail(
                         item,
                         'Return Asset',
@@ -3263,6 +3501,22 @@ export const returnAssetItem = async (req, res) => {
 
             const reason = req.body?.reason || 'Return requested by assigned employee';
             const bulkAssetIdsOrdered = uniqueBulk;
+
+            let bulkReturnAttachments;
+            try {
+                bulkReturnAttachments = await requireBulkAssetInventoryPdfAttachment(
+                    req,
+                    bulkAssetIdsOrdered,
+                    'bulk-return-inventory'
+                );
+            } catch (pdfErr) {
+                console.error('[returnAssetItem bulk] PDF required for email:', pdfErr?.message || pdfErr);
+                return res.status(503).json({
+                    message:
+                        pdfErr?.message ||
+                        'Could not generate the asset list PDF. Return request was not submitted.'
+                });
+            }
 
             for (const a of bulkAssets) {
                 a.pendingAction = 'Return Asset';
@@ -3316,19 +3570,13 @@ export const returnAssetItem = async (req, res) => {
             });
 
             try {
-                let attachments = [];
-                try {
-                    attachments = await buildBulkAssetInventoryPdfAttachment(req, bulkAssetIdsOrdered, 'bulk-return-inventory');
-                } catch (pdfErr) {
-                    console.error('Bulk return PDF attachment failed (non-fatal):', pdfErr?.message || pdfErr);
-                }
                 await sendAssetActionApprovalEmail(
                     { ...primaryAsset.toObject(), assetId: primaryAsset.assetId, name: `Bulk Return Asset (${bulkAssets.length} assets)` },
                     'Return Asset',
                     assetController,
                     { name: requesterName },
                     `Bulk return for ${bulkAssets.length} asset(s). ${reason}`,
-                    attachments
+                    bulkReturnAttachments
                 );
             } catch (e) {
                 // non-fatal
@@ -4357,6 +4605,11 @@ export const manageAccessoryStatus = async (req, res) => {
 
         accessory.status = status;
         await asset.save();
+        try {
+            await syncAllAccessoryInstancesForAsset(asset);
+        } catch (syncErr) {
+            console.error('[manageAccessoryStatus accessory catalog sync]', syncErr?.message || syncErr);
+        }
         await notifyAssignedEmployeeIfController(
             req,
             asset,
@@ -4734,6 +4987,23 @@ export const bulkRequestAssetAction = async (req, res) => {
         let fileUrl = null;
         // Note: For bulk, attachment would need to be handled per asset if different
 
+        const pdfIds = assetIds.map((id) => id.toString());
+        let bulkActionAttachments;
+        try {
+            bulkActionAttachments = await requireBulkAssetInventoryPdfAttachment(
+                req,
+                pdfIds,
+                `bulk-${String(actionType).replace(/\s+/g, '-')}-inventory`
+            );
+        } catch (pdfErr) {
+            console.error('[bulkRequestAssetAction] PDF required for email:', pdfErr?.message || pdfErr);
+            return res.status(503).json({
+                message:
+                    pdfErr?.message ||
+                    'Could not generate the asset list PDF. Request was not submitted.'
+            });
+        }
+
         const results = [];
         const errors = [];
         const bulkAssetIds = [];
@@ -4827,17 +5097,6 @@ export const bulkRequestAssetAction = async (req, res) => {
                     : assetController;
 
             try {
-                const pdfIds = assetIds.map((id) => id.toString());
-                let bulkActionAttachments = [];
-                try {
-                    bulkActionAttachments = await buildBulkAssetInventoryPdfAttachment(
-                        req,
-                        pdfIds,
-                        `bulk-${String(actionType).replace(/\s+/g, '-')}-inventory`
-                    );
-                } catch (pdfErr) {
-                    console.error('[bulkRequestAssetAction] PDF attachment failed (non-fatal):', pdfErr?.message || pdfErr);
-                }
                 await sendAssetActionApprovalEmail(
                     { ...primaryAsset.toObject(), assetId: primaryAsset.assetId, name: `Bulk ${actionType} Request (${assets.length} assets)` },
                     actionType,
@@ -5730,11 +5989,11 @@ export const uploadAccessoriesAttachment = async (req, res) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ACCESSORY-LEVEL ACTION WORKFLOW
-// These functions handle Transfer / Loss & Damage / EOL for individual
+// These functions handle Transfer / Loss & Damage / Unattach for individual
 // accessories WITHOUT touching the main asset's status field.
 // ─────────────────────────────────────────────────────────────────────────────
 
-// @desc    Request an action on a single accessory (Transfer / L&D / EOL)
+// @desc    Request an action on a single accessory (Transfer / L&D / Unattach)
 // @route   PUT /api/AssetItem/:id/accessories/:accId/request-action
 // @access  Private
 export const requestAccessoryAction = async (req, res) => {
@@ -5742,7 +6001,10 @@ export const requestAccessoryAction = async (req, res) => {
         const { id, accId } = req.params;
         const { actionType, reason, attachment, targetAssetId, fineData } = req.body;
 
-        if (!['Transfer', 'Loss and Damage', 'End of Life', 'Unattach'].includes(actionType)) {
+        if (actionType === 'End of Life') {
+            return res.status(400).json({ message: 'End of Life is not available for accessories.' });
+        }
+        if (!['Transfer', 'Loss and Damage', 'Unattach'].includes(actionType)) {
             return res.status(400).json({ message: 'Invalid accessory action type' });
         }
 
@@ -5808,6 +6070,7 @@ export const requestAccessoryAction = async (req, res) => {
 
             const catalogId = await generateAccessoryCatalogId();
             await AssetAccessoryCatalog.create({
+                recordType: 'catalog',
                 accessoryCatalogId: catalogId,
                 name: accToMove.name,
                 price: accToMove.amount || 0,
@@ -5828,6 +6091,13 @@ export const requestAccessoryAction = async (req, res) => {
             asset.markModified('accessories');
             await asset.save();
 
+            try {
+                await markCatalogInstancesDetachedFromAsset(asset._id, [accToMove.accessoryId]);
+                await syncAllAccessoryInstancesForAsset(asset);
+            } catch (syncErr) {
+                console.error('[requestAccessoryAction direct Unattach catalog sync]', syncErr?.message || syncErr);
+            }
+
             await AssetHistory.create({
                 assetId: asset._id,
                 action: 'Accepted',
@@ -5846,7 +6116,7 @@ export const requestAccessoryAction = async (req, res) => {
         }
 
         // Flow:
-        // - End of Life / Transfer -> Asset Controller approval
+        // - Transfer -> Asset Controller approval
         // - Loss and Damage -> company assets to HR, others to Asset Controller first
 
         let finalApprover;
@@ -5888,7 +6158,6 @@ export const requestAccessoryAction = async (req, res) => {
 
         // Create Dashboard Action
         const accDashType = actionType === 'Transfer' ? 'Asset Transfer' :
-            actionType === 'End of Life' ? 'Asset End of Life' :
             actionType === 'Unattach' ? 'Asset Accessory Unattach' :
             'Asset Loss Damage';
         await DashboardAction.create({
@@ -5982,10 +6251,15 @@ export const respondAccessoryAction = async (req, res) => {
             asset.actionRequiredBy?._id?.toString?.() || asset.actionRequiredBy?.toString?.() || null;
         const isDesignatedApprover = !!(currentUserEmpIdEarly && actionRequiredById && actionRequiredById === currentUserEmpIdEarly);
 
+        const addApprovalKind = pendingActionDetails?.addApprovalKind;
         const canApproveTransfer = pendingAction === 'Transfer' && actorFlags.canAct;
         const canApproveAddPending =
             pendingAction === 'Add' &&
-            (isAdmin || (isDesignatedApprover && (isAssetControllerApproving || actorFlags.canAct)));
+            (isAdmin ||
+                (isDesignatedApprover &&
+                    (addApprovalKind === 'Assignee'
+                        ? actorFlags.isAssignee || actorFlags.isPrimaryReporteeDelegate
+                        : isAssetControllerApproving || actorFlags.canAct)));
         const canApproveByAuthority =
             (pendingAction === 'Loss and Damage' || pendingAction === 'End of Life' || pendingAction === 'Unattach') &&
             (isAdmin || isAssetControllerApproving);
@@ -6093,6 +6367,14 @@ export const respondAccessoryAction = async (req, res) => {
                 asset.markModified('accessories');
                 await asset.save();
 
+                try {
+                    await markCatalogInstancesDetachedFromAsset(asset._id, [accToMove.accessoryId]);
+                    await syncAllAccessoryInstancesForAsset(asset);
+                    await syncAllAccessoryInstancesForAsset(targetAsset);
+                } catch (syncErr) {
+                    console.error('[respondAccessoryAction Transfer catalog sync]', syncErr?.message || syncErr);
+                }
+
                 return res.status(200).json({ message: `Transfer approved and finalized by Asset Controller. Accessory assigned to ${targetAsset.assetId}.`, asset });
             }
 
@@ -6104,6 +6386,7 @@ export const respondAccessoryAction = async (req, res) => {
 
                 const catalogId = await generateAccessoryCatalogId();
                 await AssetAccessoryCatalog.create({
+                    recordType: 'catalog',
                     accessoryCatalogId: catalogId,
                     name: accToMove.name,
                     price: accToMove.amount || 0,
@@ -6134,6 +6417,12 @@ export const respondAccessoryAction = async (req, res) => {
                 await DashboardAction.deleteMany({ requestId: asset._id, requestType: 'Asset Accessory Unattach' });
                 asset.markModified('accessories');
                 await asset.save();
+                try {
+                    await markCatalogInstancesDetachedFromAsset(asset._id, [accToMove.accessoryId]);
+                    await syncAllAccessoryInstancesForAsset(asset);
+                } catch (syncErr) {
+                    console.error('[respondAccessory Unattach catalog sync]', syncErr?.message || syncErr);
+                }
                 await notifyAssignedEmployeeIfController(req, asset, 'Unattach Accessory', `Accessory "${accToMove.name}" was detached and added to the accessories catalog.`);
 
                 return res.status(200).json({
@@ -6145,6 +6434,8 @@ export const respondAccessoryAction = async (req, res) => {
             // --- SPECIAL LOGIC FOR ADD APPROVAL (catalog attach) — approver is asset.actionRequiredBy (assignee or AC) ---
             if (pendingAction === 'Add') {
                 const catalogItemId = accessory?.pendingActionDetails?.catalogItemId;
+                const addKindForEmail = pendingActionDetails?.addApprovalKind;
+                const addRequestedByForEmail = pendingActionDetails?.requestedBy;
                 accessory.status = 'Attached';
                 accessory.pendingAction = null;
                 accessory.pendingActionDetails = null;
@@ -6187,9 +6478,29 @@ export const respondAccessoryAction = async (req, res) => {
                 asset.markModified('accessories');
                 await asset.save();
 
-                // Success email to assigned user (holder), regardless of who approved (AC or assignee)
-                if (asset.assignedTo) {
-                    try {
+                try {
+                    await syncAllAccessoryInstancesForAsset(asset);
+                } catch (syncErr) {
+                    console.error('[respondAccessoryAction Add catalog sync]', syncErr?.message || syncErr);
+                }
+
+                try {
+                    if (addKindForEmail === 'Assignee' && addRequestedByForEmail) {
+                        const requesterEmp = await EmployeeBasic.findById(addRequestedByForEmail)
+                            .select('firstName lastName employeeId companyEmail workEmail personalEmail email primaryReportee')
+                            .populate('primaryReportee', 'firstName lastName companyEmail workEmail personalEmail email')
+                            .lean();
+                        if (requesterEmp) {
+                            await sendAssignedEmployeeActionEmail({
+                                asset,
+                                employee: requesterEmp,
+                                action: 'Add Accessory',
+                                performedBy: actorName,
+                                details: `Assigned user approved accessory "${accessory.name}"; it is now attached to the asset.`,
+                                customIntro: 'The holder accepted the accessory addition you initiated:'
+                            });
+                        }
+                    } else if (asset.assignedTo) {
                         const assigneeEmp = await EmployeeBasic.findById(asset.assignedTo._id || asset.assignedTo)
                             .select('firstName lastName employeeId companyEmail workEmail personalEmail email primaryReportee')
                             .populate('primaryReportee', 'firstName lastName companyEmail workEmail personalEmail email')
@@ -6204,9 +6515,9 @@ export const respondAccessoryAction = async (req, res) => {
                                 customIntro: 'The accessory addition was approved. Your asset was updated:'
                             });
                         }
-                    } catch (e) {
-                        console.error('[respondAccessoryAction Add] Assignee success email (non-fatal):', e?.message || e);
                     }
+                } catch (e) {
+                    console.error('[respondAccessoryAction Add] Success email (non-fatal):', e?.message || e);
                 }
 
                 return res.status(200).json({
@@ -6423,6 +6734,8 @@ export const respondAccessoryAction = async (req, res) => {
             // Rejected
             if (pendingAction === 'Add') {
                 const catalogItemId = accessory?.pendingActionDetails?.catalogItemId;
+                const addKindReject = accessory?.pendingActionDetails?.addApprovalKind;
+                const addRequestedByReject = accessory?.pendingActionDetails?.requestedBy;
                 const accIndex = asset.accessories.findIndex(
                     (a) => (a._id && a._id.toString() === accId) || a.accessoryId === accId
                 );
@@ -6465,14 +6778,30 @@ export const respondAccessoryAction = async (req, res) => {
                 asset.markModified('accessories');
                 await asset.save();
 
-                if (asset.assignedTo) {
-                    try {
-                        const actorEmpReject = await EmployeeBasic.findById(req.user.employeeObjectId)
-                            .select('firstName lastName employeeId')
+                try {
+                    const actorEmpReject = await EmployeeBasic.findById(req.user.employeeObjectId)
+                        .select('firstName lastName employeeId')
+                        .lean();
+                    const rejectActorName = actorEmpReject
+                        ? `${actorEmpReject.firstName || ''} ${actorEmpReject.lastName || ''}`.trim()
+                        : req.user.employeeId || 'System';
+
+                    if (addKindReject === 'Assignee' && addRequestedByReject) {
+                        const requesterEmp = await EmployeeBasic.findById(addRequestedByReject)
+                            .select('firstName lastName employeeId companyEmail workEmail personalEmail email primaryReportee')
+                            .populate('primaryReportee', 'firstName lastName companyEmail workEmail personalEmail email')
                             .lean();
-                        const rejectActorName = actorEmpReject
-                            ? `${actorEmpReject.firstName || ''} ${actorEmpReject.lastName || ''}`.trim()
-                            : req.user.employeeId || 'System';
+                        if (requesterEmp) {
+                            await sendAssignedEmployeeActionEmail({
+                                asset,
+                                employee: requesterEmp,
+                                action: 'Add Accessory',
+                                performedBy: rejectActorName,
+                                details: `Accessory "${accName}" was rejected by the assigned user. Reason: ${comment || 'N/A'}`,
+                                customIntro: 'The holder did not accept this accessory addition:'
+                            });
+                        }
+                    } else if (asset.assignedTo) {
                         const assigneeEmp = await EmployeeBasic.findById(asset.assignedTo._id || asset.assignedTo)
                             .select('firstName lastName employeeId companyEmail workEmail personalEmail email primaryReportee')
                             .populate('primaryReportee', 'firstName lastName companyEmail workEmail personalEmail email')
@@ -6487,9 +6816,9 @@ export const respondAccessoryAction = async (req, res) => {
                                 customIntro: 'The accessory addition was not approved:'
                             });
                         }
-                    } catch (e) {
-                        console.error('[respondAccessoryAction Add reject] Email (non-fatal):', e?.message || e);
                     }
+                } catch (e) {
+                    console.error('[respondAccessoryAction Add reject] Email (non-fatal):', e?.message || e);
                 }
 
                 return res.status(200).json({
@@ -6545,6 +6874,98 @@ export const respondAccessoryAction = async (req, res) => {
 export const finalizeAccessoryAction = respondAccessoryAction;
 
 /**
+ * @desc    Submit a saved draft for creation approval (notify Asset Controller)
+ * @route   PUT /api/AssetItem/:id/submit-creation
+ * @access  Private (Creator or Admin)
+ */
+export const submitDraftForCreationApproval = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const item = await AssetItem.findById(id);
+        if (!item) {
+            return res.status(404).json({ message: 'Asset not found' });
+        }
+
+        const canSubmitFrom =
+            (item.status === 'Draft' || item.status === 'Rejected') && !item.actionRequiredBy;
+        if (!canSubmitFrom) {
+            return res.status(400).json({
+                message:
+                    'Only a saved draft, or a rejected creation that is not awaiting approval, can be submitted again.'
+            });
+        }
+
+        const currentUserId = req.user._id?.toString() || req.user.id?.toString();
+        const isCreator = item.createdBy?.toString() === currentUserId;
+        const isJwtAdmin = req.user.isAdmin || req.user.role === 'Admin' || req.user.role === 'ROOT';
+        const isSysAdmin = await isUserAdministrator(req.user?.id);
+        if (!isCreator && !isJwtAdmin && !isSysAdmin) {
+            return res.status(403).json({ message: 'Only the asset creator or an administrator can submit this draft.' });
+        }
+
+        const assetControllerRaw = await getDepartmentHOD('assetcontroller');
+        const assetController = assetControllerRaw ? await resolveAssetControllerEmployee(assetControllerRaw) : null;
+        if (!assetController?._id) {
+            return res.status(400).json({ message: 'Asset Controller is not configured in Flowchart.' });
+        }
+
+        const previousStatusForHistory = item.status;
+        item.status = 'Submitted for Approval';
+        item.actionRequiredBy = assetController._id;
+        await item.save();
+
+        const requesterDisplayName = await getAssetRequesterDisplayName(req);
+
+        await DashboardAction.findOneAndUpdate(
+            { requestId: item._id, requestType: 'Asset Approval', status: 'Pending' },
+            {
+                assignedTo: assetController._id,
+                assignedToEmpId: assetController.employeeId,
+                requestId: item._id,
+                requestType: 'Asset Approval',
+                subjectEmployeeId: req.user.employeeId,
+                subjectName: requesterDisplayName,
+                requestedByName: requesterDisplayName,
+                extra1: `${item.assetId} — ${item.name}`,
+                extra2: `Asset creation — requested by ${requesterDisplayName}`,
+                status: 'Pending'
+            },
+            { upsert: true, new: true, setDefaultsOnInsert: true }
+        );
+
+        let creationAttachments = [];
+        try {
+            creationAttachments = await buildBulkAssetInventoryPdfAttachment(req, [item._id.toString()], 'asset-creation-draft-inventory');
+        } catch (pdfErr) {
+            console.error('submitDraftForCreationApproval PDF attachment failed (non-fatal):', pdfErr?.message || pdfErr);
+        }
+        await sendAssetCreationApprovalEmail({
+            asset: item,
+            recipient: assetController,
+            creatorName: requesterDisplayName,
+            attachments: creationAttachments
+        });
+
+        await AssetHistory.create({
+            assetId: item._id,
+            action: 'Comment',
+            performedBy: req.user.employeeObjectId || req.user._id,
+            comments:
+                previousStatusForHistory === 'Rejected'
+                    ? 'Rejected asset resubmitted for creation approval.'
+                    : 'Draft submitted for creation approval.',
+            details: { previousStatus: previousStatusForHistory, newStatus: 'Submitted for Approval' },
+            date: new Date()
+        });
+
+        res.status(200).json(item);
+    } catch (error) {
+        console.error('submitDraftForCreationApproval:', error);
+        res.status(500).json({ message: 'Server Error' });
+    }
+};
+
+/**
  * @desc    Delete an asset item
  * @route   DELETE /api/AssetItem/:id
  * @access  Private (Asset Controller, Admin, or Creator before approval)
@@ -6562,8 +6983,26 @@ export const deleteAssetItem = async (req, res) => {
         // 1. Admin/Controller: Always authorized
         // 2. Creator: Only if Status is Draft/Pending
 
-        // Delete associated Dashboard Actions
-        await DashboardAction.deleteMany({ requestId: asset._id });
+        if (await isReqUserAdmin(req.user)) {
+            const itemForEmail = await AssetItem.findById(id)
+                .populate({
+                    path: 'assignedTo',
+                    select: 'firstName lastName employeeId companyEmail workEmail personalEmail email primaryReportee',
+                    populate: {
+                        path: 'primaryReportee',
+                        select: 'firstName lastName companyEmail workEmail personalEmail email'
+                    }
+                })
+                .populate('assignedCompany', 'name companyId')
+                .lean();
+            if (itemForEmail) {
+                void notifyAdminDeletedWholeAsset(req, itemForEmail).catch((e) =>
+                    console.error('[notify asset delete]', e?.message || e)
+                );
+            }
+        }
+
+        await cleanupDashboardActionsForDeletedAsset(asset._id);
 
         // Delete associated History
         await AssetHistory.deleteMany({ assetId: asset._id });
@@ -6580,6 +7019,301 @@ export const deleteAssetItem = async (req, res) => {
     } catch (error) {
         console.error('Error deleting asset item:', error);
         res.status(500).json({ message: 'Server Error' });
+    }
+};
+
+/**
+ * @desc    Pending asset dashboard actions assigned to the logged-in user (by EmployeeBasic id or employee code). Not a global queue.
+ * @route   GET /api/AssetItem/dashboard/pending-inbox
+ * @access  Private
+ */
+export const getPendingAssetDashboardInbox = async (req, res) => {
+    try {
+        const currentUser = req.user;
+        if (!currentUser) return res.status(401).json({ message: 'Unauthorized' });
+
+        const manager = await EmployeeBasic.findOne({
+            $or: [
+                ...(currentUser.employeeObjectId ? [{ _id: currentUser.employeeObjectId }] : []),
+                ...(currentUser.employeeId ? [{ employeeId: currentUser.employeeId }] : [])
+            ]
+        });
+
+        const relevantIds = [manager?._id, currentUser.employeeObjectId, currentUser?._id].filter(Boolean);
+        const targetEmployeeId = currentUser.employeeId || manager?.employeeId;
+
+        const match = {
+            status: 'Pending',
+            requestType: { $in: ASSET_DASHBOARD_INBOX_TYPES }
+        };
+
+        // Inbox + badge: only actions assigned to this user (not company-wide queues for Admin / Asset Controller).
+        const assigneeClauses = [
+            ...(relevantIds.length ? [{ assignedTo: { $in: relevantIds } }] : []),
+            ...(targetEmployeeId ? [{ assignedToEmpId: targetEmployeeId }] : [])
+        ];
+        if (assigneeClauses.length === 0) {
+            return res.json({ count: 0, items: [] });
+        }
+        match.$or = assigneeClauses;
+
+        const dashboardPendingItems = await DashboardAction.find(match).sort({ requestedDate: -1 }).limit(200).lean();
+
+        const seen = new Set();
+        const unique = [];
+        for (const it of dashboardPendingItems) {
+            const k = `${it.requestId?.toString()}-${it.requestType}-${it.extra1 || ''}`;
+            if (seen.has(k)) continue;
+            seen.add(k);
+            unique.push(it);
+        }
+
+        const parseExtra3 = (raw) => {
+            if (raw == null || raw === '') return null;
+            if (typeof raw === 'object') return raw;
+            if (typeof raw !== 'string') return null;
+            try {
+                return JSON.parse(raw);
+            } catch {
+                return null;
+            }
+        };
+
+        const oidStr = (x) => String(x ?? '').trim();
+        const validOid = (id) => mongoose.Types.ObjectId.isValid(oidStr(id));
+
+        /** IDs listed on DashboardAction.extra3 only (used for first DB pass). */
+        const resolveBulkIdsFromExtra3 = (da) => {
+            const parsed = parseExtra3(da.extra3);
+            if (parsed?.isBulkCreation && Array.isArray(parsed.bulkAssetIds) && parsed.bulkAssetIds.length > 1) {
+                return {
+                    isBulk: true,
+                    bulkKind: 'creation',
+                    bulkAssetIds: parsed.bulkAssetIds.map((x) => oidStr(x)).filter(validOid)
+                };
+            }
+            if (parsed?.isBulk === true) {
+                const ids = parsed.assetIds || parsed.bulkAssetIds;
+                if (Array.isArray(ids) && ids.length > 1) {
+                    let kind = 'action';
+                    if (da.requestType === 'Asset Return') kind = 'return';
+                    return {
+                        isBulk: true,
+                        bulkKind: kind,
+                        bulkAssetIds: [...new Set(ids.map((x) => oidStr(x)))].filter(validOid)
+                    };
+                }
+            }
+            return { isBulk: false, bulkKind: null, bulkAssetIds: [] };
+        };
+
+        const allIdSet = new Set();
+        for (const da of unique) {
+            if (da.requestId) allIdSet.add(da.requestId.toString());
+            const { isBulk, bulkAssetIds } = resolveBulkIdsFromExtra3(da);
+            if (isBulk && bulkAssetIds.length) {
+                bulkAssetIds.forEach((id) => allIdSet.add(id));
+            }
+        }
+
+        const allIds = [...allIdSet].filter(Boolean);
+        const assets = await AssetItem.find({ _id: { $in: allIds } })
+            .select(
+                'assetId name status assignedTo assignedToType assignedCompany pendingAction actionRequiredBy accessories acceptanceStatus pendingActionDetails'
+            )
+            .populate('assignedTo', 'firstName lastName employeeId')
+            .populate('assignedCompany', 'name companyId')
+            .lean();
+
+        const assetById = Object.fromEntries(assets.map((a) => [a._id.toString(), a]));
+
+        // Load any bulk members referenced on the primary AssetItem but missing from extra3 / invalid in extra3.
+        const supplementIds = new Set();
+        for (const da of unique) {
+            const primary = assetById[da.requestId?.toString()];
+            const pb = primary?.pendingActionDetails?.bulkAssetIds;
+            if (!Array.isArray(pb)) continue;
+            for (const id of pb) {
+                const s = oidStr(id);
+                if (validOid(s) && !assetById[s]) supplementIds.add(s);
+            }
+        }
+        if (supplementIds.size > 0) {
+            const more = await AssetItem.find({ _id: { $in: [...supplementIds] } })
+                .select(
+                    'assetId name status assignedTo assignedToType assignedCompany pendingAction actionRequiredBy accessories acceptanceStatus pendingActionDetails'
+                )
+                .populate('assignedTo', 'firstName lastName employeeId')
+                .populate('assignedCompany', 'name companyId')
+                .lean();
+            for (const a of more) {
+                assetById[a._id.toString()] = a;
+            }
+        }
+
+        /** Canonical bulk list: prefer pendingActionDetails.bulkAssetIds on primary (DB) over extra3 JSON. */
+        const resolveBulkForInboxItem = (da) => {
+            const parsed = parseExtra3(da.extra3);
+            if (parsed?.isBulkCreation && Array.isArray(parsed.bulkAssetIds) && parsed.bulkAssetIds.length > 1) {
+                const bulkAssetIds = [...new Set(parsed.bulkAssetIds.map((x) => oidStr(x)))].filter(validOid);
+                if (bulkAssetIds.length > 1) {
+                    return { isBulk: true, bulkKind: 'creation', bulkAssetIds };
+                }
+            }
+
+            const aid = da.requestId?.toString();
+            const primary = aid ? assetById[aid] : null;
+            const pb = primary?.pendingActionDetails?.bulkAssetIds;
+            if (primary?.pendingActionDetails?.isBulk === true && Array.isArray(pb) && pb.length > 1) {
+                const bulkAssetIds = [...new Set(pb.map((x) => oidStr(x)))].filter(validOid);
+                if (bulkAssetIds.length > 1) {
+                    let kind = 'action';
+                    if (da.requestType === 'Asset Return') kind = 'return';
+                    return { isBulk: true, bulkKind: kind, bulkAssetIds };
+                }
+            }
+
+            if (parsed?.isBulk === true) {
+                const ids = parsed.assetIds || parsed.bulkAssetIds;
+                if (Array.isArray(ids) && ids.length > 1) {
+                    const bulkAssetIds = [...new Set(ids.map((x) => oidStr(x)))].filter(validOid);
+                    if (bulkAssetIds.length > 1) {
+                        let kind = 'action';
+                        if (da.requestType === 'Asset Return') kind = 'return';
+                        return { isBulk: true, bulkKind: kind, bulkAssetIds };
+                    }
+                }
+            }
+
+            return { isBulk: false, bulkKind: null, bulkAssetIds: [] };
+        };
+
+        const formatAsset = (asset) => {
+            if (!asset) return null;
+            const accList = asset.accessories || [];
+            const pendingAccessories = accList.filter((x) => x.pendingAction);
+            return {
+                _id: asset._id,
+                assetId: asset.assetId,
+                name: asset.name,
+                status: asset.status,
+                pendingAction: asset.pendingAction,
+                assignedTo: asset.assignedTo,
+                accessories: accList.map((ac) => ({
+                    _id: ac._id,
+                    accessoryId: ac.accessoryId,
+                    name: ac.name,
+                    status: ac.status,
+                    pendingAction: ac.pendingAction
+                })),
+                pendingAccessoriesCount: pendingAccessories.length
+            };
+        };
+
+        const items = unique.map((da) => {
+            const aid = da.requestId?.toString();
+            const asset = assetById[aid] || null;
+            const { isBulk, bulkKind, bulkAssetIds } = resolveBulkForInboxItem(da);
+
+            let bulkAssets = [];
+            if (isBulk && bulkAssetIds.length) {
+                bulkAssets = bulkAssetIds.map((id) => {
+                    const raw = assetById[id];
+                    if (!raw) {
+                        return {
+                            _id: id,
+                            assetId: '—',
+                            name: 'Asset not found',
+                            status: null,
+                            pendingAction: null,
+                            assignedTo: null,
+                            accessories: [],
+                            pendingAccessoriesCount: 0
+                        };
+                    }
+                    return formatAsset(raw);
+                });
+            }
+
+            return {
+                dashboardActionId: da._id,
+                requestType: da.requestType,
+                requestedDate: da.requestedDate,
+                requestedByName: da.requestedByName,
+                subjectName: da.subjectName,
+                extra1: da.extra1,
+                extra2: da.extra2,
+                extra3: da.extra3,
+                requestObjectId: da.requestId,
+                primaryAssetId: aid,
+                isBulk,
+                bulkKind,
+                bulkAssetIds,
+                bulkAssets,
+                asset: formatAsset(asset)
+            };
+        });
+
+        res.json({ count: items.length, items });
+    } catch (error) {
+        console.error('getPendingAssetDashboardInbox:', error);
+        res.status(500).json({ message: 'Failed to load pending asset requests' });
+    }
+};
+
+/**
+ * @desc    Remove one pending asset dashboard notification for the current user (inbox dismiss only).
+ * @route   DELETE /api/AssetItem/dashboard/pending-inbox/:id
+ * @access  Private (assignee only, same scope as GET pending-inbox)
+ */
+export const deletePendingAssetDashboardInboxItem = async (req, res) => {
+    try {
+        const currentUser = req.user;
+        if (!currentUser) return res.status(401).json({ message: 'Unauthorized' });
+
+        const { id } = req.params;
+        if (!mongoose.Types.ObjectId.isValid(id)) {
+            return res.status(400).json({ message: 'Invalid notification id' });
+        }
+
+        const manager = await EmployeeBasic.findOne({
+            $or: [
+                ...(currentUser.employeeObjectId ? [{ _id: currentUser.employeeObjectId }] : []),
+                ...(currentUser.employeeId ? [{ employeeId: currentUser.employeeId }] : [])
+            ]
+        });
+
+        const relevantIds = [manager?._id, currentUser.employeeObjectId, currentUser?._id].filter(Boolean);
+        const targetEmployeeId = currentUser.employeeId || manager?.employeeId;
+
+        const da = await DashboardAction.findById(id);
+        if (!da) return res.status(404).json({ message: 'Notification not found' });
+        if (da.status !== 'Pending') {
+            return res.status(400).json({ message: 'Only pending notifications can be removed' });
+        }
+        if (!ASSET_DASHBOARD_INBOX_TYPES.includes(da.requestType)) {
+            return res.status(400).json({ message: 'This notification cannot be removed from here' });
+        }
+
+        const toStr = (x) => (x == null ? '' : x.toString());
+        let assigneeOk = false;
+        if (relevantIds.length && da.assignedTo) {
+            const at = toStr(da.assignedTo);
+            assigneeOk = relevantIds.some((r) => toStr(r) === at);
+        }
+        if (!assigneeOk && targetEmployeeId && da.assignedToEmpId) {
+            assigneeOk =
+                String(da.assignedToEmpId).trim().toLowerCase() === String(targetEmployeeId).trim().toLowerCase();
+        }
+        if (!assigneeOk) {
+            return res.status(403).json({ message: 'You can only remove notifications assigned to you' });
+        }
+
+        await DashboardAction.findByIdAndDelete(id);
+        res.status(200).json({ message: 'Notification removed' });
+    } catch (error) {
+        console.error('deletePendingAssetDashboardInboxItem:', error);
+        res.status(500).json({ message: 'Failed to remove notification' });
     }
 };
 

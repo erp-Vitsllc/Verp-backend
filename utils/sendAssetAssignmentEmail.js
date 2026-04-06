@@ -76,6 +76,9 @@ export const sendAssetAssignmentEmail = async ({ asset, assets = [], employee, r
         });
 
         const att = normalizePdfAttachments(attachments);
+        if (isBulk && att.length === 0) {
+            throw new Error('Bulk assignment notification requires the asset list PDF attachment.');
+        }
 
         const employeeName = employee?.isCompany ? employee.firstName : `${employee?.firstName || ""} ${employee?.lastName || ""}`.trim();
         const assetName = isBulk ? `${assetCount} Assets` : asset.name;
