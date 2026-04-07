@@ -15,14 +15,47 @@ export function pdfOutputToBuffer(pdf) {
     }
 }
 
+async function launchPdfBrowser() {
+    const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH?.trim();
+    const headlessMode = process.env.PUPPETEER_HEADLESS || 'new';
+    const baseArgs = [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--no-first-run'
+    ];
+    // Avoid unstable single-process/no-zygote combination on Windows
+    // (can crash Chromium during Page.printToPDF with "Target closed").
+    const args = process.platform === 'win32'
+        ? baseArgs
+        : [...baseArgs, '--no-zygote', '--single-process'];
+
+    const baseOptions = {
+        headless: headlessMode === 'true' ? true : headlessMode,
+        args
+    };
+
+    // Hosted deployments often require explicit chrome path.
+    if (executablePath) {
+        console.log(`[PDF] Launching Chromium via PUPPETEER_EXECUTABLE_PATH: ${executablePath}`);
+        return puppeteer.launch({ ...baseOptions, executablePath });
+    }
+
+    try {
+        return await puppeteer.launch(baseOptions);
+    } catch (err) {
+        // Retry with conservative fallback.
+        console.error('[PDF] Default Puppeteer launch failed, retrying with headless=true:', err?.message || err);
+        return puppeteer.launch({ ...baseOptions, headless: true });
+    }
+}
+
 export const generatePdf = async (url, token, user, permissions = {}, selector = '#loan-form-container') => {
     let browser = null;
     let page = null;
     try {
-        browser = await puppeteer.launch({
-            headless: 'new',
-            args: ['--no-sandbox', '--disable-setuid-sandbox']
-        });
+        browser = await launchPdfBrowser();
 
         console.log(`[generatePdf] Starting generation for: ${url}`);
         page = await browser.newPage();
@@ -149,10 +182,7 @@ export const generatePdfFromHtml = async (html, selector) => {
     let browser = null;
     let page = null;
     try {
-        browser = await puppeteer.launch({
-            headless: 'new',
-            args: ['--no-sandbox', '--disable-setuid-sandbox']
-        });
+        browser = await launchPdfBrowser();
 
         console.log(`[generatePdfFromHtml] Rendering with selector: ${selector}`);
         page = await browser.newPage();

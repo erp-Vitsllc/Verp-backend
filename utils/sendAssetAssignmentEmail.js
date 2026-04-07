@@ -1,40 +1,15 @@
 import nodemailer from "nodemailer";
 import User from "../models/User.js";
-import EmployeeBasic from "../models/EmployeeBasic.js";
 import { normalizePdfAttachments } from "./normalizeEmailAttachments.js";
 
 /** Email only the targeted employee (assignee or HR); never substitute the manager. */
 async function resolveEmailForAssignee(recipient) {
     if (!recipient) return null;
 
-    // Business rule: if employee has NO companyEmail, notify their primaryReportee instead.
+    // Always target the assignee's own emails first.
     const empCompanyEmail = (recipient.companyEmail || "").trim();
     if (empCompanyEmail) return empCompanyEmail;
 
-    const empId = recipient.employeeId;
-
-    // Try manager (primaryReportee) first when companyEmail is missing
-    const reporteeId = recipient.primaryReportee?._id
-        ? recipient.primaryReportee._id
-        : recipient.primaryReportee || null;
-
-    if (reporteeId) {
-        const manager = await EmployeeBasic.findById(reporteeId)
-            .select("companyEmail workEmail personalEmail email employeeId primaryReportee")
-            .lean()
-            .catch(() => null);
-
-        const managerCompanyEmail = (manager?.companyEmail || "").trim();
-        if (managerCompanyEmail) return managerCompanyEmail;
-
-        const managerEmpId = manager?.employeeId;
-        if (managerEmpId) {
-            const u = await User.findOne({ employeeId: managerEmpId, status: "Active" }).select("email companyEmail").lean();
-            return (u?.email || u?.companyEmail || "").trim() || null;
-        }
-    }
-
-    // Last resort: if there's an email on the employee record, use it.
     const fallbackEmpEmail = (
         recipient.workEmail ||
         recipient.personalEmail ||
@@ -86,7 +61,7 @@ export const sendAssetAssignmentEmail = async ({
 
         const att = normalizePdfAttachments(attachments);
         if (isBulk && att.length === 0) {
-            throw new Error('Bulk assignment notification requires the asset list PDF attachment.');
+            console.warn('[Email Warning] Bulk assignment PDF attachment unavailable. Sending notification email without attachment.');
         }
 
         const employeeName = employee?.isCompany ? employee.firstName : `${employee?.firstName || ""} ${employee?.lastName || ""}`.trim();

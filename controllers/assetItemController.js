@@ -2822,11 +2822,15 @@ export const respondToAssignment = async (req, res) => {
             return res.status(403).json({ message: 'You are not linked to an employee profile.' });
         }
         const cur = currentUser.toString();
+        const norm = (s) => (s || '').toString().toLowerCase().replace(/\s+/g, '');
 
         const isAssignee =
             item.assignedToType === 'Employee' &&
             item.assignedTo &&
-            (item.assignedTo._id || item.assignedTo).toString() === cur;
+            (
+                (item.assignedTo._id || item.assignedTo).toString() === cur ||
+                (item.assignedTo?.employeeId && req.user?.employeeId && norm(item.assignedTo.employeeId) === norm(req.user.employeeId))
+            );
         const isAssigner =
             item.assignedBy && (item.assignedBy._id || item.assignedBy).toString() === cur;
         const isHR =

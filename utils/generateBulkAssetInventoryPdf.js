@@ -462,9 +462,14 @@ export async function buildBulkAssetInventoryPdfAttachment(req, assetIds, filena
 export async function requireBulkAssetInventoryPdfAttachment(req, assetIds, filenameBase = 'asset-inventory') {
     const att = await buildBulkAssetInventoryPdfAttachment(req, assetIds, filenameBase);
     if (!Array.isArray(att) || att.length === 0) {
-        throw new Error(
-            'Asset list PDF could not be generated. Ensure asset IDs are valid and the PDF service is available.'
-        );
+        const msg = 'Asset list PDF could not be generated. Ensure asset IDs are valid and the PDF service is available.';
+        // In hosted environments, Chromium/Puppeteer may be unavailable. Allow business flow to continue
+        // without attachment unless strict mode is explicitly enabled.
+        if (String(process.env.STRICT_PDF_ATTACHMENTS || '').toLowerCase() === 'true') {
+            throw new Error(msg);
+        }
+        console.error(`[requireBulkAssetInventoryPdfAttachment] ${msg} Proceeding without attachment.`);
+        return [];
     }
     return att;
 }
