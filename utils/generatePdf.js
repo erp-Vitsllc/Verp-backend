@@ -24,6 +24,27 @@ function isPdfTargetClosedError(error) {
     );
 }
 
+async function renderPdfWithFallback(page, primaryOptions) {
+    try {
+        return await page.pdf(primaryOptions);
+    } catch (error) {
+        // Some hosted Chromium builds crash on custom pixel height print jobs.
+        console.warn('[PDF] Primary page.pdf failed; retrying with A4 fallback:', error?.message || error);
+        return page.pdf({
+            format: 'A4',
+            landscape: false,
+            printBackground: true,
+            preferCSSPageSize: false,
+            margin: {
+                top: '10mm',
+                right: '8mm',
+                bottom: '10mm',
+                left: '8mm'
+            }
+        });
+    }
+}
+
 async function launchPdfBrowser(attempt = 1) {
     const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH?.trim();
     const headlessMode = process.env.PUPPETEER_HEADLESS || 'new';
@@ -167,7 +188,7 @@ export const generatePdf = async (url, token, user, permissions = {}, selector =
             }, selector);
 
         // Generate PDF
-            const pdfBuffer = await page.pdf({
+            const pdfBuffer = await renderPdfWithFallback(page, {
                 width: '210mm',
                 height: `${height}px`,
                 printBackground: true,
@@ -176,7 +197,8 @@ export const generatePdf = async (url, token, user, permissions = {}, selector =
                     right: '0px',
                     bottom: '0px',
                     left: '0px'
-                }
+                },
+                preferCSSPageSize: false
             });
 
             return pdfOutputToBuffer(pdfBuffer);
@@ -254,7 +276,7 @@ export const generatePdfFromHtml = async (html, selector) => {
 
             const pdfHeightPx = Math.max(400, Math.ceil(height) || 800);
 
-            const pdfBuffer = await page.pdf({
+            const pdfBuffer = await renderPdfWithFallback(page, {
                 width: '210mm',
                 height: `${pdfHeightPx}px`,
                 printBackground: true,
@@ -263,7 +285,8 @@ export const generatePdfFromHtml = async (html, selector) => {
                     right: '0px',
                     bottom: '0px',
                     left: '0px'
-                }
+                },
+                preferCSSPageSize: false
             });
 
             const out = pdfOutputToBuffer(pdfBuffer);
