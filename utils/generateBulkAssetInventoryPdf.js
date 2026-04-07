@@ -442,7 +442,10 @@ export async function generateBulkAssetInventoryPdf(_req, assetIds) {
 /** Nodemailer attachment array from inventory PDF, or empty if generation fails. */
 export async function buildBulkAssetInventoryPdfAttachment(req, assetIds, filenameBase = 'asset-inventory') {
     const buf = await generateBulkAssetInventoryPdf(req, assetIds);
-    if (!buf?.length) return [];
+    if (!buf?.length) {
+        console.warn(`[bulkInventoryPdf] Empty PDF buffer for ${assetIds?.length || 0} asset(s).`);
+        return [];
+    }
     const safe = `${String(filenameBase).replace(/[^a-zA-Z0-9._-]/g, '_')}-${assetIds.length}.pdf`;
     console.log(`[bulkInventoryPdf] ${safe} (${buf.length} bytes)`);
     return [

@@ -267,26 +267,17 @@ export const generatePdfFromHtml = async (html, selector) => {
             `
             });
 
-            const height = await page.evaluate((sel) => {
-                const el = document.querySelector(sel);
-                if (!el) return document.body.scrollHeight;
-                const r = el.getBoundingClientRect();
-                return Math.max(r.height, el.scrollHeight || 0, document.body.scrollHeight);
-            }, selector);
-
-            const pdfHeightPx = Math.max(400, Math.ceil(height) || 800);
-
             const pdfBuffer = await renderPdfWithFallback(page, {
-                width: '210mm',
-                height: `${pdfHeightPx}px`,
+                format: 'A4',
+                landscape: false,
                 printBackground: true,
+                preferCSSPageSize: false,
                 margin: {
-                    top: '0px',
-                    right: '0px',
-                    bottom: '0px',
-                    left: '0px'
-                },
-                preferCSSPageSize: false
+                    top: '10mm',
+                    right: '8mm',
+                    bottom: '10mm',
+                    left: '8mm'
+                }
             });
 
             const out = pdfOutputToBuffer(pdfBuffer);

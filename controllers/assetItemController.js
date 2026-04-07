@@ -2529,6 +2529,9 @@ export const bulkAssignAssetItems = async (req, res) => {
                 assetIds.map(String),
                 'bulk-assignment-inventory'
             );
+            console.log(
+                `[bulkAssignAssetItems] PDF attachments prepared: ${Array.isArray(bulkAssignmentAttachments) ? bulkAssignmentAttachments.length : 0}`
+            );
         } catch (pdfErr) {
             console.error('[bulkAssignAssetItems] PDF required for email:', pdfErr?.message || pdfErr);
             return res.status(503).json({
