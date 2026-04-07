@@ -5,6 +5,7 @@ import { normalizePdfAttachments } from "./normalizeEmailAttachments.js";
 /** Email only the targeted employee (assignee or HR); never substitute the manager. */
 async function resolveEmailForAssignee(recipient) {
     if (!recipient) return null;
+    const empId = String(recipient.employeeId || '').trim();
 
     // Always target the assignee's own emails first.
     const empCompanyEmail = (recipient.companyEmail || "").trim();
