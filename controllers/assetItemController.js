@@ -1471,10 +1471,10 @@ export const bulkRespondToAssetCreation = async (req, res) => {
             rawBulkStr === 'Approve' || bulkLo === 'approve'
                 ? 'Approve'
                 : rawBulkStr === 'Reject' || bulkLo === 'reject'
-                  ? 'Reject'
-                  : rawBulkStr === 'Draft' || bulkLo === 'draft'
-                    ? 'Draft'
-                    : null;
+                    ? 'Reject'
+                    : rawBulkStr === 'Draft' || bulkLo === 'draft'
+                        ? 'Draft'
+                        : null;
         if (!Array.isArray(assetIds) || assetIds.length === 0) {
             return res.status(400).json({ message: 'assetIds is required.' });
         }
@@ -1600,8 +1600,8 @@ export const bulkRespondToAssetCreation = async (req, res) => {
             bulkActionNorm === 'Approve'
                 ? 'Bulk creation approval completed.'
                 : bulkActionNorm === 'Draft'
-                  ? 'Bulk creation: assets returned to draft.'
-                  : 'Bulk creation rejection completed.';
+                    ? 'Bulk creation: assets returned to draft.'
+                    : 'Bulk creation rejection completed.';
 
         res.status(200).json({
             message,
@@ -2193,11 +2193,11 @@ export const assignAssetItem = async (req, res) => {
                     oldAssignedTo: oldAssignedToId,
                     oldAssignedBy: (item.assignedBy?._id || item.assignedBy)?.toString?.() || null,
                     oldAssignmentType: item.assignmentType || null,
-                        oldAssignedDays: item.assignedDays ?? null,
-                        oldAssignedDate: item.assignedDate || null,
-                        oldTemporaryEndDate: item.temporaryEndDate || null,
-                        oldTemporaryReminderSentAt: item.temporaryReminderSentAt || null,
-                        oldTemporaryExpiredSentAt: item.temporaryExpiredSentAt || null
+                    oldAssignedDays: item.assignedDays ?? null,
+                    oldAssignedDate: item.assignedDate || null,
+                    oldTemporaryEndDate: item.temporaryEndDate || null,
+                    oldTemporaryReminderSentAt: item.temporaryReminderSentAt || null,
+                    oldTemporaryExpiredSentAt: item.temporaryExpiredSentAt || null
                 }
             };
         }
@@ -2490,9 +2490,13 @@ export const bulkAssignAssetItems = async (req, res) => {
 
         const empName = `${employeeToAssign?.firstName || ''} ${employeeToAssign?.lastName || ''}`.trim() || 'Unknown Employee';
 
-        // Update all items
+        // Update all items — always normalize employee assignment (bulk AC path is never company-pool).
+        // Without this, assets that previously had assignedToType: 'Company' stayed Company and the
+        // assignee failed canUserActAsAssigneeForBulkItem (strict Employee check) on pending review.
         const updateData = {
             assignedTo,
+            assignedToType: 'Employee',
+            assignedCompany: null,
             assignedBy: req.user.employeeObjectId,
             assignmentType,
             assignedDays: null,
@@ -3489,12 +3493,16 @@ export const bulkRespondToAssignment = async (req, res) => {
 
 const canUserActAsAssigneeForBulkItem = (currentUserStr, item) => {
     const curBulk = currentUserStr;
-    const isAssignee =
-        item.assignedToType === 'Employee' &&
-        item.assignedTo &&
-        (item.assignedTo._id || item.assignedTo).toString() === curBulk;
+    const assigneeId =
+        item.assignedTo?._id?.toString?.() ||
+        (item.assignedTo != null ? item.assignedTo.toString?.() : '') ||
+        '';
+    /** Real company-held assets use Company + assignedCompany; bulk AC assigns an employee only. */
+    const isCompanyPoolAsset = item.assignedToType === 'Company' && item.assignedCompany;
+    const assigneeMatchesUser = assigneeId && assigneeId === curBulk;
+    const isAssignee = assigneeMatchesUser && !isCompanyPoolAsset;
     let isPrimaryReporteeDelegate = false;
-    if (item.assignedToType === 'Employee' && item.assignedTo && item.assignedTo.primaryReportee) {
+    if (!isCompanyPoolAsset && item.assignedTo && item.assignedTo.primaryReportee) {
         const assigneeHasCompanyEmail = !!(
             item.assignedTo.companyEmail && String(item.assignedTo.companyEmail).trim().length > 0
         );
@@ -4023,10 +4031,10 @@ export const returnAssetItem = async (req, res) => {
                 extra3:
                     bulkAssets.length > 1
                         ? JSON.stringify({
-                              isBulk: true,
-                              totalAssets: bulkAssets.length,
-                              assetIds: bulkAssetIdsOrdered
-                          })
+                            isBulk: true,
+                            totalAssets: bulkAssets.length,
+                            assetIds: bulkAssetIdsOrdered
+                        })
                         : null
             });
 
@@ -5190,13 +5198,13 @@ export const requestAssetAction = async (req, res) => {
                 const empSnapLeave =
                     asset.assignedToType === 'Employee' && asset.assignedTo
                         ? [
-                              {
-                                  _id: asset._id,
-                                  assetId: asset.assetId,
-                                  name: asset.name,
-                                  assignedTo: asset.assignedTo
-                              }
-                          ]
+                            {
+                                _id: asset._id,
+                                assetId: asset.assetId,
+                                name: asset.name,
+                                assignedTo: asset.assignedTo
+                            }
+                        ]
                         : [];
                 if (empSnapLeave.length) {
                     await notifyEmployeesGroupedControllerBulkDirect(req, empSnapLeave, {
@@ -5226,13 +5234,13 @@ export const requestAssetAction = async (req, res) => {
                 const empSnapEos =
                     asset.assignedToType === 'Employee' && asset.assignedTo
                         ? [
-                              {
-                                  _id: asset._id,
-                                  assetId: asset.assetId,
-                                  name: asset.name,
-                                  assignedTo: asset.assignedTo
-                              }
-                          ]
+                            {
+                                _id: asset._id,
+                                assetId: asset.assetId,
+                                name: asset.name,
+                                assignedTo: asset.assignedTo
+                            }
+                        ]
                         : [];
                 asset.status = 'Unassigned';
                 asset.acceptanceStatus = 'Accepted';
@@ -5641,9 +5649,9 @@ export const bulkRequestAssetAction = async (req, res) => {
             const primaryAsset = assets[0];
             const approver =
                 actionType === 'Loss and Damage' &&
-                primaryAsset.assignedToType === 'Company' &&
-                primaryAsset.assignedCompany &&
-                companyCoordinator?._id
+                    primaryAsset.assignedToType === 'Company' &&
+                    primaryAsset.assignedCompany &&
+                    companyCoordinator?._id
                     ? companyCoordinator
                     : assetController;
 
@@ -6095,9 +6103,9 @@ export const handleAssetActionApproval = async (req, res) => {
                         const fullRows = bulkEmailSnapshots.length
                             ? bulkEmailSnapshots
                             : await AssetItem.find({ _id: { $in: allBulkIdStrs } })
-                                  .populate('assignedTo')
-                                  .populate('assignedCompany')
-                                  .lean();
+                                .populate('assignedTo')
+                                .populate('assignedCompany')
+                                .lean();
                         const byAssignee = new Map();
                         for (const row of fullRows) {
                             if (row.assignedToType === 'Company') continue;
@@ -6113,8 +6121,8 @@ export const handleAssetActionApproval = async (req, res) => {
                             actionType === 'Return Asset'
                                 ? 'return to store'
                                 : actionType === 'Leave'
-                                  ? 'leave / parking transfer'
-                                  : 'end of life / services';
+                                    ? 'leave / parking transfer'
+                                    : 'end of life / services';
 
                         for (const [assigneeId, rows] of byAssignee) {
                             const allIdsForEmp = rows.map((r) => r._id.toString());
@@ -6171,89 +6179,111 @@ export const handleAssetActionApproval = async (req, res) => {
                             );
                         }
                     } else {
-                    const approvalIds = processedAssets.map((a) => a._id.toString()).filter(Boolean);
-                    let approvedInvPdf = [];
-                    try {
-                        if (approvalIds.length) {
-                            approvedInvPdf = await buildBulkAssetInventoryPdfAttachment(
-                                req,
-                                approvalIds,
-                                `approved-${String(actionType).replace(/\s+/g, '-')}-inventory`
-                            );
+                        const approvalIds = processedAssets.map((a) => a._id.toString()).filter(Boolean);
+                        let approvedInvPdf = [];
+                        try {
+                            if (approvalIds.length) {
+                                approvedInvPdf = await buildBulkAssetInventoryPdfAttachment(
+                                    req,
+                                    approvalIds,
+                                    `approved-${String(actionType).replace(/\s+/g, '-')}-inventory`
+                                );
+                            }
+                        } catch (pdfErr) {
+                            console.error('[Asset Approval] Inventory PDF failed (non-fatal):', pdfErr?.message || pdfErr);
                         }
-                    } catch (pdfErr) {
-                        console.error('[Asset Approval] Inventory PDF failed (non-fatal):', pdfErr?.message || pdfErr);
-                    }
 
-                    // Leave: processedAssets still have assignee. End of Life: use bulkEmailSnapshots (assignee cleared on save).
-                    if (actionType === 'Leave') {
-                        if (isBulkTransfer && processedAssets.length > 1) {
-                            const primaryAsset = processedAssets[0];
-                            if (primaryAsset.assignedTo) {
-                                const assignedUser = await EmployeeBasic.findById(primaryAsset.assignedTo._id || primaryAsset.assignedTo).populate('primaryReportee');
-                                if (assignedUser) {
-                                    await sendAssetBulkActionApprovedEmail(
-                                        processedAssets,
-                                        actionType,
-                                        assignedUser,
-                                        assignedUser.primaryReportee || null,
-                                        assetControllerEmp || { firstName: 'Asset', lastName: 'Controller' },
-                                        approvedInvPdf
-                                    );
-                                }
-                            }
-                        } else {
-                            for (const processedAsset of processedAssets) {
-                                if (processedAsset.assignedTo) {
-                                    const assignedUser = await EmployeeBasic.findById(processedAsset.assignedTo._id || processedAsset.assignedTo).populate('primaryReportee');
-                                    if (assignedUser) {
-                                        let singleLeavePdf = [];
-                                        try {
-                                            singleLeavePdf = await buildBulkAssetInventoryPdfAttachment(
-                                                req,
-                                                [processedAsset._id.toString()],
-                                                `approved-${String(actionType).replace(/\s+/g, '-')}-inventory`
-                                            );
-                                        } catch (e) {
-                                            /* non-fatal */
-                                        }
-                                        await sendAssetActionApprovedEmail(
-                                            processedAsset,
-                                            actionType,
-                                            assignedUser,
-                                            assignedUser.primaryReportee || null,
-                                            assetControllerEmp || { firstName: 'Asset', lastName: 'Controller' },
-                                            singleLeavePdf
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                    } else if (actionType === 'End of Life') {
-                        const employeeRows = (bulkEmailSnapshots.length ? bulkEmailSnapshots : []).filter(
-                            (r) => r.assignedTo && r.assignedToType !== 'Company'
-                        );
-                        if (employeeRows.length > 0) {
-                            if (isBulkTransfer && employeeRows.length > 1) {
-                                const firstRef = employeeRows[0].assignedTo;
-                                const firstId = firstRef?._id?.toString() || firstRef?.toString?.();
-                                const sameEmp =
-                                    firstId &&
-                                    employeeRows.every((r) => {
-                                        const rid = r.assignedTo?._id?.toString() || r.assignedTo?.toString?.();
-                                        return rid === firstId;
-                                    });
-                                if (sameEmp) {
-                                    const assignedUser = await EmployeeBasic.findById(firstId).populate('primaryReportee');
+                        // Leave: processedAssets still have assignee. End of Life: use bulkEmailSnapshots (assignee cleared on save).
+                        if (actionType === 'Leave') {
+                            if (isBulkTransfer && processedAssets.length > 1) {
+                                const primaryAsset = processedAssets[0];
+                                if (primaryAsset.assignedTo) {
+                                    const assignedUser = await EmployeeBasic.findById(primaryAsset.assignedTo._id || primaryAsset.assignedTo).populate('primaryReportee');
                                     if (assignedUser) {
                                         await sendAssetBulkActionApprovedEmail(
-                                            employeeRows,
+                                            processedAssets,
                                             actionType,
                                             assignedUser,
                                             assignedUser.primaryReportee || null,
                                             assetControllerEmp || { firstName: 'Asset', lastName: 'Controller' },
                                             approvedInvPdf
                                         );
+                                    }
+                                }
+                            } else {
+                                for (const processedAsset of processedAssets) {
+                                    if (processedAsset.assignedTo) {
+                                        const assignedUser = await EmployeeBasic.findById(processedAsset.assignedTo._id || processedAsset.assignedTo).populate('primaryReportee');
+                                        if (assignedUser) {
+                                            let singleLeavePdf = [];
+                                            try {
+                                                singleLeavePdf = await buildBulkAssetInventoryPdfAttachment(
+                                                    req,
+                                                    [processedAsset._id.toString()],
+                                                    `approved-${String(actionType).replace(/\s+/g, '-')}-inventory`
+                                                );
+                                            } catch (e) {
+                                                /* non-fatal */
+                                            }
+                                            await sendAssetActionApprovedEmail(
+                                                processedAsset,
+                                                actionType,
+                                                assignedUser,
+                                                assignedUser.primaryReportee || null,
+                                                assetControllerEmp || { firstName: 'Asset', lastName: 'Controller' },
+                                                singleLeavePdf
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        } else if (actionType === 'End of Life') {
+                            const employeeRows = (bulkEmailSnapshots.length ? bulkEmailSnapshots : []).filter(
+                                (r) => r.assignedTo && r.assignedToType !== 'Company'
+                            );
+                            if (employeeRows.length > 0) {
+                                if (isBulkTransfer && employeeRows.length > 1) {
+                                    const firstRef = employeeRows[0].assignedTo;
+                                    const firstId = firstRef?._id?.toString() || firstRef?.toString?.();
+                                    const sameEmp =
+                                        firstId &&
+                                        employeeRows.every((r) => {
+                                            const rid = r.assignedTo?._id?.toString() || r.assignedTo?.toString?.();
+                                            return rid === firstId;
+                                        });
+                                    if (sameEmp) {
+                                        const assignedUser = await EmployeeBasic.findById(firstId).populate('primaryReportee');
+                                        if (assignedUser) {
+                                            await sendAssetBulkActionApprovedEmail(
+                                                employeeRows,
+                                                actionType,
+                                                assignedUser,
+                                                assignedUser.primaryReportee || null,
+                                                assetControllerEmp || { firstName: 'Asset', lastName: 'Controller' },
+                                                approvedInvPdf
+                                            );
+                                        }
+                                    } else {
+                                        for (const row of employeeRows) {
+                                            const rid = row.assignedTo?._id || row.assignedTo;
+                                            const assignedUser = await EmployeeBasic.findById(rid).populate('primaryReportee');
+                                            if (assignedUser) {
+                                                let onePdf = [];
+                                                try {
+                                                    onePdf = await buildBulkAssetInventoryPdfAttachment(req, [row._id.toString()], 'approved-eol-inventory');
+                                                } catch (e) {
+                                                    /* non-fatal */
+                                                }
+                                                await sendAssetActionApprovedEmail(
+                                                    row,
+                                                    actionType,
+                                                    assignedUser,
+                                                    assignedUser.primaryReportee || null,
+                                                    assetControllerEmp || { firstName: 'Asset', lastName: 'Controller' },
+                                                    onePdf
+                                                );
+                                            }
+                                        }
                                     }
                                 } else {
                                     for (const row of employeeRows) {
@@ -6277,43 +6307,21 @@ export const handleAssetActionApproval = async (req, res) => {
                                         }
                                     }
                                 }
-                            } else {
-                                for (const row of employeeRows) {
-                                    const rid = row.assignedTo?._id || row.assignedTo;
-                                    const assignedUser = await EmployeeBasic.findById(rid).populate('primaryReportee');
-                                    if (assignedUser) {
-                                        let onePdf = [];
-                                        try {
-                                            onePdf = await buildBulkAssetInventoryPdfAttachment(req, [row._id.toString()], 'approved-eol-inventory');
-                                        } catch (e) {
-                                            /* non-fatal */
-                                        }
-                                        await sendAssetActionApprovedEmail(
-                                            row,
-                                            actionType,
-                                            assignedUser,
-                                            assignedUser.primaryReportee || null,
-                                            assetControllerEmp || { firstName: 'Asset', lastName: 'Controller' },
-                                            onePdf
-                                        );
-                                    }
-                                }
                             }
                         }
-                    }
 
-                    // Send success email to Asset Controller (once for the bulk transfer)
-                    if (assetControllerEmp) {
-                        const primaryAsset = asset;
-                        const assignedUserObj = primaryAsset.assignedTo ? await EmployeeBasic.findById(primaryAsset.assignedTo._id || primaryAsset.assignedTo).select('firstName lastName') : null;
-                        await sendAssetTransferSuccessEmail(
-                            { ...primaryAsset.toObject(), assetId: primaryAsset.assetId, name: isBulkTransfer ? `Bulk ${actionType} (${processedAssets.length} assets)` : primaryAsset.name },
-                            actionType,
-                            assetControllerEmp,
-                            assignedUserObj,
-                            approvedInvPdf
-                        );
-                    }
+                        // Send success email to Asset Controller (once for the bulk transfer)
+                        if (assetControllerEmp) {
+                            const primaryAsset = asset;
+                            const assignedUserObj = primaryAsset.assignedTo ? await EmployeeBasic.findById(primaryAsset.assignedTo._id || primaryAsset.assignedTo).select('firstName lastName') : null;
+                            await sendAssetTransferSuccessEmail(
+                                { ...primaryAsset.toObject(), assetId: primaryAsset.assetId, name: isBulkTransfer ? `Bulk ${actionType} (${processedAssets.length} assets)` : primaryAsset.name },
+                                actionType,
+                                assetControllerEmp,
+                                assignedUserObj,
+                                approvedInvPdf
+                            );
+                        }
                     }
                 } catch (emailErr) {
                     console.error('[Asset Approval] Email send failed (non-fatal):', emailErr);
@@ -6531,7 +6539,7 @@ export const handleAssetActionApproval = async (req, res) => {
                         asset.pendingAction = null;
                         asset.pendingActionDetails = null;
                         asset.actionRequiredBy = null;
-                        asset.status = 'Out of Service';
+                        asset.status = 'Lost';
 
                         // Delete Dashboard Action for asset
                         const dashboardRequestType = 'Asset Loss Damage';
@@ -6703,13 +6711,13 @@ export const finalizeAssetAction = async (req, res) => {
         }
 
         if (approve) {
-            // Finalize: Status becomes 'Out of Service'
-            asset.status = 'Out of Service';
+            const isLossDamage = actionType === 'Loss and Damage';
+            asset.status = isLossDamage ? 'Lost' : 'Out of Service';
 
             // Log history
             await AssetHistory.create({
                 assetId: asset._id,
-                action: 'Out of Service',
+                action: isLossDamage ? 'Lost' : 'Out of Service',
                 performedBy: req.user.employeeObjectId,
                 comments: `Finalized ${actionType} by Reportee. ${comment || ''}`,
                 file: asset.pendingActionDetails?.attachment,
@@ -6743,7 +6751,11 @@ export const finalizeAssetAction = async (req, res) => {
 
         await asset.save();
         res.status(200).json({
-            message: approve ? `Asset marked as Out of Service` : `Action declined/restored`,
+            message: approve
+                ? actionType === 'Loss and Damage'
+                    ? 'Asset marked as Lost'
+                    : 'Asset marked as Out of Service'
+                : 'Action declined/restored',
             asset
         });
     } catch (error) {
@@ -6947,7 +6959,7 @@ export const requestAccessoryAction = async (req, res) => {
         // Create Dashboard Action
         const accDashType = actionType === 'Transfer' ? 'Asset Transfer' :
             actionType === 'Unattach' ? 'Asset Accessory Unattach' :
-            'Asset Loss Damage';
+                'Asset Loss Damage';
         await DashboardAction.create({
             assignedTo: finalApprover._id, // actionRequiredBy references EmployeeBasic
             requestId: asset._id,
@@ -7226,6 +7238,16 @@ export const respondAccessoryAction = async (req, res) => {
                 const catalogItemId = accessory?.pendingActionDetails?.catalogItemId;
                 const addKindForEmail = pendingActionDetails?.addApprovalKind;
                 const addRequestedByForEmail = pendingActionDetails?.requestedBy;
+                // Keep catalog ACC ID as canonical accessoryId everywhere in asset flows.
+                if ((!accessory.accessoryId || !String(accessory.accessoryId).trim()) && catalogItemId) {
+                    const catalogDoc = await AssetAccessoryCatalog.findById(catalogItemId)
+                        .select('accessoryCatalogId')
+                        .lean()
+                        .catch(() => null);
+                    if (catalogDoc?.accessoryCatalogId) {
+                        accessory.accessoryId = String(catalogDoc.accessoryCatalogId).trim();
+                    }
+                }
                 accessory.status = 'Attached';
                 accessory.pendingAction = null;
                 accessory.pendingActionDetails = null;
@@ -7498,21 +7520,65 @@ export const respondAccessoryAction = async (req, res) => {
                             details: { status: 'AssetControllerApproved', originalAction: pendingAction, accessoryId: accessory.accessoryId, fineId: uniqueFineId }
                         });
 
-                        // Clean up accessory pending action - fine is now handling the workflow
-                        accessory.pendingAction = null;
-                        accessory.pendingActionDetails = null;
-                        accessory.status = 'Damaged';
+                        // Detach accessory from asset (lost / L&D finalized). Fine + catalog carry the record forward.
+                        const accIdx = asset.accessories.findIndex(
+                            (a) => a._id?.toString() === accId || a.accessoryId === accId
+                        );
+                        if (accIdx < 0) {
+                            return res.status(404).json({ message: 'Accessory not found' });
+                        }
+                        const accToDetach = asset.accessories[accIdx].toObject();
+                        asset.accessories.splice(accIdx, 1);
                         asset.actionRequiredBy = null;
+
+                        asset.lostDetachedAccessories = asset.lostDetachedAccessories || [];
+                        asset.lostDetachedAccessories.push({
+                            accessoryId: accToDetach.accessoryId || '',
+                            name: accToDetach.name || '',
+                            amount: accToDetach.amount || 0,
+                            fineId: uniqueFineId,
+                            detachedAt: new Date()
+                        });
+
+                        await AssetAccessoryCatalog.updateMany(
+                            { recordType: 'instance', assetItemId: asset._id, assetAccessoryId: accToDetach.accessoryId },
+                            { $set: { status: 'Lost', assetItemId: null, assetIdRef: '' } }
+                        ).catch(() => null);
+
+                        const catalogId = await generateAccessoryCatalogId();
+                        await AssetAccessoryCatalog.create({
+                            recordType: 'catalog',
+                            accessoryCatalogId: catalogId,
+                            name: accToDetach.name,
+                            price: accToDetach.amount || 0,
+                            description: accToDetach.description || '',
+                            status: 'Lost',
+                            isActive: false,
+                            history: [{
+                                at: new Date(),
+                                action: 'removed',
+                                message: `Loss and damage — detached from asset ${asset.assetId} — ${asset.name} (fine ${uniqueFineId})`,
+                                assetId: asset.assetId,
+                                assetName: asset.name,
+                                assetObjectId: asset._id
+                            }]
+                        });
 
                         // Delete Dashboard Action for accessory
                         await DashboardAction.deleteMany({ requestId: asset._id, requestType: 'Asset Loss Damage' });
 
                         asset.markModified('accessories');
+                        asset.markModified('lostDetachedAccessories');
                         await asset.save();
-                        await notifyAssignedEmployeeIfController(req, asset, 'Loss and Damage Accessory', `Accessory "${accessory.name}" loss and damage was approved by Asset Controller and moved to Pending HR.`);
+                        try {
+                            await syncAllAccessoryInstancesForAsset(asset);
+                        } catch (syncErr) {
+                            console.error('[Accessory L&D approve catalog sync]', syncErr?.message || syncErr);
+                        }
+                        await notifyAssignedEmployeeIfController(req, asset, 'Loss and Damage Accessory', `Accessory "${accToDetach.name}" loss and damage was approved by Asset Controller and moved to Pending HR.`);
 
                         // Sync History (remove from previous handover docs/snapshots)
-                        await removeAccessoryFromHistorySnapshots(asset._id, accessory._id || accessory.accessoryId);
+                        await removeAccessoryFromHistorySnapshots(asset._id, accToDetach._id || accToDetach.accessoryId);
 
                         return res.status(200).json({
                             message: `Approved by Asset Controller. Fine created (${uniqueFineId}) with status Pending HR.`,

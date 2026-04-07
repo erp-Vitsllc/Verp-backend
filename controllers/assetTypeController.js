@@ -53,7 +53,9 @@ const isAdminUser = async (reqUser) => {
 // @desc    Role flags for asset type/category UI (GET /api/AssetType/meta/role)
 export const getAssetTypeRoleMeta = async (req, res) => {
     try {
-        const isAdmin = await isAdminUser(req.user);
+        const isJwtOrEnvAdmin = await isAdminUser(req.user);
+        const isFlowchartOrgAdmin = await isUserInFlowchart(req.user, 'admincontroller').catch(() => false);
+        const isAdmin = isJwtOrEnvAdmin || isFlowchartOrgAdmin;
         let isAssetController = await isUserInFlowchart(req.user, 'assetcontroller').catch(() => false);
         const norm = (s) => (s || '').toString().toLowerCase().replace(/\s+/g, '');
         let currentEmpObjectId = req.user?.employeeObjectId?.toString?.() || null;
@@ -650,6 +652,7 @@ export const getAssetTypes = async (req, res) => {
                         attachment: accObj.attachment ? await getSignedFileUrl(accObj.attachment) : null
                     };
                 })),
+                lostDetachedAccessories: (a.lostDetachedAccessories || []).map((x) => (x.toObject ? x.toObject() : { ...x })),
                 assignedTo: a.assignedTo,
                 vehicleCode: a.vehicleCode,
                 plateNumber: a.plateNumber,

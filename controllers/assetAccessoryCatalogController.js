@@ -299,6 +299,8 @@ export const requestAttachAccessoryCatalog = async (req, res) => {
 
         const targetDoc = await AssetItem.findById(targetAssetId);
         targetDoc.accessories.push({
+            // Preserve catalog ACC ID across all asset flows
+            accessoryId: catalog.accessoryCatalogId,
             name: catalog.name,
             amount: Number(catalog.price || 0),
             description: catalog.description || '',

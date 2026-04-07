@@ -124,6 +124,95 @@ async function applyAssetControllerPoolSelectionOnApprove({
     return { keptIds, reassignedIds };
 }
 
+/**
+ * For Assigned User / Admin / HR reassignment:
+ * checked keepAssetIds stay company assets;
+ * unchecked company assets are assigned back to previous holder.
+ */
+async function applyCompanyAssetSelectionOnApprove({
+    category,
+    keepAssetIds,
+    previousHolderEmpObjectId,
+    performerEmpObjectId,
+    previousHolderLabel,
+    newHolderLabel
+}) {
+    if (!previousHolderEmpObjectId || !mongoose.Types.ObjectId.isValid(String(previousHolderEmpObjectId))) {
+        return { keptIds: [], reassignedIds: [] };
+    }
+    const emailData = await buildResponsibilityEmailData(category);
+    const previewIds = (emailData.companyAssets || []).map((a) => String(a._id)).filter((id) => mongoose.Types.ObjectId.isValid(id));
+    const previewSet = new Set(previewIds);
+    const keepSet =
+        keepAssetIds == null
+            ? previewSet
+            : new Set((keepAssetIds || []).map(String).filter((id) => mongoose.Types.ObjectId.isValid(id)));
+
+    const oldId = new mongoose.Types.ObjectId(String(previousHolderEmpObjectId));
+    const when = new Date();
+    const dateStr = when.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+
+    let performerLabel = "The new role holder";
+    if (performerEmpObjectId && mongoose.Types.ObjectId.isValid(String(performerEmpObjectId))) {
+        const p = await EmployeeBasic.findById(performerEmpObjectId).select("firstName lastName").lean();
+        if (p) {
+            const n = `${p.firstName || ""} ${p.lastName || ""}`.trim();
+            if (n) performerLabel = n;
+        }
+    }
+    const prevLabel = (previousHolderLabel || "the previous holder").trim() || "the previous holder";
+    const newLabel = (newHolderLabel || "the new holder").trim() || "the new holder";
+
+    const keptIds = [];
+    const reassignedIds = [];
+    for (const idStr of previewSet) {
+        const asset = await AssetItem.findById(idStr).select("assetId name status").lean();
+        if (!asset) continue;
+
+        if (keepSet.has(idStr)) {
+            keptIds.push(idStr);
+            const userStory = `${performerLabel} accepted the role as ${newLabel} on ${dateStr}. This company asset stays under company allocation.`;
+            await AssetHistory.create({
+                assetId: idStr,
+                action: "ControllerHandover",
+                performedBy: performerEmpObjectId || undefined,
+                comments: userStory,
+                details: { userStory, variant: "kept_company_asset", assetCode: asset.assetId, assetName: asset.name },
+                date: when
+            });
+        } else {
+            reassignedIds.push(idStr);
+            await AssetItem.updateOne(
+                { _id: idStr, assignedToType: "Company" },
+                {
+                    $set: {
+                        assignedTo: oldId,
+                        assignedToType: "Employee",
+                        assignedCompany: null,
+                        status: "Assigned",
+                        acceptanceStatus: "Accepted",
+                        actionRequiredBy: null,
+                        pendingAction: null,
+                        pendingActionDetails: null
+                    }
+                }
+            );
+            const userStory = `${performerLabel} accepted the role as ${newLabel} on ${dateStr}. This company asset was assigned back to ${prevLabel}.`;
+            await AssetHistory.create({
+                assetId: idStr,
+                action: "ControllerHandover",
+                assignedTo: oldId,
+                assignedToType: "Employee",
+                performedBy: performerEmpObjectId || undefined,
+                comments: userStory,
+                details: { userStory, variant: "returned_to_previous_holder", assetCode: asset.assetId, assetName: asset.name, assignedToName: prevLabel },
+                date: when
+            });
+        }
+    }
+    return { keptIds, reassignedIds };
+}
+
 // @desc    Get all flowchart responsibilities
 // @route   GET /api/flowchart
 // @access  Private
@@ -352,7 +441,7 @@ export const addFlowchartResponsibility = async (req, res) => {
 // @access  Private
 export const respondToResponsibility = async (req, res) => {
     try {
-        const { action, actionId, category, assetControllerHandover } = req.body;
+        const { action, actionId, category, assetControllerHandover, companyAssetHandover } = req.body;
         const catNorm = (category || "").toLowerCase().replace(/\s+/g, "");
 
         // Find the responsibility by ID or category
@@ -411,6 +500,23 @@ export const respondToResponsibility = async (req, res) => {
                     console.error('[Flowchart] Asset controller pool selection failed:', acErr);
                     return res.status(500).json({
                         message: 'Failed to apply asset pool selection. Flowchart was not updated.'
+                    });
+                }
+            }
+            if (action === 'Approve' && ['assigneduser', 'admincontroller', 'hr'].includes(catNorm) && oldSnapshot?.empObjectId) {
+                try {
+                    await applyCompanyAssetSelectionOnApprove({
+                        category,
+                        keepAssetIds: companyAssetHandover?.keepAssetIds,
+                        previousHolderEmpObjectId: oldSnapshot.empObjectId,
+                        performerEmpObjectId: req.user?.employeeObjectId,
+                        previousHolderLabel: oldSnapshot.employeeName,
+                        newHolderLabel: responsibility.employeeName
+                    });
+                } catch (coErr) {
+                    console.error('[Flowchart] Company asset selection failed:', coErr);
+                    return res.status(500).json({
+                        message: 'Failed to apply company asset selection. Flowchart was not updated.'
                     });
                 }
             }

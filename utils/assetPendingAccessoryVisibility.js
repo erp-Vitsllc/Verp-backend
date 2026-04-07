@@ -14,10 +14,17 @@ export function isEmbeddedAccessoryPendingAddApproval(acc) {
     return st === 'Pending' && pa === 'Add';
 }
 
+/** Lost / End of Life stay in DB for catalog & history but must not appear as "attached" on the live asset (API + UI). */
+export function isAccessoryExcludedFromLiveAssetView(acc) {
+    const n = String(acc?.status || '').trim().toLowerCase().replace(/\s+/g, '');
+    return n === 'lost' || n === 'endoflife' || n === 'eol';
+}
+
 export function filterAccessoriesHidingPendingAdds(accessories, canSeePendingAdds) {
     if (!Array.isArray(accessories) || accessories.length === 0) return accessories || [];
-    if (canSeePendingAdds) return accessories;
-    return accessories.filter((a) => !isEmbeddedAccessoryPendingAddApproval(a));
+    const withoutTerminal = accessories.filter((a) => !isAccessoryExcludedFromLiveAssetView(a));
+    if (canSeePendingAdds) return withoutTerminal;
+    return withoutTerminal.filter((a) => !isEmbeddedAccessoryPendingAddApproval(a));
 }
 
 /**

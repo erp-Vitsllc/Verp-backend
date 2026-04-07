@@ -217,6 +217,59 @@ export async function buildAssetControllerResponsibilityPdfAttachment(unassigned
     return [{ filename: safe, content: buf, contentType: 'application/pdf', contentDisposition: 'attachment' }];
 }
 
+function buildCompanyAssetsResponsibilityHtmlDoc(companyAssetRows) {
+    const n = companyAssetRows?.length || 0;
+    const rowsHtml = !n
+        ? `<tr><td colspan="3" style="padding:12px 8px;color:#64748b;">No company assets found.</td></tr>`
+        : companyAssetRows
+            .map((a) => `<tr style="border-bottom:1px solid #e2e8f0;">
+          <td style="padding:8px;font-family:monospace;font-size:12px;">${escapeHtml(a.assetId)}</td>
+          <td style="padding:8px;">${escapeHtml(a.name)}</td>
+          <td style="padding:8px;">${escapeHtml(a.status || '—')}</td>
+        </tr>`)
+            .join('');
+    return `<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"/><title>Company assets</title></head>
+<body style="margin:0;background:#fff;">
+<div id="bulk-asset-inventory-pdf" data-inventory-ready="true" style="min-height:120px;padding:24px;font-family:Segoe UI,Tahoma,sans-serif;color:#1e293b;box-sizing:border-box;">
+  <h1 style="font-size:20px;margin:0 0 4px 0;">Company assets</h1>
+  <p style="font-size:13px;color:#64748b;margin:0 0 24px 0;">${n} item${n === 1 ? '' : 's'} — VeRP</p>
+  <table style="width:100%;border-collapse:collapse;font-size:13px;">
+    <thead>
+      <tr style="border-bottom:2px solid #cbd5e1;background:#f8fafc;">
+        <th style="text-align:left;padding:8px;font-weight:600;">Asset ID</th>
+        <th style="text-align:left;padding:8px;font-weight:600;">Name</th>
+        <th style="text-align:left;padding:8px;font-weight:600;">Status</th>
+      </tr>
+    </thead>
+    <tbody>${rowsHtml}</tbody>
+  </table>
+</div>
+</body>
+</html>`;
+}
+
+export async function buildCompanyAssetsResponsibilityPdfAttachment(companyAssetsLean, filenameBase = 'company-assets-responsibility') {
+    const rows = (companyAssetsLean || []).map((a) => ({
+        assetId: a?.assetId || '—',
+        name: a?.name || '—',
+        status: a?.status || '—'
+    }));
+    if (!rows.length) return [];
+    try {
+        const html = buildCompanyAssetsResponsibilityHtmlDoc(rows);
+        const raw = await generatePdfFromHtml(html, BULK_ASSET_INVENTORY_PDF_SELECTOR);
+        const buf = pdfOutputToBuffer(raw);
+        if (!buf?.length) return [];
+        const safe = `${String(filenameBase).replace(/[^a-zA-Z0-9._-]/g, '_')}-${rows.length}.pdf`;
+        return [{ filename: safe, content: buf, contentType: 'application/pdf', contentDisposition: 'attachment' }];
+    } catch (e) {
+        console.error('[buildCompanyAssetsResponsibilityPdfAttachment]', e?.message || e);
+        return [];
+    }
+}
+
 function buildAssetControllerOutcomeHtmlDoc(keptRows, returnedRows) {
     const thead = `
         <tr style="border-bottom:2px solid #cbd5e1;background:#f8fafc;">

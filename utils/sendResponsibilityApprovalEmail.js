@@ -1,5 +1,8 @@
 import nodemailer from "nodemailer";
-import { buildAssetControllerResponsibilityPdfAttachment } from "./generateBulkAssetInventoryPdf.js";
+import {
+    buildAssetControllerResponsibilityPdfAttachment,
+    buildCompanyAssetsResponsibilityPdfAttachment
+} from "./generateBulkAssetInventoryPdf.js";
 
 function listHtml(title, items, mapLine) {
     if (!items || items.length === 0) {
@@ -158,6 +161,17 @@ export const sendResponsibilityApprovalEmail = async ({
                     attachments.push(...pdfAtt);
                 } catch (pdfErr) {
                     console.error("[Responsibility Email] Asset controller PDF attachment failed:", pdfErr?.message || pdfErr);
+                }
+            }
+            if (catKey === "assigneduser" || catKey === "admincontroller" || catKey === "hr") {
+                try {
+                    const pdfAtt = await buildCompanyAssetsResponsibilityPdfAttachment(
+                        ed.companyAssets || [],
+                        `${catKey}-company-assets`
+                    );
+                    attachments.push(...pdfAtt);
+                } catch (pdfErr) {
+                    console.error("[Responsibility Email] Company-assets PDF attachment failed:", pdfErr?.message || pdfErr);
                 }
             }
         }

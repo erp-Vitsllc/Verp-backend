@@ -92,7 +92,7 @@ router.get("/me", async (req, res) => {
 
 // Get loan eligible employees - requires view permission
 // Place this BEFORE /:id routes to prevent conflict
-router.get("/loan-eligible", checkPermission('hrm_loan', 'view'), getLoanEligibleEmployees);
+router.get("/loan-eligible", getLoanEligibleEmployees);
 
 import { getDashboardStats } from "../controllers/stats/getDashboardStats.js";
 import { getUserActivityStats } from "../controllers/stats/getUserActivityStats.js";
@@ -206,14 +206,14 @@ router.patch("/:id/update-notice-status", checkPermission('hrm_employees_view_wo
 // Request Loan/Advance - requires view permission (anyone can apply usually, or restricted?)
 // Using 'view' permission on 'hrm_loan' for now as basic access check
 // Request Loan/Advance - requires view permission (anyone can apply usually, or restricted?)
-router.post("/request-loan", checkPermission('hrm_loan', 'view'), requestLoan);
+router.post("/request-loan", requestLoan);
 // Approve/Reject Loan - requires edit permission
 router.put("/loans/:id/status", checkPermission('hrm_loan', 'edit'), approveLoan);
-router.put("/loans/:id", checkPermission('hrm_loan', 'view'), updateLoanDetails); // Use 'view' permission for user self-edit or specific check? logic inside
-router.get("/loans/:id/pdf", checkPermission('hrm_loan', 'view'), getLoanPdf); // New PDF Download Route
-router.get("/loans", checkPermission('hrm_loan', 'view'), getLoans);
-router.get("/loans/:id", checkPermission('hrm_loan', 'view'), getLoanById);
-router.delete("/loans/:id", checkPermission('hrm_loan', 'view'), deleteLoan);
+router.put("/loans/:id", updateLoanDetails); // temporarily open; handler still validates ownership/flow
+router.get("/loans/:id/pdf", getLoanPdf); // temporarily open for all authenticated users
+router.get("/loans", getLoans); // temporarily open for all authenticated users
+router.get("/loans/:id", getLoanById); // temporarily open for all authenticated users
+router.delete("/loans/:id", deleteLoan); // temporarily open; handler checks role/ownership
 
 
 // Get specific document - requires view permission

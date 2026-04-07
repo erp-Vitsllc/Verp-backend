@@ -15,14 +15,14 @@ const router = express.Router();
 // All fine routes require authentication
 router.use(protect);
 
-// Get all fines - requires view permission
-router.get("/", checkPermission('hrm_fine', 'view'), getFines);
+// Get all fines - temporarily open for all authenticated users
+router.get("/", getFines);
 
-// Get fine by ID - requires view permission
-router.get("/:id", checkPermission('hrm_fine', 'view'), getFineById);
+// Get fine by ID - temporarily open for all authenticated users
+router.get("/:id", getFineById);
 
-// Download Fine PDF - Requires View Permission
-router.get("/:id/pdf", checkPermission('hrm_fine', 'view'), downloadFinePdf); // NEW ROUTE
+// Download Fine PDF - temporarily open for all authenticated users
+router.get("/:id/pdf", downloadFinePdf);
 
 // Add fine - requires create permission
 router.post("/", checkPermission('hrm_fine', 'create'), addFine);

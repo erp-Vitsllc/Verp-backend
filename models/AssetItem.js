@@ -212,6 +212,14 @@ const assetItemSchema = new mongoose.Schema({
             requestedAt: { type: Date, default: null }
         }
     }],
+    /** Accessories removed from this asset after Loss & Damage was finalized (fine created). Keeps list/history without re-embedding the line. */
+    lostDetachedAccessories: [{
+        accessoryId: { type: String, trim: true },
+        name: { type: String, default: '' },
+        amount: { type: Number, default: 0 },
+        fineId: { type: String, default: '' },
+        detachedAt: { type: Date, default: Date.now }
+    }],
     accessoriesAttachment: { type: String, default: null },
     vehicleCode: { type: String, trim: true },
     plateNumber: { type: String, trim: true },

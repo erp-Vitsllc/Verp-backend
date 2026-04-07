@@ -254,15 +254,31 @@ export const approveFine = async (req, res) => {
                     await f.save();
                 }
 
-                // Update Asset Status if Loss & Damage (ONLY if main asset, NOT accessory)
-                if (fine.assetId && (fine.fineType === 'Loss & Damage' || fine.category === 'Damage')) {
+                // Update Asset Status if Loss & Damage — only for the main asset case.
+                // Accessory L&D fines store accessoryId / accessoryName; parent asset must stay unchanged
+                // (accessory already marked Lost when AC approved; catalog sync handles the instance).
+                const isAccessoryContextFine =
+                    !!(fine.accessoryId && String(fine.accessoryId).trim()) ||
+                    !!(fine.accessoryName && String(fine.accessoryName).trim());
+
+                if (
+                    !isAccessoryContextFine &&
+                    fine.assetId &&
+                    (fine.fineType === 'Loss & Damage' || fine.category === 'Damage')
+                ) {
                     const AssetItem = (await import("../../models/AssetItem.js")).default;
                     const asset = await AssetItem.findOne({ assetId: fine.assetId });
 
                     if (asset) {
-                        const newStatus = (fine.fineType === 'Loss' || fine.category === 'Loss' || fine.description?.toLowerCase().includes('loss'))
-                            ? 'Lost'
-                            : 'Out of Service';
+                        const ftRaw = String(fine.fineType || '');
+                        const ft = ftRaw.toLowerCase();
+                        const isLossDamageFine =
+                            fine.category === 'Loss' ||
+                            ftRaw === 'Loss' ||
+                            ft.includes('loss & damage') ||
+                            ft.includes('loss and damage') ||
+                            fine.description?.toLowerCase().includes('loss');
+                        const newStatus = isLossDamageFine ? 'Lost' : 'Out of Service';
 
                         asset.status = newStatus;
                         asset.assignedTo = null;

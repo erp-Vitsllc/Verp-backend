@@ -49,24 +49,38 @@ export async function upsertCatalogInstanceForEmbeddedAccessory(assetDoc, embedd
     const assetItemId = assetDoc._id;
     const assetAccessoryId = String(embedded.accessoryId).trim();
     const catalogStatus = mapEmbeddedStatusToCatalog(embedded.status);
+    /** Lost / End of Life: keep catalog row but detach from asset so pool & asset page treat as unattached. */
+    const detachFromAsset = stEmb === 'Lost' || stEmb === 'End of Life';
 
-    const existing = await AssetAccessoryCatalog.findOne({
-        recordType: 'instance',
-        assetItemId,
-        assetAccessoryId
-    });
+    let existing = null;
+    if (embedded._id) {
+        existing = await AssetAccessoryCatalog.findOne({
+            recordType: 'instance',
+            embeddedAccessoryMongoId: embedded._id
+        });
+    }
+    if (!existing) {
+        existing = await AssetAccessoryCatalog.findOne({
+            recordType: 'instance',
+            assetItemId,
+            assetAccessoryId
+        });
+    }
+
+    const linkPayload = detachFromAsset
+        ? { assetItemId: null, assetIdRef: '' }
+        : { assetItemId, assetIdRef: assetDoc.assetId || '' };
 
     const basePayload = {
         recordType: 'instance',
-        assetItemId,
         assetAccessoryId,
         embeddedAccessoryMongoId: embedded._id || undefined,
         name: embedded.name || 'Accessory',
         price: Number(embedded.amount) || 0,
         description: embedded.description != null ? String(embedded.description).trim() : '',
-        assetIdRef: assetDoc.assetId || '',
         status: catalogStatus,
-        isActive: true
+        isActive: true,
+        ...linkPayload
     };
 
     if (existing) {
@@ -75,6 +89,7 @@ export async function upsertCatalogInstanceForEmbeddedAccessory(assetDoc, embedd
         existing.description = basePayload.description;
         existing.status = basePayload.status;
         existing.assetIdRef = basePayload.assetIdRef;
+        existing.assetItemId = basePayload.assetItemId;
         if (embedded._id) existing.embeddedAccessoryMongoId = embedded._id;
         await existing.save();
         return existing;
