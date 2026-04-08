@@ -42,7 +42,11 @@ import {
     buildBulkAssigneeDispositionPdfAttachment
 } from '../utils/generateBulkAssetInventoryPdf.js';
 import { sendAssetBulkDispositionResultEmail } from '../utils/sendAssetBulkDispositionResultEmail.js';
-import { notifyAdminDeletedWholeAsset, isReqUserAdmin } from '../utils/sendAdminDeletionNotificationEmails.js';
+import {
+    notifyAdminDeletedWholeAsset,
+    isReqUserAdmin,
+    getAssetControllerNotificationEmail
+} from '../utils/sendAdminDeletionNotificationEmails.js';
 import {
     cleanupDashboardActionsForDeletedAsset,
     ASSET_DASHBOARD_INBOX_TYPES
@@ -4657,7 +4661,17 @@ export const addAssetDocument = async (req, res) => {
         });
 
         await asset.save();
-        await notifyAssignedEmployeeIfController(req, asset, 'Service', `Service "${serviceType}" was added by Asset Controller.`);
+        // Only notify on Service-specific document add flows.
+        // For general documents (Registration, Insurance, etc.) there is no serviceType context.
+        if (String(type || '').trim().toLowerCase() === 'service') {
+            const serviceTypeSafe = req.body?.serviceType || 'Service';
+            await notifyAssignedEmployeeIfController(
+                req,
+                asset,
+                'Service',
+                `Service "${serviceTypeSafe}" was added by Asset Controller.`
+            );
+        }
 
         // Log to history
         try {
@@ -7912,7 +7926,16 @@ export const deleteAssetItem = async (req, res) => {
         // 1. Admin/Controller: Always authorized
         // 2. Creator: Only if Status is Draft/Pending
 
+        if (Array.isArray(asset.accessories) && asset.accessories.length > 0) {
+            return res.status(400).json({
+                message: 'Administrator cannot delete the asset while accessories are attached. Delete accessories first.',
+                accessoriesCount: asset.accessories.length
+            });
+        }
+
+        let adminNotificationEmail = null;
         if (await isReqUserAdmin(req.user)) {
+            adminNotificationEmail = await getAssetControllerNotificationEmail();
             const itemForEmail = await AssetItem.findById(id)
                 .populate({
                     path: 'assignedTo',
@@ -7944,7 +7967,10 @@ export const deleteAssetItem = async (req, res) => {
             await updateAssetTypeCounts(asset.typeId);
         }
 
-        res.status(200).json({ message: 'Asset deleted successfully' });
+        res.status(200).json({
+            message: 'Asset deleted successfully',
+            ...(adminNotificationEmail ? { assetControllerEmail: adminNotificationEmail } : {})
+        });
     } catch (error) {
         console.error('Error deleting asset item:', error);
         res.status(500).json({ message: 'Server Error' });

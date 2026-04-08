@@ -52,6 +52,30 @@ export async function emailAssetControllerHtml(subject, htmlBody) {
     }
 }
 
+export async function getAssetControllerNotificationEmail() {
+    try {
+        const ac = await getDepartmentHOD('assetcontroller');
+        if (!ac) return null;
+        const { email } = resolveEmployeeEmail(ac);
+        return email || null;
+    } catch (e) {
+        console.error('[getAssetControllerNotificationEmail]', e?.message || e);
+        return null;
+    }
+}
+
+export async function getManagementNotificationEmail() {
+    try {
+        const mgmt = await getDepartmentHOD('management');
+        if (!mgmt) return null;
+        const { email } = resolveEmployeeEmail(mgmt);
+        return email || null;
+    } catch (e) {
+        console.error('[getManagementNotificationEmail]', e?.message || e);
+        return null;
+    }
+}
+
 function performedByLine(req) {
     return req.user?.name || req.user?.employeeId || 'Administrator';
 }
@@ -196,4 +220,30 @@ export async function notifyAdminRemovedAccessoriesFromAssignedAsset(req, asset,
         actionLabel: 'Accessories removed',
         details: `Removed accessories: ${names}.`
     });
+}
+
+export async function notifyAdminDeletedBusinessRecordToManagement(req, { moduleName, recordId, details }) {
+    try {
+        const to = await getManagementNotificationEmail();
+        if (!to) return false;
+        const performedBy = performedByLine(req);
+        const subject = `${moduleName} deleted (admin): ${recordId || 'record'}`;
+        const html = `
+            <div style="font-family:Arial,sans-serif;color:#334155;max-width:600px;margin:0 auto;border:1px solid #e2e8f0;border-radius:10px;overflow:hidden">
+                <div style="background:#b91c1c;color:#fff;padding:16px 20px">
+                    <h3 style="margin:0">${moduleName} deleted</h3>
+                </div>
+                <div style="padding:20px">
+                    <p>An administrator deleted a ${moduleName} record.</p>
+                    <p><strong>Record ID:</strong> ${recordId || '—'}</p>
+                    <p><strong>Details:</strong> ${details || '—'}</p>
+                    <p><strong>Performed by:</strong> ${performedBy}</p>
+                </div>
+            </div>`;
+        await sendHtmlEmail(to, subject, html);
+        return true;
+    } catch (e) {
+        console.error('[notifyAdminDeletedBusinessRecordToManagement]', e?.message || e);
+        return false;
+    }
 }

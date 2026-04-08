@@ -18,7 +18,8 @@ import { resolveAssetControllerEmployee, getAssetRequesterDisplayName } from '..
 import {
     notifyAdminDeletedAssetTypeOrCategory,
     notifyAdminDeletedWholeAsset,
-    notifyAdminRemovedAccessoriesFromAssignedAsset
+    notifyAdminRemovedAccessoriesFromAssignedAsset,
+    getAssetControllerNotificationEmail
 } from '../utils/sendAdminDeletionNotificationEmails.js';
 import {
     syncAllAccessoryInstancesForAsset,
@@ -762,6 +763,13 @@ export const deleteAssetType = async (req, res) => {
             const isCreator = item.createdBy?.toString() === currentUserId;
             const isEditableDraft = item.status === 'Draft' && !item.actionRequiredBy;
 
+            if (Array.isArray(item.accessories) && item.accessories.length > 0) {
+                return res.status(400).json({
+                    message: 'Administrator cannot delete the asset while accessories are attached. Delete accessories first.',
+                    accessoriesCount: item.accessories.length
+                });
+            }
+
             if (!isAdmin) {
                 // Creator can delete only a save-only draft (not yet submitted for approval)
                 if (!(isCreator && isEditableDraft)) {
@@ -774,8 +782,10 @@ export const deleteAssetType = async (req, res) => {
             }
 
             const typeIdForCounts = item.typeId;
+            let adminNotificationEmail = null;
 
             if (isAdmin) {
+                adminNotificationEmail = await getAssetControllerNotificationEmail();
                 const itemForEmail = await AssetItem.findById(id)
                     .populate({
                         path: 'assignedTo',
@@ -806,7 +816,10 @@ export const deleteAssetType = async (req, res) => {
                 await AssetType.findByIdAndUpdate(typeIdForCounts, { total, assigned, unassigned });
             }
 
-            return res.status(200).json({ message: 'Asset deleted' });
+            return res.status(200).json({
+                message: 'Asset deleted',
+                ...(adminNotificationEmail ? { assetControllerEmail: adminNotificationEmail } : {})
+            });
         }
 
         res.status(404).json({ message: 'Item not found' });

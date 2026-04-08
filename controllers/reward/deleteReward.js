@@ -1,7 +1,24 @@
 import Reward from "../../models/Reward.js";
+import {
+    isReqUserAdmin,
+    getManagementNotificationEmail,
+    notifyAdminDeletedBusinessRecordToManagement
+} from "../../utils/sendAdminDeletionNotificationEmails.js";
 
 export const deleteReward = async (req, res) => {
     try {
+        const isAdmin = await isReqUserAdmin(req.user);
+        if (!isAdmin) {
+            return res.status(403).json({ message: "Delete allowed only for admin." });
+        }
+
+        const managementEmail = await getManagementNotificationEmail();
+        if (!managementEmail) {
+            return res.status(400).json({
+                message: "Cannot delete: no Management responsible person is assigned in Flowchart."
+            });
+        }
+
         const { id } = req.params;
 
         const reward = await Reward.findById(id);
@@ -17,6 +34,11 @@ export const deleteReward = async (req, res) => {
         }
 
         await Reward.findByIdAndDelete(id);
+        await notifyAdminDeletedBusinessRecordToManagement(req, {
+            moduleName: 'Reward',
+            recordId: reward.rewardId || reward._id?.toString?.(),
+            details: reward.title || reward.description || 'Reward record'
+        });
 
         return res.status(200).json({
             message: "Reward deleted successfully"

@@ -1,7 +1,24 @@
 import Loan from "../../models/Loan.js";
+import {
+    isReqUserAdmin,
+    getManagementNotificationEmail,
+    notifyAdminDeletedBusinessRecordToManagement
+} from "../../utils/sendAdminDeletionNotificationEmails.js";
 
 export const deleteLoan = async (req, res) => {
     try {
+        const isAdmin = await isReqUserAdmin(req.user);
+        if (!isAdmin) {
+            return res.status(403).json({ message: "Delete allowed only for admin." });
+        }
+
+        const managementEmail = await getManagementNotificationEmail();
+        if (!managementEmail) {
+            return res.status(400).json({
+                message: "Cannot delete: no Management responsible person is assigned in Flowchart."
+            });
+        }
+
         const { id } = req.params;
 
         const loan = await Loan.findById(id);
@@ -17,6 +34,11 @@ export const deleteLoan = async (req, res) => {
         }
 
         await Loan.findByIdAndDelete(id);
+        await notifyAdminDeletedBusinessRecordToManagement(req, {
+            moduleName: loan.type || 'Loan/Advance',
+            recordId: loan.loanId || loan._id?.toString?.(),
+            details: loan.reason || loan.notes || `${loan.type || 'Loan/Advance'} record`
+        });
 
         return res.status(200).json({
             message: `${loan.type} deleted successfully`

@@ -1,7 +1,24 @@
 import Fine from "../../models/Fine.js";
+import {
+    isReqUserAdmin,
+    getManagementNotificationEmail,
+    notifyAdminDeletedBusinessRecordToManagement
+} from "../../utils/sendAdminDeletionNotificationEmails.js";
 
 export const deleteFine = async (req, res) => {
     try {
+        const isAdmin = await isReqUserAdmin(req.user);
+        if (!isAdmin) {
+            return res.status(403).json({ message: "Delete allowed only for admin." });
+        }
+
+        const managementEmail = await getManagementNotificationEmail();
+        if (!managementEmail) {
+            return res.status(400).json({
+                message: "Cannot delete: no Management responsible person is assigned in Flowchart."
+            });
+        }
+
         const { id } = req.params;
         const fine = await Fine.findById(id);
 
@@ -18,6 +35,11 @@ export const deleteFine = async (req, res) => {
         }
 
         await Fine.findByIdAndDelete(id);
+        await notifyAdminDeletedBusinessRecordToManagement(req, {
+            moduleName: 'Fine',
+            recordId: fine.fineId || fine._id?.toString?.(),
+            details: fine.description || fine.fineType || 'Fine transaction'
+        });
         return res.status(200).json({ message: "Fine record deleted successfully" });
     } catch (error) {
         console.error('Error deleting fine:', error);
