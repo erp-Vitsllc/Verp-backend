@@ -22,6 +22,7 @@ import { connectDB } from "./config/db.js";
 import dns from "dns";
 import { processParkingAssets } from "./utils/processParkingAssets.js";
 import { processTemporaryAssignments } from "./utils/processTemporaryAssignments.js";
+import { processAccidentAssets } from "./utils/processAccidentAssets.js";
 
 dotenv.config();
 
@@ -43,6 +44,9 @@ setInterval(() => { processParkingAssets(); }, 6 * 60 * 60 * 1000);
 setTimeout(() => { processTemporaryAssignments(); }, 45 * 1000);
 // Run more frequently so "ends on date" feels accurate to users.
 setInterval(() => { processTemporaryAssignments(); }, 60 * 60 * 1000);
+
+setTimeout(() => { processAccidentAssets(); }, 60 * 1000);
+setInterval(() => { processAccidentAssets(); }, 24 * 60 * 60 * 1000);
 
 // CORS Configuration - MUST BE FIRST
 app.use(cors({

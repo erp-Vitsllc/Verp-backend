@@ -86,7 +86,7 @@ const assetItemSchema = new mongoose.Schema({
     },
     status: {
         type: String,
-        enum: ['Assigned', 'Unassigned', 'Maintenance', 'On Service', 'Service', 'Lost', 'Returned', 'Pending', 'End of Life', 'Out of Service', 'Draft', 'Rejected', 'On Leave', 'Submitted for Approval'],
+        enum: ['Assigned', 'Unassigned', 'Maintenance', 'On Service', 'Service', 'Accident', 'Lost', 'Returned', 'Pending', 'End of Life', 'Out of Service', 'Draft', 'Rejected', 'On Leave', 'Submitted for Approval'],
         default: 'Unassigned'
     },
     ownership: {
@@ -231,6 +231,9 @@ const assetItemSchema = new mongoose.Schema({
     gearOilDueDate: { type: Date, default: null },
     lastServiceDate: { type: Date, default: null },
     nextServiceDate: { type: Date, default: null },
+    accidentStartedAt: { type: Date, default: null },
+    accidentActiveUntil: { type: Date, default: null },
+    accidentReminderLastSentAt: { type: Date, default: null },
     documents: [{
         type: { type: String },
         issueAuthority: { type: String },
@@ -246,7 +249,7 @@ const assetItemSchema = new mongoose.Schema({
         serviceDuration: { type: String },   // e.g. "7 days", "2 weeks"
         currentKm: { type: Number },
         description: { type: String },
-        paidBy: { type: String, enum: ['Company', 'Employee'] },
+        paidBy: { type: String, enum: ['Company', 'Employee', 'Person'] },
         value: { type: Number },
         remark: { type: String },
         invoice: { type: String },           // URL to uploaded invoice

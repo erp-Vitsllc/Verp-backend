@@ -4749,7 +4749,7 @@ export const deleteAssetDocument = async (req, res) => {
 export const addAssetService = async (req, res) => {
     try {
         const { id } = req.params;
-        const { serviceType, date, expiryDate, currentKm, description, paidBy, value, remark, invoice } = req.body;
+        const { serviceType, date, expiryDate, currentKm, description, paidBy, value, remark, invoice, attachment } = req.body;
 
         const asset = await AssetItem.findById(id);
         if (!asset) {
@@ -4776,6 +4776,30 @@ export const addAssetService = async (req, res) => {
             }
         }
 
+        let attachmentUrl = null;
+        if (attachment && attachment.data) {
+            try {
+                const uploadResult = await uploadDocumentToS3(
+                    attachment.data,
+                    'asset-service-attachments',
+                    attachment.name || `service-attachment-${Date.now()}.pdf`
+                );
+                attachmentUrl = uploadResult.publicId;
+            } catch (error) {
+                console.error('Error uploading attachment to S3:', error);
+                return res.status(500).json({ message: 'Failed to upload attachment' });
+            }
+        }
+
+        let parsedRemark = null;
+        if (remark && typeof remark === 'string') {
+            try {
+                parsedRemark = JSON.parse(remark);
+            } catch {
+                parsedRemark = null;
+            }
+        }
+
         // Create the service record
         const newService = {
             serviceType,
@@ -4786,7 +4810,8 @@ export const addAssetService = async (req, res) => {
             paidBy,
             value: value || 0,
             remark,
-            invoice: invoiceUrl
+            invoice: invoiceUrl,
+            attachment: attachmentUrl
         };
 
         asset.services.push(newService);
@@ -4799,6 +4824,18 @@ export const addAssetService = async (req, res) => {
         // Update specialized dates if it's an Oil Service
         if (serviceType === 'Oil Service') {
             asset.oilChangeDate = date || new Date();
+            asset.lastServiceDate = date || new Date();
+        } else if (serviceType === 'Accident Repair') {
+            const accidentStatus = parsedRemark?.accidentStatus || 'Active';
+            if (accidentStatus === 'Active') {
+                const start = parsedRemark?.accidentDate ? new Date(parsedRemark.accidentDate) : (date ? new Date(date) : new Date());
+                const until = new Date(start);
+                until.setDate(until.getDate() + 60);
+                asset.status = 'Accident';
+                asset.accidentStartedAt = start;
+                asset.accidentActiveUntil = until;
+                asset.accidentReminderLastSentAt = null;
+            }
             asset.lastServiceDate = date || new Date();
         } else {
             // General last service date update
@@ -4825,6 +4862,9 @@ export const addAssetService = async (req, res) => {
         const addedService = asset.services[asset.services.length - 1].toObject();
         if (addedService.invoice) {
             addedService.invoice = await getSignedFileUrl(addedService.invoice);
+        }
+        if (addedService.attachment) {
+            addedService.attachment = await getSignedFileUrl(addedService.attachment);
         }
 
         res.status(200).json({ message: 'Service record added successfully', service: addedService });
