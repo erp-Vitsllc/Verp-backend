@@ -584,17 +584,6 @@ export const getUnassignedAssetsForEmployee = async (req, res) => {
         }
 
         if (!isAuthorized) {
-            // Allow AC if they are pending in the flowchart.
-            const isPending = await Flowchart.findOne({
-                category: 'assetcontroller',
-                empObjectId: employeeObjectId,
-                status: 'Pending'
-            });
-            if (isPending) isAuthorized = true;
-            console.log(`[getUnassignedAssetsForEmployee] Pending check result for profile: ${!!isPending}`);
-        }
-
-        if (!isAuthorized) {
             console.log(`[getUnassignedAssetsForEmployee] ACCESS DENIED for profile employee: ${employeeId}`);
             return res.status(403).json({
                 message: 'Access denied. Only Asset Controllers can view unassigned assets.',
@@ -618,18 +607,9 @@ export const getUnassignedAssetsForEmployee = async (req, res) => {
             return status === 'Unassigned' || status === 'Returned' || status === 'Pending';
         });
 
-        let controllerStatus = 'Active';
-
-        const isPending = await Flowchart.findOne({
-            category: 'assetcontroller',
-            empObjectId: employeeObjectId,
-            status: 'Pending'
-        });
-        if (isPending) controllerStatus = 'Pending';
-
         res.status(200).json({
             items: filteredItems,
-            controllerStatus
+            controllerStatus: 'Active'
         });
     } catch (error) {
         console.error('Error fetching unassigned assets for controller:', error);
@@ -699,16 +679,6 @@ export const getOnLeaveAssetsForEmployee = async (req, res) => {
                     error: 'Flowchart service unavailable'
                 });
             }
-        }
-
-        if (!isAuthorized) {
-            // Allow AC if they are pending in the flowchart.
-            const isPending = await Flowchart.findOne({
-                category: 'assetcontroller',
-                empObjectId: employeeObjectId,
-                status: 'Pending'
-            });
-            if (isPending) isAuthorized = true;
         }
 
         if (!isAuthorized) {
@@ -1047,44 +1017,17 @@ export const getHRCompanyAssets = async (req, res) => {
 
         const employeeObjectId = employee._id;
 
-        // Check if this employee is HR-designated for companies
-        // Company.responsibilities: Assigned User / Admin / legacy HR (by empObjectId or employeeId)
-        const companyAssetRoleCategoryCond = {
-            $regex: /^\s*(assigneduser|admincontroller|admin|hr|hrm|human(\s+resources?)?)\s*$/i
-        };
-
-        const designatedCompanies = await Company.find({
-            responsibilities: {
-                $elemMatch: {
-                    $or: [
-                        { empObjectId: employeeObjectId },
-                        { employeeId: { $regex: new RegExp(`^${employeeId}$`, 'i') } }
-                    ],
-                    category: companyAssetRoleCategoryCond,
-                    status: 'Active'
-                }
-            }
-        }).select('_id name companyId nickName');
-
-        console.log(`[getHRCompanyAssets] Employee ${employeeId} (${employeeObjectId}) - Found ${designatedCompanies.length} designated companies`);
-
+        // Company Assets tab must follow CURRENT flowchart responsibility only
+        // (Assigned User/Admin Controller active entries), not legacy company.responsibilities.
         const isCompanyCoordinatorFlow = await isUserActiveCompanyAssetCoordinator(employeeObjectId, employeeId);
         console.log(`[getHRCompanyAssets] Employee ${employeeId} - isCompanyCoordinatorFlow (Active): ${isCompanyCoordinatorFlow}`);
 
-        if (designatedCompanies.length === 0 && !isCompanyCoordinatorFlow) {
+        if (!isCompanyCoordinatorFlow) {
             console.log(`[getHRCompanyAssets] Employee ${employeeId} - Not company-asset coordinator, returning empty`);
             return res.status(200).json({ isHR: false, items: [], designatedCompanies: [] });
         }
 
-        // Get company IDs from designated companies
-        const designatedCompanyIds = designatedCompanies.map(c => c._id);
-
-        // If employee has a company and it's not in designated list, add it
-        if (employee.company && !designatedCompanyIds.some(id => id.toString() === employee.company.toString())) {
-            designatedCompanyIds.push(employee.company);
-        }
-
-        console.log(`[getHRCompanyAssets] Employee ${employeeId} - Querying assets for company IDs:`, designatedCompanyIds.map(id => id.toString()));
+        console.log(`[getHRCompanyAssets] Employee ${employeeId} - Querying all company-assigned assets (flowchart coordinator)`);
 
         // Fetch assets assigned to Company.
         // - Flowchart Assigned User / Admin: show ALL company allocations.
@@ -1095,9 +1038,7 @@ export const getHRCompanyAssets = async (req, res) => {
                     $or: [
                         {
                             assignedToType: 'Company',
-                            ...(isCompanyCoordinatorFlow
-                                ? {}
-                                : { assignedCompany: { $in: designatedCompanyIds } })
+                            ...(isCompanyCoordinatorFlow ? {} : { assignedCompany: null })
                         },
                         {
                             actionRequiredBy: employeeObjectId,
@@ -1127,12 +1068,7 @@ export const getHRCompanyAssets = async (req, res) => {
         res.status(200).json({
             isHR: true,
             items,
-            designatedCompanies: designatedCompanies.map(c => ({
-                _id: c._id,
-                name: c.name,
-                companyId: c.companyId,
-                nickName: c.nickName
-            }))
+            designatedCompanies: []
         });
     } catch (error) {
         console.error('Error fetching company assets for HR:', error);
