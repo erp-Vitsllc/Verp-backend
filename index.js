@@ -49,16 +49,32 @@ setTimeout(() => { processAccidentAssets(); }, 60 * 1000);
 setInterval(() => { processAccidentAssets(); }, 24 * 60 * 60 * 1000);
 
 // CORS Configuration - MUST BE FIRST
-app.use(cors({
-    origin: [
-        "http://localhost:3000",
-        "http://localhost:5173",
-        process.env.FRONTEND_URL
-    ].filter(Boolean), // Allow frontend origins and filter out undefined
-    credentials: true,
-    methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization", "x-no-compression"]
-}));
+const staticAllowedOrigins = [
+    "http://localhost:3000",
+    "http://localhost:5173",
+    process.env.FRONTEND_URL,
+].filter(Boolean);
+
+const isLocalDevOrigin = (origin) =>
+    /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin);
+
+app.use(
+    cors({
+        origin: (origin, callback) => {
+            if (!origin) {
+                return callback(null, true);
+            }
+            if (staticAllowedOrigins.includes(origin) || isLocalDevOrigin(origin)) {
+                return callback(null, true);
+            }
+            console.warn("CORS blocked origin:", origin);
+            return callback(null, false);
+        },
+        credentials: true,
+        methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+        allowedHeaders: ["Content-Type", "Authorization", "x-no-compression"],
+    })
+);
 
 // Global Rate Limiting
 app.use(commonLimiter);

@@ -5,7 +5,8 @@ import {
     respondToResponsibility,
     deleteFlowchartResponsibility,
     getEmployeesForFlowchart,
-    getFlowchartPositionSummary
+    getFlowchartPositionSummary,
+    getActiveFlowchartHolderHr
 } from '../controllers/flowchartController.js';
 
 import { protect } from '../middleware/authMiddleware.js';
@@ -21,6 +22,8 @@ router.route('/')
 router.put('/respond-responsibility', respondToResponsibility);
 
 router.get('/position-summary/:category', getFlowchartPositionSummary);
+
+router.get('/active-holder/hr', getActiveFlowchartHolderHr);
 
 router.route('/employees')
     .get(getEmployeesForFlowchart);

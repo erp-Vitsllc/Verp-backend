@@ -16,7 +16,19 @@ import EmployeeBasic from "../models/EmployeeBasic.js";
  */
 export const syncDashboardAction = async (data) => {
     try {
-        const { requestId, requestType, assignedTo, status, subjectEmployee, extra1, extra2, actionedBy, comment, requestedByName } = data;
+        const {
+            requestId,
+            requestType,
+            assignedTo,
+            status,
+            subjectEmployee,
+            extra1,
+            extra2,
+            actionedBy,
+            comment,
+            requestedByName,
+            notifySubjectEmployee
+        } = data;
 
         // 1. If status is NOT pending, find and update any existing pending actions for this request
         if (status !== 'Pending') {
@@ -36,6 +48,40 @@ export const syncDashboardAction = async (data) => {
                     comment: comment
                 }
             );
+
+            // Profile Activation: give the subject employee their own completed row (inbox/outgoing merge in stats UI).
+            if (
+                notifySubjectEmployee &&
+                requestType === 'Profile Activation' &&
+                subjectEmployee?._id &&
+                ['Approved', 'Rejected'].includes(status)
+            ) {
+                const subj = subjectEmployee;
+                const subjectName = `${subj.firstName || ''} ${subj.lastName || ''}`.trim() || 'Employee';
+                await DashboardAction.findOneAndUpdate(
+                    { requestId, assignedTo: subj._id, requestType },
+                    {
+                        assignedTo: subj._id,
+                        assignedToEmpId: subj.employeeId,
+                        requestId,
+                        requestType,
+                        status,
+                        subjectEmployeeId: subj.employeeId,
+                        subjectName: subjectName,
+                        requestedByName: requestedByName || '',
+                        requestedDate: new Date(),
+                        extra1:
+                            status === 'Approved'
+                                ? 'Your profile has been activated'
+                                : 'Your profile activation requires updates',
+                        extra2: subj.designation || '',
+                        actionedDate: new Date(),
+                        actionedBy: actionedBy || null,
+                        comment: comment || ''
+                    },
+                    { upsert: true, new: true, setDefaultsOnInsert: true }
+                );
+            }
 
             // If it's fully completed and no next step, we stop here.
             // But usually, an action's completion triggers a NEW pending action for the next person.

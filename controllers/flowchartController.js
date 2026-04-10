@@ -10,6 +10,7 @@ import { sendAssetAssignmentEmail } from "../utils/sendAssetAssignmentEmail.js";
 import { buildBulkAssetInventoryPdfAttachment } from "../utils/generateBulkAssetInventoryPdf.js";
 import { sendFlowchartReassignmentResultEmail } from "../utils/sendFlowchartReassignmentResultEmail.js";
 import { isUserAdministrator } from "../services/permissionService.js";
+import { resolveFlowchartHrEmployee } from "../utils/resolveFlowchartHrEmployee.js";
 import AssetHistory from "../models/AssetHistory.js";
 
 /**
@@ -755,6 +756,33 @@ export const getEmployeesForFlowchart = async (req, res) => {
         res.status(200).json(employees);
     } catch (error) {
         console.error('Error fetching employees:', error);
+        res.status(500).json({ message: 'Server Error' });
+    }
+};
+
+// @desc    Active Flowchart HR holder (EmployeeBasic ids) for client-side permission checks
+// @route   GET /api/Flowchart/active-holder/hr
+// @access  Private
+export const getActiveFlowchartHolderHr = async (req, res) => {
+    try {
+        const resolved = await resolveFlowchartHrEmployee();
+        if (resolved.error) {
+            return res.status(200).json({
+                ok: false,
+                code: resolved.error,
+                message: resolved.message,
+                empObjectId: null,
+                employeeId: null
+            });
+        }
+        const e = resolved.employee;
+        return res.status(200).json({
+            ok: true,
+            empObjectId: String(e._id),
+            employeeId: e.employeeId || null
+        });
+    } catch (error) {
+        console.error('getActiveFlowchartHolderHr:', error);
         res.status(500).json({ message: 'Server Error' });
     }
 };

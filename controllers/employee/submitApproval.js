@@ -1,63 +1,64 @@
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { getCompleteEmployee } from "../../services/employeeService.js";
+import { resolveFlowchartHrEmployee } from "../../utils/resolveFlowchartHrEmployee.js";
 
 export const submitApproval = async (req, res) => {
     const { id } = req.params;
 
     try {
-        // Get employee basic record
         const employeeBasic = await getCompleteEmployee(id);
         if (!employeeBasic) {
             return res.status(404).json({ message: "Employee not found" });
         }
 
-        // Strictly check for Primary Reportee
-        if (!employeeBasic.primaryReportee) {
-            return res.status(400).json({ message: "Please assign a primary reportee before submitting for approval." });
+        const hrResolved = await resolveFlowchartHrEmployee();
+        if (hrResolved.error) {
+            return res.status(400).json({
+                message: hrResolved.message,
+                code: hrResolved.error
+            });
         }
 
+        const hrEmployee = hrResolved.employee;
         const employeeId = employeeBasic.employeeId;
 
-        // Update EmployeeBasic
         const updated = await EmployeeBasic.findOneAndUpdate(
             { employeeId },
             {
                 profileApprovalStatus: "submitted",
-                profileSubmittedTo: employeeBasic.primaryReportee, // SNAPSHOT: Lock to current manager
-                // WORKFLOW: Initial Submitted Step
-                profileWorkflow: [{
-                    role: 'Manager',
-                    assignedTo: employeeBasic.primaryReportee,
-                    status: 'submitted',
-                    assignedAt: new Date()
-                }]
+                profileSubmittedTo: hrEmployee._id,
+                $push: {
+                    profileWorkflow: {
+                        role: "HR",
+                        assignedTo: hrEmployee._id,
+                        status: "submitted",
+                        assignedAt: new Date()
+                    }
+                }
             },
             { new: true }
-        ).populate("primaryReportee", "firstName lastName email workEmail")
-            .populate("reportingAuthority", "firstName lastName email workEmail");
+        );
 
         if (!updated) {
             return res.status(404).json({ message: "Employee not found" });
         }
 
-        // === SYNC DASHBOARD ACTION ===
         try {
             const { syncDashboardAction } = await import("../../utils/syncDashboard.js");
             await syncDashboardAction({
                 requestId: updated._id,
-                requestType: 'Profile Activation',
-                assignedTo: updated.profileSubmittedTo,
-                status: 'Pending',
+                requestType: "Profile Activation",
+                assignedTo: String(hrEmployee._id),
+                status: "Pending",
                 subjectEmployee: updated,
-                requestedByName: req.user.name || '',
-                extra1: 'New Profile Submission',
-                extra2: updated.designation || ''
+                requestedByName: req.user?.name || "",
+                extra1: "Profile activation — HR review",
+                extra2: updated.designation || ""
             });
         } catch (syncErr) {
             console.error("[SubmitApproval] Dashboard Sync Error:", syncErr);
         }
 
-        // Get complete employee data for response
         const completeEmployee = await getCompleteEmployee(employeeId);
         delete completeEmployee.password;
 
@@ -67,8 +68,6 @@ export const submitApproval = async (req, res) => {
         });
     } catch (error) {
         console.error("Failed to submit profile for approval:", error);
-        return res.status(500).json({ message: error.message || "Failed to submit profile." });
+        return res.status(500).json({ message: error.message || "Failed to submit profile for approval." });
     }
 };
-
-

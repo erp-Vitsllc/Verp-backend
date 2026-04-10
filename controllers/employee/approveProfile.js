@@ -13,6 +13,7 @@ export const approveProfile = async (req, res) => {
         }
 
         const employeeId = employee.employeeId;
+        const submittedToAssigneeId = employee.profileSubmittedTo;
 
         // Update EmployeeBasic
         const updated = await EmployeeBasic.findOneAndUpdate(
@@ -41,10 +42,13 @@ export const approveProfile = async (req, res) => {
             const { syncDashboardAction } = await import("../../utils/syncDashboard.js");
             await syncDashboardAction({
                 requestId: updated._id,
-                requestType: 'Profile Activation',
-                status: 'Approved',
+                requestType: "Profile Activation",
+                status: "Approved",
+                assignedTo: submittedToAssigneeId ? String(submittedToAssigneeId) : undefined,
                 subjectEmployee: updated,
-                requestedByName: req.user.name
+                requestedByName: req.user?.name || "",
+                actionedBy: req.user?.employeeObjectId || req.user?._id,
+                notifySubjectEmployee: true
             });
         } catch (syncErr) {
             console.error("[ApproveProfile] Dashboard Sync Error:", syncErr);

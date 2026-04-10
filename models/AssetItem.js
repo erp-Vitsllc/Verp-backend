@@ -243,7 +243,19 @@ const assetItemSchema = new mongoose.Schema({
         attachment: { type: String } // URL to uploaded document
     }],
     services: [{
-        serviceType: { type: String, enum: ['Oil Service', 'Taxi Charge', 'Mechanical Work', 'Body Work', 'Accident Repair', 'Other'] },
+        serviceType: {
+            type: String,
+            enum: [
+                'Oil Service',
+                'Tire Change',
+                'Mechanical Work',
+                'Body Work',
+                'Accident Repair',
+                'Car Wash',
+                'Taxi Charge',
+                'Other',
+            ],
+        },
         date: { type: Date, default: Date.now },
         expiryDate: { type: Date },
         serviceDuration: { type: String },   // e.g. "7 days", "2 weeks"

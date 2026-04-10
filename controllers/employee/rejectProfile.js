@@ -17,6 +17,7 @@ export const rejectProfile = async (req, res) => {
         }
 
         const employeeId = employee.employeeId;
+        const submittedToAssigneeId = employee.profileSubmittedTo;
 
         // Update EmployeeBasic
         // Set profileApprovalStatus to 'rejected'
@@ -47,12 +48,14 @@ export const rejectProfile = async (req, res) => {
             const { syncDashboardAction } = await import("../../utils/syncDashboard.js");
             await syncDashboardAction({
                 requestId: updated._id,
-                requestType: 'Profile Activation',
-                status: 'Rejected',
+                requestType: "Profile Activation",
+                status: "Rejected",
+                assignedTo: submittedToAssigneeId ? String(submittedToAssigneeId) : undefined,
                 subjectEmployee: updated,
-                actionedBy: req.user?._id,
-                requestedByName: req.user.name,
-                comment: reason
+                actionedBy: req.user?.employeeObjectId || req.user?._id,
+                requestedByName: req.user?.name || "",
+                comment: reason,
+                notifySubjectEmployee: true
             });
         } catch (syncErr) {
             console.error("[RejectProfile] Dashboard Sync Error:", syncErr);

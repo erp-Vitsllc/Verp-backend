@@ -2,7 +2,8 @@ import nodemailer from "nodemailer";
 
 export const sendProfileNotification = async ({ employee, manager, status, reason = "" }) => {
     try {
-        const employeeEmail = employee.companyEmail || employee.workEmail || employee.email;
+        const employeeEmail =
+            employee.companyEmail || employee.workEmail || employee.personalEmail || employee.email;
         if (!employeeEmail) {
             console.warn(`[Email Warning] No email found for employee ${employee.employeeId}`);
             return;
@@ -27,7 +28,15 @@ export const sendProfileNotification = async ({ employee, manager, status, reaso
         });
 
         const employeeName = `${employee.firstName || ""} ${employee.lastName || ""}`.trim();
-        const managerName = `${manager.firstName || ""} ${manager.lastName || ""}`.trim();
+        const managerName = (() => {
+            const m = manager;
+            if (!m) return "HR";
+            if (m.name && String(m.name).trim()) return String(m.name).trim();
+            const n = `${m.firstName || ""} ${m.lastName || ""}`.trim();
+            if (n) return n;
+            if (m.email) return m.email;
+            return "HR";
+        })();
 
         const isApproved = status.toLowerCase() === 'active' || status.toLowerCase() === 'approved';
 
@@ -77,7 +86,7 @@ export const sendProfileNotification = async ({ employee, manager, status, reaso
 
                     ${!isApproved && reason ? `
                         <div style="background-color: #fff1f2; padding: 20px; border-left: 4px solid #e11d48; border-radius: 4px; margin: 25px 0;">
-                            <p style="margin: 0; font-weight: bold; color: #9f1239;">Feedback from Manager:</p>
+                            <p style="margin: 0; font-weight: bold; color: #9f1239;">Feedback:</p>
                             <p style="margin: 8px 0 0 0; color: #be123b;">${reason}</p>
                         </div>
                     ` : ''}

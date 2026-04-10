@@ -119,15 +119,25 @@ export const getUserActivityStats = async (req, res) => {
 
         const allAssetTypes = ['Asset', 'Asset Approval', 'Asset Assignment', 'Asset Transfer', 'Asset Loss Damage', 'Asset End of Life', 'Asset Accessory', 'Asset Accessory Approval', 'Asset Accessory Unattach'];
 
-        const dashboardPendingItems = await DashboardAction.find({
-            $or: [
-                { assignedTo: { $in: relevantIds } },
-                { assignedToEmpId: targetEmployeeId },
-                ...(isAdmin ? [{ requestType: 'Responsibility Approval' }] : []),
-                ...(isAssetController ? [{ requestType: { $in: allAssetTypes } }] : [])
-            ],
-            status: 'Pending'
-        }).lean();
+        const [dashboardPendingItems, profileActivationOutcomeItems] = await Promise.all([
+            DashboardAction.find({
+                $or: [
+                    { assignedTo: { $in: relevantIds } },
+                    { assignedToEmpId: targetEmployeeId },
+                    ...(isAdmin ? [{ requestType: 'Responsibility Approval' }] : []),
+                    ...(isAssetController ? [{ requestType: { $in: allAssetTypes } }] : [])
+                ],
+                status: 'Pending'
+            }).lean(),
+            DashboardAction.find({
+                assignedTo: { $in: relevantIds },
+                requestType: 'Profile Activation',
+                status: { $in: ['Approved', 'Rejected'] }
+            })
+                .sort({ actionedDate: -1, updatedAt: -1 })
+                .limit(25)
+                .lean()
+        ]);
 
         // 4. Fallback/Direct Queries for "Needs Action" (in case DashboardAction sync is delayed)
         const inboxQueries = [
@@ -530,6 +540,37 @@ export const getUserActivityStats = async (req, res) => {
                 }
             }
         }
+
+        // 5b. Profile activation outcomes assigned to this user (e.g. employee notified after HR approve/reject)
+        profileActivationOutcomeItems.forEach((item) => {
+            const reqIdStr = item.requestId?.toString();
+            if (!reqIdStr) return;
+            const isSelf = targetEmpNorm && normEmpId(item.subjectEmployeeId) === targetEmpNorm;
+            const activityItem = {
+                id: reqIdStr,
+                actionId: item._id.toString(),
+                type: 'Profile Activation',
+                requestedBy: isSelf ? 'Me' : item.subjectName || item.requestedByName || 'Employee',
+                requestedDate: item.requestedDate,
+                actionedDate: item.actionedDate || item.updatedAt,
+                status: item.status,
+                extra1: item.extra1 || item.subjectEmployeeId,
+                extra2: item.extra2,
+                targetEmployeeId: item.subjectEmployeeId?.toString(),
+                employeeId: targetEmployeeId,
+                scope: isSelf ? 'outgoing' : 'inbox'
+            };
+
+            const idx = activityList.findIndex(
+                (i) => i.id?.toString() === reqIdStr && i.type === 'Profile Activation' && !i.isNotice
+            );
+            if (idx !== -1) {
+                activityList[idx] = { ...activityList[idx], ...activityItem };
+            } else {
+                activityList.push(activityItem);
+                seenRequests.set(reqIdStr, item.status);
+            }
+        });
 
         console.log("Stats Debug:", {
             mode: req.query.targetUserId ? "Manager View" : "Self View",

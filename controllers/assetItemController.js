@@ -414,6 +414,232 @@ export const getAssetItems = async (req, res) => {
 
 };
 
+/**
+ * Fleet dashboard for vehicle assets: reminders, status, charts (service cost, model years, usage proxy).
+ * @route GET /api/AssetItem/vehicle-fleet-dashboard
+ */
+export const getVehicleFleetDashboard = async (req, res) => {
+    try {
+        const draftVis = buildDraftVisibilityQuery(req.user);
+        const items = await AssetItem.find({ $and: [draftVis] })
+            .populate('typeId', 'name')
+            .populate('assignedTo', 'firstName lastName employeeId')
+            .select(
+                'assetId name plateNumber modelYear assetValue status registrationExpiryDate insuranceExpiryDate nextServiceDate oilChangeDate gearOilDueDate lastServiceDate currentKilometer assignedTo acceptanceStatus pendingAction services documents'
+            )
+            .lean();
+
+        const isVehicleAsset = (it) => {
+            const plate = (it.plateNumber || '').trim();
+            if (plate) return true;
+            const t = (it.typeId?.name || '').toLowerCase();
+            return t.includes('vehicle') || t.includes('car') || t.includes('fleet') || t.includes('truck');
+        };
+
+        const vehicles = items.filter(isVehicleAsset);
+        const vehicleIds = vehicles.map((v) => v._id);
+
+        const now = new Date();
+        now.setHours(0, 0, 0, 0);
+        const soonEnd = new Date(now);
+        soonEnd.setDate(soonEnd.getDate() + 30);
+
+        const registrationExpiry = (v) => {
+            if (v.registrationExpiryDate) return new Date(v.registrationExpiryDate);
+            const reg = (v.documents || []).find((d) => String(d.type || '').toLowerCase() === 'registration');
+            if (reg?.expiryDate) return new Date(reg.expiryDate);
+            return null;
+        };
+
+        const nextMaintenanceDate = (v) => {
+            const dates = [v.nextServiceDate, v.gearOilDueDate].filter(Boolean).map((d) => new Date(d));
+            if (!dates.length) return null;
+            return new Date(Math.min(...dates.map((d) => d.getTime())));
+        };
+
+        let serviceDue = 0;
+        let serviceDueSoon = 0;
+        let regDue = 0;
+        let regDueSoon = 0;
+
+        for (const v of vehicles) {
+            const sd = nextMaintenanceDate(v);
+            if (sd) {
+                const t = new Date(sd);
+                t.setHours(0, 0, 0, 0);
+                if (t < now) serviceDue++;
+                else if (t <= soonEnd) serviceDueSoon++;
+            }
+            const rd = registrationExpiry(v);
+            if (rd) {
+                const t = new Date(rd);
+                t.setHours(0, 0, 0, 0);
+                if (t < now) regDue++;
+                else if (t <= soonEnd) regDueSoon++;
+            }
+        }
+
+        const stNorm = (s) => String(s || '').toLowerCase();
+        let assigned = 0;
+        let unassigned = 0;
+        let inService = 0;
+        for (const v of vehicles) {
+            const st = stNorm(v.status);
+            if (v.assignedTo && st === 'assigned') assigned++;
+            if (!v.assignedTo && st === 'unassigned') unassigned++;
+            if (['service', 'on service', 'maintenance'].includes(st)) inService++;
+        }
+
+        let handoverPending = 0;
+        let handoverConfirmed = 0;
+        for (const v of vehicles) {
+            if (v.assignedTo && String(v.acceptanceStatus || '') === 'Pending') handoverPending++;
+            if (v.assignedTo && String(v.acceptanceStatus || '') === 'Accepted') handoverConfirmed++;
+        }
+
+        let daPending = 0;
+        let daApproved = 0;
+        if (vehicleIds.length) {
+            daPending = await DashboardAction.countDocuments({
+                requestId: { $in: vehicleIds },
+                status: 'Pending',
+                requestType: { $in: ASSET_DASHBOARD_INBOX_TYPES }
+            });
+            daApproved = await DashboardAction.countDocuments({
+                requestId: { $in: vehicleIds },
+                status: 'Approved',
+                requestType: { $in: ASSET_DASHBOARD_INBOX_TYPES }
+            });
+        }
+
+        const fleetRows = vehicles.map((v) => {
+            const total = (v.services || []).reduce((sum, s) => sum + Number(s.value || 0), 0);
+            return {
+                _id: v._id,
+                assetId: v.assetId,
+                plateNumber: v.plateNumber,
+                label: (v.plateNumber || v.assetId || 'Asset').toString().slice(0, 18),
+                totalServiceCost: total,
+                assetValue: Number(v.assetValue || 0),
+                modelYear: v.modelYear || '',
+                status: v.status,
+                assignedTo: v.assignedTo,
+                registrationExpiryDate: v.registrationExpiryDate,
+                currentKilometer: v.currentKilometer
+            };
+        });
+
+        const monthTotals = {};
+        for (const v of vehicles) {
+            for (const s of v.services || []) {
+                if (!s?.date) continue;
+                const d = new Date(s.date);
+                const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+                monthTotals[key] = (monthTotals[key] || 0) + Number(s.value || 0);
+            }
+        }
+        const monthKeys = Object.keys(monthTotals).sort();
+        const serviceCostByMonth = monthKeys.slice(-12).map((k) => ({ label: k, total: monthTotals[k] }));
+
+        const yearCounts = {};
+        for (const v of vehicles) {
+            const y = (v.modelYear || 'Unknown').toString().trim() || 'Unknown';
+            yearCounts[y] = (yearCounts[y] || 0) + 1;
+        }
+        const modelYearDistribution = Object.entries(yearCounts)
+            .map(([year, count]) => ({ year, count }))
+            .sort((a, b) => {
+                const na = parseInt(a.year, 10);
+                const nb = parseInt(b.year, 10);
+                if (!Number.isNaN(na) && !Number.isNaN(nb)) return nb - na;
+                if (a.year === 'Unknown') return 1;
+                if (b.year === 'Unknown') return -1;
+                return String(b.year).localeCompare(String(a.year));
+            });
+
+        const hasServiceInRange = (v, start, end) =>
+            (v.services || []).some((s) => {
+                if (!s?.date) return false;
+                const t = new Date(s.date).getTime();
+                return t >= start.getTime() && t <= end.getTime();
+            });
+
+        const countServicesInRange = (start, end) => {
+            let c = 0;
+            for (const v of vehicles) {
+                for (const s of v.services || []) {
+                    if (!s?.date) continue;
+                    const t = new Date(s.date).getTime();
+                    if (t >= start.getTime() && t <= end.getTime()) c++;
+                }
+            }
+            return c;
+        };
+
+        const buildUsageSeries = (unit) => {
+            const labels = [];
+            const usage = [];
+            const idle = [];
+            if (unit === 'day') {
+                for (let i = 6; i >= 0; i--) {
+                    const start = new Date(now);
+                    start.setDate(start.getDate() - i);
+                    start.setHours(0, 0, 0, 0);
+                    const end = new Date(start);
+                    end.setHours(23, 59, 59, 999);
+                    labels.push(`${start.getDate()}/${start.getMonth() + 1}`);
+                    usage.push(countServicesInRange(start, end));
+                    idle.push(vehicles.filter((v) => !hasServiceInRange(v, start, end)).length);
+                }
+            } else if (unit === 'week') {
+                for (let i = 7; i >= 0; i--) {
+                    const end = new Date(now);
+                    end.setDate(end.getDate() - i * 7);
+                    end.setHours(23, 59, 59, 999);
+                    const start = new Date(end);
+                    start.setDate(start.getDate() - 6);
+                    start.setHours(0, 0, 0, 0);
+                    labels.push(`W${8 - i}`);
+                    usage.push(countServicesInRange(start, end));
+                    idle.push(vehicles.filter((v) => !hasServiceInRange(v, start, end)).length);
+                }
+            } else {
+                for (let i = 11; i >= 0; i--) {
+                    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+                    const start = new Date(d.getFullYear(), d.getMonth(), 1);
+                    const end = new Date(d.getFullYear(), d.getMonth() + 1, 0, 23, 59, 59, 999);
+                    labels.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`);
+                    usage.push(countServicesInRange(start, end));
+                    idle.push(vehicles.filter((v) => !hasServiceInRange(v, start, end)).length);
+                }
+            }
+            return { labels, usage, idle };
+        };
+
+        res.json({
+            reminders: {
+                service: { due: serviceDue, dueSoon: serviceDueSoon },
+                registration: { due: regDue, dueSoon: regDueSoon }
+            },
+            vehicleStatus: { assigned, unassigned, inService },
+            serviceRequest: { pending: daPending, confirmed: daApproved },
+            handoverRequest: { pending: handoverPending, confirmed: handoverConfirmed },
+            serviceCostByMonth,
+            vehicles: fleetRows,
+            modelYearDistribution,
+            usageByPeriod: {
+                day: buildUsageSeries('day'),
+                week: buildUsageSeries('week'),
+                month: buildUsageSeries('month')
+            },
+            generatedAt: new Date().toISOString()
+        });
+    } catch (error) {
+        console.error('getVehicleFleetDashboard:', error);
+        res.status(500).json({ message: 'Failed to load vehicle fleet dashboard' });
+    }
+};
+
 export const getAllAssignedAssets = async (req, res) => {
     try {
         const { companyId, status } = req.query;

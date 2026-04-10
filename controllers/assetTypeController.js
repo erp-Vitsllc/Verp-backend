@@ -37,8 +37,8 @@ function dedupeAccessoryPayloadById(arr) {
             acc._id != null && acc._id !== ''
                 ? String(acc._id)
                 : acc.accessoryId != null && acc.accessoryId !== ''
-                  ? String(acc.accessoryId)
-                  : `__new_${n++}`;
+                    ? String(acc.accessoryId)
+                    : `__new_${n++}`;
         map.set(k, acc);
     }
     return Array.from(map.values());
@@ -1314,7 +1314,7 @@ export const updateAssetItem = async (req, res) => {
                                     comments: `${actorName} added accessory(ies) pending assignee approval: ${addedAccessoryNames.join(', ')}.`,
                                     date: new Date(),
                                     details: { type: 'AuthorityAccessoryAddPendingAssignee', names: addedAccessoryNames }
-                                }).catch(() => {});
+                                }).catch(() => { });
                             }
                         } catch (err) {
                             console.error('[AddAccessory Assignee Approval Flow] Error:', err);
