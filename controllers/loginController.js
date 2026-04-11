@@ -119,12 +119,12 @@ export const login = async (req, res) => {
             }
 
             // Check if account is temporarily locked (1 hour block)
-            if (user.lockUntil && user.lockUntil > Date.now()) {
-                const remainingMinutes = Math.ceil((user.lockUntil - Date.now()) / (60 * 1000));
-                return res.status(403).json({
-                    message: `Too many failed attempts. Your account is locked for ${remainingMinutes} more minutes.`
-                });
-            }
+            // if (user.lockUntil && user.lockUntil > Date.now()) {
+            //     const remainingMinutes = Math.ceil((user.lockUntil - Date.now()) / (60 * 1000));
+            //     return res.status(403).json({
+            //         message: `Too many failed attempts. Your account is locked for ${remainingMinutes} more minutes.`
+            //     });
+            // }
         }
 
         // Check if password exists (skip for system admin as password is already validated from .env)
