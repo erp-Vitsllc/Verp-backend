@@ -141,13 +141,13 @@ export const login = async (req, res) => {
                 user.loginAttempts = (user.loginAttempts || 0) + 1;
 
                 // If 5 or more attempts, lock for 1 hour
-                if (user.loginAttempts >= 5) {
-                    user.lockUntil = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
-                    await user.save();
-                    return res.status(403).json({
-                        message: "Too many failed attempts. Your account has been locked for 1 hour."
-                    });
-                }
+                // if (user.loginAttempts >= 5) {
+                //     user.lockUntil = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
+                //     await user.save();
+                //     return res.status(403).json({
+                //         message: "Too many failed attempts. Your account has been locked for 1 hour."
+                //     });
+                // }
 
                 await user.save();
                 return res.status(401).json({
