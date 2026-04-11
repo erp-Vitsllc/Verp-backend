@@ -23,6 +23,8 @@ export const getDepartmentHOD = async (departmentType) => {
             category = 'admincontroller';
         } else if (type === 'assigneduser') {
             category = 'assigneduser';
+        } else if (type === 'management' || type === 'generalmanagement' || type === 'ceo') {
+            category = 'management';
         }
 
         // Look for active HOD in Flowchart collection with regex to handle spaces in DB

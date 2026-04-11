@@ -86,7 +86,7 @@ const assetItemSchema = new mongoose.Schema({
     },
     status: {
         type: String,
-        enum: ['Assigned', 'Unassigned', 'Maintenance', 'On Service', 'Service', 'Accident', 'Lost', 'Returned', 'Pending', 'End of Life', 'Out of Service', 'Draft', 'Rejected', 'On Leave', 'Submitted for Approval'],
+        enum: ['Assigned', 'Unassigned', 'Maintenance', 'On Service', 'Online', 'Service', 'Accident', 'Lost', 'Returned', 'Pending', 'End of Life', 'Out of Service', 'Draft', 'Rejected', 'On Leave', 'Submitted for Approval'],
         default: 'Unassigned'
     },
     ownership: {
@@ -222,6 +222,8 @@ const assetItemSchema = new mongoose.Schema({
     }],
     accessoriesAttachment: { type: String, default: null },
     vehicleCode: { type: String, trim: true },
+    /** UAE emirate selected in Add Vehicle (drives license plate artwork). */
+    plateEmirate: { type: String, trim: true, default: '' },
     plateNumber: { type: String, trim: true },
     modelYear: { type: String, trim: true },
     currentKilometer: { type: Number, default: 0 },
@@ -234,6 +236,20 @@ const assetItemSchema = new mongoose.Schema({
     accidentStartedAt: { type: Date, default: null },
     accidentActiveUntil: { type: Date, default: null },
     accidentReminderLastSentAt: { type: Date, default: null },
+    /** Multi-step approval after adding a vehicle service record (HR → Accounts → On Service → AC/Admin → Management). */
+    activeServiceWorkflow: {
+        serviceRecordId: { type: mongoose.Schema.Types.ObjectId, default: null },
+        stage: { type: String, default: null },
+        previousStatus: { type: String, default: null },
+        serviceTypeLabel: { type: String, default: '' },
+        history: [{
+            stage: { type: String },
+            action: { type: String },
+            note: { type: String, default: '' },
+            byName: { type: String, default: '' },
+            at: { type: Date, default: Date.now }
+        }]
+    },
     documents: [{
         type: { type: String },
         issueAuthority: { type: String },

@@ -16,8 +16,12 @@ export const ASSET_DASHBOARD_INBOX_TYPES = [
     'Asset Return',
     'Asset Leave',
     'Asset Bulk Action',
-    'Asset Overdue'
+    'Asset Overdue',
+    'Vehicle Service Request'
 ];
+
+/** Tools / equipment Asset Management inbox — excludes fleet-only vehicle service workflow. */
+export const ASSET_TOOLS_INBOX_TYPES = ASSET_DASHBOARD_INBOX_TYPES.filter((t) => t !== 'Vehicle Service Request');
 
 /**
  * Remove dashboard / bell notifications tied to a deleted asset:

@@ -49,8 +49,14 @@ import {
 } from '../utils/sendAdminDeletionNotificationEmails.js';
 import {
     cleanupDashboardActionsForDeletedAsset,
-    ASSET_DASHBOARD_INBOX_TYPES
+    ASSET_DASHBOARD_INBOX_TYPES,
+    ASSET_TOOLS_INBOX_TYPES
 } from '../utils/cleanupAssetDashboardActions.js';
+import {
+    maybeStartVehicleServiceWorkflow,
+    getWorkflowAssigneePayloadForStage,
+    userMayRespondVehicleServiceWorkflow
+} from './vehicleServiceWorkflowController.js';
 import {
     generateVegaAccessoryCatalogId,
     syncAllAccessoryInstancesForAsset,
@@ -425,7 +431,7 @@ export const getVehicleFleetDashboard = async (req, res) => {
             .populate('typeId', 'name')
             .populate('assignedTo', 'firstName lastName employeeId')
             .select(
-                'assetId name plateNumber modelYear assetValue status registrationExpiryDate insuranceExpiryDate nextServiceDate oilChangeDate gearOilDueDate lastServiceDate currentKilometer assignedTo acceptanceStatus pendingAction services documents'
+                'assetId name plateEmirate plateNumber modelYear assetValue status registrationExpiryDate insuranceExpiryDate nextServiceDate oilChangeDate gearOilDueDate lastServiceDate currentKilometer assignedTo acceptanceStatus pendingAction services documents'
             )
             .lean();
 
@@ -487,7 +493,7 @@ export const getVehicleFleetDashboard = async (req, res) => {
             const st = stNorm(v.status);
             if (v.assignedTo && st === 'assigned') assigned++;
             if (!v.assignedTo && st === 'unassigned') unassigned++;
-            if (['service', 'on service', 'maintenance'].includes(st)) inService++;
+            if (['service', 'on service', 'maintenance', 'online'].includes(st)) inService++;
         }
 
         let handoverPending = 0;
@@ -517,6 +523,7 @@ export const getVehicleFleetDashboard = async (req, res) => {
             return {
                 _id: v._id,
                 assetId: v.assetId,
+                plateEmirate: v.plateEmirate || '',
                 plateNumber: v.plateNumber,
                 label: (v.plateNumber || v.assetId || 'Asset').toString().slice(0, 18),
                 totalServiceCost: total,
@@ -2304,6 +2311,15 @@ export const getAssetItemDetail = async (req, res) => {
                 isDesignatedCreationApprover ||
                 canApproveAsDeptAssetController)
         );
+
+        const wfStage = itemObj.activeServiceWorkflow?.stage;
+        itemObj.canRespondToServiceWorkflow = await userMayRespondVehicleServiceWorkflow(req.user, wfStage);
+        if (wfStage && !['complete', 'rejected'].includes(wfStage)) {
+            itemObj.activeServiceWorkflow = {
+                ...itemObj.activeServiceWorkflow,
+                currentAssignee: await getWorkflowAssigneePayloadForStage(wfStage)
+            };
+        }
 
         res.status(200).json(itemObj);
     } catch (error) {
@@ -5069,6 +5085,17 @@ export const addAssetService = async (req, res) => {
         }
 
         await asset.save();
+
+        const lastServiceDoc = asset.services[asset.services.length - 1];
+        try {
+            await maybeStartVehicleServiceWorkflow(asset, {
+                serviceRecordId: lastServiceDoc._id,
+                serviceType,
+                req
+            });
+        } catch (wfErr) {
+            console.error('[addAssetService] Vehicle service workflow:', wfErr);
+        }
 
         // Log to history
         try {
@@ -8199,9 +8226,19 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
         const relevantIds = [manager?._id, currentUser.employeeObjectId, currentUser?._id].filter(Boolean);
         const targetEmployeeId = currentUser.employeeId || manager?.employeeId;
 
+        const scope = String(req.query.scope || '').trim().toLowerCase();
+        let requestTypeFilter;
+        if (scope === 'vehicle') {
+            requestTypeFilter = 'Vehicle Service Request';
+        } else if (scope === 'tools') {
+            requestTypeFilter = { $in: ASSET_TOOLS_INBOX_TYPES };
+        } else {
+            requestTypeFilter = { $in: ASSET_DASHBOARD_INBOX_TYPES };
+        }
+
         const match = {
             status: 'Pending',
-            requestType: { $in: ASSET_DASHBOARD_INBOX_TYPES }
+            requestType: requestTypeFilter
         };
 
         // Inbox + badge: only actions assigned to this user (not company-wide queues for Admin / Asset Controller).

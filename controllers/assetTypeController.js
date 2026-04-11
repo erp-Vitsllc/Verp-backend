@@ -135,6 +135,21 @@ const normalizePlate = (val) => {
     return letters ? `${letters} ${numbers}` : numbers;
 };
 
+const VALID_PLATE_EMIRATES = new Set([
+    'Abu Dhabi',
+    'Dubai',
+    'Sharjah',
+    'Ajman',
+    'Umm Al Quwain',
+    'Ras Al Khaimah',
+    'Fujairah'
+]);
+
+const sanitizePlateEmirate = (val) => {
+    const s = String(val || '').trim();
+    return VALID_PLATE_EMIRATES.has(s) ? s : '';
+};
+
 // Helper to generate accessory suffix (A, B, C...)
 const generateAccessoryId = (assetId, index) => {
     const charCode = 65 + (index % 26);
@@ -147,17 +162,19 @@ export const createAssetType = async (req, res) => {
         console.log('DEBUG: createAssetType body:', req.body);
         let {
             mode, category, type, name, assetValue, purchaseDate, quantity, warranty, warrantyYears, warrantyAttachment, invoiceNumber, imagePreview, description, invoiceFile, accessories,
-            vehicleCode, plateNumber, modelYear, currentKilometer, registrationExpiryDate,
+            vehicleCode, plateNumber, plateEmirate, modelYear, currentKilometer, registrationExpiryDate,
             insuranceExpiryDate, oilChangeDate, gearOilDueDate, lastServiceDate, nextServiceDate,
             creationIntent
         } = req.body;
 
         // UAE Plate Validation if provided (usually for vehicles)
+        let plateEmirateStored = '';
         if (plateNumber) {
             if (!UAE_PLATE_REGEX.test(plateNumber.trim().toUpperCase())) {
                 return res.status(400).json({ message: 'Enter a valid UAE vehicle plate number' });
             }
             plateNumber = normalizePlate(plateNumber);
+            plateEmirateStored = sanitizePlateEmirate(plateEmirate);
         }
 
         if (mode === 'category' || mode === 'type') {
@@ -386,6 +403,7 @@ export const createAssetType = async (req, res) => {
                     actionRequiredBy: actionRequiredBy,
                     createdBy: req.user._id,
                     vehicleCode,
+                    plateEmirate: plateEmirateStored,
                     plateNumber,
                     modelYear,
                     currentKilometer,
@@ -656,6 +674,7 @@ export const getAssetTypes = async (req, res) => {
                 lostDetachedAccessories: (a.lostDetachedAccessories || []).map((x) => (x.toObject ? x.toObject() : { ...x })),
                 assignedTo: a.assignedTo,
                 vehicleCode: a.vehicleCode,
+                plateEmirate: a.plateEmirate,
                 plateNumber: a.plateNumber,
                 modelYear: a.modelYear,
                 currentKilometer: a.currentKilometer,
@@ -1057,9 +1076,11 @@ export const updateAssetItem = async (req, res) => {
                 if (key === 'status' && creatorDraftOrRejected) {
                     continue;
                 }
-                // Security rule: only admin can edit asset value
+                // Asset value: admin always; creator may set while Draft / Rejected (vehicle draft flow)
                 if (key === 'assetValue' && !isAdmin) {
-                    continue;
+                    const creatorMaySetValue =
+                        isCreator && (initialAssetStatus === 'Draft' || initialAssetStatus === 'Rejected');
+                    if (!creatorMaySetValue) continue;
                 }
                 if (key === 'accessories' && Array.isArray(updates[key])) {
                     updates[key] = dedupeAccessoryPayloadById(updates[key]);
@@ -1330,12 +1351,17 @@ export const updateAssetItem = async (req, res) => {
                         asset[key] = updates[key];
                     }
                 } else {
-                    if (key === 'plateNumber' && updates[key]) {
+                    if (key === 'type' && typeof updates[key] === 'string' && updates[key].trim()) {
+                        const tDoc = await AssetType.findOne({ name: updates[key].trim(), isActive: true });
+                        if (tDoc) asset.typeId = tDoc._id;
+                    } else if (key === 'plateNumber' && updates[key]) {
                         if (!UAE_PLATE_REGEX.test(updates[key].trim().toUpperCase())) {
                             return res.status(400).json({ message: 'Enter a valid UAE vehicle plate number' });
                         }
                         asset[key] = normalizePlate(updates[key]);
-                    } else {
+                    } else if (key === 'plateEmirate') {
+                        asset[key] = sanitizePlateEmirate(updates[key]);
+                    } else if (key !== 'type') {
                         asset[key] = updates[key];
                     }
                 }
