@@ -34,8 +34,6 @@ export const addEmployee = async (req, res) => {
             status,
             probationPeriod,
             reportingAuthority,
-            profileApprovalStatus,
-            profileStatus,
 
             // Login & Access
             email,
@@ -229,9 +227,8 @@ export const addEmployee = async (req, res) => {
                 status: normalizedStatus,
                 probationPeriod: status === 'Probation' ? (probationPeriod || 6) : null, // Default 6 months if not provided
                 reportingAuthority: reportingAuthority || null,
-                profileApprovalStatus: profileApprovalStatus || 'draft',
-                profileStatus: profileStatus || 'inactive',
-                profileStatus: profileStatus || 'inactive',
+                profileApprovalStatus: 'draft',
+                profileStatus: 'inactive',
                 email: cleanedEmail,
                 companyEmail: companyEmail || '',
                 enablePortalAccess: enablePortalAccess || false,

@@ -14,6 +14,10 @@ export const getUserActivityStats = async (req, res) => {
         const currentUser = req.user;
         if (!currentUser) return res.status(401).json({ message: "Unauthorized" });
 
+        const isAdmin =
+            ['Admin', 'CEO', 'Director', 'General Manager'].includes(currentUser.role) ||
+            currentUser.isAdmin;
+
         let targetEmployeeId = currentUser.employeeId;
         let targetEmail = currentUser.companyEmail;
 
@@ -115,7 +119,6 @@ export const getUserActivityStats = async (req, res) => {
 
         // 3. Define Queries for "Needs Action"
         const DashboardAction = await import("../../models/DashboardAction.js").then(m => m.default);
-        const isAdmin = ['Admin', 'CEO', 'Director', 'General Manager'].includes(currentUser.role) || currentUser.isAdmin;
 
         const allAssetTypes = ['Asset', 'Asset Approval', 'Asset Assignment', 'Asset Transfer', 'Asset Loss Damage', 'Asset End of Life', 'Asset Accessory', 'Asset Accessory Approval', 'Asset Accessory Unattach'];
 

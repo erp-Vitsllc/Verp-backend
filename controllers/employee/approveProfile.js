@@ -15,6 +15,13 @@ export const approveProfile = async (req, res) => {
         const employeeId = employee.employeeId;
         const submittedToAssigneeId = employee.profileSubmittedTo;
 
+        if (employee.profileApprovalStatus !== "submitted") {
+            return res.status(400).json({
+                message:
+                    "Profile must be submitted for HR review before it can be activated. Use Send for Activation first.",
+            });
+        }
+
         // Update EmployeeBasic
         const updated = await EmployeeBasic.findOneAndUpdate(
             { employeeId },

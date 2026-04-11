@@ -6,8 +6,11 @@ export const updateProfileStatus = async (req, res) => {
         const { id } = req.params;
         const { status } = req.body;
 
-        if (!['draft', 'submitted', 'active'].includes(status)) {
-            return res.status(400).json({ message: "Invalid status" });
+        if (!['draft', 'submitted'].includes(status)) {
+            return res.status(400).json({
+                message:
+                    "Invalid status. Activating a profile is only allowed after HR review via approve-profile.",
+            });
         }
 
         // Try to find by custom employeeId (e.g. VITS001) first, then fallback to _id
@@ -27,11 +30,11 @@ export const updateProfileStatus = async (req, res) => {
 
         employee.profileApprovalStatus = status;
 
-        // Sync profileStatus based on approval status
+        // Sync profileStatus based on approval status (activation only via approve-profile)
         if (status === 'draft') {
             employee.profileStatus = 'inactive';
-        } else if (status === 'active') {
-            employee.profileStatus = 'active';
+        } else if (status === 'submitted') {
+            employee.profileStatus = 'inactive';
         }
 
         await employee.save();
