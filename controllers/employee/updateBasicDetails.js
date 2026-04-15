@@ -3,6 +3,8 @@ import EmployeeBasic from "../../models/EmployeeBasic.js";
 import EmployeeSalary from "../../models/EmployeeSalary.js";
 import { uploadDocumentToS3 } from "../../utils/s3Upload.js";
 import { hasPermission, isUserAdministrator } from "../../services/permissionService.js";
+import { archiveEmployeeDocument } from "../../utils/archiveEmployeeDocument.js";
+import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
 
 export const updateBasicDetails = async (req, res) => {
     try {
@@ -15,6 +17,10 @@ export const updateBasicDetails = async (req, res) => {
         }
 
         const employeeId = employee.employeeId;
+        const [existingBasic, existingSalary] = await Promise.all([
+            EmployeeBasic.findOne({ employeeId }).select("bankAttachment").lean(),
+            EmployeeSalary.findOne({ employeeId }).select("offerLetter salaryHistory").lean(),
+        ]);
 
         // 1. Define allowed fields and their target collections
         const allowedFields = [
@@ -244,6 +250,56 @@ export const updateBasicDetails = async (req, res) => {
             }
         }
 
+        const previousBankAttachment = existingBasic?.bankAttachment;
+        const nextBankAttachment = updatePayload.bankAttachment;
+        if (previousBankAttachment?.url && nextBankAttachment?.url && previousBankAttachment.url !== nextBankAttachment.url) {
+            await archiveEmployeeDocument({
+                employeeId,
+                type: "Bank Attachment",
+                description: "Bank details attachment",
+                document: previousBankAttachment,
+            });
+        }
+
+        const previousOfferLetter = existingSalary?.offerLetter;
+        const nextOfferLetter = updatePayload.offerLetter;
+        if (previousOfferLetter?.url && nextOfferLetter?.url && previousOfferLetter.url !== nextOfferLetter.url) {
+            await archiveEmployeeDocument({
+                employeeId,
+                type: "Salary Offer Letter",
+                description: "Salary offer letter (previous version)",
+                document: previousOfferLetter,
+            });
+        }
+
+        if (Array.isArray(updatePayload.salaryHistory) && Array.isArray(existingSalary?.salaryHistory)) {
+            const prevActive = existingSalary.salaryHistory.find((entry) => !entry?.toDate);
+            const nextActive = updatePayload.salaryHistory.find((entry) => !entry?.toDate);
+            const prevActiveDoc = prevActive?.offerLetter;
+            const nextActiveDoc = nextActive?.offerLetter;
+            const sameDoc = Boolean(
+                prevActiveDoc?.url &&
+                nextActiveDoc?.url &&
+                prevActiveDoc.url === nextActiveDoc.url
+            );
+            if (prevActiveDoc?.url && nextActiveDoc?.url && !sameDoc) {
+                await archiveEmployeeDocument({
+                    employeeId,
+                    type: "Salary Increment Letter",
+                    description: prevActive?.month ? `Previous active salary (${prevActive.month})` : "Previous active salary",
+                    issueDate: prevActive?.fromDate || null,
+                    expiryDate: prevActive?.toDate || null,
+                    basicSalary: prevActive?.basic ?? null,
+                    houseRentAllowance: prevActive?.houseRentAllowance ?? null,
+                    vehicleAllowance: prevActive?.vehicleAllowance ?? null,
+                    fuelAllowance: prevActive?.fuelAllowance ?? null,
+                    otherAllowance: prevActive?.otherAllowance ?? null,
+                    totalSalary: prevActive?.totalSalary ?? null,
+                    document: prevActiveDoc,
+                });
+            }
+        }
+
         // 4. Check permission for salary history deletion
         // If salaryHistory is being updated, check if it's a deletion (array length decreased)
         if (updatePayload.salaryHistory !== undefined && Array.isArray(updatePayload.salaryHistory)) {
@@ -288,6 +344,12 @@ export const updateBasicDetails = async (req, res) => {
 
         // Remove password from response
         delete updated.password;
+
+        await triggerProfileReactivationIfNeeded({
+            employeeId,
+            actor: req.user,
+            reason: "Basic details updated",
+        });
 
         // 7. Return success
         return res.status(200).json({

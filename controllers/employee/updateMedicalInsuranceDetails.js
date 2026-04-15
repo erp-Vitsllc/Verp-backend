@@ -1,6 +1,8 @@
 import EmployeeMedicalInsurance from "../../models/EmployeeMedicalInsurance.js";
 import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeService.js";
 import { uploadDocumentToS3, deleteDocumentFromS3 } from "../../utils/s3Upload.js";
+import { archiveEmployeeDocument } from "../../utils/archiveEmployeeDocument.js";
+import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
 
 const REQUIRED_FIELDS = ["provider", "number", "issueDate", "expiryDate", "upload"];
 
@@ -71,6 +73,23 @@ export const updateMedicalInsuranceDetails = async (req, res) => {
             });
         }
 
+        const previousMedicalInsurance = existingMedicalInsurance?.medicalInsurance;
+        const hasExistingDocument = Boolean(previousMedicalInsurance?.document?.url || previousMedicalInsurance?.document?.data);
+        const hasNewDocumentUpload = Boolean(upload && typeof upload === "string" && upload.trim() !== "");
+        const shouldArchivePrevious = hasExistingDocument && hasNewDocumentUpload;
+        if (shouldArchivePrevious) {
+            await archiveEmployeeDocument({
+                employeeId,
+                type: "Medical Insurance",
+                description: previousMedicalInsurance?.number
+                    ? `Policy No: ${previousMedicalInsurance.number}`
+                    : (previousMedicalInsurance?.provider || ""),
+                issueDate: previousMedicalInsurance?.issueDate || null,
+                expiryDate: previousMedicalInsurance?.expiryDate || null,
+                document: previousMedicalInsurance.document,
+            });
+        }
+
         // Handle document upload to IDrive (S3) if new document provided
         let documentData = undefined;
         if (upload && typeof upload === 'string' && upload.trim() !== '') {
@@ -91,8 +110,8 @@ export const updateMedicalInsuranceDetails = async (req, res) => {
                     'raw'
                 );
 
-                // Delete old document from IDrive if exists
-                if (existingMedicalInsurance?.medicalInsurance?.document?.publicId) {
+                // Delete old file only when it is not archived in oldDocuments.
+                if (!shouldArchivePrevious && existingMedicalInsurance?.medicalInsurance?.document?.publicId) {
                     await deleteDocumentFromS3(existingMedicalInsurance.medicalInsurance.document.publicId);
                 }
 
@@ -129,6 +148,11 @@ export const updateMedicalInsuranceDetails = async (req, res) => {
             { upsert: true, new: true }
         );
 
+        await triggerProfileReactivationIfNeeded({
+            employeeId,
+            actor: req.user,
+            reason: "Medical insurance details updated",
+        });
         const completeEmployee = await getCompleteEmployee(employeeId);
 
         return res.json({

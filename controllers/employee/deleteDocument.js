@@ -1,6 +1,7 @@
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import mongoose from "mongoose";
 import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeService.js";
+import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
 
 // @desc    Delete a document from employee's documents list
 // @route   DELETE /api/Employee/:id/document/:index
@@ -33,7 +34,15 @@ export const deleteDocument = async (req, res) => {
             employee.oldDocuments.push({
                 type: documentToDelete.type || '',
                 description: documentToDelete.description || '',
+                issueDate: documentToDelete.issueDate || null,
                 expiryDate: documentToDelete.expiryDate || null,
+                cost: documentToDelete.cost ?? null,
+                basicSalary: documentToDelete.basicSalary ?? null,
+                houseRentAllowance: documentToDelete.houseRentAllowance ?? null,
+                vehicleAllowance: documentToDelete.vehicleAllowance ?? null,
+                fuelAllowance: documentToDelete.fuelAllowance ?? null,
+                otherAllowance: documentToDelete.otherAllowance ?? null,
+                totalSalary: documentToDelete.totalSalary ?? null,
                 createdAt: documentToDelete.createdAt || null,
                 archivedAt: new Date(),
                 archiveReason: 'Deleted',
@@ -45,6 +54,11 @@ export const deleteDocument = async (req, res) => {
         employee.documents.splice(docIndex, 1);
 
         const savedEmployee = await employee.save();
+        await triggerProfileReactivationIfNeeded({
+            employeeId: employee.employeeId,
+            actor: req.user,
+            reason: "Document deleted",
+        });
         const completeEmployee = await getCompleteEmployee(employee.employeeId);
 
         res.status(200).json({

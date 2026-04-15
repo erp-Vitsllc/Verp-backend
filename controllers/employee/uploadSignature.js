@@ -1,5 +1,6 @@
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { uploadDocumentToS3 } from "../../utils/s3Upload.js";
+import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
 
 /**
  * Handle e-Signature upload and association with employee
@@ -49,6 +50,11 @@ export const uploadSignature = async (req, res) => {
         };
 
         await employee.save();
+        await triggerProfileReactivationIfNeeded({
+            employeeId: employee.employeeId,
+            actor: req.user,
+            reason: "Signature updated",
+        });
 
         // 4. Return success (with fresh signed URL for display)
         return res.status(200).json({

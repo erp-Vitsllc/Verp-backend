@@ -78,6 +78,22 @@ const companySchema = new mongoose.Schema(
         establishmentCardAttachment: { type: String },
 
         status: { type: String, enum: ["Active", "Inactive"], default: "Active" },
+        activationStatus: {
+            type: String,
+            enum: ["draft", "submitted", "active", "rejected"],
+            default: "draft",
+        },
+        activationSubmittedTo: { type: mongoose.Schema.Types.ObjectId, ref: "EmployeeBasic", default: null },
+        activationWorkflow: [
+            {
+                role: { type: String, required: true }, // HR
+                assignedTo: { type: mongoose.Schema.Types.ObjectId, ref: "EmployeeBasic" },
+                status: { type: String, enum: ["submitted", "active", "rejected"], default: "submitted" },
+                assignedAt: { type: Date, default: Date.now },
+                actionedAt: { type: Date },
+                comment: { type: String },
+            },
+        ],
 
         // General Documents
         documents: [

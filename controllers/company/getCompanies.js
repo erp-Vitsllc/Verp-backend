@@ -1,4 +1,5 @@
 import Company from "../../models/Company.js";
+import { calculateCompanyActivationProgress } from "../../utils/companyActivation.js";
 
 export const getCompanies = async (req, res) => {
     try {
@@ -48,6 +49,7 @@ export const getCompanies = async (req, res) => {
             if (company.logo) {
                 company.logo = await getSignedFileUrl(company.logo);
             }
+            company.activationProgress = calculateCompanyActivationProgress(company);
             return company;
         }));
 

@@ -1,4 +1,5 @@
 import Company from "../../models/Company.js";
+import { calculateCompanyActivationProgress } from "../../utils/companyActivation.js";
 
 export const addCompany = async (req, res) => {
     try {
@@ -25,6 +26,8 @@ export const addCompany = async (req, res) => {
             vatNumber,
             logo,
             establishedDate,
+            status: "Inactive",
+            activationStatus: "draft",
             createdBy: req.user?._id
         });
 
@@ -32,7 +35,8 @@ export const addCompany = async (req, res) => {
 
         return res.status(201).json({
             message: "Company added successfully",
-            company: newCompany
+            company: newCompany,
+            activationProgress: calculateCompanyActivationProgress(newCompany.toObject())
         });
     } catch (error) {
         console.error("Error in addCompany:", error);

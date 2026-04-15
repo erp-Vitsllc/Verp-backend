@@ -3,6 +3,7 @@ import EmployeeBasic from '../../models/EmployeeBasic.js';
 import { getCompleteEmployee, resolveEmployeeId } from '../../services/employeeService.js';
 import s3Client, { bucketName } from '../../config/s3Client.js';
 import { randomUUID } from 'crypto';
+import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
 
 export const uploadProfilePicture = async (req, res) => {
     try {
@@ -78,6 +79,11 @@ export const uploadProfilePicture = async (req, res) => {
         }
 
         // 8. Return Response
+        await triggerProfileReactivationIfNeeded({
+            employeeId,
+            actor: req.user,
+            reason: "Profile picture updated",
+        });
         const completeEmployee = await getCompleteEmployee(employeeId);
         if (completeEmployee) delete completeEmployee.password;
 

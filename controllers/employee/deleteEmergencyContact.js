@@ -1,5 +1,6 @@
 import EmployeeEmergencyContact from "../../models/EmployeeEmergencyContact.js";
 import { getCompleteEmployee } from "../../services/employeeService.js";
+import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
 
 export const deleteEmergencyContact = async (req, res) => {
     const { id, contactId } = req.params;
@@ -44,6 +45,11 @@ export const deleteEmergencyContact = async (req, res) => {
         }
 
         await contactRecord.save();
+        await triggerProfileReactivationIfNeeded({
+            employeeId,
+            actor: req.user,
+            reason: "Emergency contact deleted",
+        });
         const completeEmployee = await getCompleteEmployee(employeeId);
 
         return res.status(200).json({

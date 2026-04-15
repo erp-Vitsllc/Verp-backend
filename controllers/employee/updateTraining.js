@@ -1,5 +1,6 @@
 import EmployeeTraining from "../../models/EmployeeTraining.js";
 import { getCompleteEmployee, resolveEmployeeId } from "../../services/employeeService.js";
+import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
 
 export const updateTraining = async (req, res) => {
     const { id, trainingId } = req.params;
@@ -65,6 +66,11 @@ export const updateTraining = async (req, res) => {
         }
 
         await trainingRecord.save();
+        await triggerProfileReactivationIfNeeded({
+            employeeId,
+            actor: req.user,
+            reason: "Training details updated",
+        });
         const completeEmployee = await getCompleteEmployee(employeeId);
 
         return res.status(200).json({

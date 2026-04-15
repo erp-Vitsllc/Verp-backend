@@ -2,6 +2,7 @@ import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { uploadDocumentToS3 } from "../../utils/s3Upload.js";
 import mongoose from "mongoose";
 import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeService.js";
+import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
 
 // @desc    Add a document to employee's documents list
 // @route   POST /api/Employee/:id/document
@@ -9,7 +10,20 @@ import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeS
 export const addDocument = async (req, res) => {
     try {
         const { id } = req.params;
-        const { type, description, expiryDate, document } = req.body;
+        const {
+            type,
+            description,
+            issueDate,
+            expiryDate,
+            cost,
+            basicSalary,
+            houseRentAllowance,
+            vehicleAllowance,
+            fuelAllowance,
+            otherAllowance,
+            totalSalary,
+            document
+        } = req.body;
 
         const resolved = await resolveEmployeeId(id);
         if (!resolved) {
@@ -52,10 +66,24 @@ export const addDocument = async (req, res) => {
             }
         }
 
+        const parseCost = (c) => {
+            if (c === undefined || c === null || c === '') return null;
+            const n = Number(String(c).replace(/,/g, ''));
+            return Number.isFinite(n) ? n : null;
+        };
+
         const newDocument = {
             type,
             description,
-            expiryDate, // Note: Schema might need update for this, but keeping it for compatibility
+            issueDate: issueDate || null,
+            expiryDate,
+            cost: parseCost(cost),
+            basicSalary: basicSalary !== undefined && basicSalary !== null && basicSalary !== '' ? Number(basicSalary) : null,
+            houseRentAllowance: houseRentAllowance !== undefined && houseRentAllowance !== null && houseRentAllowance !== '' ? Number(houseRentAllowance) : null,
+            vehicleAllowance: vehicleAllowance !== undefined && vehicleAllowance !== null && vehicleAllowance !== '' ? Number(vehicleAllowance) : null,
+            fuelAllowance: fuelAllowance !== undefined && fuelAllowance !== null && fuelAllowance !== '' ? Number(fuelAllowance) : null,
+            otherAllowance: otherAllowance !== undefined && otherAllowance !== null && otherAllowance !== '' ? Number(otherAllowance) : null,
+            totalSalary: totalSalary !== undefined && totalSalary !== null && totalSalary !== '' ? Number(totalSalary) : null,
             document: documentData,
             createdAt: new Date()
         };
@@ -64,6 +92,11 @@ export const addDocument = async (req, res) => {
         employee.documents.push(newDocument);
 
         const savedEmployee = await employee.save();
+        await triggerProfileReactivationIfNeeded({
+            employeeId: employee.employeeId,
+            actor: req.user,
+            reason: "Document added",
+        });
         const completeEmployee = await getCompleteEmployee(employee.employeeId);
 
         res.status(200).json({

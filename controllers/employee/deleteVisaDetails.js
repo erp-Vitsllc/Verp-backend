@@ -1,6 +1,7 @@
 import EmployeeVisa from "../../models/EmployeeVisa.js";
 import { resolveEmployeeId } from "../../services/employeeService.js";
 import { deleteDocumentFromS3 } from "../../utils/s3Upload.js";
+import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
 
 const ALLOWED_VISA_TYPES = ["visit", "employment", "spouse"];
 
@@ -44,6 +45,11 @@ export const deleteVisaDetails = async (req, res) => {
             return res.status(404).json({ message: "Visa record not found." });
         }
 
+        await triggerProfileReactivationIfNeeded({
+            employeeId,
+            actor: req.user,
+            reason: `${type} visa details deleted`,
+        });
         return res.json({
             message: `${type} visa details deleted successfully.`,
             visaDetails: {

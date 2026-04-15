@@ -50,6 +50,12 @@ import { approveLoan } from "../controllers/employee/approveLoan.js";
 import { updateLoanDetails } from "../controllers/employee/updateLoanDetails.js";
 import { getLoanPdf } from "../controllers/employee/getLoanPdf.js";
 import { deleteLoan } from "../controllers/employee/deleteLoan.js";
+import {
+    requestProbationChange,
+    confirmProbationByHOD,
+    employeeRespondProbationChange,
+    finalizeProbationByHR,
+} from "../controllers/employee/probationController.js";
 
 
 // All employee routes require authentication
@@ -198,6 +204,12 @@ router.post("/:id/request-notice", checkPermission('hrm_employees_view_work', 'e
 
 // Update Notice Status (Approve/Reject) - requires work details edit permission
 router.patch("/:id/update-notice-status", checkPermission('hrm_employees_view_work', 'edit'), updateNoticeStatus);
+
+// Probation change workflow
+router.post("/:id/probation/request", checkPermission('hrm_employees_view_work', 'edit'), requestProbationChange);
+router.post("/:id/probation/hod-confirm", checkPermission('hrm_employees_view_work', 'edit'), confirmProbationByHOD);
+router.post("/:id/probation/employee-respond", employeeRespondProbationChange);
+router.post("/:id/probation/hr-finalize", checkPermission('hrm_employees_view_work', 'edit'), finalizeProbationByHR);
 
 // Request Loan/Advance - requires view permission (anyone can apply usually, or restricted?)
 // Using 'view' permission on 'hrm_loan' for now as basic access check

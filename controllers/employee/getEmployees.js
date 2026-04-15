@@ -3,6 +3,7 @@ import EmployeeVisa from "../../models/EmployeeVisa.js";
 import mongoose from "mongoose";
 import { getSignedFileUrl } from "../../utils/s3Upload.js";
 import { escapeRegex } from "../../utils/regexHelper.js";
+import { ensureProbationRequestForEmployee } from "../../utils/sendProbationWorkflowEmail.js";
 
 // Get all employees (lightweight list response with optional pagination)
 export const getEmployees = async (req, res) => {
@@ -303,34 +304,18 @@ export const getEmployees = async (req, res) => {
             EmployeeBasic.countDocuments(filters, queryOptions),
         ]);
 
-        // AUTOMATION: Lazy update status for employees who passed probation (Self-Healing)
-        const idsToUpdate = [];
-        const today = new Date();
-
-        employees.forEach(emp => {
-            if (emp.dateOfJoining && emp.status === 'Probation') {
-                const joinDate = new Date(emp.dateOfJoining);
-                const probationPeriod = emp.probationPeriod || 6;
-                const probationEndDate = new Date(joinDate);
-                probationEndDate.setMonth(joinDate.getMonth() + probationPeriod);
-
-                if (today >= probationEndDate) {
-                    // Update in-memory for immediate UI reflection
-                    emp.status = 'Permanent';
-                    emp.probationPeriod = null;
-                    idsToUpdate.push(emp._id);
-                }
+        // AUTOMATION: Create probation-change requests after probation period completes.
+        // Status will no longer auto-switch to Permanent; workflow approval is required.
+        const probationCandidates = employees.filter(
+            (emp) => emp?.status === "Probation" && emp?.dateOfJoining
+        );
+        if (probationCandidates.length > 0) {
+            const docs = await EmployeeBasic.find({
+                _id: { $in: probationCandidates.map((e) => e._id) },
+            });
+            for (const doc of docs) {
+                await ensureProbationRequestForEmployee(doc);
             }
-        });
-
-        if (idsToUpdate.length > 0) {
-            // Run update in background (fire and forget for speed, or await if critical)
-            // Awaiting here to ensure consistency if they immediately click edit
-            await EmployeeBasic.updateMany(
-                { _id: { $in: idsToUpdate } },
-                { $set: { status: 'Permanent', probationPeriod: null } }
-            );
-            console.log(`[GetEmployees] Auto-updated ${idsToUpdate.length} employees to Permanent status.`);
         }
 
         // Populate visa details for each employee (only if we have employees)

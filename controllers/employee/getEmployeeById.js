@@ -4,6 +4,8 @@ import Fine from "../../models/Fine.js";
 import Reward from "../../models/Reward.js";
 import Loan from "../../models/Loan.js";
 import { getSignedFileUrl } from "../../utils/s3Upload.js";
+import EmployeeBasic from "../../models/EmployeeBasic.js";
+import { ensureProbationRequestForEmployee } from "../../utils/sendProbationWorkflowEmail.js";
 
 // Get single employee by ID
 export const getEmployeeById = async (req, res) => {
@@ -21,6 +23,20 @@ export const getEmployeeById = async (req, res) => {
         if (!employee) {
             console.log(`[getEmployeeById] Employee not found: ${id}`);
             return res.status(404).json({ message: "Employee not found" });
+        }
+
+        // Probation workflow auto-trigger:
+        // after probation completes, create approval request instead of auto-switching to Permanent.
+        try {
+            const employeeDoc = await EmployeeBasic.findById(employee._id);
+            if (employeeDoc) {
+                const created = await ensureProbationRequestForEmployee(employeeDoc);
+                if (created) {
+                    employee.probationChangeRequest = employeeDoc.probationChangeRequest;
+                }
+            }
+        } catch (probErr) {
+            console.error("[getEmployeeById] Probation workflow trigger failed:", probErr);
         }
 
         // Remove password from response

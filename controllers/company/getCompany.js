@@ -1,5 +1,6 @@
 import Company from "../../models/Company.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
+import { calculateCompanyActivationProgress } from "../../utils/companyActivation.js";
 
 /**
  * Get a single company by its companyId (e.g., EST-001)
@@ -142,7 +143,8 @@ export const getCompany = async (req, res) => {
         return res.status(200).json({
             message: "Company fetched successfully",
             company: companyObj,
-            employeeCount: employeeCount
+            employeeCount: employeeCount,
+            activationProgress: calculateCompanyActivationProgress(companyObj),
         });
     } catch (error) {
         console.error("Error fetching company:", error);

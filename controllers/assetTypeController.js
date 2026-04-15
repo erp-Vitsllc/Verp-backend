@@ -581,7 +581,7 @@ export const getAssetTypes = async (req, res) => {
             .populate('typeId')
             .populate('categoryId')
             .populate('actionRequiredBy', 'firstName lastName employeeId')
-            .populate('assignedCompany', 'name companyId companyEmail')
+            .populate('assignedCompany', 'name nickName companyId companyEmail')
             .populate({
                 path: 'assignedTo',
                 select: 'firstName lastName employeeId department primaryReportee reportingAuthority',
@@ -814,7 +814,7 @@ export const deleteAssetType = async (req, res) => {
                             select: 'firstName lastName companyEmail workEmail personalEmail email'
                         }
                     })
-                    .populate('assignedCompany', 'name companyId')
+                    .populate('assignedCompany', 'name nickName companyId')
                     .lean();
                 if (itemForEmail) {
                     void notifyAdminDeletedWholeAsset(req, itemForEmail).catch((e) =>
@@ -1392,7 +1392,7 @@ export const updateAssetItem = async (req, res) => {
                         select: 'firstName lastName companyEmail workEmail personalEmail email'
                     }
                 })
-                .populate('assignedCompany', 'name companyId')
+                .populate('assignedCompany', 'name nickName companyId')
                 .lean();
             if (assetForEmail) {
                 void notifyAdminRemovedAccessoriesFromAssignedAsset(req, assetForEmail, adminRemovedAccessoriesForNotify).catch(

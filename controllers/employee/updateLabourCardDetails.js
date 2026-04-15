@@ -1,6 +1,8 @@
 import EmployeeLabourCard from "../../models/EmployeeLabourCard.js";
 import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeService.js";
 import { uploadDocumentToS3, deleteDocumentFromS3 } from "../../utils/s3Upload.js";
+import { archiveEmployeeDocument } from "../../utils/archiveEmployeeDocument.js";
+import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
 
 const REQUIRED_FIELDS = ["number", "expiryDate", "upload"];
 
@@ -72,6 +74,21 @@ export const updateLabourCardDetails = async (req, res) => {
             });
         }
 
+        const previousLabourCard = existingLabourCard?.labourCard;
+        const hasExistingDocument = Boolean(previousLabourCard?.document?.url || previousLabourCard?.document?.data);
+        const hasNewDocumentUpload = Boolean(upload && typeof upload === "string" && upload.trim() !== "");
+        const shouldArchivePrevious = hasExistingDocument && hasNewDocumentUpload;
+        if (shouldArchivePrevious) {
+            await archiveEmployeeDocument({
+                employeeId,
+                type: "Labour Card",
+                description: previousLabourCard?.number ? `Labour Card No: ${previousLabourCard.number}` : "",
+                issueDate: previousLabourCard?.issueDate || null,
+                expiryDate: previousLabourCard?.expiryDate || null,
+                document: previousLabourCard.document,
+            });
+        }
+
         // Handle document upload to IDrive (S3) if new document provided
         let documentData = undefined;
         if (upload && typeof upload === 'string' && upload.trim() !== '') {
@@ -92,8 +109,8 @@ export const updateLabourCardDetails = async (req, res) => {
                     'raw'
                 );
 
-                // Delete old document from IDrive if exists
-                if (existingLabourCard?.labourCard?.document?.publicId) {
+                // Delete old file only when it is not archived in oldDocuments.
+                if (!shouldArchivePrevious && existingLabourCard?.labourCard?.document?.publicId) {
                     await deleteDocumentFromS3(existingLabourCard.labourCard.document.publicId);
                 }
 
@@ -129,6 +146,11 @@ export const updateLabourCardDetails = async (req, res) => {
             { upsert: true, new: true }
         );
 
+        await triggerProfileReactivationIfNeeded({
+            employeeId,
+            actor: req.user,
+            reason: "Labour card details updated",
+        });
         const completeEmployee = await getCompleteEmployee(employeeId);
 
         return res.json({

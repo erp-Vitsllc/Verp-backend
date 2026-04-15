@@ -5,6 +5,7 @@ import DashboardAction from "../../models/DashboardAction.js";
 import { sendResponsibilityApprovalEmail } from "../../utils/sendResponsibilityApprovalEmail.js";
 import { buildResponsibilityEmailData } from "../../utils/flowchartResponsibilityEmailData.js";
 import { getSignedFileUrl } from "../../utils/s3Upload.js";
+import { calculateCompanyActivationProgress, shouldTriggerCompanyReactivation, submitCompanyActivation } from "../../utils/companyActivation.js";
 
 export const updateCompany = async (req, res) => {
     try {
@@ -21,6 +22,7 @@ export const updateCompany = async (req, res) => {
 
         // Update fields provided in req.body
         const updateData = req.body;
+        const beforeCompany = company.toObject();
 
         if (updateData.responsibilities && Array.isArray(updateData.responsibilities)) {
             const existingResps = company.responsibilities || [];
@@ -140,6 +142,15 @@ export const updateCompany = async (req, res) => {
             { new: true, runValidators: true }
         );
 
+        if (shouldTriggerCompanyReactivation(beforeCompany, updateData)) {
+            await submitCompanyActivation({
+                companyId: updatedCompany._id,
+                actor: req.user,
+                reason: "Critical company document/details updated after activation",
+                force: true,
+            });
+        }
+
         // Generate signed URLs for updated documents
         const companyObj = updatedCompany.toObject();
 
@@ -200,7 +211,8 @@ export const updateCompany = async (req, res) => {
 
         res.status(200).json({
             message: "Company updated successfully",
-            company: companyObj
+            company: companyObj,
+            activationProgress: calculateCompanyActivationProgress(companyObj)
         });
     } catch (error) {
         console.error("Error updating company:", error);

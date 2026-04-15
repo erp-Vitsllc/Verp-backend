@@ -1,6 +1,8 @@
 import EmployeeEmiratesId from "../../models/EmployeeEmiratesId.js";
 import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeService.js";
 import { uploadDocumentToS3, deleteDocumentFromS3 } from "../../utils/s3Upload.js";
+import { archiveEmployeeDocument } from "../../utils/archiveEmployeeDocument.js";
+import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
 
 const REQUIRED_FIELDS = ["number", "issueDate", "expiryDate", "upload"];
 
@@ -70,6 +72,21 @@ export const updateEmiratesIdDetails = async (req, res) => {
             });
         }
 
+        const previousEmiratesId = existingEmiratesId?.emiratesId;
+        const hasExistingDocument = Boolean(previousEmiratesId?.document?.url || previousEmiratesId?.document?.data);
+        const hasNewDocumentUpload = Boolean(upload && typeof upload === "string" && upload.trim() !== "");
+        const shouldArchivePrevious = hasExistingDocument && hasNewDocumentUpload;
+        if (shouldArchivePrevious) {
+            await archiveEmployeeDocument({
+                employeeId,
+                type: "Emirates ID",
+                description: previousEmiratesId?.number ? `Emirates ID No: ${previousEmiratesId.number}` : "",
+                issueDate: previousEmiratesId?.issueDate || null,
+                expiryDate: previousEmiratesId?.expiryDate || null,
+                document: previousEmiratesId.document,
+            });
+        }
+
         // Handle document upload to IDrive (S3) if new document provided
         let documentData = undefined;
         if (upload && typeof upload === 'string' && upload.trim() !== '') {
@@ -90,8 +107,8 @@ export const updateEmiratesIdDetails = async (req, res) => {
                     'raw'
                 );
 
-                // Delete old document from IDrive if exists
-                if (existingEmiratesId?.emiratesId?.document?.publicId) {
+                // Delete old file only when it is not archived in oldDocuments.
+                if (!shouldArchivePrevious && existingEmiratesId?.emiratesId?.document?.publicId) {
                     await deleteDocumentFromS3(existingEmiratesId.emiratesId.document.publicId);
                 }
 
@@ -127,6 +144,11 @@ export const updateEmiratesIdDetails = async (req, res) => {
             { upsert: true, new: true }
         );
 
+        await triggerProfileReactivationIfNeeded({
+            employeeId,
+            actor: req.user,
+            reason: "Emirates ID details updated",
+        });
         const completeEmployee = await getCompleteEmployee(employeeId);
 
         return res.json({

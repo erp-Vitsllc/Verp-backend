@@ -1,5 +1,6 @@
 import EmployeeEducation from "../../models/EmployeeEducation.js";
 import { getCompleteEmployee } from "../../services/employeeService.js";
+import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
 
 export const deleteEducation = async (req, res) => {
     const { id, educationId } = req.params;
@@ -31,6 +32,11 @@ export const deleteEducation = async (req, res) => {
 
         education.deleteOne();
         await educationRecord.save();
+        await triggerProfileReactivationIfNeeded({
+            employeeId,
+            actor: req.user,
+            reason: "Education record deleted",
+        });
         const completeEmployee = await getCompleteEmployee(employeeId);
 
         return res.status(200).json({

@@ -1,6 +1,7 @@
 import EmployeeExperience from "../../models/EmployeeExperience.js";
 import { getCompleteEmployee, resolveEmployeeId } from "../../services/employeeService.js";
 import { uploadDocumentToS3 } from "../../utils/s3Upload.js";
+import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
 
 export const addExperience = async (req, res) => {
     const { id } = req.params;
@@ -79,6 +80,11 @@ export const addExperience = async (req, res) => {
             return res.status(404).json({ message: "Employee not found" });
         }
 
+        await triggerProfileReactivationIfNeeded({
+            employeeId,
+            actor: req.user,
+            reason: "Experience details added",
+        });
         const completeEmployee = await getCompleteEmployee(employeeId);
 
         return res.status(200).json({

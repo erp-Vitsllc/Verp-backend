@@ -363,7 +363,15 @@ export const getCompleteEmployee = async (id) => {
             documents: basicDocuments ? basicDocuments.map(doc => ({
                 type: doc.type,
                 description: doc.description,
+                issueDate: doc.issueDate,
                 expiryDate: doc.expiryDate,
+                cost: doc.cost,
+                basicSalary: doc.basicSalary,
+                houseRentAllowance: doc.houseRentAllowance,
+                vehicleAllowance: doc.vehicleAllowance,
+                fuelAllowance: doc.fuelAllowance,
+                otherAllowance: doc.otherAllowance,
+                totalSalary: doc.totalSalary,
                 createdAt: doc.createdAt,
                 document: doc.document ? {
                     name: doc.document.name,

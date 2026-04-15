@@ -1,5 +1,6 @@
 import EmployeeTraining from "../../models/EmployeeTraining.js";
 import { getCompleteEmployee, resolveEmployeeId } from "../../services/employeeService.js";
+import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
 
 export const addTraining = async (req, res) => {
     const { id } = req.params;
@@ -57,6 +58,11 @@ export const addTraining = async (req, res) => {
             return res.status(404).json({ message: "Employee not found" });
         }
 
+        await triggerProfileReactivationIfNeeded({
+            employeeId,
+            actor: req.user,
+            reason: "Training details added",
+        });
         const completeEmployee = await getCompleteEmployee(employeeId);
 
         return res.status(200).json({

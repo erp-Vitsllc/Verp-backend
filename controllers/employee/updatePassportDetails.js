@@ -1,7 +1,8 @@
 import EmployeePassport from "../../models/EmployeePassport.js";
-import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeService.js";
 import { uploadDocumentToS3, deleteDocumentFromS3 } from "../../utils/s3Upload.js";
+import { archiveEmployeeDocument } from "../../utils/archiveEmployeeDocument.js";
+import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
 
 const REQUIRED_FIELDS = ["number", "issueDate", "expiryDate"];
 
@@ -22,7 +23,6 @@ export const updatePassportDetails = async (req, res) => {
         passportCopy,
         passportCopyName,
         passportCopyMime,
-        isRenewal, // Check for renewal flag
     } = req.body || {};
 
     // Validate required fields
@@ -60,21 +60,18 @@ export const updatePassportDetails = async (req, res) => {
         // Fetch existing passport to handle renewal/archiving
         const existingPassport = await EmployeePassport.findOne({ employeeId });
 
-        // HANDLE RENEWAL: Archive old passport to Documents tab
-        if (isRenewal && existingPassport && existingPassport.document) {
-            console.log(`[Passport Renewal] Archiving old passport for ${employeeId}`);
-
-            const archiveDoc = {
-                type: "Passport (Expired)",
-                description: `Passport No: ${existingPassport.number || 'N/A'}, Expired on ${existingPassport.expiryDate ? new Date(existingPassport.expiryDate).toLocaleDateString() : 'N/A'}`,
-                expiryDate: existingPassport.expiryDate,
-                document: existingPassport.document
-            };
-
-            await EmployeeBasic.findOneAndUpdate(
-                { employeeId },
-                { $push: { documents: archiveDoc } }
-            );
+        const hasExistingDocument = Boolean(existingPassport?.document?.url || existingPassport?.document?.data);
+        const hasNewDocumentUpload = Boolean(passportCopy && typeof passportCopy === "string" && passportCopy.trim() !== "");
+        const shouldArchivePrevious = hasExistingDocument && hasNewDocumentUpload;
+        if (shouldArchivePrevious) {
+            await archiveEmployeeDocument({
+                employeeId,
+                type: "Passport",
+                description: existingPassport?.number ? `Passport No: ${existingPassport.number}` : "",
+                issueDate: existingPassport?.issueDate || null,
+                expiryDate: existingPassport?.expiryDate || null,
+                document: existingPassport.document,
+            });
         }
 
         // Handle document upload to IDrive (S3) if new document provided
@@ -98,9 +95,8 @@ export const updatePassportDetails = async (req, res) => {
                     'raw'
                 );
 
-                // Delete old document from IDrive ONLY if NOT renewing
-                // If renewing, we kept the old doc in the archive, so don't delete it!
-                if (!isRenewal && existingPassport?.document?.publicId) {
+                // Delete old file only when it is not archived in oldDocuments.
+                if (!shouldArchivePrevious && existingPassport?.document?.publicId) {
                     await deleteDocumentFromS3(existingPassport.document.publicId);
                 }
 
@@ -112,9 +108,8 @@ export const updatePassportDetails = async (req, res) => {
                 };
             }
         } else {
-            // Preserve existing document if no new one provided AND NOT RENEWAL
-            // If renewal and no new doc provided, it effectively clears the doc (unless frontend forces a new one)
-            if (!isRenewal && existingPassport?.document) {
+            // Preserve existing document if no new one provided
+            if (existingPassport?.document) {
                 documentData = existingPassport.document;
             }
         }
@@ -142,6 +137,11 @@ export const updatePassportDetails = async (req, res) => {
         console.log("✅ Passport details saved for employee:", employeeId);
         console.log("   Passport Number:", passportPayload.number);
         console.log("   Expiry Date:", passportPayload.expiryDate);
+        await triggerProfileReactivationIfNeeded({
+            employeeId,
+            actor: req.user,
+            reason: "Passport details updated",
+        });
         const completeEmployee = await getCompleteEmployee(employeeId);
 
         return res.json({

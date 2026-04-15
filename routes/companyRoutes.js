@@ -10,6 +10,11 @@ import { uploadCompanyDocument } from "../controllers/company/uploadCompanyDocum
 import { deleteCompany } from "../controllers/company/deleteCompany.js";
 import { respondToResponsibility } from "../controllers/company/respondToResponsibility.js";
 import { getAllOwners } from "../controllers/company/getAllOwners.js";
+import {
+    submitCompanyActivationRequest,
+    approveCompanyActivationRequest,
+    rejectCompanyActivationRequest,
+} from "../controllers/company/activationController.js";
 
 const router = express.Router();
 
@@ -21,6 +26,9 @@ router.get("/all-owners", getAllOwners);
 router.get("/:id", getCompany);
 router.post("/", addCompany);
 router.patch("/:id", updateCompany);
+router.post("/:id/submit-activation", submitCompanyActivationRequest);
+router.post("/:id/approve-activation", approveCompanyActivationRequest);
+router.post("/:id/reject-activation", rejectCompanyActivationRequest);
 router.put("/:id/respond-responsibility", respondToResponsibility);
 router.post("/:id/upload", uploadCompanyDocument);
 router.delete("/:id", deleteCompany);

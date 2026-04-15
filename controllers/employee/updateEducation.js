@@ -1,6 +1,7 @@
 import EmployeeEducation from "../../models/EmployeeEducation.js";
 import { getCompleteEmployee, resolveEmployeeId } from "../../services/employeeService.js";
 import { uploadDocumentToS3 } from "../../utils/s3Upload.js";
+import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
 
 export const updateEducation = async (req, res) => {
     const { id, educationId } = req.params;
@@ -86,6 +87,11 @@ export const updateEducation = async (req, res) => {
         }
 
         await educationRecord.save();
+        await triggerProfileReactivationIfNeeded({
+            employeeId,
+            actor: req.user,
+            reason: "Education details updated",
+        });
         const completeEmployee = await getCompleteEmployee(employeeId);
 
         return res.status(200).json({

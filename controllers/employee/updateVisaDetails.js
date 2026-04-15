@@ -2,6 +2,8 @@ import EmployeeVisa from "../../models/EmployeeVisa.js";
 import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeService.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { uploadDocumentToS3, deleteDocumentFromS3 } from "../../utils/s3Upload.js";
+import { archiveEmployeeDocument } from "../../utils/archiveEmployeeDocument.js";
+import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
 
 const ALLOWED_VISA_TYPES = ["visit", "employment", "spouse"];
 
@@ -87,6 +89,21 @@ export const updateVisaDetails = async (req, res) => {
             });
         }
 
+        const previousVisaEntry = existingVisa?.[visaType];
+        const hasExistingDocument = Boolean(previousVisaEntry?.document?.url || previousVisaEntry?.document?.data);
+        const hasNewDocumentUpload = Boolean(visaCopy && typeof visaCopy === "string" && visaCopy.trim() !== "");
+        const shouldArchivePrevious = hasExistingDocument && hasNewDocumentUpload;
+        if (shouldArchivePrevious) {
+            await archiveEmployeeDocument({
+                employeeId,
+                type: `${visaType.charAt(0).toUpperCase() + visaType.slice(1)} Visa`,
+                description: previousVisaEntry?.number ? `Visa No: ${previousVisaEntry.number}` : "",
+                issueDate: previousVisaEntry?.issueDate || null,
+                expiryDate: previousVisaEntry?.expiryDate || null,
+                document: previousVisaEntry.document,
+            });
+        }
+
         // Handle document upload to IDrive (S3) if new document provided
         let documentData = undefined;
         if (visaCopy && typeof visaCopy === 'string' && visaCopy.trim() !== '') {
@@ -107,8 +124,8 @@ export const updateVisaDetails = async (req, res) => {
                     'raw'
                 );
 
-                // Delete old document from IDrive if exists
-                if (existingVisa?.[visaType]?.document?.publicId) {
+                // Delete old file only when it is not archived in oldDocuments.
+                if (!shouldArchivePrevious && existingVisa?.[visaType]?.document?.publicId) {
                     await deleteDocumentFromS3(existingVisa[visaType].document.publicId);
                 }
 
@@ -160,6 +177,11 @@ export const updateVisaDetails = async (req, res) => {
             );
         }
 
+        await triggerProfileReactivationIfNeeded({
+            employeeId,
+            actor: req.user,
+            reason: `${visaType} visa details updated`,
+        });
         const completeEmployee = await getCompleteEmployee(employeeId);
 
         return res.json({

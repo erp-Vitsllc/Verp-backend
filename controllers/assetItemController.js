@@ -8525,5 +8525,57 @@ export const deletePendingAssetDashboardInboxItem = async (req, res) => {
     }
 };
 
+export const getEmployeePreviousAssets = async (req, res) => {
+    try {
+        const { employeeId } = req.params;
+        
+        let empObjId = null;
+        const mongoose = (await import('mongoose')).default;
+        if (mongoose.Types.ObjectId.isValid(employeeId)) {
+            empObjId = employeeId;
+        } else {
+            const EmployeeBasic = (await import('../models/EmployeeBasic.js')).default;
+            const normEmp = (s) => (s || '').toString().toLowerCase().replace(/\s+/g, '');
+            const emp = await EmployeeBasic.findOne({
+                employeeId: { $regex: new RegExp(`^${normEmp(employeeId).replace(/\s+/g, '\\s*')}$`, 'i') }
+            }).select('_id').lean();
+            if (emp) empObjId = emp._id.toString();
+        }
+
+        if (!empObjId) {
+            return res.status(404).json({ message: 'Employee not found' });
+        }
+
+        const AssetHistory = (await import('../models/AssetHistory.js')).default;
+        const historyRecords = await AssetHistory.find({ assignedTo: empObjId }).select('assetId').lean();
+        const distinctAssetIds = [...new Set(historyRecords.map(h => h.assetId?.toString()).filter(Boolean))];
+
+        if (distinctAssetIds.length === 0) {
+            return res.status(200).json({ items: [] });
+        }
+
+        const AssetItem = (await import('../models/AssetItem.js')).default;
+        
+        const previousAssets = await AssetItem.find({
+            _id: { $in: distinctAssetIds },
+            $or: [
+                { assignedTo: { $ne: empObjId } },
+                { assignedTo: null },
+                { assignedTo: { $exists: false } }
+            ]
+        })
+        .populate('assignedTo', 'firstName lastName employeeId')
+        .populate('assignedCompany', 'name shortName nickName companyId')
+        .populate('typeId', 'name')
+        .populate('categoryId', 'name')
+        .lean();
+
+        res.status(200).json({ items: previousAssets });
+    } catch (error) {
+        console.error('getEmployeePreviousAssets:', error);
+        res.status(500).json({ message: 'Server Error' });
+    }
+};
+
 
 

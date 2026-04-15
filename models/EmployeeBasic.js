@@ -81,7 +81,15 @@ const employeeBasicSchema = new mongoose.Schema(
             {
                 type: { type: String },
                 description: { type: String },
+                issueDate: { type: Date },
                 expiryDate: { type: Date },
+                cost: { type: Number, default: null },
+                basicSalary: { type: Number, default: null },
+                houseRentAllowance: { type: Number, default: null },
+                vehicleAllowance: { type: Number, default: null },
+                fuelAllowance: { type: Number, default: null },
+                otherAllowance: { type: Number, default: null },
+                totalSalary: { type: Number, default: null },
                 createdAt: { type: Date, default: Date.now },
                 document: {
                     url: { type: String }, // Storage URL (preferred)
@@ -97,7 +105,15 @@ const employeeBasicSchema = new mongoose.Schema(
             {
                 type: { type: String },
                 description: { type: String },
+                issueDate: { type: Date },
                 expiryDate: { type: Date },
+                cost: { type: Number, default: null },
+                basicSalary: { type: Number, default: null },
+                houseRentAllowance: { type: Number, default: null },
+                vehicleAllowance: { type: Number, default: null },
+                fuelAllowance: { type: Number, default: null },
+                otherAllowance: { type: Number, default: null },
+                totalSalary: { type: Number, default: null },
                 createdAt: { type: Date },
                 archivedAt: { type: Date, default: Date.now },
                 archiveReason: { type: String, enum: ['Replaced', 'Deleted'], default: 'Replaced' },
@@ -137,6 +153,32 @@ const employeeBasicSchema = new mongoose.Schema(
                 assignedAt: { type: Date, default: Date.now },
                 actionedAt: { type: Date },
                 comment: { type: String }
+            }]
+        },
+
+        // PROBATION TO PERMANENT WORKFLOW
+        probationChangeRequest: {
+            status: {
+                type: String,
+                enum: ['none', 'pending_hod', 'pending_employee', 'pending_hr_final', 'approved', 'rejected'],
+                default: 'none'
+            },
+            probationEndDate: { type: Date, default: null },
+            requestedAt: { type: Date, default: null }, // auto request after probation completion
+            hodConfirmedAt: { type: Date, default: null },
+            hodConfirmedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'EmployeeBasic', default: null },
+            hrSubmittedAt: { type: Date, default: null },
+            hrSubmittedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'EmployeeBasic', default: null },
+            employeeDecisionAt: { type: Date, default: null },
+            employeeDecisionBy: { type: mongoose.Schema.Types.ObjectId, ref: 'EmployeeBasic', default: null },
+            rejectionReason: { type: String, default: '' },
+            workflow: [{
+                role: { type: String, enum: ['HR', 'Admin', 'HOD', 'Employee'], required: true },
+                assignedTo: { type: mongoose.Schema.Types.ObjectId, ref: 'EmployeeBasic', default: null },
+                status: { type: String, enum: ['pending', 'approved', 'rejected', 'notified'], default: 'pending' },
+                assignedAt: { type: Date, default: Date.now },
+                actionedAt: { type: Date, default: null },
+                comment: { type: String, default: '' }
             }]
         },
 

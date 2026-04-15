@@ -23,16 +23,18 @@ import dns from "dns";
 import { processParkingAssets } from "./utils/processParkingAssets.js";
 import { processTemporaryAssignments } from "./utils/processTemporaryAssignments.js";
 import { processAccidentAssets } from "./utils/processAccidentAssets.js";
+import { processDocumentExpiryReminders } from "./utils/processDocumentExpiryReminders.js";
 
 dotenv.config();
 
 // Set DNS before DB connection
 dns.setServers(["8.8.8.8"]);
 
-connectDB(); // Now Atlas hostname will resolve correctly
+// connectDB(); // Now Atlas hostname will resolve correctly
 
 dotenv.config();
 connectDB(); // <-- Call DB connection
+console.log("MONGO_URI:", process.env.MONGO_URI);
 
 const app = express();
 app.disable("x-powered-by");
@@ -47,6 +49,10 @@ setInterval(() => { processTemporaryAssignments(); }, 60 * 60 * 1000);
 
 setTimeout(() => { processAccidentAssets(); }, 60 * 1000);
 setInterval(() => { processAccidentAssets(); }, 24 * 60 * 60 * 1000);
+
+// Run company/employee document expiry reminders (30/20/10 day notifications).
+setTimeout(() => { processDocumentExpiryReminders(); }, 90 * 1000);
+setInterval(() => { processDocumentExpiryReminders(); }, 24 * 60 * 60 * 1000);
 
 // CORS Configuration - MUST BE FIRST
 const staticAllowedOrigins = [

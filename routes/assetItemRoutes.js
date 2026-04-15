@@ -1,7 +1,7 @@
 import express from 'express';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import User from '../models/User.js';
-import { createAssetItem, getAssetItems, getVehicleFleetDashboard, getAllAssignedAssets, getMyAssignedAssetsForReturn, getUnassignedAssetsForEmployee, getHRCompanyAssets, getOnLeaveAssetsForEmployee, handleOnLeaveAction, bulkHandleOnLeaveAction, getAssetItemDetail, assignAssetItem, bulkAssignAssetItems, downloadHandoverPdf, downloadHistoryHandoverPdf, respondToAssignment, bulkRespondToAssignment, getBulkAssignmentPendingGroup, respondBulkAssignmentGroup, getAssetHistory, getHistoryRecord, returnAssetItem, updateAssetStatus, addAssetDocument, updateAssetDocument, deleteAssetDocument, addAssetService, addAssetImage, deleteAssetImage, transferAssetAccessory, manageAccessoryStatus, updateAssetItem, deleteAssetItem, endOfLifeAsset, requestAssetAction, bulkRequestAssetAction, handleAssetActionApproval, finalizeAssetAction, uploadAccessoriesAttachment, requestAccessoryAction, respondAccessoryAction, finalizeAccessoryAction, respondToAssetCreation, bulkRespondToAssetCreation, getBulkAssetDetails, getBulkAssetInventoryForPrint, transferAsset, submitDraftForCreationApproval, getPendingAssetDashboardInbox, deletePendingAssetDashboardInboxItem } from '../controllers/assetItemController.js';
+import { createAssetItem, getAssetItems, getVehicleFleetDashboard, getAllAssignedAssets, getMyAssignedAssetsForReturn, getUnassignedAssetsForEmployee, getHRCompanyAssets, getOnLeaveAssetsForEmployee, handleOnLeaveAction, bulkHandleOnLeaveAction, getAssetItemDetail, assignAssetItem, bulkAssignAssetItems, downloadHandoverPdf, downloadHistoryHandoverPdf, respondToAssignment, bulkRespondToAssignment, getBulkAssignmentPendingGroup, respondBulkAssignmentGroup, getAssetHistory, getHistoryRecord, returnAssetItem, updateAssetStatus, addAssetDocument, updateAssetDocument, deleteAssetDocument, addAssetService, addAssetImage, deleteAssetImage, transferAssetAccessory, manageAccessoryStatus, updateAssetItem, deleteAssetItem, endOfLifeAsset, requestAssetAction, bulkRequestAssetAction, handleAssetActionApproval, finalizeAssetAction, uploadAccessoriesAttachment, requestAccessoryAction, respondAccessoryAction, finalizeAccessoryAction, respondToAssetCreation, bulkRespondToAssetCreation, getBulkAssetDetails, getBulkAssetInventoryForPrint, transferAsset, submitDraftForCreationApproval, getPendingAssetDashboardInbox, deletePendingAssetDashboardInboxItem, getEmployeePreviousAssets } from '../controllers/assetItemController.js';
 import { respondVehicleServiceWorkflow } from '../controllers/vehicleServiceWorkflowController.js';
 import { protect } from '../middleware/authMiddleware.js';
 import {
@@ -479,7 +479,7 @@ router.get('/assigned/me-for-return', protect, getMyAssignedAssetsForReturn);
 router.get('/unassigned/controller/:employeeId', protect, getUnassignedAssetsForEmployee);
 router.get('/on-leave/controller/:employeeId', protect, getOnLeaveAssetsForEmployee);
 router.get('/company-assets/hr/:employeeId', protect, getHRCompanyAssets);
-
+router.get('/previous/:employeeId', protect, getEmployeePreviousAssets);
 router.get('/detail/:id', protect, getAssetItemDetail);
 router.get('/bulk/details', protect, getBulkAssetDetails);
 router.get('/bulk/print-inventory', protect, getBulkAssetInventoryForPrint);

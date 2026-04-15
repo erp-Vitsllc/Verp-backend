@@ -1,6 +1,8 @@
 import EmployeeDrivingLicense from "../../models/EmployeeDrivingLicense.js";
 import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeService.js";
 import { uploadDocumentToS3, deleteDocumentFromS3 } from "../../utils/s3Upload.js";
+import { archiveEmployeeDocument } from "../../utils/archiveEmployeeDocument.js";
+import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
 
 const REQUIRED_FIELDS = ["number", "issueDate", "expiryDate", "document"];
 
@@ -70,6 +72,21 @@ export const updateDrivingLicenseDetails = async (req, res) => {
             });
         }
 
+        const previousDrivingLicense = existingDrivingLicense?.drivingLicenceDetails;
+        const hasExistingDocument = Boolean(previousDrivingLicense?.document?.url || previousDrivingLicense?.document?.data);
+        const hasNewDocumentUpload = Boolean(document && typeof document === "string" && document.trim() !== "");
+        const shouldArchivePrevious = hasExistingDocument && hasNewDocumentUpload;
+        if (shouldArchivePrevious) {
+            await archiveEmployeeDocument({
+                employeeId,
+                type: "Driving License",
+                description: previousDrivingLicense?.number ? `License No: ${previousDrivingLicense.number}` : "",
+                issueDate: previousDrivingLicense?.issueDate || null,
+                expiryDate: previousDrivingLicense?.expiryDate || null,
+                document: previousDrivingLicense.document,
+            });
+        }
+
         // Handle document upload to IDrive (S3) if new document provided
         let documentData = undefined;
         if (document && document.trim() !== '') {
@@ -90,8 +107,8 @@ export const updateDrivingLicenseDetails = async (req, res) => {
                     'raw'
                 );
 
-                // Delete old document from IDrive if exists
-                if (existingDrivingLicense?.drivingLicenceDetails?.document?.publicId) {
+                // Delete old file only when it is not archived in oldDocuments.
+                if (!shouldArchivePrevious && existingDrivingLicense?.drivingLicenceDetails?.document?.publicId) {
                     await deleteDocumentFromS3(existingDrivingLicense.drivingLicenceDetails.document.publicId);
                 }
 
@@ -131,6 +148,11 @@ export const updateDrivingLicenseDetails = async (req, res) => {
         console.log("   Driving License Number:", drivingLicensePayload.number);
         console.log("   Expiry Date:", drivingLicensePayload.expiryDate);
 
+        await triggerProfileReactivationIfNeeded({
+            employeeId,
+            actor: req.user,
+            reason: "Driving license details updated",
+        });
         const completeEmployee = await getCompleteEmployee(employeeId);
 
         return res.json({
