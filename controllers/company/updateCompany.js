@@ -151,6 +151,34 @@ export const updateCompany = async (req, res) => {
             await updatedCompany.save();
         }
 
+        // Sync owner details across all other companies where the owner exists by name
+        if (updateData.owners && Array.isArray(updateData.owners)) {
+            for (const owner of updateData.owners) {
+                if (owner.name) {
+                    const syncData = {};
+                    if (owner.nationality !== undefined) syncData["owners.$.nationality"] = owner.nationality;
+                    if (owner.attachment !== undefined) syncData["owners.$.attachment"] = owner.attachment;
+                    if (owner.passport !== undefined) syncData["owners.$.passport"] = owner.passport;
+                    if (owner.visa !== undefined) syncData["owners.$.visa"] = owner.visa;
+                    if (owner.emiratesId !== undefined) syncData["owners.$.emiratesId"] = owner.emiratesId;
+                    if (owner.medical !== undefined) syncData["owners.$.medical"] = owner.medical;
+                    if (owner.drivingLicense !== undefined) syncData["owners.$.drivingLicense"] = owner.drivingLicense;
+                    if (owner.labourCard !== undefined) syncData["owners.$.labourCard"] = owner.labourCard;
+
+                    if (Object.keys(syncData).length > 0) {
+                        try {
+                            await Company.updateMany(
+                                { _id: { $ne: updatedCompany._id }, "owners.name": owner.name },
+                                { $set: syncData }
+                            );
+                        } catch (syncErr) {
+                            console.error(`Error syncing owner details for ${owner.name}:`, syncErr);
+                        }
+                    }
+                }
+            }
+        }
+
         // Generate signed URLs for updated documents
         const companyObj = updatedCompany.toObject();
 

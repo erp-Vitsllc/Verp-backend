@@ -2,6 +2,7 @@ import nodemailer from "nodemailer";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { getCompleteEmployee } from "../../services/employeeService.js";
 import mongoose from "mongoose";
+import { getDepartmentHOD } from "../../utils/getDepartmentHOD.js";
 
 // Helper to send email
 const sendEmail = async (to, subject, html) => {
@@ -24,6 +25,18 @@ const sendEmail = async (to, subject, html) => {
         to,
         subject,
         html
+    });
+};
+
+const resolveEmail = (emp) => emp?.companyEmail || emp?.workEmail || emp?.personalEmail || emp?.email || null;
+
+const dedupeEmails = (items = []) => {
+    const seen = new Set();
+    return items.filter(Boolean).filter((email) => {
+        const key = String(email).toLowerCase();
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
     });
 };
 
@@ -52,6 +65,15 @@ export const requestNotice = async (req, res) => {
         const reporteeInit = fullEmployeeInit?.primaryReportee;
 
         // Save request
+        const actorEmployee = req.user?.employeeObjectId
+            ? await EmployeeBasic.findById(req.user.employeeObjectId).select("firstName lastName employeeId companyEmail workEmail personalEmail email")
+            : (req.user?.employeeId ? await EmployeeBasic.findOne({ employeeId: req.user.employeeId }).select("firstName lastName employeeId companyEmail workEmail personalEmail email") : null);
+        const hrEmployee = await getDepartmentHOD("hr");
+        const requesterName =
+            `${actorEmployee?.firstName || employee.firstName || ""} ${actorEmployee?.lastName || employee.lastName || ""}`.trim() ||
+            actorEmployee?.employeeId ||
+            employee.employeeId;
+
         employee.noticeRequest = {
             duration,
             reason,
@@ -59,15 +81,24 @@ export const requestNotice = async (req, res) => {
             status: "Pending",
             originalStatus: employee.status,
             requestedAt: new Date(),
+            requestedBy: actorEmployee?._id || employee._id,
             // SNAPSHOT: Manager who received the request
             submittedTo: reporteeInit ? reporteeInit._id : null,
             // WORKFLOW: Initial Pending Step
-            workflow: reporteeInit ? [{
-                role: 'Manager',
-                assignedTo: reporteeInit._id,
-                status: 'Pending',
-                assignedAt: new Date()
-            }] : []
+            workflow: [
+                ...(reporteeInit ? [{
+                    role: 'Manager',
+                    assignedTo: reporteeInit._id,
+                    status: 'Pending',
+                    assignedAt: new Date()
+                }] : []),
+                ...(hrEmployee?._id ? [{
+                    role: 'HR',
+                    assignedTo: hrEmployee._id,
+                    status: 'Pending',
+                    assignedAt: new Date()
+                }] : [])
+            ]
         };
         await employee.save();
 
@@ -81,7 +112,19 @@ export const requestNotice = async (req, res) => {
                     assignedTo: reporteeInit._id,
                     status: 'Pending',
                     subjectEmployee: employee,
-                    requestedByName: req.user.name || '',
+                    requestedByName: requesterName,
+                    extra1: reason,
+                    extra2: duration
+                });
+            }
+            if (hrEmployee?._id) {
+                await syncDashboardAction({
+                    requestId: employee._id,
+                    requestType: 'Notice Request',
+                    assignedTo: hrEmployee._id,
+                    status: 'Pending',
+                    subjectEmployee: employee,
+                    requestedByName: requesterName,
                     extra1: reason,
                     extra2: duration
                 });
@@ -136,6 +179,35 @@ export const requestNotice = async (req, res) => {
 
                 console.log(`[Email Debug] Sending Notice Request to: ${reporteeEmail}`);
                 await sendEmail(reporteeEmail, `Notice Request: ${employeeName}`, html);
+            }
+        }
+
+        if (hrEmployee) {
+            const hrEmail = resolveEmail(hrEmployee);
+            if (hrEmail) {
+                const employeeName = `${employee.firstName || ""} ${employee.lastName || ""}`.trim();
+                const hrName = `${hrEmployee.firstName || ""} ${hrEmployee.lastName || ""}`.trim() || 'HR';
+                const origin = req.headers.origin || (req.headers.referer ? new URL(req.headers.referer).origin : null);
+                const baseUrl = process.env.FRONTEND_URL || origin || "http://localhost:3000";
+                const profileUrl = `${baseUrl}/emp/${employee.employeeId}?action=review_notice`;
+                await sendEmail(hrEmail, `Notice Request: ${employeeName}`, `
+                    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; border: 1px solid #eee; border-radius: 10px; overflow: hidden;">
+                        <div style="background-color: #000000; color: white; padding: 20px; text-align: center;">
+                            <h2 style="margin: 0;">Notice Request</h2>
+                        </div>
+                        <div style="padding: 30px;">
+                            <p>Hello <strong>${hrName}</strong>,</p>
+                            <p>A notice period request has been submitted and is visible in your dashboard.</p>
+                            <p><strong>Employee:</strong> ${employeeName} (${employee.employeeId})</p>
+                            <p><strong>Reason:</strong> ${reason}</p>
+                            <p><strong>Duration:</strong> ${duration}</p>
+                            <p><strong>Requested by:</strong> ${requesterName}</p>
+                            <p style="text-align: center; margin: 35px 0;">
+                                <a href="${profileUrl}" style="background-color: #2563eb; color: white; padding: 14px 30px; text-decoration: none; border-radius: 6px; font-weight: bold;">Open Request</a>
+                            </p>
+                        </div>
+                    </div>
+                `);
             }
         }
 
@@ -260,25 +332,22 @@ export const updateNoticeStatus = async (req, res) => {
         }
 
         // Notify Recipients (Employee + Previous Approvers)
-        const employeeEmail = employee.companyEmail || employee.workEmail || employee.email;
-        let recipients = employeeEmail ? [employeeEmail] : [];
-
-        if (status === 'Rejected' && employee.noticeRequest?.workflow?.length > 0) {
-            const previousApproverIds = employee.noticeRequest.workflow
-                .filter(w => w.status === 'Approved' && w.assignedTo)
-                .map(w => w.assignedTo);
-
-            if (previousApproverIds.length > 0) {
-                const approvers = await EmployeeBasic.find({ _id: { $in: previousApproverIds } }).select('companyEmail workEmail email');
-                const approverEmails = approvers.map(a => a.companyEmail || a.workEmail || a.email).filter(e => e);
-                recipients = [...new Set([...recipients, ...approverEmails])];
-            }
-        }
+        const employeeEmail = resolveEmail(employee);
+        const primaryReporteeEmployee = employee.primaryReportee && mongoose.Types.ObjectId.isValid(employee.primaryReportee)
+            ? await EmployeeBasic.findById(employee.primaryReportee).select('firstName lastName employeeId companyEmail workEmail personalEmail email')
+            : null;
+        const requesterEmployee = employee.noticeRequest?.requestedBy && mongoose.Types.ObjectId.isValid(employee.noticeRequest.requestedBy)
+            ? await EmployeeBasic.findById(employee.noticeRequest.requestedBy).select('firstName lastName employeeId companyEmail workEmail personalEmail email')
+            : null;
+        const recipients = dedupeEmails([
+            employeeEmail,
+            resolveEmail(primaryReporteeEmployee),
+            resolveEmail(requesterEmployee)
+        ]);
 
         if (recipients.length > 0) {
             const employeeName = `${employee.firstName || ""} ${employee.lastName || ""}`.trim();
             const subject = `Notice Period ${status}`;
-            const color = status === 'Approved' ? '#10b981' : '#ef4444'; // Green or Red
 
             const html = `
                <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; border: 1px solid #eee; border-radius: 10px; overflow: hidden;">
@@ -286,7 +355,7 @@ export const updateNoticeStatus = async (req, res) => {
         <h2 style="margin: 0;">Notice Period ${status}</h2>
     </div>
     <div style="padding: 30px;">
-        <p>Hello <strong>${employeeName}</strong>,</p>
+        <p>Hello,</p>
         <p>Greetings from the VeRP Portal.</p>
         
         ${status === 'Approved' ? `

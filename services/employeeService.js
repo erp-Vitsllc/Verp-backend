@@ -1039,6 +1039,48 @@ export const saveEmployeeData = async (employeeId, updatePayload) => {
         if (Object.keys(salaryUpdate).length > 0) {
             // Calculate total salary if salary fields are being updated
             if (salaryUpdate.salaryHistory && Array.isArray(salaryUpdate.salaryHistory)) {
+                // Ensure salary history has exactly one active entry (toDate === null),
+                // and close older "active" entries by setting toDate.
+                try {
+                    const history = salaryUpdate.salaryHistory;
+                    const activeCandidates = history
+                        .map((entry, idx) => ({ entry, idx }))
+                        .filter(({ entry }) => !entry?.toDate);
+
+                    if (activeCandidates.length > 1) {
+                        const parseFrom = (e) => {
+                            const d = e?.fromDate ? new Date(e.fromDate) : null;
+                            return d && !Number.isNaN(d.getTime()) ? d : null;
+                        };
+
+                        // Pick newest by fromDate as the only active one.
+                        const sorted = [...activeCandidates].sort((a, b) => {
+                            const da = parseFrom(a.entry);
+                            const db = parseFrom(b.entry);
+                            const ta = da ? da.getTime() : 0;
+                            const tb = db ? db.getTime() : 0;
+                            return tb - ta;
+                        });
+
+                        const active = sorted[0];
+                        const activeFrom = parseFrom(active.entry);
+
+                        // Close all other "active" entries.
+                        sorted.slice(1).forEach(({ idx }) => {
+                            if (activeFrom) {
+                                const end = new Date(activeFrom);
+                                end.setDate(end.getDate() - 1);
+                                history[idx] = { ...history[idx], toDate: end };
+                            } else {
+                                history[idx] = { ...history[idx], toDate: new Date() };
+                            }
+                        });
+                        salaryUpdate.salaryHistory = history;
+                    }
+                } catch (e) {
+                    console.error('[saveEmployeeData] Failed to normalize salaryHistory toDate:', e?.message || e);
+                }
+
                 // Calculate total salary for each history entry
                 salaryUpdate.salaryHistory = salaryUpdate.salaryHistory.map(entry => {
                     const basic = parseFloat(entry.basic) || 0;

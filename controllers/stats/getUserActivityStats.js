@@ -232,6 +232,7 @@ export const getUserActivityStats = async (req, res) => {
 
         dashboardPendingItems.forEach(item => {
             const reqIdStr = item.requestId?.toString();
+            const viewerName = `${manager?.firstName || ''} ${manager?.lastName || ''}`.trim() || currentUser.name || currentUser.employeeId || '';
 
             // For Fines, try to use fineId for cleaner URLs
             let displayId = reqIdStr;
@@ -247,6 +248,10 @@ export const getUserActivityStats = async (req, res) => {
                 item.requestType === 'Asset Approval' &&
                 targetEmpNorm &&
                 normEmpId(item.subjectEmployeeId) === targetEmpNorm;
+            const isCompanyActivationRequester =
+                item.requestType === 'Company Activation' &&
+                viewerName &&
+                String(item.requestedByName || '').trim().toLowerCase() === viewerName.trim().toLowerCase();
 
             activityList.push({
                 id: displayId,
@@ -260,7 +265,7 @@ export const getUserActivityStats = async (req, res) => {
                 extra2: item.extra2,
                 extra3: item.extra3,
                 targetEmployeeId: item.subjectEmployeeId?.toString(),
-                scope: isCreatorSideAssetApproval ? 'outgoing' : 'inbox'
+                scope: (isCreatorSideAssetApproval || isCompanyActivationRequester) ? 'outgoing' : 'inbox'
             });
             if (reqIdStr) seenRequests.set(reqIdStr, 'Pending');
         });

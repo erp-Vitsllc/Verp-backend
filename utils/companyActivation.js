@@ -169,6 +169,24 @@ export const submitCompanyActivation = async ({
         extra2: company.companyId || "",
     });
 
+    if (actor?.employeeObjectId || actor?._id) {
+        await syncDashboardAction({
+            requestId: company._id,
+            requestType: "Company Activation",
+            assignedTo: String(actor.employeeObjectId || actor._id),
+            status: "Pending",
+            subjectEmployee: {
+                employeeId: company.companyId,
+                firstName: company.name,
+                lastName: "",
+                designation: company.nickName || "",
+            },
+            requestedByName,
+            extra1: reason,
+            extra2: company.companyId || "",
+        });
+    }
+
     try {
         const hrName = `${hr.firstName || ""} ${hr.lastName || ""}`.trim() || "HR";
         await sendCompanyActivationEmailToHr({
