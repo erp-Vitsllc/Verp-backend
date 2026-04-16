@@ -5,7 +5,7 @@ import DashboardAction from "../../models/DashboardAction.js";
 import { sendResponsibilityApprovalEmail } from "../../utils/sendResponsibilityApprovalEmail.js";
 import { buildResponsibilityEmailData } from "../../utils/flowchartResponsibilityEmailData.js";
 import { getSignedFileUrl } from "../../utils/s3Upload.js";
-import { calculateCompanyActivationProgress, shouldTriggerCompanyReactivation, submitCompanyActivation } from "../../utils/companyActivation.js";
+import { calculateCompanyActivationProgress, shouldTriggerCompanyReactivation } from "../../utils/companyActivation.js";
 
 export const updateCompany = async (req, res) => {
     try {
@@ -143,12 +143,12 @@ export const updateCompany = async (req, res) => {
         );
 
         if (shouldTriggerCompanyReactivation(beforeCompany, updateData)) {
-            await submitCompanyActivation({
-                companyId: updatedCompany._id,
-                actor: req.user,
-                reason: "Critical company document/details updated after activation",
-                force: true,
-            });
+            // Any critical change after activation must move the company back to inactive,
+            // but should not auto-submit to HR. Submission is manual from the UI button.
+            updatedCompany.status = "Inactive";
+            updatedCompany.activationStatus = "draft";
+            updatedCompany.activationSubmittedTo = null;
+            await updatedCompany.save();
         }
 
         // Generate signed URLs for updated documents

@@ -157,6 +157,10 @@ const assetItemSchema = new mongoose.Schema({
         type: Date,
         default: null
     },
+    parkingDurationCompleteSentAt: {
+        type: Date,
+        default: null
+    },
     acceptedBy: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'EmployeeBasic',
@@ -283,7 +287,9 @@ const assetItemSchema = new mongoose.Schema({
         invoice: { type: String },           // URL to uploaded invoice
         attachment: { type: String },        // URL to any supporting attachment
         requestedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'EmployeeBasic' },
-        lastWarningSentAt: { type: Date, default: null }
+        lastWarningSentAt: { type: Date, default: null },
+        reminderSentAt: { type: Date, default: null },
+        durationCompleteSentAt: { type: Date, default: null }
     }]
 }, {
     timestamps: true

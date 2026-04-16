@@ -92,7 +92,9 @@ export const getEmployeeById = async (req, res) => {
                 status: { $in: ["Approved", "Paid"] }
             }).sort({ createdAt: -1 }).lean();
 
-            // Fetch Assigned Assets (Included assets where user needs to take action, e.g., HR handover)
+            // Fetch assets the employee currently holds.
+            // Do not include actionRequiredBy-only records here, so role-reassignment
+            // assets stay visible under the previous holder until target acceptance.
             const heldStatuses = ['Assigned', 'Pending', 'On Leave', 'Out of Service', 'Returned', 'Service'];
             let assets = await AssetItem.find({
                 $or: [
@@ -101,7 +103,6 @@ export const getEmployeeById = async (req, res) => {
                         acceptanceStatus: { $in: ['Accepted', 'Pending'] },
                         status: { $in: heldStatuses }
                     },
-                    { actionRequiredBy: employee._id, status: 'Pending' },
                     { assignedBy: employee._id, status: 'Returned' }
                 ]
             }).populate('typeId categoryId assignedTo assignedBy acceptedBy').lean();

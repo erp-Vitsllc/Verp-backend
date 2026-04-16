@@ -1,8 +1,9 @@
 import AssetItem from '../models/AssetItem.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import AssetHistory from '../models/AssetHistory.js';
+import DashboardAction from '../models/DashboardAction.js';
 import { getDepartmentHOD } from './getDepartmentHOD.js';
-import { sendParkingReminderEmail, sendParkingExpiredEmail } from './sendAssetParkingNotifications.js';
+import { sendParkingReminderEmail } from './sendAssetParkingNotifications.js';
 
 const startOfDay = (d) => {
     const x = new Date(d);
@@ -32,47 +33,44 @@ export const processParkingAssets = async () => {
                 .populate('primaryReportee', 'firstName lastName companyEmail workEmail personalEmail email')
                 .lean();
 
-            if (diffDays === 5 && !asset.parkingReminderSentAt) {
+            if (diffDays === 2 && !asset.parkingReminderSentAt) {
                 await sendParkingReminderEmail({
                     asset,
                     assignedEmployee,
                     assetController,
-                    daysLeft: 5
+                    daysLeft: 2
                 });
                 asset.parkingReminderSentAt = new Date();
                 await asset.save();
             }
 
-            if (diffDays <= 0) {
-                asset.status = 'Unassigned';
-                asset.assignedTo = null;
-                asset.assignedBy = null;
-                asset.assignmentType = null;
-                asset.assignedDays = null;
-                asset.acceptanceStatus = null;
-                asset.actionRequiredBy = null;
-                asset.negotiationHistory = [];
-                asset.onLeaveStartDate = null;
-                asset.onLeaveEndDate = null;
-                asset.onLeaveDuration = null;
-                asset.parkingExtendedDays = 0;
-                asset.parkingReminderSentAt = null;
-                await asset.save();
-
+            if (diffDays <= 0 && !asset.parkingDurationCompleteSentAt) {
+                if (assetController?._id) {
+                    await DashboardAction.create({
+                        assignedTo: assetController._id,
+                        assignedToEmpId: assetController.employeeId,
+                        requestId: asset._id,
+                        requestType: 'Asset Leave',
+                        subjectEmployeeId: assignedEmployee?.employeeId || asset.assetId,
+                        subjectName: `${assignedEmployee?.firstName || ''} ${assignedEmployee?.lastName || ''}`.trim() || 'Assigned Employee',
+                        requestedByName: 'System Monitor',
+                        extra1: `${asset.assetId} - ${asset.name}`,
+                        extra2: 'Parking duration completed. Please Extend or Return.',
+                        status: 'Pending'
+                    }).catch((e) => {
+                        console.error('[processParkingAssets] Failed creating expiry notification:', e?.message || e);
+                    });
+                }
                 await AssetHistory.create({
                     assetId: asset._id,
-                    action: 'Returned',
+                    action: 'Comment',
                     performedBy: null,
-                    comments: `Parking duration completed. Asset auto-moved to Unassigned.`,
+                    comments: `Parking duration completed. Notification sent to seek Extend or Return action.`,
                     date: new Date(),
-                    details: { auto: true, reason: 'ParkingDurationCompleted' }
+                    details: { auto: true, reason: 'ParkingDurationCompletedNotification' }
                 });
-
-                await sendParkingExpiredEmail({
-                    asset,
-                    assignedEmployee,
-                    assetController
-                });
+                asset.parkingDurationCompleteSentAt = new Date();
+                await asset.save();
             }
         }
     } catch (e) {

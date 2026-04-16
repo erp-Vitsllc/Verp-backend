@@ -1,7 +1,7 @@
 import express from 'express';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import User from '../models/User.js';
-import { createAssetItem, getAssetItems, getVehicleFleetDashboard, getAllAssignedAssets, getMyAssignedAssetsForReturn, getUnassignedAssetsForEmployee, getHRCompanyAssets, getOnLeaveAssetsForEmployee, handleOnLeaveAction, bulkHandleOnLeaveAction, getAssetItemDetail, assignAssetItem, bulkAssignAssetItems, downloadHandoverPdf, downloadHistoryHandoverPdf, respondToAssignment, bulkRespondToAssignment, getBulkAssignmentPendingGroup, respondBulkAssignmentGroup, getAssetHistory, getHistoryRecord, returnAssetItem, updateAssetStatus, addAssetDocument, updateAssetDocument, deleteAssetDocument, addAssetService, addAssetImage, deleteAssetImage, transferAssetAccessory, manageAccessoryStatus, updateAssetItem, deleteAssetItem, endOfLifeAsset, requestAssetAction, bulkRequestAssetAction, handleAssetActionApproval, finalizeAssetAction, uploadAccessoriesAttachment, requestAccessoryAction, respondAccessoryAction, finalizeAccessoryAction, respondToAssetCreation, bulkRespondToAssetCreation, getBulkAssetDetails, getBulkAssetInventoryForPrint, transferAsset, submitDraftForCreationApproval, getPendingAssetDashboardInbox, deletePendingAssetDashboardInboxItem, getEmployeePreviousAssets } from '../controllers/assetItemController.js';
+import { createAssetItem, getAssetItems, getVehicleFleetDashboard, getAllAssignedAssets, getMyAssignedAssetsForReturn, getUnassignedAssetsForEmployee, getHRCompanyAssets, getOnLeaveAssetsForEmployee, getOnServiceAssetsForEmployee, handleOnLeaveAction, bulkHandleOnLeaveAction, handleOnServiceAction, bulkHandleOnServiceAction, getAssetItemDetail, assignAssetItem, bulkAssignAssetItems, downloadHandoverPdf, downloadHistoryHandoverPdf, respondToAssignment, bulkRespondToAssignment, getBulkAssignmentPendingGroup, respondBulkAssignmentGroup, getAssetHistory, getHistoryRecord, returnAssetItem, updateAssetStatus, addAssetDocument, updateAssetDocument, deleteAssetDocument, addAssetService, addAssetImage, deleteAssetImage, transferAssetAccessory, manageAccessoryStatus, updateAssetItem, deleteAssetItem, endOfLifeAsset, requestAssetAction, bulkRequestAssetAction, handleAssetActionApproval, finalizeAssetAction, uploadAccessoriesAttachment, requestAccessoryAction, respondAccessoryAction, finalizeAccessoryAction, respondToAssetCreation, bulkRespondToAssetCreation, getBulkAssetDetails, getBulkAssetInventoryForPrint, transferAsset, submitDraftForCreationApproval, getPendingAssetDashboardInbox, deletePendingAssetDashboardInboxItem, getEmployeePreviousAssets } from '../controllers/assetItemController.js';
 import { respondVehicleServiceWorkflow } from '../controllers/vehicleServiceWorkflowController.js';
 import { protect } from '../middleware/authMiddleware.js';
 import {
@@ -367,12 +367,18 @@ const requireAssetFullAccess = async (req, res, next) => {
         const { assetIds } = req.body;
         if (assetIds && Array.isArray(assetIds) && assetIds.length > 0) {
             const AssetItem = (await import('../models/AssetItem.js')).default;
-            const assets = await AssetItem.find({ _id: { $in: assetIds } }).select('assignedTo status actionRequiredBy');
+            const assets = await AssetItem.find({ _id: { $in: assetIds } }).select('assignedTo status actionRequiredBy assignedToType assignedCompany');
+            const isCompanyCoordinatorActive = await isUserActiveCompanyAssetCoordinator(
+                req.user?.employeeObjectId,
+                req.user?.employeeId
+            ).catch(() => false);
 
             const allPermitted = assets.every(a => {
                 const isAssignedUser = a.assignedTo && a.assignedTo.toString() === currentEmpId;
                 const isActionRequiredByMe = a.actionRequiredBy && (a.actionRequiredBy.toString() === currentEmpId || a.actionRequiredBy.toString() === currentUserId);
-                return isAssignedUser || isActionRequiredByMe;
+                const isCompanyAssigned = a.assignedToType === 'Company' && !!a.assignedCompany;
+                const isCompanyCoordinatorForCompanyAsset = isCompanyCoordinatorActive && isCompanyAssigned;
+                return isAssignedUser || isActionRequiredByMe || isCompanyCoordinatorForCompanyAsset;
             });
 
             if (allPermitted && assets.length === assetIds.length) return next();
@@ -413,9 +419,19 @@ const requireReturnAssetAccess = async (req, res, next) => {
         }
 
         const AssetItem = (await import('../models/AssetItem.js')).default;
-        const asset = await AssetItem.findById(id).select('assignedTo');
+        const asset = await AssetItem.findById(id).select('assignedTo assignedToType assignedCompany');
         if (!asset) {
             return res.status(404).json({ message: 'Asset not found' });
+        }
+
+        // Company-assigned assets: allow active flowchart company coordinators
+        // (Assigned User/Admin Controller) to process returns.
+        if (asset.assignedToType === 'Company' && asset.assignedCompany) {
+            const isCompanyCoordinatorActive = await isUserActiveCompanyAssetCoordinator(
+                req.user?.employeeObjectId,
+                req.user?.employeeId
+            ).catch(() => false);
+            if (isCompanyCoordinatorActive) return next();
         }
 
         if (asset.assignedTo && asset.assignedTo.toString() === currentEmpId) {
@@ -423,7 +439,7 @@ const requireReturnAssetAccess = async (req, res, next) => {
         }
 
         return res.status(403).json({
-            message: 'Access denied. Only the assigned employee, Asset Controller, or an administrator can return this asset.'
+            message: 'Access denied. Only the assigned employee, flowchart Assigned User/Admin, Asset Controller, or an administrator can return this asset.'
         });
     } catch (error) {
         next(error);
@@ -478,6 +494,7 @@ router.get('/assigned/all', protect, getAllAssignedAssets);
 router.get('/assigned/me-for-return', protect, getMyAssignedAssetsForReturn);
 router.get('/unassigned/controller/:employeeId', protect, getUnassignedAssetsForEmployee);
 router.get('/on-leave/controller/:employeeId', protect, getOnLeaveAssetsForEmployee);
+router.get('/on-service/controller/:employeeId', protect, getOnServiceAssetsForEmployee);
 router.get('/company-assets/hr/:employeeId', protect, getHRCompanyAssets);
 router.get('/previous/:employeeId', protect, getEmployeePreviousAssets);
 router.get('/detail/:id', protect, getAssetItemDetail);
@@ -494,6 +511,10 @@ router.put('/bulk/on-leave-action', protect, requireAssetControllerOrAdmin, (req
     console.log('[Route] PUT /bulk/on-leave-action hit. Body:', JSON.stringify(req.body));
     bulkHandleOnLeaveAction(req, res, next);
 });
+router.put('/bulk/on-service-action', protect, requireAssetControllerOrAdmin, (req, res, next) => {
+    console.log('[Route] PUT /bulk/on-service-action hit. Body:', JSON.stringify(req.body));
+    bulkHandleOnServiceAction(req, res, next);
+});
 router.put('/:id/assign', protect, requireAssetControllerOrAdmin, assignAssetItem);
 router.put('/:id/respond', protect, respondToAssignment);
 router.put('/bulk/respond', protect, bulkRespondToAssignment);
@@ -505,6 +526,10 @@ router.put('/:id/return', protect, requireReturnAssetAccess, returnAssetItem);
 router.put('/:id/on-leave-action', protect, requireParkingAssetAccess, (req, res, next) => {
     console.log(`[Route] PUT /${req.params.id}/on-leave-action hit`);
     handleOnLeaveAction(req, res, next);
+});
+router.put('/:id/on-service-action', protect, requireAssetControllerOrAdmin, (req, res, next) => {
+    console.log(`[Route] PUT /${req.params.id}/on-service-action hit`);
+    handleOnServiceAction(req, res, next);
 });
 router.put('/:id/status', protect, requireAssetFullAccess, updateAssetStatus);
 router.post('/:id/document', protect, requireAssetFullAccess, addAssetDocument);

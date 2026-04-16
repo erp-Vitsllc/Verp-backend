@@ -6,12 +6,19 @@ import { syncDashboardAction } from "../../utils/syncDashboard.js";
 
 export const sendApprovalEmail = async (req, res) => {
     const { id } = req.params;
+    const { reason, attachment } = req.body || {};
 
     try {
         const employeeBasic = await getCompleteEmployee(id);
         if (!employeeBasic) {
             return res.status(404).json({ message: "Employee not found" });
         }
+
+        if (!reason || !String(reason).trim()) {
+            return res.status(400).json({ message: "Reason is required for profile activation request." });
+        }
+        const reasonText = String(reason).trim();
+        const attachmentText = attachment && String(attachment).trim() ? String(attachment).trim() : null;
 
         const hrResolved = await resolveFlowchartHrEmployee();
         if (hrResolved.error) {
@@ -69,6 +76,10 @@ export const sendApprovalEmail = async (req, res) => {
                     <p style="text-align: center; margin: 35px 0;">
                         <a href="${profileUrl}" style="background-color: #2563eb; color: white; padding: 14px 30px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block; font-size: 16px;">View & Activate Profile</a>
                     </p>
+                    <div style="background-color: #f8fafc; padding: 14px 16px; border-radius: 8px; border: 1px solid #e2e8f0; margin: 18px 0;">
+                        <p style="margin: 0;"><strong>Reason:</strong> ${reasonText}</p>
+                        ${attachmentText ? `<p style="margin: 8px 0 0 0;"><strong>Attachment:</strong> <a href="${attachmentText}" target="_blank" rel="noopener noreferrer">${attachmentText}</a></p>` : ''}
+                    </div>
                 </div>
             </div>
         `;
@@ -110,7 +121,7 @@ export const sendApprovalEmail = async (req, res) => {
             status: "Pending",
             subjectEmployee: subjectForDashboard || employeeBasic,
             requestedByName,
-            extra1: "Profile activation — HR review",
+            extra1: `Profile activation — ${reasonText}`,
             extra2: employeeBasic.designation || "",
         });
 

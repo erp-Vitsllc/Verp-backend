@@ -5,7 +5,7 @@ import { resolveEmployeeEmail } from "./resolveEmployeeEmail.js";
  * Sends email notifications for asset service events.
  * @param {Object} asset - The asset item document.
  * @param {Object} recipient - The employee receiving the email.
- * @param {String} type - 'Started', 'Done', or 'Warning'.
+ * @param {String} type - 'Started', 'Done', 'Warning', 'Reminder', 'DurationComplete', or 'Extended'.
  * @param {Object} details - Additional service details (duration, description, etc.).
  * @param {Object} sender - The employee who initiated the action.
  */
@@ -58,6 +58,21 @@ export const sendAssetServiceEmail = async ({ asset, recipient, type, details, s
             headerTitle = "Service Overdue";
             headerColor = "#ef4444"; // Red
             message = `The expected service duration for this asset has passed, but the service status has not been updated yet.`;
+        } else if (type === 'Reminder') {
+            subject = `Service Duration Reminder: ${asset.assetId} - ${asset.name}`;
+            headerTitle = "Service Reminder";
+            headerColor = "#f59e0b"; // Amber
+            message = `The service duration for this asset is close to expiry.`;
+        } else if (type === 'DurationComplete') {
+            subject = `Service Duration Completed: ${asset.assetId} - ${asset.name}`;
+            headerTitle = "Duration Completed";
+            headerColor = "#ef4444"; // Red
+            message = `The service duration for this asset is completed. Please update the asset status when service is done.`;
+        } else if (type === 'Extended') {
+            subject = `Service Duration Extended: ${asset.assetId} - ${asset.name}`;
+            headerTitle = "Service Extended";
+            headerColor = "#6366f1"; // Indigo
+            message = `Service duration was extended by <strong>${details?.extensionDays || 'N/A'} day(s)</strong>.`;
         }
 
         const html = `
@@ -90,6 +105,18 @@ export const sendAssetServiceEmail = async ({ asset, recipient, type, details, s
                             <tr>
                                 <td style="padding: 8px 0; color: #64748b; font-size: 12px; text-transform: uppercase; font-weight: 800;">Description</td>
                                 <td style="padding: 8px 0; font-weight: 700; color: #0f172a;">${details.description}</td>
+                            </tr>
+                            ` : ''}
+                            ${details?.currentExpiryDate ? `
+                            <tr>
+                                <td style="padding: 8px 0; color: #64748b; font-size: 12px; text-transform: uppercase; font-weight: 800;">Current Expiry Date</td>
+                                <td style="padding: 8px 0; font-weight: 700; color: #0f172a;">${new Date(details.currentExpiryDate).toLocaleDateString()}</td>
+                            </tr>
+                            ` : ''}
+                            ${details?.extensionReason ? `
+                            <tr>
+                                <td style="padding: 8px 0; color: #64748b; font-size: 12px; text-transform: uppercase; font-weight: 800;">Extension Reason</td>
+                                <td style="padding: 8px 0; font-weight: 700; color: #0f172a;">${details.extensionReason}</td>
                             </tr>
                             ` : ''}
                         </table>

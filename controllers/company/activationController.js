@@ -10,13 +10,26 @@ const resolveCompanyById = async (id) => {
 export const submitCompanyActivationRequest = async (req, res) => {
     try {
         const { id } = req.params;
+        const { reason, description, attachment } = req.body || {};
         const company = await resolveCompanyById(id);
         if (!company) return res.status(404).json({ message: "Company not found" });
+
+        if (!reason || !String(reason).trim() || !description || !String(description).trim()) {
+            return res.status(400).json({
+                message: "Reason and description are required for activation submission.",
+            });
+        }
+
+        const reasonText = String(reason).trim();
+        const descriptionText = String(description).trim();
+        const attachmentText = attachment && String(attachment).trim()
+            ? `Attachment: ${String(attachment).trim()}`
+            : null;
 
         const result = await submitCompanyActivation({
             companyId: company._id,
             actor: req.user,
-            reason: "Company submitted for activation",
+            reason: `Reason: ${reasonText}${descriptionText ? ` | Description: ${descriptionText}` : ""}${attachmentText ? ` | ${attachmentText}` : ""}`,
             force: false,
         });
 

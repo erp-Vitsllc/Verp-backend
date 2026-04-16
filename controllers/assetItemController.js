@@ -33,6 +33,7 @@ import AssetAccessoryCatalog from '../models/AssetAccessoryCatalog.js';
 import { sendAssignedEmployeeActionEmail } from '../utils/sendAssignedEmployeeActionEmail.js';
 import { processParkingAssets } from '../utils/processParkingAssets.js';
 import { sendParkingReassignAcceptedEmail } from '../utils/sendParkingReassignAcceptedEmail.js';
+import { sendParkingExtensionEmail } from '../utils/sendAssetParkingNotifications.js';
 import { notifyAssetControllerReassignmentAcceptedWithHandover } from '../utils/notifyAssetControllerReassignmentAcceptedWithHandover.js';
 import { notifyPreviousAssigneeReassignmentAcceptedWithHandover } from '../utils/notifyPreviousAssigneeReassignmentAcceptedWithHandover.js';
 import { ASSET_HANDOVER_PDF_SELECTOR } from '../utils/assetHandoverPdfConstants.js';
@@ -308,6 +309,9 @@ const getActorPermissionFlagsForAsset = async (reqUser, asset) => {
     const currentEmpObjectId = reqUser?.employeeObjectId?.toString?.() || null;
     const isAdmin = reqUser?.isAdmin === true || reqUser?.role === 'Admin' || reqUser?.role === 'ROOT';
     const isAssetController = await isUserInFlowchart(reqUser, 'assetcontroller').catch(() => false);
+    const isCompanyAsset = asset?.assignedToType === 'Company' && !!asset?.assignedCompany;
+    const isCompanyCoordinator =
+        isCompanyAsset && (await isUserCompanyAssetCoordinator(reqUser).catch(() => false));
 
     const toIdString = (v) => {
         if (!v) return null;
@@ -364,8 +368,22 @@ const getActorPermissionFlagsForAsset = async (reqUser, asset) => {
         );
     }
 
-    const canAct = isAdmin || isAssetController || isAssigner || isAssignee || isPrimaryReporteeDelegate;
-    return { canAct, isAdmin, isAssetController, isAssigner, isAssignee, isPrimaryReporteeDelegate };
+    const canAct =
+        isAdmin ||
+        isAssetController ||
+        isCompanyCoordinator ||
+        isAssigner ||
+        isAssignee ||
+        isPrimaryReporteeDelegate;
+    return {
+        canAct,
+        isAdmin,
+        isAssetController,
+        isCompanyCoordinator,
+        isAssigner,
+        isAssignee,
+        isPrimaryReporteeDelegate
+    };
 };
 
 
@@ -946,6 +964,378 @@ export const getOnLeaveAssetsForEmployee = async (req, res) => {
 };
 
 /**
+ * @desc    Get on-service assets for Asset Controller profile view
+ * @route   GET /api/AssetItem/on-service/controller/:employeeId
+ * @access  Private
+ */
+export const getOnServiceAssetsForEmployee = async (req, res) => {
+    try {
+        const { employeeId } = req.params;
+
+        const employee = await EmployeeBasic.findOne({
+            employeeId: { $regex: new RegExp(`^${employeeId}$`, 'i') }
+        }).select('_id employeeId');
+
+        if (!employee) {
+            return res.status(404).json({ message: 'Employee not found' });
+        }
+
+        const employeeObjectId = employee._id;
+
+        const currentUserEmpObjectId = req.user?.employeeObjectId?.toString();
+        const currentUserEmpId = req.user?.employeeId;
+
+        let isAuthorized = false;
+        if (
+            currentUserEmpObjectId &&
+            currentUserEmpObjectId === employeeObjectId.toString()
+        ) {
+            isAuthorized = true;
+        } else if (currentUserEmpId && currentUserEmpId.toLowerCase() === employeeId.toLowerCase()) {
+            isAuthorized = true;
+        } else {
+            const isAdmin = req.user?.isAdmin === true || req.user?.role === 'Admin' || req.user?.role === 'ROOT';
+            if (isAdmin) {
+                isAuthorized = true;
+            } else {
+                try {
+                    isAuthorized = await isUserActiveInFlowchart(
+                        { employeeObjectId, employeeId: employee.employeeId },
+                        'assetcontroller'
+                    );
+                } catch {
+                    return res.status(403).json({
+                        message: 'Access denied. Only Asset Controllers can view on-service assets.',
+                        code: 'ASSET_CONTROLLER_REQUIRED'
+                    });
+                }
+            }
+        }
+
+        if (!isAuthorized) {
+            return res.status(403).json({
+                message: 'Access denied. Only Asset Controllers can view on-service assets.',
+                code: 'ASSET_CONTROLLER_REQUIRED',
+                employeeId
+            });
+        }
+
+        const onServiceQuery = {
+            status: { $regex: /^(service|on\s+service)$/i }
+        };
+        const items = await AssetItem.find(onServiceQuery)
+            .select('assetId name assetValue status purchaseDate invoiceFile typeId categoryId assignedTo assignedDate services')
+            .populate('typeId', 'name type')
+            .populate('categoryId', 'name category')
+            .populate('assignedTo', 'firstName lastName employeeId')
+            .sort({ assetId: 1 });
+
+        res.status(200).json({
+            items,
+            controllerStatus: 'Active'
+        });
+    } catch (error) {
+        console.error('Error fetching on-service assets for controller:', error);
+        res.status(500).json({
+            message: 'Server Error',
+            error: error.message
+        });
+    }
+};
+
+function parseServiceDurationDays(raw) {
+    const value = String(raw || '').trim().toLowerCase();
+    if (!value) return null;
+    const m = value.match(/(\d+)\s*(day|week|month|year)s?/i);
+    if (!m) {
+        const direct = parseInt(value, 10);
+        return Number.isInteger(direct) && direct > 0 ? direct : null;
+    }
+    const n = parseInt(m[1], 10);
+    if (!Number.isInteger(n) || n <= 0) return null;
+    const unit = m[2].toLowerCase();
+    if (unit.startsWith('day')) return n;
+    if (unit.startsWith('week')) return n * 7;
+    if (unit.startsWith('month')) return n * 30;
+    if (unit.startsWith('year')) return n * 365;
+    return null;
+}
+
+/**
+ * @desc    Handle On Service asset action (Return or Extend)
+ * @route   PUT /api/AssetItem/:id/on-service-action
+ * @access  Private
+ */
+export const handleOnServiceAction = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { action, extensionDays, extensionReason } = req.body; // 'Return' | 'Extend'
+
+        if (!['Return', 'Extend', 'Live'].includes(action)) {
+            return res.status(400).json({ message: 'Invalid action. Must be "Return", "Live", or "Extend"' });
+        }
+
+        const isAdmin = req.user?.isAdmin === true || req.user?.role === 'Admin' || req.user?.role === 'ROOT';
+        const isAssetController = await isUserInFlowchart(req.user, 'assetcontroller');
+        if (!isAdmin && !isAssetController) {
+            return res.status(403).json({ message: 'Access denied. Only Asset Controller or Admin can perform this action.' });
+        }
+
+        const item = await AssetItem.findById(id).populate('assignedTo');
+        if (!item) return res.status(404).json({ message: 'Asset not found' });
+
+        const statusLower = String(item.status || '').toLowerCase().trim();
+        if (statusLower !== 'service' && statusLower !== 'on service') {
+            return res.status(400).json({ message: 'Asset is not in "Service/On Service" status' });
+        }
+
+        const snapshotItem = await AssetItem.findById(item._id)
+            .populate('categoryId typeId assignedTo assignedBy acceptedBy');
+        const statusSnapshot = snapshotItem.toObject();
+        const prevAssignedTo = item.assignedTo?._id || item.assignedTo;
+
+        const currentService = item.services?.length ? item.services[item.services.length - 1] : null;
+        if (!currentService) {
+            return res.status(400).json({ message: 'No active service record found for this asset.' });
+        }
+
+        if (action === 'Extend') {
+            const ext = parseInt(extensionDays, 10);
+            if (!Number.isInteger(ext) || ext <= 0 || ext > 30) {
+                return res.status(400).json({ message: 'Invalid extension days. Must be between 1 and 30.' });
+            }
+            const reason = String(extensionReason || '').trim();
+            if (!reason) {
+                return res.status(400).json({ message: 'Extension reason is required.' });
+            }
+
+            const baseExpiry = currentService.expiryDate ? new Date(currentService.expiryDate) : new Date();
+            const newExpiry = new Date(baseExpiry);
+            newExpiry.setDate(newExpiry.getDate() + ext);
+
+            const previousDurationDays =
+                parseServiceDurationDays(currentService.serviceDuration) ||
+                Math.max(1, Math.ceil((baseExpiry.getTime() - new Date(currentService.date || new Date()).getTime()) / (1000 * 60 * 60 * 24)));
+            const updatedTotalDays = previousDurationDays + ext;
+
+            currentService.expiryDate = newExpiry;
+            currentService.serviceDuration = `${updatedTotalDays} days`;
+            currentService.reminderSentAt = null;
+            currentService.durationCompleteSentAt = null;
+            currentService.lastWarningSentAt = null;
+
+            await AssetHistory.create({
+                assetId: item._id,
+                action: 'Extend',
+                assignedTo: prevAssignedTo,
+                performedBy: req.user.employeeObjectId,
+                comments: `Service duration extended by ${ext} day(s). New total: ${updatedTotalDays} day(s). Reason: ${reason}`,
+                date: new Date(),
+                details: { ...statusSnapshot, extensionDays: ext, extensionReason: reason, updatedTotalDays, newExpiryDate: newExpiry }
+            });
+
+            const assignedEmployee = item.assignedTo
+                ? await EmployeeBasic.findById(item.assignedTo?._id || item.assignedTo)
+                    .select('firstName lastName employeeId companyEmail workEmail personalEmail email primaryReportee')
+                    .populate('primaryReportee', 'firstName lastName employeeId companyEmail workEmail personalEmail email')
+                    .lean()
+                    .catch(() => null)
+                : null;
+            const hodEmployee = assignedEmployee?.primaryReportee || null;
+            const assetController = await getDepartmentHOD('assetcontroller');
+            const recipients = [assignedEmployee, hodEmployee, assetController]
+                .filter(Boolean)
+                .reduce((acc, r) => {
+                    const id = String(r._id || '');
+                    if (!id || acc.some((x) => String(x._id) === id)) return acc;
+                    acc.push(r);
+                    return acc;
+                }, []);
+            const senderInfo = { firstName: 'Asset', lastName: 'Controller' };
+            for (const recipient of recipients) {
+                await sendAssetServiceEmail({
+                    asset: item,
+                    recipient,
+                    type: 'Extended',
+                    details: {
+                        serviceDuration: `${updatedTotalDays} days`,
+                        extensionDays: ext,
+                        currentExpiryDate: baseExpiry,
+                        extensionReason: reason
+                    },
+                    sender: senderInfo
+                });
+            }
+        } else if (action === 'Return' || action === 'Live') {
+            item.status = item.assignedTo ? 'Assigned' : 'Unassigned';
+            if (currentService.durationCompleteSentAt == null) {
+                currentService.durationCompleteSentAt = new Date();
+            }
+
+            await AssetHistory.create({
+                assetId: item._id,
+                action: 'Service Receive',
+                assignedTo: prevAssignedTo,
+                performedBy: req.user.employeeObjectId,
+                comments: 'Asset returned from service and moved back to active status.',
+                date: new Date(),
+                details: { ...statusSnapshot, returnedFromService: true, nextStatus: item.status }
+            });
+        }
+
+        await item.save();
+        await notifyAssignedEmployeeIfController(req, item, 'Edit Asset', 'Asset service status updated by Asset Controller.');
+        await updateAssetTypeCounts(item.typeId);
+
+        res.status(200).json({
+            message:
+                action === 'Extend'
+                    ? 'Service duration extended successfully'
+                    : action === 'Live'
+                      ? 'Asset marked as Live successfully'
+                      : 'Asset returned from service successfully',
+            asset: item
+        });
+    } catch (error) {
+        console.error('Error handling on-service action:', error);
+        res.status(500).json({
+            message: 'Server Error',
+            error: error.message
+        });
+    }
+};
+
+/**
+ * @desc    Bulk Handle On Service asset action (Return or Extend)
+ * @route   PUT /api/AssetItem/bulk/on-service-action
+ * @access  Private
+ */
+export const bulkHandleOnServiceAction = async (req, res) => {
+    try {
+        const { assetIds, action, extensionDays, extensionReason } = req.body;
+        if (!Array.isArray(assetIds) || assetIds.length === 0) {
+            return res.status(400).json({ message: 'Please provide at least one asset ID' });
+        }
+        if (!['Return', 'Extend', 'Live'].includes(action)) {
+            return res.status(400).json({ message: 'Invalid action. Must be "Return", "Live", or "Extend"' });
+        }
+
+        const isAdmin = req.user?.isAdmin === true || req.user?.role === 'Admin' || req.user?.role === 'ROOT';
+        const isAssetController = await isUserInFlowchart(req.user, 'assetcontroller');
+        if (!isAdmin && !isAssetController) {
+            return res.status(403).json({ message: 'Access denied. Only Asset Controller or Admin can perform this action.' });
+        }
+
+        const ext = action === 'Extend' ? parseInt(extensionDays, 10) : null;
+        if (action === 'Extend' && (!Number.isInteger(ext) || ext <= 0 || ext > 30)) {
+            return res.status(400).json({ message: 'Invalid extension days. Must be between 1 and 30.' });
+        }
+        const reason = action === 'Extend' ? String(extensionReason || '').trim() : '';
+        if (action === 'Extend' && !reason) {
+            return res.status(400).json({ message: 'Extension reason is required.' });
+        }
+
+        const items = await AssetItem.find({ _id: { $in: assetIds } }).populate('assignedTo');
+        const results = { success: [], failed: [] };
+
+        for (const item of items) {
+            try {
+                const statusLower = String(item.status || '').toLowerCase().trim();
+                if (statusLower !== 'service' && statusLower !== 'on service') {
+                    results.failed.push({ id: item._id, message: `Asset is not in Service/On Service status (Current: ${item.status})` });
+                    continue;
+                }
+
+                const currentService = item.services?.length ? item.services[item.services.length - 1] : null;
+                if (!currentService) {
+                    results.failed.push({ id: item._id, message: 'No active service record found.' });
+                    continue;
+                }
+
+                if (action === 'Extend') {
+                    const baseExpiry = currentService.expiryDate ? new Date(currentService.expiryDate) : new Date();
+                    const newExpiry = new Date(baseExpiry);
+                    newExpiry.setDate(newExpiry.getDate() + ext);
+                    const prevDays = parseServiceDurationDays(currentService.serviceDuration) || 0;
+                    currentService.expiryDate = newExpiry;
+                    currentService.serviceDuration = `${Math.max(1, prevDays) + ext} days`;
+                    currentService.reminderSentAt = null;
+                    currentService.durationCompleteSentAt = null;
+                    currentService.lastWarningSentAt = null;
+                    await AssetHistory.create({
+                        assetId: item._id,
+                        action: 'Extend',
+                        assignedTo: item.assignedTo?._id || item.assignedTo,
+                        performedBy: req.user.employeeObjectId,
+                        comments: `Service duration extended by ${ext} day(s) in bulk action. Reason: ${reason}`,
+                        date: new Date()
+                    });
+
+                    const assignedEmployee = item.assignedTo
+                        ? await EmployeeBasic.findById(item.assignedTo?._id || item.assignedTo)
+                            .select('firstName lastName employeeId companyEmail workEmail personalEmail email primaryReportee')
+                            .populate('primaryReportee', 'firstName lastName employeeId companyEmail workEmail personalEmail email')
+                            .lean()
+                            .catch(() => null)
+                        : null;
+                    const hodEmployee = assignedEmployee?.primaryReportee || null;
+                    const assetController = await getDepartmentHOD('assetcontroller');
+                    const recipients = [assignedEmployee, hodEmployee, assetController]
+                        .filter(Boolean)
+                        .reduce((acc, r) => {
+                            const rid = String(r._id || '');
+                            if (!rid || acc.some((x) => String(x._id) === rid)) return acc;
+                            acc.push(r);
+                            return acc;
+                        }, []);
+                    for (const recipient of recipients) {
+                        await sendAssetServiceEmail({
+                            asset: item,
+                            recipient,
+                            type: 'Extended',
+                            details: {
+                                serviceDuration: currentService.serviceDuration,
+                                extensionDays: ext,
+                                currentExpiryDate: baseExpiry,
+                                extensionReason: reason
+                            },
+                            sender: { firstName: 'Asset', lastName: 'Controller' }
+                        });
+                    }
+                } else if (action === 'Return' || action === 'Live') {
+                    item.status = item.assignedTo ? 'Assigned' : 'Unassigned';
+                    if (currentService.durationCompleteSentAt == null) {
+                        currentService.durationCompleteSentAt = new Date();
+                    }
+                    await AssetHistory.create({
+                        assetId: item._id,
+                        action: 'Service Receive',
+                        assignedTo: item.assignedTo?._id || item.assignedTo,
+                        performedBy: req.user.employeeObjectId,
+                        comments: 'Asset returned from service in bulk action.',
+                        date: new Date()
+                    });
+                }
+
+                await item.save();
+                await updateAssetTypeCounts(item.typeId);
+                results.success.push(item._id);
+            } catch (err) {
+                results.failed.push({ id: item._id, message: err.message });
+            }
+        }
+
+        res.status(200).json({
+            message: `Processed ${items.length} assets: ${results.success.length} successful, ${results.failed.length} failed.`,
+            results
+        });
+    } catch (error) {
+        console.error('Error handling bulk on-service action:', error);
+        res.status(500).json({ message: 'Internal server error', error: error.message });
+    }
+};
+
+/**
  * @desc    Handle On Leave asset action (Return or On Duty)
  * @route   PUT /api/AssetItem/:id/on-leave-action
  * @access  Private
@@ -953,7 +1343,7 @@ export const getOnLeaveAssetsForEmployee = async (req, res) => {
 export const handleOnLeaveAction = async (req, res) => {
     try {
         const { id } = req.params;
-        const { action } = req.body; // 'Return' or 'OnDuty'
+        const { action, extensionReason } = req.body; // 'Return' or 'OnDuty'
 
         if (!['Return', 'OnDuty', 'Extend'].includes(action)) {
             return res.status(400).json({ message: 'Invalid action. Must be "Return", "OnDuty", or "Extend"' });
@@ -998,6 +1388,7 @@ export const handleOnLeaveAction = async (req, res) => {
             item.negotiationHistory = [];
             item.parkingExtendedDays = 0;
             item.parkingReminderSentAt = null;
+            item.parkingDurationCompleteSentAt = null;
 
             // Log History
             await AssetHistory.create({
@@ -1038,6 +1429,7 @@ export const handleOnLeaveAction = async (req, res) => {
                 item.onLeaveDuration = null;
                 item.parkingExtendedDays = 0;
                 item.parkingReminderSentAt = null;
+                item.parkingDurationCompleteSentAt = null;
             }
 
             // Log History
@@ -1068,6 +1460,10 @@ export const handleOnLeaveAction = async (req, res) => {
             if (usedExtensionDays + extensionDays > 10) {
                 return res.status(400).json({ message: `Maximum total extension is 10 days. Already used ${usedExtensionDays} day(s).` });
             }
+            const reason = String(extensionReason || '').trim();
+            if (!reason) {
+                return res.status(400).json({ message: 'Extension reason is required.' });
+            }
 
             // Calculate new end date based on current end date (or today if missing)
             const currentEndDate = item.onLeaveEndDate || new Date();
@@ -1078,6 +1474,7 @@ export const handleOnLeaveAction = async (req, res) => {
             item.onLeaveDuration = (item.onLeaveDuration || 0) + extensionDays;
             item.parkingExtendedDays = usedExtensionDays + extensionDays;
             item.parkingReminderSentAt = null;
+            item.parkingDurationCompleteSentAt = null;
 
             // Log History
             await AssetHistory.create({
@@ -1085,9 +1482,25 @@ export const handleOnLeaveAction = async (req, res) => {
                 action: 'Extend',
                 assignedTo: prevAssignedTo,
                 performedBy: req.user.employeeObjectId,
-                comments: `Asset parking duration extended by ${extensionDays} day(s) by Asset Controller. New end date: ${newEndDate.toLocaleDateString()}`,
+                comments: `Asset parking duration extended by ${extensionDays} day(s) by Asset Controller. New end date: ${newEndDate.toLocaleDateString()}. Reason: ${reason}`,
                 date: new Date(),
-                details: { ...statusSnapshot, extensionDays, newEndDate }
+                details: { ...statusSnapshot, extensionDays, extensionReason: reason, newEndDate }
+            });
+
+            const assignedEmployee = await EmployeeBasic.findById(prevAssignedTo)
+                .select('firstName lastName employeeId companyEmail workEmail personalEmail email primaryReportee')
+                .populate('primaryReportee', 'firstName lastName employeeId companyEmail workEmail personalEmail email')
+                .lean()
+                .catch(() => null);
+            const hodEmployee = assignedEmployee?.primaryReportee || null;
+            await sendParkingExtensionEmail({
+                asset: item,
+                assignedEmployee,
+                hodEmployee,
+                assetController,
+                previousExpiryDate: currentEndDate,
+                extensionDays,
+                reason
             });
         }
 
@@ -1121,14 +1534,18 @@ export const handleOnLeaveAction = async (req, res) => {
  */
 export const bulkHandleOnLeaveAction = async (req, res) => {
     try {
-        const { assetIds, action } = req.body;
+        const { assetIds, action, extensionReason } = req.body;
 
         if (!Array.isArray(assetIds) || assetIds.length === 0) {
             return res.status(400).json({ message: 'Please provide at least one asset ID' });
         }
 
-        if (!['Return', 'OnDuty'].includes(action)) {
-            return res.status(400).json({ message: 'Invalid action. Must be "Return" or "OnDuty"' });
+        if (!['Return', 'OnDuty', 'Extend'].includes(action)) {
+            return res.status(400).json({ message: 'Invalid action. Must be "Return", "OnDuty", or "Extend"' });
+        }
+        const reason = action === 'Extend' ? String(extensionReason || '').trim() : '';
+        if (action === 'Extend' && !reason) {
+            return res.status(400).json({ message: 'Extension reason is required.' });
         }
 
         const isAdmin = req.user?.isAdmin === true || req.user?.role === 'Admin' || req.user?.role === 'ROOT';
@@ -1165,6 +1582,7 @@ export const bulkHandleOnLeaveAction = async (req, res) => {
                     item.onLeaveDuration = null;
                     item.parkingExtendedDays = 0;
                     item.parkingReminderSentAt = null;
+                    item.parkingDurationCompleteSentAt = null;
 
                     await item.save();
 
@@ -1198,6 +1616,7 @@ export const bulkHandleOnLeaveAction = async (req, res) => {
                         item.onLeaveDuration = null;
                         item.parkingExtendedDays = 0;
                         item.parkingReminderSentAt = null;
+                        item.parkingDurationCompleteSentAt = null;
                     }
 
                     await item.save();
@@ -1209,6 +1628,54 @@ export const bulkHandleOnLeaveAction = async (req, res) => {
                         performedBy: req.user.employeeObjectId,
                         comments: `Asset status changed from On Leave to Assigned (On Duty) by Asset Controller (Bulk)${originalDuration ? `. Duration tracking started: ${originalDuration} day(s)` : ''}`,
                         date: new Date()
+                    });
+                    results.success.push(item._id);
+                } else if (action === 'Extend') {
+                    const extensionDays = parseInt(req.body.extensionDays, 10);
+                    if (!Number.isInteger(extensionDays) || extensionDays <= 0 || extensionDays > 10) {
+                        results.failed.push({ id: item._id, message: 'Invalid extension days (1-10 required).' });
+                        continue;
+                    }
+                    const usedExtensionDays = Number(item.parkingExtendedDays || 0);
+                    if (usedExtensionDays + extensionDays > 10) {
+                        results.failed.push({ id: item._id, message: `Maximum total extension is 10 days. Already used ${usedExtensionDays} day(s).` });
+                        continue;
+                    }
+                    const currentEndDate = item.onLeaveEndDate || new Date();
+                    const newEndDate = new Date(currentEndDate);
+                    newEndDate.setDate(newEndDate.getDate() + extensionDays);
+                    item.onLeaveEndDate = newEndDate;
+                    item.onLeaveDuration = (item.onLeaveDuration || 0) + extensionDays;
+                    item.parkingExtendedDays = usedExtensionDays + extensionDays;
+                    item.parkingReminderSentAt = null;
+                    item.parkingDurationCompleteSentAt = null;
+                    await item.save();
+                    await AssetHistory.create({
+                        assetId: item._id,
+                        action: 'Extend',
+                        assignedTo: prevAssignedTo,
+                        performedBy: req.user.employeeObjectId,
+                        comments: `Asset parking duration extended by ${extensionDays} day(s) by Asset Controller (Bulk). Reason: ${reason}`,
+                        date: new Date()
+                    });
+
+                    const assignedEmployee = prevAssignedTo
+                        ? await EmployeeBasic.findById(prevAssignedTo)
+                            .select('firstName lastName employeeId companyEmail workEmail personalEmail email primaryReportee')
+                            .populate('primaryReportee', 'firstName lastName employeeId companyEmail workEmail personalEmail email')
+                            .lean()
+                            .catch(() => null)
+                        : null;
+                    const hodEmployee = assignedEmployee?.primaryReportee || null;
+                    const assetController = await getDepartmentHOD('assetcontroller');
+                    await sendParkingExtensionEmail({
+                        asset: item,
+                        assignedEmployee,
+                        hodEmployee,
+                        assetController,
+                        previousExpiryDate: currentEndDate,
+                        extensionDays,
+                        reason
                     });
                     results.success.push(item._id);
                 }
@@ -4028,12 +4495,22 @@ export const returnAssetItem = async (req, res) => {
         const isJwtAdmin = req.user.isAdmin === true || req.user.role === 'Admin' || req.user.role === 'ROOT';
         const isSysAdmin = await isUserAdministrator(req.user?.id);
         const isAcFlow = await isUserInFlowchart(req.user, 'assetcontroller');
+        const isCompanyCoordinatorFlow = await isUserActiveCompanyAssetCoordinator(
+            req.user?.employeeObjectId,
+            req.user?.employeeId
+        );
         const hodAc = await getDepartmentHOD('assetcontroller');
         const matchesDeptAc =
             !!hodAc?._id &&
             req.user?.employeeObjectId &&
             hodAc._id.toString() === req.user.employeeObjectId.toString();
-        const isElevatedReturn = isJwtAdmin || isSysAdmin || isAcFlow || matchesDeptAc;
+        const isCompanyAssignedAsset = item.assignedToType === 'Company' && !!item.assignedCompany;
+        const isElevatedReturn =
+            isJwtAdmin ||
+            isSysAdmin ||
+            isAcFlow ||
+            matchesDeptAc ||
+            (isCompanyCoordinatorFlow && isCompanyAssignedAsset);
 
         let currentEmpId = req.user?.employeeObjectId?.toString();
         if (!currentEmpId && req.user?.employeeId) {
@@ -4579,7 +5056,9 @@ export const updateAssetStatus = async (req, res) => {
 
         // Email Notifications for Service
         try {
-            if (status === 'Service' || status === 'Live') {
+            // Do NOT notify immediately when entering Service.
+            // Service reminder/completion notifications are handled by scheduled checks.
+            if (status === 'Live') {
                 const assetController = await getDepartmentHOD('assetcontroller');
                 const requestInitiatorId = req.user.employeeObjectId;
                 const initiator = await EmployeeBasic.findById(requestInitiatorId);
@@ -4625,21 +5104,7 @@ export const updateAssetStatus = async (req, res) => {
 
                     // Manage Dashboard Actions
                     try {
-                        if (status === 'Service') {
-                            // Create a task to remind them to complete service
-                            await DashboardAction.create({
-                                assignedTo: recipient._id,
-                                assignedToEmpId: recipient.employeeId,
-                                requestId: item._id,
-                                requestType: 'Asset',
-                                subjectEmployeeId: initiator?.employeeId || item.assetId,
-                                subjectName: `${initiator?.firstName || 'System'} ${initiator?.lastName || ''}`.trim(),
-                                requestedByName: `${senderInfo.firstName} ${senderInfo.lastName}`,
-                                extra1: `${item.assetId} - ${item.name}`,
-                                extra2: `Maintenance Started: Expected ${serviceDuration || 'soon'}`,
-                                status: 'Pending'
-                            });
-                        } else if (status === 'Live') {
+                        if (status === 'Live') {
                             // Clear any "Service" or "Overdue" tasks for this asset
                             await DashboardAction.updateMany(
                                 { requestId: item._id, status: 'Pending', requestType: { $in: ['Asset', 'Asset Overdue'] } },
@@ -5399,7 +5864,10 @@ export const requestAssetAction = async (req, res) => {
         // Also allow assigner + primary reportee delegation
         const actorFlags = await getActorPermissionFlagsForAsset(req.user, asset);
         if (!actorFlags.canAct) {
-            return res.status(403).json({ message: 'Access denied. Only Asset Controller/Admin, assigner, assigned user, or delegated primary reportee can request this asset action.' });
+            return res.status(403).json({
+                message:
+                    'Access denied. Only Asset Controller/Admin, flowchart Assigned User/Admin for company assets, assigner, assigned user, or delegated primary reportee can request this asset action.'
+            });
         }
 
         // Upload attachment if present

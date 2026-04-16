@@ -14,6 +14,9 @@ import { getManagementHOD } from "./getManagementHOD.js";
 import { resolveEmployeeEmail } from "./resolveEmployeeEmail.js";
 
 const REMINDER_DAYS = [30, 20, 10];
+const EXPIRY_DAY = 0;
+const THIRD_REMINDER_TASK_MARKER = -10;
+const EXPIRY_DAY_TASK_MARKER = -20;
 
 const startOfDay = (d) => {
     const x = new Date(d);
@@ -201,7 +204,9 @@ const processCompanyReminders = async () => {
         const docs = buildCompanyDocuments(company);
         for (const doc of docs) {
             const days = getDaysUntil(doc.expiryDate);
-            if (!REMINDER_DAYS.includes(days)) continue;
+            const isReminderDay = REMINDER_DAYS.includes(days);
+            const isExpiryDay = days === EXPIRY_DAY;
+            if (!isReminderDay && !isExpiryDay) continue;
 
             const alreadySent = await wasReminderSent({
                 targetType: "company",
@@ -211,14 +216,16 @@ const processCompanyReminders = async () => {
             });
             if (alreadySent) continue;
 
-            const subject = `Company document expiry reminder (${days} days): ${company.name}`;
+            const subject = isExpiryDay
+                ? `Company document expired: ${company.name}`
+                : `Company document expiry reminder (${days} days): ${company.name}`;
             const html = `
                 <div style="font-family: Arial, sans-serif; line-height: 1.6;">
-                    <h3>Company Document Expiry Reminder</h3>
+                    <h3>${isExpiryDay ? "Company Document Expired" : "Company Document Expiry Reminder"}</h3>
                     <p><strong>Company:</strong> ${company.name || "N/A"} (${company.companyId || "N/A"})</p>
                     <p><strong>Document:</strong> ${doc.label}</p>
                     <p><strong>Expiry Date:</strong> ${new Date(doc.expiryDate).toLocaleDateString("en-GB")}</p>
-                    <p><strong>Reminder:</strong> ${days} day(s) before expiry.</p>
+                    <p><strong>${isExpiryDay ? "Status" : "Reminder"}:</strong> ${isExpiryDay ? "Expired today. Immediate action required." : `${days} day(s) before expiry.`}</p>
                 </div>
             `;
 
@@ -265,10 +272,52 @@ const processCompanyReminders = async () => {
                     targetType: "company",
                     targetId: String(company._id),
                     docKey: doc.key,
-                    daysBefore: 0,
+                    daysBefore: THIRD_REMINDER_TASK_MARKER,
                     expiryDate: doc.expiryDate,
                     metadata: { taskCreated: true },
                 });
+            }
+
+            if (isExpiryDay) {
+                const taskAlreadyCreated = await wasReminderSent({
+                    targetType: "company",
+                    targetId: String(company._id),
+                    docKey: doc.key,
+                    daysBefore: EXPIRY_DAY_TASK_MARKER,
+                });
+
+                if (!taskAlreadyCreated) {
+                    const extra1 = `Expired document action required: ${doc.label}`;
+                    const extra2 = `${company.name || ""} (${company.companyId || ""})`;
+                    if (recipients.admin?._id) {
+                        await ensureDashboardAction({
+                            assignedTo: recipients.admin._id,
+                            requestId: company._id,
+                            subjectEmployeeId: company.companyId,
+                            subjectName: company.name,
+                            extra1,
+                            extra2,
+                        });
+                    }
+                    if (recipients.hr?._id) {
+                        await ensureDashboardAction({
+                            assignedTo: recipients.hr._id,
+                            requestId: company._id,
+                            subjectEmployeeId: company.companyId,
+                            subjectName: company.name,
+                            extra1,
+                            extra2,
+                        });
+                    }
+                    await markReminderSent({
+                        targetType: "company",
+                        targetId: String(company._id),
+                        docKey: doc.key,
+                        daysBefore: EXPIRY_DAY_TASK_MARKER,
+                        expiryDate: doc.expiryDate,
+                        metadata: { taskCreated: true, trigger: "expiry_day" },
+                    });
+                }
             }
         }
     }
@@ -335,7 +384,9 @@ const processEmployeeReminders = async () => {
 
         for (const doc of docs) {
             const days = getDaysUntil(doc.expiryDate);
-            if (!REMINDER_DAYS.includes(days)) continue;
+            const isReminderDay = REMINDER_DAYS.includes(days);
+            const isExpiryDay = days === EXPIRY_DAY;
+            if (!isReminderDay && !isExpiryDay) continue;
 
             const docKey = `employee:${employee.employeeId}:${doc.key}`;
             const alreadySent = await wasReminderSent({
@@ -346,14 +397,16 @@ const processEmployeeReminders = async () => {
             });
             if (alreadySent) continue;
 
-            const subject = `Employee document expiry reminder (${days} days): ${subjectName}`;
+            const subject = isExpiryDay
+                ? `Employee document expired: ${subjectName}`
+                : `Employee document expiry reminder (${days} days): ${subjectName}`;
             const html = `
                 <div style="font-family: Arial, sans-serif; line-height: 1.6;">
-                    <h3>Employee Document Expiry Reminder</h3>
+                    <h3>${isExpiryDay ? "Employee Document Expired" : "Employee Document Expiry Reminder"}</h3>
                     <p><strong>Employee:</strong> ${subjectName} (${employee.employeeId})</p>
                     <p><strong>Document:</strong> ${doc.label}</p>
                     <p><strong>Expiry Date:</strong> ${new Date(doc.expiryDate).toLocaleDateString("en-GB")}</p>
-                    <p><strong>Reminder:</strong> ${days} day(s) before expiry.</p>
+                    <p><strong>${isExpiryDay ? "Status" : "Reminder"}:</strong> ${isExpiryDay ? "Expired today. Immediate action required." : `${days} day(s) before expiry.`}</p>
                 </div>
             `;
 
@@ -390,10 +443,43 @@ const processEmployeeReminders = async () => {
                     targetType: "employee",
                     targetId: String(employee._id),
                     docKey,
-                    daysBefore: 0,
+                    daysBefore: THIRD_REMINDER_TASK_MARKER,
                     expiryDate: doc.expiryDate,
                     metadata: { taskCreated: true },
                 });
+            }
+
+            if (isExpiryDay) {
+                const taskAlreadyCreated = await wasReminderSent({
+                    targetType: "employee",
+                    targetId: String(employee._id),
+                    docKey,
+                    daysBefore: EXPIRY_DAY_TASK_MARKER,
+                });
+
+                if (!taskAlreadyCreated) {
+                    const extra1 = `Expired document action required: ${doc.label}`;
+                    const extra2 = `${subjectName} (${employee.employeeId})`;
+                    const assignees = [recipients.admin, recipients.hr, recipients.hod].filter((x) => x?._id);
+                    for (const a of assignees) {
+                        await ensureDashboardAction({
+                            assignedTo: a._id,
+                            requestId: employee._id,
+                            subjectEmployeeId: employee.employeeId,
+                            subjectName,
+                            extra1,
+                            extra2,
+                        });
+                    }
+                    await markReminderSent({
+                        targetType: "employee",
+                        targetId: String(employee._id),
+                        docKey,
+                        daysBefore: EXPIRY_DAY_TASK_MARKER,
+                        expiryDate: doc.expiryDate,
+                        metadata: { taskCreated: true, trigger: "expiry_day" },
+                    });
+                }
             }
         }
     }

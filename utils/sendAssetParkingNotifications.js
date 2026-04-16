@@ -26,6 +26,17 @@ const buildRecipients = (assignedEmployee, assetController) => {
     return recipients;
 };
 
+const buildRecipientsWithHod = (assignedEmployee, hodEmployee, assetController) => {
+    const recipients = [];
+    const assigned = resolveEmployeeEmail(assignedEmployee || {}).email;
+    const hod = resolveEmployeeEmail(hodEmployee || {}).email;
+    const controller = resolveEmployeeEmail(assetController || {}).email;
+    if (assigned) recipients.push(assigned);
+    if (hod && !recipients.includes(hod)) recipients.push(hod);
+    if (controller && !recipients.includes(controller)) recipients.push(controller);
+    return recipients;
+};
+
 export const sendParkingReminderEmail = async ({ asset, assignedEmployee, assetController, daysLeft }) => {
     try {
         const transporter = getTransporter();
@@ -63,5 +74,35 @@ export const sendParkingExpiredEmail = async ({ asset, assignedEmployee, assetCo
         });
     } catch (e) {
         console.error('[sendParkingExpiredEmail] Non-fatal error:', e?.message || e);
+    }
+};
+
+export const sendParkingExtensionEmail = async ({
+    asset,
+    assignedEmployee,
+    hodEmployee,
+    assetController,
+    previousExpiryDate,
+    extensionDays,
+    reason
+}) => {
+    try {
+        const transporter = getTransporter();
+        if (!transporter) return;
+        const to = buildRecipientsWithHod(assignedEmployee, hodEmployee, assetController);
+        if (!to.length) return;
+
+        const emailUser = process.env.EMAIL_USER || process.env.VERP_EMAIL || process.env.GMAIL_USER;
+        await transporter.sendMail({
+            from: `"VeRP Asset Management" <${emailUser}>`,
+            to: to.join(','),
+            subject: `Parking Extension: ${asset.assetId} (+${extensionDays} days)`,
+            html: `<p>Asset <strong>${asset.assetId} - ${asset.name}</strong> parking duration was extended.</p>
+                   <p><strong>Current expiry date:</strong> ${previousExpiryDate ? new Date(previousExpiryDate).toLocaleDateString() : 'N/A'}</p>
+                   <p><strong>Extension:</strong> ${extensionDays} day(s)</p>
+                   <p><strong>Reason:</strong> ${reason || 'N/A'}</p>`
+        });
+    } catch (e) {
+        console.error('[sendParkingExtensionEmail] Non-fatal error:', e?.message || e);
     }
 };

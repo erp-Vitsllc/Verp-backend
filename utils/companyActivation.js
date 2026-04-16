@@ -4,11 +4,6 @@ import { resolveFlowchartHrEmployee } from "./resolveFlowchartHrEmployee.js";
 import { syncDashboardAction } from "./syncDashboard.js";
 
 const hasValue = (v) => !(v === undefined || v === null || (typeof v === "string" && v.trim() === ""));
-const num = (v) => {
-    const n = Number(v);
-    return Number.isFinite(n) ? n : 0;
-};
-
 const hasAttachment = (v) => hasValue(v);
 
 const hasMoaDocument = (company = {}) => {
@@ -22,14 +17,10 @@ const hasMoaDocument = (company = {}) => {
 };
 
 export const calculateCompanyActivationProgress = (company = {}) => {
-    const owners = Array.isArray(company.owners) ? company.owners : [];
-    const validOwners = owners.filter((o) => hasValue(o?.name) && num(o?.sharePercentage) > 0);
-    const totalShare = validOwners.reduce((sum, o) => sum + num(o.sharePercentage), 0);
-
     const checks = [
         {
             key: "basicDetails",
-            label: "All basic details",
+            label: "Basic details",
             completed: [
                 company.name,
                 company.nickName,
@@ -41,7 +32,7 @@ export const calculateCompanyActivationProgress = (company = {}) => {
         },
         {
             key: "tradeLicense",
-            label: "Trade license",
+            label: "Trade License",
             completed: [
                 company.tradeLicenseNumber,
                 company.tradeLicenseIssueDate,
@@ -50,16 +41,11 @@ export const calculateCompanyActivationProgress = (company = {}) => {
         },
         {
             key: "establishmentCard",
-            label: "Establishment card",
+            label: "Establishment Card Details",
             completed: [
                 company.establishmentCardNumber,
                 company.establishmentCardExpiry,
             ].every(hasValue) && hasAttachment(company.establishmentCardAttachment),
-        },
-        {
-            key: "ownerDetails",
-            label: "Owner details",
-            completed: validOwners.length >= 1 && Math.abs(totalShare - 100) < 0.001,
         },
         {
             key: "moa",
