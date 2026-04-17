@@ -67,7 +67,7 @@ export const updateLabourCardDetails = async (req, res) => {
         const existingDocument = existingLabourCard?.labourCard?.document?.url || existingLabourCard?.labourCard?.document?.data;
         const existingContractDocument = existingLabourCard?.labourCard?.labourContractAttachment?.url || existingLabourCard?.labourCard?.labourContractAttachment?.data;
 
-        const missingFields = buildMissingFields({ number, expiryDate, upload, contractUpload }, existingDocument, existingContractDocument);
+        const missingFields = buildMissingFields({ number, issueDate, expiryDate, upload, contractUpload }, existingDocument, existingContractDocument);
         if (missingFields.length > 0) {
             return res.status(400).json({
                 message: "Missing required Labour Card fields.",
