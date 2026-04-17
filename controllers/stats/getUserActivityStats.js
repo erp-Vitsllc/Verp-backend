@@ -248,10 +248,19 @@ export const getUserActivityStats = async (req, res) => {
                 item.requestType === 'Asset Approval' &&
                 targetEmpNorm &&
                 normEmpId(item.subjectEmployeeId) === targetEmpNorm;
-            const isCompanyActivationRequester =
+
+            // Company activation: HR/approver row must stay "inbox" (To Action). Only the submitter's copy is "outgoing".
+            let companyActivationViewerRole = null;
+            if (item.requestType === 'Company Activation' && item.extra3) {
+                try {
+                    companyActivationViewerRole = JSON.parse(item.extra3).companyActivationViewerRole || null;
+                } catch {
+                    companyActivationViewerRole = null;
+                }
+            }
+            const isCompanyActivationRequesterCopy =
                 item.requestType === 'Company Activation' &&
-                viewerName &&
-                String(item.requestedByName || '').trim().toLowerCase() === viewerName.trim().toLowerCase();
+                companyActivationViewerRole === 'requester';
 
             activityList.push({
                 id: displayId,
@@ -265,7 +274,7 @@ export const getUserActivityStats = async (req, res) => {
                 extra2: item.extra2,
                 extra3: item.extra3,
                 targetEmployeeId: item.subjectEmployeeId?.toString(),
-                scope: (isCreatorSideAssetApproval || isCompanyActivationRequester) ? 'outgoing' : 'inbox'
+                scope: (isCreatorSideAssetApproval || isCompanyActivationRequesterCopy) ? 'outgoing' : 'inbox'
             });
             if (reqIdStr) seenRequests.set(reqIdStr, 'Pending');
         });
@@ -573,7 +582,12 @@ export const getUserActivityStats = async (req, res) => {
                 (i) => i.id?.toString() === reqIdStr && i.type === 'Profile Activation' && !i.isNotice
             );
             if (idx !== -1) {
-                activityList[idx] = { ...activityList[idx], ...activityItem };
+                const existing = activityList[idx];
+                // Do not replace a live Pending HR task with an older Approved/Rejected outcome row (same requestId).
+                if (existing.status === 'Pending' && ['Approved', 'Rejected'].includes(activityItem.status)) {
+                    return;
+                }
+                activityList[idx] = { ...existing, ...activityItem };
             } else {
                 activityList.push(activityItem);
                 seenRequests.set(reqIdStr, item.status);
@@ -835,7 +849,14 @@ export const getUserActivityStats = async (req, res) => {
                 // Since one profile can have multiple steps, we only add/update once
                 if (seenRequests.has(reqIdStr)) {
                     const idx = activityList.findIndex(item => item.id.toString() === reqIdStr && !item.isNotice);
-                    if (idx !== -1) activityList[idx] = activityItem;
+                    if (idx !== -1) {
+                        const existing = activityList[idx];
+                        // If the request is currently pending again, keep that live item visible for HR action.
+                        if (existing.status === 'Pending' && ['Approved', 'Rejected'].includes(activityItem.status)) {
+                            return;
+                        }
+                        activityList[idx] = activityItem;
+                    }
                 } else {
                     activityList.push(activityItem);
                     seenRequests.set(reqIdStr, status);

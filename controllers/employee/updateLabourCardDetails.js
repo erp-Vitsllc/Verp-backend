@@ -4,14 +4,18 @@ import { uploadDocumentToS3, deleteDocumentFromS3 } from "../../utils/s3Upload.j
 import { archiveEmployeeDocument } from "../../utils/archiveEmployeeDocument.js";
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
 
-const REQUIRED_FIELDS = ["number", "expiryDate", "upload"];
+const REQUIRED_FIELDS = ["number", "issueDate", "expiryDate", "upload", "contractUpload"];
 
-const buildMissingFields = (body, existingDocument) => {
+const buildMissingFields = (body, existingDocument, existingContractDocument) => {
     return REQUIRED_FIELDS.filter((field) => {
         if (field === "upload") {
             // Check if upload is provided OR if existing document exists in DB
             const hasUpload = body.upload && typeof body.upload === 'string' && body.upload.trim() !== '';
             return !hasUpload && !existingDocument;
+        }
+        if (field === "contractUpload") {
+            const hasContractUpload = body.contractUpload && typeof body.contractUpload === 'string' && body.contractUpload.trim() !== '';
+            return !hasContractUpload && !existingContractDocument;
         }
         const value = body[field];
         return value === undefined || value === null || value === "";
@@ -33,6 +37,9 @@ export const updateLabourCardDetails = async (req, res) => {
         upload,
         uploadName,
         uploadMime,
+        contractUpload,
+        contractUploadName,
+        contractUploadMime,
     } = req.body || {};
 
     // Type validation
@@ -41,6 +48,9 @@ export const updateLabourCardDetails = async (req, res) => {
     }
     if (upload !== undefined && typeof upload !== 'string') {
         return res.status(400).json({ message: "Upload must be a string (base64 or URL)" });
+    }
+    if (contractUpload !== undefined && typeof contractUpload !== 'string') {
+        return res.status(400).json({ message: "Contract upload must be a string (base64 or URL)" });
     }
 
     try {
@@ -55,8 +65,9 @@ export const updateLabourCardDetails = async (req, res) => {
         // Check if existing document exists in database (check for both url and data for backward compatibility)
         const existingLabourCard = await EmployeeLabourCard.findOne({ employeeId });
         const existingDocument = existingLabourCard?.labourCard?.document?.url || existingLabourCard?.labourCard?.document?.data;
+        const existingContractDocument = existingLabourCard?.labourCard?.labourContractAttachment?.url || existingLabourCard?.labourCard?.labourContractAttachment?.data;
 
-        const missingFields = buildMissingFields({ number, expiryDate, upload }, existingDocument);
+        const missingFields = buildMissingFields({ number, expiryDate, upload, contractUpload }, existingDocument, existingContractDocument);
         if (missingFields.length > 0) {
             return res.status(400).json({
                 message: "Missing required Labour Card fields.",
@@ -67,7 +78,13 @@ export const updateLabourCardDetails = async (req, res) => {
         const parsedIssueDate = normalizeDate(issueDate);
         const parsedExpiryDate = normalizeDate(expiryDate);
 
-        // Only validate expiryDate is valid. issueDate is optional.
+        if (!parsedIssueDate) {
+            return res.status(400).json({
+                message: "Invalid issue date provided.",
+            });
+        }
+
+        // Validate expiry date.
         if (!parsedExpiryDate) {
             return res.status(400).json({
                 message: "Invalid expiry date provided.",
@@ -76,8 +93,11 @@ export const updateLabourCardDetails = async (req, res) => {
 
         const previousLabourCard = existingLabourCard?.labourCard;
         const hasExistingDocument = Boolean(previousLabourCard?.document?.url || previousLabourCard?.document?.data);
+        const hasExistingContractDocument = Boolean(previousLabourCard?.labourContractAttachment?.url || previousLabourCard?.labourContractAttachment?.data);
         const hasNewDocumentUpload = Boolean(upload && typeof upload === "string" && upload.trim() !== "");
+        const hasNewContractDocumentUpload = Boolean(contractUpload && typeof contractUpload === "string" && contractUpload.trim() !== "");
         const shouldArchivePrevious = hasExistingDocument && hasNewDocumentUpload;
+        const shouldArchivePreviousContract = hasExistingContractDocument && hasNewContractDocumentUpload;
         if (shouldArchivePrevious) {
             await archiveEmployeeDocument({
                 employeeId,
@@ -86,6 +106,16 @@ export const updateLabourCardDetails = async (req, res) => {
                 issueDate: previousLabourCard?.issueDate || null,
                 expiryDate: previousLabourCard?.expiryDate || null,
                 document: previousLabourCard.document,
+            });
+        }
+        if (shouldArchivePreviousContract) {
+            await archiveEmployeeDocument({
+                employeeId,
+                type: "Labour Contract",
+                description: previousLabourCard?.number ? `Labour Contract (Labour Card No: ${previousLabourCard.number})` : "Labour Contract",
+                issueDate: previousLabourCard?.issueDate || null,
+                expiryDate: previousLabourCard?.expiryDate || null,
+                document: previousLabourCard.labourContractAttachment,
             });
         }
 
@@ -126,12 +156,44 @@ export const updateLabourCardDetails = async (req, res) => {
             documentData = existingLabourCard?.labourCard?.document || undefined;
         }
 
+        let contractDocumentData = undefined;
+        if (contractUpload && typeof contractUpload === 'string' && contractUpload.trim() !== '') {
+            if (contractUpload.startsWith('http://') || contractUpload.startsWith('https://')) {
+                contractDocumentData = {
+                    url: contractUpload,
+                    name: contractUploadName || "",
+                    mimeType: contractUploadMime || "",
+                };
+            } else {
+                const contractUploadResult = await uploadDocumentToS3(
+                    contractUpload,
+                    `employee-documents/${employeeId}/labour-contract`,
+                    contractUploadName || 'labour-contract.pdf',
+                    'raw'
+                );
+
+                if (!shouldArchivePreviousContract && existingLabourCard?.labourCard?.labourContractAttachment?.publicId) {
+                    await deleteDocumentFromS3(existingLabourCard.labourCard.labourContractAttachment.publicId);
+                }
+
+                contractDocumentData = {
+                    url: contractUploadResult.url,
+                    publicId: contractUploadResult.publicId,
+                    name: contractUploadName || "",
+                    mimeType: contractUploadMime || "",
+                };
+            }
+        } else {
+            contractDocumentData = existingLabourCard?.labourCard?.labourContractAttachment || undefined;
+        }
+
         // Build payload - preserve existing document if no new one provided
         const labourCardPayload = {
             number: number,
             issueDate: parsedIssueDate,
             expiryDate: parsedExpiryDate,
             document: documentData,
+            labourContractAttachment: contractDocumentData,
             lastUpdated: new Date(),
         };
 

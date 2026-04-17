@@ -16,6 +16,13 @@ const labourCardDocumentSchema = new mongoose.Schema(
             name: { type: String },
             mimeType: { type: String },
         },
+        labourContractAttachment: {
+            url: { type: String },
+            publicId: { type: String },
+            data: { type: String },
+            name: { type: String },
+            mimeType: { type: String },
+        },
         lastUpdated: { type: Date },
     },
     { _id: false }

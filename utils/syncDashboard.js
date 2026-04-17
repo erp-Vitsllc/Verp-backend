@@ -24,6 +24,7 @@ export const syncDashboardAction = async (data) => {
             subjectEmployee,
             extra1,
             extra2,
+            extra3,
             actionedBy,
             comment,
             requestedByName,
@@ -33,6 +34,9 @@ export const syncDashboardAction = async (data) => {
         // 1. If status is NOT pending, find and update any existing pending actions for this request
         if (status !== 'Pending') {
             const query = { requestId: requestId, status: 'Pending' };
+            if (requestType) {
+                query.requestType = requestType;
+            }
             // NEW: If assignedTo is provided for a non-pending status, only clear THAT person's action.
             // This is critical for parallel workflows (Reward) where one person acting shouldn't clear everyone.
             if (assignedTo) {
@@ -126,7 +130,8 @@ export const syncDashboardAction = async (data) => {
                 requestedByName: requestedByName || '',
                 requestedDate: new Date(),
                 extra1: extra1,
-                extra2: extra2
+                extra2: extra2,
+                ...(extra3 !== undefined && extra3 !== null ? { extra3: String(extra3) } : {})
             },
             { upsert: true, new: true }
         );

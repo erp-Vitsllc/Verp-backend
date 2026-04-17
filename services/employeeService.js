@@ -511,6 +511,12 @@ export const getCompleteEmployee = async (id) => {
                         url: labourCard.labourCard.document.url,
                         publicId: labourCard.labourCard.document.publicId
                     } : undefined,
+                    labourContractAttachment: labourCard.labourCard.labourContractAttachment ? {
+                        name: labourCard.labourCard.labourContractAttachment.name,
+                        mimeType: labourCard.labourCard.labourContractAttachment.mimeType,
+                        url: labourCard.labourCard.labourContractAttachment.url,
+                        publicId: labourCard.labourCard.labourContractAttachment.publicId
+                    } : undefined,
                     lastUpdated: labourCard.labourCard.lastUpdated,
                 } : undefined,
             }),
@@ -825,6 +831,9 @@ export const getCompleteEmployee = async (id) => {
         // Labour Card
         if (completeEmployee.labourCardDetails?.document) {
             signingPromises.push(signUrl(completeEmployee.labourCardDetails.document));
+        }
+        if (completeEmployee.labourCardDetails?.labourContractAttachment) {
+            signingPromises.push(signUrl(completeEmployee.labourCardDetails.labourContractAttachment, 'labour.contract'));
         }
         // Medical Insurance
         if (completeEmployee.medicalInsuranceDetails?.document) {

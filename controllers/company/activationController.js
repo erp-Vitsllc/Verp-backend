@@ -1,5 +1,7 @@
 import Company from "../../models/Company.js";
 import { calculateCompanyActivationProgress, submitCompanyActivation } from "../../utils/companyActivation.js";
+import { syncDashboardAction } from "../../utils/syncDashboard.js";
+import { formatActivationAttachmentLine, shortenUrlsInString } from "../../utils/shortenUrlsInString.js";
 
 const resolveCompanyById = async (id) => {
     return Company.findOne({
@@ -10,7 +12,7 @@ const resolveCompanyById = async (id) => {
 export const submitCompanyActivationRequest = async (req, res) => {
     try {
         const { id } = req.params;
-        const { reason, description, attachment } = req.body || {};
+        const { reason, description, attachment, attachmentName } = req.body || {};
         const company = await resolveCompanyById(id);
         if (!company) return res.status(404).json({ message: "Company not found" });
 
@@ -22,14 +24,21 @@ export const submitCompanyActivationRequest = async (req, res) => {
 
         const reasonText = String(reason).trim();
         const descriptionText = String(description).trim();
-        const attachmentText = attachment && String(attachment).trim()
-            ? `Attachment: ${String(attachment).trim()}`
-            : null;
+        const rawAtt = attachment != null ? String(attachment).trim() : "";
+        const attachmentLineFull = rawAtt ? `Attachment: ${rawAtt}` : null;
+        const attachmentLineShort =
+            formatActivationAttachmentLine(attachment, attachmentName) ||
+            (rawAtt ? shortenUrlsInString(`Attachment: ${rawAtt}`) : null);
+
+        const combinedFull = `Reason: ${reasonText}${descriptionText ? ` | Description: ${descriptionText}` : ""}${attachmentLineFull ? ` | ${attachmentLineFull}` : ""}`;
+        const combinedDashboard = `Reason: ${reasonText}${descriptionText ? ` | Description: ${descriptionText}` : ""}${attachmentLineShort ? ` | ${attachmentLineShort}` : ""}`;
+        const dashboardSummary = shortenUrlsInString(combinedDashboard);
 
         const result = await submitCompanyActivation({
             companyId: company._id,
             actor: req.user,
-            reason: `Reason: ${reasonText}${descriptionText ? ` | Description: ${descriptionText}` : ""}${attachmentText ? ` | ${attachmentText}` : ""}`,
+            reason: combinedFull,
+            dashboardSummary,
             force: false,
         });
 
@@ -72,6 +81,18 @@ export const approveCompanyActivationRequest = async (req, res) => {
         });
         await company.save();
 
+        try {
+            await syncDashboardAction({
+                requestId: company._id,
+                requestType: "Company Activation",
+                status: "Approved",
+                actionedBy: req.user?.employeeObjectId || req.user?._id,
+                comment: "Company activation approved",
+            });
+        } catch (syncErr) {
+            console.error("[approveCompanyActivationRequest] Dashboard sync error:", syncErr);
+        }
+
         return res.status(200).json({
             message: "Company activation approved successfully.",
             company,
@@ -102,6 +123,18 @@ export const rejectCompanyActivationRequest = async (req, res) => {
             comment: reason || "Company activation rejected",
         });
         await company.save();
+
+        try {
+            await syncDashboardAction({
+                requestId: company._id,
+                requestType: "Company Activation",
+                status: "Rejected",
+                actionedBy: req.user?.employeeObjectId || req.user?._id,
+                comment: reason || "Company activation rejected",
+            });
+        } catch (syncErr) {
+            console.error("[rejectCompanyActivationRequest] Dashboard sync error:", syncErr);
+        }
 
         return res.status(200).json({
             message: "Company activation rejected.",

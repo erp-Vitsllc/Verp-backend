@@ -2,6 +2,7 @@ import nodemailer from "nodemailer";
 import Company from "../models/Company.js";
 import { resolveFlowchartHrEmployee } from "./resolveFlowchartHrEmployee.js";
 import { syncDashboardAction } from "./syncDashboard.js";
+import { shortenUrlsInString } from "./shortenUrlsInString.js";
 
 const hasValue = (v) => !(v === undefined || v === null || (typeof v === "string" && v.trim() === ""));
 const hasAttachment = (v) => hasValue(v);
@@ -117,6 +118,8 @@ export const submitCompanyActivation = async ({
     companyId,
     actor = null,
     reason = "Company submitted for activation",
+    /** Shorter text for dashboard / notifications (full URL kept only in `reason` / workflow when provided). */
+    dashboardSummary = null,
     force = false,
 }) => {
     const company = await Company.findById(companyId);
@@ -139,6 +142,7 @@ export const submitCompanyActivation = async ({
 
     const hr = hrResolved.employee;
     const requestedByName = getActorName(actor);
+    const extra1ForDashboard = dashboardSummary != null ? dashboardSummary : reason;
 
     company.status = "Inactive";
     company.activationStatus = "submitted";
@@ -165,8 +169,9 @@ export const submitCompanyActivation = async ({
             designation: company.nickName || "",
         },
         requestedByName,
-        extra1: reason,
+        extra1: extra1ForDashboard,
         extra2: company.companyId || "",
+        extra3: JSON.stringify({ companyActivationViewerRole: "approver" }),
     });
 
     if (actor?.employeeObjectId || actor?._id) {
@@ -182,8 +187,9 @@ export const submitCompanyActivation = async ({
                 designation: company.nickName || "",
             },
             requestedByName,
-            extra1: reason,
+            extra1: extra1ForDashboard,
             extra2: company.companyId || "",
+            extra3: JSON.stringify({ companyActivationViewerRole: "requester" }),
         });
     }
 
@@ -194,7 +200,7 @@ export const submitCompanyActivation = async ({
             hrEmail: hrResolved.email,
             hrName,
             requestedByName,
-            reason,
+            reason: shortenUrlsInString(reason),
         });
     } catch (e) {
         console.error("[submitCompanyActivation] Email failed:", e?.message || e);

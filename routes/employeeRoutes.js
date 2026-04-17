@@ -102,6 +102,7 @@ router.get("/loan-eligible", getLoanEligibleEmployees);
 
 import { getDashboardStats } from "../controllers/stats/getDashboardStats.js";
 import { getUserActivityStats } from "../controllers/stats/getUserActivityStats.js";
+import { deleteDashboardAction } from "../controllers/stats/deleteDashboardAction.js";
 import { getHierarchy } from "../controllers/employee/getHierarchy.js";
 import { getTeamStats } from "../controllers/stats/getTeamStats.js";
 
@@ -124,6 +125,9 @@ router.get("/dashboard/stats", checkPermission('hrm_employees_list', 'view'), ge
 
 // User Specific Stats - basic access for anyone logged in
 router.get("/dashboard/user-stats", getUserActivityStats);
+
+// Dismiss a dashboard notification row (own assignee or admin)
+router.delete("/dashboard/actions/:actionId", deleteDashboardAction);
 
 // Add employee - requires create permission
 router.post("/", checkPermission('hrm_employees_add', 'create'), addEmployee);
