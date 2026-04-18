@@ -12,6 +12,7 @@ import ExpiryReminderLog from "../models/ExpiryReminderLog.js";
 import { getDepartmentHOD } from "./getDepartmentHOD.js";
 import { getManagementHOD } from "./getManagementHOD.js";
 import { resolveEmployeeEmail } from "./resolveEmployeeEmail.js";
+import { resolveFlowchartHrEmployee } from "./resolveFlowchartHrEmployee.js";
 
 const REMINDER_DAYS = [30, 20, 10];
 const EXPIRY_DAY = 0;
@@ -68,12 +69,22 @@ const sendExpiryReminderEmail = async ({ to, subject, html }) => {
     });
 };
 
-const ensureDashboardAction = async ({ assignedTo, requestId, subjectEmployeeId, subjectName, extra1, extra2 }) => {
+/** Company trade licence / establishment / ejari expiry tasks — assignees are Admin/HR on company record. */
+const ensureDashboardAction = async ({
+    assignedTo,
+    assignedToEmpId,
+    requestId,
+    subjectEmployeeId,
+    subjectName,
+    extra1,
+    extra2,
+    requestType = "Document Expiry Reminder",
+}) => {
     if (!assignedTo || !requestId) return;
     const exists = await DashboardAction.findOne({
         assignedTo,
         requestId,
-        requestType: "Document Expiry Reminder",
+        requestType,
         status: "Pending",
         extra1,
     }).lean();
@@ -81,8 +92,9 @@ const ensureDashboardAction = async ({ assignedTo, requestId, subjectEmployeeId,
 
     await DashboardAction.create({
         assignedTo,
+        ...(assignedToEmpId ? { assignedToEmpId } : {}),
         requestId,
-        requestType: "Document Expiry Reminder",
+        requestType,
         status: "Pending",
         subjectEmployeeId,
         subjectName,
@@ -129,20 +141,32 @@ const getCompanyRecipientBundle = async () => {
     return { admin, hr, management, emails };
 };
 
-const getEmployeeRecipientBundle = async (employee) => {
-    const [admin, hr, fallbackHod] = await Promise.all([
-        getDepartmentHOD("admincontroller"),
-        getDepartmentHOD("hr"),
-        getManagementHOD(),
+/**
+ * Employee document expiry emails: Flowchart HR + the employee + their primary reportee (no generic “management” fallback).
+ */
+const collectAddressEmails = (emp) => {
+    if (!emp || typeof emp !== "object") return [];
+    return dedupeEmails([
+        emp.companyEmail,
+        emp.workEmail,
+        emp.personalEmail,
+        emp.email,
     ]);
-    const directHod = employee?.primaryReportee || null;
-    const hod = directHod?._id ? directHod : fallbackHod;
-    const emails = dedupeEmails([
-        resolveEmployeeEmail(admin || {}).email,
-        resolveEmployeeEmail(hr || {}).email,
-        resolveEmployeeEmail(hod || {}).email,
-    ]);
-    return { admin, hr, hod, emails };
+};
+
+/** Same Flowchart HR as profile / company activation; falls back to department HOD if flowchart HR is missing. */
+const getEmployeeDocExpiryEmails = async (employee) => {
+    let hrEmail = null;
+    const hrResolved = await resolveFlowchartHrEmployee();
+    if (!hrResolved.error && hrResolved.email) {
+        hrEmail = hrResolved.email;
+    } else {
+        const hr = await getDepartmentHOD("hr");
+        hrEmail = resolveEmployeeEmail(hr || {}).email;
+    }
+    const selfEmails = collectAddressEmails(employee);
+    const reporteeEmails = collectAddressEmails(employee?.primaryReportee);
+    return dedupeEmails([hrEmail, ...selfEmails, ...reporteeEmails].filter(Boolean));
 };
 
 const buildCompanyDocuments = (company) => {
@@ -171,6 +195,26 @@ const buildCompanyDocuments = (company) => {
         });
     });
 
+    (company?.ejari || []).forEach((ej, idx) => {
+        if (!ej?.expiryDate) return;
+        const subKey = ej?._id != null ? String(ej._id) : `idx-${idx}`;
+        docs.push({
+            key: `company:${company._id}:ejari:${subKey}`,
+            label: ej?.type ? `Ejari — ${ej.type}` : "Ejari",
+            expiryDate: ej.expiryDate,
+        });
+    });
+
+    (company?.insurance || []).forEach((ins, idx) => {
+        if (!ins?.expiryDate) return;
+        const subKey = ins?._id != null ? String(ins._id) : `idx-${idx}`;
+        docs.push({
+            key: `company:${company._id}:insurance:${subKey}`,
+            label: ins?.type ? `Insurance — ${ins.type}` : "Insurance",
+            expiryDate: ins.expiryDate,
+        });
+    });
+
     const ownerFields = [
         { key: "passport", label: "Passport" },
         { key: "visa", label: "Visa" },
@@ -196,7 +240,7 @@ const buildCompanyDocuments = (company) => {
 
 const processCompanyReminders = async () => {
     const companies = await Company.find({}).select(
-        "_id name companyId tradeLicenseExpiry establishmentCardExpiry documents owners"
+        "_id name companyId tradeLicenseExpiry establishmentCardExpiry documents ejari insurance owners"
     ).lean();
     const recipients = await getCompanyRecipientBundle();
 
@@ -251,6 +295,7 @@ const processCompanyReminders = async () => {
                 if (recipients.admin?._id) {
                     await ensureDashboardAction({
                         assignedTo: recipients.admin._id,
+                        assignedToEmpId: recipients.admin.employeeId,
                         requestId: company._id,
                         subjectEmployeeId: company.companyId,
                         subjectName: company.name,
@@ -261,6 +306,7 @@ const processCompanyReminders = async () => {
                 if (recipients.hr?._id) {
                     await ensureDashboardAction({
                         assignedTo: recipients.hr._id,
+                        assignedToEmpId: recipients.hr.employeeId,
                         requestId: company._id,
                         subjectEmployeeId: company.companyId,
                         subjectName: company.name,
@@ -292,6 +338,7 @@ const processCompanyReminders = async () => {
                     if (recipients.admin?._id) {
                         await ensureDashboardAction({
                             assignedTo: recipients.admin._id,
+                            assignedToEmpId: recipients.admin.employeeId,
                             requestId: company._id,
                             subjectEmployeeId: company.companyId,
                             subjectName: company.name,
@@ -302,6 +349,7 @@ const processCompanyReminders = async () => {
                     if (recipients.hr?._id) {
                         await ensureDashboardAction({
                             assignedTo: recipients.hr._id,
+                            assignedToEmpId: recipients.hr.employeeId,
                             requestId: company._id,
                             subjectEmployeeId: company.companyId,
                             subjectName: company.name,
@@ -379,7 +427,7 @@ const processEmployeeReminders = async () => {
             });
         });
 
-        const recipients = await getEmployeeRecipientBundle(employee);
+        const recipients = await getEmployeeDocExpiryEmails(employee);
         const subjectName = `${employee.firstName || ""} ${employee.lastName || ""}`.trim() || employee.employeeId;
 
         for (const doc of docs) {
@@ -411,7 +459,7 @@ const processEmployeeReminders = async () => {
             `;
 
             await sendExpiryReminderEmail({
-                to: recipients.emails,
+                to: recipients,
                 subject,
                 html,
             });
@@ -428,17 +476,16 @@ const processEmployeeReminders = async () => {
             if (days === 10) {
                 const extra1 = `Expiry follow-up required: ${doc.label}`;
                 const extra2 = `${subjectName} (${employee.employeeId})`;
-                const assignees = [recipients.admin, recipients.hr, recipients.hod].filter((x) => x?._id);
-                for (const a of assignees) {
-                    await ensureDashboardAction({
-                        assignedTo: a._id,
-                        requestId: employee._id,
-                        subjectEmployeeId: employee.employeeId,
-                        subjectName,
-                        extra1,
-                        extra2,
-                    });
-                }
+                await ensureDashboardAction({
+                    assignedTo: employee._id,
+                    assignedToEmpId: employee.employeeId,
+                    requestId: employee._id,
+                    subjectEmployeeId: employee.employeeId,
+                    subjectName,
+                    extra1,
+                    extra2,
+                    requestType: "Employee Document Expiry Reminder",
+                });
                 await markReminderSent({
                     targetType: "employee",
                     targetId: String(employee._id),
@@ -460,17 +507,16 @@ const processEmployeeReminders = async () => {
                 if (!taskAlreadyCreated) {
                     const extra1 = `Expired document action required: ${doc.label}`;
                     const extra2 = `${subjectName} (${employee.employeeId})`;
-                    const assignees = [recipients.admin, recipients.hr, recipients.hod].filter((x) => x?._id);
-                    for (const a of assignees) {
-                        await ensureDashboardAction({
-                            assignedTo: a._id,
-                            requestId: employee._id,
-                            subjectEmployeeId: employee.employeeId,
-                            subjectName,
-                            extra1,
-                            extra2,
-                        });
-                    }
+                    await ensureDashboardAction({
+                        assignedTo: employee._id,
+                        assignedToEmpId: employee.employeeId,
+                        requestId: employee._id,
+                        subjectEmployeeId: employee.employeeId,
+                        subjectName,
+                        extra1,
+                        extra2,
+                        requestType: "Employee Document Expiry Reminder",
+                    });
                     await markReminderSent({
                         targetType: "employee",
                         targetId: String(employee._id),
@@ -485,8 +531,42 @@ const processEmployeeReminders = async () => {
     }
 };
 
+/**
+ * Older runs stored employee document tasks as `Document Expiry Reminder` assigned to HR/Admin.
+ * Pending rows whose `requestId` is an employee `_id` are moved to `Employee Document Expiry Reminder`
+ * and assigned to that employee so company vs employee notification UIs stay separated.
+ */
+const migrateLegacyEmployeeDocExpiryActions = async () => {
+    try {
+        const pending = await DashboardAction.find({
+            requestType: "Document Expiry Reminder",
+            status: "Pending",
+        })
+            .select("_id requestId")
+            .lean();
+
+        for (const row of pending) {
+            if (!row.requestId) continue;
+            const emp = await EmployeeBasic.findById(row.requestId).select("_id").lean();
+            if (!emp) continue;
+            await DashboardAction.updateOne(
+                { _id: row._id },
+                {
+                    $set: {
+                        requestType: "Employee Document Expiry Reminder",
+                        assignedTo: emp._id,
+                    },
+                }
+            );
+        }
+    } catch (e) {
+        console.warn("[migrateLegacyEmployeeDocExpiryActions]", e?.message || e);
+    }
+};
+
 export const processDocumentExpiryReminders = async () => {
     try {
+        await migrateLegacyEmployeeDocExpiryActions();
         await processCompanyReminders();
         await processEmployeeReminders();
     } catch (err) {

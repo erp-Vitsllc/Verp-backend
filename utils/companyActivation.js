@@ -1,8 +1,32 @@
 import nodemailer from "nodemailer";
 import Company from "../models/Company.js";
+import EmployeeBasic from "../models/EmployeeBasic.js";
 import { resolveFlowchartHrEmployee } from "./resolveFlowchartHrEmployee.js";
 import { syncDashboardAction } from "./syncDashboard.js";
 import { shortenUrlsInString } from "./shortenUrlsInString.js";
+
+const dedupeEmailList = (emails = []) => {
+    const seen = new Set();
+    return emails
+        .map((e) => (e || "").trim())
+        .filter((e) => {
+            if (!e) return false;
+            const k = e.toLowerCase();
+            if (seen.has(k)) return false;
+            seen.add(k);
+            return true;
+        });
+};
+
+const getActorCcEmails = async (actor, excludeLowerEmails = new Set()) => {
+    if (!actor?.employeeObjectId) return [];
+    const emp = await EmployeeBasic.findById(actor.employeeObjectId)
+        .select("companyEmail workEmail personalEmail email")
+        .lean();
+    if (!emp) return [];
+    const raw = [emp.companyEmail, emp.workEmail, emp.personalEmail, emp.email];
+    return dedupeEmailList(raw).filter((e) => !excludeLowerEmails.has(e.toLowerCase()));
+};
 
 const hasValue = (v) => !(v === undefined || v === null || (typeof v === "string" && v.trim() === ""));
 const hasAttachment = (v) => hasValue(v);
@@ -63,7 +87,7 @@ export const calculateCompanyActivationProgress = (company = {}) => {
     return { checks, completed, total, percentage, missing };
 };
 
-const sendCompanyActivationEmailToHr = async ({ company, hrEmail, hrName, requestedByName, reason }) => {
+const sendCompanyActivationEmailToHr = async ({ company, hrEmail, hrName, requestedByName, reason, ccEmails = [] }) => {
     const emailUser = process.env.EMAIL_USER?.trim();
     const emailPass = process.env.EMAIL_PASS?.trim();
     if (!emailUser || !emailPass || !hrEmail) return;
@@ -100,9 +124,14 @@ const sendCompanyActivationEmailToHr = async ({ company, hrEmail, hrName, reques
         </div>
     `;
 
+    const hrLower = (hrEmail || "").trim().toLowerCase();
+    const exclude = new Set([hrLower]);
+    const cc = dedupeEmailList(ccEmails).filter((e) => !exclude.has(e.toLowerCase()));
+
     await transporter.sendMail({
         from: `"VeRP Portal" <${emailUser}>`,
         to: hrEmail,
+        ...(cc.length ? { cc: cc.join(", ") } : {}),
         subject,
         html,
     });
@@ -195,12 +224,15 @@ export const submitCompanyActivation = async ({
 
     try {
         const hrName = `${hr.firstName || ""} ${hr.lastName || ""}`.trim() || "HR";
+        const hrMailLower = (hrResolved.email || "").trim().toLowerCase();
+        const actorCc = await getActorCcEmails(actor, new Set(hrMailLower ? [hrMailLower] : []));
         await sendCompanyActivationEmailToHr({
             company,
             hrEmail: hrResolved.email,
             hrName,
             requestedByName,
             reason: shortenUrlsInString(reason),
+            ccEmails: actorCc,
         });
     } catch (e) {
         console.error("[submitCompanyActivation] Email failed:", e?.message || e);

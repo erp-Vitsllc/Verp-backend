@@ -100,6 +100,8 @@ const companySchema = new mongoose.Schema(
             {
                 type: { type: String },
                 description: { type: String },
+                context: { type: String },
+                provider: { type: String },
                 issueDate: { type: Date },
                 startDate: { type: Date },
                 expiryDate: { type: Date },
@@ -117,6 +119,9 @@ const companySchema = new mongoose.Schema(
             {
                 type: { type: String }, // Medical, Liability, etc.
                 provider: { type: String },
+                description: { type: String },
+                context: { type: String },
+                issueDate: { type: Date },
                 startDate: { type: Date },
                 expiryDate: { type: Date },
                 value: { type: Number },
@@ -131,6 +136,10 @@ const companySchema = new mongoose.Schema(
         ejari: [
             {
                 type: { type: String }, // Dynamic name like "Office Rental", "Warehouse Lease"
+                description: { type: String },
+                provider: { type: String },
+                context: { type: String },
+                issueDate: { type: Date },
                 startDate: { type: Date },
                 expiryDate: { type: Date },
                 value: { type: Number },

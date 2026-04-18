@@ -240,12 +240,17 @@ const assetItemSchema = new mongoose.Schema({
     accidentStartedAt: { type: Date, default: null },
     accidentActiveUntil: { type: Date, default: null },
     accidentReminderLastSentAt: { type: Date, default: null },
-    /** Multi-step approval after adding a vehicle service record (HR → Accounts → On Service → AC/Admin → Management). */
+    /** Multi-step approval: requester → HR → Accounts → Asset Controller (on service), then complete. */
     activeServiceWorkflow: {
         serviceRecordId: { type: mongoose.Schema.Types.ObjectId, default: null },
         stage: { type: String, default: null },
         previousStatus: { type: String, default: null },
         serviceTypeLabel: { type: String, default: '' },
+        accountsHold: {
+            reason: { type: String, default: '' },
+            days: { type: Number, default: null },
+            heldAt: { type: Date, default: null },
+        },
         history: [{
             stage: { type: String },
             action: { type: String },
@@ -285,11 +290,26 @@ const assetItemSchema = new mongoose.Schema({
         value: { type: Number },
         remark: { type: String },
         invoice: { type: String },           // URL to uploaded invoice
-        attachment: { type: String },        // URL to any supporting attachment
+        attachment: { type: String },        // Primary quotation / combined attachment URL
+        quotation2: { type: String },        // Optional 2nd quotation (Tire / Mechanical / Body / Accident)
+        quotation3: { type: String },        // Optional 3rd quotation
         requestedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'EmployeeBasic' },
         lastWarningSentAt: { type: Date, default: null },
         reminderSentAt: { type: Date, default: null },
-        durationCompleteSentAt: { type: Date, default: null }
+        durationCompleteSentAt: { type: Date, default: null },
+        /** Frozen copy of multi-step approval when workflow completes/rejects (fleet tracker per row). */
+        workflowSnapshot: {
+            stage: { type: String, default: null },
+            serviceTypeLabel: { type: String, default: '' },
+            serviceRecordId: { type: mongoose.Schema.Types.ObjectId, default: null },
+            history: [{
+                stage: { type: String },
+                action: { type: String },
+                note: { type: String, default: '' },
+                byName: { type: String, default: '' },
+                at: { type: Date, default: Date.now }
+            }]
+        }
     }]
 }, {
     timestamps: true
@@ -307,6 +327,13 @@ assetItemSchema.pre('save', function (next) {
             // Normalize pendingAction: string 'null' or empty string -> actual null
             if (acc.pendingAction === 'null' || acc.pendingAction === '') {
                 acc.pendingAction = null;
+            }
+        });
+    }
+    if (this.services && this.services.length > 0) {
+        this.services.forEach((svc) => {
+            if (!svc._id) {
+                svc._id = new mongoose.Types.ObjectId();
             }
         });
     }

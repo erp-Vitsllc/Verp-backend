@@ -665,6 +665,356 @@ export const getVehicleFleetDashboard = async (req, res) => {
     }
 };
 
+function mapAssetHistoryWorkflowActionToTimelineAction(wa) {
+    if (wa === 'start') return 'created';
+    return wa || 'approve';
+}
+
+function inferWorkflowStageFromHistoryEvents(eventsChrono) {
+    if (!eventsChrono.length) return null;
+    if (eventsChrono.some((e) => e.workflowAction === 'reject')) return 'rejected';
+    const last = eventsChrono[eventsChrono.length - 1];
+    if (!last) return null;
+    if (last.workflowAction === 'hold') return 'pending_accounts';
+    if (last.workflowAction === 'start') return 'pending_hr';
+    if (last.workflowAction === 'approve') {
+        if (last.stage === 'pending_admin' || last.stage === 'pending_management') return 'complete';
+        const next = {
+            pending_hr: 'pending_accounts',
+            pending_accounts: 'pending_admin',
+            pending_admin: 'complete',
+            pending_management: 'complete',
+        };
+        return next[last.stage] || 'complete';
+    }
+    if (last.stage) return last.stage;
+    return null;
+}
+
+/** Map embedded snapshot history (action: created|approve|…) to infer stage when `stage` field missing. */
+function inferStageFromEmbeddedHistory(hist) {
+    if (!Array.isArray(hist) || !hist.length) return null;
+    const ev = hist.map((h) => ({
+        stage: h.stage,
+        workflowAction: h.action === 'created' ? 'start' : h.action,
+    }));
+    return inferWorkflowStageFromHistoryEvents(ev) || null;
+}
+
+/** When services[].workflowSnapshot was never stored, rebuild from AssetHistory (details.serviceRecordId). */
+function workflowSnapshotFromAssetHistoryDocs(historyDocs, serviceTypeLabelFallback) {
+    if (!historyDocs?.length) return null;
+    const sorted = [...historyDocs].sort((a, b) => new Date(a.date) - new Date(b.date));
+    const timeline = sorted.map((d) => {
+        const det = d.details || {};
+        return {
+            stage: det.stage,
+            workflowAction: det.workflowAction,
+            note: det.note || '',
+            byName: det.byName || '',
+            at: d.date,
+        };
+    });
+    let stage = inferWorkflowStageFromHistoryEvents(
+        timeline.map((t) => ({ stage: t.stage, workflowAction: t.workflowAction }))
+    );
+    if (!stage && timeline.length) {
+        const hasApprove = timeline.some((t) => t.workflowAction === 'approve');
+        stage = hasApprove ? 'complete' : 'pending_hr';
+    }
+    if (!stage) return null;
+    const history = timeline.map((t) => ({
+        stage: t.stage,
+        action: mapAssetHistoryWorkflowActionToTimelineAction(t.workflowAction),
+        note: t.note,
+        byName: t.byName,
+        at: t.at,
+    }));
+    const firstDet = sorted[0]?.details || {};
+    return {
+        stage,
+        serviceTypeLabel: firstDet.serviceTypeLabel || serviceTypeLabelFallback || '',
+        serviceRecordId: firstDet.serviceRecordId || null,
+        history,
+    };
+}
+
+/** Mixed `details.serviceRecordId` may be ObjectId, string, or populated shape. */
+function rawServiceRecordIdFromHistoryDetails(details) {
+    let sid = details?.serviceRecordId;
+    if (sid != null && typeof sid === 'object' && !(sid instanceof mongoose.Types.ObjectId) && sid._id) {
+        sid = sid._id;
+    }
+    return sid;
+}
+
+/** Stable map key for pairing AssetHistory rows to services[]. */
+function workflowLogKey(assetId, serviceSubdocId) {
+    const aid = String(assetId);
+    let sid = '';
+    if (serviceSubdocId != null && serviceSubdocId !== '') {
+        const raw = String(serviceSubdocId);
+        sid = mongoose.Types.ObjectId.isValid(raw) ? new mongoose.Types.ObjectId(raw).toString() : raw;
+    }
+    return `${aid}::${sid}`;
+}
+
+function serviceTypeLabelCompatibleWithRow(logLabel, rowServiceType) {
+    const L = String(logLabel || '').trim();
+    const T = String(rowServiceType || '').trim();
+    if (!L || !T) return true;
+    if (L === T) return true;
+    const a = L.toLowerCase();
+    const b = T.toLowerCase();
+    return a.includes(b) || b.includes(a);
+}
+
+/**
+ * Logs without details.serviceRecordId: assign each to the nearest service row by date
+ * (same calendar day was too strict when workflow events and service.date differ).
+ * Uses label match when possible; falls back to date-only so custom labels do not drop all logs.
+ */
+function assignOrphanLogsToServicesByNearestDate(assetId, services, orphans) {
+    const out = new Map();
+    if (!orphans?.length || !services?.length) return out;
+    const aid = String(assetId);
+    const sorted = [...services].sort((a, b) => {
+        const da = a.date ? new Date(a.date).getTime() : 0;
+        const db = b.date ? new Date(b.date).getTime() : 0;
+        if (da !== db) return da - db;
+        return String(a._id).localeCompare(String(b._id));
+    });
+    const maxDistMs = 400 * 24 * 60 * 60 * 1000;
+
+    const pickNearest = (log, requireTypeMatch) => {
+        let best = null;
+        let bestDist = Infinity;
+        const lt = new Date(log.date).getTime();
+        const stLbl = String(log.details?.serviceTypeLabel || '').trim();
+        for (const s of sorted) {
+            const sType = String(s.serviceType || '').trim();
+            if (requireTypeMatch && !serviceTypeLabelCompatibleWithRow(stLbl, sType)) continue;
+            const sd = s.date ? new Date(s.date).getTime() : lt;
+            const d = Math.abs(lt - sd);
+            if (
+                d < bestDist ||
+                (d === bestDist && best && String(s._id).localeCompare(String(best._id)) < 0)
+            ) {
+                bestDist = d;
+                best = s;
+            }
+        }
+        if (!best || bestDist > maxDistMs) return null;
+        return best;
+    };
+
+    for (const log of orphans) {
+        let best = pickNearest(log, true);
+        if (!best) best = pickNearest(log, false);
+        if (!best) continue;
+        const key = workflowLogKey(aid, best._id);
+        if (!out.has(key)) out.set(key, []);
+        out.get(key).push(log);
+    }
+    for (const arr of out.values()) {
+        arr.sort((a, b) => new Date(a.date) - new Date(b.date));
+    }
+    return out;
+}
+
+/**
+ * Flat list of all service records across vehicle assets (for fleet dashboard table).
+ * @route GET /api/AssetItem/vehicle-fleet-service-requests
+ */
+export const getVehicleFleetServiceRequests = async (req, res) => {
+    try {
+        const draftVis = buildDraftVisibilityQuery(req.user);
+        const items = await AssetItem.find({ $and: [draftVis] })
+            .populate('typeId', 'name')
+            .select('assetId name plateEmirate plateNumber services typeId activeServiceWorkflow')
+            .lean();
+
+        const isVehicleAsset = (it) => {
+            const plate = (it.plateNumber || '').trim();
+            if (plate) return true;
+            const t = (it.typeId?.name || '').toLowerCase();
+            return t.includes('vehicle') || t.includes('car') || t.includes('fleet') || t.includes('truck');
+        };
+
+        const vehicles = items.filter(isVehicleAsset);
+
+        const assetIds = [];
+        vehicles.forEach((vv) => {
+            assetIds.push(vv._id);
+        });
+        const keyedWorkflowLogs = new Map();
+        const unkeyedWorkflowLogsByAsset = new Map();
+        if (assetIds.length) {
+            const wfLogsAll = await AssetHistory.find({
+                assetId: { $in: assetIds },
+                'details.type': 'VehicleServiceWorkflow',
+            })
+                .select('assetId date details')
+                .lean();
+            for (const log of wfLogsAll) {
+                const sid = rawServiceRecordIdFromHistoryDetails(log.details);
+                const aid = String(log.assetId);
+                if (sid != null && sid !== '') {
+                    const k = workflowLogKey(aid, sid);
+                    if (!keyedWorkflowLogs.has(k)) keyedWorkflowLogs.set(k, []);
+                    keyedWorkflowLogs.get(k).push(log);
+                } else {
+                    if (!unkeyedWorkflowLogsByAsset.has(aid)) unkeyedWorkflowLogsByAsset.set(aid, []);
+                    unkeyedWorkflowLogsByAsset.get(aid).push(log);
+                }
+            }
+        }
+
+        const orphanLogsByServiceKey = new Map();
+        for (const v of vehicles) {
+            const orphans = unkeyedWorkflowLogsByAsset.get(String(v._id)) || [];
+            const part = assignOrphanLogsToServicesByNearestDate(v._id, v.services || [], orphans);
+            for (const [k, logs] of part.entries()) {
+                orphanLogsByServiceKey.set(k, logs);
+            }
+        }
+
+        const vehicleLabel = (v) => {
+            const plate = [v.plateEmirate, v.plateNumber].filter(Boolean).join(' ').trim();
+            if (plate) return plate;
+            return v.name || v.assetId || String(v._id);
+        };
+
+        const rows = [];
+        for (const v of vehicles) {
+            const vLabel = vehicleLabel(v);
+            const wf = v.activeServiceWorkflow || {};
+            const wfSid = wf.serviceRecordId;
+            for (const s of v.services || []) {
+                const [attachment, quotation2, quotation3, invoice] = await Promise.all([
+                    s.attachment ? getSignedFileUrl(s.attachment) : Promise.resolve(null),
+                    s.quotation2 ? getSignedFileUrl(s.quotation2) : Promise.resolve(null),
+                    s.quotation3 ? getSignedFileUrl(s.quotation3) : Promise.resolve(null),
+                    s.invoice ? getSignedFileUrl(s.invoice) : Promise.resolve(null),
+                ]);
+                const wfMatch = wfSid && String(wfSid) === String(s._id);
+                const stored = s.workflowSnapshot;
+                let workflowSnapshot = null;
+                if (stored && (stored.stage || (Array.isArray(stored.history) && stored.history.length))) {
+                    const sh = Array.isArray(stored.history) ? stored.history : [];
+                    let stageVal = stored.stage;
+                    if (!stageVal && sh.length) {
+                        stageVal = inferStageFromEmbeddedHistory(sh) || 'complete';
+                    }
+                    workflowSnapshot = {
+                        stage: stageVal,
+                        serviceTypeLabel: stored.serviceTypeLabel || '',
+                        serviceRecordId: stored.serviceRecordId || s._id,
+                        history: sh.map((h) => ({
+                            stage: h.stage,
+                            action: h.action,
+                            note: h.note || '',
+                            byName: h.byName || '',
+                            at: h.at,
+                        })),
+                    };
+                } else if (wfMatch && wf.stage) {
+                    const hist = Array.isArray(wf.history) ? wf.history : [];
+                    workflowSnapshot = {
+                        stage: wf.stage,
+                        serviceTypeLabel: wf.serviceTypeLabel || '',
+                        serviceRecordId: wf.serviceRecordId,
+                        history: hist.map((h) => ({
+                            stage: h.stage,
+                            action: h.action,
+                            note: h.note || '',
+                            byName: h.byName || '',
+                            at: h.at,
+                        })),
+                    };
+                }
+                if (!workflowSnapshot) {
+                    const k = workflowLogKey(v._id, s._id);
+                    let docs = keyedWorkflowLogs.get(k);
+                    if (!docs?.length) {
+                        docs = orphanLogsByServiceKey.get(k);
+                    }
+                    if (docs?.length) {
+                        const rebuilt = workflowSnapshotFromAssetHistoryDocs(docs, s.serviceType);
+                        if (rebuilt && (rebuilt.stage || (rebuilt.history && rebuilt.history.length))) {
+                            const sh = Array.isArray(rebuilt.history) ? rebuilt.history : [];
+                            workflowSnapshot = {
+                                stage: rebuilt.stage || 'complete',
+                                serviceTypeLabel: rebuilt.serviceTypeLabel || '',
+                                serviceRecordId: rebuilt.serviceRecordId || s._id,
+                                history: sh.map((h) => ({
+                                    stage: h.stage,
+                                    action: h.action,
+                                    note: h.note || '',
+                                    byName: h.byName || '',
+                                    at: h.at,
+                                })),
+                            };
+                        }
+                    }
+                }
+                if (!workflowSnapshot && s._id) {
+                    workflowSnapshot = {
+                        stage: null,
+                        history: [],
+                        serviceRecordId: s._id,
+                        serviceTypeLabel: s.serviceType || '',
+                        trailIncomplete: true,
+                    };
+                }
+                const rowWorkflowStage = workflowSnapshot?.stage ?? (wfMatch ? wf.stage || null : null);
+                const rowWorkflowLabel =
+                    workflowSnapshot?.serviceTypeLabel ?? (wfMatch ? wf.serviceTypeLabel || '' : '');
+                const hasUsableTrail =
+                    workflowSnapshot &&
+                    !workflowSnapshot.trailIncomplete &&
+                    (workflowSnapshot.stage || (Array.isArray(workflowSnapshot.history) && workflowSnapshot.history.length > 0));
+                rows.push({
+                    serviceId: s._id,
+                    serviceType: s.serviceType,
+                    date: s.date,
+                    value: s.value,
+                    description: s.description || '',
+                    paidBy: s.paidBy || null,
+                    currentKm: s.currentKm != null ? s.currentKm : null,
+                    remark: s.remark || '',
+                    vehicleId: v._id,
+                    vehicleAssetId: v.assetId,
+                    vehicleLabel: vLabel,
+                    attachment,
+                    quotation2,
+                    quotation3,
+                    invoice,
+                    workflowStage: rowWorkflowStage,
+                    workflowServiceTypeLabel: rowWorkflowLabel,
+                    workflowSnapshot,
+                    vehicleHasDifferentActiveWorkflow:
+                        !!(wf.stage && !['complete', 'rejected'].includes(wf.stage)) &&
+                        !wfMatch &&
+                        !hasUsableTrail &&
+                        !workflowSnapshot?.trailIncomplete,
+                });
+            }
+        }
+
+        rows.sort((a, b) => {
+            const ta = a.date ? new Date(a.date).getTime() : 0;
+            const tb = b.date ? new Date(b.date).getTime() : 0;
+            return tb - ta;
+        });
+
+        res.json({ items: rows, total: rows.length });
+    } catch (error) {
+        console.error('getVehicleFleetServiceRequests:', error);
+        res.status(500).json({ message: 'Failed to load vehicle service records' });
+    }
+};
+
 export const getAllAssignedAssets = async (req, res) => {
     try {
         const { companyId, status } = req.query;
@@ -1192,8 +1542,8 @@ export const handleOnServiceAction = async (req, res) => {
                 action === 'Extend'
                     ? 'Service duration extended successfully'
                     : action === 'Live'
-                      ? 'Asset marked as Live successfully'
-                      : 'Asset returned from service successfully',
+                        ? 'Asset marked as Live successfully'
+                        : 'Asset returned from service successfully',
             asset: item
         });
     } catch (error) {
@@ -2699,6 +3049,12 @@ export const getAssetItemDetail = async (req, res) => {
                 }
                 if (service.attachment) {
                     service.attachment = await getSignedFileUrl(service.attachment);
+                }
+                if (service.quotation2) {
+                    service.quotation2 = await getSignedFileUrl(service.quotation2);
+                }
+                if (service.quotation3) {
+                    service.quotation3 = await getSignedFileUrl(service.quotation3);
                 }
             }
         }
@@ -4983,6 +5339,7 @@ export const updateAssetStatus = async (req, res) => {
 
             // Build service record
             serviceRecord = {
+                _id: new mongoose.Types.ObjectId(),
                 date: new Date(),
                 expiryDate: expiryDate,
                 serviceDuration: serviceDuration || null,
@@ -5029,6 +5386,7 @@ export const updateAssetStatus = async (req, res) => {
             // Add completion record if data provided
             if (serviceReport || amount) {
                 completionRecord = {
+                    _id: new mongoose.Types.ObjectId(),
                     date: new Date(),
                     description: serviceReport,
                     value: amount || 0,
@@ -5456,11 +5814,28 @@ export const deleteAssetDocument = async (req, res) => {
 export const addAssetService = async (req, res) => {
     try {
         const { id } = req.params;
-        const { serviceType, date, expiryDate, currentKm, description, paidBy, value, remark, invoice, attachment } = req.body;
+        const { serviceType, date, expiryDate, currentKm, description, paidBy, value, remark, invoice, attachment, quotation2, quotation3, serviceRequestSource } = req.body;
 
-        const asset = await AssetItem.findById(id);
+        const asset = await AssetItem.findById(id).populate('typeId', 'name');
         if (!asset) {
             return res.status(404).json({ message: 'Asset not found' });
+        }
+
+        const isVehicleAssetForServiceGate = () => {
+            const plate = String(asset.plateNumber || '').trim();
+            if (plate) return true;
+            const name = (asset.typeId && typeof asset.typeId === 'object' && asset.typeId.name)
+                ? String(asset.typeId.name)
+                : '';
+            const t = name.toLowerCase();
+            return t.includes('vehicle') || t.includes('car') || t.includes('fleet') || t.includes('truck');
+        };
+
+        if (isVehicleAssetForServiceGate() && serviceRequestSource !== 'vehicle_fleet_dashboard') {
+            return res.status(403).json({
+                message:
+                    'Vehicle service requests must be created from the Vehicle Asset Fleet Dashboard (Add service request).',
+            });
         }
 
         // Permission: asset controller/admin OR assignee
@@ -5498,6 +5873,36 @@ export const addAssetService = async (req, res) => {
             }
         }
 
+        let quotation2Url = null;
+        if (quotation2 && quotation2.data) {
+            try {
+                const uploadResult = await uploadDocumentToS3(
+                    quotation2.data,
+                    'asset-service-attachments',
+                    quotation2.name || `service-quotation2-${Date.now()}.pdf`
+                );
+                quotation2Url = uploadResult.publicId;
+            } catch (error) {
+                console.error('Error uploading quotation2 to S3:', error);
+                return res.status(500).json({ message: 'Failed to upload quotation 2' });
+            }
+        }
+
+        let quotation3Url = null;
+        if (quotation3 && quotation3.data) {
+            try {
+                const uploadResult = await uploadDocumentToS3(
+                    quotation3.data,
+                    'asset-service-attachments',
+                    quotation3.name || `service-quotation3-${Date.now()}.pdf`
+                );
+                quotation3Url = uploadResult.publicId;
+            } catch (error) {
+                console.error('Error uploading quotation3 to S3:', error);
+                return res.status(500).json({ message: 'Failed to upload quotation 3' });
+            }
+        }
+
         let parsedRemark = null;
         if (remark && typeof remark === 'string') {
             try {
@@ -5507,8 +5912,9 @@ export const addAssetService = async (req, res) => {
             }
         }
 
-        // Create the service record
+        // Create the service record (explicit subdoc _id for stable keys in UI + workflow linkage)
         const newService = {
+            _id: new mongoose.Types.ObjectId(),
             serviceType,
             date: date || new Date(),
             expiryDate: expiryDate || null,
@@ -5518,7 +5924,9 @@ export const addAssetService = async (req, res) => {
             value: value || 0,
             remark,
             invoice: invoiceUrl,
-            attachment: attachmentUrl
+            attachment: attachmentUrl,
+            ...(quotation2Url ? { quotation2: quotation2Url } : {}),
+            ...(quotation3Url ? { quotation3: quotation3Url } : {}),
         };
 
         asset.services.push(newService);
@@ -5583,6 +5991,12 @@ export const addAssetService = async (req, res) => {
         }
         if (addedService.attachment) {
             addedService.attachment = await getSignedFileUrl(addedService.attachment);
+        }
+        if (addedService.quotation2) {
+            addedService.quotation2 = await getSignedFileUrl(addedService.quotation2);
+        }
+        if (addedService.quotation3) {
+            addedService.quotation3 = await getSignedFileUrl(addedService.quotation3);
         }
 
         res.status(200).json({ message: 'Service record added successfully', service: addedService });
@@ -8996,7 +9410,7 @@ export const deletePendingAssetDashboardInboxItem = async (req, res) => {
 export const getEmployeePreviousAssets = async (req, res) => {
     try {
         const { employeeId } = req.params;
-        
+
         let empObjId = null;
         const mongoose = (await import('mongoose')).default;
         if (mongoose.Types.ObjectId.isValid(employeeId)) {
@@ -9023,7 +9437,7 @@ export const getEmployeePreviousAssets = async (req, res) => {
         }
 
         const AssetItem = (await import('../models/AssetItem.js')).default;
-        
+
         const previousAssets = await AssetItem.find({
             _id: { $in: distinctAssetIds },
             $or: [
@@ -9032,11 +9446,11 @@ export const getEmployeePreviousAssets = async (req, res) => {
                 { assignedTo: { $exists: false } }
             ]
         })
-        .populate('assignedTo', 'firstName lastName employeeId')
-        .populate('assignedCompany', 'name shortName nickName companyId')
-        .populate('typeId', 'name')
-        .populate('categoryId', 'name')
-        .lean();
+            .populate('assignedTo', 'firstName lastName employeeId')
+            .populate('assignedCompany', 'name shortName nickName companyId')
+            .populate('typeId', 'name')
+            .populate('categoryId', 'name')
+            .lean();
 
         res.status(200).json({ items: previousAssets });
     } catch (error) {

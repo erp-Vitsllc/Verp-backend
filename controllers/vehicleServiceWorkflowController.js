@@ -107,7 +107,9 @@ async function mergeWorkflowServiceRecord(asset, serviceRecordId, body) {
         value,
         remark,
         invoice,
-        attachment
+        attachment,
+        quotation2,
+        quotation3
     } = body;
 
     let invoiceUrl = sub.invoice || null;
@@ -136,6 +138,36 @@ async function mergeWorkflowServiceRecord(asset, serviceRecordId, body) {
         }
     }
 
+    let quotation2Url = sub.quotation2 || null;
+    if (quotation2 && quotation2.data) {
+        try {
+            const uploadResult = await uploadDocumentToS3(
+                quotation2.data,
+                'asset-service-attachments',
+                quotation2.name || `service-quotation2-${Date.now()}.pdf`
+            );
+            quotation2Url = uploadResult.publicId;
+        } catch (error) {
+            console.error('[mergeWorkflowServiceRecord] quotation2 upload:', error);
+            throw new Error('Failed to upload quotation 2');
+        }
+    }
+
+    let quotation3Url = sub.quotation3 || null;
+    if (quotation3 && quotation3.data) {
+        try {
+            const uploadResult = await uploadDocumentToS3(
+                quotation3.data,
+                'asset-service-attachments',
+                quotation3.name || `service-quotation3-${Date.now()}.pdf`
+            );
+            quotation3Url = uploadResult.publicId;
+        } catch (error) {
+            console.error('[mergeWorkflowServiceRecord] quotation3 upload:', error);
+            throw new Error('Failed to upload quotation 3');
+        }
+    }
+
     if (serviceType != null) sub.serviceType = serviceType;
     if (date != null) sub.date = new Date(date);
     if (expiryDate !== undefined) sub.expiryDate = expiryDate ? new Date(expiryDate) : null;
@@ -146,6 +178,8 @@ async function mergeWorkflowServiceRecord(asset, serviceRecordId, body) {
     if (remark !== undefined) sub.remark = remark;
     if (invoiceUrl != null) sub.invoice = invoiceUrl;
     if (attachmentUrl != null) sub.attachment = attachmentUrl;
+    if (quotation2Url != null) sub.quotation2 = quotation2Url;
+    if (quotation3Url != null) sub.quotation3 = quotation3Url;
 
     const ck = body.currentKm != null ? Number(body.currentKm) : null;
     if (ck && !Number.isNaN(ck) && ck > (asset.currentKilometer || 0)) {
@@ -167,6 +201,28 @@ async function pushWorkflowHistory(asset, { stage, action, note, byName }) {
     });
 }
 
+/** Save final workflow timeline on the services[] subdoc so fleet/history views keep the tracker after a new workflow starts. */
+function persistWorkflowSnapshotToServiceSubdoc(asset) {
+    const wf = asset.activeServiceWorkflow;
+    if (!wf?.serviceRecordId) return;
+    const sub = asset.services?.id?.(wf.serviceRecordId);
+    if (!sub) return;
+    const hist = Array.isArray(wf.history) ? wf.history : [];
+    sub.workflowSnapshot = {
+        stage: wf.stage,
+        serviceTypeLabel: wf.serviceTypeLabel || '',
+        serviceRecordId: wf.serviceRecordId,
+        history: hist.map((h) => ({
+            stage: h.stage,
+            action: h.action,
+            note: h.note || '',
+            byName: h.byName || '',
+            at: h.at,
+        })),
+    };
+    asset.markModified('services');
+}
+
 const STAGE_LABEL = {
     [STAGE.HR]: 'HR',
     [STAGE.ACCOUNTS]: 'Accounts',
@@ -184,7 +240,8 @@ async function logVehicleServiceWorkflowToAssetHistory(asset, {
     byName,
     performedById,
     serviceTypeLabel,
-    hasServiceUpdates
+    hasServiceUpdates,
+    serviceRecordId: serviceRecordIdOverride
 }) {
     try {
         const label = STAGE_LABEL[stage] || stage;
@@ -200,6 +257,8 @@ async function logVehicleServiceWorkflowToAssetHistory(asset, {
             comments = `Approved at ${label}`;
             if (hasServiceUpdates) comments += ' (service record updated)';
             if (note) comments += `. ${note}`;
+        } else if (workflowAction === 'hold') {
+            comments = `Accounts hold: ${note || '—'}`;
         }
 
         await AssetHistory.create({
@@ -209,6 +268,8 @@ async function logVehicleServiceWorkflowToAssetHistory(asset, {
             comments,
             details: {
                 type: 'VehicleServiceWorkflow',
+                serviceRecordId:
+                    serviceRecordIdOverride ?? (asset.activeServiceWorkflow?.serviceRecordId || null),
                 stage,
                 workflowAction,
                 note: note || '',
@@ -245,6 +306,16 @@ export async function maybeStartVehicleServiceWorkflow(asset, { serviceRecordId,
             return;
         }
 
+        if (
+            cur?.serviceRecordId &&
+            [STAGE.COMPLETE, STAGE.REJECTED].includes(cur.stage)
+        ) {
+            const prevSub = asset.services?.id?.(cur.serviceRecordId);
+            if (prevSub && !prevSub.workflowSnapshot?.stage) {
+                persistWorkflowSnapshotToServiceSubdoc(asset);
+            }
+        }
+
         const hr = await resolveAssigneeForStage(STAGE.HR);
         if (!hr?._id) {
             console.warn('[VehicleServiceWorkflow] No Flowchart HR — workflow not started');
@@ -276,7 +347,8 @@ export async function maybeStartVehicleServiceWorkflow(asset, { serviceRecordId,
             byName: await getRequesterName(req.user),
             performedById: requesterEmp?._id,
             serviceTypeLabel: serviceType || '',
-            hasServiceUpdates: false
+            hasServiceUpdates: false,
+            serviceRecordId
         });
 
         const requesterName = await getRequesterName(req.user);
@@ -300,6 +372,7 @@ export async function maybeStartVehicleServiceWorkflow(asset, { serviceRecordId,
             detailLine: `${requesterName} logged a service (${serviceType}). Please approve or reject in your dashboard.`
         });
 
+        persistWorkflowSnapshotToServiceSubdoc(asset);
         asset.markModified('activeServiceWorkflow');
         await asset.save();
     } catch (e) {
@@ -309,15 +382,16 @@ export async function maybeStartVehicleServiceWorkflow(asset, { serviceRecordId,
 
 /**
  * POST /api/AssetItem/:id/service-workflow/respond
- * body: { action: 'approve' | 'reject', comment?: string, serviceUpdates?: object }
+ * body: { action: 'approve' | 'reject' | 'hold', comment?, serviceUpdates?, holdReason?, holdDays? }
+ * - hold: Accounts step only; requires holdReason + holdDays (≥1). Notifies vehicle assignee.
  * serviceUpdates uses the same shape as POST /AssetItem/:id/service (optional on approve).
  */
 export const respondVehicleServiceWorkflow = async (req, res) => {
     try {
         const { id } = req.params;
-        const { action, comment, serviceUpdates } = req.body || {};
-        if (!['approve', 'reject'].includes(action)) {
-            return res.status(400).json({ message: 'action must be approve or reject' });
+        const { action, comment, serviceUpdates, holdReason, holdDays } = req.body || {};
+        if (!['approve', 'reject', 'hold'].includes(action)) {
+            return res.status(400).json({ message: 'action must be approve, reject, or hold' });
         }
 
         const asset = await AssetItem.findById(id).populate('assignedTo', 'firstName lastName employeeId');
@@ -344,6 +418,66 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
             `${(await resolveActorEmployee(req.user))?.firstName || ''}`;
         const actorEmp = await resolveActorEmployee(req.user);
         const performedById = actorEmp?._id;
+
+        if (action === 'hold') {
+            if (stage !== STAGE.ACCOUNTS) {
+                return res.status(400).json({ message: 'Hold is only available at the Accounts step' });
+            }
+            const reason = String(holdReason || '').trim();
+            const daysNum = Number(holdDays);
+            if (!reason) {
+                return res.status(400).json({ message: 'Hold reason is required' });
+            }
+            if (!Number.isFinite(daysNum) || daysNum < 1) {
+                return res.status(400).json({ message: 'Hold requires a valid number of days (1 or more)' });
+            }
+            if (!asset.activeServiceWorkflow.accountsHold) asset.activeServiceWorkflow.accountsHold = {};
+            asset.activeServiceWorkflow.accountsHold = {
+                reason,
+                days: daysNum,
+                heldAt: new Date()
+            };
+            await pushWorkflowHistory(asset, {
+                stage,
+                action: 'hold',
+                note: `${reason} (${daysNum} day${daysNum === 1 ? '' : 's'})`,
+                byName: actorName
+            });
+            await logVehicleServiceWorkflowToAssetHistory(asset, {
+                stage,
+                workflowAction: 'hold',
+                note: `${reason} (${daysNum} days)`,
+                byName: actorName,
+                performedById,
+                serviceTypeLabel: wf.serviceTypeLabel,
+                hasServiceUpdates: false,
+                serviceRecordId: wf.serviceRecordId
+            });
+            if (asset.assignedTo?._id) {
+                await syncDashboardAction({
+                    requestId: asset._id,
+                    requestType: 'Vehicle Service Request',
+                    status: 'Pending',
+                    assignedTo: asset.assignedTo._id,
+                    subjectEmployee: asset.assignedTo,
+                    requestedByName: actorName,
+                    extra1: `${asset.assetId} — ${wf.serviceTypeLabel || 'Service'}`,
+                    extra2: `Accounts on hold (${daysNum} days): ${reason}`
+                });
+                await sendVehicleServiceWorkflowEmail({
+                    recipient: asset.assignedTo,
+                    asset,
+                    stageLabel: 'Service request on hold',
+                    actionLabel: 'Vehicle service — Accounts hold',
+                    detailLine: `Accounts placed this request on hold for ${daysNum} days. Reason: ${reason}`
+                });
+            }
+            persistWorkflowSnapshotToServiceSubdoc(asset);
+            asset.markModified('activeServiceWorkflow');
+            await asset.save();
+            const holdFresh = await AssetItem.findById(asset._id).populate('assignedTo', 'firstName lastName employeeId');
+            return res.json({ message: 'Hold recorded', asset: holdFresh });
+        }
 
         let hadServiceUpdates = false;
         if (action === 'approve' && serviceUpdates && wf.serviceRecordId) {
@@ -379,8 +513,10 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
                 byName: actorName,
                 performedById,
                 serviceTypeLabel: wf.serviceTypeLabel,
-                hasServiceUpdates: false
+                hasServiceUpdates: false,
+                serviceRecordId: wf.serviceRecordId
             });
+            persistWorkflowSnapshotToServiceSubdoc(asset);
             await asset.save();
             const rejectedFresh = await AssetItem.findById(asset._id).populate('assignedTo', 'firstName lastName employeeId');
             return res.json({ message: 'Workflow rejected', asset: rejectedFresh });
@@ -408,18 +544,19 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
             byName: actorName,
             performedById,
             serviceTypeLabel: wf.serviceTypeLabel,
-            hasServiceUpdates: hadServiceUpdates
+            hasServiceUpdates: hadServiceUpdates,
+            serviceRecordId: wf.serviceRecordId
         });
 
         let nextStage = null;
         if (stage === STAGE.HR) nextStage = STAGE.ACCOUNTS;
         else if (stage === STAGE.ACCOUNTS) nextStage = STAGE.ADMIN;
-        else if (stage === STAGE.ADMIN) nextStage = STAGE.MANAGEMENT;
-        else if (stage === STAGE.MANAGEMENT) nextStage = STAGE.COMPLETE;
+        else if (stage === STAGE.ADMIN || stage === STAGE.MANAGEMENT) nextStage = STAGE.COMPLETE;
 
         if (nextStage === STAGE.COMPLETE) {
             asset.activeServiceWorkflow.stage = STAGE.COMPLETE;
             if (wf.previousStatus) asset.status = wf.previousStatus;
+            persistWorkflowSnapshotToServiceSubdoc(asset);
             await asset.save();
             const doneFresh = await AssetItem.findById(asset._id).populate('assignedTo', 'firstName lastName employeeId');
             return res.json({ message: 'Service workflow completed', asset: doneFresh });
@@ -430,6 +567,7 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
         }
 
         asset.activeServiceWorkflow.stage = nextStage;
+        persistWorkflowSnapshotToServiceSubdoc(asset);
         await asset.save();
 
         const nextAssignee = await resolveAssigneeForStage(nextStage);
@@ -437,8 +575,7 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
             const requesterName = actorName;
             let extra2 = 'Action required';
             if (nextStage === STAGE.ACCOUNTS) extra2 = 'Awaiting Accounts approval';
-            if (nextStage === STAGE.ADMIN) extra2 = 'Vehicle is On Service — Asset Controller update';
-            if (nextStage === STAGE.MANAGEMENT) extra2 = 'Awaiting Management closure';
+            if (nextStage === STAGE.ADMIN) extra2 = 'Vehicle is On Service — Asset Controller review & close';
 
             await syncDashboardAction({
                 requestId: asset._id,

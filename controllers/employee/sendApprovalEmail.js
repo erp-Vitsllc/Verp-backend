@@ -4,6 +4,33 @@ import { getCompleteEmployee } from "../../services/employeeService.js";
 import { resolveFlowchartHrEmployee } from "../../utils/resolveFlowchartHrEmployee.js";
 import { syncDashboardAction } from "../../utils/syncDashboard.js";
 
+const dedupeEmailList = (emails = []) => {
+    const seen = new Set();
+    return emails
+        .map((e) => (e || "").trim())
+        .filter((e) => {
+            if (!e) return false;
+            const k = e.toLowerCase();
+            if (seen.has(k)) return false;
+            seen.add(k);
+            return true;
+        });
+};
+
+/** HR is To; employee + primary reportee are CC (same thread). */
+const buildProfileActivationCc = (emp, hrEmail) => {
+    const skip = new Set();
+    const h = (hrEmail || "").trim().toLowerCase();
+    if (h) skip.add(h);
+    const raw = [];
+    [emp.companyEmail, emp.workEmail, emp.personalEmail, emp.email].forEach((x) => raw.push(x));
+    const pr = emp.primaryReportee;
+    if (pr && typeof pr === "object") {
+        [pr.companyEmail, pr.workEmail, pr.personalEmail, pr.email].forEach((x) => raw.push(x));
+    }
+    return dedupeEmailList(raw).filter((e) => !skip.has(e.toLowerCase()));
+};
+
 export const sendApprovalEmail = async (req, res) => {
     const { id } = req.params;
     const { reason, attachment } = req.body || {};
@@ -84,10 +111,12 @@ export const sendApprovalEmail = async (req, res) => {
             </div>
         `;
 
-        console.log(`[sendApprovalEmail] To (HR): ${hrEmail}`);
+        const ccEmails = buildProfileActivationCc(employeeBasic, hrEmail);
+        console.log(`[sendApprovalEmail] To (HR): ${hrEmail}`, ccEmails.length ? `CC: ${ccEmails.join(", ")}` : "");
         await transporter.sendMail({
             from: `"VeRP Portal" <${emailUser}>`,
             to: hrEmail,
+            ...(ccEmails.length ? { cc: ccEmails.join(", ") } : {}),
             subject,
             html,
         });
@@ -129,6 +158,7 @@ export const sendApprovalEmail = async (req, res) => {
             message: "Approval request sent successfully.",
             notified: {
                 hrEmail,
+                ccEmails,
             },
         });
     } catch (error) {

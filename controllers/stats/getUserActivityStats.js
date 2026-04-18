@@ -122,15 +122,43 @@ export const getUserActivityStats = async (req, res) => {
 
         const allAssetTypes = ['Asset', 'Asset Approval', 'Asset Assignment', 'Asset Transfer', 'Asset Loss Damage', 'Asset End of Life', 'Asset Accessory', 'Asset Accessory Approval', 'Asset Accessory Unattach', 'Vehicle Service Request'];
 
-        const [dashboardPendingItems, profileActivationOutcomeItems] = await Promise.all([
+        const dashboardOrConditions = [
+            { assignedTo: { $in: relevantIds } },
+        ];
+        if (targetEmployeeId && String(targetEmployeeId).trim() !== '') {
+            dashboardOrConditions.push({ assignedToEmpId: targetEmployeeId });
+        }
+        if (isAdmin) {
+            dashboardOrConditions.push({ requestType: 'Responsibility Approval' });
+        }
+        if (isAssetController) {
+            dashboardOrConditions.push({ requestType: { $in: allAssetTypes } });
+        }
+
+        const ASSIGNMENT_STRICT_TYPES = new Set([
+            'Document Expiry Reminder',
+            'Employee Document Expiry Reminder',
+            'Company Activation',
+        ]);
+        const normEmpForAssignee = (s) => (s || '').toString().trim().toLowerCase();
+        const dashboardRowAssignedToViewer = (item) => {
+            const assigneeId = item?.assignedTo?.toString();
+            if (!assigneeId) return false;
+            if (relevantIds.some((id) => id && id.toString() === assigneeId)) return true;
+            if (
+                targetEmployeeId &&
+                item.assignedToEmpId &&
+                normEmpForAssignee(item.assignedToEmpId) === normEmpForAssignee(targetEmployeeId)
+            ) {
+                return true;
+            }
+            return false;
+        };
+
+        const [dashboardPendingItemsRaw, profileActivationOutcomeItems] = await Promise.all([
             DashboardAction.find({
-                $or: [
-                    { assignedTo: { $in: relevantIds } },
-                    { assignedToEmpId: targetEmployeeId },
-                    ...(isAdmin ? [{ requestType: 'Responsibility Approval' }] : []),
-                    ...(isAssetController ? [{ requestType: { $in: allAssetTypes } }] : [])
-                ],
-                status: 'Pending'
+                $or: dashboardOrConditions,
+                status: 'Pending',
             }).lean(),
             DashboardAction.find({
                 assignedTo: { $in: relevantIds },
@@ -141,6 +169,11 @@ export const getUserActivityStats = async (req, res) => {
                 .limit(25)
                 .lean()
         ]);
+
+        const dashboardPendingItems = dashboardPendingItemsRaw.filter((item) => {
+            if (!ASSIGNMENT_STRICT_TYPES.has(item.requestType)) return true;
+            return dashboardRowAssignedToViewer(item);
+        });
 
         // 4. Fallback/Direct Queries for "Needs Action" (in case DashboardAction sync is delayed)
         const inboxQueries = [
