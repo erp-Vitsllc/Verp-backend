@@ -38,6 +38,7 @@ import { updateDocument } from "../controllers/employee/updateDocument.js";
 import { protect } from "../middleware/authMiddleware.js";
 import { checkPermission } from "../middleware/permissionMiddleware.js";
 import { getEmployeeDocument } from "../controllers/employee/getEmployeeDocument.js";
+import { getReporteeOptions } from "../controllers/employee/getReporteeOptions.js";
 
 const router = express.Router();
 
@@ -110,6 +111,7 @@ import { getNextEmployeeId } from "../controllers/employee/getNextEmployeeId.js"
 
 // Employee list - requires view permission
 router.get("/", checkPermission('hrm_employees_list', 'view'), getEmployees);
+router.get("/reportee-options", checkPermission('hrm_employees_view_work', 'view'), getReporteeOptions);
 
 // Get next employee ID - requires create permission (or just authenticated)
 router.get("/next-id", checkPermission('hrm_employees_add', 'create'), getNextEmployeeId);
