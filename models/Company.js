@@ -92,6 +92,10 @@ const companySchema = new mongoose.Schema(
                 assignedAt: { type: Date, default: Date.now },
                 actionedAt: { type: Date },
                 comment: { type: String },
+                reason: { type: String, default: "" },
+                description: { type: String, default: "" },
+                attachment: { type: String, default: "" },
+                attachmentName: { type: String, default: "" },
             },
         ],
 

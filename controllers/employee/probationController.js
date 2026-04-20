@@ -1,5 +1,5 @@
 import EmployeeBasic from "../../models/EmployeeBasic.js";
-import { sendProbationWorkflowEmail, ensureProbationRequestForEmployee } from "../../utils/sendProbationWorkflowEmail.js";
+import { sendProbationWorkflowEmail, ensureProbationRequestForEmployee, ensureProbationDashboardTask } from "../../utils/sendProbationWorkflowEmail.js";
 
 const toObjIdString = (v) => (v == null ? "" : String(v));
 
@@ -116,12 +116,14 @@ export const employeeRespondProbationChange = async (req, res) => {
         }
         await employee.save();
 
-        await sendProbationWorkflowEmail({
-            employee,
-            phase: "employee_approved",
-            probationEndDate: employee.probationChangeRequest.probationEndDate,
-            actorName: `${employee.firstName || ""} ${employee.lastName || ""}`.trim() || employee.employeeId,
-        });
+        if (isApprove) {
+            await sendProbationWorkflowEmail({
+                employee,
+                phase: "employee_approved",
+                probationEndDate: employee.probationChangeRequest.probationEndDate,
+                actorName: `${employee.firstName || ""} ${employee.lastName || ""}`.trim() || employee.employeeId,
+            });
+        }
 
         return res.status(200).json({
             message: isApprove
@@ -176,6 +178,18 @@ export const finalizeProbationByHR = async (req, res) => {
         }
 
         await employee.save();
+
+        if (isApprove) {
+            await ensureProbationDashboardTask({
+                assignedTo: employee._id,
+                assignedToEmpId: employee.employeeId,
+                requestId: employee._id,
+                subjectEmployeeId: employee.employeeId,
+                subjectName: `${employee.firstName || ""} ${employee.lastName || ""}`.trim() || employee.employeeId,
+                extra1: "Probation status changed to Permanent",
+                extra2: "Open Work Details tab to review updated status",
+            });
+        }
 
         await sendProbationWorkflowEmail({
             employee,

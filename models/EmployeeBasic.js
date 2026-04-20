@@ -48,7 +48,11 @@ const employeeBasicSchema = new mongoose.Schema(
             status: { type: String, enum: ['submitted', 'active', 'rejected'], default: 'submitted' },
             assignedAt: { type: Date, default: Date.now },
             actionedAt: { type: Date },
-            comment: { type: String }
+            comment: { type: String },
+            reason: { type: String, default: '' },
+            description: { type: String, default: '' },
+            attachment: { type: String, default: '' },
+            attachmentName: { type: String, default: '' }
         }],
 
         // LOGIN & ACCESS

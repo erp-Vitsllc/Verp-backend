@@ -37,7 +37,11 @@ export const submitCompanyActivationRequest = async (req, res) => {
         const result = await submitCompanyActivation({
             companyId: company._id,
             actor: req.user,
-            reason: combinedFull,
+            reason: reasonText,
+            workflowComment: combinedFull,
+            description: descriptionText,
+            attachment: rawAtt,
+            attachmentName: attachmentName ? String(attachmentName).trim() : "",
             dashboardSummary,
             force: false,
         });
@@ -108,6 +112,10 @@ export const rejectCompanyActivationRequest = async (req, res) => {
     try {
         const { id } = req.params;
         const { reason } = req.body || {};
+        if (!reason || !String(reason).trim()) {
+            return res.status(400).json({ message: "Rejection reason is required." });
+        }
+        const reasonText = String(reason).trim();
         const company = await resolveCompanyById(id);
         if (!company) return res.status(404).json({ message: "Company not found" });
 
@@ -120,7 +128,7 @@ export const rejectCompanyActivationRequest = async (req, res) => {
             status: "rejected",
             assignedAt: new Date(),
             actionedAt: new Date(),
-            comment: reason || "Company activation rejected",
+            comment: reasonText,
         });
         await company.save();
 
@@ -130,7 +138,7 @@ export const rejectCompanyActivationRequest = async (req, res) => {
                 requestType: "Company Activation",
                 status: "Rejected",
                 actionedBy: req.user?.employeeObjectId || req.user?._id,
-                comment: reason || "Company activation rejected",
+                comment: reasonText,
             });
         } catch (syncErr) {
             console.error("[rejectCompanyActivationRequest] Dashboard sync error:", syncErr);

@@ -33,7 +33,7 @@ const buildProfileActivationCc = (emp, hrEmail) => {
 
 export const sendApprovalEmail = async (req, res) => {
     const { id } = req.params;
-    const { reason, attachment } = req.body || {};
+    const { reason, description, attachment, attachmentName } = req.body || {};
 
     try {
         const employeeBasic = await getCompleteEmployee(id);
@@ -45,7 +45,9 @@ export const sendApprovalEmail = async (req, res) => {
             return res.status(400).json({ message: "Reason is required for profile activation request." });
         }
         const reasonText = String(reason).trim();
+        const descriptionText = description && String(description).trim() ? String(description).trim() : "";
         const attachmentText = attachment && String(attachment).trim() ? String(attachment).trim() : null;
+        const attachmentNameText = attachmentName && String(attachmentName).trim() ? String(attachmentName).trim() : "";
 
         const hrResolved = await resolveFlowchartHrEmployee();
         if (hrResolved.error) {
@@ -105,7 +107,8 @@ export const sendApprovalEmail = async (req, res) => {
                     </p>
                     <div style="background-color: #f8fafc; padding: 14px 16px; border-radius: 8px; border: 1px solid #e2e8f0; margin: 18px 0;">
                         <p style="margin: 0;"><strong>Reason:</strong> ${reasonText}</p>
-                        ${attachmentText ? `<p style="margin: 8px 0 0 0;"><strong>Attachment:</strong> <a href="${attachmentText}" target="_blank" rel="noopener noreferrer">${attachmentText}</a></p>` : ''}
+                        ${descriptionText ? `<p style="margin: 8px 0 0 0;"><strong>Description:</strong> ${descriptionText}</p>` : ''}
+                        ${attachmentText ? `<p style="margin: 8px 0 0 0;"><strong>Attachment:</strong> <a href="${attachmentText}" target="_blank" rel="noopener noreferrer">${attachmentNameText || 'View attachment'}</a></p>` : ''}
                     </div>
                 </div>
             </div>
@@ -130,6 +133,11 @@ export const sendApprovalEmail = async (req, res) => {
                     assignedTo: hrEmployee._id,
                     status: "submitted",
                     assignedAt: new Date(),
+                    comment: `Reason: ${reasonText}${descriptionText ? ` | Description: ${descriptionText}` : ""}${attachmentText ? ` | Attachment: ${attachmentText}` : ""}`,
+                    reason: reasonText,
+                    description: descriptionText,
+                    attachment: attachmentText || "",
+                    attachmentName: attachmentNameText,
                 },
             },
         });

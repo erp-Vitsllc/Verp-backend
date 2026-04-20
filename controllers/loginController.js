@@ -115,6 +115,11 @@ export const login = async (req, res) => {
             }
 
             if (user.status !== 'Active') {
+                if (user.status === 'Locked') {
+                    return res.status(423).json({
+                        message: "Your account is locked after multiple failed login attempts. Please contact administrator."
+                    });
+                }
                 return res.status(403).json({ message: `Your account is ${user.status}. Please contact administrator.` });
             }
 
@@ -139,19 +144,21 @@ export const login = async (req, res) => {
             // Increment failed attempts for non-admin logins
             if (!isAdminLogin) {
                 user.loginAttempts = (user.loginAttempts || 0) + 1;
+                const maxAttempts = 2;
 
-                // If 5 or more attempts, lock for 1 hour
-                // if (user.loginAttempts >= 5) {
-                //     user.lockUntil = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
-                //     await user.save();
-                //     return res.status(403).json({
-                //         message: "Too many failed attempts. Your account has been locked for 1 hour."
-                //     });
-                // }
+                // Lock account after 2 failed attempts. Admin must reset password/unlock.
+                if (user.loginAttempts >= maxAttempts) {
+                    user.status = "Locked";
+                    user.lockUntil = null;
+                    await user.save();
+                    return res.status(423).json({
+                        message: "Too many failed attempts. Your account has been locked. Contact administrator."
+                    });
+                }
 
                 await user.save();
                 return res.status(401).json({
-                    message: `Invalid credentials. ${5 - user.loginAttempts} attempts remaining.`
+                    message: `Invalid credentials. ${maxAttempts - user.loginAttempts} attempt(s) remaining before account lock.`
                 });
             }
             return res.status(401).json({ message: "Invalid credentials" });
@@ -208,6 +215,88 @@ export const login = async (req, res) => {
     } catch (error) {
         console.error('Login error:', error);
         return res.status(500).json({ message: error.message });
+    }
+};
+
+export const completePasswordReset = async (req, res) => {
+    try {
+        const { token, password, confirmPassword } = req.body || {};
+
+        if (!token || !password || !confirmPassword) {
+            return res.status(400).json({ message: "Token, password and confirmPassword are required." });
+        }
+        if (password !== confirmPassword) {
+            return res.status(400).json({ message: "Password and confirm password do not match." });
+        }
+        if (password.length < 8) {
+            return res.status(400).json({ message: "Password must be at least 8 characters" });
+        }
+        if (!/[A-Z]/.test(password)) {
+            return res.status(400).json({ message: "Password must contain at least one uppercase letter" });
+        }
+        if (!/[a-z]/.test(password)) {
+            return res.status(400).json({ message: "Password must contain at least one lowercase letter" });
+        }
+        if (!/[0-9]/.test(password)) {
+            return res.status(400).json({ message: "Password must contain at least one number" });
+        }
+
+        if (!process.env.JWT_SECRET) {
+            return res.status(500).json({ message: "JWT secret is not configured." });
+        }
+
+        let decoded;
+        try {
+            decoded = jwt.verify(String(token), process.env.JWT_SECRET);
+        } catch {
+            return res.status(400).json({ message: "Reset link is invalid or expired." });
+        }
+
+        if (!decoded?.id || decoded?.purpose !== "password-reset") {
+            return res.status(400).json({ message: "Invalid reset token." });
+        }
+
+        const user = await User.findById(decoded.id);
+        if (!user) {
+            return res.status(404).json({ message: "User not found." });
+        }
+
+        if (user.password) {
+            const isCurrentMatch = await bcrypt.compare(password, user.password);
+            if (isCurrentMatch) {
+                return res.status(400).json({ message: "New password must be different from current password." });
+            }
+        }
+
+        if (user.passwordHistory && user.passwordHistory.length > 0) {
+            for (const oldHash of user.passwordHistory) {
+                const isHistoryMatch = await bcrypt.compare(password, oldHash);
+                if (isHistoryMatch) {
+                    return res.status(400).json({ message: "New password must be different from recently used passwords." });
+                }
+            }
+        }
+
+        const newHistory = [...(user.passwordHistory || [])];
+        if (user.password) {
+            newHistory.push(user.password);
+            if (newHistory.length > 5) newHistory.shift();
+        }
+
+        user.password = await bcrypt.hash(password, 10);
+        user.passwordHistory = newHistory;
+        user.status = "Active";
+        user.loginAttempts = 0;
+        user.lockUntil = null;
+        const newExpiry = new Date();
+        newExpiry.setDate(newExpiry.getDate() + 180);
+        user.passwordExpiryDate = newExpiry;
+        await user.save();
+
+        return res.status(200).json({ message: "Password updated successfully. You can now login." });
+    } catch (error) {
+        console.error("completePasswordReset error:", error);
+        return res.status(500).json({ message: error.message || "Failed to reset password." });
     }
 };
 

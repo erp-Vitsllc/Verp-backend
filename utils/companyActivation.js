@@ -87,7 +87,17 @@ export const calculateCompanyActivationProgress = (company = {}) => {
     return { checks, completed, total, percentage, missing };
 };
 
-const sendCompanyActivationEmailToHr = async ({ company, hrEmail, hrName, requestedByName, reason, ccEmails = [] }) => {
+const sendCompanyActivationEmailToHr = async ({
+    company,
+    hrEmail,
+    hrName,
+    requestedByName,
+    reason,
+    description = "",
+    attachment = "",
+    attachmentName = "",
+    ccEmails = [],
+}) => {
     const emailUser = process.env.EMAIL_USER?.trim();
     const emailPass = process.env.EMAIL_PASS?.trim();
     if (!emailUser || !emailPass || !hrEmail) return;
@@ -103,6 +113,14 @@ const sendCompanyActivationEmailToHr = async ({ company, hrEmail, hrName, reques
     const companyUrl = `${baseUrl}/Company/${company._id}`;
     const subject = `Company activation request: ${company.name}`;
 
+    const reasonHtml = shortenUrlsInString(reason || "Activation request");
+    const descriptionHtml = shortenUrlsInString(description || "");
+    const attachmentUrl = attachment ? String(attachment).trim() : "";
+    const attachmentLabel =
+        attachmentName ||
+        shortenUrlsInString(attachmentUrl) ||
+        "View attachment";
+
     const html = `
         <div style="font-family: Arial, sans-serif; color: #333; line-height: 1.6; max-width: 640px; margin: 0 auto; border: 1px solid #eee; border-radius: 10px; overflow: hidden;">
             <div style="background:#1d4ed8;color:#fff;padding:18px 22px;">
@@ -115,7 +133,9 @@ const sendCompanyActivationEmailToHr = async ({ company, hrEmail, hrName, reques
                     <p style="margin:0;"><strong>Company:</strong> ${company.name || "N/A"}</p>
                     <p style="margin:6px 0 0;"><strong>Company ID:</strong> ${company.companyId || "N/A"}</p>
                     <p style="margin:6px 0 0;"><strong>Requested by:</strong> ${requestedByName || "System"}</p>
-                    <p style="margin:6px 0 0;"><strong>Reason:</strong> ${reason || "Activation request"}</p>
+                    <p style="margin:6px 0 0;"><strong>Reason:</strong> ${reasonHtml}</p>
+                    ${descriptionHtml ? `<p style="margin:6px 0 0;"><strong>Description:</strong> ${descriptionHtml}</p>` : ""}
+                    ${attachmentUrl ? `<p style="margin:6px 0 0;"><strong>Attachment:</strong> <a href="${attachmentUrl}" target="_blank" rel="noopener noreferrer">${attachmentLabel}</a></p>` : ""}
                 </div>
                 <p style="margin-top:20px;">
                     <a href="${companyUrl}" style="background:#2563eb;color:#fff;text-decoration:none;padding:10px 16px;border-radius:6px;font-weight:600;display:inline-block;">Review Company</a>
@@ -147,6 +167,10 @@ export const submitCompanyActivation = async ({
     companyId,
     actor = null,
     reason = "Company submitted for activation",
+    workflowComment = "",
+    description = "",
+    attachment = "",
+    attachmentName = "",
     /** Shorter text for dashboard / notifications (full URL kept only in `reason` / workflow when provided). */
     dashboardSummary = null,
     force = false,
@@ -182,7 +206,11 @@ export const submitCompanyActivation = async ({
         assignedTo: hr._id,
         status: "submitted",
         assignedAt: new Date(),
-        comment: reason,
+        comment: workflowComment || reason,
+        reason: reason || "",
+        description: description || "",
+        attachment: attachment || "",
+        attachmentName: attachmentName || "",
     });
     await company.save();
 
@@ -231,7 +259,10 @@ export const submitCompanyActivation = async ({
             hrEmail: hrResolved.email,
             hrName,
             requestedByName,
-            reason: shortenUrlsInString(reason),
+            reason,
+            description,
+            attachment,
+            attachmentName,
             ccEmails: actorCc,
         });
     } catch (e) {

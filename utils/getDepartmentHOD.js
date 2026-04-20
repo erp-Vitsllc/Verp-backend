@@ -29,10 +29,43 @@ export const getDepartmentHOD = async (departmentType) => {
 
         // Look for active HOD in Flowchart collection with regex to handle spaces in DB
         const categoryRegex = new RegExp(`^${category.split('').join('\\s*')}$`, 'i');
-        const responsibility = await Flowchart.findOne({
+        let responsibility = await Flowchart.findOne({
             category: { $regex: categoryRegex },
             status: 'Active'
         }).populate('empObjectId', 'employeeId firstName lastName companyEmail workEmail personalEmail email designation department profileStatus signature');
+
+        // During reassignment (status Pending), keep previous active holder effective
+        // until the invited user accepts.
+        if (!responsibility) {
+            const pending = await Flowchart.findOne({
+                category: { $regex: categoryRegex },
+                status: 'Pending',
+                reassignmentSnapshot: { $ne: null }
+            }).lean();
+            if (pending?.reassignmentSnapshot?.empObjectId || pending?.reassignmentSnapshot?.employeeId) {
+                const snapshotEmpObjectId = pending.reassignmentSnapshot.empObjectId;
+                const snapshotEmployeeId = pending.reassignmentSnapshot.employeeId;
+                const snapDoc = snapshotEmpObjectId
+                    ? await EmployeeBasic.findById(snapshotEmpObjectId).select(
+                        'employeeId firstName lastName companyEmail workEmail personalEmail email designation department profileStatus signature'
+                    )
+                    : (snapshotEmployeeId
+                        ? await EmployeeBasic.findOne({
+                            employeeId: { $regex: buildWhitespaceAgnosticExactRegex(snapshotEmployeeId) || /^$/ }
+                        }).select(
+                            'employeeId firstName lastName companyEmail workEmail personalEmail email designation department profileStatus signature'
+                        )
+                        : null);
+
+                if (snapDoc) {
+                    responsibility = {
+                        ...pending,
+                        status: 'Active',
+                        empObjectId: snapDoc
+                    };
+                }
+            }
+        }
 
         if (responsibility) {
             if (responsibility.empObjectId) {
@@ -105,14 +138,33 @@ export const isUserInFlowchart = async (user, category) => {
 
         const query = {
             category: { $regex: categoryRegex },
-            status: { $in: ['Active', 'Pending'] }, // Allow both Active and Pending
             $or: []
         };
 
-        if (user.employeeObjectId) query.$or.push({ empObjectId: user.employeeObjectId });
+        // Active holder is always authorized.
+        if (user.employeeObjectId) query.$or.push({ status: 'Active', empObjectId: user.employeeObjectId });
         if (user.employeeId) {
             const safeEmployeeIdRegex = buildWhitespaceAgnosticExactRegex(user.employeeId);
-            if (safeEmployeeIdRegex) query.$or.push({ employeeId: { $regex: safeEmployeeIdRegex } });
+            if (safeEmployeeIdRegex) query.$or.push({ status: 'Active', employeeId: { $regex: safeEmployeeIdRegex } });
+        }
+
+        // For Pending reassignment rows, keep previous holder authorized until approval.
+        if (user.employeeObjectId) {
+            query.$or.push({
+                status: 'Pending',
+                reassignmentSnapshot: { $ne: null },
+                'reassignmentSnapshot.empObjectId': user.employeeObjectId
+            });
+        }
+        if (user.employeeId) {
+            const safeEmployeeIdRegex = buildWhitespaceAgnosticExactRegex(user.employeeId);
+            if (safeEmployeeIdRegex) {
+                query.$or.push({
+                    status: 'Pending',
+                    reassignmentSnapshot: { $ne: null },
+                    'reassignmentSnapshot.employeeId': { $regex: safeEmployeeIdRegex }
+                });
+            }
         }
 
         if (query.$or.length === 0) return false;

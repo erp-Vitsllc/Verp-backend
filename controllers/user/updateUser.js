@@ -2,12 +2,62 @@ import User from "../../models/User.js";
 import Group from "../../models/Group.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import bcrypt from "bcryptjs";
+import nodemailer from "nodemailer";
+import jwt from "jsonwebtoken";
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+const sendPasswordResetCredentialsEmail = async ({
+    recipientEmail,
+    username,
+    fullName,
+    newPassword,
+    resetUrl,
+}) => {
+    const emailUser = process.env.EMAIL_USER?.trim();
+    const emailPass = process.env.EMAIL_PASS?.trim();
+    if (!emailUser || !emailPass || !recipientEmail) {
+        console.warn('[updateUser] Unlock/reset email skipped. Missing EMAIL_USER/EMAIL_PASS/recipientEmail.');
+        return;
+    }
+
+    const transporter = nodemailer.createTransport({
+        host: "smtp.office365.com",
+        port: 587,
+        secure: false,
+        auth: { user: emailUser, pass: emailPass }
+    });
+
+    await transporter.sendMail({
+        from: `"VeRP Portal" <${emailUser}>`,
+        to: recipientEmail,
+        subject: "Your VeRP account has been unlocked",
+        html: `
+            <div style="font-family: Arial, sans-serif; color: #1f2937; line-height: 1.6;">
+                <h3 style="margin-bottom: 8px;">Account Unlocked - New Login Credentials</h3>
+                <p>Hello ${fullName || "User"},</p>
+                <p>Your account was locked due to failed login attempts. The administrator has re-activated your account.</p>
+                <p><strong>Username:</strong> ${username}</p>
+                ${newPassword ? `<p><strong>New Password:</strong> ${newPassword}</p>` : ""}
+                ${newPassword ? `<p><strong>Confirm Password:</strong> ${newPassword}</p>` : ""}
+                <p>${newPassword
+                ? "Please use these credentials to sign in, then change your password immediately."
+                : "Please click the button below to set a new password, then login normally."}
+                </p>
+                ${resetUrl ? `
+                <p style="margin-top: 16px;">
+                    <a href="${resetUrl}" style="display: inline-block; background: #2563eb; color: #fff; text-decoration: none; padding: 10px 16px; border-radius: 6px; font-weight: 600;">
+                        Change Password
+                    </a>
+                </p>` : ""}
+            </div>
+        `
+    });
+};
 
 // Update user
 // Note: Rate limiting for this sensitive endpoint should be handled by a global middleware (e.g., express-rate-limit)
@@ -63,6 +113,22 @@ const updateUserHandler = async (req, res) => {
         const user = await User.findById(id);
         if (!user) {
             return res.status(404).json({ message: "User not found" });
+        }
+        const wasLocked = user.status === "Locked";
+        const willResetPassword = password !== undefined && password !== null && password !== '';
+        const requestedStatus = status !== undefined ? String(status) : undefined;
+        const triesUnlockByStatus = wasLocked && requestedStatus === "Active";
+        const triesUnlockByPasswordReset = wasLocked && willResetPassword;
+        const unlockRequested = triesUnlockByStatus || triesUnlockByPasswordReset;
+
+        if (unlockRequested) {
+            const { isUserAdministrator } = await import("../../services/permissionService.js");
+            const canAdminUnlock = await isUserAdministrator(req.user?.id);
+            if (!canAdminUnlock) {
+                return res.status(403).json({
+                    message: "Only administrator can unlock a locked user."
+                });
+            }
         }
 
         // Check if this is the system admin user
@@ -174,7 +240,7 @@ const updateUserHandler = async (req, res) => {
             }
             updateData.email = newEmail;
         }
-        if (password !== undefined && password !== null && password !== '') {
+        if (willResetPassword) {
             // Check if password matches current password
             if (user.password) {
                 const isMatch = await bcrypt.compare(password, user.password);
@@ -213,6 +279,13 @@ const updateUserHandler = async (req, res) => {
             const newExpiry = new Date();
             newExpiry.setDate(newExpiry.getDate() + 180);
             updateData.passwordExpiryDate = newExpiry;
+
+            // Password reset by admin should unlock account.
+            if (wasLocked) {
+                updateData.status = "Active";
+                updateData.loginAttempts = 0;
+                updateData.lockUntil = null;
+            }
         }
         if (employeeId !== undefined) {
             if (employeeId) {
@@ -251,6 +324,33 @@ const updateUserHandler = async (req, res) => {
             { $set: updateData },
             { new: true, runValidators: true }
         ).select('-password').populate('group', 'name');
+
+        // For locked users: on unlock, always send reset email to company email (or fallback email).
+        if (unlockRequested) {
+            try {
+                const recipientEmail = (updatedUser.companyEmail || '').trim() || (updatedUser.email || '').trim();
+                const baseUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+                let resetUrl = '';
+                if (process.env.JWT_SECRET) {
+                    const resetToken = jwt.sign(
+                        { id: updatedUser._id.toString(), purpose: "password-reset" },
+                        process.env.JWT_SECRET,
+                        { expiresIn: "24h" }
+                    );
+                    resetUrl = `${baseUrl}/change-password?token=${encodeURIComponent(resetToken)}`;
+                }
+                await sendPasswordResetCredentialsEmail({
+                    recipientEmail,
+                    username: updatedUser.username,
+                    fullName: updatedUser.name,
+                    newPassword: willResetPassword ? password : '',
+                    resetUrl,
+                });
+                console.log(`[updateUser] Unlock/reset email sent to ${recipientEmail || '(no-recipient)'}`);
+            } catch (mailErr) {
+                console.error('[updateUser] Failed to send unlock/reset email:', mailErr);
+            }
+        }
 
         if (updatedUser.employeeId) {
             try {

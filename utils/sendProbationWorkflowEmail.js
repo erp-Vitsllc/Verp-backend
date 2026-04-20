@@ -1,6 +1,7 @@
 import nodemailer from "nodemailer";
 import { getDepartmentHOD } from "./getDepartmentHOD.js";
 import { getManagementHOD } from "./getManagementHOD.js";
+import DashboardAction from "../models/DashboardAction.js";
 
 const resolveEmployeeEmail = (emp) =>
     emp?.companyEmail || emp?.workEmail || emp?.personalEmail || emp?.email || null;
@@ -33,6 +34,44 @@ const getStakeholders = async () => {
     return Array.from(map.values());
 };
 
+const startOfDay = (d) => {
+    const x = new Date(d);
+    x.setHours(0, 0, 0, 0);
+    return x;
+};
+
+export const ensureProbationDashboardTask = async ({
+    assignedTo,
+    assignedToEmpId,
+    requestId,
+    subjectEmployeeId,
+    subjectName,
+    extra1,
+    extra2,
+}) => {
+    if (!assignedTo || !requestId || !extra1) return;
+    const exists = await DashboardAction.findOne({
+        assignedTo,
+        requestId,
+        requestType: "Probation Change",
+        status: "Pending",
+        extra1,
+    }).lean();
+    if (exists) return;
+    await DashboardAction.create({
+        assignedTo,
+        ...(assignedToEmpId ? { assignedToEmpId } : {}),
+        requestId,
+        requestType: "Probation Change",
+        status: "Pending",
+        subjectEmployeeId,
+        subjectName,
+        requestedByName: "System",
+        extra1,
+        extra2,
+    });
+};
+
 export const sendProbationWorkflowEmail = async ({
     employee,
     phase,
@@ -51,7 +90,9 @@ export const sendProbationWorkflowEmail = async ({
         const probText = probationEndDate
             ? new Date(probationEndDate).toLocaleDateString()
             : "N/A";
-        const profileUrl = `${process.env.FRONTEND_URL || "http://localhost:3000"}/emp/${employee.employeeId}`;
+        const baseUrl = process.env.FRONTEND_URL || "http://localhost:3000";
+        const profileUrl = `${baseUrl}/emp/${employee.employeeId}`;
+        const workDetailsUrl = `${baseUrl}/emp/${employee.employeeId}?tab=work-details`;
 
         if (phase === "request_created") {
             if (!stakeholderEmails.length) return;
@@ -117,7 +158,8 @@ export const sendProbationWorkflowEmail = async ({
                     <p>HR has finalized probation workflow for <strong>${employeeName}</strong> (${employee.employeeId}).</p>
                     <p>Final outcome: <strong>${isApproved ? "Approved - Status changed to Permanent" : "Rejected / Not approved"}</strong>.</p>
                     <p>Actioned by: <strong>${actorName}</strong></p>
-                    <p><a href="${profileUrl}">Open Employee Profile</a></p>
+                    <p>${isApproved ? `Status has been updated from <strong>Probation</strong> to <strong>Permanent</strong>.` : ""}</p>
+                    <p><a href="${workDetailsUrl}">Open Work Details Tab</a></p>
                 `,
             });
         }
@@ -128,14 +170,14 @@ export const sendProbationWorkflowEmail = async ({
 
 export const ensureProbationRequestForEmployee = async (employeeDoc) => {
     if (!employeeDoc || employeeDoc.status !== "Probation" || !employeeDoc.dateOfJoining) return false;
-    const today = new Date();
+    const today = startOfDay(new Date());
     const joinDate = new Date(employeeDoc.contractJoiningDate || employeeDoc.dateOfJoining);
     const probationMonths = employeeDoc.probationPeriod || 6;
     const probationEndDate = new Date(joinDate);
     probationEndDate.setMonth(probationEndDate.getMonth() + probationMonths);
     probationEndDate.setHours(0, 0, 0, 0);
 
-    if (today < probationEndDate) return false;
+    if (today.getTime() !== probationEndDate.getTime()) return false;
 
     const current = employeeDoc.probationChangeRequest || {};
     const alreadyOpen = ["pending_hod", "pending_employee", "pending_hr_final"].includes(current.status);
@@ -143,6 +185,12 @@ export const ensureProbationRequestForEmployee = async (employeeDoc) => {
     if (alreadyOpen || alreadyFinal) return false;
 
     const stakeholders = await getStakeholders();
+    await employeeDoc.populate("primaryReportee", "firstName lastName employeeId companyEmail workEmail personalEmail email");
+    const primaryReportee = employeeDoc.primaryReportee;
+    const primaryReporteeEmail = resolveEmployeeEmail(primaryReportee || {});
+    const primaryReporteeName = `${primaryReportee?.firstName || ""} ${primaryReportee?.lastName || ""}`.trim() || primaryReportee?.employeeId || "Primary reportee";
+    const baseUrl = process.env.FRONTEND_URL || "http://localhost:3000";
+    const workDetailsUrl = `${baseUrl}/emp/${employeeDoc.employeeId}?tab=work-details`;
     employeeDoc.probationChangeRequest = {
         status: "pending_hod",
         probationEndDate,
@@ -160,6 +208,33 @@ export const ensureProbationRequestForEmployee = async (employeeDoc) => {
         })),
     };
     await employeeDoc.save();
+    if (primaryReportee?._id) {
+        await ensureProbationDashboardTask({
+            assignedTo: primaryReportee._id,
+            assignedToEmpId: primaryReportee.employeeId,
+            requestId: employeeDoc._id,
+            subjectEmployeeId: employeeDoc.employeeId,
+            subjectName: `${employeeDoc.firstName || ""} ${employeeDoc.lastName || ""}`.trim() || employeeDoc.employeeId,
+            extra1: "Probation completed today - confirm status change request",
+            extra2: `Review ${employeeDoc.employeeId} in Work Details`,
+        });
+    }
+    if (primaryReporteeEmail) {
+        const transporter = createTransporter();
+        if (transporter) {
+            await transporter.sendMail({
+                from: `"VeRP Portal" <${process.env.EMAIL_USER}>`,
+                to: primaryReporteeEmail,
+                subject: `Probation completion requires your review: ${employeeDoc.firstName || ""} ${employeeDoc.lastName || ""}`.trim(),
+                html: `
+                    <p>Hello ${primaryReporteeName},</p>
+                    <p>Probation duration has completed today for <strong>${employeeDoc.firstName || ""} ${employeeDoc.lastName || ""}</strong> (${employeeDoc.employeeId}).</p>
+                    <p>Please review and proceed with probation-to-permanent workflow.</p>
+                    <p><a href="${workDetailsUrl}">Open Employee Work Details</a></p>
+                `,
+            });
+        }
+    }
     await sendProbationWorkflowEmail({
         employee: employeeDoc,
         phase: "request_created",

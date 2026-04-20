@@ -12,7 +12,6 @@ import ExpiryReminderLog from "../models/ExpiryReminderLog.js";
 import { getDepartmentHOD } from "./getDepartmentHOD.js";
 import { getManagementHOD } from "./getManagementHOD.js";
 import { resolveEmployeeEmail } from "./resolveEmployeeEmail.js";
-import { resolveFlowchartHrEmployee } from "./resolveFlowchartHrEmployee.js";
 
 const REMINDER_DAYS = [30, 20, 10];
 const EXPIRY_DAY = 0;
@@ -127,46 +126,29 @@ const markReminderSent = async ({ targetType, targetId, docKey, daysBefore, expi
     );
 };
 
-const getCompanyRecipientBundle = async () => {
+ const pickCompanyAddress = (emp = {}) =>
+    (emp?.companyEmail || "").trim() ||
+    resolveEmployeeEmail(emp || {}).email ||
+    null;
+
+const getFlowchartRecipientBundle = async () => {
     const [admin, hr, management] = await Promise.all([
         getDepartmentHOD("admincontroller"),
         getDepartmentHOD("hr"),
         getManagementHOD(),
     ]);
     const emails = dedupeEmails([
-        resolveEmployeeEmail(admin || {}).email,
-        resolveEmployeeEmail(hr || {}).email,
-        resolveEmployeeEmail(management || {}).email,
+        pickCompanyAddress(admin || {}),
+        pickCompanyAddress(hr || {}),
+        pickCompanyAddress(management || {}),
     ]);
     return { admin, hr, management, emails };
 };
 
-/**
- * Employee document expiry emails: Flowchart HR + the employee + their primary reportee (no generic “management” fallback).
- */
-const collectAddressEmails = (emp) => {
-    if (!emp || typeof emp !== "object") return [];
-    return dedupeEmails([
-        emp.companyEmail,
-        emp.workEmail,
-        emp.personalEmail,
-        emp.email,
-    ]);
-};
-
-/** Same Flowchart HR as profile / company activation; falls back to department HOD if flowchart HR is missing. */
-const getEmployeeDocExpiryEmails = async (employee) => {
-    let hrEmail = null;
-    const hrResolved = await resolveFlowchartHrEmployee();
-    if (!hrResolved.error && hrResolved.email) {
-        hrEmail = hrResolved.email;
-    } else {
-        const hr = await getDepartmentHOD("hr");
-        hrEmail = resolveEmployeeEmail(hr || {}).email;
-    }
-    const selfEmails = collectAddressEmails(employee);
-    const reporteeEmails = collectAddressEmails(employee?.primaryReportee);
-    return dedupeEmails([hrEmail, ...selfEmails, ...reporteeEmails].filter(Boolean));
+/** Employee document expiry emails follow company flowchart routing: Admin + HR + Management. */
+const getEmployeeDocExpiryEmails = async () => {
+    const recipients = await getFlowchartRecipientBundle();
+    return recipients.emails;
 };
 
 const buildCompanyDocuments = (company) => {
@@ -242,7 +224,7 @@ const processCompanyReminders = async () => {
     const companies = await Company.find({}).select(
         "_id name companyId tradeLicenseExpiry establishmentCardExpiry documents ejari insurance owners"
     ).lean();
-    const recipients = await getCompanyRecipientBundle();
+    const recipients = await getFlowchartRecipientBundle();
 
     for (const company of companies) {
         const docs = buildCompanyDocuments(company);
@@ -410,9 +392,9 @@ const buildEmployeeDocumentMap = async (employeeIds) => {
 
 const processEmployeeReminders = async () => {
     const employees = await EmployeeBasic.find({ employeeId: { $ne: "VEGA-HR-0000" } })
-        .select("_id employeeId firstName lastName companyEmail workEmail personalEmail email documents primaryReportee")
-        .populate("primaryReportee", "firstName lastName employeeId companyEmail workEmail personalEmail email")
+        .select("_id employeeId firstName lastName documents")
         .lean();
+    const flowchartRecipients = await getFlowchartRecipientBundle();
     const employeeIds = employees.map((e) => e.employeeId);
     const map = await buildEmployeeDocumentMap(employeeIds);
 
@@ -427,7 +409,7 @@ const processEmployeeReminders = async () => {
             });
         });
 
-        const recipients = await getEmployeeDocExpiryEmails(employee);
+        const recipients = await getEmployeeDocExpiryEmails();
         const subjectName = `${employee.firstName || ""} ${employee.lastName || ""}`.trim() || employee.employeeId;
 
         for (const doc of docs) {
@@ -476,16 +458,30 @@ const processEmployeeReminders = async () => {
             if (days === 10) {
                 const extra1 = `Expiry follow-up required: ${doc.label}`;
                 const extra2 = `${subjectName} (${employee.employeeId})`;
-                await ensureDashboardAction({
-                    assignedTo: employee._id,
-                    assignedToEmpId: employee.employeeId,
-                    requestId: employee._id,
-                    subjectEmployeeId: employee.employeeId,
-                    subjectName,
-                    extra1,
-                    extra2,
-                    requestType: "Employee Document Expiry Reminder",
-                });
+                if (flowchartRecipients.admin?._id) {
+                    await ensureDashboardAction({
+                        assignedTo: flowchartRecipients.admin._id,
+                        assignedToEmpId: flowchartRecipients.admin.employeeId,
+                        requestId: employee._id,
+                        subjectEmployeeId: employee.employeeId,
+                        subjectName,
+                        extra1,
+                        extra2,
+                        requestType: "Employee Document Expiry Reminder",
+                    });
+                }
+                if (flowchartRecipients.hr?._id) {
+                    await ensureDashboardAction({
+                        assignedTo: flowchartRecipients.hr._id,
+                        assignedToEmpId: flowchartRecipients.hr.employeeId,
+                        requestId: employee._id,
+                        subjectEmployeeId: employee.employeeId,
+                        subjectName,
+                        extra1,
+                        extra2,
+                        requestType: "Employee Document Expiry Reminder",
+                    });
+                }
                 await markReminderSent({
                     targetType: "employee",
                     targetId: String(employee._id),
@@ -507,16 +503,30 @@ const processEmployeeReminders = async () => {
                 if (!taskAlreadyCreated) {
                     const extra1 = `Expired document action required: ${doc.label}`;
                     const extra2 = `${subjectName} (${employee.employeeId})`;
-                    await ensureDashboardAction({
-                        assignedTo: employee._id,
-                        assignedToEmpId: employee.employeeId,
-                        requestId: employee._id,
-                        subjectEmployeeId: employee.employeeId,
-                        subjectName,
-                        extra1,
-                        extra2,
-                        requestType: "Employee Document Expiry Reminder",
-                    });
+                    if (flowchartRecipients.admin?._id) {
+                        await ensureDashboardAction({
+                            assignedTo: flowchartRecipients.admin._id,
+                            assignedToEmpId: flowchartRecipients.admin.employeeId,
+                            requestId: employee._id,
+                            subjectEmployeeId: employee.employeeId,
+                            subjectName,
+                            extra1,
+                            extra2,
+                            requestType: "Employee Document Expiry Reminder",
+                        });
+                    }
+                    if (flowchartRecipients.hr?._id) {
+                        await ensureDashboardAction({
+                            assignedTo: flowchartRecipients.hr._id,
+                            assignedToEmpId: flowchartRecipients.hr.employeeId,
+                            requestId: employee._id,
+                            subjectEmployeeId: employee.employeeId,
+                            subjectName,
+                            extra1,
+                            extra2,
+                            requestType: "Employee Document Expiry Reminder",
+                        });
+                    }
                     await markReminderSent({
                         targetType: "employee",
                         targetId: String(employee._id),
