@@ -6,6 +6,7 @@ import { sendResponsibilityApprovalEmail } from "../../utils/sendResponsibilityA
 import { buildResponsibilityEmailData } from "../../utils/flowchartResponsibilityEmailData.js";
 import { getSignedFileUrl } from "../../utils/s3Upload.js";
 import { calculateCompanyActivationProgress, shouldTriggerCompanyReactivation } from "../../utils/companyActivation.js";
+import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
 
 export const updateCompany = async (req, res) => {
     try {
@@ -23,6 +24,82 @@ export const updateCompany = async (req, res) => {
         // Update fields provided in req.body
         const updateData = req.body;
         const beforeCompany = company.toObject();
+        const requesterIsAdmin = await isReqUserAdmin(req.user);
+
+        const collectAttachmentUrls = (items = [], path = "document.url") => {
+            const [root, leaf, nested] = path.split(".");
+            const urls = [];
+            (items || []).forEach((item) => {
+                let value;
+                if (nested) value = item?.[root]?.[leaf]?.[nested];
+                else if (leaf) value = item?.[root]?.[leaf];
+                else value = item?.[root];
+                if (typeof value === "string" && value.trim()) urls.push(value.trim());
+            });
+            return urls;
+        };
+
+        const isDocumentRemovalAttempt = () => {
+            // Top-level required docs
+            if (
+                Object.prototype.hasOwnProperty.call(updateData, "tradeLicenseAttachment") &&
+                beforeCompany.tradeLicenseAttachment &&
+                !updateData.tradeLicenseAttachment
+            ) return true;
+            if (
+                Object.prototype.hasOwnProperty.call(updateData, "establishmentCardAttachment") &&
+                beforeCompany.establishmentCardAttachment &&
+                !updateData.establishmentCardAttachment
+            ) return true;
+
+            // Array-based company documents
+            const checkArrayRemoval = (field, path = "document.url") => {
+                if (!Object.prototype.hasOwnProperty.call(updateData, field)) return false;
+                const prev = beforeCompany[field] || [];
+                const next = updateData[field] || [];
+                if (next.length < prev.length) return true;
+                const prevUrls = new Set(collectAttachmentUrls(prev, path));
+                const nextUrls = new Set(collectAttachmentUrls(next, path));
+                for (const url of prevUrls) {
+                    if (!nextUrls.has(url)) return true;
+                }
+                return false;
+            };
+
+            if (checkArrayRemoval("documents")) return true;
+            if (checkArrayRemoval("ejari")) return true;
+            if (checkArrayRemoval("insurance")) return true;
+
+            // Owner document attachments
+            if (Object.prototype.hasOwnProperty.call(updateData, "owners")) {
+                const ownerDocFields = ["attachment", "passport.attachment", "visa.attachment", "emiratesId.attachment", "medical.attachment", "drivingLicense.attachment", "labourCard.attachment"];
+                const prevOwners = beforeCompany.owners || [];
+                const nextOwners = updateData.owners || [];
+                for (const field of ownerDocFields) {
+                    const [p1, p2] = field.split(".");
+                    const prevUrls = new Set(
+                        prevOwners
+                            .map((o) => (p2 ? o?.[p1]?.[p2] : o?.[p1]))
+                            .filter((x) => typeof x === "string" && x.trim())
+                    );
+                    const nextUrls = new Set(
+                        nextOwners
+                            .map((o) => (p2 ? o?.[p1]?.[p2] : o?.[p1]))
+                            .filter((x) => typeof x === "string" && x.trim())
+                    );
+                    for (const url of prevUrls) {
+                        if (!nextUrls.has(url)) return true;
+                    }
+                }
+            }
+            return false;
+        };
+
+        if (!requesterIsAdmin && isDocumentRemovalAttempt()) {
+            return res.status(403).json({
+                message: "Only administrator can delete company profile documents/cards."
+            });
+        }
 
         if (updateData.responsibilities && Array.isArray(updateData.responsibilities)) {
             const existingResps = company.responsibilities || [];

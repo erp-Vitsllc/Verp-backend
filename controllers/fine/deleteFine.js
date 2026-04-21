@@ -1,7 +1,6 @@
 import Fine from "../../models/Fine.js";
 import {
     isReqUserAdmin,
-    getManagementNotificationEmail,
     notifyAdminDeletedBusinessRecordToManagement
 } from "../../utils/sendAdminDeletionNotificationEmails.js";
 
@@ -12,26 +11,11 @@ export const deleteFine = async (req, res) => {
             return res.status(403).json({ message: "Delete allowed only for admin." });
         }
 
-        const managementEmail = await getManagementNotificationEmail();
-        if (!managementEmail) {
-            return res.status(400).json({
-                message: "Cannot delete: no Management responsible person is assigned in Flowchart."
-            });
-        }
-
         const { id } = req.params;
         const fine = await Fine.findById(id);
 
         if (!fine) {
             return res.status(404).json({ message: "Fine not found" });
-        }
-
-        // Strict Deletion Policy - Only 'Draft' records can be deleted.
-        // Once a record is Pending or further in the workflow, it cannot be deleted for audit purposes.
-        if (fine.fineStatus !== 'Draft') {
-            return res.status(400).json({
-                message: `Cannot delete record with '${fine.fineStatus}' status. ONLY 'Draft' records can be deleted. Please cancel or reject active records instead.`
-            });
         }
 
         await Fine.findByIdAndDelete(id);

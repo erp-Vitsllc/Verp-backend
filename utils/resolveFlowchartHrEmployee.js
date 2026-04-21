@@ -1,8 +1,7 @@
 import EmployeeBasic from "../models/EmployeeBasic.js";
 import { getDepartmentHOD } from "./getDepartmentHOD.js";
 
-const pickEmployeeEmail = (emp) =>
-    emp?.companyEmail || emp?.workEmail || emp?.personalEmail || emp?.email || null;
+const pickEmployeeEmail = (emp) => (emp?.companyEmail || "").trim() || null;
 
 /**
  * Resolve Flowchart HR to an EmployeeBasic document for dashboard + email.
@@ -51,7 +50,7 @@ export const resolveFlowchartHrEmployee = async () => {
         return {
             error: "HR_EMAIL_MISSING",
             message:
-                "The Flowchart HR contact has no company, work, or personal email. Add an email on the HR employee profile before sending profile activation.",
+                "The Flowchart HR contact has no company email. First add company email address on the HR profile.",
         };
     }
 

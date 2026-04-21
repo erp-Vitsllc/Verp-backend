@@ -2,6 +2,7 @@ import EmployeeVisa from "../../models/EmployeeVisa.js";
 import { resolveEmployeeId } from "../../services/employeeService.js";
 import { deleteDocumentFromS3 } from "../../utils/s3Upload.js";
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
+import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
 
 const ALLOWED_VISA_TYPES = ["visit", "employment", "spouse"];
 
@@ -13,6 +14,11 @@ export const deleteVisaDetails = async (req, res) => {
     }
 
     try {
+        const isAdmin = await isReqUserAdmin(req.user);
+        if (!isAdmin) {
+            return res.status(403).json({ message: "Only administrator can delete visa details." });
+        }
+
         const employee = await resolveEmployeeId(id);
         if (!employee) {
             return res.status(404).json({ message: "Employee not found." });

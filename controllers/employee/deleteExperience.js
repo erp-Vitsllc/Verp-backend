@@ -1,6 +1,7 @@
 import EmployeeExperience from "../../models/EmployeeExperience.js";
 import { getCompleteEmployee } from "../../services/employeeService.js";
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
+import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
 
 export const deleteExperience = async (req, res) => {
     const { id, experienceId } = req.params;
@@ -10,6 +11,11 @@ export const deleteExperience = async (req, res) => {
     }
 
     try {
+        const isAdmin = await isReqUserAdmin(req.user);
+        if (!isAdmin) {
+            return res.status(403).json({ message: "Only administrator can delete experience records." });
+        }
+
         // Get employeeId from employee record
         const employee = await getCompleteEmployee(id);
         if (!employee) {

@@ -1,6 +1,7 @@
 import EmployeeEducation from "../../models/EmployeeEducation.js";
 import { getCompleteEmployee } from "../../services/employeeService.js";
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
+import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
 
 export const deleteEducation = async (req, res) => {
     const { id, educationId } = req.params;
@@ -10,6 +11,11 @@ export const deleteEducation = async (req, res) => {
     }
 
     try {
+        const isAdmin = await isReqUserAdmin(req.user);
+        if (!isAdmin) {
+            return res.status(403).json({ message: "Only administrator can delete education records." });
+        }
+
         // Get employeeId from employee record
         const employee = await getCompleteEmployee(id);
         if (!employee) {

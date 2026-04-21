@@ -1,7 +1,6 @@
 import Reward from "../../models/Reward.js";
 import {
     isReqUserAdmin,
-    getManagementNotificationEmail,
     notifyAdminDeletedBusinessRecordToManagement
 } from "../../utils/sendAdminDeletionNotificationEmails.js";
 
@@ -12,25 +11,11 @@ export const deleteReward = async (req, res) => {
             return res.status(403).json({ message: "Delete allowed only for admin." });
         }
 
-        const managementEmail = await getManagementNotificationEmail();
-        if (!managementEmail) {
-            return res.status(400).json({
-                message: "Cannot delete: no Management responsible person is assigned in Flowchart."
-            });
-        }
-
         const { id } = req.params;
 
         const reward = await Reward.findById(id);
         if (!reward) {
             return res.status(404).json({ message: "Reward not found" });
-        }
-
-        // Strict Deletion Policy - Only 'Draft' records can be deleted.
-        if (reward.rewardStatus !== 'Draft') {
-            return res.status(400).json({
-                message: `Cannot delete record with '${reward.rewardStatus}' status. ONLY 'Draft' records can be deleted.`
-            });
         }
 
         await Reward.findByIdAndDelete(id);

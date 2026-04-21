@@ -21,10 +21,10 @@ const dedupeEmailList = (emails = []) => {
 const getActorCcEmails = async (actor, excludeLowerEmails = new Set()) => {
     if (!actor?.employeeObjectId) return [];
     const emp = await EmployeeBasic.findById(actor.employeeObjectId)
-        .select("companyEmail workEmail personalEmail email")
+        .select("companyEmail")
         .lean();
     if (!emp) return [];
-    const raw = [emp.companyEmail, emp.workEmail, emp.personalEmail, emp.email];
+    const raw = [emp.companyEmail];
     return dedupeEmailList(raw).filter((e) => !excludeLowerEmails.has(e.toLowerCase()));
 };
 
@@ -134,7 +134,7 @@ const sendCompanyActivationEmailToHr = async ({
                     <p style="margin:6px 0 0;"><strong>Company ID:</strong> ${company.companyId || "N/A"}</p>
                     <p style="margin:6px 0 0;"><strong>Requested by:</strong> ${requestedByName || "System"}</p>
                     <p style="margin:6px 0 0;"><strong>Reason:</strong> ${reasonHtml}</p>
-                    ${descriptionHtml ? `<p style="margin:6px 0 0;"><strong>Description:</strong> ${descriptionHtml}</p>` : ""}
+                    ${descriptionHtml ? `<p style="margin:6px 0 0;"><strong>Edited Details:</strong> ${descriptionHtml}</p>` : ""}
                     ${attachmentUrl ? `<p style="margin:6px 0 0;"><strong>Attachment:</strong> <a href="${attachmentUrl}" target="_blank" rel="noopener noreferrer">${attachmentLabel}</a></p>` : ""}
                 </div>
                 <p style="margin-top:20px;">

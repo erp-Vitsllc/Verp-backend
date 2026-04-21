@@ -49,6 +49,7 @@ const companySchema = new mongoose.Schema(
                 },
                 emiratesId: {
                     number: { type: String },
+                    issueDate: { type: Date },
                     expiryDate: { type: Date },
                     attachment: { type: String }
                 },

@@ -2,12 +2,18 @@ import EmployeeBasic from "../../models/EmployeeBasic.js";
 import mongoose from "mongoose";
 import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeService.js";
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
+import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
 
 // @desc    Delete a document from employee's documents list
 // @route   DELETE /api/Employee/:id/document/:index
 // @access  Private
 export const deleteDocument = async (req, res) => {
     try {
+        const isAdmin = await isReqUserAdmin(req.user);
+        if (!isAdmin) {
+            return res.status(403).json({ message: "Only administrator can delete employee documents." });
+        }
+
         const { id, index } = req.params;
 
         const resolved = await resolveEmployeeId(id);

@@ -3,7 +3,7 @@ import EmployeeBasic from "../../models/EmployeeBasic.js";
 import EmployeeBank from "../../models/EmployeeBank.js";
 import EmployeeSalary from "../../models/EmployeeSalary.js";
 import { uploadDocumentToS3 } from "../../utils/s3Upload.js";
-import { hasPermission, isUserAdministrator } from "../../services/permissionService.js";
+import { isUserAdministrator } from "../../services/permissionService.js";
 import { archiveEmployeeDocument } from "../../utils/archiveEmployeeDocument.js";
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
 
@@ -18,9 +18,10 @@ export const updateBasicDetails = async (req, res) => {
         }
 
         const employeeId = employee.employeeId;
-        const [existingBank, existingSalary] = await Promise.all([
+        const [existingBank, existingSalary, existingBasic] = await Promise.all([
             EmployeeBank.findOne({ employeeId }).select("bankName accountName accountNumber ibanNumber swiftCode bankAttachment").lean(),
             EmployeeSalary.findOne({ employeeId }).select("offerLetter salaryHistory").lean(),
+            EmployeeBasic.findOne({ employeeId }).select("trainingDetails").lean(),
         ]);
 
         // 1. Define allowed fields and their target collections
@@ -314,33 +315,31 @@ export const updateBasicDetails = async (req, res) => {
             }
         }
 
-        // 4. Check permission for salary history deletion
+        const userId = req.user?.id;
+        const isAdminUser = req.user?.isAdmin === true || (userId ? await isUserAdministrator(userId) : false);
+
+        // 4. Enforce admin-only delete on salary history and training records.
         // If salaryHistory is being updated, check if it's a deletion (array length decreased)
         if (updatePayload.salaryHistory !== undefined && Array.isArray(updatePayload.salaryHistory)) {
-            // Get user ID from request (set by authMiddleware)
-            const userId = req.user?.id;
+            // Get current salary history from EmployeeSalary model
+            const employeeSalary = await EmployeeSalary.findOne({ employeeId });
+            const currentSalaryHistory = employeeSalary?.salaryHistory || [];
+            const newSalaryHistory = updatePayload.salaryHistory;
 
-            if (userId) {
-                // Get current salary history from EmployeeSalary model
-                const employeeSalary = await EmployeeSalary.findOne({ employeeId });
-                const currentSalaryHistory = employeeSalary?.salaryHistory || [];
-                const newSalaryHistory = updatePayload.salaryHistory;
+            // If new array is shorter, it means deletion occurred
+            if (newSalaryHistory.length < currentSalaryHistory.length && !isAdminUser) {
+                return res.status(403).json({
+                    message: "Only administrator can delete salary history records."
+                });
+            }
+        }
 
-                // If new array is shorter, it means deletion occurred
-                if (newSalaryHistory.length < currentSalaryHistory.length) {
-                    // Check if user is admin
-                    const isAdminUser = await isUserAdministrator(userId);
-
-                    // If not admin, check delete permission for salary
-                    if (!isAdminUser) {
-                        const hasDeletePermission = await hasPermission(userId, 'hrm_employees_view_salary', 'delete');
-                        if (!hasDeletePermission) {
-                            return res.status(403).json({
-                                message: "Access denied. You don't have delete permission for salary details."
-                            });
-                        }
-                    }
-                }
+        if (updatePayload.trainingDetails !== undefined && Array.isArray(updatePayload.trainingDetails)) {
+            const currentTrainingDetails = existingBasic?.trainingDetails || [];
+            if (updatePayload.trainingDetails.length < currentTrainingDetails.length && !isAdminUser) {
+                return res.status(403).json({
+                    message: "Only administrator can delete training records."
+                });
             }
         }
 

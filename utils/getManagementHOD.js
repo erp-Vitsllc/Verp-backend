@@ -41,7 +41,7 @@ export const getManagementHOD = async (identifier = null) => {
                 lastName: responsibility.employeeName?.split(' ').slice(1).join(' ') || '',
                 employeeId: responsibility.employeeId,
                 designation: responsibility.designation,
-                email: responsibility.email || responsibility.companyEmail,
+                email: responsibility.companyEmail || null,
                 isFlowchartOnly: true
             };
         }

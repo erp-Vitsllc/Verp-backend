@@ -19,6 +19,13 @@ import { updateLabourCardDetails } from "../controllers/employee/updateLabourCar
 import { updateMedicalInsuranceDetails } from "../controllers/employee/updateMedicalInsuranceDetails.js";
 import { updatePassportDetails } from "../controllers/employee/updatePassportDetails.js";
 import { updateDrivingLicenseDetails } from "../controllers/employee/updateDrivingLicenseDetails.js";
+import { deletePassportDetails } from "../controllers/employee/deletePassportDetails.js";
+import { deleteEmiratesIdDetails } from "../controllers/employee/deleteEmiratesIdDetails.js";
+import { deleteLabourCardDetails } from "../controllers/employee/deleteLabourCardDetails.js";
+import { deleteMedicalInsuranceDetails } from "../controllers/employee/deleteMedicalInsuranceDetails.js";
+import { deleteDrivingLicenseDetails } from "../controllers/employee/deleteDrivingLicenseDetails.js";
+import { deleteWorkDetailsCard } from "../controllers/employee/deleteWorkDetailsCard.js";
+import { deleteSignatureCard } from "../controllers/employee/deleteSignatureCard.js";
 import { updateWorkDetails } from "../controllers/employee/updateWorkDetails.js";
 import { addEducation } from "../controllers/employee/addEducation.js";
 import { updateEducation } from "../controllers/employee/updateEducation.js";
@@ -140,9 +147,11 @@ router.patch("/basic-details/:id", checkPermission('hrm_employees_view_basic', '
 
 // Update work details - requires edit permission
 router.patch("/work-details/:id", checkPermission('hrm_employees_view_work', 'edit'), updateWorkDetails);
+router.delete("/work-details/:id", checkPermission('hrm_employees_view_work', 'delete'), deleteWorkDetailsCard);
 
 // Update passport - requires edit permission
 router.patch("/passport/:id", checkPermission('hrm_employees_view_passport', 'edit'), updatePassportDetails);
+router.delete("/passport/:id", checkPermission('hrm_employees_view_passport', 'delete'), deletePassportDetails);
 
 // Update visa - requires edit permission
 router.patch("/visa/:id", checkPermission('hrm_employees_view_visa', 'edit'), updateVisaDetails);
@@ -150,21 +159,26 @@ router.delete("/visa/:id/:type", checkPermission('hrm_employees_view_visa', 'edi
 
 // Update Emirates ID - requires edit permission
 router.patch("/emirates-id/:id", checkPermission('hrm_employees_view_passport', 'edit'), updateEmiratesIdDetails);
+router.delete("/emirates-id/:id", checkPermission('hrm_employees_view_passport', 'delete'), deleteEmiratesIdDetails);
 
 // Update Labour Card - requires edit permission
 router.patch("/labour-card/:id", checkPermission('hrm_employees_view_passport', 'edit'), updateLabourCardDetails);
+router.delete("/labour-card/:id", checkPermission('hrm_employees_view_passport', 'delete'), deleteLabourCardDetails);
 
 // Update Medical Insurance - requires edit permission
 router.patch("/medical-insurance/:id", checkPermission('hrm_employees_view_passport', 'edit'), updateMedicalInsuranceDetails);
+router.delete("/medical-insurance/:id", checkPermission('hrm_employees_view_passport', 'delete'), deleteMedicalInsuranceDetails);
 
 // Update Driving License - requires edit permission
 router.patch("/driving-license/:id", checkPermission('hrm_employees_view_passport', 'edit'), updateDrivingLicenseDetails);
+router.delete("/driving-license/:id", checkPermission('hrm_employees_view_passport', 'delete'), deleteDrivingLicenseDetails);
 
 // Upload profile picture - requires edit permission
 router.post("/upload-profile-picture/:id", checkPermission('hrm_employees_view_basic', 'edit'), uploadProfilePicture);
 
 // Upload e-signature - requires work details edit permission
 router.post("/:id/upload-signature", checkPermission('hrm_employees_view_work', 'edit'), uploadSignature);
+router.delete("/:id/signature", checkPermission('hrm_employees_view_work', 'delete'), deleteSignatureCard);
 
 // Upload document to Cloudinary - requires edit permission
 router.post("/upload-document/:id", checkPermission('hrm_employees_view', 'edit'), uploadDocument);

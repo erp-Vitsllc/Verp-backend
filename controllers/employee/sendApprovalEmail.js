@@ -23,10 +23,10 @@ const buildProfileActivationCc = (emp, hrEmail) => {
     const h = (hrEmail || "").trim().toLowerCase();
     if (h) skip.add(h);
     const raw = [];
-    [emp.companyEmail, emp.workEmail, emp.personalEmail, emp.email].forEach((x) => raw.push(x));
+    [emp.companyEmail].forEach((x) => raw.push(x));
     const pr = emp.primaryReportee;
     if (pr && typeof pr === "object") {
-        [pr.companyEmail, pr.workEmail, pr.personalEmail, pr.email].forEach((x) => raw.push(x));
+        [pr.companyEmail].forEach((x) => raw.push(x));
     }
     return dedupeEmailList(raw).filter((e) => !skip.has(e.toLowerCase()));
 };
@@ -40,12 +40,20 @@ export const sendApprovalEmail = async (req, res) => {
         if (!employeeBasic) {
             return res.status(404).json({ message: "Employee not found" });
         }
+        if (!employeeBasic.companyEmail || !String(employeeBasic.companyEmail).trim()) {
+            return res.status(400).json({
+                message: "Employee company email is required. First add company email address."
+            });
+        }
 
         if (!reason || !String(reason).trim()) {
             return res.status(400).json({ message: "Reason is required for profile activation request." });
         }
+        if (!description || !String(description).trim()) {
+            return res.status(400).json({ message: "Edited details are required for profile activation request." });
+        }
         const reasonText = String(reason).trim();
-        const descriptionText = description && String(description).trim() ? String(description).trim() : "";
+        const descriptionText = String(description).trim();
         const attachmentText = attachment && String(attachment).trim() ? String(attachment).trim() : null;
         const attachmentNameText = attachmentName && String(attachmentName).trim() ? String(attachmentName).trim() : "";
 
@@ -107,7 +115,7 @@ export const sendApprovalEmail = async (req, res) => {
                     </p>
                     <div style="background-color: #f8fafc; padding: 14px 16px; border-radius: 8px; border: 1px solid #e2e8f0; margin: 18px 0;">
                         <p style="margin: 0;"><strong>Reason:</strong> ${reasonText}</p>
-                        ${descriptionText ? `<p style="margin: 8px 0 0 0;"><strong>Description:</strong> ${descriptionText}</p>` : ''}
+                        <p style="margin: 8px 0 0 0;"><strong>Edited Details:</strong><br/>${descriptionText.replace(/\n/g, '<br/>')}</p>
                         ${attachmentText ? `<p style="margin: 8px 0 0 0;"><strong>Attachment:</strong> <a href="${attachmentText}" target="_blank" rel="noopener noreferrer">${attachmentNameText || 'View attachment'}</a></p>` : ''}
                     </div>
                 </div>
