@@ -196,6 +196,7 @@ export const updateCompany = async (req, res) => {
         // Owners Documents
         if (companyObj.owners && Array.isArray(companyObj.owners)) {
             companyObj.owners = await Promise.all(companyObj.owners.map(async (owner) => {
+                if (!owner || typeof owner !== "object") return owner;
                 if (owner.attachment) owner.attachment = await getSignedFileUrl(owner.attachment);
                 if (owner.passport?.attachment) owner.passport.attachment = await getSignedFileUrl(owner.passport.attachment);
                 if (owner.visa?.attachment) owner.visa.attachment = await getSignedFileUrl(owner.visa.attachment);
@@ -210,6 +211,7 @@ export const updateCompany = async (req, res) => {
         // Custom Documents
         if (companyObj.documents && Array.isArray(companyObj.documents)) {
             companyObj.documents = await Promise.all(companyObj.documents.map(async (doc) => {
+                if (!doc || typeof doc !== "object") return doc;
                 if (doc.document?.url) {
                     doc.document.url = await getSignedFileUrl(doc.document.url);
                 }
@@ -220,6 +222,7 @@ export const updateCompany = async (req, res) => {
         // Insurance Records
         if (companyObj.insurance && Array.isArray(companyObj.insurance)) {
             companyObj.insurance = await Promise.all(companyObj.insurance.map(async (item) => {
+                if (!item || typeof item !== "object") return item;
                 if (item.document?.url) {
                     item.document.url = await getSignedFileUrl(item.document.url);
                 }
@@ -230,6 +233,7 @@ export const updateCompany = async (req, res) => {
         // Ejari Records
         if (companyObj.ejari && Array.isArray(companyObj.ejari)) {
             companyObj.ejari = await Promise.all(companyObj.ejari.map(async (item) => {
+                if (!item || typeof item !== "object") return item;
                 if (item.document?.url) {
                     item.document.url = await getSignedFileUrl(item.document.url);
                 }

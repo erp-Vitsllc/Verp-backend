@@ -1,5 +1,8 @@
 import Company from "../../models/Company.js";
 import Fine from "../../models/Fine.js";
+import EmployeeBasic from "../../models/EmployeeBasic.js";
+import User from "../../models/User.js";
+import { deleteEmployeeData } from "../../services/employeeService.js";
 
 export const deleteCompany = async (req, res) => {
     try {
@@ -30,10 +33,27 @@ export const deleteCompany = async (req, res) => {
         // NOTE: In a more complex multi-tenant system, we'd check for employees, departments, etc.
         // linked to this specific company ID.
 
+        // Cascade delete employees mapped to this company so stale employee records
+        // do not remain after company removal.
+        const employeesInCompany = await EmployeeBasic.find({ company: company._id })
+            .select("employeeId")
+            .lean();
+        const employeeIds = employeesInCompany
+            .map((employee) => employee.employeeId)
+            .filter(Boolean);
+
+        if (employeeIds.length > 0) {
+            await Promise.all(employeeIds.map((employeeId) => deleteEmployeeData(employeeId)));
+
+            // Remove linked user accounts for deleted employees to avoid orphaned logins.
+            await User.deleteMany({ employeeId: { $in: employeeIds } });
+        }
+
         await Company.findByIdAndDelete(id);
 
         return res.status(200).json({
-            message: "Company deleted successfully"
+            message: "Company deleted successfully",
+            deletedEmployees: employeeIds.length
         });
     } catch (error) {
         console.error("Error in deleteCompany:", error);

@@ -394,11 +394,38 @@ export const getEmployees = async (req, res) => {
             }
         }));
 
-        // Calculate total companies with at least one employee (global stat)
-        const companiesWithEmployeesCount = (await EmployeeBasic.distinct("company", {
-            company: { $ne: null },
-            employeeId: { $ne: 'VEGA-HR-0000' }
-        })).length;
+        // Calculate companies with employees using only valid (existing) company references.
+        // This prevents deleted/orphaned company IDs from inflating dashboard company counts.
+        const companiesWithEmployeesCountResult = await EmployeeBasic.aggregate([
+            {
+                $match: {
+                    employeeId: { $ne: 'VEGA-HR-0000' },
+                    company: { $ne: null }
+                }
+            },
+            {
+                $lookup: {
+                    from: "companies",
+                    localField: "company",
+                    foreignField: "_id",
+                    as: "companyInfo"
+                }
+            },
+            {
+                $match: {
+                    "companyInfo.0": { $exists: true }
+                }
+            },
+            {
+                $group: {
+                    _id: "$company"
+                }
+            },
+            {
+                $count: "total"
+            }
+        ]);
+        const companiesWithEmployeesCount = companiesWithEmployeesCountResult[0]?.total || 0;
 
         clearTimeout(timeout);
         return res.status(200).json({

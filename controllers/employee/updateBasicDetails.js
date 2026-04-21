@@ -1,5 +1,6 @@
 import { getCompleteEmployee, saveEmployeeData, resolveEmployeeId } from "../../services/employeeService.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
+import EmployeeBank from "../../models/EmployeeBank.js";
 import EmployeeSalary from "../../models/EmployeeSalary.js";
 import { uploadDocumentToS3 } from "../../utils/s3Upload.js";
 import { hasPermission, isUserAdministrator } from "../../services/permissionService.js";
@@ -17,8 +18,8 @@ export const updateBasicDetails = async (req, res) => {
         }
 
         const employeeId = employee.employeeId;
-        const [existingBasic, existingSalary] = await Promise.all([
-            EmployeeBasic.findOne({ employeeId }).select("bankAttachment").lean(),
+        const [existingBank, existingSalary] = await Promise.all([
+            EmployeeBank.findOne({ employeeId }).select("bankName accountName accountNumber ibanNumber swiftCode bankAttachment").lean(),
             EmployeeSalary.findOne({ employeeId }).select("offerLetter salaryHistory").lean(),
         ]);
 
@@ -250,13 +251,26 @@ export const updateBasicDetails = async (req, res) => {
             }
         }
 
-        const previousBankAttachment = existingBasic?.bankAttachment;
+        const previousBankAttachment = existingBank?.bankAttachment;
         const nextBankAttachment = updatePayload.bankAttachment;
-        if (previousBankAttachment?.url && nextBankAttachment?.url && previousBankAttachment.url !== nextBankAttachment.url) {
+        const bankCoreFields = ["bankName", "accountName", "accountNumber", "ibanNumber", "swiftCode"];
+        const bankFieldsChanged = bankCoreFields.some((field) => updatePayload[field] !== undefined);
+        const bankAttachmentReplaced = Boolean(
+            previousBankAttachment?.url &&
+            nextBankAttachment?.url &&
+            previousBankAttachment.url !== nextBankAttachment.url
+        );
+        if (previousBankAttachment?.url && (bankAttachmentReplaced || bankFieldsChanged)) {
+            const prevSummary = [
+                existingBank?.bankName ? `Bank: ${existingBank.bankName}` : "",
+                existingBank?.accountName ? `Account: ${existingBank.accountName}` : "",
+                existingBank?.accountNumber ? `A/C: ${existingBank.accountNumber}` : "",
+                existingBank?.ibanNumber ? `IBAN: ${existingBank.ibanNumber}` : "",
+            ].filter(Boolean).join(" | ");
             await archiveEmployeeDocument({
                 employeeId,
                 type: "Bank Attachment",
-                description: "Bank details attachment",
+                description: prevSummary || "Bank details attachment",
                 document: previousBankAttachment,
             });
         }
