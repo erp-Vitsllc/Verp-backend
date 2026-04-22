@@ -1,7 +1,7 @@
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import mongoose from "mongoose";
 import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeService.js";
-import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
+import { triggerProfileReactivationIfNeeded, shouldQueueProfileChange } from "../../utils/triggerProfileReactivation.js";
 import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
 
 // @desc    Delete a document from employee's documents list
@@ -33,42 +33,61 @@ export const deleteDocument = async (req, res) => {
             return res.status(400).json({ message: "Invalid document index" });
         }
 
-        // Archive document before deleting from live list
         const documentToDelete = employee.documents[docIndex];
-        if (documentToDelete) {
-            if (!employee.oldDocuments) employee.oldDocuments = [];
-            employee.oldDocuments.push({
-                type: documentToDelete.type || '',
-                description: documentToDelete.description || '',
-                issueDate: documentToDelete.issueDate || null,
-                expiryDate: documentToDelete.expiryDate || null,
-                cost: documentToDelete.cost ?? null,
-                basicSalary: documentToDelete.basicSalary ?? null,
-                houseRentAllowance: documentToDelete.houseRentAllowance ?? null,
-                vehicleAllowance: documentToDelete.vehicleAllowance ?? null,
-                fuelAllowance: documentToDelete.fuelAllowance ?? null,
-                otherAllowance: documentToDelete.otherAllowance ?? null,
-                totalSalary: documentToDelete.totalSalary ?? null,
-                createdAt: documentToDelete.createdAt || null,
-                archivedAt: new Date(),
-                archiveReason: 'Deleted',
-                document: documentToDelete.document || null
+        const requiresApprovalQueue = shouldQueueProfileChange(employee);
+        if (requiresApprovalQueue) {
+            await triggerProfileReactivationIfNeeded({
+                employeeId: employee.employeeId,
+                actor: req.user,
+                reason: "Document deleted",
+                changeEntry: {
+                    card: `Document: ${documentToDelete?.type || "Document"}`,
+                    reason: "Document deleted",
+                    section: "documents",
+                    changeType: "delete",
+                    targetIndex: docIndex,
+                    previousData: documentToDelete?.toObject ? documentToDelete.toObject() : documentToDelete,
+                    proposedData: null,
+                },
+            });
+        } else {
+            // Archive document before deleting from live list
+            if (documentToDelete) {
+                if (!employee.oldDocuments) employee.oldDocuments = [];
+                employee.oldDocuments.push({
+                    type: documentToDelete.type || '',
+                    description: documentToDelete.description || '',
+                    issueDate: documentToDelete.issueDate || null,
+                    expiryDate: documentToDelete.expiryDate || null,
+                    cost: documentToDelete.cost ?? null,
+                    basicSalary: documentToDelete.basicSalary ?? null,
+                    houseRentAllowance: documentToDelete.houseRentAllowance ?? null,
+                    vehicleAllowance: documentToDelete.vehicleAllowance ?? null,
+                    fuelAllowance: documentToDelete.fuelAllowance ?? null,
+                    otherAllowance: documentToDelete.otherAllowance ?? null,
+                    totalSalary: documentToDelete.totalSalary ?? null,
+                    createdAt: documentToDelete.createdAt || null,
+                    archivedAt: new Date(),
+                    archiveReason: 'Deleted',
+                    document: documentToDelete.document || null
+                });
+            }
+
+            // Remove document from array
+            employee.documents.splice(docIndex, 1);
+            await employee.save();
+            await triggerProfileReactivationIfNeeded({
+                employeeId: employee.employeeId,
+                actor: req.user,
+                reason: "Document deleted",
             });
         }
-
-        // Remove document from array
-        employee.documents.splice(docIndex, 1);
-
-        const savedEmployee = await employee.save();
-        await triggerProfileReactivationIfNeeded({
-            employeeId: employee.employeeId,
-            actor: req.user,
-            reason: "Document deleted",
-        });
         const completeEmployee = await getCompleteEmployee(employee.employeeId);
 
         res.status(200).json({
-            message: "Document deleted successfully",
+            message: requiresApprovalQueue
+                ? "Document deletion queued for HR activation approval."
+                : "Document deleted successfully",
             employee: completeEmployee
         });
 

@@ -18,6 +18,20 @@ const STAGE = {
     REJECTED: 'rejected'
 };
 
+function vehicleServiceDetailsPath(assetId, serviceRecordId) {
+    if (!assetId || !serviceRecordId) return null;
+    return `/HRM/Asset/Vehicle/service-requests/details/${assetId}/${serviceRecordId}`;
+}
+
+function vehicleServiceDashboardMeta(asset, serviceRecordId) {
+    const path = vehicleServiceDetailsPath(asset?._id, serviceRecordId);
+    return JSON.stringify({
+        vehicleId: asset?._id ? String(asset._id) : '',
+        serviceRecordId: serviceRecordId ? String(serviceRecordId) : '',
+        detailsPath: path || '',
+    });
+}
+
 async function resolveAssigneeForStage(stage) {
     if (stage === STAGE.HR) return getDepartmentHOD('hr');
     if (stage === STAGE.ACCOUNTS) return getDepartmentHOD('accounts');
@@ -361,7 +375,8 @@ export async function maybeStartVehicleServiceWorkflow(asset, { serviceRecordId,
             subjectEmployee: subjectEmp,
             requestedByName: requesterName,
             extra1: `${asset.assetId} — ${serviceType || 'Service'}`,
-            extra2: 'Awaiting HR approval'
+            extra2: 'Awaiting HR approval',
+            extra3: vehicleServiceDashboardMeta(asset, serviceRecordId),
         });
 
         await sendVehicleServiceWorkflowEmail({
@@ -369,7 +384,8 @@ export async function maybeStartVehicleServiceWorkflow(asset, { serviceRecordId,
             asset,
             stageLabel: 'HR approval required',
             actionLabel: 'New vehicle service request',
-            detailLine: `${requesterName} logged a service (${serviceType}). Please approve or reject in your dashboard.`
+            detailLine: `${requesterName} logged a service (${serviceType}). Please approve or reject in your dashboard.`,
+            linkPath: vehicleServiceDetailsPath(asset._id, serviceRecordId),
         });
 
         persistWorkflowSnapshotToServiceSubdoc(asset);
@@ -382,14 +398,14 @@ export async function maybeStartVehicleServiceWorkflow(asset, { serviceRecordId,
 
 /**
  * POST /api/AssetItem/:id/service-workflow/respond
- * body: { action: 'approve' | 'reject' | 'hold', comment?, serviceUpdates?, holdReason?, holdDays? }
- * - hold: Accounts step only; requires holdReason + holdDays (≥1). Notifies vehicle assignee.
+ * body: { action: 'approve' | 'reject' | 'hold', comment?, serviceUpdates?, holdReason?, holdDays?, holdUntilDate? }
+ * - hold: Accounts step only; requires holdReason + holdUntilDate (or holdDays for legacy payloads).
  * serviceUpdates uses the same shape as POST /AssetItem/:id/service (optional on approve).
  */
 export const respondVehicleServiceWorkflow = async (req, res) => {
     try {
         const { id } = req.params;
-        const { action, comment, serviceUpdates, holdReason, holdDays } = req.body || {};
+        const { action, comment, serviceUpdates, holdReason, holdDays, holdUntilDate } = req.body || {};
         if (!['approve', 'reject', 'hold'].includes(action)) {
             return res.status(400).json({ message: 'action must be approve, reject, or hold' });
         }
@@ -424,59 +440,55 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
                 return res.status(400).json({ message: 'Hold is only available at the Accounts step' });
             }
             const reason = String(holdReason || '').trim();
-            const daysNum = Number(holdDays);
             if (!reason) {
                 return res.status(400).json({ message: 'Hold reason is required' });
             }
-            if (!Number.isFinite(daysNum) || daysNum < 1) {
-                return res.status(400).json({ message: 'Hold requires a valid number of days (1 or more)' });
+            let holdUntil = null;
+            if (holdUntilDate) {
+                holdUntil = new Date(holdUntilDate);
+            } else if (Number.isFinite(Number(holdDays)) && Number(holdDays) >= 1) {
+                holdUntil = new Date(Date.now() + Number(holdDays) * 24 * 60 * 60 * 1000);
             }
+            if (!holdUntil || Number.isNaN(holdUntil.getTime())) {
+                return res.status(400).json({ message: 'Hold date is required' });
+            }
+            const now = new Date();
+            const msPerDay = 24 * 60 * 60 * 1000;
+            const daysNum = Math.max(1, Math.ceil((holdUntil.getTime() - now.getTime()) / msPerDay));
+            const remindAt = new Date(holdUntil.getTime() - msPerDay);
             if (!asset.activeServiceWorkflow.accountsHold) asset.activeServiceWorkflow.accountsHold = {};
             asset.activeServiceWorkflow.accountsHold = {
                 reason,
                 days: daysNum,
-                heldAt: new Date()
+                heldAt: now,
+                holdUntilDate: holdUntil,
+                remindAt,
+                reminderSentAt: null,
             };
             await pushWorkflowHistory(asset, {
                 stage,
                 action: 'hold',
-                note: `${reason} (${daysNum} day${daysNum === 1 ? '' : 's'})`,
+                note: `${reason} (until ${holdUntil.toISOString().slice(0, 10)})`,
                 byName: actorName
             });
             await logVehicleServiceWorkflowToAssetHistory(asset, {
                 stage,
                 workflowAction: 'hold',
-                note: `${reason} (${daysNum} days)`,
+                note: `${reason} (until ${holdUntil.toISOString().slice(0, 10)})`,
                 byName: actorName,
                 performedById,
                 serviceTypeLabel: wf.serviceTypeLabel,
                 hasServiceUpdates: false,
                 serviceRecordId: wf.serviceRecordId
             });
-            if (asset.assignedTo?._id) {
-                await syncDashboardAction({
-                    requestId: asset._id,
-                    requestType: 'Vehicle Service Request',
-                    status: 'Pending',
-                    assignedTo: asset.assignedTo._id,
-                    subjectEmployee: asset.assignedTo,
-                    requestedByName: actorName,
-                    extra1: `${asset.assetId} — ${wf.serviceTypeLabel || 'Service'}`,
-                    extra2: `Accounts on hold (${daysNum} days): ${reason}`
-                });
-                await sendVehicleServiceWorkflowEmail({
-                    recipient: asset.assignedTo,
-                    asset,
-                    stageLabel: 'Service request on hold',
-                    actionLabel: 'Vehicle service — Accounts hold',
-                    detailLine: `Accounts placed this request on hold for ${daysNum} days. Reason: ${reason}`
-                });
-            }
             persistWorkflowSnapshotToServiceSubdoc(asset);
             asset.markModified('activeServiceWorkflow');
             await asset.save();
             const holdFresh = await AssetItem.findById(asset._id).populate('assignedTo', 'firstName lastName employeeId');
-            return res.json({ message: 'Hold recorded', asset: holdFresh });
+            return res.json({
+                message: `Hold recorded until ${holdUntil.toLocaleDateString()}`,
+                asset: holdFresh
+            });
         }
 
         let hadServiceUpdates = false;
@@ -518,6 +530,25 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
             });
             persistWorkflowSnapshotToServiceSubdoc(asset);
             await asset.save();
+            try {
+                const serviceSub = asset.services?.id?.(wf.serviceRecordId);
+                const requesterId = serviceSub?.requestedBy || null;
+                if (requesterId) {
+                    const requester = await EmployeeBasic.findById(requesterId).select('firstName lastName employeeId companyEmail workEmail personalEmail email').lean();
+                    if (requester) {
+                        await sendVehicleServiceWorkflowEmail({
+                            recipient: requester,
+                            asset,
+                            stageLabel: 'Service request rejected',
+                            actionLabel: 'Vehicle service rejected',
+                            detailLine: `Your service request was rejected at ${STAGE_LABEL[stage] || stage}. Reason: ${comment || 'No reason provided'}. You can edit and re-submit.`,
+                            linkPath: vehicleServiceDetailsPath(asset._id, wf.serviceRecordId),
+                        });
+                    }
+                }
+            } catch (notifyErr) {
+                console.error('[VehicleServiceWorkflow] reject notify requester failed:', notifyErr);
+            }
             const rejectedFresh = await AssetItem.findById(asset._id).populate('assignedTo', 'firstName lastName employeeId');
             return res.json({ message: 'Workflow rejected', asset: rejectedFresh });
         }
@@ -585,7 +616,8 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
                 subjectEmployee: asset.assignedTo,
                 requestedByName: requesterName,
                 extra1: `${asset.assetId} — ${wf.serviceTypeLabel || 'Service'}`,
-                extra2
+                extra2,
+                extra3: vehicleServiceDashboardMeta(asset, wf.serviceRecordId),
             });
 
             await sendVehicleServiceWorkflowEmail({
@@ -593,7 +625,8 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
                 asset,
                 stageLabel: extra2,
                 actionLabel: 'Vehicle service workflow',
-                detailLine: `The request moved to the next step. Please review in VeRP.`
+                detailLine: `The request moved to the next step. Please review in VeRP.`,
+                linkPath: vehicleServiceDetailsPath(asset._id, wf.serviceRecordId),
             });
         }
 

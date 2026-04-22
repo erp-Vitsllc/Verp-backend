@@ -4,7 +4,14 @@ import { resolveEmployeeEmail } from './resolveEmployeeEmail.js';
 /**
  * Notify flowchart role when a vehicle service workflow step is waiting or completed.
  */
-export async function sendVehicleServiceWorkflowEmail({ recipient, asset, stageLabel, actionLabel, detailLine }) {
+export async function sendVehicleServiceWorkflowEmail({
+    recipient,
+    asset,
+    stageLabel,
+    actionLabel,
+    detailLine,
+    linkPath,
+}) {
     try {
         const { email: to } = resolveEmployeeEmail(recipient);
         if (!to) {
@@ -23,7 +30,7 @@ export async function sendVehicleServiceWorkflowEmail({ recipient, asset, stageL
         });
 
         const base = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/$/, '');
-        const link = `${base}/HRM/Asset/Vehicle/details/${asset._id}`;
+        const link = linkPath ? `${base}${linkPath.startsWith('/') ? linkPath : `/${linkPath}`}` : `${base}/HRM/Asset/Vehicle/details/${asset._id}`;
 
         const subject = `[VeRP] Vehicle service — ${actionLabel}: ${asset.assetId || asset.name}`;
         const html = `

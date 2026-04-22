@@ -1,8 +1,9 @@
 import EmployeeDrivingLicense from "../../models/EmployeeDrivingLicense.js";
+import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeService.js";
 import { uploadDocumentToS3, deleteDocumentFromS3 } from "../../utils/s3Upload.js";
 import { archiveEmployeeDocument } from "../../utils/archiveEmployeeDocument.js";
-import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
+import { triggerProfileReactivationIfNeeded, shouldQueueProfileChange } from "../../utils/triggerProfileReactivation.js";
 
 const REQUIRED_FIELDS = ["number", "issueDate", "expiryDate", "document"];
 
@@ -10,12 +11,26 @@ const buildMissingFields = (body, existingDocument) => {
     return REQUIRED_FIELDS.filter((field) => {
         if (field === "document") {
             // Check if document is provided OR if existing document exists in DB
-            const hasDocument = body.document && typeof body.document === 'string' && body.document.trim() !== '';
+            const hasDocumentString = body.document && typeof body.document === "string" && body.document.trim() !== "";
+            const hasDocumentObject = body.document && typeof body.document === "object" && (
+                (typeof body.document.url === "string" && body.document.url.trim() !== "") ||
+                (typeof body.document.data === "string" && body.document.data.trim() !== "")
+            );
+            const hasDocument = hasDocumentString || hasDocumentObject;
             return !hasDocument && !existingDocument;
         }
         const value = body[field];
         return value === undefined || value === null || value === "";
     });
+};
+
+const normalizeDocumentInput = (document) => {
+    if (typeof document === "string") return document.trim();
+    if (document && typeof document === "object") {
+        if (typeof document.url === "string" && document.url.trim() !== "") return document.url.trim();
+        if (typeof document.data === "string" && document.data.trim() !== "") return document.data.trim();
+    }
+    return "";
 };
 
 const normalizeDate = (value) => {
@@ -39,8 +54,9 @@ export const updateDrivingLicenseDetails = async (req, res) => {
     if (number !== undefined && typeof number !== 'string') {
         return res.status(400).json({ message: "License number must be a string" });
     }
-    if (document !== undefined && typeof document !== 'string') {
-        return res.status(400).json({ message: "Document must be a string (base64 or URL)" });
+    const normalizedDocument = normalizeDocumentInput(document);
+    if (document !== undefined && typeof document !== "string" && typeof document !== "object") {
+        return res.status(400).json({ message: "Document must be a string or an object containing url/data" });
     }
 
     try {
@@ -51,12 +67,14 @@ export const updateDrivingLicenseDetails = async (req, res) => {
         }
 
         const employeeId = employee.employeeId;
+        const employeeBasic = await EmployeeBasic.findOne({ employeeId }).select("company profileStatus profileWorkflow").lean();
+        const requiresApprovalQueue = shouldQueueProfileChange(employeeBasic);
 
         // Check if existing document exists in database (check for both url and data for backward compatibility)
         const existingDrivingLicense = await EmployeeDrivingLicense.findOne({ employeeId });
         const existingDocument = existingDrivingLicense?.drivingLicenceDetails?.document?.url || existingDrivingLicense?.drivingLicenceDetails?.document?.data;
 
-        const missingFields = buildMissingFields({ number, issueDate, expiryDate, document }, existingDocument);
+        const missingFields = buildMissingFields({ number, issueDate, expiryDate, document: normalizedDocument || document }, existingDocument);
         if (missingFields.length > 0) {
             return res.status(400).json({
                 message: "Missing required Driving License fields.",
@@ -74,8 +92,8 @@ export const updateDrivingLicenseDetails = async (req, res) => {
 
         const previousDrivingLicense = existingDrivingLicense?.drivingLicenceDetails;
         const hasExistingDocument = Boolean(previousDrivingLicense?.document?.url || previousDrivingLicense?.document?.data);
-        const hasNewDocumentUpload = Boolean(document && typeof document === "string" && document.trim() !== "");
-        const shouldArchivePrevious = hasExistingDocument && hasNewDocumentUpload;
+        const hasNewDocumentUpload = Boolean(normalizedDocument);
+        const shouldArchivePrevious = !requiresApprovalQueue && hasExistingDocument && hasNewDocumentUpload;
         if (shouldArchivePrevious) {
             await archiveEmployeeDocument({
                 employeeId,
@@ -89,19 +107,19 @@ export const updateDrivingLicenseDetails = async (req, res) => {
 
         // Handle document upload to IDrive (S3) if new document provided
         let documentData = undefined;
-        if (document && document.trim() !== '') {
+        if (normalizedDocument) {
             // Check if it's already a URL (IDrive or otherwise)
-            if (document.startsWith('http://') || document.startsWith('https://')) {
+            if (normalizedDocument.startsWith('http://') || normalizedDocument.startsWith('https://')) {
                 // Already a URL
                 documentData = {
-                    url: document,
+                    url: normalizedDocument,
                     name: documentName || "",
                     mimeType: documentMime || "",
                 };
             } else {
                 // Upload base64 to IDrive
                 const uploadResult = await uploadDocumentToS3(
-                    document,
+                    normalizedDocument,
                     `employee-documents/${employeeId}/driving-license`,
                     documentName || 'driving-license.pdf',
                     'raw'
@@ -133,31 +151,46 @@ export const updateDrivingLicenseDetails = async (req, res) => {
             lastUpdated: new Date(),
         };
 
-        // Update or create Driving License record
-        const updatedDrivingLicense = await EmployeeDrivingLicense.findOneAndUpdate(
-            { employeeId },
-            {
-                $set: {
-                    drivingLicenceDetails: drivingLicensePayload,
+        let updatedDrivingLicense = existingDrivingLicense;
+        if (requiresApprovalQueue) {
+            await triggerProfileReactivationIfNeeded({
+                employeeId,
+                actor: req.user,
+                reason: "Driving license details updated",
+                changeEntry: {
+                    card: "Driving License",
+                    reason: "Driving license details updated",
+                    section: "drivingLicense",
+                    changeType: "update",
+                    targetIndex: null,
+                    previousData: previousDrivingLicense || null,
+                    proposedData: drivingLicensePayload,
                 },
-            },
-            { upsert: true, new: true }
-        );
-
-        console.log("✅ Driving License details saved for employee:", employeeId);
-        console.log("   Driving License Number:", drivingLicensePayload.number);
-        console.log("   Expiry Date:", drivingLicensePayload.expiryDate);
-
-        await triggerProfileReactivationIfNeeded({
-            employeeId,
-            actor: req.user,
-            reason: "Driving license details updated",
-        });
+            });
+        } else {
+            // Update or create Driving License record
+            updatedDrivingLicense = await EmployeeDrivingLicense.findOneAndUpdate(
+                { employeeId },
+                {
+                    $set: {
+                        drivingLicenceDetails: drivingLicensePayload,
+                    },
+                },
+                { upsert: true, new: true }
+            );
+            await triggerProfileReactivationIfNeeded({
+                employeeId,
+                actor: req.user,
+                reason: "Driving license details updated",
+            });
+        }
         const completeEmployee = await getCompleteEmployee(employeeId);
 
         return res.json({
-            message: "Driving License details updated successfully.",
-            drivingLicenceDetails: updatedDrivingLicense.drivingLicenceDetails,
+            message: requiresApprovalQueue
+                ? "Driving License change queued for HR activation approval."
+                : "Driving License details updated successfully.",
+            drivingLicenceDetails: updatedDrivingLicense?.drivingLicenceDetails || completeEmployee?.drivingLicenceDetails,
             employee: completeEmployee
         });
     } catch (error) {

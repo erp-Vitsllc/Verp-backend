@@ -808,6 +808,14 @@ export const getCompleteEmployee = async (id) => {
                 if (doc.document) signingPromises.push(signUrl(doc.document, `document[${idx}]`));
             });
         }
+        // Archived / old documents
+        if (completeEmployee.oldDocuments && Array.isArray(completeEmployee.oldDocuments)) {
+            completeEmployee.oldDocuments.forEach((doc, idx) => {
+                if (doc?.document) {
+                    signingPromises.push(signUrl(doc.document, `oldDocuments[${idx}]`));
+                }
+            });
+        }
         // Basic Training
         if (completeEmployee.trainingDetails) {
             completeEmployee.trainingDetails.forEach((t, idx) => {

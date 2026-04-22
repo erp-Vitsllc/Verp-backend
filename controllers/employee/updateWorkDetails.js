@@ -1,7 +1,7 @@
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import User from "../../models/User.js";
 import { getCompleteEmployee } from "../../services/employeeService.js";
-import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
+import { triggerProfileReactivationIfNeeded, shouldQueueProfileChange } from "../../utils/triggerProfileReactivation.js";
 
 export const updateWorkDetails = async (req, res) => {
     try {
@@ -69,39 +69,75 @@ export const updateWorkDetails = async (req, res) => {
             updatePayload.probationPeriod = 6;
         }
 
-        // 5. Update EmployeeBasic
-        const updated = await EmployeeBasic.findOneAndUpdate(
-            { employeeId },
-            { $set: updatePayload },
-            { new: true, runValidators: true }
-        ).select("-password");
+        const requiresApprovalQueue = shouldQueueProfileChange(employee);
+        if (requiresApprovalQueue) {
+            await triggerProfileReactivationIfNeeded({
+                employeeId,
+                actor: req.user,
+                reason: "Work details updated",
+                changeEntry: {
+                    card: "Work Details",
+                    reason: "Work details updated",
+                    section: "workDetails",
+                    changeType: "update",
+                    targetIndex: null,
+                    previousData: {
+                        reportingAuthority: employee.reportingAuthority || null,
+                        primaryReportee: employee.primaryReportee || null,
+                        secondaryReportee: employee.secondaryReportee || null,
+                        overtime: employee.overtime,
+                        status: employee.status,
+                        probationPeriod: employee.probationPeriod,
+                        designation: employee.designation,
+                        department: employee.department,
+                        company: employee.company || null,
+                        contractJoiningDate: employee.contractJoiningDate || null,
+                        contractExpiryDate: employee.contractExpiryDate || null,
+                        dateOfJoining: employee.dateOfJoining || null,
+                        companyEmail: employee.companyEmail || "",
+                        profileStatus: employee.profileStatus,
+                        profileApprovalStatus: employee.profileApprovalStatus,
+                    },
+                    proposedData: updatePayload,
+                },
+            });
+        } else {
+            // 5. Update EmployeeBasic
+            const updated = await EmployeeBasic.findOneAndUpdate(
+                { employeeId },
+                { $set: updatePayload },
+                { new: true, runValidators: true }
+            ).select("-password");
 
-        if (!updated) {
-            return res.status(404).json({ message: "Employee not found" });
+            if (!updated) {
+                return res.status(404).json({ message: "Employee not found" });
+            }
+
+            await triggerProfileReactivationIfNeeded({
+                employeeId,
+                actor: req.user,
+                reason: "Work details updated",
+            });
+
+            // 6. Sync companyEmail to User model if updated
+            if (updatePayload.companyEmail !== undefined) {
+                // Find linked User by employeeId
+                await User.findOneAndUpdate(
+                    { employeeId: employeeId },
+                    { $set: { companyEmail: updatePayload.companyEmail } }
+                );
+            }
         }
-
-        await triggerProfileReactivationIfNeeded({
-            employeeId,
-            actor: req.user,
-            reason: "Work details updated",
-        });
 
         // Get updated employee data
         const completeEmployee = await getCompleteEmployee(employeeId);
         delete completeEmployee.password;
 
-        // 6. Sync companyEmail to User model if updated
-        if (updatePayload.companyEmail !== undefined) {
-            // Find linked User by employeeId
-            await User.findOneAndUpdate(
-                { employeeId: employeeId },
-                { $set: { companyEmail: updatePayload.companyEmail } }
-            );
-        }
-
         // 7. Return success
         return res.status(200).json({
-            message: "Work details updated",
+            message: requiresApprovalQueue
+                ? "Work details change queued for HR activation approval."
+                : "Work details updated",
             employee: completeEmployee
         });
 

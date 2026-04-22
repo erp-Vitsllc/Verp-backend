@@ -87,7 +87,18 @@ export const sendApprovalEmail = async (req, res) => {
 
         const employeeName = `${employeeBasic.firstName || ""} ${employeeBasic.lastName || ""}`.trim() || "Employee";
         const hrName = `${hrEmployee.firstName || ""} ${hrEmployee.lastName || ""}`.trim() || "HR";
-        const subject = `Profile activation request: ${employeeName}`;
+        const wasPreviouslyActive = Array.isArray(employeeBasic.profileWorkflow)
+            ? employeeBasic.profileWorkflow.some((w) => String(w?.status || "").toLowerCase() === "active")
+            : false;
+        const activationTypeLabel = wasPreviouslyActive ? "Reactivation" : "New Activation";
+        const pendingCards = Array.isArray(employeeBasic.pendingReactivationChanges)
+            ? [...new Set(employeeBasic.pendingReactivationChanges.map((x) => String(x?.card || "").trim()).filter(Boolean))]
+            : [];
+        const pendingCardsHtml = pendingCards.length
+            ? `<p style="margin: 8px 0 0 0;"><strong>Requested Changes:</strong><br/>${pendingCards.map((c) => `- ${c}`).join("<br/>")}</p>`
+            : "";
+        const pendingCardsText = pendingCards.length ? ` | Requested Changes: ${pendingCards.join(", ")}` : "";
+        const subject = `${activationTypeLabel} request: ${employeeName}`;
 
         const origin = req.headers.origin || (req.headers.referer ? new URL(req.headers.referer).origin : null);
         const baseUrl = process.env.FRONTEND_URL || origin || "http://localhost:3000";
@@ -101,7 +112,7 @@ export const sendApprovalEmail = async (req, res) => {
                 <div style="padding: 30px;">
                     <p>Hello <strong>${hrName}</strong>,</p>
                     <p>Greetings from VeRP Portal.</p>
-                    <p>The following employee has completed their profile and is requesting activation. As the <strong>HR</strong> contact assigned in the company Flowchart, please review the profile and grant activation if everything is in order.</p>
+                    <p>The following employee is requesting <strong>${activationTypeLabel.toLowerCase()}</strong>. As the <strong>HR</strong> contact assigned in the company Flowchart, please review and grant approval if everything is in order.</p>
                     
                     <div style="background-color: #f8fafc; padding: 20px; border-radius: 8px; border: 1px solid #e2e8f0; margin: 25px 0;">
                         <p style="margin: 0;"><strong>Employee Name:</strong> ${employeeName}</p>
@@ -114,8 +125,10 @@ export const sendApprovalEmail = async (req, res) => {
                         <a href="${profileUrl}" style="background-color: #2563eb; color: white; padding: 14px 30px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block; font-size: 16px;">View & Activate Profile</a>
                     </p>
                     <div style="background-color: #f8fafc; padding: 14px 16px; border-radius: 8px; border: 1px solid #e2e8f0; margin: 18px 0;">
-                        <p style="margin: 0;"><strong>Reason:</strong> ${reasonText}</p>
+                        <p style="margin: 0;"><strong>Type:</strong> ${activationTypeLabel}</p>
+                        <p style="margin: 8px 0 0 0;"><strong>Reason:</strong> ${reasonText}</p>
                         <p style="margin: 8px 0 0 0;"><strong>Edited Details:</strong><br/>${descriptionText.replace(/\n/g, '<br/>')}</p>
+                        ${pendingCardsHtml}
                         ${attachmentText ? `<p style="margin: 8px 0 0 0;"><strong>Attachment:</strong> <a href="${attachmentText}" target="_blank" rel="noopener noreferrer">${attachmentNameText || 'View attachment'}</a></p>` : ''}
                     </div>
                 </div>
@@ -141,7 +154,7 @@ export const sendApprovalEmail = async (req, res) => {
                     assignedTo: hrEmployee._id,
                     status: "submitted",
                     assignedAt: new Date(),
-                    comment: `Reason: ${reasonText}${descriptionText ? ` | Description: ${descriptionText}` : ""}${attachmentText ? ` | Attachment: ${attachmentText}` : ""}`,
+                    comment: `Type: ${activationTypeLabel} | Reason: ${reasonText}${descriptionText ? ` | Description: ${descriptionText}` : ""}${pendingCards.length ? ` | Requested Changes: ${pendingCards.join(", ")}` : ""}${attachmentText ? ` | Attachment: ${attachmentText}` : ""}`,
                     reason: reasonText,
                     description: descriptionText,
                     attachment: attachmentText || "",
@@ -166,7 +179,7 @@ export const sendApprovalEmail = async (req, res) => {
             status: "Pending",
             subjectEmployee: subjectForDashboard || employeeBasic,
             requestedByName,
-            extra1: `Profile activation — ${reasonText}`,
+            extra1: `${activationTypeLabel} — ${reasonText}${pendingCardsText}`,
             extra2: employeeBasic.designation || "",
         });
 

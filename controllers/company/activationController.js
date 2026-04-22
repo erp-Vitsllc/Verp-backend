@@ -69,11 +69,29 @@ export const submitCompanyActivationRequest = async (req, res) => {
 export const approveCompanyActivationRequest = async (req, res) => {
     try {
         const { id } = req.params;
+        const approvedChangeIds = Array.isArray(req.body?.approvedChangeIds) ? req.body.approvedChangeIds.map(String) : [];
+        const selectionProvided = req.body?.selectionProvided === true;
         const company = await resolveCompanyById(id);
         if (!company) return res.status(404).json({ message: "Company not found" });
 
+        const pendingChanges = Array.isArray(company.pendingReactivationChanges)
+            ? company.pendingReactivationChanges.map((entry) => entry?.toObject ? entry.toObject() : entry)
+            : [];
+        const selectedChanges = pendingChanges.filter((entry, idx) => {
+            const entryId = String(entry?._id || idx);
+            if (!selectionProvided) return true;
+            return approvedChangeIds.includes(entryId);
+        });
+
+        for (const change of selectedChanges) {
+            const proposedData = change?.proposedData;
+            if (!proposedData || typeof proposedData !== "object") continue;
+            Object.assign(company, proposedData);
+        }
+
         company.status = "Active";
         company.activationStatus = "active";
+        company.pendingReactivationChanges = [];
         if (!Array.isArray(company.activationWorkflow)) company.activationWorkflow = [];
         company.activationWorkflow.push({
             role: "HR",

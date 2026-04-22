@@ -5,7 +5,7 @@ import EmployeeSalary from "../../models/EmployeeSalary.js";
 import { uploadDocumentToS3 } from "../../utils/s3Upload.js";
 import { isUserAdministrator } from "../../services/permissionService.js";
 import { archiveEmployeeDocument } from "../../utils/archiveEmployeeDocument.js";
-import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
+import { triggerProfileReactivationIfNeeded, shouldQueueProfileChange } from "../../utils/triggerProfileReactivation.js";
 
 export const updateBasicDetails = async (req, res) => {
     try {
@@ -348,25 +348,56 @@ export const updateBasicDetails = async (req, res) => {
             return res.status(400).json({ message: "Nothing to update" });
         }
 
-        // 6. Update using service (which handles routing to correct collections)
-        const updated = await saveEmployeeData(employeeId, updatePayload);
+        const requiresApprovalQueue = shouldQueueProfileChange(existingBasic);
+        let updated = null;
+        if (requiresApprovalQueue) {
+            await triggerProfileReactivationIfNeeded({
+                employeeId,
+                actor: req.user,
+                reason: "Basic details updated",
+                changeEntry: {
+                    card: "Basic Details",
+                    reason: "Basic details updated",
+                    section: "basicDetails",
+                    changeType: "update",
+                    targetIndex: null,
+                    previousData: {
+                        firstName: existingBasic?.firstName || "",
+                        lastName: existingBasic?.lastName || "",
+                        email: existingBasic?.email || "",
+                        contactNumber: existingBasic?.contactNumber || "",
+                        gender: existingBasic?.gender || "",
+                        maritalStatus: existingBasic?.maritalStatus || "",
+                        nationality: existingBasic?.nationality || "",
+                        dateOfBirth: existingBasic?.dateOfBirth || null,
+                    },
+                    proposedData: updatePayload,
+                },
+            });
+            updated = await getCompleteEmployee(employeeId);
+        } else {
+            // 6. Update using service (which handles routing to correct collections)
+            updated = await saveEmployeeData(employeeId, updatePayload);
 
-        if (!updated) {
-            return res.status(404).json({ message: "Employee not found" });
+            if (!updated) {
+                return res.status(404).json({ message: "Employee not found" });
+            }
+
+            await triggerProfileReactivationIfNeeded({
+                employeeId,
+                actor: req.user,
+                reason: "Basic details updated",
+            });
         }
 
         // Remove password from response
         delete updated.password;
 
-        await triggerProfileReactivationIfNeeded({
-            employeeId,
-            actor: req.user,
-            reason: "Basic details updated",
-        });
-
         // 7. Return success
         return res.status(200).json({
-            message: "Basic details updated",
+            message: requiresApprovalQueue
+                ? "Basic details change queued for HR activation approval."
+                : "Basic details updated",
             employee: updated
         });
 

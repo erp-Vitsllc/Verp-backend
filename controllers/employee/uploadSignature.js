@@ -1,6 +1,6 @@
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { uploadDocumentToS3 } from "../../utils/s3Upload.js";
-import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
+import { triggerProfileReactivationIfNeeded, shouldQueueProfileChange } from "../../utils/triggerProfileReactivation.js";
 
 /**
  * Handle e-Signature upload and association with employee
@@ -17,6 +17,7 @@ export const uploadSignature = async (req, res) => {
     try {
         // 1. Verify employee exists
         const employee = await EmployeeBasic.findById(id);
+        const requiresApprovalQueue = shouldQueueProfileChange(employee);
         if (!employee) {
             return res.status(404).json({ message: "Employee not found." });
         }
@@ -37,9 +38,7 @@ export const uploadSignature = async (req, res) => {
         // uploadDocumentToS3 handles base64 cleaning and S3 transfer
         const result = await uploadDocumentToS3(signatureData, folder, fileName, resourceType);
 
-        // 3. Update Employee Record
-        // We store the publicId (S3 Key) and metadata
-        employee.signature = {
+        const proposedSignature = {
             url: result.publicId,
             publicId: result.publicId,
             name: reqFileName || 'Signature',
@@ -48,20 +47,41 @@ export const uploadSignature = async (req, res) => {
             ipAddress: req.ip || req.headers['x-forwarded-for'] || req.socket.remoteAddress,
             format: result.format || extension
         };
-
-        await employee.save();
-        await triggerProfileReactivationIfNeeded({
-            employeeId: employee.employeeId,
-            actor: req.user,
-            reason: "Signature updated",
-        });
+        if (requiresApprovalQueue) {
+            await triggerProfileReactivationIfNeeded({
+                employeeId: employee.employeeId,
+                actor: req.user,
+                reason: "Signature updated",
+                changeEntry: {
+                    card: "Digital Signature",
+                    reason: "Signature updated",
+                    section: "signature",
+                    changeType: "update",
+                    targetIndex: null,
+                    previousData: employee.signature || null,
+                    proposedData: proposedSignature,
+                },
+            });
+        } else {
+            // 3. Update Employee Record
+            // We store the publicId (S3 Key) and metadata
+            employee.signature = proposedSignature;
+            await employee.save();
+            await triggerProfileReactivationIfNeeded({
+                employeeId: employee.employeeId,
+                actor: req.user,
+                reason: "Signature updated",
+            });
+        }
 
         // 4. Return success (with fresh signed URL for display)
         return res.status(200).json({
-            message: "Signature uploaded and saved successfully.",
+            message: requiresApprovalQueue
+                ? "Signature change queued for HR activation approval."
+                : "Signature uploaded and saved successfully.",
             signatureUrl: result.url,
-            signedAt: employee.signature.signedAt,
-            format: employee.signature.format
+            signedAt: proposedSignature.signedAt,
+            format: proposedSignature.format
         });
 
     } catch (error) {

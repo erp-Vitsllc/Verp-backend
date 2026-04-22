@@ -97,6 +97,8 @@ const sendCompanyActivationEmailToHr = async ({
     attachment = "",
     attachmentName = "",
     ccEmails = [],
+    activationTypeLabel = "New Activation",
+    requestedChanges = [],
 }) => {
     const emailUser = process.env.EMAIL_USER?.trim();
     const emailPass = process.env.EMAIL_PASS?.trim();
@@ -111,7 +113,7 @@ const sendCompanyActivationEmailToHr = async ({
 
     const baseUrl = process.env.FRONTEND_URL || "http://localhost:3000";
     const companyUrl = `${baseUrl}/Company/${company._id}`;
-    const subject = `Company activation request: ${company.name}`;
+    const subject = `${activationTypeLabel} request: ${company.name}`;
 
     const reasonHtml = shortenUrlsInString(reason || "Activation request");
     const descriptionHtml = shortenUrlsInString(description || "");
@@ -121,6 +123,10 @@ const sendCompanyActivationEmailToHr = async ({
         shortenUrlsInString(attachmentUrl) ||
         "View attachment";
 
+    const changesHtml = Array.isArray(requestedChanges) && requestedChanges.length
+        ? `<p style="margin:6px 0 0;"><strong>Requested Changes:</strong><br/>${requestedChanges.map((c) => `- ${c}`).join("<br/>")}</p>`
+        : "";
+
     const html = `
         <div style="font-family: Arial, sans-serif; color: #333; line-height: 1.6; max-width: 640px; margin: 0 auto; border: 1px solid #eee; border-radius: 10px; overflow: hidden;">
             <div style="background:#1d4ed8;color:#fff;padding:18px 22px;">
@@ -128,13 +134,15 @@ const sendCompanyActivationEmailToHr = async ({
             </div>
             <div style="padding:22px;">
                 <p>Hello <strong>${hrName}</strong>,</p>
-                <p>A company has been submitted for activation / reactivation and requires HR authorization.</p>
+                <p>A company has been submitted for <strong>${activationTypeLabel.toLowerCase()}</strong> and requires HR authorization.</p>
                 <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:14px 16px;margin:16px 0;">
                     <p style="margin:0;"><strong>Company:</strong> ${company.name || "N/A"}</p>
                     <p style="margin:6px 0 0;"><strong>Company ID:</strong> ${company.companyId || "N/A"}</p>
+                    <p style="margin:6px 0 0;"><strong>Type:</strong> ${activationTypeLabel}</p>
                     <p style="margin:6px 0 0;"><strong>Requested by:</strong> ${requestedByName || "System"}</p>
                     <p style="margin:6px 0 0;"><strong>Reason:</strong> ${reasonHtml}</p>
                     ${descriptionHtml ? `<p style="margin:6px 0 0;"><strong>Edited Details:</strong> ${descriptionHtml}</p>` : ""}
+                    ${changesHtml}
                     ${attachmentUrl ? `<p style="margin:6px 0 0;"><strong>Attachment:</strong> <a href="${attachmentUrl}" target="_blank" rel="noopener noreferrer">${attachmentLabel}</a></p>` : ""}
                 </div>
                 <p style="margin-top:20px;">
@@ -195,7 +203,16 @@ export const submitCompanyActivation = async ({
 
     const hr = hrResolved.employee;
     const requestedByName = getActorName(actor);
-    const extra1ForDashboard = dashboardSummary != null ? dashboardSummary : reason;
+    const wasPreviouslyActive = Array.isArray(company.activationWorkflow)
+        ? company.activationWorkflow.some((w) => String(w?.status || "").toLowerCase() === "active")
+        : false;
+    const activationTypeLabel = wasPreviouslyActive ? "Reactivation" : "New Activation";
+    const requestedChanges = Array.isArray(company.pendingReactivationChanges)
+        ? [...new Set(company.pendingReactivationChanges.map((x) => String(x?.card || "").trim()).filter(Boolean))]
+        : [];
+    const extra1ForDashboard = dashboardSummary != null
+        ? `${activationTypeLabel} | ${dashboardSummary}${requestedChanges.length ? ` | Requested Changes: ${requestedChanges.join(", ")}` : ""}`
+        : `${activationTypeLabel} | ${reason}${requestedChanges.length ? ` | Requested Changes: ${requestedChanges.join(", ")}` : ""}`;
 
     company.status = "Inactive";
     company.activationStatus = "submitted";
@@ -207,8 +224,8 @@ export const submitCompanyActivation = async ({
         status: "submitted",
         assignedAt: new Date(),
         comment: workflowComment || reason,
-        reason: reason || "",
-        description: description || "",
+        reason: `Type: ${activationTypeLabel}${reason ? ` | ${reason}` : ""}`,
+        description: `${description || ""}${requestedChanges.length ? `${description ? " | " : ""}Requested Changes: ${requestedChanges.join(", ")}` : ""}`,
         attachment: attachment || "",
         attachmentName: attachmentName || "",
     });
@@ -264,6 +281,8 @@ export const submitCompanyActivation = async ({
             attachment,
             attachmentName,
             ccEmails: actorCc,
+            activationTypeLabel,
+            requestedChanges,
         });
     } catch (e) {
         console.error("[submitCompanyActivation] Email failed:", e?.message || e);

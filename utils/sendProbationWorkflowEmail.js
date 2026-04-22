@@ -1,7 +1,7 @@
 import nodemailer from "nodemailer";
 import { getDepartmentHOD } from "./getDepartmentHOD.js";
-import { getManagementHOD } from "./getManagementHOD.js";
 import DashboardAction from "../models/DashboardAction.js";
+import EmployeeBasic from "../models/EmployeeBasic.js";
 
 const resolveEmployeeEmail = (emp) =>
     emp?.companyEmail || emp?.workEmail || emp?.personalEmail || emp?.email || null;
@@ -18,14 +18,20 @@ const createTransporter = () => {
     });
 };
 
-const getStakeholders = async () => {
-    const [hr, admin, hod] = await Promise.all([
+const getStakeholders = async (employee) => {
+    let employeeHod = null;
+    if (employee?.primaryReportee) {
+        employeeHod = await EmployeeBasic.findById(employee.primaryReportee)
+            .select("employeeId firstName lastName companyEmail workEmail personalEmail email")
+            .lean();
+    }
+
+    const [hr, admin] = await Promise.all([
         getDepartmentHOD("hr"),
         getDepartmentHOD("admincontroller"),
-        getManagementHOD(),
     ]);
     const map = new Map();
-    [hr, admin, hod].forEach((emp) => {
+    [hr, admin, employeeHod].forEach((emp) => {
         if (!emp) return;
         const key = (emp._id?.toString?.() || emp.employeeId || "").toString();
         if (!key) return;
@@ -82,7 +88,7 @@ export const sendProbationWorkflowEmail = async ({
         const transporter = createTransporter();
         if (!transporter || !employee) return;
 
-        const stakeholders = await getStakeholders();
+        const stakeholders = await getStakeholders(employee);
         const stakeholderEmails = stakeholders.map(resolveEmployeeEmail).filter(Boolean);
         const employeeEmail = resolveEmployeeEmail(employee);
 
@@ -184,7 +190,7 @@ export const ensureProbationRequestForEmployee = async (employeeDoc) => {
     const alreadyFinal = ["approved", "rejected"].includes(current.status);
     if (alreadyOpen || alreadyFinal) return false;
 
-    const stakeholders = await getStakeholders();
+    const stakeholders = await getStakeholders(employeeDoc);
     await employeeDoc.populate("primaryReportee", "firstName lastName employeeId companyEmail workEmail personalEmail email");
     const primaryReportee = employeeDoc.primaryReportee;
     const primaryReporteeEmail = resolveEmployeeEmail(primaryReportee || {});

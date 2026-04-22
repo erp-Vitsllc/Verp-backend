@@ -99,6 +99,18 @@ const companySchema = new mongoose.Schema(
                 attachmentName: { type: String, default: "" },
             },
         ],
+        pendingReactivationChanges: [
+            {
+                card: { type: String, default: "" },
+                reason: { type: String, default: "" },
+                section: { type: String, default: "" },
+                changeType: { type: String, enum: ["add", "update", "delete", ""], default: "" },
+                targetIndex: { type: Number, default: null },
+                previousData: { type: mongoose.Schema.Types.Mixed, default: null },
+                proposedData: { type: mongoose.Schema.Types.Mixed, default: null },
+                changedAt: { type: Date, default: Date.now },
+            }
+        ],
 
         // General Documents
         documents: [

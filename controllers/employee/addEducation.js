@@ -1,7 +1,8 @@
 import EmployeeEducation from "../../models/EmployeeEducation.js";
+import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { getCompleteEmployee, resolveEmployeeId } from "../../services/employeeService.js";
 import { uploadDocumentToS3 } from "../../utils/s3Upload.js";
-import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
+import { triggerProfileReactivationIfNeeded, shouldQueueProfileChange } from "../../utils/triggerProfileReactivation.js";
 
 export const addEducation = async (req, res) => {
     const { id } = req.params;
@@ -34,6 +35,8 @@ export const addEducation = async (req, res) => {
         }
 
         const employeeId = employee.employeeId;
+        const employeeBasic = await EmployeeBasic.findOne({ employeeId }).select("profileStatus profileWorkflow").lean();
+        const requiresApprovalQueue = shouldQueueProfileChange(employeeBasic);
 
         let certificateData;
         if (certificate) {
@@ -69,31 +72,51 @@ export const addEducation = async (req, res) => {
             certificate: certificateData
         };
 
-        // Update or create education record
-        const updated = await EmployeeEducation.findOneAndUpdate(
-            { employeeId },
-            {
-                $push: {
-                    educationDetails: educationData
-                }
-            },
-            { upsert: true, new: true, runValidators: true }
-        );
+        let updated = null;
+        if (requiresApprovalQueue) {
+            await triggerProfileReactivationIfNeeded({
+                employeeId,
+                actor: req.user,
+                reason: "Education details added",
+                changeEntry: {
+                    card: "Education",
+                    reason: "Education details added",
+                    section: "education",
+                    changeType: "add",
+                    targetIndex: null,
+                    previousData: null,
+                    proposedData: educationData,
+                },
+            });
+        } else {
+            // Update or create education record
+            updated = await EmployeeEducation.findOneAndUpdate(
+                { employeeId },
+                {
+                    $push: {
+                        educationDetails: educationData
+                    }
+                },
+                { upsert: true, new: true, runValidators: true }
+            );
 
-        if (!updated) {
-            return res.status(404).json({ message: "Employee not found" });
+            if (!updated) {
+                return res.status(404).json({ message: "Employee not found" });
+            }
+
+            await triggerProfileReactivationIfNeeded({
+                employeeId,
+                actor: req.user,
+                reason: "Education details added",
+            });
         }
-
-        await triggerProfileReactivationIfNeeded({
-            employeeId,
-            actor: req.user,
-            reason: "Education details added",
-        });
         const completeEmployee = await getCompleteEmployee(employeeId);
 
         return res.status(200).json({
-            message: "Education details added successfully",
-            educationDetails: updated.educationDetails,
+            message: requiresApprovalQueue
+                ? "Education change queued for HR activation approval."
+                : "Education details added successfully",
+            educationDetails: updated?.educationDetails || completeEmployee?.educationDetails,
             employee: completeEmployee
         });
     } catch (err) {

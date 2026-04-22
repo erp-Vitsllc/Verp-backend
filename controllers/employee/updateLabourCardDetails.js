@@ -1,8 +1,9 @@
 import EmployeeLabourCard from "../../models/EmployeeLabourCard.js";
+import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeService.js";
 import { uploadDocumentToS3, deleteDocumentFromS3 } from "../../utils/s3Upload.js";
 import { archiveEmployeeDocument } from "../../utils/archiveEmployeeDocument.js";
-import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
+import { triggerProfileReactivationIfNeeded, shouldQueueProfileChange } from "../../utils/triggerProfileReactivation.js";
 
 const REQUIRED_FIELDS = ["number", "issueDate", "expiryDate", "upload", "contractUpload"];
 
@@ -10,16 +11,35 @@ const buildMissingFields = (body, existingDocument, existingContractDocument) =>
     return REQUIRED_FIELDS.filter((field) => {
         if (field === "upload") {
             // Check if upload is provided OR if existing document exists in DB
-            const hasUpload = body.upload && typeof body.upload === 'string' && body.upload.trim() !== '';
+            const hasUploadString = body.upload && typeof body.upload === "string" && body.upload.trim() !== "";
+            const hasUploadObject = body.upload && typeof body.upload === "object" && (
+                (typeof body.upload.url === "string" && body.upload.url.trim() !== "") ||
+                (typeof body.upload.data === "string" && body.upload.data.trim() !== "")
+            );
+            const hasUpload = hasUploadString || hasUploadObject;
             return !hasUpload && !existingDocument;
         }
         if (field === "contractUpload") {
-            const hasContractUpload = body.contractUpload && typeof body.contractUpload === 'string' && body.contractUpload.trim() !== '';
+            const hasContractUploadString = body.contractUpload && typeof body.contractUpload === "string" && body.contractUpload.trim() !== "";
+            const hasContractUploadObject = body.contractUpload && typeof body.contractUpload === "object" && (
+                (typeof body.contractUpload.url === "string" && body.contractUpload.url.trim() !== "") ||
+                (typeof body.contractUpload.data === "string" && body.contractUpload.data.trim() !== "")
+            );
+            const hasContractUpload = hasContractUploadString || hasContractUploadObject;
             return !hasContractUpload && !existingContractDocument;
         }
         const value = body[field];
         return value === undefined || value === null || value === "";
     });
+};
+
+const normalizeUploadInput = (value) => {
+    if (typeof value === "string") return value.trim();
+    if (value && typeof value === "object") {
+        if (typeof value.url === "string" && value.url.trim() !== "") return value.url.trim();
+        if (typeof value.data === "string" && value.data.trim() !== "") return value.data.trim();
+    }
+    return "";
 };
 
 const normalizeDate = (value) => {
@@ -46,11 +66,13 @@ export const updateLabourCardDetails = async (req, res) => {
     if (number !== undefined && typeof number !== 'string') {
         return res.status(400).json({ message: "Number must be a string" });
     }
-    if (upload !== undefined && typeof upload !== 'string') {
-        return res.status(400).json({ message: "Upload must be a string (base64 or URL)" });
+    const normalizedUpload = normalizeUploadInput(upload);
+    const normalizedContractUpload = normalizeUploadInput(contractUpload);
+    if (upload !== undefined && typeof upload !== "string" && typeof upload !== "object") {
+        return res.status(400).json({ message: "Upload must be a string or an object containing url/data" });
     }
-    if (contractUpload !== undefined && typeof contractUpload !== 'string') {
-        return res.status(400).json({ message: "Contract upload must be a string (base64 or URL)" });
+    if (contractUpload !== undefined && typeof contractUpload !== "string" && typeof contractUpload !== "object") {
+        return res.status(400).json({ message: "Contract upload must be a string or an object containing url/data" });
     }
 
     try {
@@ -61,13 +83,19 @@ export const updateLabourCardDetails = async (req, res) => {
         }
 
         const employeeId = employee.employeeId;
+        const employeeBasic = await EmployeeBasic.findOne({ employeeId }).select("company profileStatus profileWorkflow").lean();
+        const requiresApprovalQueue = shouldQueueProfileChange(employeeBasic);
 
         // Check if existing document exists in database (check for both url and data for backward compatibility)
         const existingLabourCard = await EmployeeLabourCard.findOne({ employeeId });
         const existingDocument = existingLabourCard?.labourCard?.document?.url || existingLabourCard?.labourCard?.document?.data;
         const existingContractDocument = existingLabourCard?.labourCard?.labourContractAttachment?.url || existingLabourCard?.labourCard?.labourContractAttachment?.data;
 
-        const missingFields = buildMissingFields({ number, issueDate, expiryDate, upload, contractUpload }, existingDocument, existingContractDocument);
+        const missingFields = buildMissingFields(
+            { number, issueDate, expiryDate, upload: normalizedUpload || upload, contractUpload: normalizedContractUpload || contractUpload },
+            existingDocument,
+            existingContractDocument
+        );
         if (missingFields.length > 0) {
             return res.status(400).json({
                 message: "Missing required Labour Card fields.",
@@ -94,10 +122,10 @@ export const updateLabourCardDetails = async (req, res) => {
         const previousLabourCard = existingLabourCard?.labourCard;
         const hasExistingDocument = Boolean(previousLabourCard?.document?.url || previousLabourCard?.document?.data);
         const hasExistingContractDocument = Boolean(previousLabourCard?.labourContractAttachment?.url || previousLabourCard?.labourContractAttachment?.data);
-        const hasNewDocumentUpload = Boolean(upload && typeof upload === "string" && upload.trim() !== "");
-        const hasNewContractDocumentUpload = Boolean(contractUpload && typeof contractUpload === "string" && contractUpload.trim() !== "");
-        const shouldArchivePrevious = hasExistingDocument && hasNewDocumentUpload;
-        const shouldArchivePreviousContract = hasExistingContractDocument && hasNewContractDocumentUpload;
+        const hasNewDocumentUpload = Boolean(normalizedUpload);
+        const hasNewContractDocumentUpload = Boolean(normalizedContractUpload);
+        const shouldArchivePrevious = !requiresApprovalQueue && hasExistingDocument && hasNewDocumentUpload;
+        const shouldArchivePreviousContract = !requiresApprovalQueue && hasExistingContractDocument && hasNewContractDocumentUpload;
         if (shouldArchivePrevious) {
             await archiveEmployeeDocument({
                 employeeId,
@@ -121,19 +149,19 @@ export const updateLabourCardDetails = async (req, res) => {
 
         // Handle document upload to IDrive (S3) if new document provided
         let documentData = undefined;
-        if (upload && typeof upload === 'string' && upload.trim() !== '') {
+        if (normalizedUpload) {
             // Check if it's already a URL (IDrive or otherwise)
-            if (upload.startsWith('http://') || upload.startsWith('https://')) {
+            if (normalizedUpload.startsWith('http://') || normalizedUpload.startsWith('https://')) {
                 // Already a URL
                 documentData = {
-                    url: upload,
+                    url: normalizedUpload,
                     name: uploadName || "",
                     mimeType: uploadMime || "",
                 };
             } else {
                 // Upload base64 to IDrive
                 const uploadResult = await uploadDocumentToS3(
-                    upload,
+                    normalizedUpload,
                     `employee-documents/${employeeId}/labour-card`,
                     uploadName || 'labour-card.pdf',
                     'raw'
@@ -157,16 +185,16 @@ export const updateLabourCardDetails = async (req, res) => {
         }
 
         let contractDocumentData = undefined;
-        if (contractUpload && typeof contractUpload === 'string' && contractUpload.trim() !== '') {
-            if (contractUpload.startsWith('http://') || contractUpload.startsWith('https://')) {
+        if (normalizedContractUpload) {
+            if (normalizedContractUpload.startsWith('http://') || normalizedContractUpload.startsWith('https://')) {
                 contractDocumentData = {
-                    url: contractUpload,
+                    url: normalizedContractUpload,
                     name: contractUploadName || "",
                     mimeType: contractUploadMime || "",
                 };
             } else {
                 const contractUploadResult = await uploadDocumentToS3(
-                    contractUpload,
+                    normalizedContractUpload,
                     `employee-documents/${employeeId}/labour-contract`,
                     contractUploadName || 'labour-contract.pdf',
                     'raw'
@@ -197,27 +225,46 @@ export const updateLabourCardDetails = async (req, res) => {
             lastUpdated: new Date(),
         };
 
-        // Update or create Labour Card record
-        const updatedLabourCard = await EmployeeLabourCard.findOneAndUpdate(
-            { employeeId },
-            {
-                $set: {
-                    labourCard: labourCardPayload,
+        let updatedLabourCard = existingLabourCard;
+        if (requiresApprovalQueue) {
+            await triggerProfileReactivationIfNeeded({
+                employeeId,
+                actor: req.user,
+                reason: "Labour card details updated",
+                changeEntry: {
+                    card: "Labour Card",
+                    reason: "Labour card details updated",
+                    section: "labourCard",
+                    changeType: "update",
+                    targetIndex: null,
+                    previousData: previousLabourCard || null,
+                    proposedData: labourCardPayload,
                 },
-            },
-            { upsert: true, new: true }
-        );
-
-        await triggerProfileReactivationIfNeeded({
-            employeeId,
-            actor: req.user,
-            reason: "Labour card details updated",
-        });
+            });
+        } else {
+            // Update or create Labour Card record
+            updatedLabourCard = await EmployeeLabourCard.findOneAndUpdate(
+                { employeeId },
+                {
+                    $set: {
+                        labourCard: labourCardPayload,
+                    },
+                },
+                { upsert: true, new: true }
+            );
+            await triggerProfileReactivationIfNeeded({
+                employeeId,
+                actor: req.user,
+                reason: "Labour card details updated",
+            });
+        }
         const completeEmployee = await getCompleteEmployee(employeeId);
 
         return res.json({
-            message: "Labour Card details updated successfully.",
-            labourCardDetails: updatedLabourCard.labourCard,
+            message: requiresApprovalQueue
+                ? "Labour Card change queued for HR activation approval."
+                : "Labour Card details updated successfully.",
+            labourCardDetails: updatedLabourCard?.labourCard || completeEmployee?.labourCardDetails,
             employee: completeEmployee
         });
     } catch (error) {

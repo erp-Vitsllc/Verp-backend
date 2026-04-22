@@ -13,11 +13,10 @@ import { getDepartmentHOD } from "./getDepartmentHOD.js";
 import { getManagementHOD } from "./getManagementHOD.js";
 import { resolveEmployeeEmail } from "./resolveEmployeeEmail.js";
 
-const REMINDER_DAYS = [30, 20, 10];
-const EXPIRY_DAY = 0;
-const PRE_30_DAY_TASK_MARKER = -30;
+const STAGE_1_MARKER = 30;
+const STAGE_2_MARKER = 20;
+const STAGE_3_MARKER = 10;
 const THIRD_REMINDER_TASK_MARKER = -10;
-const EXPIRY_DAY_TASK_MARKER = -20;
 
 const startOfDay = (d) => {
     const x = new Date(d);
@@ -30,6 +29,20 @@ const getDaysUntil = (expiryDate) => {
     const today = startOfDay(new Date());
     const exp = startOfDay(expiryDate);
     return Math.round((exp - today) / (1000 * 60 * 60 * 24));
+};
+
+const getReminderStageMarker = (daysUntilExpiry) => {
+    if (daysUntilExpiry == null) return null;
+    if (daysUntilExpiry <= 30 && daysUntilExpiry > 20) return STAGE_1_MARKER;
+    if (daysUntilExpiry <= 20 && daysUntilExpiry > 10) return STAGE_2_MARKER;
+    if (daysUntilExpiry <= 10) return STAGE_3_MARKER;
+    return null;
+};
+
+const getReminderStageLabel = (marker) => {
+    if (marker === STAGE_1_MARKER) return "1st Reminder";
+    if (marker === STAGE_2_MARKER) return "2nd Reminder";
+    return "3rd Reminder";
 };
 
 const dedupeEmails = (emails = []) => {
@@ -104,6 +117,29 @@ const ensureDashboardAction = async ({
     });
 };
 
+const removeObsoleteExpiryActions = async ({ requestId, requestType, allowedExtra1Set }) => {
+    if (!requestId || !requestType) return;
+    const pending = await DashboardAction.find({
+        requestId,
+        requestType,
+        status: "Pending",
+    })
+        .select("_id extra1")
+        .lean();
+
+    const actionIdsToDelete = pending
+        .filter((row) => {
+            const extra1 = (row?.extra1 || "").trim();
+            if (!extra1.toLowerCase().startsWith("expiry follow-up required:")) return false;
+            return !allowedExtra1Set.has(extra1);
+        })
+        .map((row) => row._id);
+
+    if (actionIdsToDelete.length > 0) {
+        await DashboardAction.deleteMany({ _id: { $in: actionIdsToDelete } });
+    }
+};
+
 const wasReminderSent = async ({ targetType, targetId, docKey, daysBefore }) => {
     const x = await ExpiryReminderLog.findOne({ targetType, targetId, docKey, daysBefore }).lean();
     return !!x;
@@ -146,10 +182,23 @@ const getFlowchartRecipientBundle = async () => {
     return { admin, hr, management, emails };
 };
 
-/** Employee document expiry emails follow company flowchart routing: Admin + HR + Management. */
-const getEmployeeDocExpiryEmails = async () => {
-    const recipients = await getFlowchartRecipientBundle();
-    return recipients.emails;
+/** Employee document expiry routing: Admin + HR + employee HOD (primary reportee). */
+const getEmployeeRecipientBundle = async (employee) => {
+    const [admin, hr, hod] = await Promise.all([
+        getDepartmentHOD("admincontroller"),
+        getDepartmentHOD("hr"),
+        employee?.primaryReportee
+            ? EmployeeBasic.findById(employee.primaryReportee)
+                .select("employeeId firstName lastName companyEmail workEmail personalEmail email")
+                .lean()
+            : null,
+    ]);
+    const emails = dedupeEmails([
+        pickCompanyAddress(admin || {}),
+        pickCompanyAddress(hr || {}),
+        pickCompanyAddress(hod || {}),
+    ]);
+    return { admin, hr, hod, emails };
 };
 
 const buildCompanyDocuments = (company) => {
@@ -229,30 +278,40 @@ const processCompanyReminders = async () => {
 
     for (const company of companies) {
         const docs = buildCompanyDocuments(company);
+        const activeThirdStageExtra1 = new Set(
+            docs
+                .filter((doc) => getReminderStageMarker(getDaysUntil(doc.expiryDate)) === STAGE_3_MARKER)
+                .map((doc) => `Expiry follow-up required: ${doc.label}`)
+        );
+
+        await removeObsoleteExpiryActions({
+            requestId: company._id,
+            requestType: "Document Expiry Reminder",
+            allowedExtra1Set: activeThirdStageExtra1,
+        });
+
         for (const doc of docs) {
             const days = getDaysUntil(doc.expiryDate);
-            const isReminderDay = REMINDER_DAYS.includes(days);
-            const isExpiryDay = days === EXPIRY_DAY;
-            if (!isReminderDay && !isExpiryDay) continue;
+            const reminderStage = getReminderStageMarker(days);
+            if (!reminderStage) continue;
 
             const alreadySent = await wasReminderSent({
                 targetType: "company",
                 targetId: String(company._id),
                 docKey: doc.key,
-                daysBefore: days,
+                daysBefore: reminderStage,
             });
             if (alreadySent) continue;
 
-            const subject = isExpiryDay
-                ? `Company document expired: ${company.name}`
-                : `Company document expiry reminder (${days} days): ${company.name}`;
+            const stageLabel = getReminderStageLabel(reminderStage);
+            const subject = `Company document expiry ${stageLabel}: ${company.name}`;
             const html = `
                 <div style="font-family: Arial, sans-serif; line-height: 1.6;">
-                    <h3>${isExpiryDay ? "Company Document Expired" : "Company Document Expiry Reminder"}</h3>
+                    <h3>Company Document Expiry Reminder (${stageLabel})</h3>
                     <p><strong>Company:</strong> ${company.name || "N/A"} (${company.companyId || "N/A"})</p>
                     <p><strong>Document:</strong> ${doc.label}</p>
                     <p><strong>Expiry Date:</strong> ${new Date(doc.expiryDate).toLocaleDateString("en-GB")}</p>
-                    <p><strong>${isExpiryDay ? "Status" : "Reminder"}:</strong> ${isExpiryDay ? "Expired today. Immediate action required." : `${days} day(s) before expiry.`}</p>
+                    <p><strong>Current lead time:</strong> ${days} day(s) before expiry.</p>
                 </div>
             `;
 
@@ -266,59 +325,13 @@ const processCompanyReminders = async () => {
                 targetType: "company",
                 targetId: String(company._id),
                 docKey: doc.key,
-                daysBefore: days,
+                daysBefore: reminderStage,
                 expiryDate: doc.expiryDate,
                 metadata: { companyName: company.name, docLabel: doc.label },
             });
 
-            // Create a dashboard notification as soon as document enters <=30 days window.
-            // This ensures reminders are visible in notifications well before expiry.
-            if (days >= 0 && days <= 30) {
-                const pre30TaskAlreadyCreated = await wasReminderSent({
-                    targetType: "company",
-                    targetId: String(company._id),
-                    docKey: doc.key,
-                    daysBefore: PRE_30_DAY_TASK_MARKER,
-                });
-
-                if (!pre30TaskAlreadyCreated) {
-                    const extra1 = `Document expiring within 30 days: ${doc.label}`;
-                    const extra2 = `${company.name || ""} (${company.companyId || ""})`;
-                    if (recipients.admin?._id) {
-                        await ensureDashboardAction({
-                            assignedTo: recipients.admin._id,
-                            assignedToEmpId: recipients.admin.employeeId,
-                            requestId: company._id,
-                            subjectEmployeeId: company.companyId,
-                            subjectName: company.name,
-                            extra1,
-                            extra2,
-                        });
-                    }
-                    if (recipients.hr?._id) {
-                        await ensureDashboardAction({
-                            assignedTo: recipients.hr._id,
-                            assignedToEmpId: recipients.hr.employeeId,
-                            requestId: company._id,
-                            subjectEmployeeId: company.companyId,
-                            subjectName: company.name,
-                            extra1,
-                            extra2,
-                        });
-                    }
-                    await markReminderSent({
-                        targetType: "company",
-                        targetId: String(company._id),
-                        docKey: doc.key,
-                        daysBefore: PRE_30_DAY_TASK_MARKER,
-                        expiryDate: doc.expiryDate,
-                        metadata: { taskCreated: true, trigger: "pre_30_days" },
-                    });
-                }
-            }
-
-            if (days === 10) {
-                // Post-third reminder task under Admin + HR.
+            // Create dashboard task only at third reminder stage.
+            if (reminderStage === STAGE_3_MARKER) {
                 const extra1 = `Expiry follow-up required: ${doc.label}`;
                 const extra2 = `${company.name || ""} (${company.companyId || ""})`;
                 if (recipients.admin?._id) {
@@ -351,50 +364,6 @@ const processCompanyReminders = async () => {
                     expiryDate: doc.expiryDate,
                     metadata: { taskCreated: true },
                 });
-            }
-
-            if (isExpiryDay) {
-                const taskAlreadyCreated = await wasReminderSent({
-                    targetType: "company",
-                    targetId: String(company._id),
-                    docKey: doc.key,
-                    daysBefore: EXPIRY_DAY_TASK_MARKER,
-                });
-
-                if (!taskAlreadyCreated) {
-                    const extra1 = `Expired document action required: ${doc.label}`;
-                    const extra2 = `${company.name || ""} (${company.companyId || ""})`;
-                    if (recipients.admin?._id) {
-                        await ensureDashboardAction({
-                            assignedTo: recipients.admin._id,
-                            assignedToEmpId: recipients.admin.employeeId,
-                            requestId: company._id,
-                            subjectEmployeeId: company.companyId,
-                            subjectName: company.name,
-                            extra1,
-                            extra2,
-                        });
-                    }
-                    if (recipients.hr?._id) {
-                        await ensureDashboardAction({
-                            assignedTo: recipients.hr._id,
-                            assignedToEmpId: recipients.hr.employeeId,
-                            requestId: company._id,
-                            subjectEmployeeId: company.companyId,
-                            subjectName: company.name,
-                            extra1,
-                            extra2,
-                        });
-                    }
-                    await markReminderSent({
-                        targetType: "company",
-                        targetId: String(company._id),
-                        docKey: doc.key,
-                        daysBefore: EXPIRY_DAY_TASK_MARKER,
-                        expiryDate: doc.expiryDate,
-                        metadata: { taskCreated: true, trigger: "expiry_day" },
-                    });
-                }
             }
         }
     }
@@ -439,9 +408,8 @@ const buildEmployeeDocumentMap = async (employeeIds) => {
 
 const processEmployeeReminders = async () => {
     const employees = await EmployeeBasic.find({ employeeId: { $ne: "VEGA-HR-0000" } })
-        .select("_id employeeId firstName lastName documents contractExpiryDate")
+        .select("_id employeeId firstName lastName documents contractExpiryDate primaryReportee")
         .lean();
-    const flowchartRecipients = await getFlowchartRecipientBundle();
     const employeeIds = employees.map((e) => e.employeeId);
     const map = await buildEmployeeDocumentMap(employeeIds);
 
@@ -463,39 +431,48 @@ const processEmployeeReminders = async () => {
             });
         }
 
-        const recipients = await getEmployeeDocExpiryEmails();
+        const activeThirdStageExtra1 = new Set(
+            docs
+                .filter((doc) => getReminderStageMarker(getDaysUntil(doc.expiryDate)) === STAGE_3_MARKER)
+                .map((doc) => `Expiry follow-up required: ${doc.label}`)
+        );
+        await removeObsoleteExpiryActions({
+            requestId: employee._id,
+            requestType: "Employee Document Expiry Reminder",
+            allowedExtra1Set: activeThirdStageExtra1,
+        });
+
+        const recipients = await getEmployeeRecipientBundle(employee);
         const subjectName = `${employee.firstName || ""} ${employee.lastName || ""}`.trim() || employee.employeeId;
 
         for (const doc of docs) {
             const days = getDaysUntil(doc.expiryDate);
-            const isReminderDay = REMINDER_DAYS.includes(days);
-            const isExpiryDay = days === EXPIRY_DAY;
-            if (!isReminderDay && !isExpiryDay) continue;
+            const reminderStage = getReminderStageMarker(days);
+            if (!reminderStage) continue;
 
             const docKey = `employee:${employee.employeeId}:${doc.key}`;
             const alreadySent = await wasReminderSent({
                 targetType: "employee",
                 targetId: String(employee._id),
                 docKey,
-                daysBefore: days,
+                daysBefore: reminderStage,
             });
             if (alreadySent) continue;
 
-            const subject = isExpiryDay
-                ? `Employee document expired: ${subjectName}`
-                : `Employee document expiry reminder (${days} days): ${subjectName}`;
+            const stageLabel = getReminderStageLabel(reminderStage);
+            const subject = `Employee document expiry ${stageLabel}: ${subjectName}`;
             const html = `
                 <div style="font-family: Arial, sans-serif; line-height: 1.6;">
-                    <h3>${isExpiryDay ? "Employee Document Expired" : "Employee Document Expiry Reminder"}</h3>
+                    <h3>Employee Document Expiry Reminder (${stageLabel})</h3>
                     <p><strong>Employee:</strong> ${subjectName} (${employee.employeeId})</p>
                     <p><strong>Document:</strong> ${doc.label}</p>
                     <p><strong>Expiry Date:</strong> ${new Date(doc.expiryDate).toLocaleDateString("en-GB")}</p>
-                    <p><strong>${isExpiryDay ? "Status" : "Reminder"}:</strong> ${isExpiryDay ? "Expired today. Immediate action required." : `${days} day(s) before expiry.`}</p>
+                    <p><strong>Current lead time:</strong> ${days} day(s) before expiry.</p>
                 </div>
             `;
 
             await sendExpiryReminderEmail({
-                to: recipients,
+                to: recipients.emails,
                 subject,
                 html,
             });
@@ -504,65 +481,19 @@ const processEmployeeReminders = async () => {
                 targetType: "employee",
                 targetId: String(employee._id),
                 docKey,
-                daysBefore: days,
+                daysBefore: reminderStage,
                 expiryDate: doc.expiryDate,
                 metadata: { employeeId: employee.employeeId, docLabel: doc.label },
             });
 
-            // Create a dashboard notification as soon as document enters <=30 days window.
-            if (days >= 0 && days <= 30) {
-                const pre30TaskAlreadyCreated = await wasReminderSent({
-                    targetType: "employee",
-                    targetId: String(employee._id),
-                    docKey,
-                    daysBefore: PRE_30_DAY_TASK_MARKER,
-                });
-
-                if (!pre30TaskAlreadyCreated) {
-                    const extra1 = `Document expiring within 30 days: ${doc.label}`;
-                    const extra2 = `${subjectName} (${employee.employeeId})`;
-                    if (flowchartRecipients.admin?._id) {
-                        await ensureDashboardAction({
-                            assignedTo: flowchartRecipients.admin._id,
-                            assignedToEmpId: flowchartRecipients.admin.employeeId,
-                            requestId: employee._id,
-                            subjectEmployeeId: employee.employeeId,
-                            subjectName,
-                            extra1,
-                            extra2,
-                            requestType: "Employee Document Expiry Reminder",
-                        });
-                    }
-                    if (flowchartRecipients.hr?._id) {
-                        await ensureDashboardAction({
-                            assignedTo: flowchartRecipients.hr._id,
-                            assignedToEmpId: flowchartRecipients.hr.employeeId,
-                            requestId: employee._id,
-                            subjectEmployeeId: employee.employeeId,
-                            subjectName,
-                            extra1,
-                            extra2,
-                            requestType: "Employee Document Expiry Reminder",
-                        });
-                    }
-                    await markReminderSent({
-                        targetType: "employee",
-                        targetId: String(employee._id),
-                        docKey,
-                        daysBefore: PRE_30_DAY_TASK_MARKER,
-                        expiryDate: doc.expiryDate,
-                        metadata: { taskCreated: true, trigger: "pre_30_days" },
-                    });
-                }
-            }
-
-            if (days === 10) {
+            // Create dashboard task/notification only at third reminder stage.
+            if (reminderStage === STAGE_3_MARKER) {
                 const extra1 = `Expiry follow-up required: ${doc.label}`;
                 const extra2 = `${subjectName} (${employee.employeeId})`;
-                if (flowchartRecipients.admin?._id) {
+                if (recipients.admin?._id) {
                     await ensureDashboardAction({
-                        assignedTo: flowchartRecipients.admin._id,
-                        assignedToEmpId: flowchartRecipients.admin.employeeId,
+                        assignedTo: recipients.admin._id,
+                        assignedToEmpId: recipients.admin.employeeId,
                         requestId: employee._id,
                         subjectEmployeeId: employee.employeeId,
                         subjectName,
@@ -571,10 +502,10 @@ const processEmployeeReminders = async () => {
                         requestType: "Employee Document Expiry Reminder",
                     });
                 }
-                if (flowchartRecipients.hr?._id) {
+                if (recipients.hr?._id) {
                     await ensureDashboardAction({
-                        assignedTo: flowchartRecipients.hr._id,
-                        assignedToEmpId: flowchartRecipients.hr.employeeId,
+                        assignedTo: recipients.hr._id,
+                        assignedToEmpId: recipients.hr.employeeId,
                         requestId: employee._id,
                         subjectEmployeeId: employee.employeeId,
                         subjectName,
@@ -583,6 +514,20 @@ const processEmployeeReminders = async () => {
                         requestType: "Employee Document Expiry Reminder",
                     });
                 }
+
+                if (recipients.hod?._id) {
+                    await ensureDashboardAction({
+                        assignedTo: recipients.hod._id,
+                        assignedToEmpId: recipients.hod.employeeId,
+                        requestId: employee._id,
+                        subjectEmployeeId: employee.employeeId,
+                        subjectName,
+                        extra1,
+                        extra2,
+                        requestType: "Employee Document Expiry Reminder",
+                    });
+                }
+
                 await markReminderSent({
                     targetType: "employee",
                     targetId: String(employee._id),
@@ -591,52 +536,6 @@ const processEmployeeReminders = async () => {
                     expiryDate: doc.expiryDate,
                     metadata: { taskCreated: true },
                 });
-            }
-
-            if (isExpiryDay) {
-                const taskAlreadyCreated = await wasReminderSent({
-                    targetType: "employee",
-                    targetId: String(employee._id),
-                    docKey,
-                    daysBefore: EXPIRY_DAY_TASK_MARKER,
-                });
-
-                if (!taskAlreadyCreated) {
-                    const extra1 = `Expired document action required: ${doc.label}`;
-                    const extra2 = `${subjectName} (${employee.employeeId})`;
-                    if (flowchartRecipients.admin?._id) {
-                        await ensureDashboardAction({
-                            assignedTo: flowchartRecipients.admin._id,
-                            assignedToEmpId: flowchartRecipients.admin.employeeId,
-                            requestId: employee._id,
-                            subjectEmployeeId: employee.employeeId,
-                            subjectName,
-                            extra1,
-                            extra2,
-                            requestType: "Employee Document Expiry Reminder",
-                        });
-                    }
-                    if (flowchartRecipients.hr?._id) {
-                        await ensureDashboardAction({
-                            assignedTo: flowchartRecipients.hr._id,
-                            assignedToEmpId: flowchartRecipients.hr.employeeId,
-                            requestId: employee._id,
-                            subjectEmployeeId: employee.employeeId,
-                            subjectName,
-                            extra1,
-                            extra2,
-                            requestType: "Employee Document Expiry Reminder",
-                        });
-                    }
-                    await markReminderSent({
-                        targetType: "employee",
-                        targetId: String(employee._id),
-                        docKey,
-                        daysBefore: EXPIRY_DAY_TASK_MARKER,
-                        expiryDate: doc.expiryDate,
-                        metadata: { taskCreated: true, trigger: "expiry_day" },
-                    });
-                }
             }
         }
     }

@@ -1,8 +1,9 @@
 import EmployeeMedicalInsurance from "../../models/EmployeeMedicalInsurance.js";
+import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeService.js";
 import { uploadDocumentToS3, deleteDocumentFromS3 } from "../../utils/s3Upload.js";
 import { archiveEmployeeDocument } from "../../utils/archiveEmployeeDocument.js";
-import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
+import { triggerProfileReactivationIfNeeded, shouldQueueProfileChange } from "../../utils/triggerProfileReactivation.js";
 
 const REQUIRED_FIELDS = ["provider", "number", "issueDate", "expiryDate", "upload"];
 
@@ -10,12 +11,26 @@ const buildMissingFields = (body, existingDocument) => {
     return REQUIRED_FIELDS.filter((field) => {
         if (field === "upload") {
             // Check if upload is provided OR if existing document exists in DB
-            const hasUpload = body.upload && typeof body.upload === 'string' && body.upload.trim() !== '';
+            const hasUploadString = body.upload && typeof body.upload === "string" && body.upload.trim() !== "";
+            const hasUploadObject = body.upload && typeof body.upload === "object" && (
+                (typeof body.upload.url === "string" && body.upload.url.trim() !== "") ||
+                (typeof body.upload.data === "string" && body.upload.data.trim() !== "")
+            );
+            const hasUpload = hasUploadString || hasUploadObject;
             return !hasUpload && !existingDocument;
         }
         const value = body[field];
         return value === undefined || value === null || value === "";
     });
+};
+
+const normalizeUploadInput = (upload) => {
+    if (typeof upload === "string") return upload.trim();
+    if (upload && typeof upload === "object") {
+        if (typeof upload.url === "string" && upload.url.trim() !== "") return upload.url.trim();
+        if (typeof upload.data === "string" && upload.data.trim() !== "") return upload.data.trim();
+    }
+    return "";
 };
 
 const normalizeDate = (value) => {
@@ -40,8 +55,9 @@ export const updateMedicalInsuranceDetails = async (req, res) => {
     if (provider !== undefined && typeof provider !== 'string') {
         return res.status(400).json({ message: "Provider must be a string" });
     }
-    if (upload !== undefined && typeof upload !== 'string') {
-        return res.status(400).json({ message: "Upload must be a string (base64 or URL)" });
+    const normalizedUpload = normalizeUploadInput(upload);
+    if (upload !== undefined && typeof upload !== "string" && typeof upload !== "object") {
+        return res.status(400).json({ message: "Upload must be a string or an object containing url/data" });
     }
 
     try {
@@ -52,12 +68,14 @@ export const updateMedicalInsuranceDetails = async (req, res) => {
         }
 
         const employeeId = employee.employeeId;
+        const employeeBasic = await EmployeeBasic.findOne({ employeeId }).select("company profileStatus profileWorkflow").lean();
+        const requiresApprovalQueue = shouldQueueProfileChange(employeeBasic);
 
         // Check if existing document exists in database (check for both url and data for backward compatibility)
         const existingMedicalInsurance = await EmployeeMedicalInsurance.findOne({ employeeId });
         const existingDocument = existingMedicalInsurance?.medicalInsurance?.document?.url || existingMedicalInsurance?.medicalInsurance?.document?.data;
 
-        const missingFields = buildMissingFields({ provider, number, issueDate, expiryDate, upload }, existingDocument);
+        const missingFields = buildMissingFields({ provider, number, issueDate, expiryDate, upload: normalizedUpload || upload }, existingDocument);
         if (missingFields.length > 0) {
             return res.status(400).json({
                 message: "Missing required Medical Insurance fields.",
@@ -75,8 +93,8 @@ export const updateMedicalInsuranceDetails = async (req, res) => {
 
         const previousMedicalInsurance = existingMedicalInsurance?.medicalInsurance;
         const hasExistingDocument = Boolean(previousMedicalInsurance?.document?.url || previousMedicalInsurance?.document?.data);
-        const hasNewDocumentUpload = Boolean(upload && typeof upload === "string" && upload.trim() !== "");
-        const shouldArchivePrevious = hasExistingDocument && hasNewDocumentUpload;
+        const hasNewDocumentUpload = Boolean(normalizedUpload);
+        const shouldArchivePrevious = !requiresApprovalQueue && hasExistingDocument && hasNewDocumentUpload;
         if (shouldArchivePrevious) {
             await archiveEmployeeDocument({
                 employeeId,
@@ -92,19 +110,19 @@ export const updateMedicalInsuranceDetails = async (req, res) => {
 
         // Handle document upload to IDrive (S3) if new document provided
         let documentData = undefined;
-        if (upload && typeof upload === 'string' && upload.trim() !== '') {
+        if (normalizedUpload) {
             // Check if it's already a URL (IDrive or otherwise)
-            if (upload.startsWith('http://') || upload.startsWith('https://')) {
+            if (normalizedUpload.startsWith('http://') || normalizedUpload.startsWith('https://')) {
                 // Already a URL
                 documentData = {
-                    url: upload,
+                    url: normalizedUpload,
                     name: uploadName || "",
                     mimeType: uploadMime || "",
                 };
             } else {
                 // Upload base64 to IDrive
                 const uploadResult = await uploadDocumentToS3(
-                    upload,
+                    normalizedUpload,
                     `employee-documents/${employeeId}/medical-insurance`,
                     uploadName || 'medical-insurance.pdf',
                     'raw'
@@ -137,27 +155,46 @@ export const updateMedicalInsuranceDetails = async (req, res) => {
             lastUpdated: new Date(),
         };
 
-        // Update or create Medical Insurance record
-        const updatedMedicalInsurance = await EmployeeMedicalInsurance.findOneAndUpdate(
-            { employeeId },
-            {
-                $set: {
-                    medicalInsurance: medicalInsurancePayload,
+        let updatedMedicalInsurance = existingMedicalInsurance;
+        if (requiresApprovalQueue) {
+            await triggerProfileReactivationIfNeeded({
+                employeeId,
+                actor: req.user,
+                reason: "Medical insurance details updated",
+                changeEntry: {
+                    card: "Medical Insurance",
+                    reason: "Medical insurance details updated",
+                    section: "medicalInsurance",
+                    changeType: "update",
+                    targetIndex: null,
+                    previousData: previousMedicalInsurance || null,
+                    proposedData: medicalInsurancePayload,
                 },
-            },
-            { upsert: true, new: true }
-        );
-
-        await triggerProfileReactivationIfNeeded({
-            employeeId,
-            actor: req.user,
-            reason: "Medical insurance details updated",
-        });
+            });
+        } else {
+            // Update or create Medical Insurance record
+            updatedMedicalInsurance = await EmployeeMedicalInsurance.findOneAndUpdate(
+                { employeeId },
+                {
+                    $set: {
+                        medicalInsurance: medicalInsurancePayload,
+                    },
+                },
+                { upsert: true, new: true }
+            );
+            await triggerProfileReactivationIfNeeded({
+                employeeId,
+                actor: req.user,
+                reason: "Medical insurance details updated",
+            });
+        }
         const completeEmployee = await getCompleteEmployee(employeeId);
 
         return res.json({
-            message: "Medical Insurance details updated successfully.",
-            medicalInsuranceDetails: updatedMedicalInsurance.medicalInsurance,
+            message: requiresApprovalQueue
+                ? "Medical Insurance change queued for HR activation approval."
+                : "Medical Insurance details updated successfully.",
+            medicalInsuranceDetails: updatedMedicalInsurance?.medicalInsurance || completeEmployee?.medicalInsuranceDetails,
             employee: completeEmployee
         });
     } catch (error) {

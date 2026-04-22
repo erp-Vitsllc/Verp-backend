@@ -1,8 +1,9 @@
 import EmployeeEmiratesId from "../../models/EmployeeEmiratesId.js";
+import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeService.js";
 import { uploadDocumentToS3, deleteDocumentFromS3 } from "../../utils/s3Upload.js";
 import { archiveEmployeeDocument } from "../../utils/archiveEmployeeDocument.js";
-import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
+import { triggerProfileReactivationIfNeeded, shouldQueueProfileChange } from "../../utils/triggerProfileReactivation.js";
 
 const REQUIRED_FIELDS = ["number", "issueDate", "expiryDate", "upload"];
 
@@ -10,12 +11,26 @@ const buildMissingFields = (body, existingDocument) => {
     return REQUIRED_FIELDS.filter((field) => {
         if (field === "upload") {
             // Check if upload is provided OR if existing document exists in DB
-            const hasUpload = body.upload && typeof body.upload === 'string' && body.upload.trim() !== '';
+            const hasUploadString = body.upload && typeof body.upload === "string" && body.upload.trim() !== "";
+            const hasUploadObject = body.upload && typeof body.upload === "object" && (
+                (typeof body.upload.url === "string" && body.upload.url.trim() !== "") ||
+                (typeof body.upload.data === "string" && body.upload.data.trim() !== "")
+            );
+            const hasUpload = hasUploadString || hasUploadObject;
             return !hasUpload && !existingDocument;
         }
         const value = body[field];
         return value === undefined || value === null || value === "";
     });
+};
+
+const normalizeUploadInput = (upload) => {
+    if (typeof upload === "string") return upload.trim();
+    if (upload && typeof upload === "object") {
+        if (typeof upload.url === "string" && upload.url.trim() !== "") return upload.url.trim();
+        if (typeof upload.data === "string" && upload.data.trim() !== "") return upload.data.trim();
+    }
+    return "";
 };
 
 const normalizeDate = (value) => {
@@ -39,8 +54,9 @@ export const updateEmiratesIdDetails = async (req, res) => {
     if (number !== undefined && typeof number !== 'string') {
         return res.status(400).json({ message: "Number must be a string" });
     }
-    if (upload !== undefined && typeof upload !== 'string') {
-        return res.status(400).json({ message: "Upload must be a string (base64 or URL)" });
+    const normalizedUpload = normalizeUploadInput(upload);
+    if (upload !== undefined && typeof upload !== "string" && typeof upload !== "object") {
+        return res.status(400).json({ message: "Upload must be a string or an object containing url/data" });
     }
 
     try {
@@ -51,12 +67,14 @@ export const updateEmiratesIdDetails = async (req, res) => {
         }
 
         const employeeId = employee.employeeId;
+        const employeeBasic = await EmployeeBasic.findOne({ employeeId }).select("company profileStatus profileWorkflow").lean();
+        const requiresApprovalQueue = shouldQueueProfileChange(employeeBasic);
 
         // Check if existing document exists in database (check for both url and data for backward compatibility)
         const existingEmiratesId = await EmployeeEmiratesId.findOne({ employeeId });
         const existingDocument = existingEmiratesId?.emiratesId?.document?.url || existingEmiratesId?.emiratesId?.document?.data;
 
-        const missingFields = buildMissingFields({ number, issueDate, expiryDate, upload }, existingDocument);
+        const missingFields = buildMissingFields({ number, issueDate, expiryDate, upload: normalizedUpload || upload }, existingDocument);
         if (missingFields.length > 0) {
             return res.status(400).json({
                 message: "Missing required Emirates ID fields.",
@@ -74,8 +92,8 @@ export const updateEmiratesIdDetails = async (req, res) => {
 
         const previousEmiratesId = existingEmiratesId?.emiratesId;
         const hasExistingDocument = Boolean(previousEmiratesId?.document?.url || previousEmiratesId?.document?.data);
-        const hasNewDocumentUpload = Boolean(upload && typeof upload === "string" && upload.trim() !== "");
-        const shouldArchivePrevious = hasExistingDocument && hasNewDocumentUpload;
+        const hasNewDocumentUpload = Boolean(normalizedUpload);
+        const shouldArchivePrevious = !requiresApprovalQueue && hasExistingDocument && hasNewDocumentUpload;
         if (shouldArchivePrevious) {
             await archiveEmployeeDocument({
                 employeeId,
@@ -89,19 +107,19 @@ export const updateEmiratesIdDetails = async (req, res) => {
 
         // Handle document upload to IDrive (S3) if new document provided
         let documentData = undefined;
-        if (upload && typeof upload === 'string' && upload.trim() !== '') {
+        if (normalizedUpload) {
             // Check if it's already a URL (IDrive or otherwise)
-            if (upload.startsWith('http://') || upload.startsWith('https://')) {
+            if (normalizedUpload.startsWith('http://') || normalizedUpload.startsWith('https://')) {
                 // Already a URL
                 documentData = {
-                    url: upload,
+                    url: normalizedUpload,
                     name: uploadName || "",
                     mimeType: uploadMime || "",
                 };
             } else {
                 // Upload base64 to IDrive
                 const uploadResult = await uploadDocumentToS3(
-                    upload,
+                    normalizedUpload,
                     `employee-documents/${employeeId}/emirates-id`,
                     uploadName || 'emirates-id.pdf',
                     'raw'
@@ -133,27 +151,46 @@ export const updateEmiratesIdDetails = async (req, res) => {
             lastUpdated: new Date(),
         };
 
-        // Update or create Emirates ID record
-        const updatedEmiratesId = await EmployeeEmiratesId.findOneAndUpdate(
-            { employeeId },
-            {
-                $set: {
-                    emiratesId: emiratesIdPayload,
+        let updatedEmiratesId = existingEmiratesId;
+        if (requiresApprovalQueue) {
+            await triggerProfileReactivationIfNeeded({
+                employeeId,
+                actor: req.user,
+                reason: "Emirates ID details updated",
+                changeEntry: {
+                    card: "Emirates ID",
+                    reason: "Emirates ID details updated",
+                    section: "emiratesId",
+                    changeType: "update",
+                    targetIndex: null,
+                    previousData: previousEmiratesId || null,
+                    proposedData: emiratesIdPayload,
                 },
-            },
-            { upsert: true, new: true }
-        );
-
-        await triggerProfileReactivationIfNeeded({
-            employeeId,
-            actor: req.user,
-            reason: "Emirates ID details updated",
-        });
+            });
+        } else {
+            // Update or create Emirates ID record
+            updatedEmiratesId = await EmployeeEmiratesId.findOneAndUpdate(
+                { employeeId },
+                {
+                    $set: {
+                        emiratesId: emiratesIdPayload,
+                    },
+                },
+                { upsert: true, new: true }
+            );
+            await triggerProfileReactivationIfNeeded({
+                employeeId,
+                actor: req.user,
+                reason: "Emirates ID details updated",
+            });
+        }
         const completeEmployee = await getCompleteEmployee(employeeId);
 
         return res.json({
-            message: "Emirates ID details updated successfully.",
-            emiratesIdDetails: updatedEmiratesId.emiratesId,
+            message: requiresApprovalQueue
+                ? "Emirates ID change queued for HR activation approval."
+                : "Emirates ID details updated successfully.",
+            emiratesIdDetails: updatedEmiratesId?.emiratesId || completeEmployee?.emiratesIdDetails,
             employee: completeEmployee
         });
     } catch (error) {

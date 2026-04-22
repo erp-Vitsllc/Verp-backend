@@ -21,6 +21,14 @@ export const submitApproval = async (req, res) => {
 
         const hrEmployee = hrResolved.employee;
         const employeeId = employeeBasic.employeeId;
+        const wasPreviouslyActive = Array.isArray(employeeBasic.profileWorkflow)
+            ? employeeBasic.profileWorkflow.some((w) => String(w?.status || "").toLowerCase() === "active")
+            : false;
+        const activationTypeLabel = wasPreviouslyActive ? "Reactivation" : "New Activation";
+        const pendingCards = Array.isArray(employeeBasic.pendingReactivationChanges)
+            ? [...new Set(employeeBasic.pendingReactivationChanges.map((x) => String(x?.card || "").trim()).filter(Boolean))]
+            : [];
+        const pendingCardsText = pendingCards.length ? ` | Requested Changes: ${pendingCards.join(", ")}` : "";
 
         const updated = await EmployeeBasic.findOneAndUpdate(
             { employeeId },
@@ -52,7 +60,7 @@ export const submitApproval = async (req, res) => {
                 status: "Pending",
                 subjectEmployee: updated,
                 requestedByName: req.user?.name || "",
-                extra1: "Profile activation — HR review",
+                extra1: `${activationTypeLabel} — HR review${pendingCardsText}`,
                 extra2: updated.designation || ""
             });
         } catch (syncErr) {

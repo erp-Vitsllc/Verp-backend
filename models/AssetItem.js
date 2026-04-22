@@ -250,6 +250,9 @@ const assetItemSchema = new mongoose.Schema({
             reason: { type: String, default: '' },
             days: { type: Number, default: null },
             heldAt: { type: Date, default: null },
+            holdUntilDate: { type: Date, default: null },
+            remindAt: { type: Date, default: null },
+            reminderSentAt: { type: Date, default: null },
         },
         history: [{
             stage: { type: String },

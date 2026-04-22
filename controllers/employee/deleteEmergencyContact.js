@@ -1,6 +1,7 @@
 import EmployeeEmergencyContact from "../../models/EmployeeEmergencyContact.js";
+import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { getCompleteEmployee } from "../../services/employeeService.js";
-import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
+import { triggerProfileReactivationIfNeeded, shouldQueueProfileChange } from "../../utils/triggerProfileReactivation.js";
 
 export const deleteEmergencyContact = async (req, res) => {
     const { id, contactId } = req.params;
@@ -17,6 +18,8 @@ export const deleteEmergencyContact = async (req, res) => {
         }
 
         const employeeId = employee.employeeId;
+        const employeeBasic = await EmployeeBasic.findOne({ employeeId }).select("profileStatus profileWorkflow").lean();
+        const requiresApprovalQueue = shouldQueueProfileChange(employeeBasic);
 
         const contactRecord = await EmployeeEmergencyContact.findOne({ employeeId });
 
@@ -30,7 +33,24 @@ export const deleteEmergencyContact = async (req, res) => {
             return res.status(404).json({ message: "Emergency contact not found" });
         }
 
-        contact.deleteOne();
+        if (requiresApprovalQueue) {
+            await triggerProfileReactivationIfNeeded({
+                employeeId,
+                actor: req.user,
+                reason: "Emergency contact deleted",
+                changeEntry: {
+                    card: "Emergency Contact",
+                    reason: "Emergency contact deleted",
+                    section: "emergencyContact",
+                    changeType: "delete",
+                    targetIndex: null,
+                    previousData: contact?.toObject ? contact.toObject() : contact,
+                    proposedData: { contactId },
+                },
+            });
+        } else {
+            contact.deleteOne();
+        }
 
         // Update legacy fields from first contact
         const primaryContact = contactRecord.emergencyContacts?.[0];
@@ -44,16 +64,20 @@ export const deleteEmergencyContact = async (req, res) => {
             contactRecord.emergencyContactNumber = '';
         }
 
-        await contactRecord.save();
-        await triggerProfileReactivationIfNeeded({
-            employeeId,
-            actor: req.user,
-            reason: "Emergency contact deleted",
-        });
+        if (!requiresApprovalQueue) {
+            await contactRecord.save();
+            await triggerProfileReactivationIfNeeded({
+                employeeId,
+                actor: req.user,
+                reason: "Emergency contact deleted",
+            });
+        }
         const completeEmployee = await getCompleteEmployee(employeeId);
 
         return res.status(200).json({
-            message: "Emergency contact deleted",
+            message: requiresApprovalQueue
+                ? "Emergency contact deletion queued for HR activation approval."
+                : "Emergency contact deleted",
             emergencyContacts: contactRecord.emergencyContacts,
             employee: completeEmployee
         });

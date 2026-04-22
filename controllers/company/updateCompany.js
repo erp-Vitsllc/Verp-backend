@@ -8,6 +8,135 @@ import { getSignedFileUrl } from "../../utils/s3Upload.js";
 import { calculateCompanyActivationProgress, shouldTriggerCompanyReactivation } from "../../utils/companyActivation.js";
 import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
 
+const startOfDay = (d) => {
+    const x = new Date(d);
+    x.setHours(0, 0, 0, 0);
+    return x;
+};
+
+const getDaysUntil = (expiryDate) => {
+    if (!expiryDate) return null;
+    const today = startOfDay(new Date());
+    const exp = startOfDay(expiryDate);
+    return Math.round((exp - today) / (1000 * 60 * 60 * 24));
+};
+
+const getReminderStageMarker = (daysUntilExpiry) => {
+    if (daysUntilExpiry == null) return null;
+    if (daysUntilExpiry <= 30 && daysUntilExpiry > 20) return 30;
+    if (daysUntilExpiry <= 20 && daysUntilExpiry > 10) return 20;
+    if (daysUntilExpiry <= 10) return 10;
+    return null;
+};
+
+const buildCompanyExpiringDocs = (company) => {
+    const docs = [];
+    if (company?.tradeLicenseExpiry) {
+        docs.push({ label: "Trade License", expiryDate: company.tradeLicenseExpiry });
+    }
+    if (company?.establishmentCardExpiry) {
+        docs.push({ label: "Establishment Card", expiryDate: company.establishmentCardExpiry });
+    }
+    (company?.documents || []).forEach((d) => {
+        if (!d?.expiryDate) return;
+        docs.push({ label: d?.type || "Company Document", expiryDate: d.expiryDate });
+    });
+    (company?.ejari || []).forEach((ej) => {
+        if (!ej?.expiryDate) return;
+        docs.push({ label: ej?.type ? `Ejari — ${ej.type}` : "Ejari", expiryDate: ej.expiryDate });
+    });
+    (company?.insurance || []).forEach((ins) => {
+        if (!ins?.expiryDate) return;
+        docs.push({ label: ins?.type ? `Insurance — ${ins.type}` : "Insurance", expiryDate: ins.expiryDate });
+    });
+    const ownerFields = [
+        { key: "passport", label: "Passport" },
+        { key: "visa", label: "Visa" },
+        { key: "emiratesId", label: "Emirates ID" },
+        { key: "medical", label: "Medical Insurance" },
+        { key: "drivingLicense", label: "Driving License" },
+        { key: "labourCard", label: "Labour Card" },
+    ];
+    (company?.owners || []).forEach((owner) => {
+        ownerFields.forEach((f) => {
+            const exp = owner?.[f.key]?.expiryDate;
+            if (!exp) return;
+            docs.push({ label: `${owner?.name || "Owner"} - ${f.label}`, expiryDate: exp });
+        });
+    });
+    return docs;
+};
+
+const cleanupCompanyExpiryNotifications = async (company) => {
+    const docs = buildCompanyExpiringDocs(company);
+    const allowedExtra1Set = new Set(
+        docs
+            .filter((doc) => getReminderStageMarker(getDaysUntil(doc.expiryDate)) === 10)
+            .map((doc) => `Expiry follow-up required: ${doc.label}`)
+    );
+    const pending = await DashboardAction.find({
+        requestId: company._id,
+        requestType: "Document Expiry Reminder",
+        status: "Pending",
+    })
+        .select("_id extra1")
+        .lean();
+    const staleIds = pending
+        .filter((row) => {
+            const extra1 = (row?.extra1 || "").trim();
+            if (!extra1.toLowerCase().startsWith("expiry follow-up required:")) return false;
+            return !allowedExtra1Set.has(extra1);
+        })
+        .map((row) => row._id);
+    if (staleIds.length > 0) {
+        await DashboardAction.deleteMany({ _id: { $in: staleIds } });
+    }
+};
+
+const collectCompanyReactivationChanges = (updateData = {}) => {
+    const changes = [];
+    const hasAny = (keys) => keys.some((k) => Object.prototype.hasOwnProperty.call(updateData, k));
+
+    if (hasAny(["tradeLicenseNumber", "tradeLicenseIssueDate", "tradeLicenseExpiry", "tradeLicenseAttachment"])) {
+        changes.push("Trade License");
+    }
+    if (hasAny(["establishmentCardNumber", "establishmentCardIssueDate", "establishmentCardExpiry", "establishmentCardAttachment"])) {
+        changes.push("Establishment Card");
+    }
+    if (Object.prototype.hasOwnProperty.call(updateData, "owners")) {
+        changes.push("Owner Details");
+    }
+    if (Object.prototype.hasOwnProperty.call(updateData, "documents")) {
+        const docs = Array.isArray(updateData.documents) ? updateData.documents : [];
+        if (docs.some((d) => String(d?.type || "").toLowerCase().includes("moa"))) {
+            changes.push("MOA");
+        }
+        changes.push("Company Documents");
+    }
+    if (Object.prototype.hasOwnProperty.call(updateData, "insurance")) changes.push("Insurance");
+    if (Object.prototype.hasOwnProperty.call(updateData, "ejari")) changes.push("Ejari");
+
+    return [...new Set(changes)];
+};
+
+const shouldQueueCompanyChange = (company = {}) => {
+    const status = String(company?.status || "").toLowerCase();
+    if (status === "active") return true;
+    const workflow = Array.isArray(company?.activationWorkflow) ? company.activationWorkflow : [];
+    const hasEverBeenActive = workflow.some((w) => String(w?.status || "").toLowerCase() === "active");
+    return hasEverBeenActive;
+};
+
+const toSerializable = (value) => {
+    if (value === undefined) return undefined;
+    if (value === null) return null;
+    try {
+        return JSON.parse(JSON.stringify(value));
+    } catch (_error) {
+        return value;
+    }
+};
+
 export const updateCompany = async (req, res) => {
     try {
         const { id } = req.params;
@@ -39,6 +168,38 @@ export const updateCompany = async (req, res) => {
             return urls;
         };
 
+        // getCompany returns signed URLs; PATCH sends those back while DB has keys or pre-sign URLs.
+        // Direct string compare falsely treats every document as "removed" for non-admins.
+        const FOLDER_MARKERS = [
+            "company-documents",
+            "employee-documents",
+            "asset-invoices",
+            "asset-photos",
+            "profile-pictures",
+            "signatures",
+            "rewards",
+            "fines"
+        ];
+        const normalizeAttachmentKeyForCompare = (value) => {
+            if (typeof value !== "string" || !value.trim()) return "";
+            const noQuery = value.split("?")[0].trim();
+            const lower = noQuery.toLowerCase();
+            for (const folder of FOLDER_MARKERS) {
+                const idx = lower.indexOf(folder);
+                if (idx !== -1) return noQuery.slice(idx).toLowerCase();
+            }
+            return noQuery.toLowerCase();
+        };
+
+        const collectAttachmentUrlSet = (items, path = "document.url") => {
+            const set = new Set();
+            collectAttachmentUrls(items, path).forEach((u) => {
+                const k = normalizeAttachmentKeyForCompare(u);
+                if (k) set.add(k);
+            });
+            return set;
+        };
+
         const isDocumentRemovalAttempt = () => {
             // Top-level required docs
             if (
@@ -58,10 +219,10 @@ export const updateCompany = async (req, res) => {
                 const prev = beforeCompany[field] || [];
                 const next = updateData[field] || [];
                 if (next.length < prev.length) return true;
-                const prevUrls = new Set(collectAttachmentUrls(prev, path));
-                const nextUrls = new Set(collectAttachmentUrls(next, path));
-                for (const url of prevUrls) {
-                    if (!nextUrls.has(url)) return true;
+                const prevUrls = collectAttachmentUrlSet(prev, path);
+                const nextUrls = collectAttachmentUrlSet(next, path);
+                for (const k of prevUrls) {
+                    if (!nextUrls.has(k)) return true;
                 }
                 return false;
             };
@@ -81,14 +242,18 @@ export const updateCompany = async (req, res) => {
                         prevOwners
                             .map((o) => (p2 ? o?.[p1]?.[p2] : o?.[p1]))
                             .filter((x) => typeof x === "string" && x.trim())
+                            .map((x) => normalizeAttachmentKeyForCompare(x))
+                            .filter(Boolean)
                     );
                     const nextUrls = new Set(
                         nextOwners
                             .map((o) => (p2 ? o?.[p1]?.[p2] : o?.[p1]))
                             .filter((x) => typeof x === "string" && x.trim())
+                            .map((x) => normalizeAttachmentKeyForCompare(x))
+                            .filter(Boolean)
                     );
-                    for (const url of prevUrls) {
-                        if (!nextUrls.has(url)) return true;
+                    for (const k of prevUrls) {
+                        if (!nextUrls.has(k)) return true;
                     }
                 }
             }
@@ -213,23 +378,45 @@ export const updateCompany = async (req, res) => {
             }
         }
 
-        const updatedCompany = await Company.findByIdAndUpdate(
-            company._id,
-            { $set: updateData },
-            { new: true, runValidators: true }
-        );
+        const queueForApproval = shouldQueueCompanyChange(company);
+        let updatedCompany = null;
+        if (queueForApproval) {
+            const changedCards = collectCompanyReactivationChanges(updateData);
+            const cardLabel = changedCards.length ? changedCards.join(", ") : "Company Profile";
+            const currentStatus = String(company?.status || "").toLowerCase();
+            const currentActivation = String(company?.activationStatus || "").toLowerCase();
+            if (currentStatus === "active" || currentActivation === "submitted") {
+                company.status = "Inactive";
+                company.activationStatus = "draft";
+                company.activationSubmittedTo = null;
+            }
+            if (!Array.isArray(company.pendingReactivationChanges)) company.pendingReactivationChanges = [];
+            company.pendingReactivationChanges.push({
+                card: cardLabel,
+                reason: cardLabel,
+                section: "companyProfile",
+                changeType: "update",
+                targetIndex: null,
+                previousData: toSerializable(beforeCompany),
+                proposedData: toSerializable(updateData),
+                changedAt: new Date(),
+            });
+            updatedCompany = await company.save();
+        } else {
+            updatedCompany = await Company.findByIdAndUpdate(
+                company._id,
+                { $set: updateData },
+                { new: true, runValidators: true }
+            );
+        }
 
-        if (shouldTriggerCompanyReactivation(beforeCompany, updateData)) {
-            // Any critical change after activation must move the company back to inactive,
-            // but should not auto-submit to HR. Submission is manual from the UI button.
-            updatedCompany.status = "Inactive";
-            updatedCompany.activationStatus = "draft";
-            updatedCompany.activationSubmittedTo = null;
-            await updatedCompany.save();
+        // Remove stale expiry reminder notifications immediately after any company document/card edit.
+        if (!queueForApproval) {
+            await cleanupCompanyExpiryNotifications(updatedCompany);
         }
 
         // Sync owner details across all other companies where the owner exists by name
-        if (updateData.owners && Array.isArray(updateData.owners)) {
+        if (!queueForApproval && updateData.owners && Array.isArray(updateData.owners)) {
             for (const owner of updateData.owners) {
                 if (owner.name) {
                     const syncData = {};
@@ -319,7 +506,9 @@ export const updateCompany = async (req, res) => {
         }
 
         res.status(200).json({
-            message: "Company updated successfully",
+            message: queueForApproval
+                ? "Company change queued for HR activation approval."
+                : "Company updated successfully",
             company: companyObj,
             activationProgress: calculateCompanyActivationProgress(companyObj)
         });

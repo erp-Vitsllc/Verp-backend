@@ -1,8 +1,9 @@
 import EmployeePassport from "../../models/EmployeePassport.js";
+import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeService.js";
 import { uploadDocumentToS3, deleteDocumentFromS3 } from "../../utils/s3Upload.js";
 import { archiveEmployeeDocument } from "../../utils/archiveEmployeeDocument.js";
-import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
+import { triggerProfileReactivationIfNeeded, shouldQueueProfileChange } from "../../utils/triggerProfileReactivation.js";
 
 const REQUIRED_FIELDS = ["number", "issueDate", "expiryDate"];
 
@@ -56,13 +57,15 @@ export const updatePassportDetails = async (req, res) => {
         }
 
         const employeeId = employee.employeeId;
+        const employeeBasic = await EmployeeBasic.findOne({ employeeId }).select("company profileStatus profileWorkflow").lean();
+        const requiresApprovalQueue = shouldQueueProfileChange(employeeBasic);
 
         // Fetch existing passport to handle renewal/archiving
         const existingPassport = await EmployeePassport.findOne({ employeeId });
 
         const hasExistingDocument = Boolean(existingPassport?.document?.url || existingPassport?.document?.data);
         const hasNewDocumentUpload = Boolean(passportCopy && typeof passportCopy === "string" && passportCopy.trim() !== "");
-        const shouldArchivePrevious = hasExistingDocument && hasNewDocumentUpload;
+        const shouldArchivePrevious = !requiresApprovalQueue && hasExistingDocument && hasNewDocumentUpload;
         if (shouldArchivePrevious) {
             await archiveEmployeeDocument({
                 employeeId,
@@ -127,33 +130,49 @@ export const updatePassportDetails = async (req, res) => {
             passportExp: parsedExpiryDate, // Update expiry date for quick reference
         };
 
-        // Update or create passport record
-        const updatedPassport = await EmployeePassport.findOneAndUpdate(
-            { employeeId },
-            passportPayload,
-            { upsert: true, new: true }
-        );
-
-        console.log("✅ Passport details saved for employee:", employeeId);
-        console.log("   Passport Number:", passportPayload.number);
-        console.log("   Expiry Date:", passportPayload.expiryDate);
-        await triggerProfileReactivationIfNeeded({
-            employeeId,
-            actor: req.user,
-            reason: "Passport details updated",
-        });
+        let updatedPassport = existingPassport;
+        if (requiresApprovalQueue) {
+            await triggerProfileReactivationIfNeeded({
+                employeeId,
+                actor: req.user,
+                reason: "Passport details updated",
+                changeEntry: {
+                    card: "Passport",
+                    reason: "Passport details updated",
+                    section: "passport",
+                    changeType: "update",
+                    targetIndex: null,
+                    previousData: existingPassport || null,
+                    proposedData: passportPayload,
+                },
+            });
+        } else {
+            // Update or create passport record
+            updatedPassport = await EmployeePassport.findOneAndUpdate(
+                { employeeId },
+                passportPayload,
+                { upsert: true, new: true }
+            );
+            await triggerProfileReactivationIfNeeded({
+                employeeId,
+                actor: req.user,
+                reason: "Passport details updated",
+            });
+        }
         const completeEmployee = await getCompleteEmployee(employeeId);
 
         return res.json({
-            message: "Passport details updated successfully.",
+            message: requiresApprovalQueue
+                ? "Passport change queued for HR activation approval."
+                : "Passport details updated successfully.",
             passportDetails: {
-                number: updatedPassport.number,
-                nationality: updatedPassport.nationality,
-                issueDate: updatedPassport.issueDate,
-                expiryDate: updatedPassport.expiryDate,
-                placeOfIssue: updatedPassport.placeOfIssue,
-                document: updatedPassport.document,
-                lastUpdated: updatedPassport.lastUpdated,
+                number: updatedPassport?.number,
+                nationality: updatedPassport?.nationality,
+                issueDate: updatedPassport?.issueDate,
+                expiryDate: updatedPassport?.expiryDate,
+                placeOfIssue: updatedPassport?.placeOfIssue,
+                document: updatedPassport?.document,
+                lastUpdated: updatedPassport?.lastUpdated,
             },
             employee: completeEmployee
         });

@@ -5925,6 +5925,7 @@ export const addAssetService = async (req, res) => {
             remark,
             invoice: invoiceUrl,
             attachment: attachmentUrl,
+            requestedBy: req.user.employeeObjectId || undefined,
             ...(quotation2Url ? { quotation2: quotation2Url } : {}),
             ...(quotation3Url ? { quotation3: quotation3Url } : {}),
         };

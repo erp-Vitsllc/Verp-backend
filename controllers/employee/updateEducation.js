@@ -1,7 +1,8 @@
 import EmployeeEducation from "../../models/EmployeeEducation.js";
+import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { getCompleteEmployee, resolveEmployeeId } from "../../services/employeeService.js";
 import { uploadDocumentToS3 } from "../../utils/s3Upload.js";
-import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
+import { triggerProfileReactivationIfNeeded, shouldQueueProfileChange } from "../../utils/triggerProfileReactivation.js";
 
 export const updateEducation = async (req, res) => {
     const { id, educationId } = req.params;
@@ -40,6 +41,8 @@ export const updateEducation = async (req, res) => {
         }
 
         const employeeId = employee.employeeId;
+        const employeeBasic = await EmployeeBasic.findOne({ employeeId }).select("profileStatus profileWorkflow").lean();
+        const requiresApprovalQueue = shouldQueueProfileChange(employeeBasic);
 
         const educationRecord = await EmployeeEducation.findOne({ employeeId });
 
@@ -53,12 +56,15 @@ export const updateEducation = async (req, res) => {
             return res.status(404).json({ message: "Education record not found" });
         }
 
-        // Update education fields
-        education.universityOrBoard = (universityOrBoard || '').trim();
-        education.collegeOrInstitute = (collegeOrInstitute || '').trim();
-        education.course = course.trim();
-        education.fieldOfStudy = fieldOfStudy.trim();
-        education.completedYear = completedYear.trim();
+        const previousEducation = education?.toObject ? education.toObject() : education;
+        const proposedEducation = {
+            ...previousEducation,
+            universityOrBoard: (universityOrBoard || '').trim(),
+            collegeOrInstitute: (collegeOrInstitute || '').trim(),
+            course: course.trim(),
+            fieldOfStudy: fieldOfStudy.trim(),
+            completedYear: completedYear.trim(),
+        };
 
         // Update certificate if provided
         if (certificate && certificate.data) {
@@ -68,14 +74,14 @@ export const updateEducation = async (req, res) => {
                 folderPath,
                 certificate.name || 'education-certificate'
             );
-            education.certificate = {
+            proposedEducation.certificate = {
                 name: certificate.name || '',
                 mimeType: certificate.mimeType || 'application/pdf',
                 url: uploadResult.url,
                 publicId: uploadResult.publicId
             };
         } else if (certificate && certificate.url) {
-            education.certificate = {
+            proposedEducation.certificate = {
                 name: certificate.name || '',
                 mimeType: certificate.mimeType || 'application/pdf',
                 url: certificate.url,
@@ -83,20 +89,47 @@ export const updateEducation = async (req, res) => {
             };
         } else if (certificate === null) {
             // Allow clearing the certificate
-            education.certificate = undefined;
+            proposedEducation.certificate = undefined;
         }
-
-        await educationRecord.save();
-        await triggerProfileReactivationIfNeeded({
-            employeeId,
-            actor: req.user,
-            reason: "Education details updated",
-        });
+        if (requiresApprovalQueue) {
+            await triggerProfileReactivationIfNeeded({
+                employeeId,
+                actor: req.user,
+                reason: "Education details updated",
+                changeEntry: {
+                    card: "Education",
+                    reason: "Education details updated",
+                    section: "education",
+                    changeType: "update",
+                    targetIndex: null,
+                    previousData: previousEducation || null,
+                    proposedData: { educationId, ...proposedEducation },
+                },
+            });
+        } else {
+            // Update education fields
+            education.universityOrBoard = proposedEducation.universityOrBoard;
+            education.collegeOrInstitute = proposedEducation.collegeOrInstitute;
+            education.course = proposedEducation.course;
+            education.fieldOfStudy = proposedEducation.fieldOfStudy;
+            education.completedYear = proposedEducation.completedYear;
+            if (Object.prototype.hasOwnProperty.call(proposedEducation, "certificate")) {
+                education.certificate = proposedEducation.certificate;
+            }
+            await educationRecord.save();
+            await triggerProfileReactivationIfNeeded({
+                employeeId,
+                actor: req.user,
+                reason: "Education details updated",
+            });
+        }
         const completeEmployee = await getCompleteEmployee(employeeId);
 
         return res.status(200).json({
-            message: "Education details updated successfully",
-            educationDetails: educationRecord.educationDetails,
+            message: requiresApprovalQueue
+                ? "Education change queued for HR activation approval."
+                : "Education details updated successfully",
+            educationDetails: educationRecord?.educationDetails || completeEmployee?.educationDetails,
             employee: completeEmployee
         });
     } catch (err) {

@@ -24,6 +24,7 @@ import { processParkingAssets } from "./utils/processParkingAssets.js";
 import { processTemporaryAssignments } from "./utils/processTemporaryAssignments.js";
 import { processAccidentAssets } from "./utils/processAccidentAssets.js";
 import { processDocumentExpiryReminders } from "./utils/processDocumentExpiryReminders.js";
+import { processVehicleServiceHoldReminders } from "./utils/processVehicleServiceHoldReminders.js";
 
 dotenv.config();
 
@@ -53,6 +54,10 @@ setInterval(() => { processAccidentAssets(); }, 24 * 60 * 60 * 1000);
 // Run company/employee document expiry reminders (30/20/10 day notifications).
 setTimeout(() => { processDocumentExpiryReminders(); }, 90 * 1000);
 setInterval(() => { processDocumentExpiryReminders(); }, 24 * 60 * 60 * 1000);
+
+// Run vehicle service hold reminders (creates deferred task/email near hold date).
+setTimeout(() => { processVehicleServiceHoldReminders(); }, 120 * 1000);
+setInterval(() => { processVehicleServiceHoldReminders(); }, 6 * 60 * 60 * 1000);
 
 // CORS Configuration - MUST BE FIRST
 const staticAllowedOrigins = [

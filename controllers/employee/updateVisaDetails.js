@@ -3,7 +3,7 @@ import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeS
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { uploadDocumentToS3, deleteDocumentFromS3 } from "../../utils/s3Upload.js";
 import { archiveEmployeeDocument } from "../../utils/archiveEmployeeDocument.js";
-import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
+import { triggerProfileReactivationIfNeeded, shouldQueueProfileChange } from "../../utils/triggerProfileReactivation.js";
 
 const ALLOWED_VISA_TYPES = ["visit", "employment", "spouse"];
 
@@ -64,6 +64,8 @@ export const updateVisaDetails = async (req, res) => {
             return res.status(404).json({ message: "Employee not found." });
         }
         const employeeId = employee.employeeId;
+        const employeeBasic = await EmployeeBasic.findOne({ employeeId }).select("company profileStatus status profileWorkflow").lean();
+        const requiresApprovalQueue = shouldQueueProfileChange(employeeBasic);
 
         // Check if existing document exists in database (check for both url and data for backward compatibility)
         const existingVisa = await EmployeeVisa.findOne({ employeeId });
@@ -92,7 +94,7 @@ export const updateVisaDetails = async (req, res) => {
         const previousVisaEntry = existingVisa?.[visaType];
         const hasExistingDocument = Boolean(previousVisaEntry?.document?.url || previousVisaEntry?.document?.data);
         const hasNewDocumentUpload = Boolean(visaCopy && typeof visaCopy === "string" && visaCopy.trim() !== "");
-        const shouldArchivePrevious = hasExistingDocument && hasNewDocumentUpload;
+        const shouldArchivePrevious = !requiresApprovalQueue && hasExistingDocument && hasNewDocumentUpload;
         if (shouldArchivePrevious) {
             await archiveEmployeeDocument({
                 employeeId,
@@ -151,16 +153,34 @@ export const updateVisaDetails = async (req, res) => {
             lastUpdated: new Date(),
         };
 
-        // Update or create visa record
-        const updatedVisa = await EmployeeVisa.findOneAndUpdate(
-            { employeeId },
-            {
-                $set: {
-                    [visaType]: visaPayload,
+        let updatedVisa = existingVisa;
+        if (requiresApprovalQueue) {
+            await triggerProfileReactivationIfNeeded({
+                employeeId,
+                actor: req.user,
+                reason: `${visaType} visa details updated`,
+                changeEntry: {
+                    card: `${visaType} Visa`,
+                    reason: `${visaType} visa details updated`,
+                    section: "visa",
+                    changeType: "update",
+                    targetIndex: null,
+                    previousData: existingVisa?.[visaType] || null,
+                    proposedData: { visaType, ...visaPayload },
                 },
-            },
-            { upsert: true, new: true }
-        );
+            });
+        } else {
+            // Update or create visa record
+            updatedVisa = await EmployeeVisa.findOneAndUpdate(
+                { employeeId },
+                {
+                    $set: {
+                        [visaType]: visaPayload,
+                    },
+                },
+                { upsert: true, new: true }
+            );
+        }
 
         // Check for Visa Expiry and Update Status
         const expiryCheck = new Date(parsedExpiryDate);
@@ -168,7 +188,7 @@ export const updateVisaDetails = async (req, res) => {
         expiryCheck.setHours(0, 0, 0, 0);
         todayCheck.setHours(0, 0, 0, 0);
 
-        if (expiryCheck <= todayCheck) {
+        if (!requiresApprovalQueue && expiryCheck <= todayCheck) {
             // If the visa being updated is expired, set employee status to Inactive
             // Only update if currently 'Active' to avoid overwriting other statuses like 'Terminated' or 'Resigned'
             await EmployeeBasic.updateOne(
@@ -177,19 +197,23 @@ export const updateVisaDetails = async (req, res) => {
             );
         }
 
-        await triggerProfileReactivationIfNeeded({
-            employeeId,
-            actor: req.user,
-            reason: `${visaType} visa details updated`,
-        });
+        if (!requiresApprovalQueue) {
+            await triggerProfileReactivationIfNeeded({
+                employeeId,
+                actor: req.user,
+                reason: `${visaType} visa details updated`,
+            });
+        }
         const completeEmployee = await getCompleteEmployee(employeeId);
 
         return res.json({
-            message: `${visaType} visa details updated successfully.`,
+            message: requiresApprovalQueue
+                ? `${visaType} visa change queued for HR activation approval.`
+                : `${visaType} visa details updated successfully.`,
             visaDetails: {
-                visit: updatedVisa.visit,
-                employment: updatedVisa.employment,
-                spouse: updatedVisa.spouse,
+                visit: updatedVisa?.visit,
+                employment: updatedVisa?.employment,
+                spouse: updatedVisa?.spouse,
             },
             employee: completeEmployee
         });

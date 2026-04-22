@@ -1,6 +1,7 @@
 import EmployeeTraining from "../../models/EmployeeTraining.js";
+import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { getCompleteEmployee } from "../../services/employeeService.js";
-import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
+import { triggerProfileReactivationIfNeeded, shouldQueueProfileChange } from "../../utils/triggerProfileReactivation.js";
 import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
 
 export const deleteTraining = async (req, res) => {
@@ -23,6 +24,8 @@ export const deleteTraining = async (req, res) => {
         }
 
         const employeeId = employee.employeeId;
+        const employeeBasic = await EmployeeBasic.findOne({ employeeId }).select("profileStatus profileWorkflow").lean();
+        const requiresApprovalQueue = shouldQueueProfileChange(employeeBasic);
 
         const trainingRecord = await EmployeeTraining.findOne({ employeeId });
 
@@ -36,18 +39,37 @@ export const deleteTraining = async (req, res) => {
             return res.status(404).json({ message: "Training record not found" });
         }
 
-        training.deleteOne();
-        await trainingRecord.save();
-        await triggerProfileReactivationIfNeeded({
-            employeeId,
-            actor: req.user,
-            reason: "Training record deleted",
-        });
+        if (requiresApprovalQueue) {
+            await triggerProfileReactivationIfNeeded({
+                employeeId,
+                actor: req.user,
+                reason: "Training record deleted",
+                changeEntry: {
+                    card: "Training",
+                    reason: "Training record deleted",
+                    section: "training",
+                    changeType: "delete",
+                    targetIndex: null,
+                    previousData: training?.toObject ? training.toObject() : training,
+                    proposedData: { trainingId },
+                },
+            });
+        } else {
+            training.deleteOne();
+            await trainingRecord.save();
+            await triggerProfileReactivationIfNeeded({
+                employeeId,
+                actor: req.user,
+                reason: "Training record deleted",
+            });
+        }
         const completeEmployee = await getCompleteEmployee(employeeId);
 
         return res.status(200).json({
-            message: "Training record deleted successfully",
-            trainingDetails: trainingRecord.trainingDetails,
+            message: requiresApprovalQueue
+                ? "Training deletion queued for HR activation approval."
+                : "Training record deleted successfully",
+            trainingDetails: trainingRecord?.trainingDetails || completeEmployee?.trainingDetails,
             employee: completeEmployee
         });
     } catch (err) {
