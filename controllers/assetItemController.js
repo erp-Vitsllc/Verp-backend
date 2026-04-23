@@ -5838,12 +5838,16 @@ export const addAssetService = async (req, res) => {
             });
         }
 
-        // Permission: asset controller/admin OR assignee
+        // Fleet vehicle service request: any authenticated user (same rule as route middleware).
+        const isFleetVehicleServiceRequest =
+            isVehicleAssetForServiceGate() && serviceRequestSource === 'vehicle_fleet_dashboard';
+
+        // Permission: asset controller/admin OR assignee (non-fleet vehicle, or non-vehicle assets)
         // Also allow:
         // - assigner (asset.assignedBy) with full permissions
         // - primary reportee delegation when assignee has NO companyEmail
         const actorFlags = await getActorPermissionFlagsForAsset(req.user, asset);
-        if (!actorFlags.canAct) {
+        if (!isFleetVehicleServiceRequest && !actorFlags.canAct) {
             return res.status(403).json({ message: 'Access denied. Only Asset Controller/Admin, assigner, assigned user, or (if assignee has no company email) primary reportee can add service records.' });
         }
 

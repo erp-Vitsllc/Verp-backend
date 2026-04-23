@@ -199,8 +199,9 @@ const requireAssetActionApprover = async (req, res, next) => {
 
 /**
  * Middleware for granular asset CRUD operations.
- * 1. If asset is UNASSIGNED: Only Asset Controller or Admin.
- * 2. If asset is ASSIGNED: Asset Controller, Admin, or the ASSIGNED USER.
+ * 1. If asset is UNASSIGNED: Only Asset Controller or Admin (except POST add-service on vehicles — see below).
+ * 2. If asset is ASSIGNED: Asset Controller, Admin, or the ASSIGNED USER (plus company/HR flows as implemented).
+ * 3. POST `/:id/service` on a vehicle asset: any authenticated user (fleet flow is enforced in `addAssetService`).
  */
 const requireAssetFullAccess = async (req, res, next) => {
     try {
@@ -210,6 +211,35 @@ const requireAssetFullAccess = async (req, res, next) => {
 
         // Admin / designated Asset Controller always have full access.
         if (isAdminUser || isAssetControllerUser) return next();
+
+        // Vehicle fleet "Add service request": any logged-in user may POST (controller enforces
+        // `serviceRequestSource === 'vehicle_fleet_dashboard'` for vehicles). Avoids blocking
+        // unassigned fleet vehicles that only AC could touch before.
+        if (id && req.method === 'POST') {
+            const pathNoQuery = String(req.originalUrl || req.url || '').split('?')[0];
+            if (pathNoQuery.endsWith('/service') && !pathNoQuery.includes('service-workflow')) {
+                const AssetItem = (await import('../models/AssetItem.js')).default;
+                const assetQuick = await AssetItem.findById(id)
+                    .populate('typeId', 'name')
+                    .select('plateNumber typeId')
+                    .lean();
+                if (assetQuick) {
+                    const plate = String(assetQuick.plateNumber || '').trim();
+                    const typeName =
+                        assetQuick.typeId && typeof assetQuick.typeId === 'object' && assetQuick.typeId.name
+                            ? String(assetQuick.typeId.name)
+                            : '';
+                    const tn = typeName.toLowerCase();
+                    const isVehicle =
+                        !!plate ||
+                        tn.includes('vehicle') ||
+                        tn.includes('car') ||
+                        tn.includes('fleet') ||
+                        tn.includes('truck');
+                    if (isVehicle) return next();
+                }
+            }
+        }
 
         // Check for specific employee permissions (Assigned User or Action Required By)
         let currentEmpId = req.user?.employeeObjectId?.toString();
