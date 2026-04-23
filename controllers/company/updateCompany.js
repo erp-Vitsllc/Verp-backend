@@ -378,7 +378,9 @@ export const updateCompany = async (req, res) => {
             }
         }
 
-        const queueForApproval = shouldQueueCompanyChange(company);
+        // Queue reactivation only for critical profile changes (license/card/owner/MOA).
+        // Operational docs like memo/other company documents should save immediately.
+        const queueForApproval = shouldTriggerCompanyReactivation(beforeCompany, updateData);
         let updatedCompany = null;
         if (queueForApproval) {
             const changedCards = collectCompanyReactivationChanges(updateData);
