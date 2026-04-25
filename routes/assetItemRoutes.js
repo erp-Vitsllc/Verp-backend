@@ -1,8 +1,8 @@
 import express from 'express';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import User from '../models/User.js';
-import { createAssetItem, getAssetItems, getVehicleFleetDashboard, getVehicleFleetServiceRequests, getAllAssignedAssets, getMyAssignedAssetsForReturn, getUnassignedAssetsForEmployee, getHRCompanyAssets, getOnLeaveAssetsForEmployee, getOnServiceAssetsForEmployee, handleOnLeaveAction, bulkHandleOnLeaveAction, handleOnServiceAction, bulkHandleOnServiceAction, getAssetItemDetail, assignAssetItem, bulkAssignAssetItems, downloadHandoverPdf, downloadHistoryHandoverPdf, respondToAssignment, bulkRespondToAssignment, getBulkAssignmentPendingGroup, respondBulkAssignmentGroup, getAssetHistory, getHistoryRecord, returnAssetItem, updateAssetStatus, addAssetDocument, updateAssetDocument, deleteAssetDocument, addAssetService, addAssetImage, deleteAssetImage, transferAssetAccessory, manageAccessoryStatus, updateAssetItem, deleteAssetItem, endOfLifeAsset, requestAssetAction, bulkRequestAssetAction, handleAssetActionApproval, finalizeAssetAction, uploadAccessoriesAttachment, requestAccessoryAction, respondAccessoryAction, finalizeAccessoryAction, respondToAssetCreation, bulkRespondToAssetCreation, getBulkAssetDetails, getBulkAssetInventoryForPrint, transferAsset, submitDraftForCreationApproval, getPendingAssetDashboardInbox, deletePendingAssetDashboardInboxItem, getEmployeePreviousAssets } from '../controllers/assetItemController.js';
-import { respondVehicleServiceWorkflow } from '../controllers/vehicleServiceWorkflowController.js';
+import { createAssetItem, getAssetItems, getVehicleFleetDashboard, getVehicleFleetServiceRequests, getAllAssignedAssets, getMyAssignedAssetsForReturn, getUnassignedAssetsForEmployee, getHRCompanyAssets, getOnLeaveAssetsForEmployee, getOnServiceAssetsForEmployee, handleOnLeaveAction, bulkHandleOnLeaveAction, handleOnServiceAction, bulkHandleOnServiceAction, getAssetItemDetail, assignAssetItem, bulkAssignAssetItems, downloadHandoverPdf, downloadHistoryHandoverPdf, respondToAssignment, bulkRespondToAssignment, getBulkAssignmentPendingGroup, respondBulkAssignmentGroup, getAssetHistory, getHistoryRecord, returnAssetItem, updateAssetStatus, addAssetDocument, updateAssetDocument, deleteAssetDocument, addAssetService, deleteAssetService, submitAssetServiceDraft, addAssetImage, deleteAssetImage, transferAssetAccessory, manageAccessoryStatus, updateAssetItem, deleteAssetItem, endOfLifeAsset, requestAssetAction, bulkRequestAssetAction, handleAssetActionApproval, finalizeAssetAction, uploadAccessoriesAttachment, requestAccessoryAction, respondAccessoryAction, finalizeAccessoryAction, respondToAssetCreation, bulkRespondToAssetCreation, getBulkAssetDetails, getBulkAssetInventoryForPrint, transferAsset, submitDraftForCreationApproval, getPendingAssetDashboardInbox, deletePendingAssetDashboardInboxItem, getEmployeePreviousAssets } from '../controllers/assetItemController.js';
+import { respondVehicleServiceWorkflow, respondVehicleServiceScheduledPeriod } from '../controllers/vehicleServiceWorkflowController.js';
 import { protect } from '../middleware/authMiddleware.js';
 import {
     isUserInFlowchart,
@@ -567,7 +567,10 @@ router.post('/:id/document', protect, requireAssetFullAccess, addAssetDocument);
 router.put('/:id/document/:docId', protect, requireAssetFullAccess, updateAssetDocument);
 router.delete('/:id/document/:docId', protect, requireAssetControllerOrAdmin, deleteAssetDocument);
 router.post('/:id/service', protect, requireAssetFullAccess, addAssetService);
+router.delete('/:id/service/:serviceId', protect, requireAssetFullAccess, deleteAssetService);
+router.post('/:id/service/:serviceId/submit-request', protect, requireAssetFullAccess, submitAssetServiceDraft);
 router.post('/:id/service-workflow/respond', protect, respondVehicleServiceWorkflow);
+router.post('/:id/service-workflow/period', protect, respondVehicleServiceScheduledPeriod);
 router.post('/:id/images', protect, requireAssetFullAccess, addAssetImage);
 router.delete('/:id/images/:imageId', protect, requireAssetControllerOrAdmin, deleteAssetImage);
 

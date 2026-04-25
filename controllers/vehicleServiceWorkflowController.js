@@ -7,16 +7,29 @@ import { syncDashboardAction } from '../utils/syncDashboard.js';
 import { getDepartmentHOD } from '../utils/getDepartmentHOD.js';
 import { getManagementHOD } from '../utils/getManagementHOD.js';
 import { sendVehicleServiceWorkflowEmail } from '../utils/sendVehicleServiceWorkflowEmail.js';
+import { resolveEmployeeEmail } from '../utils/resolveEmployeeEmail.js';
 import { isUserAdministrator } from '../services/permissionService.js';
 
 const STAGE = {
     HR: 'pending_hr',
     ACCOUNTS: 'pending_accounts',
     ADMIN: 'pending_admin',
+    /** After Admin approves: waiting for first service day / in-window actions (Extend, Mark live). */
+    SCHEDULED: 'scheduled_service',
     MANAGEMENT: 'pending_management',
     COMPLETE: 'complete',
     REJECTED: 'rejected'
 };
+
+function computeInclusiveWindowEnd(startDate, durationDays) {
+    const s = new Date(startDate);
+    if (Number.isNaN(s.getTime())) return null;
+    const n = Math.max(1, Math.floor(Number(durationDays) || 1));
+    const e = new Date(s);
+    e.setDate(e.getDate() + (n - 1));
+    e.setHours(12, 0, 0, 0);
+    return e;
+}
 
 function vehicleServiceDetailsPath(assetId, serviceRecordId) {
     if (!assetId || !serviceRecordId) return null;
@@ -32,10 +45,71 @@ function vehicleServiceDashboardMeta(asset, serviceRecordId) {
     });
 }
 
+function resolveStatusAfterService(asset, wf) {
+    const prev = String(wf?.previousStatus || '').trim();
+    // We should never remain in service-like statuses after "mark live"/reject/cancel.
+    if (prev && !['on service', 'waiting for service'].includes(prev.toLowerCase())) {
+        return prev;
+    }
+    // Fallback for older rows that didn't store previousStatus correctly.
+    return asset?.assignedTo ? 'Assigned' : 'Unassigned';
+}
+
+function uniqRecipients(list) {
+    const seen = new Set();
+    const out = [];
+    for (const emp of list || []) {
+        if (!emp) continue;
+        const k = String(emp._id || emp.employeeId || '').trim().toLowerCase();
+        const { email } = resolveEmployeeEmail(emp);
+        const ek = String(email || '').trim().toLowerCase();
+        const key = k || ek;
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        out.push(emp);
+    }
+    return out;
+}
+
+async function sendWorkflowEmailWithConsole({ recipient, asset, stageLabel, actionLabel, detailLine, linkPath }) {
+    const { email } = resolveEmployeeEmail(recipient || {});
+    const who = `${recipient?.firstName || ''} ${recipient?.lastName || ''}`.trim() || recipient?.employeeId || 'Unknown';
+    console.log(`[VehicleServiceWorkflow][Email] ${actionLabel} -> ${who} <${email || 'no-company-email'}>`);
+    if (!email) return;
+    await sendVehicleServiceWorkflowEmail({
+        recipient,
+        asset,
+        stageLabel,
+        actionLabel,
+        detailLine,
+        linkPath,
+    });
+}
+
+async function resolveWorkflowStakeholders(asset, serviceRecordId) {
+    const sub = asset?.services?.id?.(serviceRecordId);
+    const requesterId = sub?.requestedBy ? String(sub.requestedBy) : '';
+    const requester = requesterId
+        ? await EmployeeBasic.findById(requesterId).select('_id firstName lastName employeeId companyEmail primaryReportee').lean()
+        : null;
+    const assignedEmpRaw = asset?.assignedTo?._id
+        ? await EmployeeBasic.findById(asset.assignedTo._id)
+            .populate('primaryReportee', '_id firstName lastName employeeId companyEmail')
+            .select('_id firstName lastName employeeId companyEmail primaryReportee')
+            .lean()
+        : null;
+    const primaryReportee = assignedEmpRaw?.primaryReportee || null;
+    return {
+        requester,
+        assignedEmployee: assignedEmpRaw,
+        primaryReportee,
+    };
+}
+
 async function resolveAssigneeForStage(stage) {
     if (stage === STAGE.HR) return getDepartmentHOD('hr');
     if (stage === STAGE.ACCOUNTS) return getDepartmentHOD('accounts');
-    if (stage === STAGE.ADMIN) return getDepartmentHOD('assetcontroller');
+    if (stage === STAGE.ADMIN || stage === STAGE.SCHEDULED) return getDepartmentHOD('assetcontroller');
     if (stage === STAGE.MANAGEMENT) return getManagementHOD();
     return null;
 }
@@ -77,6 +151,64 @@ async function actorMayAct(reqUser, assignee) {
     return String(actor._id) === String(assignee._id);
 }
 
+function parseRemarkMeta(remarkValue) {
+    if (!remarkValue) return {};
+    if (typeof remarkValue === 'object') return remarkValue;
+    try {
+        return JSON.parse(remarkValue);
+    } catch {
+        return {};
+    }
+}
+
+function requiresQuotationSelection(serviceType) {
+    return ['Tire Change', 'Mechanical Work', 'Body Work', 'Accident Repair'].includes(String(serviceType || ''));
+}
+
+function selectedQuotationExists(choice, serviceSub, incomingUpdates) {
+    const hasQ1 = !!(serviceSub?.attachment || incomingUpdates?.attachment?.data);
+    const hasQ2 = !!(serviceSub?.quotation2 || incomingUpdates?.quotation2?.data);
+    const hasQ3 = !!(serviceSub?.quotation3 || incomingUpdates?.quotation3?.data);
+    if (choice === 'q1') return hasQ1;
+    if (choice === 'q2') return hasQ2;
+    if (choice === 'q3') return hasQ3;
+    return false;
+}
+
+function availableQuotationCount(serviceSub, incomingUpdates) {
+    const hasQ1 = !!(serviceSub?.attachment || incomingUpdates?.attachment?.data);
+    const hasQ2 = !!(serviceSub?.quotation2 || incomingUpdates?.quotation2?.data);
+    const hasQ3 = !!(serviceSub?.quotation3 || incomingUpdates?.quotation3?.data);
+    return [hasQ1, hasQ2, hasQ3].filter(Boolean).length;
+}
+
+function keepOnlySelectedQuotationOnService(serviceSub) {
+    if (!serviceSub) return;
+    const remark = parseRemarkMeta(serviceSub.remark);
+    const choice = String(remark?.approvedQuotationChoice || '').trim();
+    if (!['q1', 'q2', 'q3'].includes(choice)) return;
+
+    const q1 = serviceSub.attachment || null;
+    const q2 = serviceSub.quotation2 || null;
+    const q3 = serviceSub.quotation3 || null;
+    const selected = choice === 'q1' ? q1 : choice === 'q2' ? q2 : q3;
+    if (!selected) return;
+
+    serviceSub.attachment = selected;
+    serviceSub.quotation2 = null;
+    serviceSub.quotation3 = null;
+
+    if (choice === 'q2' && remark.quotation2Name) {
+        remark.attachmentName = remark.quotation2Name;
+    } else if (choice === 'q3' && remark.quotation3Name) {
+        remark.attachmentName = remark.quotation3Name;
+    }
+    // Normalize storage/view: once non-selected files are removed, keep approved key as q1
+    // because the selected file now lives in `attachment`.
+    remark.approvedQuotationChoice = 'q1';
+    serviceSub.remark = JSON.stringify(remark);
+}
+
 /** Non-persisted payload for GET asset detail — who must act at this stage. */
 export async function getWorkflowAssigneePayloadForStage(stage) {
     if (!stage || [STAGE.COMPLETE, STAGE.REJECTED].includes(stage)) return null;
@@ -114,6 +246,8 @@ async function mergeWorkflowServiceRecord(asset, serviceRecordId, body) {
     const {
         serviceType,
         date,
+        scheduledServiceDate,
+        serviceDurationDays,
         expiryDate,
         currentKm,
         description,
@@ -183,13 +317,27 @@ async function mergeWorkflowServiceRecord(asset, serviceRecordId, body) {
     }
 
     if (serviceType != null) sub.serviceType = serviceType;
-    if (date != null) sub.date = new Date(date);
+    if (scheduledServiceDate) {
+        sub.date = new Date(scheduledServiceDate);
+    } else if (date != null) {
+        sub.date = new Date(date);
+    }
     if (expiryDate !== undefined) sub.expiryDate = expiryDate ? new Date(expiryDate) : null;
     if (currentKm !== undefined) sub.currentKm = currentKm != null ? Number(currentKm) : null;
     if (description != null) sub.description = description;
     if (paidBy != null) sub.paidBy = paidBy;
     if (value !== undefined) sub.value = Number(value) || 0;
     if (remark !== undefined) sub.remark = remark;
+    if (Number.isFinite(Number(serviceDurationDays)) && Number(serviceDurationDays) >= 1) {
+        const n = Math.floor(Number(serviceDurationDays));
+        sub.serviceDuration = `${n} day${n === 1 ? '' : 's'}`;
+        const r = parseRemarkMeta(sub.remark);
+        if (scheduledServiceDate) {
+            r.adminScheduledServiceDate = String(scheduledServiceDate).slice(0, 10);
+        }
+        r.adminServiceDurationDays = n;
+        sub.remark = JSON.stringify(r);
+    }
     if (invoiceUrl != null) sub.invoice = invoiceUrl;
     if (attachmentUrl != null) sub.attachment = attachmentUrl;
     if (quotation2Url != null) sub.quotation2 = quotation2Url;
@@ -241,6 +389,7 @@ const STAGE_LABEL = {
     [STAGE.HR]: 'HR',
     [STAGE.ACCOUNTS]: 'Accounts',
     [STAGE.ADMIN]: 'On service (Asset Controller)',
+    [STAGE.SCHEDULED]: 'Scheduled service',
     [STAGE.MANAGEMENT]: 'Management'
 };
 
@@ -379,7 +528,7 @@ export async function maybeStartVehicleServiceWorkflow(asset, { serviceRecordId,
             extra3: vehicleServiceDashboardMeta(asset, serviceRecordId),
         });
 
-        await sendVehicleServiceWorkflowEmail({
+        await sendWorkflowEmailWithConsole({
             recipient: hr,
             asset,
             stageLabel: 'HR approval required',
@@ -398,7 +547,7 @@ export async function maybeStartVehicleServiceWorkflow(asset, { serviceRecordId,
 
 /**
  * POST /api/AssetItem/:id/service-workflow/respond
- * body: { action: 'approve' | 'reject' | 'hold', comment?, serviceUpdates?, holdReason?, holdDays?, holdUntilDate? }
+ * body: { action: 'approve' | 'reject' | 'hold' | 'unhold', comment?, serviceUpdates?, holdReason?, holdDays?, holdUntilDate? }
  * - hold: Accounts step only; requires holdReason + holdUntilDate (or holdDays for legacy payloads).
  * serviceUpdates uses the same shape as POST /AssetItem/:id/service (optional on approve).
  */
@@ -406,8 +555,8 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
     try {
         const { id } = req.params;
         const { action, comment, serviceUpdates, holdReason, holdDays, holdUntilDate } = req.body || {};
-        if (!['approve', 'reject', 'hold'].includes(action)) {
-            return res.status(400).json({ message: 'action must be approve, reject, or hold' });
+        if (!['approve', 'reject', 'hold', 'unhold'].includes(action)) {
+            return res.status(400).json({ message: 'action must be approve, reject, hold, or unhold' });
         }
 
         const asset = await AssetItem.findById(id).populate('assignedTo', 'firstName lastName employeeId');
@@ -419,6 +568,12 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
         }
 
         const stage = wf.stage;
+        if (stage === STAGE.SCHEDULED) {
+            return res.status(400).json({
+                message:
+                    'This request is in the scheduled service window. Use Extend or Mark live (POST .../service-workflow/period), not the approval endpoint.',
+            });
+        }
         const assignee = await resolveAssigneeForStage(stage);
         if (!assignee?._id && !isPortalAdmin(req.user)) {
             return res.status(503).json({ message: 'Workflow role is not configured in Flowchart (assignee missing).' });
@@ -484,6 +639,21 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
             persistWorkflowSnapshotToServiceSubdoc(asset);
             asset.markModified('activeServiceWorkflow');
             await asset.save();
+            try {
+                const hr = await resolveAssigneeForStage(STAGE.HR);
+                if (hr?._id) {
+                    await sendWorkflowEmailWithConsole({
+                        recipient: hr,
+                        asset,
+                        stageLabel: 'Accounts hold',
+                        actionLabel: 'Vehicle service request is on hold',
+                        detailLine: `Accounts placed this request on hold until ${holdUntil.toISOString().slice(0, 10)}. Reason: ${reason}.`,
+                        linkPath: vehicleServiceDetailsPath(asset._id, wf.serviceRecordId),
+                    });
+                }
+            } catch (e) {
+                console.error('[VehicleServiceWorkflow] hold notify HR failed:', e);
+            }
             const holdFresh = await AssetItem.findById(asset._id).populate('assignedTo', 'firstName lastName employeeId');
             return res.json({
                 message: `Hold recorded until ${holdUntil.toLocaleDateString()}`,
@@ -491,13 +661,88 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
             });
         }
 
+        if (action === 'unhold') {
+            if (stage !== STAGE.ACCOUNTS) {
+                return res.status(400).json({ message: 'Unhold is only available at the Accounts step' });
+            }
+            const hold = asset.activeServiceWorkflow?.accountsHold || null;
+            if (!hold?.holdUntilDate) {
+                return res.status(400).json({ message: 'This request is not currently on hold' });
+            }
+
+            asset.activeServiceWorkflow.accountsHold = null;
+            await pushWorkflowHistory(asset, {
+                stage,
+                action: 'unhold',
+                note: comment || 'Hold cleared',
+                byName: actorName
+            });
+            await logVehicleServiceWorkflowToAssetHistory(asset, {
+                stage,
+                workflowAction: 'approve',
+                note: comment || 'Hold cleared',
+                byName: actorName,
+                performedById,
+                serviceTypeLabel: wf.serviceTypeLabel,
+                hasServiceUpdates: false,
+                serviceRecordId: wf.serviceRecordId
+            });
+            persistWorkflowSnapshotToServiceSubdoc(asset);
+            asset.markModified('activeServiceWorkflow');
+            await asset.save();
+            const fresh = await AssetItem.findById(asset._id).populate('assignedTo', 'firstName lastName employeeId');
+            return res.json({ message: 'Hold cleared. You can now approve or reject.', asset: fresh });
+        }
+
         let hadServiceUpdates = false;
+        if (action === 'approve' && stage === STAGE.HR && wf.serviceRecordId) {
+            const serviceSub = asset.services?.id?.(wf.serviceRecordId);
+            const incomingType = serviceUpdates?.serviceType || serviceSub?.serviceType || wf.serviceTypeLabel;
+            const meta = parseRemarkMeta(serviceUpdates?.remark);
+            const choice = String(meta?.approvedQuotationChoice || '').trim();
+            const vendorName = String(meta?.vendorName || '').trim();
+            if (!vendorName) {
+                return res.status(400).json({ message: 'Vendor is required before HR approval.' });
+            }
+            if (requiresQuotationSelection(incomingType)) {
+                const qCount = availableQuotationCount(serviceSub, serviceUpdates);
+                if (qCount > 1) {
+                    if (!choice || !['q1', 'q2', 'q3'].includes(choice)) {
+                        return res.status(400).json({ message: 'HR must select one approved quotation before approval.' });
+                    }
+                    if (!selectedQuotationExists(choice, serviceSub, serviceUpdates)) {
+                        return res.status(400).json({ message: 'Selected quotation file is missing.' });
+                    }
+                }
+            }
+        }
+
+        if (action === 'approve' && stage === STAGE.ADMIN && wf.serviceRecordId) {
+            const su = serviceUpdates || {};
+            const startRaw = su.scheduledServiceDate || su.date;
+            const durationDays = Number(su.serviceDurationDays);
+            if (!startRaw) {
+                return res.status(400).json({ message: 'Service date is required before Admin approval.' });
+            }
+            if (!Number.isFinite(durationDays) || durationDays < 1) {
+                return res.status(400).json({ message: 'Service duration (days) is required and must be at least 1.' });
+            }
+        }
+
         if (action === 'approve' && serviceUpdates && wf.serviceRecordId) {
             try {
                 await mergeWorkflowServiceRecord(asset, wf.serviceRecordId, serviceUpdates);
                 hadServiceUpdates = true;
             } catch (mergeErr) {
                 return res.status(400).json({ message: mergeErr.message || 'Could not update service record' });
+            }
+        }
+
+        if (action === 'approve' && stage === STAGE.HR && wf.serviceRecordId) {
+            const serviceSub = asset.services?.id?.(wf.serviceRecordId);
+            if (serviceSub && requiresQuotationSelection(serviceSub.serviceType || wf.serviceTypeLabel)) {
+                keepOnlySelectedQuotationOnService(serviceSub);
+                asset.markModified('services');
             }
         }
 
@@ -515,7 +760,7 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
                 });
             }
 
-            if (wf.previousStatus) asset.status = wf.previousStatus;
+            asset.status = resolveStatusAfterService(asset, wf);
             asset.activeServiceWorkflow.stage = STAGE.REJECTED;
             await pushWorkflowHistory(asset, { stage, action: 'reject', note: comment || '', byName: actorName });
             await logVehicleServiceWorkflowToAssetHistory(asset, {
@@ -536,13 +781,26 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
                 if (requesterId) {
                     const requester = await EmployeeBasic.findById(requesterId).select('firstName lastName employeeId companyEmail workEmail personalEmail email').lean();
                     if (requester) {
-                        await sendVehicleServiceWorkflowEmail({
+                        await sendWorkflowEmailWithConsole({
                             recipient: requester,
                             asset,
                             stageLabel: 'Service request rejected',
                             actionLabel: 'Vehicle service rejected',
                             detailLine: `Your service request was rejected at ${STAGE_LABEL[stage] || stage}. Reason: ${comment || 'No reason provided'}. You can edit and re-submit.`,
                             linkPath: vehicleServiceDetailsPath(asset._id, wf.serviceRecordId),
+                        });
+                        await syncDashboardAction({
+                            requestId: asset._id,
+                            requestType: 'Vehicle Service Request',
+                            status: 'Rejected',
+                            assignedTo: requester._id,
+                            actionedBy: (await resolveActorEmployee(req.user))?._id,
+                            comment: comment || 'Rejected',
+                            subjectEmployee: asset.assignedTo,
+                            requestedByName: actorName,
+                            extra1: `${asset.assetId} — ${wf.serviceTypeLabel || 'Service'}`,
+                            extra2: `Rejected at ${STAGE_LABEL[stage] || stage}`,
+                            extra3: vehicleServiceDashboardMeta(asset, wf.serviceRecordId),
                         });
                     }
                 }
@@ -582,20 +840,105 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
         let nextStage = null;
         if (stage === STAGE.HR) nextStage = STAGE.ACCOUNTS;
         else if (stage === STAGE.ACCOUNTS) nextStage = STAGE.ADMIN;
-        else if (stage === STAGE.ADMIN || stage === STAGE.MANAGEMENT) nextStage = STAGE.COMPLETE;
+        else if (stage === STAGE.MANAGEMENT) nextStage = STAGE.COMPLETE;
+        else if (stage === STAGE.ADMIN) nextStage = STAGE.SCHEDULED;
+
+        if (nextStage === STAGE.SCHEDULED) {
+            const su = serviceUpdates || {};
+            const startRaw = su.scheduledServiceDate || su.date;
+            const n = Math.floor(Number(su.serviceDurationDays));
+            const startD = new Date(startRaw);
+            if (Number.isNaN(startD.getTime())) {
+                return res.status(400).json({ message: 'Invalid service date.' });
+            }
+            if (!asset.activeServiceWorkflow) asset.activeServiceWorkflow = {};
+            asset.activeServiceWorkflow.scheduledServiceDate = startD;
+            asset.activeServiceWorkflow.serviceDurationDays = n;
+            asset.activeServiceWorkflow.serviceWindowEndDate = computeInclusiveWindowEnd(startD, n);
+            asset.activeServiceWorkflow.serviceDurationEmailSentAt = null;
+            asset.activeServiceWorkflow.stage = STAGE.SCHEDULED;
+            // Flip immediately when today is already inside the scheduled window
+            // so UI does not depend on the periodic background job timing.
+            const startUtc = Date.UTC(startD.getUTCFullYear(), startD.getUTCMonth(), startD.getUTCDate());
+            const endD = asset.activeServiceWorkflow.serviceWindowEndDate;
+            const endUtc = endD
+                ? Date.UTC(endD.getUTCFullYear(), endD.getUTCMonth(), endD.getUTCDate())
+                : startUtc;
+            const now = new Date();
+            const todayUtc = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+            asset.status = todayUtc >= startUtc && todayUtc <= endUtc ? 'On Service' : 'Waiting for Service';
+            persistWorkflowSnapshotToServiceSubdoc(asset);
+            await asset.save();
+
+            const nextAssignee = await resolveAssigneeForStage(STAGE.SCHEDULED);
+            if (nextAssignee?._id) {
+                const requesterName = actorName;
+                await syncDashboardAction({
+                    requestId: asset._id,
+                    requestType: 'Vehicle Service Request',
+                    status: 'Pending',
+                    assignedTo: nextAssignee._id,
+                    subjectEmployee: asset.assignedTo,
+                    requestedByName: requesterName,
+                    extra1: `${asset.assetId} — ${wf.serviceTypeLabel || 'Service'}`,
+                    extra2: 'Service scheduled — use Extend or Mark live during the service window',
+                    extra3: vehicleServiceDashboardMeta(asset, wf.serviceRecordId),
+                });
+                await sendWorkflowEmailWithConsole({
+                    recipient: nextAssignee,
+                    asset,
+                    stageLabel: 'Service scheduled (asset controller)',
+                    actionLabel: 'Vehicle service window is scheduled',
+                    detailLine: `A service date and duration are set. The vehicle is waiting for service until the first service day, then you can use Extend or Mark live during the window.`,
+                    linkPath: vehicleServiceDetailsPath(asset._id, wf.serviceRecordId),
+                });
+            }
+
+            try {
+                const stakeholders = await resolveWorkflowStakeholders(asset, wf.serviceRecordId);
+                const hr = await resolveAssigneeForStage(STAGE.HR);
+                const accounts = await resolveAssigneeForStage(STAGE.ACCOUNTS);
+                for (const recipient of uniqRecipients([
+                    stakeholders.requester,
+                    stakeholders.assignedEmployee,
+                    stakeholders.primaryReportee,
+                    hr,
+                    accounts,
+                ])) {
+                    await sendWorkflowEmailWithConsole({
+                        recipient,
+                        asset,
+                        stageLabel: 'Admin approved; service scheduled',
+                        actionLabel: 'Vehicle service moved to scheduled window',
+                        detailLine: `Admin approved and scheduled this service window. Current vehicle status: ${asset.status}.`,
+                        linkPath: vehicleServiceDetailsPath(asset._id, wf.serviceRecordId),
+                    });
+                }
+            } catch (notifyErr) {
+                console.error('[VehicleServiceWorkflow] admin scheduled notify failed:', notifyErr);
+            }
+
+            const fresh = await AssetItem.findById(asset._id).populate('assignedTo', 'firstName lastName employeeId');
+            return res.json({
+                message:
+                    asset.status === 'On Service'
+                        ? 'Service date and duration saved. Vehicle is now On Service (inside the scheduled window).'
+                        : 'Service date and duration saved. The vehicle is waiting for service until the scheduled day.',
+                asset: fresh,
+            });
+        }
 
         if (nextStage === STAGE.COMPLETE) {
             asset.activeServiceWorkflow.stage = STAGE.COMPLETE;
-            if (wf.previousStatus) asset.status = wf.previousStatus;
+            asset.status = resolveStatusAfterService(asset, wf);
             persistWorkflowSnapshotToServiceSubdoc(asset);
             await asset.save();
             const doneFresh = await AssetItem.findById(asset._id).populate('assignedTo', 'firstName lastName employeeId');
             return res.json({ message: 'Service workflow completed', asset: doneFresh });
         }
 
-        if (stage === STAGE.ACCOUNTS && nextStage === STAGE.ADMIN) {
-            asset.status = 'On Service';
-        }
+        // Keep current status unchanged at Accounts approval.
+        // Admin approval moves the vehicle into a scheduled service window (not "On Service" until the service day).
 
         asset.activeServiceWorkflow.stage = nextStage;
         persistWorkflowSnapshotToServiceSubdoc(asset);
@@ -606,7 +949,9 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
             const requesterName = actorName;
             let extra2 = 'Action required';
             if (nextStage === STAGE.ACCOUNTS) extra2 = 'Awaiting Accounts approval';
-            if (nextStage === STAGE.ADMIN) extra2 = 'Vehicle is On Service — Asset Controller review & close';
+            if (nextStage === STAGE.ADMIN) {
+                extra2 = 'Admin must set the service date and duration to schedule the in-shop window';
+            }
 
             await syncDashboardAction({
                 requestId: asset._id,
@@ -620,7 +965,7 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
                 extra3: vehicleServiceDashboardMeta(asset, wf.serviceRecordId),
             });
 
-            await sendVehicleServiceWorkflowEmail({
+            await sendWorkflowEmailWithConsole({
                 recipient: nextAssignee,
                 asset,
                 stageLabel: extra2,
@@ -630,10 +975,262 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
             });
         }
 
+        if (stage === STAGE.HR && nextStage === STAGE.ACCOUNTS) {
+            try {
+                const stakeholders = await resolveWorkflowStakeholders(asset, wf.serviceRecordId);
+                for (const recipient of uniqRecipients([stakeholders.assignedEmployee, stakeholders.primaryReportee])) {
+                    await sendWorkflowEmailWithConsole({
+                        recipient,
+                        asset,
+                        stageLabel: 'HR approved; sent to Accounts',
+                        actionLabel: 'Vehicle service request update',
+                        detailLine: `Your vehicle service request was approved by HR and moved to Accounts review.`,
+                        linkPath: vehicleServiceDetailsPath(asset._id, wf.serviceRecordId),
+                    });
+                }
+            } catch (notifyErr) {
+                console.error('[VehicleServiceWorkflow] HR->Accounts notify stakeholders failed:', notifyErr);
+            }
+        }
+
         const fresh = await AssetItem.findById(asset._id).populate('assignedTo', 'firstName lastName employeeId');
         return res.json({ message: 'Step recorded', asset: fresh });
     } catch (error) {
         console.error('[respondVehicleServiceWorkflow]', error);
+        res.status(500).json({ message: error.message || 'Server error' });
+    }
+};
+
+function utcDayStart(d) {
+    if (!d) return NaN;
+    const x = new Date(d);
+    return Date.UTC(x.getUTCFullYear(), x.getUTCMonth(), x.getUTCDate());
+}
+
+/**
+ * POST /api/AssetItem/:id/service-workflow/period
+ * { action: 'extend' | 'go_live', extendDays?, invoice?, comment? }
+ * — Asset Controller: extend the scheduled in-shop window, or mark live (invoice required) to complete the workflow.
+ */
+export const respondVehicleServiceScheduledPeriod = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { action, extendDays, invoice, comment } = req.body || {};
+        if (!['extend', 'go_live', 'cancel', 'reject'].includes(String(action || ''))) {
+            return res.status(400).json({ message: 'action must be extend, go_live, cancel, or reject' });
+        }
+
+        const asset = await AssetItem.findById(id).populate('assignedTo', 'firstName lastName employeeId');
+        if (!asset) return res.status(404).json({ message: 'Asset not found' });
+
+        const wf = asset.activeServiceWorkflow;
+        if (wf?.stage !== STAGE.SCHEDULED) {
+            return res
+                .status(400)
+                .json({ message: 'This action is only available during the scheduled service window (after Admin approval).' });
+        }
+
+        const assignee = await resolveAssigneeForStage(STAGE.SCHEDULED);
+        const allowed = await actorMayAct(req.user, assignee);
+        if (!allowed) {
+            return res.status(403).json({ message: 'You are not authorized for this action' });
+        }
+
+        const actorName = (await getRequesterName(req.user)) || 'User';
+        const actorEmp = await resolveActorEmployee(req.user);
+        const performedById = actorEmp?._id;
+        const today = utcDayStart(new Date());
+        const start = wf.scheduledServiceDate ? utcDayStart(wf.scheduledServiceDate) : NaN;
+        const end = wf.serviceWindowEndDate ? utcDayStart(wf.serviceWindowEndDate) : NaN;
+        const serviceRecordId = wf.serviceRecordId;
+
+        if (action === 'extend') {
+            const ext = Math.floor(Number(extendDays));
+            if (!Number.isFinite(ext) || ext < 1) {
+                return res.status(400).json({ message: 'extendDays must be a whole number of at least 1' });
+            }
+            if (Number.isFinite(start) && today < start) {
+                return res.status(400).json({ message: 'Extend is not available before the scheduled first service day.' });
+            }
+            if (Number.isFinite(end) && today > end) {
+                return res.status(400).json({ message: 'The service window has ended. Use Mark live to close the workflow, or contact an administrator.' });
+            }
+            if (!wf.serviceWindowEndDate) {
+                return res.status(400).json({ message: 'Missing service window data on this request.' });
+            }
+            const newEnd = new Date(wf.serviceWindowEndDate);
+            newEnd.setDate(newEnd.getDate() + ext);
+            wf.serviceWindowEndDate = newEnd;
+            const prevDur = Math.max(1, Math.floor(Number(wf.serviceDurationDays) || 1));
+            wf.serviceDurationDays = prevDur + ext;
+            if (serviceRecordId) {
+                const sub = asset.services?.id?.(serviceRecordId);
+                if (sub) {
+                    const n = wf.serviceDurationDays;
+                    sub.serviceDuration = `${n} day${n === 1 ? '' : 's'}`;
+                    const r = parseRemarkMeta(sub.remark);
+                    r.extendedByDays = (r.extendedByDays || 0) + ext;
+                    if (String(comment || '').trim()) {
+                        r.lastExtendNote = String(comment).trim();
+                    }
+                    sub.remark = JSON.stringify(r);
+                    asset.markModified('services');
+                }
+            }
+            await pushWorkflowHistory(asset, {
+                stage: STAGE.SCHEDULED,
+                action: 'extend',
+                note: `+${ext} day(s). ${String(comment || '').trim()}`,
+                byName: actorName,
+            });
+            await logVehicleServiceWorkflowToAssetHistory(asset, {
+                stage: STAGE.SCHEDULED,
+                workflowAction: 'approve',
+                note: `Extended service window by ${ext} day(s)${comment ? `. ${comment}` : ''}`,
+                byName: actorName,
+                performedById,
+                serviceTypeLabel: wf.serviceTypeLabel,
+                hasServiceUpdates: true,
+                serviceRecordId,
+            });
+            persistWorkflowSnapshotToServiceSubdoc(asset);
+            await asset.save();
+            const out = await AssetItem.findById(asset._id).populate('assignedTo', 'firstName lastName employeeId');
+            return res.json({ message: 'Service window extended', asset: out });
+        }
+
+        if (action === 'go_live') {
+            if (Number.isFinite(start) && today < start) {
+                return res.status(400).json({ message: 'Mark live is not available before the scheduled first service day.' });
+            }
+            const goLiveNote = String(comment || '').trim();
+            if (!goLiveNote) {
+                return res.status(400).json({ message: 'Description is required to mark live.' });
+            }
+            if (invoice?.data && serviceRecordId) {
+                await mergeWorkflowServiceRecord(asset, serviceRecordId, { invoice });
+            }
+            if (serviceRecordId) {
+                const sub = asset.services?.id?.(serviceRecordId);
+                if (sub) {
+                    const r = parseRemarkMeta(sub.remark);
+                    r.vehicleServiceCompleted = 'live';
+                    r.vehicleServiceCompletedAt = new Date().toISOString();
+                    sub.remark = JSON.stringify(r);
+                    asset.markModified('services');
+                }
+            }
+            asset.status = resolveStatusAfterService(asset, wf);
+            wf.stage = STAGE.COMPLETE;
+            if (assignee?._id) {
+                await syncDashboardAction({
+                    requestId: asset._id,
+                    requestType: 'Vehicle Service Request',
+                    status: 'Approved',
+                    assignedTo: assignee._id,
+                    actionedBy: (await resolveActorEmployee(req.user))?._id,
+                    comment: comment || 'Marked live',
+                    subjectEmployee: asset.assignedTo,
+                    requestedByName: actorName,
+                });
+            }
+            await pushWorkflowHistory(asset, {
+                stage: STAGE.SCHEDULED,
+                action: 'go_live',
+                note: goLiveNote,
+                byName: actorName,
+            });
+            await logVehicleServiceWorkflowToAssetHistory(asset, {
+                stage: STAGE.SCHEDULED,
+                workflowAction: 'approve',
+                note: 'Workflow completed — vehicle marked live (invoice saved)',
+                byName: actorName,
+                performedById,
+                serviceTypeLabel: wf.serviceTypeLabel,
+                hasServiceUpdates: true,
+                serviceRecordId,
+            });
+            try {
+                const stakeholders = await resolveWorkflowStakeholders(asset, serviceRecordId);
+                const hr = await resolveAssigneeForStage(STAGE.HR);
+                const accounts = await resolveAssigneeForStage(STAGE.ACCOUNTS);
+                const admin = await resolveAssigneeForStage(STAGE.SCHEDULED);
+                for (const recipient of uniqRecipients([
+                    stakeholders.requester,
+                    stakeholders.assignedEmployee,
+                    stakeholders.primaryReportee,
+                    hr,
+                    accounts,
+                    admin,
+                ])) {
+                    await sendWorkflowEmailWithConsole({
+                        recipient,
+                        asset,
+                        stageLabel: 'Vehicle marked live',
+                        actionLabel: 'Service workflow completed',
+                        detailLine: `Service is marked live and completed. Vehicle status is restored to ${asset.status}.`,
+                        linkPath: vehicleServiceDetailsPath(asset._id, serviceRecordId),
+                    });
+                }
+            } catch (notifyErr) {
+                console.error('[VehicleServiceWorkflow] go_live notify stakeholders failed:', notifyErr);
+            }
+            persistWorkflowSnapshotToServiceSubdoc(asset);
+            await asset.save();
+            const doneFresh = await AssetItem.findById(asset._id).populate('assignedTo', 'firstName lastName employeeId');
+            return res.json({ message: 'Vehicle is back in normal use — service workflow completed.', asset: doneFresh });
+        }
+        if (action === 'cancel') {
+            asset.status = resolveStatusAfterService(asset, wf);
+            wf.stage = STAGE.COMPLETE;
+            await pushWorkflowHistory(asset, {
+                stage: STAGE.SCHEDULED,
+                action: 'cancel',
+                note: String(comment || 'Cancelled in scheduled period').trim(),
+                byName: actorName,
+            });
+            await logVehicleServiceWorkflowToAssetHistory(asset, {
+                stage: STAGE.SCHEDULED,
+                workflowAction: 'approve',
+                note: `Scheduled service cancelled${comment ? `. ${comment}` : ''}`,
+                byName: actorName,
+                performedById,
+                serviceTypeLabel: wf.serviceTypeLabel,
+                hasServiceUpdates: false,
+                serviceRecordId,
+            });
+            persistWorkflowSnapshotToServiceSubdoc(asset);
+            await asset.save();
+            const doneFresh = await AssetItem.findById(asset._id).populate('assignedTo', 'firstName lastName employeeId');
+            return res.json({ message: 'Scheduled service cancelled and vehicle status restored.', asset: doneFresh });
+        }
+        if (action === 'reject') {
+            asset.status = resolveStatusAfterService(asset, wf);
+            wf.stage = STAGE.REJECTED;
+            await pushWorkflowHistory(asset, {
+                stage: STAGE.SCHEDULED,
+                action: 'reject',
+                note: String(comment || 'Rejected in scheduled period').trim(),
+                byName: actorName,
+            });
+            await logVehicleServiceWorkflowToAssetHistory(asset, {
+                stage: STAGE.SCHEDULED,
+                workflowAction: 'reject',
+                note: `Scheduled service rejected${comment ? `. ${comment}` : ''}`,
+                byName: actorName,
+                performedById,
+                serviceTypeLabel: wf.serviceTypeLabel,
+                hasServiceUpdates: false,
+                serviceRecordId,
+            });
+            persistWorkflowSnapshotToServiceSubdoc(asset);
+            await asset.save();
+            const doneFresh = await AssetItem.findById(asset._id).populate('assignedTo', 'firstName lastName employeeId');
+            return res.json({ message: 'Scheduled service rejected and vehicle status restored.', asset: doneFresh });
+        }
+        return res.status(400).json({ message: 'Invalid action' });
+    } catch (error) {
+        console.error('[respondVehicleServiceScheduledPeriod]', error);
         res.status(500).json({ message: error.message || 'Server error' });
     }
 };

@@ -25,6 +25,7 @@ import { processTemporaryAssignments } from "./utils/processTemporaryAssignments
 import { processAccidentAssets } from "./utils/processAccidentAssets.js";
 import { processDocumentExpiryReminders } from "./utils/processDocumentExpiryReminders.js";
 import { processVehicleServiceHoldReminders } from "./utils/processVehicleServiceHoldReminders.js";
+import { processVehicleServiceScheduledPhase } from "./utils/processVehicleServiceScheduledPhase.js";
 
 dotenv.config();
 
@@ -58,6 +59,10 @@ setInterval(() => { processDocumentExpiryReminders(); }, 24 * 60 * 60 * 1000);
 // Run vehicle service hold reminders (creates deferred task/email near hold date).
 setTimeout(() => { processVehicleServiceHoldReminders(); }, 120 * 1000);
 setInterval(() => { processVehicleServiceHoldReminders(); }, 6 * 60 * 60 * 1000);
+
+// Scheduled vehicle service window: flip to "On Service" on the first day, email AC after window ends.
+setTimeout(() => { processVehicleServiceScheduledPhase(); }, 150 * 1000);
+setInterval(() => { processVehicleServiceScheduledPhase(); }, 2 * 60 * 60 * 1000);
 
 // CORS Configuration - MUST BE FIRST
 const staticAllowedOrigins = [

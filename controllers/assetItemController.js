@@ -678,11 +678,13 @@ function inferWorkflowStageFromHistoryEvents(eventsChrono) {
     if (last.workflowAction === 'hold') return 'pending_accounts';
     if (last.workflowAction === 'start') return 'pending_hr';
     if (last.workflowAction === 'approve') {
-        if (last.stage === 'pending_admin' || last.stage === 'pending_management') return 'complete';
+        if (last.stage === 'pending_management') return 'complete';
+        if (last.stage === 'pending_admin') return 'scheduled_service';
         const next = {
             pending_hr: 'pending_accounts',
             pending_accounts: 'pending_admin',
-            pending_admin: 'complete',
+            pending_admin: 'scheduled_service',
+            scheduled_service: 'complete',
             pending_management: 'complete',
         };
         return next[last.stage] || 'complete';
@@ -981,8 +983,17 @@ export const getVehicleFleetServiceRequests = async (req, res) => {
                     value: s.value,
                     description: s.description || '',
                     paidBy: s.paidBy || null,
+                    requestedById: s.requestedBy || null,
                     currentKm: s.currentKm != null ? s.currentKm : null,
                     remark: s.remark || '',
+                    requestStatus: (() => {
+                        try {
+                            const r = s.remark ? JSON.parse(s.remark) : null;
+                            return String(r?.requestStatus || '').toLowerCase() === 'draft' ? 'draft' : 'submitted';
+                        } catch {
+                            return 'submitted';
+                        }
+                    })(),
                     vehicleId: v._id,
                     vehicleAssetId: v.assetId,
                     vehicleLabel: vLabel,
@@ -1041,7 +1052,7 @@ export const getAllAssignedAssets = async (req, res) => {
             query.$or = [
                 { assignedTo: { $ne: null } },
                 { assignedCompany: { $ne: null } },
-                { status: { $in: ['Unassigned', 'Pending', 'Assigned', 'On Leave', 'Returned', 'Lost', 'Service', 'Maintenance', 'On Service'] } }
+                { status: { $in: ['Unassigned', 'Pending', 'Assigned', 'On Leave', 'Returned', 'Lost', 'Service', 'Maintenance', 'On Service', 'Waiting for Service'] } }
             ];
         }
 
@@ -5814,7 +5825,7 @@ export const deleteAssetDocument = async (req, res) => {
 export const addAssetService = async (req, res) => {
     try {
         const { id } = req.params;
-        const { serviceType, date, expiryDate, currentKm, description, paidBy, value, remark, invoice, attachment, quotation2, quotation3, serviceRequestSource } = req.body;
+        const { serviceType, date, expiryDate, currentKm, description, paidBy, value, remark, invoice, attachment, quotation2, quotation3, tireCondition, bodyWorkImages, accidentImages, serviceRequestSource, isDraft } = req.body;
 
         const asset = await AssetItem.findById(id).populate('typeId', 'name');
         if (!asset) {
@@ -5836,6 +5847,22 @@ export const addAssetService = async (req, res) => {
                 message:
                     'Vehicle service requests must be created from the Vehicle Asset Fleet Dashboard (Add service request).',
             });
+        }
+
+        // Avoid overlapping vehicle service workflows on the same asset.
+        // If one request is already in pipeline, force users to finish/reject it first
+        // so each newly raised request starts cleanly from HR.
+        if (isVehicleAssetForServiceGate() && !isDraft) {
+            const activeStage = String(asset.activeServiceWorkflow?.stage || '').trim();
+            const hasActiveWorkflow =
+                activeStage &&
+                !['complete', 'rejected'].includes(activeStage.toLowerCase());
+            if (hasActiveWorkflow) {
+                return res.status(409).json({
+                    message:
+                        'A vehicle service request is already in progress for this asset. Please complete or reject the current workflow before raising a new request.',
+                });
+            }
         }
 
         // Fleet vehicle service request: any authenticated user (same rule as route middleware).
@@ -5906,6 +5933,46 @@ export const addAssetService = async (req, res) => {
                 return res.status(500).json({ message: 'Failed to upload quotation 3' });
             }
         }
+        const bodyWorkImageUrls = [];
+        if (Array.isArray(bodyWorkImages) && bodyWorkImages.length) {
+            for (const img of bodyWorkImages) {
+                if (!img?.data) continue;
+                try {
+                    const uploadResult = await uploadDocumentToS3(
+                        img.data,
+                        'asset-service-attachments',
+                        img.name || `body-work-image-${Date.now()}.jpg`
+                    );
+                    bodyWorkImageUrls.push({
+                        url: uploadResult.publicId,
+                        name: img.name || 'Body work image',
+                    });
+                } catch (error) {
+                    console.error('Error uploading body work image to S3:', error);
+                    return res.status(500).json({ message: 'Failed to upload body work images' });
+                }
+            }
+        }
+        const accidentImageUrls = [];
+        if (Array.isArray(accidentImages) && accidentImages.length) {
+            for (const img of accidentImages) {
+                if (!img?.data) continue;
+                try {
+                    const uploadResult = await uploadDocumentToS3(
+                        img.data,
+                        'asset-service-attachments',
+                        img.name || `accident-image-${Date.now()}.jpg`
+                    );
+                    accidentImageUrls.push({
+                        url: uploadResult.publicId,
+                        name: img.name || 'Accident image',
+                    });
+                } catch (error) {
+                    console.error('Error uploading accident image to S3:', error);
+                    return res.status(500).json({ message: 'Failed to upload accident images' });
+                }
+            }
+        }
 
         let parsedRemark = null;
         if (remark && typeof remark === 'string') {
@@ -5915,8 +5982,35 @@ export const addAssetService = async (req, res) => {
                 parsedRemark = null;
             }
         }
+        let tireConditionUrl = null;
+        if (tireCondition && tireCondition.data) {
+            try {
+                const uploadResult = await uploadDocumentToS3(
+                    tireCondition.data,
+                    'asset-service-attachments',
+                    tireCondition.name || `service-tire-condition-${Date.now()}.pdf`
+                );
+                tireConditionUrl = uploadResult.publicId;
+            } catch (error) {
+                console.error('Error uploading tire condition to S3:', error);
+                return res.status(500).json({ message: 'Failed to upload tire condition file' });
+            }
+        }
 
         // Create the service record (explicit subdoc _id for stable keys in UI + workflow linkage)
+        const remarkObj = parsedRemark && typeof parsedRemark === 'object' ? parsedRemark : {};
+        if (tireConditionUrl) {
+            remarkObj.tireConditionUrl = tireConditionUrl;
+            remarkObj.tireConditionName = tireCondition.name || '';
+        }
+        if (bodyWorkImageUrls.length) {
+            remarkObj.bodyWorkImages = bodyWorkImageUrls;
+        }
+        if (accidentImageUrls.length) {
+            remarkObj.accidentImages = accidentImageUrls;
+        }
+        remarkObj.requestStatus = isDraft ? 'draft' : 'submitted';
+        remarkObj.requestedByUserId = req.user?.id || req.user?._id || null;
         const newService = {
             _id: new mongoose.Types.ObjectId(),
             serviceType,
@@ -5926,7 +6020,7 @@ export const addAssetService = async (req, res) => {
             description,
             paidBy,
             value: value || 0,
-            remark,
+            remark: JSON.stringify(remarkObj),
             invoice: invoiceUrl,
             attachment: attachmentUrl,
             requestedBy: req.user.employeeObjectId || undefined,
@@ -5965,14 +6059,16 @@ export const addAssetService = async (req, res) => {
         await asset.save();
 
         const lastServiceDoc = asset.services[asset.services.length - 1];
-        try {
-            await maybeStartVehicleServiceWorkflow(asset, {
-                serviceRecordId: lastServiceDoc._id,
-                serviceType,
-                req
-            });
-        } catch (wfErr) {
-            console.error('[addAssetService] Vehicle service workflow:', wfErr);
+        if (!isDraft) {
+            try {
+                await maybeStartVehicleServiceWorkflow(asset, {
+                    serviceRecordId: lastServiceDoc._id,
+                    serviceType,
+                    req
+                });
+            } catch (wfErr) {
+                console.error('[addAssetService] Vehicle service workflow:', wfErr);
+            }
         }
 
         // Log to history
@@ -5982,8 +6078,8 @@ export const addAssetService = async (req, res) => {
                 assetId: asset._id,
                 action: 'Service',
                 performedBy: req.user.employeeObjectId || req.user._id,
-                comments: `Service record added: ${serviceType}. ${description || ''}`,
-                details: { type: 'ServiceAdd', serviceType, value, description }
+                comments: `${isDraft ? 'Service draft saved' : 'Service record added'}: ${serviceType}. ${description || ''}`,
+                details: { type: 'ServiceAdd', serviceType, value, description, isDraft: !!isDraft }
             });
         } catch (historyErr) {
             console.error('History log failed during addAssetService:', historyErr);
@@ -6004,10 +6100,136 @@ export const addAssetService = async (req, res) => {
             addedService.quotation3 = await getSignedFileUrl(addedService.quotation3);
         }
 
-        res.status(200).json({ message: 'Service record added successfully', service: addedService });
+        res.status(200).json({ message: isDraft ? 'Service draft saved successfully' : 'Service record added successfully', service: addedService });
     } catch (error) {
         console.error('Error adding asset service:', error);
         res.status(500).json({ message: 'Internal server error' });
+    }
+};
+
+// @desc    Delete a service record from an asset item
+// @route   DELETE /api/AssetItem/:id/service/:serviceId
+// @access  Private (Admin only)
+export const deleteAssetService = async (req, res) => {
+    try {
+        const isJwtAdmin = req.user?.isAdmin === true || req.user?.role === 'Admin' || req.user?.role === 'ROOT';
+        const isSysAdmin = await isUserAdministrator(req.user?.id);
+        if (!isJwtAdmin && !isSysAdmin) {
+            return res.status(403).json({ message: 'Access denied. Only admin can delete service records.' });
+        }
+
+        const { id, serviceId } = req.params;
+        if (!id || !serviceId) {
+            return res.status(400).json({ message: 'Asset id and service id are required' });
+        }
+
+        const asset = await AssetItem.findById(id);
+        if (!asset) {
+            return res.status(404).json({ message: 'Asset not found' });
+        }
+
+        const serviceSubdoc = asset.services?.id?.(serviceId);
+        if (!serviceSubdoc) {
+            return res.status(404).json({ message: 'Service record not found' });
+        }
+
+        const removedServiceType = serviceSubdoc.serviceType || 'Service';
+        serviceSubdoc.deleteOne();
+        asset.markModified('services');
+
+        if (
+            asset.activeServiceWorkflow?.serviceRecordId &&
+            String(asset.activeServiceWorkflow.serviceRecordId) === String(serviceId)
+        ) {
+            asset.activeServiceWorkflow.stage = 'rejected';
+            asset.activeServiceWorkflow.serviceRecordId = null;
+            asset.activeServiceWorkflow.accountsHold = null;
+            asset.markModified('activeServiceWorkflow');
+        }
+
+        await asset.save();
+
+        try {
+            await AssetHistory.create({
+                assetId: asset._id,
+                action: 'Service',
+                performedBy: req.user.employeeObjectId || req.user._id,
+                comments: `Service record deleted: ${removedServiceType}.`,
+                details: { type: 'ServiceDelete', serviceId, serviceType: removedServiceType },
+            });
+        } catch (historyErr) {
+            console.error('History log failed during deleteAssetService:', historyErr);
+        }
+
+        return res.status(200).json({ message: 'Service record deleted successfully' });
+    } catch (error) {
+        console.error('Error deleting asset service:', error);
+        return res.status(500).json({ message: 'Internal server error' });
+    }
+};
+
+// @desc    Submit a previously saved draft service request (starts workflow)
+// @route   POST /api/AssetItem/:id/service/:serviceId/submit-request
+// @access  Private
+export const submitAssetServiceDraft = async (req, res) => {
+    try {
+        const { id, serviceId } = req.params;
+        const asset = await AssetItem.findById(id).populate('typeId', 'name');
+        if (!asset) return res.status(404).json({ message: 'Asset not found' });
+        const service = asset.services?.id?.(serviceId);
+        if (!service) return res.status(404).json({ message: 'Service record not found' });
+
+        const remarkObj = (() => {
+            try {
+                return service.remark ? JSON.parse(service.remark) : {};
+            } catch {
+                return {};
+            }
+        })();
+        const reqStatus = String(remarkObj?.requestStatus || '').toLowerCase();
+        if (reqStatus !== 'draft') {
+            return res.status(400).json({ message: 'Only draft service requests can be submitted.' });
+        }
+
+        const actorEmployeeId = String(req.user?.employeeObjectId || '');
+        const requestedById = String(service.requestedBy || '');
+        if (requestedById && actorEmployeeId && requestedById !== actorEmployeeId) {
+            const isJwtAdmin = req.user?.isAdmin === true || req.user?.role === 'Admin' || req.user?.role === 'ROOT';
+            const isSysAdmin = await isUserAdministrator(req.user?.id);
+            if (!isJwtAdmin && !isSysAdmin) {
+                return res.status(403).json({ message: 'Only the draft creator or admin can submit this request.' });
+            }
+        }
+
+        const activeStage = String(asset.activeServiceWorkflow?.stage || '').trim().toLowerCase();
+        if (activeStage && !['complete', 'rejected'].includes(activeStage)) {
+            return res.status(409).json({
+                message:
+                    'A vehicle service request is already in progress for this asset. Please complete or reject the current workflow before submitting this draft.',
+            });
+        }
+
+        remarkObj.requestStatus = 'submitted';
+        service.remark = JSON.stringify(remarkObj);
+        asset.markModified('services');
+        await asset.save();
+
+        try {
+            await maybeStartVehicleServiceWorkflow(asset, {
+                serviceRecordId: service._id,
+                serviceType: service.serviceType,
+                req,
+            });
+        } catch (wfErr) {
+            console.error('[submitAssetServiceDraft] Vehicle service workflow:', wfErr);
+        }
+
+        const fresh = await AssetItem.findById(asset._id).lean();
+        const out = fresh?.services?.find((s) => String(s._id) === String(service._id)) || service.toObject();
+        return res.json({ message: 'Draft submitted successfully', service: out });
+    } catch (error) {
+        console.error('submitAssetServiceDraft:', error);
+        return res.status(500).json({ message: error.message || 'Internal server error' });
     }
 };
 

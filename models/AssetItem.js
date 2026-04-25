@@ -86,7 +86,25 @@ const assetItemSchema = new mongoose.Schema({
     },
     status: {
         type: String,
-        enum: ['Assigned', 'Unassigned', 'Maintenance', 'On Service', 'Online', 'Service', 'Accident', 'Lost', 'Returned', 'Pending', 'End of Life', 'Out of Service', 'Draft', 'Rejected', 'On Leave', 'Submitted for Approval'],
+        enum: [
+            'Assigned',
+            'Unassigned',
+            'Maintenance',
+            'On Service',
+            'Waiting for Service',
+            'Online',
+            'Service',
+            'Accident',
+            'Lost',
+            'Returned',
+            'Pending',
+            'End of Life',
+            'Out of Service',
+            'Draft',
+            'Rejected',
+            'On Leave',
+            'Submitted for Approval',
+        ],
         default: 'Unassigned'
     },
     ownership: {
@@ -246,6 +264,12 @@ const assetItemSchema = new mongoose.Schema({
         stage: { type: String, default: null },
         previousStatus: { type: String, default: null },
         serviceTypeLabel: { type: String, default: '' },
+        /** Set when Admin approves: planned first service day and total calendar days in the service window. */
+        scheduledServiceDate: { type: Date, default: null },
+        serviceDurationDays: { type: Number, default: null },
+        serviceWindowEndDate: { type: Date, default: null },
+        /** Set once when the service window has ended (end-of-duration email to Asset Controller). */
+        serviceDurationEmailSentAt: { type: Date, default: null },
         accountsHold: {
             reason: { type: String, default: '' },
             days: { type: Number, default: null },
