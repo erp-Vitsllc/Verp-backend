@@ -26,8 +26,10 @@ import { processAccidentAssets } from "./utils/processAccidentAssets.js";
 import { processDocumentExpiryReminders } from "./utils/processDocumentExpiryReminders.js";
 import { processVehicleServiceHoldReminders } from "./utils/processVehicleServiceHoldReminders.js";
 import { processVehicleServiceScheduledPhase } from "./utils/processVehicleServiceScheduledPhase.js";
+import { setupEmailSubjectTag } from "./utils/setupEmailSubjectTag.js";
 
 dotenv.config();
+setupEmailSubjectTag();
 
 // Set DNS before DB connection
 dns.setServers(["8.8.8.8"]);
