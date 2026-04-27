@@ -2,7 +2,7 @@ import EmployeeEducation from "../../models/EmployeeEducation.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { getCompleteEmployee, resolveEmployeeId } from "../../services/employeeService.js";
 import { uploadDocumentToS3 } from "../../utils/s3Upload.js";
-import { triggerProfileReactivationIfNeeded, shouldQueueProfileChange } from "../../utils/triggerProfileReactivation.js";
+
 
 export const updateEducation = async (req, res) => {
     const { id, educationId } = req.params;
@@ -41,8 +41,7 @@ export const updateEducation = async (req, res) => {
         }
 
         const employeeId = employee.employeeId;
-        const employeeBasic = await EmployeeBasic.findOne({ employeeId }).select("profileStatus profileWorkflow").lean();
-        const requiresApprovalQueue = shouldQueueProfileChange(employeeBasic);
+
 
         const educationRecord = await EmployeeEducation.findOne({ employeeId });
 
@@ -91,22 +90,6 @@ export const updateEducation = async (req, res) => {
             // Allow clearing the certificate
             proposedEducation.certificate = undefined;
         }
-        if (requiresApprovalQueue) {
-            await triggerProfileReactivationIfNeeded({
-                employeeId,
-                actor: req.user,
-                reason: "Education details updated",
-                changeEntry: {
-                    card: "Education",
-                    reason: "Education details updated",
-                    section: "education",
-                    changeType: "update",
-                    targetIndex: null,
-                    previousData: previousEducation || null,
-                    proposedData: { educationId, ...proposedEducation },
-                },
-            });
-        } else {
             // Update education fields
             education.universityOrBoard = proposedEducation.universityOrBoard;
             education.collegeOrInstitute = proposedEducation.collegeOrInstitute;
@@ -117,18 +100,11 @@ export const updateEducation = async (req, res) => {
                 education.certificate = proposedEducation.certificate;
             }
             await educationRecord.save();
-            await triggerProfileReactivationIfNeeded({
-                employeeId,
-                actor: req.user,
-                reason: "Education details updated",
-            });
-        }
+        
         const completeEmployee = await getCompleteEmployee(employeeId);
 
         return res.status(200).json({
-            message: requiresApprovalQueue
-                ? "Education change queued for HR activation approval."
-                : "Education details updated successfully",
+            message: "Education details updated successfully",
             educationDetails: educationRecord?.educationDetails || completeEmployee?.educationDetails,
             employee: completeEmployee
         });

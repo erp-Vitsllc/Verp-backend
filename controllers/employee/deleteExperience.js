@@ -1,6 +1,6 @@
 import EmployeeExperience from "../../models/EmployeeExperience.js";
 import { getCompleteEmployee } from "../../services/employeeService.js";
-import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
+
 import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
 
 export const deleteExperience = async (req, res) => {
@@ -38,11 +38,6 @@ export const deleteExperience = async (req, res) => {
 
         experience.deleteOne();
         await experienceRecord.save();
-        await triggerProfileReactivationIfNeeded({
-            employeeId,
-            actor: req.user,
-            reason: "Experience record deleted",
-        });
         const completeEmployee = await getCompleteEmployee(employeeId);
 
         return res.status(200).json({

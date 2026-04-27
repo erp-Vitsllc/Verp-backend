@@ -2,7 +2,7 @@ import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { uploadDocumentToS3 } from "../../utils/s3Upload.js";
 import mongoose from "mongoose";
 import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeService.js";
-import { triggerProfileReactivationIfNeeded, shouldQueueProfileChange } from "../../utils/triggerProfileReactivation.js";
+
 
 // @desc    Update a document in employee's documents list
 // @route   PATCH /api/Employee/:id/document/:index
@@ -16,6 +16,7 @@ export const updateDocument = async (req, res) => {
             issueDate,
             expiryDate,
             cost,
+            isRenewMode,
             basicSalary,
             houseRentAllowance,
             vehicleAllowance,
@@ -95,25 +96,8 @@ export const updateDocument = async (req, res) => {
                 proposedDoc.document = documentData;
             }
         }
-        const requiresApprovalQueue = shouldQueueProfileChange(employee);
-        if (requiresApprovalQueue) {
-            await triggerProfileReactivationIfNeeded({
-                employeeId: employee.employeeId,
-                actor: req.user,
-                reason: "Document updated",
-                changeEntry: {
-                    card: `Document: ${proposedDoc.type || currentDoc?.type || "Document"}`,
-                    reason: "Document updated",
-                    section: "documents",
-                    changeType: "update",
-                    targetIndex: docIndex,
-                    previousData: currentDoc?.toObject ? currentDoc.toObject() : currentDoc,
-                    proposedData: proposedDoc,
-                },
-            });
-        } else {
-            // Archive current version before replacing/editing
-            if (currentDoc) {
+            // Archive current version only when user explicitly performs renewal.
+            if (currentDoc && isRenewMode === true) {
                 if (!employee.oldDocuments) employee.oldDocuments = [];
                 employee.oldDocuments.push({
                     type: currentDoc.type || '',
@@ -135,18 +119,11 @@ export const updateDocument = async (req, res) => {
             }
             employee.documents[docIndex] = proposedDoc;
             await employee.save();
-            await triggerProfileReactivationIfNeeded({
-                employeeId: employee.employeeId,
-                actor: req.user,
-                reason: "Document updated",
-            });
-        }
+        
         const completeEmployee = await getCompleteEmployee(employee.employeeId);
 
         res.status(200).json({
-            message: requiresApprovalQueue
-                ? "Document update queued for HR activation approval."
-                : "Document updated successfully",
+            message: "Document updated successfully",
             employee: completeEmployee
         });
 

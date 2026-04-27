@@ -97,24 +97,21 @@ const collectCompanyReactivationChanges = (updateData = {}) => {
     const changes = [];
     const hasAny = (keys) => keys.some((k) => Object.prototype.hasOwnProperty.call(updateData, k));
 
+    if (hasAny(["name", "nickName", "email", "phone", "establishedDate"])) {
+        changes.push("Basic Details");
+    }
     if (hasAny(["tradeLicenseNumber", "tradeLicenseIssueDate", "tradeLicenseExpiry", "tradeLicenseAttachment"])) {
         changes.push("Trade License");
     }
     if (hasAny(["establishmentCardNumber", "establishmentCardIssueDate", "establishmentCardExpiry", "establishmentCardAttachment"])) {
         changes.push("Establishment Card");
     }
-    if (Object.prototype.hasOwnProperty.call(updateData, "owners")) {
-        changes.push("Owner Details");
-    }
     if (Object.prototype.hasOwnProperty.call(updateData, "documents")) {
         const docs = Array.isArray(updateData.documents) ? updateData.documents : [];
         if (docs.some((d) => String(d?.type || "").toLowerCase().includes("moa"))) {
             changes.push("MOA");
         }
-        changes.push("Company Documents");
     }
-    if (Object.prototype.hasOwnProperty.call(updateData, "insurance")) changes.push("Insurance");
-    if (Object.prototype.hasOwnProperty.call(updateData, "ejari")) changes.push("Ejari");
 
     return [...new Set(changes)];
 };

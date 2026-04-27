@@ -1,7 +1,7 @@
 import EmployeeTraining from "../../models/EmployeeTraining.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { getCompleteEmployee, resolveEmployeeId } from "../../services/employeeService.js";
-import { triggerProfileReactivationIfNeeded, shouldQueueProfileChange } from "../../utils/triggerProfileReactivation.js";
+
 
 export const addTraining = async (req, res) => {
     const { id } = req.params;
@@ -30,8 +30,7 @@ export const addTraining = async (req, res) => {
         }
 
         const employeeId = employee.employeeId;
-        const employeeBasic = await EmployeeBasic.findOne({ employeeId }).select("profileStatus profileWorkflow").lean();
-        const requiresApprovalQueue = shouldQueueProfileChange(employeeBasic);
+
 
         const trainingData = {
             trainingName: trainingName.trim(),
@@ -47,22 +46,6 @@ export const addTraining = async (req, res) => {
         };
 
         let updated = null;
-        if (requiresApprovalQueue) {
-            await triggerProfileReactivationIfNeeded({
-                employeeId,
-                actor: req.user,
-                reason: "Training details added",
-                changeEntry: {
-                    card: "Training",
-                    reason: "Training details added",
-                    section: "training",
-                    changeType: "add",
-                    targetIndex: null,
-                    previousData: null,
-                    proposedData: trainingData,
-                },
-            });
-        } else {
             // Update or create training record
             updated = await EmployeeTraining.findOneAndUpdate(
                 { employeeId },
@@ -77,19 +60,11 @@ export const addTraining = async (req, res) => {
             if (!updated) {
                 return res.status(404).json({ message: "Employee not found" });
             }
-
-            await triggerProfileReactivationIfNeeded({
-                employeeId,
-                actor: req.user,
-                reason: "Training details added",
-            });
-        }
+        
         const completeEmployee = await getCompleteEmployee(employeeId);
 
         return res.status(200).json({
-            message: requiresApprovalQueue
-                ? "Training change queued for HR activation approval."
-                : "Training details added successfully",
+            message: "Training details added successfully",
             trainingDetails: updated?.trainingDetails || completeEmployee?.trainingDetails,
             employee: completeEmployee
         });

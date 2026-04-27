@@ -309,12 +309,14 @@ export const shouldTriggerCompanyReactivation = (beforeCompany = {}, updateData 
         "establishmentCardAttachment",
     ].some((k) => Object.prototype.hasOwnProperty.call(updateData, k));
 
-    const hasOwnerChange = Object.prototype.hasOwnProperty.call(updateData, "owners");
+    const hasBasicDetailsChange = [
+        "name", "nickName", "email", "phone", "establishedDate"
+    ].some((k) => Object.prototype.hasOwnProperty.call(updateData, k));
 
     const hasMoaChange = Array.isArray(updateData.documents) && updateData.documents.some((d) => {
         const t = String(d?.type || "").toLowerCase();
         return t.includes("moa");
     });
 
-    return hasTradeLicenseChange || hasEstablishmentCardChange || hasOwnerChange || hasMoaChange;
+    return hasBasicDetailsChange || hasTradeLicenseChange || hasEstablishmentCardChange || hasMoaChange;
 };

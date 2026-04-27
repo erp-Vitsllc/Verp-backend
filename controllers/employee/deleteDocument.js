@@ -1,7 +1,6 @@
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import mongoose from "mongoose";
 import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeService.js";
-import { triggerProfileReactivationIfNeeded, shouldQueueProfileChange } from "../../utils/triggerProfileReactivation.js";
 import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
 
 // @desc    Delete a document from employee's documents list
@@ -34,23 +33,6 @@ export const deleteDocument = async (req, res) => {
         }
 
         const documentToDelete = employee.documents[docIndex];
-        const requiresApprovalQueue = shouldQueueProfileChange(employee);
-        if (requiresApprovalQueue) {
-            await triggerProfileReactivationIfNeeded({
-                employeeId: employee.employeeId,
-                actor: req.user,
-                reason: "Document deleted",
-                changeEntry: {
-                    card: `Document: ${documentToDelete?.type || "Document"}`,
-                    reason: "Document deleted",
-                    section: "documents",
-                    changeType: "delete",
-                    targetIndex: docIndex,
-                    previousData: documentToDelete?.toObject ? documentToDelete.toObject() : documentToDelete,
-                    proposedData: null,
-                },
-            });
-        } else {
             // Archive document before deleting from live list
             if (documentToDelete) {
                 if (!employee.oldDocuments) employee.oldDocuments = [];
@@ -76,18 +58,11 @@ export const deleteDocument = async (req, res) => {
             // Remove document from array
             employee.documents.splice(docIndex, 1);
             await employee.save();
-            await triggerProfileReactivationIfNeeded({
-                employeeId: employee.employeeId,
-                actor: req.user,
-                reason: "Document deleted",
-            });
-        }
+        
         const completeEmployee = await getCompleteEmployee(employee.employeeId);
 
         res.status(200).json({
-            message: requiresApprovalQueue
-                ? "Document deletion queued for HR activation approval."
-                : "Document deleted successfully",
+            message: "Document deleted successfully",
             employee: completeEmployee
         });
 

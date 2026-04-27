@@ -3,7 +3,6 @@ import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeService.js";
 import { uploadDocumentToS3, deleteDocumentFromS3 } from "../../utils/s3Upload.js";
 import { archiveEmployeeDocument } from "../../utils/archiveEmployeeDocument.js";
-import { triggerProfileReactivationIfNeeded, shouldQueueProfileChange } from "../../utils/triggerProfileReactivation.js";
 
 const REQUIRED_FIELDS = ["provider", "number", "issueDate", "expiryDate", "upload"];
 
@@ -68,8 +67,6 @@ export const updateMedicalInsuranceDetails = async (req, res) => {
         }
 
         const employeeId = employee.employeeId;
-        const employeeBasic = await EmployeeBasic.findOne({ employeeId }).select("company profileStatus profileWorkflow").lean();
-        const requiresApprovalQueue = shouldQueueProfileChange(employeeBasic);
 
         // Check if existing document exists in database (check for both url and data for backward compatibility)
         const existingMedicalInsurance = await EmployeeMedicalInsurance.findOne({ employeeId });
@@ -94,8 +91,7 @@ export const updateMedicalInsuranceDetails = async (req, res) => {
         const previousMedicalInsurance = existingMedicalInsurance?.medicalInsurance;
         const hasExistingDocument = Boolean(previousMedicalInsurance?.document?.url || previousMedicalInsurance?.document?.data);
         const hasNewDocumentUpload = Boolean(normalizedUpload);
-        const shouldArchivePrevious = !requiresApprovalQueue && hasExistingDocument && hasNewDocumentUpload;
-        if (shouldArchivePrevious) {
+        if (hasExistingDocument && hasNewDocumentUpload) {
             await archiveEmployeeDocument({
                 employeeId,
                 type: "Medical Insurance",
@@ -129,7 +125,7 @@ export const updateMedicalInsuranceDetails = async (req, res) => {
                 );
 
                 // Delete old file only when it is not archived in oldDocuments.
-                if (!shouldArchivePrevious && existingMedicalInsurance?.medicalInsurance?.document?.publicId) {
+                if (!(hasExistingDocument && hasNewDocumentUpload) && existingMedicalInsurance?.medicalInsurance?.document?.publicId) {
                     await deleteDocumentFromS3(existingMedicalInsurance.medicalInsurance.document.publicId);
                 }
 
@@ -155,45 +151,21 @@ export const updateMedicalInsuranceDetails = async (req, res) => {
             lastUpdated: new Date(),
         };
 
-        let updatedMedicalInsurance = existingMedicalInsurance;
-        if (requiresApprovalQueue) {
-            await triggerProfileReactivationIfNeeded({
-                employeeId,
-                actor: req.user,
-                reason: "Medical insurance details updated",
-                changeEntry: {
-                    card: "Medical Insurance",
-                    reason: "Medical insurance details updated",
-                    section: "medicalInsurance",
-                    changeType: "update",
-                    targetIndex: null,
-                    previousData: previousMedicalInsurance || null,
-                    proposedData: medicalInsurancePayload,
+        // Update or create Medical Insurance record
+        const updatedMedicalInsurance = await EmployeeMedicalInsurance.findOneAndUpdate(
+            { employeeId },
+            {
+                $set: {
+                    medicalInsurance: medicalInsurancePayload,
                 },
-            });
-        } else {
-            // Update or create Medical Insurance record
-            updatedMedicalInsurance = await EmployeeMedicalInsurance.findOneAndUpdate(
-                { employeeId },
-                {
-                    $set: {
-                        medicalInsurance: medicalInsurancePayload,
-                    },
-                },
-                { upsert: true, new: true }
-            );
-            await triggerProfileReactivationIfNeeded({
-                employeeId,
-                actor: req.user,
-                reason: "Medical insurance details updated",
-            });
-        }
+            },
+            { upsert: true, new: true }
+        );
+        
         const completeEmployee = await getCompleteEmployee(employeeId);
 
         return res.json({
-            message: requiresApprovalQueue
-                ? "Medical Insurance change queued for HR activation approval."
-                : "Medical Insurance details updated successfully.",
+            message: "Medical Insurance details updated successfully.",
             medicalInsuranceDetails: updatedMedicalInsurance?.medicalInsurance || completeEmployee?.medicalInsuranceDetails,
             employee: completeEmployee
         });

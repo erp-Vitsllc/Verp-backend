@@ -2,7 +2,7 @@ import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { uploadDocumentToS3 } from "../../utils/s3Upload.js";
 import mongoose from "mongoose";
 import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeService.js";
-import { triggerProfileReactivationIfNeeded, shouldQueueProfileChange } from "../../utils/triggerProfileReactivation.js";
+
 
 // @desc    Add a document to employee's documents list
 // @route   POST /api/Employee/:id/document
@@ -88,38 +88,14 @@ export const addDocument = async (req, res) => {
             createdAt: new Date()
         };
 
-        const requiresApprovalQueue = shouldQueueProfileChange(employee);
-        if (requiresApprovalQueue) {
-            await triggerProfileReactivationIfNeeded({
-                employeeId: employee.employeeId,
-                actor: req.user,
-                reason: "Document added",
-                changeEntry: {
-                    card: `Document: ${newDocument.type || "Document"}`,
-                    reason: "Document added",
-                    section: "documents",
-                    changeType: "add",
-                    targetIndex: null,
-                    previousData: null,
-                    proposedData: newDocument,
-                },
-            });
-        } else {
             if (!employee.documents) employee.documents = [];
             employee.documents.push(newDocument);
             await employee.save();
-            await triggerProfileReactivationIfNeeded({
-                employeeId: employee.employeeId,
-                actor: req.user,
-                reason: "Document added",
-            });
-        }
+        
         const completeEmployee = await getCompleteEmployee(employee.employeeId);
 
         res.status(200).json({
-            message: requiresApprovalQueue
-                ? "Document change queued for HR activation approval."
-                : "Document added successfully",
+            message: "Document added successfully",
             employee: completeEmployee
         });
 

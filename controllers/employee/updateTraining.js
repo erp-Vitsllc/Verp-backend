@@ -1,7 +1,7 @@
 import EmployeeTraining from "../../models/EmployeeTraining.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { getCompleteEmployee, resolveEmployeeId } from "../../services/employeeService.js";
-import { triggerProfileReactivationIfNeeded, shouldQueueProfileChange } from "../../utils/triggerProfileReactivation.js";
+
 
 export const updateTraining = async (req, res) => {
     const { id, trainingId } = req.params;
@@ -34,8 +34,7 @@ export const updateTraining = async (req, res) => {
         }
 
         const employeeId = employee.employeeId;
-        const employeeBasic = await EmployeeBasic.findOne({ employeeId }).select("profileStatus profileWorkflow").lean();
-        const requiresApprovalQueue = shouldQueueProfileChange(employeeBasic);
+
 
         const trainingRecord = await EmployeeTraining.findOne({ employeeId });
 
@@ -70,22 +69,6 @@ export const updateTraining = async (req, res) => {
             // Allow clearing the certificate
             proposedTraining.trainingCertificate = undefined;
         }
-        if (requiresApprovalQueue) {
-            await triggerProfileReactivationIfNeeded({
-                employeeId,
-                actor: req.user,
-                reason: "Training details updated",
-                changeEntry: {
-                    card: "Training",
-                    reason: "Training details updated",
-                    section: "training",
-                    changeType: "update",
-                    targetIndex: null,
-                    previousData: previousTraining || null,
-                    proposedData: { trainingId, ...proposedTraining },
-                },
-            });
-        } else {
             // Update training fields
             training.trainingName = proposedTraining.trainingName;
             training.trainingDetails = proposedTraining.trainingDetails;
@@ -96,18 +79,11 @@ export const updateTraining = async (req, res) => {
                 training.trainingCertificate = proposedTraining.trainingCertificate;
             }
             await trainingRecord.save();
-            await triggerProfileReactivationIfNeeded({
-                employeeId,
-                actor: req.user,
-                reason: "Training details updated",
-            });
-        }
+        
         const completeEmployee = await getCompleteEmployee(employeeId);
 
         return res.status(200).json({
-            message: requiresApprovalQueue
-                ? "Training change queued for HR activation approval."
-                : "Training details updated successfully",
+            message: "Training details updated successfully",
             trainingDetails: trainingRecord?.trainingDetails || completeEmployee?.trainingDetails,
             employee: completeEmployee
         });

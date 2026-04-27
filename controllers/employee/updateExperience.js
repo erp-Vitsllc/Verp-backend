@@ -2,7 +2,7 @@ import EmployeeExperience from "../../models/EmployeeExperience.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { getCompleteEmployee, resolveEmployeeId } from "../../services/employeeService.js";
 import { uploadDocumentToS3 } from "../../utils/s3Upload.js";
-import { triggerProfileReactivationIfNeeded, shouldQueueProfileChange } from "../../utils/triggerProfileReactivation.js";
+
 
 export const updateExperience = async (req, res) => {
     const { id, experienceId } = req.params;
@@ -36,8 +36,7 @@ export const updateExperience = async (req, res) => {
         }
 
         const employeeId = employee.employeeId;
-        const employeeBasic = await EmployeeBasic.findOne({ employeeId }).select("profileStatus profileWorkflow").lean();
-        const requiresApprovalQueue = shouldQueueProfileChange(employeeBasic);
+
 
         const experienceRecord = await EmployeeExperience.findOne({ employeeId });
 
@@ -85,22 +84,6 @@ export const updateExperience = async (req, res) => {
             // Allow clearing the certificate
             proposedExperience.certificate = undefined;
         }
-        if (requiresApprovalQueue) {
-            await triggerProfileReactivationIfNeeded({
-                employeeId,
-                actor: req.user,
-                reason: "Experience details updated",
-                changeEntry: {
-                    card: "Experience",
-                    reason: "Experience details updated",
-                    section: "experience",
-                    changeType: "update",
-                    targetIndex: null,
-                    previousData: previousExperience || null,
-                    proposedData: { experienceId, ...proposedExperience },
-                },
-            });
-        } else {
             // Update experience fields
             experience.company = proposedExperience.company;
             experience.designation = proposedExperience.designation;
@@ -110,18 +93,11 @@ export const updateExperience = async (req, res) => {
                 experience.certificate = proposedExperience.certificate;
             }
             await experienceRecord.save();
-            await triggerProfileReactivationIfNeeded({
-                employeeId,
-                actor: req.user,
-                reason: "Experience details updated",
-            });
-        }
+        
         const completeEmployee = await getCompleteEmployee(employeeId);
 
         return res.status(200).json({
-            message: requiresApprovalQueue
-                ? "Experience change queued for HR activation approval."
-                : "Experience details updated successfully",
+            message: "Experience details updated successfully",
             experienceDetails: experienceRecord?.experienceDetails || completeEmployee?.experienceDetails,
             employee: completeEmployee
         });
