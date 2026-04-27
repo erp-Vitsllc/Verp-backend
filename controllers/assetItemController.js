@@ -444,12 +444,14 @@ export const getAssetItems = async (req, res) => {
  */
 export const getVehicleFleetDashboard = async (req, res) => {
     try {
+        const fallbackAssetController = await getDepartmentHOD('assetcontroller');
         const draftVis = buildDraftVisibilityQuery(req.user);
         const items = await AssetItem.find({ $and: [draftVis] })
             .populate('typeId', 'name')
             .populate('assignedTo', 'firstName lastName employeeId')
+            .populate('actionRequiredBy', 'firstName lastName employeeId')
             .select(
-                'assetId name plateEmirate plateNumber modelYear assetValue status registrationExpiryDate insuranceExpiryDate nextServiceDate oilChangeDate gearOilDueDate lastServiceDate currentKilometer assignedTo acceptanceStatus pendingAction services documents'
+                'assetId name plateEmirate plateNumber modelYear assetValue status registrationExpiryDate insuranceExpiryDate nextServiceDate oilChangeDate gearOilDueDate lastServiceDate currentKilometer assignedTo acceptanceStatus pendingAction services documents actionRequiredBy'
             )
             .lean();
 
@@ -538,6 +540,25 @@ export const getVehicleFleetDashboard = async (req, res) => {
 
         const fleetRows = vehicles.map((v) => {
             const total = (v.services || []).reduce((sum, s) => sum + Number(s.value || 0), 0);
+            const workflowController = v.actionRequiredBy && typeof v.actionRequiredBy === 'object' ? v.actionRequiredBy : null;
+            const resolvedController = workflowController || ((!v.assignedTo && fallbackAssetController) ? fallbackAssetController : null);
+            const hasControllerObjectId = !!resolvedController?._id;
+            const controllerPayload = resolvedController
+                ? {
+                    _id: hasControllerObjectId
+                        ? resolvedController._id
+                        : `flowchart_${resolvedController.category || 'assetcontroller'}`,
+                    firstName:
+                        resolvedController.firstName ||
+                        resolvedController.employeeName?.split(' ')[0] ||
+                        'Asset',
+                    lastName:
+                        resolvedController.lastName ||
+                        resolvedController.employeeName?.split(' ').slice(1).join(' ') ||
+                        'Controller',
+                    employeeId: resolvedController.employeeId || '',
+                }
+                : null;
             return {
                 _id: v._id,
                 assetId: v.assetId,
@@ -549,6 +570,8 @@ export const getVehicleFleetDashboard = async (req, res) => {
                 modelYear: v.modelYear || '',
                 status: v.status,
                 assignedTo: v.assignedTo,
+                assetController: controllerPayload,
+                assetControllerId: controllerPayload?._id || null,
                 registrationExpiryDate: v.registrationExpiryDate,
                 currentKilometer: v.currentKilometer
             };
