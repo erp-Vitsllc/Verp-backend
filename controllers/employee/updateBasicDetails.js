@@ -73,6 +73,7 @@ export const updateBasicDetails = async (req, res) => {
             "offerLetter",
             "profilePicture",
             "documents",
+            "oldDocuments",
             "trainingDetails",
             "enablePortalAccess"
         ];

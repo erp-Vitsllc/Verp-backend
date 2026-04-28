@@ -958,7 +958,7 @@ export const saveEmployeeData = async (employeeId, updatePayload) => {
             'employeeId', 'firstName', 'lastName', 'role', 'department', 'designation', 'company',
             'status', 'probationPeriod', 'reportingAuthority', 'primaryReportee', 'secondaryReportee', 'overtime',
             'profileApprovalStatus', 'profileStatus', 'email', 'companyEmail', 'password',
-            'enablePortalAccess', 'dateOfJoining', 'contractJoiningDate', 'profilePicture', 'documents', 'trainingDetails'
+            'enablePortalAccess', 'dateOfJoining', 'contractJoiningDate', 'profilePicture', 'documents', 'oldDocuments', 'trainingDetails'
         ];
 
         const contactFields = [
