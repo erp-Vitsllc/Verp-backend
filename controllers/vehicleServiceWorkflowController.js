@@ -162,7 +162,8 @@ function parseRemarkMeta(remarkValue) {
 }
 
 function requiresQuotationSelection(serviceType) {
-    return ['Tire Change', 'Mechanical Work', 'Body Work', 'Accident Repair'].includes(String(serviceType || ''));
+    // Accident Repair does not require quotation selection in HR flow.
+    return ['Tire Change', 'Mechanical Work', 'Body Work'].includes(String(serviceType || ''));
 }
 
 function selectedQuotationExists(choice, serviceSub, incomingUpdates) {
@@ -700,10 +701,6 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
             const incomingType = serviceUpdates?.serviceType || serviceSub?.serviceType || wf.serviceTypeLabel;
             const meta = parseRemarkMeta(serviceUpdates?.remark);
             const choice = String(meta?.approvedQuotationChoice || '').trim();
-            const vendorName = String(meta?.vendorName || '').trim();
-            if (!vendorName) {
-                return res.status(400).json({ message: 'Vendor is required before HR approval.' });
-            }
             if (requiresQuotationSelection(incomingType)) {
                 const qCount = availableQuotationCount(serviceSub, serviceUpdates);
                 if (qCount > 1) {

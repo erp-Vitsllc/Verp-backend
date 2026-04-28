@@ -67,12 +67,26 @@ const buildCompanyExpiringDocs = (company) => {
     return docs;
 };
 
+const formatExpiryDateLabel = (expiryDate) => {
+    if (!expiryDate) return "";
+    try {
+        const d = new Date(expiryDate);
+        if (Number.isNaN(d.getTime())) return "";
+        return d.toLocaleDateString("en-GB");
+    } catch {
+        return "";
+    }
+};
+
 const cleanupCompanyExpiryNotifications = async (company) => {
     const docs = buildCompanyExpiringDocs(company);
     const allowedExtra1Set = new Set(
         docs
             .filter((doc) => getReminderStageMarker(getDaysUntil(doc.expiryDate)) === 10)
-            .map((doc) => `Expiry follow-up required: ${doc.label}`)
+            .map((doc) => {
+                const expLabel = formatExpiryDateLabel(doc.expiryDate);
+                return `Expiry follow-up required: ${doc.label}${expLabel ? ` (Exp: ${expLabel})` : ""}`;
+            })
     );
     const pending = await DashboardAction.find({
         requestId: company._id,

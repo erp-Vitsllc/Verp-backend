@@ -3090,6 +3090,49 @@ export const getAssetItemDetail = async (req, res) => {
                 if (service.quotation3) {
                     service.quotation3 = await getSignedFileUrl(service.quotation3);
                 }
+
+                // Sign image/file keys stored inside remark JSON (e.g. accident/body work images).
+                if (service.remark && typeof service.remark === 'string') {
+                    try {
+                        const remarkObj = JSON.parse(service.remark);
+                        if (remarkObj && typeof remarkObj === 'object') {
+                            const signRemarkImages = async (arr) => {
+                                if (!Array.isArray(arr)) return arr;
+                                const next = [];
+                                for (const img of arr) {
+                                    if (!img) continue;
+                                    if (typeof img === 'string') {
+                                        next.push(await getSignedFileUrl(img));
+                                        continue;
+                                    }
+                                    if (typeof img === 'object') {
+                                        const rawUrl = img.url || img.publicId || '';
+                                        if (rawUrl) {
+                                            next.push({
+                                                ...img,
+                                                url: await getSignedFileUrl(rawUrl),
+                                            });
+                                        } else {
+                                            next.push(img);
+                                        }
+                                    }
+                                }
+                                return next;
+                            };
+
+                            if (Array.isArray(remarkObj.accidentImages)) {
+                                remarkObj.accidentImages = await signRemarkImages(remarkObj.accidentImages);
+                            }
+                            if (Array.isArray(remarkObj.bodyWorkImages)) {
+                                remarkObj.bodyWorkImages = await signRemarkImages(remarkObj.bodyWorkImages);
+                            }
+
+                            service.remark = JSON.stringify(remarkObj);
+                        }
+                    } catch (_e) {
+                        // keep original remark when JSON parse fails
+                    }
+                }
             }
         }
 

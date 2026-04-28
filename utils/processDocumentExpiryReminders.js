@@ -45,6 +45,17 @@ const getReminderStageLabel = (marker) => {
     return "3rd Reminder";
 };
 
+const formatExpiryDateLabel = (expiryDate) => {
+    if (!expiryDate) return "";
+    try {
+        const d = new Date(expiryDate);
+        if (Number.isNaN(d.getTime())) return "";
+        return d.toLocaleDateString("en-GB");
+    } catch {
+        return "";
+    }
+};
+
 const dedupeEmails = (emails = []) => {
     const seen = new Set();
     return emails
@@ -281,7 +292,10 @@ const processCompanyReminders = async () => {
         const activeThirdStageExtra1 = new Set(
             docs
                 .filter((doc) => getReminderStageMarker(getDaysUntil(doc.expiryDate)) === STAGE_3_MARKER)
-                .map((doc) => `Expiry follow-up required: ${doc.label}`)
+                .map((doc) => {
+                    const expLabel = formatExpiryDateLabel(doc.expiryDate);
+                    return `Expiry follow-up required: ${doc.label}${expLabel ? ` (Exp: ${expLabel})` : ""}`;
+                })
         );
 
         await removeObsoleteExpiryActions({
@@ -332,7 +346,8 @@ const processCompanyReminders = async () => {
 
             // Create dashboard task only at third reminder stage.
             if (reminderStage === STAGE_3_MARKER) {
-                const extra1 = `Expiry follow-up required: ${doc.label}`;
+                const expLabel = formatExpiryDateLabel(doc.expiryDate);
+                const extra1 = `Expiry follow-up required: ${doc.label}${expLabel ? ` (Exp: ${expLabel})` : ""}`;
                 const extra2 = `${company.name || ""} (${company.companyId || ""})`;
                 if (recipients.admin?._id) {
                     await ensureDashboardAction({
@@ -434,7 +449,10 @@ const processEmployeeReminders = async () => {
         const activeThirdStageExtra1 = new Set(
             docs
                 .filter((doc) => getReminderStageMarker(getDaysUntil(doc.expiryDate)) === STAGE_3_MARKER)
-                .map((doc) => `Expiry follow-up required: ${doc.label}`)
+                .map((doc) => {
+                    const expLabel = formatExpiryDateLabel(doc.expiryDate);
+                    return `Expiry follow-up required: ${doc.label}${expLabel ? ` (Exp: ${expLabel})` : ""}`;
+                })
         );
         await removeObsoleteExpiryActions({
             requestId: employee._id,
@@ -488,7 +506,8 @@ const processEmployeeReminders = async () => {
 
             // Create dashboard task/notification only at third reminder stage.
             if (reminderStage === STAGE_3_MARKER) {
-                const extra1 = `Expiry follow-up required: ${doc.label}`;
+                const expLabel = formatExpiryDateLabel(doc.expiryDate);
+                const extra1 = `Expiry follow-up required: ${doc.label}${expLabel ? ` (Exp: ${expLabel})` : ""}`;
                 const extra2 = `${subjectName} (${employee.employeeId})`;
                 if (recipients.admin?._id) {
                     await ensureDashboardAction({
