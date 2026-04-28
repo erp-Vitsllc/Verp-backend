@@ -130,13 +130,20 @@ export const updatePassportDetails = async (req, res) => {
             passportExp: parsedExpiryDate, // Update expiry date for quick reference
         };
 
-        let updatedPassport = existingPassport;
-        if (requiresApprovalQueue) {
-            await triggerProfileReactivationIfNeeded({
-                employeeId,
-                actor: req.user,
-                reason: "Passport details updated",
-                changeEntry: {
+        // Always persist passport changes to DB.
+        // If profile is in reactivation flow, we still store the record, but also track it for HR re-approval.
+        const updatedPassport = await EmployeePassport.findOneAndUpdate(
+            { employeeId },
+            passportPayload,
+            { upsert: true, new: true }
+        );
+
+        await triggerProfileReactivationIfNeeded({
+            employeeId,
+            actor: req.user,
+            reason: "Passport details updated",
+            changeEntry: requiresApprovalQueue
+                ? {
                     card: "Passport",
                     reason: "Passport details updated",
                     section: "passport",
@@ -144,21 +151,10 @@ export const updatePassportDetails = async (req, res) => {
                     targetIndex: null,
                     previousData: existingPassport || null,
                     proposedData: passportPayload,
-                },
-            });
-        } else {
-            // Update or create passport record
-            updatedPassport = await EmployeePassport.findOneAndUpdate(
-                { employeeId },
-                passportPayload,
-                { upsert: true, new: true }
-            );
-            await triggerProfileReactivationIfNeeded({
-                employeeId,
-                actor: req.user,
-                reason: "Passport details updated",
-            });
-        }
+                }
+                : null,
+            trackDefaultChange: !requiresApprovalQueue,
+        });
         const completeEmployee = await getCompleteEmployee(employeeId);
 
         return res.json({

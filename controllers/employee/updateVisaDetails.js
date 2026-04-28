@@ -153,7 +153,18 @@ export const updateVisaDetails = async (req, res) => {
             lastUpdated: new Date(),
         };
 
-        let updatedVisa = existingVisa;
+        // Always persist visa changes to DB.
+        // If profile is in reactivation flow, we still store the record, but also track it for HR re-approval.
+        const updatedVisa = await EmployeeVisa.findOneAndUpdate(
+            { employeeId },
+            {
+                $set: {
+                    [visaType]: visaPayload,
+                },
+            },
+            { upsert: true, new: true }
+        );
+
         if (requiresApprovalQueue) {
             await triggerProfileReactivationIfNeeded({
                 employeeId,
@@ -169,17 +180,6 @@ export const updateVisaDetails = async (req, res) => {
                     proposedData: { visaType, ...visaPayload },
                 },
             });
-        } else {
-            // Update or create visa record
-            updatedVisa = await EmployeeVisa.findOneAndUpdate(
-                { employeeId },
-                {
-                    $set: {
-                        [visaType]: visaPayload,
-                    },
-                },
-                { upsert: true, new: true }
-            );
         }
 
         // Check for Visa Expiry and Update Status

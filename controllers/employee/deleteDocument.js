@@ -14,6 +14,7 @@ export const deleteDocument = async (req, res) => {
         }
 
         const { id, index } = req.params;
+        const skipArchive = String(req.query?.skipArchive || '').toLowerCase() === 'true';
 
         const resolved = await resolveEmployeeId(id);
         if (!resolved) {
@@ -33,27 +34,28 @@ export const deleteDocument = async (req, res) => {
         }
 
         const documentToDelete = employee.documents[docIndex];
-            // Archive document before deleting from live list
-            if (documentToDelete) {
-                if (!employee.oldDocuments) employee.oldDocuments = [];
-                employee.oldDocuments.push({
-                    type: documentToDelete.type || '',
-                    description: documentToDelete.description || '',
-                    issueDate: documentToDelete.issueDate || null,
-                    expiryDate: documentToDelete.expiryDate || null,
-                    cost: documentToDelete.cost ?? null,
-                    basicSalary: documentToDelete.basicSalary ?? null,
-                    houseRentAllowance: documentToDelete.houseRentAllowance ?? null,
-                    vehicleAllowance: documentToDelete.vehicleAllowance ?? null,
-                    fuelAllowance: documentToDelete.fuelAllowance ?? null,
-                    otherAllowance: documentToDelete.otherAllowance ?? null,
-                    totalSalary: documentToDelete.totalSalary ?? null,
-                    createdAt: documentToDelete.createdAt || null,
-                    archivedAt: new Date(),
-                    archiveReason: 'Deleted',
-                    document: documentToDelete.document || null
-                });
-            }
+        // Archive document before deleting from live list (default behavior).
+        // Some actions (eg. "Not Renew") archive separately and must not double-archive.
+        if (!skipArchive && documentToDelete) {
+            if (!employee.oldDocuments) employee.oldDocuments = [];
+            employee.oldDocuments.push({
+                type: documentToDelete.type || '',
+                description: documentToDelete.description || '',
+                issueDate: documentToDelete.issueDate || null,
+                expiryDate: documentToDelete.expiryDate || null,
+                cost: documentToDelete.cost ?? null,
+                basicSalary: documentToDelete.basicSalary ?? null,
+                houseRentAllowance: documentToDelete.houseRentAllowance ?? null,
+                vehicleAllowance: documentToDelete.vehicleAllowance ?? null,
+                fuelAllowance: documentToDelete.fuelAllowance ?? null,
+                otherAllowance: documentToDelete.otherAllowance ?? null,
+                totalSalary: documentToDelete.totalSalary ?? null,
+                createdAt: documentToDelete.createdAt || null,
+                archivedAt: new Date(),
+                archiveReason: 'Deleted',
+                document: documentToDelete.document || null
+            });
+        }
 
             // Remove document from array
             employee.documents.splice(docIndex, 1);

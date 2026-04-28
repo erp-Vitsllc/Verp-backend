@@ -132,7 +132,11 @@ const employeeBasicSchema = new mongoose.Schema(
                 totalSalary: { type: Number, default: null },
                 createdAt: { type: Date },
                 archivedAt: { type: Date, default: Date.now },
-                archiveReason: { type: String, enum: ['Replaced', 'Deleted'], default: 'Replaced' },
+                // Why archived:
+                // - Replaced: superseded by renew action
+                // - Deleted: manually removed
+                // - Not Renewed: explicitly archived without renewal
+                archiveReason: { type: String, enum: ['Replaced', 'Deleted', 'Not Renewed'], default: 'Replaced' },
                 document: {
                     url: { type: String },
                     data: { type: String },
