@@ -1,6 +1,7 @@
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { getCompleteEmployee } from "../../services/employeeService.js";
 import { resolveFlowchartHrEmployee } from "../../utils/resolveFlowchartHrEmployee.js";
+import { resolveProfileActivationSubmitterId } from "../../utils/resolveProfileActivationSubmitterId.js";
 
 export const submitApproval = async (req, res) => {
     const { id } = req.params;
@@ -9,6 +10,14 @@ export const submitApproval = async (req, res) => {
         const employeeBasic = await getCompleteEmployee(id);
         if (!employeeBasic) {
             return res.status(404).json({ message: "Employee not found" });
+        }
+
+        const submitterEmployeeId = await resolveProfileActivationSubmitterId(req);
+        if (!submitterEmployeeId) {
+            return res.status(400).json({
+                message:
+                    "Your portal login must be linked to an Employee record before you can submit for activation. Check user → employee mapping or employee ID on your account.",
+            });
         }
 
         const hrResolved = await resolveFlowchartHrEmployee();
@@ -33,16 +42,19 @@ export const submitApproval = async (req, res) => {
         const updated = await EmployeeBasic.findOneAndUpdate(
             { employeeId },
             {
-                profileApprovalStatus: "submitted",
-                profileSubmittedTo: hrEmployee._id,
+                $set: {
+                    profileApprovalStatus: "submitted",
+                    profileSubmittedTo: hrEmployee._id,
+                    profileActivationSubmittedBy: submitterEmployeeId,
+                },
                 $push: {
                     profileWorkflow: {
                         role: "HR",
                         assignedTo: hrEmployee._id,
                         status: "submitted",
-                        assignedAt: new Date()
-                    }
-                }
+                        assignedAt: new Date(),
+                    },
+                },
             },
             { new: true }
         );

@@ -1,7 +1,8 @@
 import EmployeeEmergencyContact from "../../models/EmployeeEmergencyContact.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { getCompleteEmployee, resolveEmployeeId } from "../../services/employeeService.js";
-import { triggerProfileReactivationIfNeeded, shouldQueueProfileChange } from "../../utils/triggerProfileReactivation.js";
+import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
+import { skipLiveProfileWritesPendingHr, queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
 
 export const addEmergencyContact = async (req, res) => {
     const { id } = req.params;
@@ -21,29 +22,34 @@ export const addEmergencyContact = async (req, res) => {
         }
 
         const employeeId = employee.employeeId;
-        const employeeBasic = await EmployeeBasic.findOne({ employeeId }).select("profileStatus profileWorkflow").lean();
-        const requiresApprovalQueue = shouldQueueProfileChange(employeeBasic);
+        const employeeBasic = await EmployeeBasic.findOne({ employeeId })
+            .select("profileStatus profileWorkflow profileApprovalStatus company")
+            .lean();
+        const skipLive = skipLiveProfileWritesPendingHr(employeeBasic);
 
         const newContact = {
             name,
             relation,
             number: normalizedNumber
         };
+        const emergencyAddEntry = {
+            card: "Emergency Contact",
+            reason: "Emergency contact added",
+            section: "emergencyContact",
+            changeType: "add",
+            targetIndex: null,
+            previousData: null,
+            proposedData: newContact,
+        };
+
         let updated = null;
-        if (requiresApprovalQueue) {
-            await triggerProfileReactivationIfNeeded({
+        if (skipLive) {
+            await queueOrTriggerProfileChange({
                 employeeId,
                 actor: req.user,
                 reason: "Emergency contact added",
-                changeEntry: {
-                    card: "Emergency Contact",
-                    reason: "Emergency contact added",
-                    section: "emergencyContact",
-                    changeType: "add",
-                    targetIndex: null,
-                    previousData: null,
-                    proposedData: newContact,
-                },
+                employeeBasic,
+                changeEntry: emergencyAddEntry,
             });
         } else {
             updated = await EmployeeEmergencyContact.findOneAndUpdate(
@@ -69,12 +75,14 @@ export const addEmergencyContact = async (req, res) => {
                 employeeId,
                 actor: req.user,
                 reason: "Emergency contact added",
+                changeEntry: null,
+                trackDefaultChange: true,
             });
         }
         const completeEmployee = await getCompleteEmployee(employeeId);
 
         return res.status(200).json({
-            message: requiresApprovalQueue
+            message: skipLive
                 ? "Emergency contact change queued for HR activation approval."
                 : "Emergency contact added",
             emergencyContacts: updated?.emergencyContacts || completeEmployee?.emergencyContacts,

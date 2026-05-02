@@ -309,8 +309,13 @@ export const approveProfile = async (req, res) => {
             }
             return step;
         });
+        const activationSubmitterId = updated.profileActivationSubmittedBy || null;
+
         await updated.save();
-        await EmployeeBasic.updateOne({ employeeId }, { $unset: { profileActivationHold: 1 } });
+        await EmployeeBasic.updateOne(
+            { employeeId },
+            { $unset: { profileActivationHold: 1, profileActivationSubmittedBy: 1 } },
+        );
 
         // === SYNC DASHBOARD ACTION ===
         try {
@@ -323,19 +328,40 @@ export const approveProfile = async (req, res) => {
                 subjectEmployee: updated,
                 requestedByName: req.user?.name || "",
                 actionedBy: req.user?.employeeObjectId || req.user?._id,
-                notifySubjectEmployee: true
             });
         } catch (syncErr) {
             console.error("[ApproveProfile] Dashboard Sync Error:", syncErr);
         }
 
+        try {
+            const DashboardAction = (await import("../../models/DashboardAction.js")).default;
+            await DashboardAction.updateMany(
+                { requestId: updated._id, requestType: "Profile Activation", status: "On Hold" },
+                {
+                    status: "Approved",
+                    actionedDate: new Date(),
+                    actionedBy: req.user?.employeeObjectId || req.user?._id,
+                    comment: "",
+                },
+            );
+        } catch (_clearErr) {
+            /* non-fatal */
+        }
+
         // Get complete employee data for response
         const completeEmployee = await getCompleteEmployee(employeeId);
+
+        const recipientForActivationEmail = activationSubmitterId
+            ? await EmployeeBasic.findById(activationSubmitterId)
+                  .select("firstName lastName employeeId companyEmail workEmail email personalEmail")
+                  .lean()
+            : null;
 
         // Trigger Email Notification (Background)
         const manager = req.user; // The person who approved
         sendProfileNotification({
             employee: completeEmployee,
+            recipientEmployee: recipientForActivationEmail,
             manager: manager,
             status: 'active'
         }).catch(err => console.error("Async Email Error:", err));

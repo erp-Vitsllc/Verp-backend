@@ -5,7 +5,8 @@ import EmployeeSalary from "../../models/EmployeeSalary.js";
 import { uploadDocumentToS3 } from "../../utils/s3Upload.js";
 import { isUserAdministrator } from "../../services/permissionService.js";
 import { archiveEmployeeDocument } from "../../utils/archiveEmployeeDocument.js";
-import { triggerProfileReactivationIfNeeded, shouldQueueProfileChange } from "../../utils/triggerProfileReactivation.js";
+import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
+import { skipLiveProfileWritesPendingHr, queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
 import { markProfileActivationHoldResolvedForSection } from "../../utils/markProfileActivationHoldResolved.js";
 
 export const updateBasicDetails = async (req, res) => {
@@ -394,18 +395,11 @@ export const updateBasicDetails = async (req, res) => {
             proposedData: updatePayload,
         });
 
-        const requiresApprovalQueue = shouldQueueProfileChange(existingBasic);
+        const skipLive = skipLiveProfileWritesPendingHr(existingBasic);
         let updated = null;
-        if (requiresApprovalQueue) {
-            await triggerProfileReactivationIfNeeded({
-                employeeId,
-                actor: req.user,
-                reason: "Basic details updated",
-                changeEntry: buildBasicDetailsReactivationEntry(),
-            });
-            updated = await getCompleteEmployee(employeeId);
-        } else {
-            // 6. Update using service (which handles routing to correct collections)
+        const basicChangeEntry = buildBasicDetailsReactivationEntry();
+
+        if (!skipLive) {
             updated = await saveEmployeeData(employeeId, updatePayload);
 
             if (!updated) {
@@ -416,14 +410,26 @@ export const updateBasicDetails = async (req, res) => {
                 employeeId,
                 actor: req.user,
                 reason: "Basic details updated",
-                changeEntry: buildBasicDetailsReactivationEntry(),
+                changeEntry: basicChangeEntry,
+                trackDefaultChange: true,
             });
+        } else {
+            await queueOrTriggerProfileChange({
+                employeeId,
+                actor: req.user,
+                reason: "Basic details updated",
+                employeeBasic: existingBasic,
+                changeEntry: basicChangeEntry,
+            });
+            updated = await getCompleteEmployee(employeeId);
         }
 
-        try {
-            await markProfileActivationHoldResolvedForSection(employeeId, "basicDetails");
-        } catch (_e) {
-            /* non-fatal */
+        if (!skipLive) {
+            try {
+                await markProfileActivationHoldResolvedForSection(employeeId, "basicDetails");
+            } catch (_e) {
+                /* non-fatal */
+            }
         }
 
         updated = await getCompleteEmployee(employeeId);
@@ -435,7 +441,7 @@ export const updateBasicDetails = async (req, res) => {
 
         // 7. Return success
         return res.status(200).json({
-            message: requiresApprovalQueue
+            message: skipLive
                 ? "Basic details change queued for HR activation approval."
                 : "Basic details updated",
             employee: updated

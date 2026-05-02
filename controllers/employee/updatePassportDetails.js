@@ -3,7 +3,8 @@ import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeService.js";
 import { uploadDocumentToS3, deleteDocumentFromS3 } from "../../utils/s3Upload.js";
 import { archiveEmployeeDocument } from "../../utils/archiveEmployeeDocument.js";
-import { triggerProfileReactivationIfNeeded, shouldQueueProfileChange } from "../../utils/triggerProfileReactivation.js";
+import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
+import { skipLiveProfileWritesPendingHr, queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
 import { markProfileActivationHoldResolvedForSection } from "../../utils/markProfileActivationHoldResolved.js";
 
 const REQUIRED_FIELDS = ["number", "issueDate", "expiryDate"];
@@ -58,15 +59,17 @@ export const updatePassportDetails = async (req, res) => {
         }
 
         const employeeId = employee.employeeId;
-        const employeeBasic = await EmployeeBasic.findOne({ employeeId }).select("company profileStatus profileWorkflow").lean();
-        const requiresApprovalQueue = shouldQueueProfileChange(employeeBasic);
+        const employeeBasic = await EmployeeBasic.findOne({ employeeId })
+            .select("company profileStatus profileWorkflow profileApprovalStatus")
+            .lean();
+        const skipLive = skipLiveProfileWritesPendingHr(employeeBasic);
 
         // Fetch existing passport to handle renewal/archiving
         const existingPassport = await EmployeePassport.findOne({ employeeId });
 
         const hasExistingDocument = Boolean(existingPassport?.document?.url || existingPassport?.document?.data);
         const hasNewDocumentUpload = Boolean(passportCopy && typeof passportCopy === "string" && passportCopy.trim() !== "");
-        const shouldArchivePrevious = !requiresApprovalQueue && hasExistingDocument && hasNewDocumentUpload;
+        const shouldArchivePrevious = !skipLive && hasExistingDocument && hasNewDocumentUpload;
         if (shouldArchivePrevious) {
             await archiveEmployeeDocument({
                 employeeId,
@@ -131,40 +134,53 @@ export const updatePassportDetails = async (req, res) => {
             passportExp: parsedExpiryDate, // Update expiry date for quick reference
         };
 
-        // Always persist passport changes to DB.
-        // If profile is in reactivation flow, we still store the record, but also track it for HR re-approval.
-        const updatedPassport = await EmployeePassport.findOneAndUpdate(
-            { employeeId },
-            passportPayload,
-            { upsert: true, new: true }
-        );
+        let updatedPassport = existingPassport;
+        if (!skipLive) {
+            updatedPassport = await EmployeePassport.findOneAndUpdate(
+                { employeeId },
+                passportPayload,
+                { upsert: true, new: true }
+            );
+        }
 
-        await triggerProfileReactivationIfNeeded({
-            employeeId,
-            actor: req.user,
+        const passportChangeEntry = {
+            card: "Passport",
             reason: "Passport details updated",
-            changeEntry: requiresApprovalQueue
-                ? {
-                    card: "Passport",
-                    reason: "Passport details updated",
-                    section: "passport",
-                    changeType: "update",
-                    targetIndex: null,
-                    previousData: existingPassport || null,
-                    proposedData: passportPayload,
-                }
-                : null,
-            trackDefaultChange: !requiresApprovalQueue,
-        });
-        try {
-            await markProfileActivationHoldResolvedForSection(employeeId, "passport");
-        } catch (_e) {
-            /* ignore */
+            section: "passport",
+            changeType: "update",
+            targetIndex: null,
+            previousData: existingPassport || null,
+            proposedData: passportPayload,
+        };
+
+        if (skipLive) {
+            await queueOrTriggerProfileChange({
+                employeeId,
+                actor: req.user,
+                reason: "Passport details updated",
+                employeeBasic,
+                changeEntry: passportChangeEntry,
+            });
+        } else {
+            await triggerProfileReactivationIfNeeded({
+                employeeId,
+                actor: req.user,
+                reason: "Passport details updated",
+                changeEntry: null,
+                trackDefaultChange: true,
+            });
+        }
+        if (!skipLive) {
+            try {
+                await markProfileActivationHoldResolvedForSection(employeeId, "passport");
+            } catch (_e) {
+                /* ignore */
+            }
         }
         const completeEmployee = await getCompleteEmployee(employeeId);
 
         return res.json({
-            message: requiresApprovalQueue
+            message: skipLive
                 ? "Passport change queued for HR activation approval."
                 : "Passport details updated successfully.",
             passportDetails: {

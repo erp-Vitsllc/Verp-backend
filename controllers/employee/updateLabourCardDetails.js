@@ -3,7 +3,8 @@ import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeService.js";
 import { uploadDocumentToS3, deleteDocumentFromS3 } from "../../utils/s3Upload.js";
 import { archiveEmployeeDocument } from "../../utils/archiveEmployeeDocument.js";
-import { triggerProfileReactivationIfNeeded, shouldQueueProfileChange } from "../../utils/triggerProfileReactivation.js";
+import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
+import { skipLiveProfileWritesPendingHr, queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
 
 const REQUIRED_FIELDS = ["number", "issueDate", "expiryDate", "upload", "contractUpload"];
 
@@ -83,8 +84,10 @@ export const updateLabourCardDetails = async (req, res) => {
         }
 
         const employeeId = employee.employeeId;
-        const employeeBasic = await EmployeeBasic.findOne({ employeeId }).select("company profileStatus profileWorkflow").lean();
-        const requiresApprovalQueue = shouldQueueProfileChange(employeeBasic);
+        const employeeBasic = await EmployeeBasic.findOne({ employeeId })
+            .select("company profileStatus profileWorkflow profileApprovalStatus")
+            .lean();
+        const skipLive = skipLiveProfileWritesPendingHr(employeeBasic);
 
         // Check if existing document exists in database (check for both url and data for backward compatibility)
         const existingLabourCard = await EmployeeLabourCard.findOne({ employeeId });
@@ -124,8 +127,8 @@ export const updateLabourCardDetails = async (req, res) => {
         const hasExistingContractDocument = Boolean(previousLabourCard?.labourContractAttachment?.url || previousLabourCard?.labourContractAttachment?.data);
         const hasNewDocumentUpload = Boolean(normalizedUpload);
         const hasNewContractDocumentUpload = Boolean(normalizedContractUpload);
-        const shouldArchivePrevious = !requiresApprovalQueue && hasExistingDocument && hasNewDocumentUpload;
-        const shouldArchivePreviousContract = !requiresApprovalQueue && hasExistingContractDocument && hasNewContractDocumentUpload;
+        const shouldArchivePrevious = !skipLive && hasExistingDocument && hasNewDocumentUpload;
+        const shouldArchivePreviousContract = !skipLive && hasExistingContractDocument && hasNewContractDocumentUpload;
         if (shouldArchivePrevious) {
             await archiveEmployeeDocument({
                 employeeId,
@@ -226,23 +229,7 @@ export const updateLabourCardDetails = async (req, res) => {
         };
 
         let updatedLabourCard = existingLabourCard;
-        if (requiresApprovalQueue) {
-            await triggerProfileReactivationIfNeeded({
-                employeeId,
-                actor: req.user,
-                reason: "Labour card details updated",
-                changeEntry: {
-                    card: "Labour Card",
-                    reason: "Labour card details updated",
-                    section: "labourCard",
-                    changeType: "update",
-                    targetIndex: null,
-                    previousData: previousLabourCard || null,
-                    proposedData: labourCardPayload,
-                },
-            });
-        } else {
-            // Update or create Labour Card record
+        if (!skipLive) {
             updatedLabourCard = await EmployeeLabourCard.findOneAndUpdate(
                 { employeeId },
                 {
@@ -252,16 +239,39 @@ export const updateLabourCardDetails = async (req, res) => {
                 },
                 { upsert: true, new: true }
             );
+        }
+
+        const labourChangeEntry = {
+            card: "Labour Card",
+            reason: "Labour card details updated",
+            section: "labourCard",
+            changeType: "update",
+            targetIndex: null,
+            previousData: previousLabourCard || null,
+            proposedData: labourCardPayload,
+        };
+
+        if (skipLive) {
+            await queueOrTriggerProfileChange({
+                employeeId,
+                actor: req.user,
+                reason: "Labour card details updated",
+                employeeBasic,
+                changeEntry: labourChangeEntry,
+            });
+        } else {
             await triggerProfileReactivationIfNeeded({
                 employeeId,
                 actor: req.user,
                 reason: "Labour card details updated",
+                changeEntry: null,
+                trackDefaultChange: true,
             });
         }
         const completeEmployee = await getCompleteEmployee(employeeId);
 
         return res.json({
-            message: requiresApprovalQueue
+            message: skipLive
                 ? "Labour Card change queued for HR activation approval."
                 : "Labour Card details updated successfully.",
             labourCardDetails: updatedLabourCard?.labourCard || completeEmployee?.labourCardDetails,

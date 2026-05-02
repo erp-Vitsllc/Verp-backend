@@ -5,6 +5,7 @@ import Reward from "../../models/Reward.js";
 import Loan from "../../models/Loan.js";
 import { getSignedFileUrl } from "../../utils/s3Upload.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
+import { isRequestUserDesignatedFlowchartHr } from "../../utils/isDesignatedFlowchartHr.js";
 import { ensureProbationRequestForEmployee } from "../../utils/sendProbationWorkflowEmail.js";
 
 // Get single employee by ID
@@ -151,6 +152,21 @@ export const getEmployeeById = async (req, res) => {
 
         console.log(`[getEmployeeById] Successfully fetched employee: ${employee.employeeId || id}`);
 
+        const viewerIsDesignatedFlowchartHr = await isRequestUserDesignatedFlowchartHr(req);
+
+        if (Array.isArray(employee.pendingNotRenewRequests) && employee.pendingNotRenewRequests.length) {
+            for (const p of employee.pendingNotRenewRequests) {
+                const key = (p.supportingAttachmentKey || "").trim();
+                if (key) {
+                    try {
+                        p.supportingAttachmentUrl = await getSignedFileUrl(key);
+                    } catch {
+                        p.supportingAttachmentUrl = "";
+                    }
+                }
+            }
+        }
+
         // Calculate approximate response size for logging
         const responseSize = JSON.stringify(employee).length;
         console.log(`[getEmployeeById] Response size: ${(responseSize / 1024).toFixed(2)} KB`);
@@ -162,6 +178,7 @@ export const getEmployeeById = async (req, res) => {
         return res.status(200).json({
             message: "Employee fetched successfully",
             employee,
+            viewerIsDesignatedFlowchartHr,
         });
     } catch (error) {
         console.error('[getEmployeeById] Error:', error);

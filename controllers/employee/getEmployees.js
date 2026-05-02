@@ -237,7 +237,7 @@ export const getEmployees = async (req, res) => {
                                 { $gt: [{ $strLenCP: { $ifNull: ["$companyEmail", ""] } }, 0] }
                             ]
                         },
-                        dateOfJoining: 1, contractJoiningDate: 1,
+                        dateOfJoining: 1, contractJoiningDate: 1, contractExpiryDate: 1,
                         company: 1,
                         companyName: "$companyInfo.name",
                         companyNickName: "$companyInfo.nickName",

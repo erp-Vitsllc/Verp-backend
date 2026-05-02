@@ -4,6 +4,7 @@ import { getCompleteEmployee, resolveEmployeeId } from '../../services/employeeS
 import s3Client, { bucketName } from '../../config/s3Client.js';
 import { randomUUID } from 'crypto';
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
+import { skipLiveProfileWritesPendingHr, queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
 
 export const uploadProfilePicture = async (req, res) => {
     try {
@@ -67,28 +68,53 @@ export const uploadProfilePicture = async (req, res) => {
 
         console.log('Generated Public URL:', publicUrl);
 
-        // 7. Update EmployeeBasic
-        const updated = await EmployeeBasic.findOneAndUpdate(
-            { employeeId },
-            { profilePicture: publicUrl },
-            { new: true, runValidators: true }
-        ).select('-password');
-
-        if (!updated) {
-            return res.status(404).json({ message: 'Employee not found during update' });
+        const employeeBasic = await EmployeeBasic.findOne({ employeeId })
+            .select("profilePicture profileStatus profileWorkflow profileApprovalStatus company")
+            .lean();
+        if (!employeeBasic) {
+            return res.status(404).json({ message: "Employee not found during update" });
         }
 
-        // 8. Return Response
-        await triggerProfileReactivationIfNeeded({
-            employeeId,
-            actor: req.user,
-            reason: "Profile picture updated",
-        });
+        const skipLive = skipLiveProfileWritesPendingHr(employeeBasic);
+        const previousPicture = employeeBasic.profilePicture || null;
+
+        if (!skipLive) {
+            await EmployeeBasic.findOneAndUpdate(
+                { employeeId },
+                { profilePicture: publicUrl },
+                { new: true, runValidators: true }
+            );
+            await triggerProfileReactivationIfNeeded({
+                employeeId,
+                actor: req.user,
+                reason: "Profile picture updated",
+                changeEntry: null,
+                trackDefaultChange: true,
+            });
+        } else {
+            await queueOrTriggerProfileChange({
+                employeeId,
+                actor: req.user,
+                reason: "Profile picture updated",
+                employeeBasic,
+                changeEntry: {
+                    card: "Profile picture",
+                    reason: "Profile picture updated",
+                    section: "basicDetails",
+                    changeType: "update",
+                    targetIndex: null,
+                    previousData: { profilePicture: previousPicture },
+                    proposedData: { profilePicture: publicUrl },
+                },
+            });
+        }
         const completeEmployee = await getCompleteEmployee(employeeId);
         if (completeEmployee) delete completeEmployee.password;
 
         return res.status(200).json({
-            message: 'Profile picture uploaded successfully',
+            message: skipLive
+                ? "Profile picture change queued for HR activation approval."
+                : "Profile picture uploaded successfully",
             profilePicture: publicUrl,
             employee: completeEmployee
         });

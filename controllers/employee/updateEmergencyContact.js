@@ -1,7 +1,8 @@
 import EmployeeEmergencyContact from "../../models/EmployeeEmergencyContact.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { getCompleteEmployee, resolveEmployeeId } from "../../services/employeeService.js";
-import { triggerProfileReactivationIfNeeded, shouldQueueProfileChange } from "../../utils/triggerProfileReactivation.js";
+import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
+import { skipLiveProfileWritesPendingHr, queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
 
 export const updateEmergencyContact = async (req, res) => {
     const { id, contactId } = req.params;
@@ -32,8 +33,10 @@ export const updateEmergencyContact = async (req, res) => {
         }
 
         const employeeId = employee.employeeId;
-        const employeeBasic = await EmployeeBasic.findOne({ employeeId }).select("profileStatus profileWorkflow").lean();
-        const requiresApprovalQueue = shouldQueueProfileChange(employeeBasic);
+        const employeeBasic = await EmployeeBasic.findOne({ employeeId })
+            .select("profileStatus profileWorkflow profileApprovalStatus company")
+            .lean();
+        const skipLive = skipLiveProfileWritesPendingHr(employeeBasic);
         const currentRecord = await EmployeeEmergencyContact.findOne({ employeeId });
         const currentContact = currentRecord?.emergencyContacts?.id(contactId);
         const proposedContact = {
@@ -43,22 +46,26 @@ export const updateEmergencyContact = async (req, res) => {
             number: normalizedNumber,
         };
 
+        const emergencyUpdateEntry = {
+            card: "Emergency Contact",
+            reason: "Emergency contact updated",
+            section: "emergencyContact",
+            changeType: "update",
+            targetIndex: null,
+            previousData: currentContact?.toObject ? currentContact.toObject() : currentContact,
+            proposedData: { contactId, ...proposedContact },
+        };
+
         let updated = null;
-        if (requiresApprovalQueue) {
-            await triggerProfileReactivationIfNeeded({
+        if (skipLive) {
+            await queueOrTriggerProfileChange({
                 employeeId,
                 actor: req.user,
                 reason: "Emergency contact updated",
-                changeEntry: {
-                    card: "Emergency Contact",
-                    reason: "Emergency contact updated",
-                    section: "emergencyContact",
-                    changeType: "update",
-                    targetIndex: null,
-                    previousData: currentContact?.toObject ? currentContact.toObject() : currentContact,
-                    proposedData: { contactId, ...proposedContact },
-                },
+                employeeBasic,
+                changeEntry: emergencyUpdateEntry,
             });
+            updated = currentRecord;
         } else {
             updated = await EmployeeEmergencyContact.findOneAndUpdate(
                 { employeeId, "emergencyContacts._id": contactId },
@@ -71,39 +78,35 @@ export const updateEmergencyContact = async (req, res) => {
                 },
                 { new: true, runValidators: true }
             );
-        }
 
-        if (!updated) {
-            if (!requiresApprovalQueue) {
+            if (!updated) {
                 return res.status(404).json({ message: "Employee or contact not found" });
             }
-            updated = currentRecord;
-        }
 
-        // Update legacy fields from first contact
-        const primaryContact = updated.emergencyContacts?.[0];
-        if (primaryContact) {
-            updated.emergencyContactName = primaryContact.name || '';
-            updated.emergencyContactRelation = primaryContact.relation || 'Self';
-            updated.emergencyContactNumber = primaryContact.number || '';
-        } else {
-            updated.emergencyContactName = '';
-            updated.emergencyContactRelation = '';
-            updated.emergencyContactNumber = '';
-        }
+            const primaryContact = updated.emergencyContacts?.[0];
+            if (primaryContact) {
+                updated.emergencyContactName = primaryContact.name || '';
+                updated.emergencyContactRelation = primaryContact.relation || 'Self';
+                updated.emergencyContactNumber = primaryContact.number || '';
+            } else {
+                updated.emergencyContactName = '';
+                updated.emergencyContactRelation = '';
+                updated.emergencyContactNumber = '';
+            }
 
-        if (!requiresApprovalQueue) {
             await updated.save();
             await triggerProfileReactivationIfNeeded({
                 employeeId,
                 actor: req.user,
                 reason: "Emergency contact updated",
+                changeEntry: null,
+                trackDefaultChange: true,
             });
         }
         const completeEmployee = await getCompleteEmployee(employeeId);
 
         return res.status(200).json({
-            message: requiresApprovalQueue
+            message: skipLive
                 ? "Emergency contact change queued for HR activation approval."
                 : "Emergency contact updated",
             emergencyContacts: updated.emergencyContacts,

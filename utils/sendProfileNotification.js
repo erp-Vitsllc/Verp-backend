@@ -1,11 +1,31 @@
 import nodemailer from "nodemailer";
 
-export const sendProfileNotification = async ({ employee, manager, status, reason = "" }) => {
+const pickEmployeeEmail = (emp) =>
+    emp?.companyEmail || emp?.workEmail || emp?.personalEmail || emp?.email || "";
+
+/**
+ * HR activation outcome email: **only** the submitter (`recipientEmployee`). Never mails the profile subject.
+ * Caller must resolve `profileActivationSubmittedBy` → EmployeeBasic lean; otherwise no email is sent.
+ *
+ * @param {object} employee — profile subject (context + link target)
+ * @param {object|null} recipientEmployee — activation submitter (required to send)
+ */
+export const sendProfileNotification = async ({ employee, recipientEmployee = null, manager, status, reason = "" }) => {
     try {
-        const employeeEmail =
-            employee.companyEmail || employee.workEmail || employee.personalEmail || employee.email;
-        if (!employeeEmail) {
-            console.warn(`[Email Warning] No email found for employee ${employee.employeeId}`);
+        const profileSubjectName = `${employee.firstName || ""} ${employee.lastName || ""}`.trim() || "Employee";
+
+        if (!recipientEmployee) {
+            console.warn(
+                `[Email] Activation ${status} skipped — no submitter on file (subject employeeId ${employee.employeeId})`,
+            );
+            return;
+        }
+
+        const recipientEmail = pickEmployeeEmail(recipientEmployee);
+        if (!recipientEmail) {
+            console.warn(
+                `[Email] Activation ${status} skipped — submitter has no email (subject employeeId ${employee.employeeId})`,
+            );
             return;
         }
 
@@ -20,14 +40,17 @@ export const sendProfileNotification = async ({ employee, manager, status, reaso
         const transporter = nodemailer.createTransport({
             host: "smtp.office365.com",
             port: 587,
-            secure: false, // true for 587 (TLS)
+            secure: false,
             auth: {
                 user: emailUser,
-                pass: emailPass
-            }
+                pass: emailPass,
+            },
         });
 
-        const employeeName = `${employee.firstName || ""} ${employee.lastName || ""}`.trim();
+        const recipientName =
+            `${recipientEmployee.firstName || ""} ${recipientEmployee.lastName || ""}`.trim() ||
+            "there";
+
         const managerName = (() => {
             const m = manager;
             if (!m) return "HR";
@@ -38,69 +61,55 @@ export const sendProfileNotification = async ({ employee, manager, status, reaso
             return "HR";
         })();
 
-        const isApproved = status.toLowerCase() === 'active' || status.toLowerCase() === 'approved';
+        const isApproved = status.toLowerCase() === "active" || status.toLowerCase() === "approved";
 
-        let recipientList = [employeeEmail];
-
-        if (!isApproved) {
-            // Fetch Previous Approvers from profileWorkflow
-            const previousApprovers = (employee.profileWorkflow || [])
-                .filter(w => w.status === 'active' && w.assignedTo);
-
-            if (previousApprovers.length > 0) {
-                // We need to fetch their emails. Since we might not have a direct ref here, 
-                // and this is utility, we should ideally have passed them or we'll do a quick fetch
-                try {
-                    const EmployeeBasic = (await import("../models/EmployeeBasic.js")).default;
-                    const approverIds = previousApprovers.map(p => p.assignedTo);
-                    const approverEmps = await EmployeeBasic.find({ _id: { $in: approverIds } })
-                        .select('companyEmail workEmail email');
-
-                    const approverEmails = approverEmps
-                        .map(ae => ae.companyEmail || ae.workEmail || ae.email)
-                        .filter(e => e);
-
-                    recipientList = [...new Set([...recipientList, ...approverEmails])];
-                } catch (fetchErr) {
-                    console.error("[Email Error] Failed to fetch previous approver emails:", fetchErr);
-                }
-            }
-        }
+        const sameRecipientAsSubject =
+            String(recipientEmployee._id || recipientEmployee.id || "") ===
+            String(employee._id || employee.id || "");
 
         const subject = isApproved
-            ? `Your VeRP Profile has been Activated!`
-            : `Update Required: Profile Activation Request`;
+            ? sameRecipientAsSubject
+                ? `Your VeRP Profile has been Activated!`
+                : `Profile activation approved: ${profileSubjectName}`
+            : sameRecipientAsSubject
+              ? `Update Required: Profile Activation Request`
+              : `Profile activation rejected: ${profileSubjectName}`;
+
+        const approvedBody = sameRecipientAsSubject
+            ? `<p>Great news! Your profile activation request has been <strong>approved</strong> by ${managerName}. Your account is now fully active.</p>
+               <p>You can now access all portal features including Salary Slips, Leave Applications, and Loan Requests.</p>`
+            : `<p>The profile activation you submitted for <strong>${profileSubjectName}</strong> (Employee ID: <strong>${employee.employeeId || "—"}</strong>) has been <strong>approved</strong> by ${managerName}. That employee’s account is now fully active.</p>`;
+
+        const rejectedBody = sameRecipientAsSubject
+            ? `<p>Your profile activation request has been <strong>rejected</strong> by ${managerName}. Please review the feedback below and update your profile details.</p>
+               <p>Once you've made the necessary changes, you can resubmit your profile for activation.</p>`
+            : `<p>The profile activation you submitted for <strong>${profileSubjectName}</strong> (Employee ID: <strong>${employee.employeeId || "—"}</strong>) has been <strong>rejected</strong> by ${managerName}. Please review the feedback and update that employee’s profile before sending for activation again.</p>`;
 
         const html = `
             <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; color: #1e293b; line-height: 1.6; max-width: 600px; margin: 0 auto; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden; background-color: #ffffff;">
-                <div style="background-color: ${isApproved ? '#059669' : '#e11d48'}; color: white; padding: 30px; text-align: center;">
-                    <h1 style="margin: 0; font-size: 24px;">Profile ${isApproved ? 'Activated' : 'Action Required'}</h1>
+                <div style="background-color: ${isApproved ? "#059669" : "#e11d48"}; color: white; padding: 30px; text-align: center;">
+                    <h1 style="margin: 0; font-size: 24px;">Profile ${isApproved ? "Activated" : "Action Required"}</h1>
                 </div>
                 <div style="padding: 40px;">
-                    <p style="font-size: 16px;">Hello <strong>${employeeName}</strong>,</p>
+                    <p style="font-size: 16px;">Hello <strong>${recipientName}</strong>,</p>
                     
-                    ${isApproved ?
-                `<p>Great news! Your profile activation request has been <strong>approved</strong> by ${managerName}. Your account is now fully active.</p>` :
-                `<p>Your profile activation request has been <strong>rejected</strong> by ${managerName}. Please review the feedback below and update your profile details.</p>`
-            }
+                    ${isApproved ? approvedBody : rejectedBody}
 
-                    ${!isApproved && reason ? `
+                    ${
+                        !isApproved && reason
+                            ? `
                         <div style="background-color: #fff1f2; padding: 20px; border-left: 4px solid #e11d48; border-radius: 4px; margin: 25px 0;">
                             <p style="margin: 0; font-weight: bold; color: #9f1239;">Feedback:</p>
                             <p style="margin: 8px 0 0 0; color: #be123b;">${reason}</p>
                         </div>
-                    ` : ''}
-
-                    ${isApproved ? `
-                        <p>You can now access all portal features including Salary Slips, Leave Applications, and Loan Requests.</p>
-                    ` : `
-                        <p>Once you've made the necessary changes, you can resubmit your profile for activation.</p>
-                    `}
+                    `
+                            : ""
+                    }
 
                     <div style="text-align: center; margin-top: 40px;">
-                        <a href="${process.env.FRONTEND_URL || 'http://localhost:3000'}/emp/${employee.employeeId}" 
-                           style="background-color: ${isApproved ? '#059669' : '#1e293b'}; color: white; padding: 14px 28px; text-decoration: none; border-radius: 8px; font-weight: bold; display: inline-block; font-size: 15px;">
-                           View My Profile
+                        <a href="${process.env.FRONTEND_URL || "http://localhost:3000"}/emp/${employee.employeeId}" 
+                           style="background-color: ${isApproved ? "#059669" : "#1e293b"}; color: white; padding: 14px 28px; text-decoration: none; border-radius: 8px; font-weight: bold; display: inline-block; font-size: 15px;">
+                           ${sameRecipientAsSubject ? "View My Profile" : "Open employee profile"}
                         </a>
                     </div>
                 </div>
@@ -112,12 +121,12 @@ export const sendProfileNotification = async ({ employee, manager, status, reaso
 
         await transporter.sendMail({
             from: `"VeRP Portal" <${emailUser}>`,
-            to: recipientList,
+            to: [recipientEmail],
             subject,
-            html
+            html,
         });
 
-        console.log(`[Email Success] ${isApproved ? 'Activation' : 'Rejection'} email sent to ${employeeEmail}`);
+        console.log(`[Email Success] ${isApproved ? "Activation" : "Rejection"} email sent to submitter ${recipientEmail}`);
     } catch (error) {
         console.error("[Email Error] Failed to send profile notification email:", error);
     }

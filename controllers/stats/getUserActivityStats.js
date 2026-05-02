@@ -155,19 +155,26 @@ export const getUserActivityStats = async (req, res) => {
             return false;
         };
 
+        const profileActivationOutcomeOr = [{ assignedTo: { $in: relevantIds } }];
+        if (targetEmployeeId && String(targetEmployeeId).trim() !== '') {
+            // Outcome rows for the profile subject use assignedTo = subject's EmployeeBasic _id and assignedToEmpId = subject employeeId.
+            // Also match by employeeId so the submitting employee sees On Hold / outcomes even if id resolution differs from HR's queue row.
+            profileActivationOutcomeOr.push({ assignedToEmpId: String(targetEmployeeId).trim() });
+        }
+
         const [dashboardPendingItemsRaw, profileActivationOutcomeItems] = await Promise.all([
             DashboardAction.find({
                 $or: dashboardOrConditions,
                 status: 'Pending',
             }).lean(),
             DashboardAction.find({
-                assignedTo: { $in: relevantIds },
                 requestType: 'Profile Activation',
-                status: { $in: ['Approved', 'Rejected', 'On Hold'] }
+                status: { $in: ['Approved', 'Rejected', 'On Hold'] },
+                $or: profileActivationOutcomeOr,
             })
                 .sort({ actionedDate: -1, updatedAt: -1 })
                 .limit(25)
-                .lean()
+                .lean(),
         ]);
 
         const dashboardPendingItems = dashboardPendingItemsRaw.filter((item) => {
@@ -182,7 +189,6 @@ export const getUserActivityStats = async (req, res) => {
                 $or: [
                     { profileSubmittedTo: { $in: relevantIds }, profileApprovalStatus: 'submitted' },
                     ...(isAdmin ? [{ profileApprovalStatus: 'submitted' }] : []),
-                    { profileSubmittedTo: null, primaryReportee: manager._id, profileApprovalStatus: 'submitted' }
                 ]
             }),
             // Pending Notices
@@ -914,11 +920,15 @@ export const getUserActivityStats = async (req, res) => {
         const approvedCount = finalActivityList.filter(i => i.status === 'Approved').length;
         const rejectedCount = finalActivityList.filter(i => (i.status === 'Rejected' || i.status === 'rejected')).length;
 
+        const { getDepartmentHOD } = await import("../../utils/getDepartmentHOD.js");
+        const flowchartHrEmp = await getDepartmentHOD("hr");
+
         res.status(200).json({
             pending: pendingCount,
             approved: approvedCount,
             rejected: rejectedCount,
             total: finalActivityList.length,
+            flowchartHrEmployeeObjectId: flowchartHrEmp?._id ? String(flowchartHrEmp._id) : null,
             items: finalActivityList.sort((a, b) => {
                 const dateA = new Date(a.actionedDate || a.requestedDate || 0);
                 const dateB = new Date(b.actionedDate || b.requestedDate || 0);

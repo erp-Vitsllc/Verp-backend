@@ -3,7 +3,8 @@ import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeService.js";
 import { uploadDocumentToS3, deleteDocumentFromS3 } from "../../utils/s3Upload.js";
 import { archiveEmployeeDocument } from "../../utils/archiveEmployeeDocument.js";
-import { triggerProfileReactivationIfNeeded, shouldQueueProfileChange } from "../../utils/triggerProfileReactivation.js";
+import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
+import { skipLiveProfileWritesPendingHr, queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
 
 const REQUIRED_FIELDS = ["number", "issueDate", "expiryDate", "upload"];
 
@@ -67,8 +68,10 @@ export const updateEmiratesIdDetails = async (req, res) => {
         }
 
         const employeeId = employee.employeeId;
-        const employeeBasic = await EmployeeBasic.findOne({ employeeId }).select("company profileStatus profileWorkflow").lean();
-        const requiresApprovalQueue = shouldQueueProfileChange(employeeBasic);
+        const employeeBasic = await EmployeeBasic.findOne({ employeeId })
+            .select("company profileStatus profileWorkflow profileApprovalStatus")
+            .lean();
+        const skipLive = skipLiveProfileWritesPendingHr(employeeBasic);
 
         // Check if existing document exists in database (check for both url and data for backward compatibility)
         const existingEmiratesId = await EmployeeEmiratesId.findOne({ employeeId });
@@ -93,7 +96,7 @@ export const updateEmiratesIdDetails = async (req, res) => {
         const previousEmiratesId = existingEmiratesId?.emiratesId;
         const hasExistingDocument = Boolean(previousEmiratesId?.document?.url || previousEmiratesId?.document?.data);
         const hasNewDocumentUpload = Boolean(normalizedUpload);
-        const shouldArchivePrevious = !requiresApprovalQueue && hasExistingDocument && hasNewDocumentUpload;
+        const shouldArchivePrevious = !skipLive && hasExistingDocument && hasNewDocumentUpload;
         if (shouldArchivePrevious) {
             await archiveEmployeeDocument({
                 employeeId,
@@ -152,23 +155,7 @@ export const updateEmiratesIdDetails = async (req, res) => {
         };
 
         let updatedEmiratesId = existingEmiratesId;
-        if (requiresApprovalQueue) {
-            await triggerProfileReactivationIfNeeded({
-                employeeId,
-                actor: req.user,
-                reason: "Emirates ID details updated",
-                changeEntry: {
-                    card: "Emirates ID",
-                    reason: "Emirates ID details updated",
-                    section: "emiratesId",
-                    changeType: "update",
-                    targetIndex: null,
-                    previousData: previousEmiratesId || null,
-                    proposedData: emiratesIdPayload,
-                },
-            });
-        } else {
-            // Update or create Emirates ID record
+        if (!skipLive) {
             updatedEmiratesId = await EmployeeEmiratesId.findOneAndUpdate(
                 { employeeId },
                 {
@@ -178,16 +165,39 @@ export const updateEmiratesIdDetails = async (req, res) => {
                 },
                 { upsert: true, new: true }
             );
+        }
+
+        const emiratesChangeEntry = {
+            card: "Emirates ID",
+            reason: "Emirates ID details updated",
+            section: "emiratesId",
+            changeType: "update",
+            targetIndex: null,
+            previousData: previousEmiratesId || null,
+            proposedData: emiratesIdPayload,
+        };
+
+        if (skipLive) {
+            await queueOrTriggerProfileChange({
+                employeeId,
+                actor: req.user,
+                reason: "Emirates ID details updated",
+                employeeBasic,
+                changeEntry: emiratesChangeEntry,
+            });
+        } else {
             await triggerProfileReactivationIfNeeded({
                 employeeId,
                 actor: req.user,
                 reason: "Emirates ID details updated",
+                changeEntry: null,
+                trackDefaultChange: true,
             });
         }
         const completeEmployee = await getCompleteEmployee(employeeId);
 
         return res.json({
-            message: requiresApprovalQueue
+            message: skipLive
                 ? "Emirates ID change queued for HR activation approval."
                 : "Emirates ID details updated successfully.",
             emiratesIdDetails: updatedEmiratesId?.emiratesId || completeEmployee?.emiratesIdDetails,

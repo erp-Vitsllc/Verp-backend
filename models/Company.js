@@ -208,6 +208,36 @@ const companySchema = new mongoose.Schema(
                 status: { type: String, enum: ["Pending", "Active"], default: "Pending" }
             }
         ],
+
+        pendingNotRenewRequests: [
+            {
+                requestId: { type: String, required: true },
+                kind: {
+                    type: String,
+                    enum: ["tradeLicense", "establishmentCard", "document", "ownerDoc", "ejari", "insurance"],
+                    required: true,
+                },
+                label: { type: String, default: "" },
+                documentIndex: { type: Number },
+                documentItemId: { type: String, default: "" },
+                arrayIndex: { type: Number },
+                arrayItemId: { type: String, default: "" },
+                ownerIndex: { type: Number },
+                docKey: { type: String, default: "" },
+                reason: { type: String, required: true },
+                supportingAttachmentKey: { type: String, default: "" },
+                supportingAttachmentName: { type: String, default: "" },
+                status: { type: String, enum: ["pending", "approved", "rejected"], default: "pending" },
+                submittedByUserId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+                submittedByName: { type: String, default: "" },
+                submittedByEmployeeId: { type: String, default: "" },
+                submittedAt: { type: Date, default: Date.now },
+                hrComment: { type: String, default: "" },
+                actionedAt: { type: Date },
+                actionedByUserId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+            },
+        ],
+
         createdBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" }
     },
     { timestamps: true }

@@ -11,34 +11,15 @@ import DashboardAction from "../models/DashboardAction.js";
 import ExpiryReminderLog from "../models/ExpiryReminderLog.js";
 import User from "../models/User.js";
 import { getDepartmentHOD } from "./getDepartmentHOD.js";
-import { getManagementHOD } from "./getManagementHOD.js";
 import { resolveEmployeeEmail } from "./resolveEmployeeEmail.js";
+import {
+    getDaysUntil,
+    getEmailReminderStageMarker,
+    isExpiryTaskWindow,
+} from "./documentExpiryReminderStages.js";
 
 const STAGE_1_MARKER = 30;
 const STAGE_2_MARKER = 20;
-const STAGE_3_MARKER = 10;
-const THIRD_REMINDER_TASK_MARKER = -10;
-
-const startOfDay = (d) => {
-    const x = new Date(d);
-    x.setHours(0, 0, 0, 0);
-    return x;
-};
-
-const getDaysUntil = (expiryDate) => {
-    if (!expiryDate) return null;
-    const today = startOfDay(new Date());
-    const exp = startOfDay(expiryDate);
-    return Math.round((exp - today) / (1000 * 60 * 60 * 24));
-};
-
-const getReminderStageMarker = (daysUntilExpiry) => {
-    if (daysUntilExpiry == null) return null;
-    if (daysUntilExpiry <= 30 && daysUntilExpiry > 20) return STAGE_1_MARKER;
-    if (daysUntilExpiry <= 20 && daysUntilExpiry > 10) return STAGE_2_MARKER;
-    if (daysUntilExpiry <= 10) return STAGE_3_MARKER;
-    return null;
-};
 
 const getReminderStageLabel = (marker) => {
     if (marker === STAGE_1_MARKER) return "1st Reminder";
@@ -94,7 +75,19 @@ const sendExpiryReminderEmail = async ({ to, subject, html }) => {
     });
 };
 
-/** Company trade licence / establishment / ejari expiry tasks — assignees are Admin/HR on company record. */
+/** Remove wrongly assigned expiry follow-ups (tasks belong to Flowchart HR only). */
+const purgeNonHrExpiryTasks = async ({ requestId, requestType, hrObjectId }) => {
+    if (!requestId || !hrObjectId) return;
+    await DashboardAction.deleteMany({
+        requestId,
+        requestType,
+        status: "Pending",
+        assignedTo: { $ne: hrObjectId },
+        extra1: { $regex: /^Expiry follow-up required:/i },
+    });
+};
+
+/** Company / employee document expiry tasks — assignee is Flowchart HR only. */
 const ensureDashboardAction = async ({
     assignedTo,
     assignedToEmpId,
@@ -181,17 +174,16 @@ const pickCompanyAddress = (emp = {}) =>
     null;
 
 const getFlowchartRecipientBundle = async () => {
-    const [admin, hr, management] = await Promise.all([
+    const [admin, hr] = await Promise.all([
         getDepartmentHOD("admincontroller"),
         getDepartmentHOD("hr"),
-        getManagementHOD(),
     ]);
+    /** Company document expiry emails: Admin Controller + HR (Flowchart) only. */
     const emails = dedupeEmails([
         pickCompanyAddress(admin || {}),
         pickCompanyAddress(hr || {}),
-        pickCompanyAddress(management || {}),
     ]);
-    return { admin, hr, management, emails };
+    return { admin, hr, emails };
 };
 
 /** Employee document expiry routing: Admin + HR + employee HOD (primary reportee). */
@@ -332,9 +324,9 @@ const processCompanyReminders = async () => {
 
     for (const company of companies) {
         const docs = buildCompanyDocuments(company);
-        const activeThirdStageExtra1 = new Set(
+        const activeTaskWindowExtra1 = new Set(
             docs
-                .filter((doc) => getReminderStageMarker(getDaysUntil(doc.expiryDate)) === STAGE_3_MARKER)
+                .filter((doc) => isExpiryTaskWindow(getDaysUntil(doc.expiryDate)))
                 .map((doc) => {
                     const expLabel = formatExpiryDateLabel(doc.expiryDate);
                     return `Expiry follow-up required: ${doc.label}${expLabel ? ` (Exp: ${expLabel})` : ""}`;
@@ -344,53 +336,46 @@ const processCompanyReminders = async () => {
         await removeObsoleteExpiryActions({
             requestId: company._id,
             requestType: "Document Expiry Reminder",
-            allowedExtra1Set: activeThirdStageExtra1,
+            allowedExtra1Set: activeTaskWindowExtra1,
+        });
+        await purgeNonHrExpiryTasks({
+            requestId: company._id,
+            requestType: "Document Expiry Reminder",
+            hrObjectId: recipients.hr?._id || null,
         });
 
         for (const doc of docs) {
             const days = getDaysUntil(doc.expiryDate);
-            const reminderStage = getReminderStageMarker(days);
-            if (!reminderStage) continue;
+            if (days == null) continue;
 
             const expLabel = formatExpiryDateLabel(doc.expiryDate);
             const extra1 = `Expiry follow-up required: ${doc.label}${expLabel ? ` (Exp: ${expLabel})` : ""}`;
             const extra2 = `${company.name || ""} (${company.companyId || ""})`;
 
-            // Always ensure pending task exists while document is <=10 days or expired.
-            if (reminderStage === STAGE_3_MARKER) {
-                if (recipients.admin?._id) {
-                    await ensureDashboardAction({
-                        assignedTo: recipients.admin._id,
-                        assignedToEmpId: recipients.admin.employeeId,
-                        requestId: company._id,
-                        subjectEmployeeId: company.companyId,
-                        subjectName: company.name,
-                        extra1,
-                        extra2,
-                    });
-                }
-                if (recipients.hr?._id) {
-                    await ensureDashboardAction({
-                        assignedTo: recipients.hr._id,
-                        assignedToEmpId: recipients.hr.employeeId,
-                        requestId: company._id,
-                        subjectEmployeeId: company.companyId,
-                        subjectName: company.name,
-                        extra1,
-                        extra2,
-                    });
-                }
+            if (isExpiryTaskWindow(days) && recipients.hr?._id) {
+                await ensureDashboardAction({
+                    assignedTo: recipients.hr._id,
+                    assignedToEmpId: recipients.hr.employeeId,
+                    requestId: company._id,
+                    subjectEmployeeId: company.companyId,
+                    subjectName: company.name,
+                    extra1,
+                    extra2,
+                });
             }
+
+            const emailStage = getEmailReminderStageMarker(days);
+            if (emailStage == null) continue;
 
             const alreadySent = await wasReminderSent({
                 targetType: "company",
                 targetId: String(company._id),
                 docKey: doc.key,
-                daysBefore: reminderStage,
+                daysBefore: emailStage,
             });
             if (alreadySent) continue;
 
-            const stageLabel = getReminderStageLabel(reminderStage);
+            const stageLabel = getReminderStageLabel(emailStage);
             const subject = `Company document expiry ${stageLabel}: ${company.name}`;
             const html = `
                 <div style="font-family: Arial, sans-serif; line-height: 1.6;">
@@ -399,6 +384,7 @@ const processCompanyReminders = async () => {
                     <p><strong>Document:</strong> ${doc.label}</p>
                     <p><strong>Expiry Date:</strong> ${new Date(doc.expiryDate).toLocaleDateString("en-GB")}</p>
                     <p><strong>Current lead time:</strong> ${days} day(s) before expiry.</p>
+                    <p style="margin-top:12px;color:#555;font-size:13px;"><em>This email is sent to the designated <strong>Admin Controller</strong> and <strong>HR</strong> on the organizational flowchart. Follow-up tasks are assigned only to designated HR.</em></p>
                 </div>
             `;
 
@@ -412,22 +398,10 @@ const processCompanyReminders = async () => {
                 targetType: "company",
                 targetId: String(company._id),
                 docKey: doc.key,
-                daysBefore: reminderStage,
+                daysBefore: emailStage,
                 expiryDate: doc.expiryDate,
                 metadata: { companyName: company.name, docLabel: doc.label },
             });
-
-            // Create dashboard task only at third reminder stage.
-            if (reminderStage === STAGE_3_MARKER) {
-                await markReminderSent({
-                    targetType: "company",
-                    targetId: String(company._id),
-                    docKey: doc.key,
-                    daysBefore: THIRD_REMINDER_TASK_MARKER,
-                    expiryDate: doc.expiryDate,
-                    metadata: { taskCreated: true },
-                });
-            }
         }
     }
 };
@@ -494,9 +468,9 @@ const processEmployeeReminders = async () => {
             });
         }
 
-        const activeThirdStageExtra1 = new Set(
+        const activeTaskWindowExtra1 = new Set(
             docs
-                .filter((doc) => getReminderStageMarker(getDaysUntil(doc.expiryDate)) === STAGE_3_MARKER)
+                .filter((doc) => isExpiryTaskWindow(getDaysUntil(doc.expiryDate)))
                 .map((doc) => {
                     const expLabel = formatExpiryDateLabel(doc.expiryDate);
                     return `Expiry follow-up required: ${doc.label}${expLabel ? ` (Exp: ${expLabel})` : ""}`;
@@ -505,72 +479,51 @@ const processEmployeeReminders = async () => {
         await removeObsoleteExpiryActions({
             requestId: employee._id,
             requestType: "Employee Document Expiry Reminder",
-            allowedExtra1Set: activeThirdStageExtra1,
+            allowedExtra1Set: activeTaskWindowExtra1,
         });
 
         const recipients = await getEmployeeRecipientBundle(employee);
+        await purgeNonHrExpiryTasks({
+            requestId: employee._id,
+            requestType: "Employee Document Expiry Reminder",
+            hrObjectId: recipients.hr?._id || null,
+        });
         const subjectName = `${employee.firstName || ""} ${employee.lastName || ""}`.trim() || employee.employeeId;
 
         for (const doc of docs) {
             const days = getDaysUntil(doc.expiryDate);
-            const reminderStage = getReminderStageMarker(days);
-            if (!reminderStage) continue;
+            if (days == null) continue;
 
             const expLabel = formatExpiryDateLabel(doc.expiryDate);
             const extra1 = `Expiry follow-up required: ${doc.label}${expLabel ? ` (Exp: ${expLabel})` : ""}`;
             const extra2 = `${subjectName} (${employee.employeeId})`;
 
-            // Create pending inbox tasks for Admin + HR + reporting HOD.
-            if (reminderStage === STAGE_3_MARKER) {
-                for (const adminRecipient of recipients.admins || []) {
-                    if (!adminRecipient?._id) continue;
-                    await ensureDashboardAction({
-                        assignedTo: adminRecipient._id,
-                        assignedToEmpId: adminRecipient.employeeId,
-                        requestId: employee._id,
-                        subjectEmployeeId: employee.employeeId,
-                        subjectName,
-                        extra1,
-                        extra2,
-                        requestType: "Employee Document Expiry Reminder",
-                    });
-                }
-                if (recipients.hr?._id) {
-                    await ensureDashboardAction({
-                        assignedTo: recipients.hr._id,
-                        assignedToEmpId: recipients.hr.employeeId,
-                        requestId: employee._id,
-                        subjectEmployeeId: employee.employeeId,
-                        subjectName,
-                        extra1,
-                        extra2,
-                        requestType: "Employee Document Expiry Reminder",
-                    });
-                }
-                if (recipients.hod?._id) {
-                    await ensureDashboardAction({
-                        assignedTo: recipients.hod._id,
-                        assignedToEmpId: recipients.hod.employeeId,
-                        requestId: employee._id,
-                        subjectEmployeeId: employee.employeeId,
-                        subjectName,
-                        extra1,
-                        extra2,
-                        requestType: "Employee Document Expiry Reminder",
-                    });
-                }
+            if (isExpiryTaskWindow(days) && recipients.hr?._id) {
+                await ensureDashboardAction({
+                    assignedTo: recipients.hr._id,
+                    assignedToEmpId: recipients.hr.employeeId,
+                    requestId: employee._id,
+                    subjectEmployeeId: employee.employeeId,
+                    subjectName,
+                    extra1,
+                    extra2,
+                    requestType: "Employee Document Expiry Reminder",
+                });
             }
 
             const docKey = `employee:${employee.employeeId}:${doc.key}`;
+            const emailStage = getEmailReminderStageMarker(days);
+            if (emailStage == null) continue;
+
             const alreadySent = await wasReminderSent({
                 targetType: "employee",
                 targetId: String(employee._id),
                 docKey,
-                daysBefore: reminderStage,
+                daysBefore: emailStage,
             });
             if (alreadySent) continue;
 
-            const stageLabel = getReminderStageLabel(reminderStage);
+            const stageLabel = getReminderStageLabel(emailStage);
             const subject = `Employee document expiry ${stageLabel}: ${subjectName}`;
             const html = `
                 <div style="font-family: Arial, sans-serif; line-height: 1.6;">
@@ -579,6 +532,7 @@ const processEmployeeReminders = async () => {
                     <p><strong>Document:</strong> ${doc.label}</p>
                     <p><strong>Expiry Date:</strong> ${new Date(doc.expiryDate).toLocaleDateString("en-GB")}</p>
                     <p><strong>Current lead time:</strong> ${days} day(s) before expiry.</p>
+                    <p style="margin-top:12px;color:#555;font-size:13px;"><em>This email is sent to <strong>Admin</strong>, designated <strong>HR</strong> on the organizational flowchart, and the employee&rsquo;s <strong>primary reportee</strong>. Follow-up tasks are assigned only to designated HR.</em></p>
                 </div>
             `;
 
@@ -592,33 +546,23 @@ const processEmployeeReminders = async () => {
                 targetType: "employee",
                 targetId: String(employee._id),
                 docKey,
-                daysBefore: reminderStage,
+                daysBefore: emailStage,
                 expiryDate: doc.expiryDate,
                 metadata: { employeeId: employee.employeeId, docLabel: doc.label },
             });
-
-            // Create dashboard task/notification only at third reminder stage.
-            if (reminderStage === STAGE_3_MARKER) {
-                await markReminderSent({
-                    targetType: "employee",
-                    targetId: String(employee._id),
-                    docKey,
-                    daysBefore: THIRD_REMINDER_TASK_MARKER,
-                    expiryDate: doc.expiryDate,
-                    metadata: { taskCreated: true },
-                });
-            }
         }
     }
 };
 
 /**
- * Older runs stored employee document tasks as `Document Expiry Reminder` assigned to HR/Admin.
- * Pending rows whose `requestId` is an employee `_id` are moved to `Employee Document Expiry Reminder`
- * and assigned to that employee so company vs employee notification UIs stay separated.
+ * Legacy: rows that used `Document Expiry Reminder` for an employee `_id` are retyped to
+ * `Employee Document Expiry Reminder` and assigned to the designated Flowchart HR.
  */
 const migrateLegacyEmployeeDocExpiryActions = async () => {
     try {
+        const hrFlow = await getDepartmentHOD("hr");
+        if (!hrFlow?._id) return;
+
         const pending = await DashboardAction.find({
             requestType: "Document Expiry Reminder",
             status: "Pending",
@@ -635,7 +579,8 @@ const migrateLegacyEmployeeDocExpiryActions = async () => {
                 {
                     $set: {
                         requestType: "Employee Document Expiry Reminder",
-                        assignedTo: emp._id,
+                        assignedTo: hrFlow._id,
+                        ...(hrFlow.employeeId ? { assignedToEmpId: hrFlow.employeeId } : {}),
                     },
                 }
             );

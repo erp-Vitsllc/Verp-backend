@@ -1,6 +1,7 @@
 import Company from "../../models/Company.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { calculateCompanyActivationProgress } from "../../utils/companyActivation.js";
+import { isRequestUserDesignatedFlowchartHr } from "../../utils/isDesignatedFlowchartHr.js";
 
 /**
  * Get a single company by its companyId (e.g., EST-001)
@@ -123,6 +124,21 @@ export const getCompany = async (req, res) => {
             }));
         }
 
+        const viewerIsDesignatedFlowchartHr = await isRequestUserDesignatedFlowchartHr(req);
+
+        if (Array.isArray(companyObj.pendingNotRenewRequests) && companyObj.pendingNotRenewRequests.length) {
+            for (const p of companyObj.pendingNotRenewRequests) {
+                const key = (p.supportingAttachmentKey || "").trim();
+                if (key) {
+                    try {
+                        p.supportingAttachmentUrl = await getSignedFileUrl(key);
+                    } catch {
+                        p.supportingAttachmentUrl = "";
+                    }
+                }
+            }
+        }
+
         // --- FETCH COMPANY ASSETS (Direct Company Assignments Only) ---
         // Find assets assigned specifically to this company
         const companyAssets = await AssetItem.find({
@@ -149,6 +165,7 @@ export const getCompany = async (req, res) => {
             company: companyObj,
             employeeCount: employeeCount,
             activationProgress: calculateCompanyActivationProgress(companyObj),
+            viewerIsDesignatedFlowchartHr,
         });
     } catch (error) {
         console.error("Error fetching company:", error);

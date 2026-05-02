@@ -28,7 +28,8 @@ export const syncDashboardAction = async (data) => {
             actionedBy,
             comment,
             requestedByName,
-            notifySubjectEmployee,
+            /** Profile Activation On Hold: outcome row for the submitter (dashboard / sidebar). */
+            profileActivationNotifyAssignee,
             /** When true, do not mark assignee Pending rows as completed (used for Profile hold: HR keeps the task open). */
             skipPendingCompletion = false,
         } = data;
@@ -57,41 +58,42 @@ export const syncDashboardAction = async (data) => {
                 );
             }
 
-            // Profile Activation: give the subject employee their own completed row (inbox/outgoing merge in stats UI).
+            // Profile Activation — On Hold only: dashboard / task row for the **submitter** (not the profile subject).
+            // Approve / Reject: email only; no outcome row here (callers omit profileActivationNotifyAssignee).
             if (
-                notifySubjectEmployee &&
                 requestType === 'Profile Activation' &&
+                status === 'On Hold' &&
                 subjectEmployee?._id &&
-                ['Approved', 'Rejected', 'On Hold'].includes(status)
+                profileActivationNotifyAssignee?._id
             ) {
+                const assignee = profileActivationNotifyAssignee;
                 const subj = subjectEmployee;
-                const subjectName = `${subj.firstName || ''} ${subj.lastName || ''}`.trim() || 'Employee';
+                const subjectNameDisplay = `${subj.firstName || ''} ${subj.lastName || ''}`.trim() || 'Employee';
                 const outcomeExtra1 =
-                    status === 'Approved'
-                        ? '[Employee profile] Your profile has been activated'
-                        : status === 'Rejected'
-                            ? '[Employee profile] Your profile activation requires updates'
-                            : (extra1 || '[Employee profile] HR placed your activation on hold — please update the items listed in your email.');
+                    extra1 ||
+                    '[Employee profile] HR placed your activation on hold — please update the listed items.';
                 await DashboardAction.findOneAndUpdate(
-                    { requestId, assignedTo: subj._id, requestType },
+                    { requestId, assignedTo: assignee._id, requestType },
                     {
-                        assignedTo: subj._id,
-                        assignedToEmpId: subj.employeeId,
+                        assignedTo: assignee._id,
+                        assignedToEmpId: assignee.employeeId,
                         requestId,
                         requestType,
-                        status,
+                        status: 'On Hold',
                         subjectEmployeeId: subj.employeeId,
-                        subjectName: subjectName,
+                        subjectName: subjectNameDisplay,
                         requestedByName: requestedByName || '',
                         requestedDate: new Date(),
                         extra1: outcomeExtra1,
                         extra2: subj.designation || '',
-                        extra3: extra3 ?? JSON.stringify({ activationSubject: 'employee', activationViewerRole: 'subject' }),
+                        extra3:
+                            extra3 ??
+                            JSON.stringify({ activationSubject: 'employee', activationViewerRole: 'submitter' }),
                         actionedDate: new Date(),
                         actionedBy: actionedBy || null,
-                        comment: comment || ''
+                        comment: comment || '',
                     },
-                    { upsert: true, new: true, setDefaultsOnInsert: true }
+                    { upsert: true, new: true, setDefaultsOnInsert: true },
                 );
             }
 

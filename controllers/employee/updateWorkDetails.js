@@ -1,7 +1,8 @@
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import User from "../../models/User.js";
 import { getCompleteEmployee } from "../../services/employeeService.js";
-import { triggerProfileReactivationIfNeeded, shouldQueueProfileChange } from "../../utils/triggerProfileReactivation.js";
+import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
+import { skipLiveProfileWritesPendingHr, queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
 import { markProfileActivationHoldResolvedForSection } from "../../utils/markProfileActivationHoldResolved.js";
 
 export const updateWorkDetails = async (req, res) => {
@@ -70,40 +71,35 @@ export const updateWorkDetails = async (req, res) => {
             updatePayload.probationPeriod = 6;
         }
 
-        const requiresApprovalQueue = shouldQueueProfileChange(employee);
-        if (requiresApprovalQueue) {
-            await triggerProfileReactivationIfNeeded({
-                employeeId,
-                actor: req.user,
-                reason: "Work details updated",
-                changeEntry: {
-                    card: "Work Details",
-                    reason: "Work details updated",
-                    section: "workDetails",
-                    changeType: "update",
-                    targetIndex: null,
-                    previousData: {
-                        reportingAuthority: employee.reportingAuthority || null,
-                        primaryReportee: employee.primaryReportee || null,
-                        secondaryReportee: employee.secondaryReportee || null,
-                        overtime: employee.overtime,
-                        status: employee.status,
-                        probationPeriod: employee.probationPeriod,
-                        designation: employee.designation,
-                        department: employee.department,
-                        company: employee.company || null,
-                        contractJoiningDate: employee.contractJoiningDate || null,
-                        contractExpiryDate: employee.contractExpiryDate || null,
-                        dateOfJoining: employee.dateOfJoining || null,
-                        companyEmail: employee.companyEmail || "",
-                        profileStatus: employee.profileStatus,
-                        profileApprovalStatus: employee.profileApprovalStatus,
-                    },
-                    proposedData: updatePayload,
-                },
-            });
-        } else {
-            // 5. Update EmployeeBasic
+        const skipLive = skipLiveProfileWritesPendingHr(employee);
+
+        const workChangeEntry = {
+            card: "Work Details",
+            reason: "Work details updated",
+            section: "workDetails",
+            changeType: "update",
+            targetIndex: null,
+            previousData: {
+                reportingAuthority: employee.reportingAuthority || null,
+                primaryReportee: employee.primaryReportee || null,
+                secondaryReportee: employee.secondaryReportee || null,
+                overtime: employee.overtime,
+                status: employee.status,
+                probationPeriod: employee.probationPeriod,
+                designation: employee.designation,
+                department: employee.department,
+                company: employee.company || null,
+                contractJoiningDate: employee.contractJoiningDate || null,
+                contractExpiryDate: employee.contractExpiryDate || null,
+                dateOfJoining: employee.dateOfJoining || null,
+                companyEmail: employee.companyEmail || "",
+                profileStatus: employee.profileStatus,
+                profileApprovalStatus: employee.profileApprovalStatus,
+            },
+            proposedData: updatePayload,
+        };
+
+        if (!skipLive) {
             const updated = await EmployeeBasic.findOneAndUpdate(
                 { employeeId },
                 { $set: updatePayload },
@@ -118,22 +114,32 @@ export const updateWorkDetails = async (req, res) => {
                 employeeId,
                 actor: req.user,
                 reason: "Work details updated",
+                changeEntry: null,
+                trackDefaultChange: true,
             });
 
-            // 6. Sync companyEmail to User model if updated
             if (updatePayload.companyEmail !== undefined) {
-                // Find linked User by employeeId
                 await User.findOneAndUpdate(
                     { employeeId: employeeId },
                     { $set: { companyEmail: updatePayload.companyEmail } }
                 );
             }
+        } else {
+            await queueOrTriggerProfileChange({
+                employeeId,
+                actor: req.user,
+                reason: "Work details updated",
+                employeeBasic: employee,
+                changeEntry: workChangeEntry,
+            });
         }
 
-        try {
-            await markProfileActivationHoldResolvedForSection(employeeId, "workDetails");
-        } catch (_e) {
-            /* ignore */
+        if (!skipLive) {
+            try {
+                await markProfileActivationHoldResolvedForSection(employeeId, "workDetails");
+            } catch (_e) {
+                /* ignore */
+            }
         }
 
         // Get updated employee data
@@ -142,7 +148,7 @@ export const updateWorkDetails = async (req, res) => {
 
         // 7. Return success
         return res.status(200).json({
-            message: requiresApprovalQueue
+            message: skipLive
                 ? "Work details change queued for HR activation approval."
                 : "Work details updated",
             employee: completeEmployee

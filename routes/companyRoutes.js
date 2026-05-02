@@ -6,6 +6,10 @@ import { getNextCompanyId } from "../controllers/company/getNextCompanyId.js";
 import { protect } from "../middleware/authMiddleware.js";
 
 import { updateCompany } from "../controllers/company/updateCompany.js";
+import {
+    submitCompanyNotRenewRequest,
+    respondCompanyNotRenewRequest,
+} from "../controllers/company/companyNotRenewController.js";
 import { uploadCompanyDocument } from "../controllers/company/uploadCompanyDocument.js";
 import { deleteCompany } from "../controllers/company/deleteCompany.js";
 import { respondToResponsibility } from "../controllers/company/respondToResponsibility.js";
@@ -27,6 +31,8 @@ router.get("/all-owners", getAllOwners);
 router.get("/:id", getCompany);
 router.post("/", addCompany);
 router.patch("/:id", updateCompany);
+router.post("/:id/not-renew-requests", submitCompanyNotRenewRequest);
+router.post("/:id/not-renew-requests/:requestId/respond", respondCompanyNotRenewRequest);
 router.post("/:id/submit-activation", submitCompanyActivationRequest);
 router.post("/:id/approve-activation", approveCompanyActivationRequest);
 router.post("/:id/hold-activation", holdCompanyActivationRequest);

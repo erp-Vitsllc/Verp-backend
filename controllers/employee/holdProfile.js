@@ -106,9 +106,14 @@ export const holdProfile = async (req, res) => {
         await doc.save();
 
         const subjectLean = await EmployeeBasic.findOne({ employeeId })
-            .select("_id employeeId firstName lastName designation companyEmail workEmail email personalEmail primaryReportee")
-            .populate("primaryReportee", "firstName lastName employeeId companyEmail workEmail email")
+            .select("_id employeeId firstName lastName designation companyEmail workEmail email personalEmail")
             .lean();
+
+        const submitterForNotify = doc.profileActivationSubmittedBy
+            ? await EmployeeBasic.findById(doc.profileActivationSubmittedBy)
+                  .select("_id employeeId firstName lastName designation companyEmail workEmail email personalEmail")
+                  .lean()
+            : null;
 
         const outcomeExtra1 = `[Employee profile] On hold — update: ${(doc.profileActivationHold.unapprovedCards || []).join(", ")}`;
 
@@ -119,23 +124,19 @@ export const holdProfile = async (req, res) => {
             status: "On Hold",
             skipPendingCompletion: true,
             subjectEmployee: subjectLean || doc,
+            profileActivationNotifyAssignee: submitterForNotify || undefined,
             requestedByName: req.user?.name || "",
             actionedBy: req.user?.employeeObjectId || req.user?._id,
             comment: comment || unapprovedCards.join(", "),
-            notifySubjectEmployee: true,
             extra1: outcomeExtra1,
-            extra3: JSON.stringify({ activationSubject: "employee", activationViewerRole: "subject" }),
+            extra3: JSON.stringify({ activationSubject: "employee", activationViewerRole: "submitter" }),
         });
 
         const completeForEmail = await getCompleteEmployee(employeeId);
-        const hod =
-            typeof completeForEmail?.primaryReportee === "object" && completeForEmail.primaryReportee !== null
-                ? completeForEmail.primaryReportee
-                : subjectLean?.primaryReportee;
 
         sendProfileActivationHoldEmail({
-            employee: completeForEmail,
-            hodEmployee: hod,
+            subjectEmployee: completeForEmail,
+            submitterEmployee: submitterForNotify,
             hrManager: req.user,
             unapprovedCards: doc.profileActivationHold.unapprovedCards || [],
             comment: doc.profileActivationHold.comment || "",

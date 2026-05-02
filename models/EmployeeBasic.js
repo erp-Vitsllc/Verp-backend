@@ -40,6 +40,8 @@ const employeeBasicSchema = new mongoose.Schema(
         },
         // SNAPSHOT: Manager who received the profile submission
         profileSubmittedTo: { type: mongoose.Schema.Types.ObjectId, ref: "EmployeeBasic", default: null },
+        /** EmployeeBasic _id of the portal user who clicked "Send for Activation" (hold / resubmit UX is for them only, not primary reportee). */
+        profileActivationSubmittedBy: { type: mongoose.Schema.Types.ObjectId, ref: "EmployeeBasic", default: null },
 
         // NEW: Profile Workflow Array
         profileWorkflow: [{
@@ -65,6 +67,32 @@ const employeeBasicSchema = new mongoose.Schema(
                 proposedData: { type: mongoose.Schema.Types.Mixed, default: null },
                 changedAt: { type: Date, default: Date.now },
             }
+        ],
+
+        /** Pending HR approval for archiving a manual employee document ("Not renew") */
+        pendingNotRenewRequests: [
+            {
+                requestId: { type: String, required: true },
+                kind: {
+                    type: String,
+                    enum: ["manualDocument"],
+                    required: true,
+                },
+                label: { type: String, default: "" },
+                documentIndex: { type: Number },
+                documentItemId: { type: String, default: "" },
+                reason: { type: String, required: true },
+                supportingAttachmentKey: { type: String, default: "" },
+                supportingAttachmentName: { type: String, default: "" },
+                status: { type: String, enum: ["pending", "approved", "rejected"], default: "pending" },
+                submittedByUserId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+                submittedByName: { type: String, default: "" },
+                submittedByEmployeeId: { type: String, default: "" },
+                submittedAt: { type: Date, default: Date.now },
+                hrComment: { type: String, default: "" },
+                actionedAt: { type: Date },
+                actionedByUserId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+            },
         ],
 
         /** Set when HR uses partial hold — profile stays submitted/inactive until full approval or resubmit. */

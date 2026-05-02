@@ -3,6 +3,7 @@ import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { getCompleteEmployee } from "../../services/employeeService.js";
 import { resolveFlowchartHrEmployee } from "../../utils/resolveFlowchartHrEmployee.js";
 import { syncDashboardAction } from "../../utils/syncDashboard.js";
+import { resolveProfileActivationSubmitterId } from "../../utils/resolveProfileActivationSubmitterId.js";
 
 const dedupeEmailList = (emails = []) => {
     const seen = new Set();
@@ -17,7 +18,7 @@ const dedupeEmailList = (emails = []) => {
         });
 };
 
-/** HR is To; employee + primary reportee are CC (same thread). */
+/** HR is To; CC fallback when submitter id is unknown (legacy). Prefer submitter-only CC in handler when possible. */
 const buildProfileActivationCc = (emp, hrEmail) => {
     const skip = new Set();
     const h = (hrEmail || "").trim().toLowerCase();
@@ -53,17 +54,12 @@ export const sendApprovalEmail = async (req, res) => {
             return res.status(400).json({ message: "Edited details are required for profile activation request." });
         }
 
-        const hold = employeeBasic.profileActivationHold;
-        const unapprovedHeld = Array.isArray(hold?.unapprovedEntryIds) ? hold.unapprovedEntryIds : [];
-        const resolvedHeld = new Set((hold?.resolvedEntryIds || []).map(String));
-        if (unapprovedHeld.length > 0) {
-            const allFixed = unapprovedHeld.every((id) => resolvedHeld.has(String(id)));
-            if (!allFixed) {
-                return res.status(400).json({
-                    message:
-                        "HR placed your activation on hold. Update every flagged item first (they turn green after you save), then submit again.",
-                });
-            }
+        const submitterEmployeeId = await resolveProfileActivationSubmitterId(req);
+        if (!submitterEmployeeId) {
+            return res.status(400).json({
+                message:
+                    "Your portal login must be linked to an Employee record before you can send activation to HR. Check user → employee mapping or employee ID on your account.",
+            });
         }
 
         const reasonText = String(reason).trim();
@@ -149,7 +145,23 @@ export const sendApprovalEmail = async (req, res) => {
             </div>
         `;
 
-        const ccEmails = buildProfileActivationCc(employeeBasic, hrEmail);
+        let ccEmails = [];
+        const hrLower = (hrEmail || "").trim().toLowerCase();
+        const subCc = await EmployeeBasic.findById(submitterEmployeeId)
+            .select("companyEmail workEmail email personalEmail")
+            .lean();
+        if (subCc) {
+            ccEmails = dedupeEmailList([
+                subCc.companyEmail,
+                subCc.workEmail,
+                subCc.email,
+                subCc.personalEmail,
+            ]).filter((e) => e && String(e).trim().toLowerCase() !== hrLower);
+        }
+        if (!ccEmails.length) {
+            ccEmails = buildProfileActivationCc(employeeBasic, hrEmail);
+        }
+
         console.log(`[sendApprovalEmail] To (HR): ${hrEmail}`, ccEmails.length ? `CC: ${ccEmails.join(", ")}` : "");
         await transporter.sendMail({
             from: `"VeRP Portal" <${emailUser}>`,
@@ -160,8 +172,11 @@ export const sendApprovalEmail = async (req, res) => {
         });
 
         await EmployeeBasic.findByIdAndUpdate(employeeBasic._id, {
-            profileApprovalStatus: "submitted",
-            profileSubmittedTo: hrEmployee._id,
+                $set: {
+                    profileApprovalStatus: "submitted",
+                    profileSubmittedTo: hrEmployee._id,
+                    profileActivationSubmittedBy: submitterEmployeeId,
+                },
             $unset: { profileActivationHold: "" },
             $push: {
                 profileWorkflow: {

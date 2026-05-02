@@ -3,7 +3,8 @@ import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeS
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { uploadDocumentToS3, deleteDocumentFromS3 } from "../../utils/s3Upload.js";
 import { archiveEmployeeDocument } from "../../utils/archiveEmployeeDocument.js";
-import { triggerProfileReactivationIfNeeded, shouldQueueProfileChange } from "../../utils/triggerProfileReactivation.js";
+import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
+import { skipLiveProfileWritesPendingHr, queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
 
 const ALLOWED_VISA_TYPES = ["visit", "employment", "spouse"];
 
@@ -64,8 +65,10 @@ export const updateVisaDetails = async (req, res) => {
             return res.status(404).json({ message: "Employee not found." });
         }
         const employeeId = employee.employeeId;
-        const employeeBasic = await EmployeeBasic.findOne({ employeeId }).select("company profileStatus status profileWorkflow").lean();
-        const requiresApprovalQueue = shouldQueueProfileChange(employeeBasic);
+        const employeeBasic = await EmployeeBasic.findOne({ employeeId })
+            .select("company profileStatus status profileWorkflow profileApprovalStatus")
+            .lean();
+        const skipLive = skipLiveProfileWritesPendingHr(employeeBasic);
 
         // Check if existing document exists in database (check for both url and data for backward compatibility)
         const existingVisa = await EmployeeVisa.findOne({ employeeId });
@@ -94,7 +97,7 @@ export const updateVisaDetails = async (req, res) => {
         const previousVisaEntry = existingVisa?.[visaType];
         const hasExistingDocument = Boolean(previousVisaEntry?.document?.url || previousVisaEntry?.document?.data);
         const hasNewDocumentUpload = Boolean(visaCopy && typeof visaCopy === "string" && visaCopy.trim() !== "");
-        const shouldArchivePrevious = !requiresApprovalQueue && hasExistingDocument && hasNewDocumentUpload;
+        const shouldArchivePrevious = !skipLive && hasExistingDocument && hasNewDocumentUpload;
         if (shouldArchivePrevious) {
             await archiveEmployeeDocument({
                 employeeId,
@@ -153,32 +156,44 @@ export const updateVisaDetails = async (req, res) => {
             lastUpdated: new Date(),
         };
 
-        // Always persist visa changes to DB.
-        // If profile is in reactivation flow, we still store the record, but also track it for HR re-approval.
-        const updatedVisa = await EmployeeVisa.findOneAndUpdate(
-            { employeeId },
-            {
-                $set: {
-                    [visaType]: visaPayload,
+        let updatedVisa = existingVisa;
+        if (!skipLive) {
+            updatedVisa = await EmployeeVisa.findOneAndUpdate(
+                { employeeId },
+                {
+                    $set: {
+                        [visaType]: visaPayload,
+                    },
                 },
-            },
-            { upsert: true, new: true }
-        );
+                { upsert: true, new: true }
+            );
+        }
 
-        if (requiresApprovalQueue) {
+        const visaChangeEntry = {
+            card: `${visaType} Visa`,
+            reason: `${visaType} visa details updated`,
+            section: "visa",
+            changeType: "update",
+            targetIndex: null,
+            previousData: existingVisa?.[visaType] || null,
+            proposedData: { visaType, ...visaPayload },
+        };
+
+        if (skipLive) {
+            await queueOrTriggerProfileChange({
+                employeeId,
+                actor: req.user,
+                reason: `${visaType} visa details updated`,
+                employeeBasic,
+                changeEntry: visaChangeEntry,
+            });
+        } else {
             await triggerProfileReactivationIfNeeded({
                 employeeId,
                 actor: req.user,
                 reason: `${visaType} visa details updated`,
-                changeEntry: {
-                    card: `${visaType} Visa`,
-                    reason: `${visaType} visa details updated`,
-                    section: "visa",
-                    changeType: "update",
-                    targetIndex: null,
-                    previousData: existingVisa?.[visaType] || null,
-                    proposedData: { visaType, ...visaPayload },
-                },
+                changeEntry: null,
+                trackDefaultChange: true,
             });
         }
 
@@ -188,7 +203,7 @@ export const updateVisaDetails = async (req, res) => {
         expiryCheck.setHours(0, 0, 0, 0);
         todayCheck.setHours(0, 0, 0, 0);
 
-        if (!requiresApprovalQueue && expiryCheck <= todayCheck) {
+        if (!skipLive && expiryCheck <= todayCheck) {
             // If the visa being updated is expired, set employee status to Inactive
             // Only update if currently 'Active' to avoid overwriting other statuses like 'Terminated' or 'Resigned'
             await EmployeeBasic.updateOne(
@@ -197,17 +212,10 @@ export const updateVisaDetails = async (req, res) => {
             );
         }
 
-        if (!requiresApprovalQueue) {
-            await triggerProfileReactivationIfNeeded({
-                employeeId,
-                actor: req.user,
-                reason: `${visaType} visa details updated`,
-            });
-        }
         const completeEmployee = await getCompleteEmployee(employeeId);
 
         return res.json({
-            message: requiresApprovalQueue
+            message: skipLive
                 ? `${visaType} visa change queued for HR activation approval.`
                 : `${visaType} visa details updated successfully.`,
             visaDetails: {

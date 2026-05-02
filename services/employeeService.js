@@ -361,6 +361,7 @@ export const getCompleteEmployee = async (id) => {
             } : undefined,
             // Include documents but exclude base64 data (metadata only) - reduces payload by ~90%
             documents: basicDocuments ? basicDocuments.map(doc => ({
+                _id: doc._id,
                 type: doc.type,
                 description: doc.description,
                 issueDate: doc.issueDate,

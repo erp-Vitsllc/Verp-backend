@@ -41,6 +41,10 @@ import { uploadProfilePicture } from "../controllers/employee/uploadProfilePictu
 import { uploadSignature } from "../controllers/employee/uploadSignature.js";
 import { uploadDocument } from "../controllers/employee/uploadDocument.js";
 import { deleteDocument } from "../controllers/employee/deleteDocument.js";
+import {
+    submitEmployeeDocumentNotRenewRequest,
+    respondEmployeeDocumentNotRenewRequest,
+} from "../controllers/employee/employeeNotRenewController.js";
 import { addDocument } from "../controllers/employee/addDocument.js";
 import { updateDocument } from "../controllers/employee/updateDocument.js";
 import { protect } from "../middleware/authMiddleware.js";
@@ -186,6 +190,8 @@ router.post("/upload-document/:id", checkPermission('hrm_employees_view', 'edit'
 router.post("/:id/document", checkPermission('hrm_employees_view', 'edit'), addDocument);
 router.patch("/:id/document/:index", checkPermission('hrm_employees_view', 'edit'), updateDocument);
 router.delete("/:id/document/:index", checkPermission('hrm_employees_view', 'edit'), deleteDocument);
+router.post("/:id/document-not-renew-requests", submitEmployeeDocumentNotRenewRequest);
+router.post("/:id/document-not-renew-requests/:requestId/respond", respondEmployeeDocumentNotRenewRequest);
 
 // All :id specific routes must come before the generic :id route
 // Emergency contacts - requires edit permission

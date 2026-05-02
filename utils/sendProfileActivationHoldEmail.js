@@ -1,35 +1,33 @@
 import nodemailer from "nodemailer";
 
-export const sendProfileActivationHoldEmail = async ({
-    employee,
-    hodEmployee,
-    hrManager,
-    unapprovedCards = [],
-    comment = "",
-}) => {
+const pickEmployeeEmail = (emp) =>
+    emp?.companyEmail || emp?.workEmail || emp?.personalEmail || emp?.email || "";
+
+/**
+ * Emails **only** the portal user who submitted for activation (`submitterEmployee` from `profileActivationSubmittedBy`).
+ * Does not mail the profile subject. No-op if submitter record or email is missing.
+ */
+export const sendProfileActivationHoldEmail = async (params) => {
+    const { subjectEmployee, submitterEmployee = null, hrManager, unapprovedCards = [], comment = "" } = params;
+    const employee = subjectEmployee;
+    if (!employee) return;
+
+    if (!submitterEmployee) {
+        console.warn(
+            `[hold email] Skipped — no activation submitter (profileActivationSubmittedBy) for employeeId ${employee.employeeId}`,
+        );
+        return;
+    }
+
+    const toEmail = pickEmployeeEmail(submitterEmployee).trim();
+    if (!toEmail) {
+        console.warn(
+            `[hold email] Skipped — submitter has no email (subject employeeId ${employee.employeeId})`,
+        );
+        return;
+    }
+
     try {
-        const employeeEmail =
-            employee.companyEmail || employee.workEmail || employee.personalEmail || employee.email;
-        if (!employeeEmail) {
-            console.warn(`[hold email] No email found for employee ${employee.employeeId}`);
-            return;
-        }
-
-        const hodEmailRaw =
-            hodEmployee &&
-            String(
-                hodEmployee.companyEmail ||
-                    hodEmployee.workEmail ||
-                    hodEmployee.email ||
-                    hodEmployee.personalEmail ||
-                    "",
-            ).trim();
-
-        const hodEmail =
-            hodEmailRaw &&
-            hodEmailRaw.toLowerCase() !== String(employeeEmail).toLowerCase()
-                ? hodEmailRaw.toLowerCase()
-                : "";
         const emailUser = process.env.EMAIL_USER?.trim();
         const emailPass = process.env.EMAIL_PASS?.trim();
         if (!emailUser || !emailPass) return;
@@ -41,7 +39,11 @@ export const sendProfileActivationHoldEmail = async ({
             auth: { user: emailUser, pass: emailPass },
         });
 
-        const employeeName = `${employee.firstName || ""} ${employee.lastName || ""}`.trim();
+        const profileName = `${employee.firstName || ""} ${employee.lastName || ""}`.trim() || "Employee";
+        const greetingName =
+            `${submitterEmployee.firstName || ""} ${submitterEmployee.lastName || ""}`.trim() ||
+            "there";
+
         const hrName = (() => {
             const m = hrManager;
             if (!m) return "HR";
@@ -54,56 +56,41 @@ export const sendProfileActivationHoldEmail = async ({
         const profileUrl = `${baseUrl}/emp/${employee.employeeId}`;
         const listHtml = unapprovedCards.length
             ? `<ul style="margin:12px 0;padding-left:20px;"><li>${unapprovedCards.join("</li><li>")}</li></ul>`
-            : "<p>No specific cards were listed; please open your profile to review HR notes.</p>";
+            : "<p>No specific cards were listed; please open the employee profile to review HR notes.</p>";
         const commentBlock =
             comment && String(comment).trim()
                 ? `<div style="background:#fef3c7;padding:14px;border-radius:8px;margin:18px 0;border-left:4px solid #d97706;"><strong>HR note:</strong><br/>${String(comment).trim().replace(/\n/g, "<br/>")}</div>`
                 : "";
 
-        const hodName = hodEmployee
-            ? `${hodEmployee.firstName || ""} ${hodEmployee.lastName || ""}`.trim() ||
-              hodEmployee.name ||
-              "Primary manager"
-            : "";
+        const samePerson =
+            employee?._id &&
+            String(submitterEmployee._id || submitterEmployee.id || "") === String(employee._id || employee.id || "");
 
-        const hodCopy = hodEmail
-            ? `
-                        <hr style="border:none;border-top:1px solid #e2e8f0;margin:24px 0;" />
-                        <p><strong>Note for managers (copied)</strong>${hodName ? ` — ${hodName}` : ''}: activation is <strong>on hold</strong> until pending items listed above are corrected.</p>
-                        <p>Open their profile any time:</p>
-                        <p style="text-align:center;margin-top:14px;">
-                            <a href="${profileUrl}" style="background:#0f766e;color:#fff;padding:10px 18px;text-decoration:none;border-radius:8px;font-weight:600;display:inline-block;">Open employee profile</a>
-                        </p>
-            `
-            : "";
+        const introSame = `<p>${hrName} reviewed the activation request and placed it <strong>on hold</strong>. The profile is <strong>not activated</strong> until the items below are corrected and you send for reactivation again.</p>`;
+        const introOther = `<p>${hrName} reviewed your submitted activation for <strong>${profileName}</strong> (Employee ID: <strong>${employee.employeeId || "—"}</strong>) and placed it <strong>on hold</strong>. The profile is <strong>not activated</strong> until the listed items are addressed and activation is sent again.</p>`;
 
         const mailOpts = {
             from: `"VeRP Portal" <${emailUser}>`,
-            to: employeeEmail,
-            subject: `${employeeName}: profile activation — items to update (held by HR)`,
+            to: toEmail,
+            subject: `${profileName}: profile activation — items to update (held by HR)`,
             html: `
                 <div style="font-family:Segoe UI,Arial,sans-serif;color:#1e293b;line-height:1.6;max-width:600px;margin:0 auto;border:1px solid #e2e8f0;border-radius:12px;overflow:hidden;">
                     <div style="background:#b45309;color:#fff;padding:22px;">
                         <h1 style="margin:0;font-size:20px;">Activation on hold</h1>
                     </div>
                     <div style="padding:28px;">
-                        <p>Hello <strong>${employeeName}</strong>,</p>
-                        <p>${hrName} reviewed your profile activation and placed it <strong>on hold</strong>. Your profile is <strong>not activated</strong> until these items are corrected and you send for reactivation.</p>
+                        <p>Hello <strong>${greetingName}</strong>,</p>
+                        ${samePerson ? introSame : introOther}
                         <p><strong>Items not approved (please update):</strong></p>
                         ${listHtml}
                         ${commentBlock}
-                        ${hodCopy}
                         <p style="text-align:center;margin-top:28px;">
-                            <a href="${profileUrl}" style="background:#1d4ed8;color:#fff;padding:12px 22px;text-decoration:none;border-radius:8px;font-weight:600;display:inline-block;">Review profile</a>
+                            <a href="${profileUrl}" style="background:#1d4ed8;color:#fff;padding:12px 22px;text-decoration:none;border-radius:8px;font-weight:600;display:inline-block;">Open employee profile</a>
                         </p>
                     </div>
                 </div>
             `,
         };
-
-        if (hodEmail) {
-            mailOpts.cc = hodEmail;
-        }
 
         await transporter.sendMail(mailOpts);
     } catch (e) {

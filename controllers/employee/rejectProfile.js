@@ -18,6 +18,7 @@ export const rejectProfile = async (req, res) => {
 
         const employeeId = employee.employeeId;
         const submittedToAssigneeId = employee.profileSubmittedTo;
+        const activationSubmitterId = employee.profileActivationSubmittedBy || null;
 
         // Update EmployeeBasic
         // Set profileApprovalStatus to 'rejected'
@@ -27,8 +28,9 @@ export const rejectProfile = async (req, res) => {
             {
                 profileApprovalStatus: "rejected",
                 profileStatus: "inactive",
-                $unset: { profileActivationHold: 1 },
+                $unset: { profileActivationHold: 1, profileActivationSubmittedBy: 1 },
                 $set: {
+                    pendingReactivationChanges: [],
                     "profileWorkflow.$[elem].status": "rejected",
                     "profileWorkflow.$[elem].actionedAt": new Date(),
                     "profileWorkflow.$[elem].comment": reason || "Profile activation request rejected."
@@ -56,19 +58,40 @@ export const rejectProfile = async (req, res) => {
                 actionedBy: req.user?.employeeObjectId || req.user?._id,
                 requestedByName: req.user?.name || "",
                 comment: reason,
-                notifySubjectEmployee: true
             });
         } catch (syncErr) {
             console.error("[RejectProfile] Dashboard Sync Error:", syncErr);
         }
 
+        try {
+            const DashboardAction = (await import("../../models/DashboardAction.js")).default;
+            await DashboardAction.updateMany(
+                { requestId: updated._id, requestType: "Profile Activation", status: "On Hold" },
+                {
+                    status: "Rejected",
+                    actionedDate: new Date(),
+                    actionedBy: req.user?.employeeObjectId || req.user?._id,
+                    comment: reason || "",
+                },
+            );
+        } catch (_clearErr) {
+            /* non-fatal */
+        }
+
         // Get complete employee data for response
         const completeEmployee = await getCompleteEmployee(employeeId);
+
+        const recipientForActivationEmail = activationSubmitterId
+            ? await EmployeeBasic.findById(activationSubmitterId)
+                  .select("firstName lastName employeeId companyEmail workEmail email personalEmail")
+                  .lean()
+            : null;
 
         // Trigger Email Notification (Background)
         const manager = req.user; // The person who rejected
         sendProfileNotification({
             employee: completeEmployee,
+            recipientEmployee: recipientForActivationEmail,
             manager: manager,
             status: 'rejected',
             reason: reason || "Profile activation request rejected. Please review your details."

@@ -7,27 +7,7 @@ import { buildResponsibilityEmailData } from "../../utils/flowchartResponsibilit
 import { getSignedFileUrl } from "../../utils/s3Upload.js";
 import { calculateCompanyActivationProgress, shouldTriggerCompanyReactivation } from "../../utils/companyActivation.js";
 import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
-
-const startOfDay = (d) => {
-    const x = new Date(d);
-    x.setHours(0, 0, 0, 0);
-    return x;
-};
-
-const getDaysUntil = (expiryDate) => {
-    if (!expiryDate) return null;
-    const today = startOfDay(new Date());
-    const exp = startOfDay(expiryDate);
-    return Math.round((exp - today) / (1000 * 60 * 60 * 24));
-};
-
-const getReminderStageMarker = (daysUntilExpiry) => {
-    if (daysUntilExpiry == null) return null;
-    if (daysUntilExpiry <= 30 && daysUntilExpiry > 20) return 30;
-    if (daysUntilExpiry <= 20 && daysUntilExpiry > 10) return 20;
-    if (daysUntilExpiry <= 10) return 10;
-    return null;
-};
+import { getDaysUntil, isExpiryTaskWindow } from "../../utils/documentExpiryReminderStages.js";
 
 const buildCompanyExpiringDocs = (company) => {
     const docs = [];
@@ -82,7 +62,7 @@ const cleanupCompanyExpiryNotifications = async (company) => {
     const docs = buildCompanyExpiringDocs(company);
     const allowedExtra1Set = new Set(
         docs
-            .filter((doc) => getReminderStageMarker(getDaysUntil(doc.expiryDate)) === 10)
+            .filter((doc) => isExpiryTaskWindow(getDaysUntil(doc.expiryDate)))
             .map((doc) => {
                 const expLabel = formatExpiryDateLabel(doc.expiryDate);
                 return `Expiry follow-up required: ${doc.label}${expLabel ? ` (Exp: ${expLabel})` : ""}`;
@@ -165,6 +145,16 @@ export const updateCompany = async (req, res) => {
         const updateData = req.body;
         const beforeCompany = company.toObject();
         const requesterIsAdmin = await isReqUserAdmin(req.user);
+
+        const isCompanyDocumentNotRenewArchive =
+            updateData.companyDocumentNotRenew === true &&
+            Array.isArray(updateData.documents) &&
+            updateData.documents.length > 0 &&
+            typeof updateData.documents[0]?.description === "string" &&
+            updateData.documents[0].description.toLowerCase().includes("not renewed");
+        if (Object.prototype.hasOwnProperty.call(updateData, "companyDocumentNotRenew")) {
+            delete updateData.companyDocumentNotRenew;
+        }
 
         const collectAttachmentUrls = (items = [], path = "document.url") => {
             const [root, leaf, nested] = path.split(".");
@@ -271,7 +261,7 @@ export const updateCompany = async (req, res) => {
             return false;
         };
 
-        if (!requesterIsAdmin && isDocumentRemovalAttempt()) {
+        if (!requesterIsAdmin && isDocumentRemovalAttempt() && !isCompanyDocumentNotRenewArchive) {
             return res.status(403).json({
                 message: "Only administrator can delete company profile documents/cards."
             });
