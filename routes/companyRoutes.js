@@ -13,6 +13,7 @@ import { getAllOwners } from "../controllers/company/getAllOwners.js";
 import {
     submitCompanyActivationRequest,
     approveCompanyActivationRequest,
+    holdCompanyActivationRequest,
     rejectCompanyActivationRequest,
 } from "../controllers/company/activationController.js";
 
@@ -28,6 +29,7 @@ router.post("/", addCompany);
 router.patch("/:id", updateCompany);
 router.post("/:id/submit-activation", submitCompanyActivationRequest);
 router.post("/:id/approve-activation", approveCompanyActivationRequest);
+router.post("/:id/hold-activation", holdCompanyActivationRequest);
 router.post("/:id/reject-activation", rejectCompanyActivationRequest);
 router.put("/:id/respond-responsibility", respondToResponsibility);
 router.post("/:id/upload", uploadCompanyDocument);

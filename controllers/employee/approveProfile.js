@@ -47,13 +47,29 @@ export const approveProfile = async (req, res) => {
         const hasExplicitSelection = selectionProvided;
 
         const sortedChanges = pendingChanges
-            .map((entry) => entry?.toObject ? entry.toObject() : entry)
+            .map((entry, idx) => {
+                const o = entry?.toObject ? entry.toObject() : entry;
+                return { ...o, __applyId: String(o?._id || idx) };
+            })
             .sort((a, b) => new Date(a?.changedAt || 0) - new Date(b?.changedAt || 0));
 
+        const allApplyIds = sortedChanges.map((e) => e.__applyId);
+        if (hasExplicitSelection) {
+            const allApprovedPresent = allApplyIds.length > 0 && allApplyIds.every((xid) => approvedChangeIds.includes(xid));
+            const countsMatch =
+                approvedChangeIds.length === allApplyIds.length &&
+                [...approvedChangeIds].sort().join(",") === [...allApplyIds].sort().join(",");
+            if (!allApprovedPresent || !countsMatch) {
+                return res.status(400).json({
+                    message:
+                        "Activation requires approving every pending change listed, or use Hold if only some sections are acceptable.",
+                });
+            }
+        }
+
         const changesToApply = sortedChanges.filter((entry) => {
-            const entryId = String(entry?._id || "");
             if (!hasExplicitSelection) return true;
-            return approvedChangeIds.includes(entryId);
+            return approvedChangeIds.includes(entry.__applyId);
         });
 
         for (const change of changesToApply) {
@@ -294,6 +310,7 @@ export const approveProfile = async (req, res) => {
             return step;
         });
         await updated.save();
+        await EmployeeBasic.updateOne({ employeeId }, { $unset: { profileActivationHold: 1 } });
 
         // === SYNC DASHBOARD ACTION ===
         try {

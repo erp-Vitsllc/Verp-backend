@@ -1,6 +1,7 @@
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { uploadDocumentToS3 } from "../../utils/s3Upload.js";
 import { triggerProfileReactivationIfNeeded, shouldQueueProfileChange } from "../../utils/triggerProfileReactivation.js";
+import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
 
 /**
  * Handle e-Signature upload and association with employee
@@ -17,10 +18,11 @@ export const uploadSignature = async (req, res) => {
     try {
         // 1. Verify employee exists
         const employee = await EmployeeBasic.findById(id);
-        const requiresApprovalQueue = shouldQueueProfileChange(employee);
         if (!employee) {
             return res.status(404).json({ message: "Employee not found." });
         }
+        const isAdminUser = await isReqUserAdmin(req.user);
+        const requiresApprovalQueue = !isAdminUser && shouldQueueProfileChange(employee);
 
         // Determine if it's an uploaded file or drawn signature
         const isDocument = !!reqFileName;

@@ -3081,6 +3081,12 @@ export const getAssetItemDetail = async (req, res) => {
                 if (service.invoice) {
                     service.invoice = await getSignedFileUrl(service.invoice);
                 }
+                if (service.serviceCompletionReport) {
+                    service.serviceCompletionReport = await getSignedFileUrl(service.serviceCompletionReport);
+                }
+                if (service.shopInvoice) {
+                    service.shopInvoice = await getSignedFileUrl(service.shopInvoice);
+                }
                 if (service.attachment) {
                     service.attachment = await getSignedFileUrl(service.attachment);
                 }
@@ -3132,6 +3138,24 @@ export const getAssetItemDetail = async (req, res) => {
                     } catch (_e) {
                         // keep original remark when JSON parse fails
                     }
+                }
+
+                // Sign workflow snapshot signature URLs on service history rows.
+                if (Array.isArray(service?.workflowSnapshot?.history)) {
+                    for (const h of service.workflowSnapshot.history) {
+                        if (h?.bySignatureUrl) {
+                            h.bySignatureUrl = await getSignedFileUrl(h.bySignatureUrl);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Sign active workflow history signature URLs (HR/Accounts signature display).
+        if (Array.isArray(itemObj?.activeServiceWorkflow?.history)) {
+            for (const h of itemObj.activeServiceWorkflow.history) {
+                if (h?.bySignatureUrl) {
+                    h.bySignatureUrl = await getSignedFileUrl(h.bySignatureUrl);
                 }
             }
         }

@@ -67,6 +67,22 @@ const employeeBasicSchema = new mongoose.Schema(
             }
         ],
 
+        /** Set when HR uses partial hold — profile stays submitted/inactive until full approval or resubmit. */
+        profileActivationHold: {
+            type: new mongoose.Schema(
+                {
+                    heldAt: { type: Date },
+                    unapprovedEntryIds: [{ type: String }],
+                    unapprovedCards: [{ type: String }],
+                    /** Queue entry ids (string) the employee has corrected by saving the matching section again. */
+                    resolvedEntryIds: [{ type: String }],
+                    comment: { type: String, default: "" },
+                },
+                { _id: false },
+            ),
+            default: undefined,
+        },
+
         // LOGIN & ACCESS
         email: { type: String, required: true, unique: true, trim: true, lowercase: true },
         companyEmail: { type: String, default: '', trim: true, lowercase: true },

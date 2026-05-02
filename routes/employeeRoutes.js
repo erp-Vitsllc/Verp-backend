@@ -9,6 +9,7 @@ import { updateEmergencyContact } from "../controllers/employee/updateEmergencyC
 import { deleteEmergencyContact } from "../controllers/employee/deleteEmergencyContact.js";
 import { sendApprovalEmail } from "../controllers/employee/sendApprovalEmail.js";
 import { approveProfile } from "../controllers/employee/approveProfile.js";
+import { holdProfile } from "../controllers/employee/holdProfile.js";
 import { rejectProfile } from "../controllers/employee/rejectProfile.js";
 import { deleteEmployee } from "../controllers/employee/deleteEmployee.js";
 import { updateVisaDetails } from "../controllers/employee/updateVisaDetails.js";
@@ -212,6 +213,9 @@ router.post("/:id/send-approval-email", checkPermission('hrm_employees', 'edit')
 
 // Approve profile - requires edit permission
 router.post("/:id/approve-profile", checkPermission('hrm_employees', 'edit'), approveProfile);
+
+// Hold profile activation (partial HR review) - requires edit permission
+router.post("/:id/hold-profile", checkPermission('hrm_employees', 'edit'), holdProfile);
 
 // Reject profile - requires edit permission
 router.post("/:id/reject-profile", checkPermission('hrm_employees', 'edit'), rejectProfile);

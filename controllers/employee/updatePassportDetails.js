@@ -4,6 +4,7 @@ import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeS
 import { uploadDocumentToS3, deleteDocumentFromS3 } from "../../utils/s3Upload.js";
 import { archiveEmployeeDocument } from "../../utils/archiveEmployeeDocument.js";
 import { triggerProfileReactivationIfNeeded, shouldQueueProfileChange } from "../../utils/triggerProfileReactivation.js";
+import { markProfileActivationHoldResolvedForSection } from "../../utils/markProfileActivationHoldResolved.js";
 
 const REQUIRED_FIELDS = ["number", "issueDate", "expiryDate"];
 
@@ -155,6 +156,11 @@ export const updatePassportDetails = async (req, res) => {
                 : null,
             trackDefaultChange: !requiresApprovalQueue,
         });
+        try {
+            await markProfileActivationHoldResolvedForSection(employeeId, "passport");
+        } catch (_e) {
+            /* ignore */
+        }
         const completeEmployee = await getCompleteEmployee(employeeId);
 
         return res.json({

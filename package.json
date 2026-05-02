@@ -9,6 +9,7 @@
     "dev": "nodemon index.js",
     "prod": "node index.js",
     "normalize-status": "node scripts/updateEmployeeStatus.js",
+    "probation:test-expired": "node scripts/setProbationExpiredForTesting.js",
     "check-service": "node scripts/checkServiceOverdue.js"
   },
   "keywords": [],

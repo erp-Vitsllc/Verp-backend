@@ -129,14 +129,14 @@ function isPortalAdmin(reqUser) {
 async function resolveActorEmployee(reqUser) {
     if (!reqUser?.employeeObjectId && !reqUser?.employeeId) return null;
     if (reqUser.employeeObjectId) {
-        const e = await EmployeeBasic.findById(reqUser.employeeObjectId).select('_id employeeId firstName lastName').lean();
+        const e = await EmployeeBasic.findById(reqUser.employeeObjectId).select('_id employeeId firstName lastName signature').lean();
         if (e) return e;
     }
     if (reqUser.employeeId) {
         return EmployeeBasic.findOne({
             employeeId: { $regex: new RegExp(`^${String(reqUser.employeeId).replace(/\s+/g, '\\s*')}$`, 'i') }
         })
-            .select('_id employeeId firstName lastName')
+            .select('_id employeeId firstName lastName signature')
             .lean();
     }
     return null;
@@ -188,25 +188,9 @@ function keepOnlySelectedQuotationOnService(serviceSub) {
     const remark = parseRemarkMeta(serviceSub.remark);
     const choice = String(remark?.approvedQuotationChoice || '').trim();
     if (!['q1', 'q2', 'q3'].includes(choice)) return;
-
-    const q1 = serviceSub.attachment || null;
-    const q2 = serviceSub.quotation2 || null;
-    const q3 = serviceSub.quotation3 || null;
-    const selected = choice === 'q1' ? q1 : choice === 'q2' ? q2 : q3;
-    if (!selected) return;
-
-    serviceSub.attachment = selected;
-    serviceSub.quotation2 = null;
-    serviceSub.quotation3 = null;
-
-    if (choice === 'q2' && remark.quotation2Name) {
-        remark.attachmentName = remark.quotation2Name;
-    } else if (choice === 'q3' && remark.quotation3Name) {
-        remark.attachmentName = remark.quotation3Name;
-    }
-    // Normalize storage/view: once non-selected files are removed, keep approved key as q1
-    // because the selected file now lives in `attachment`.
-    remark.approvedQuotationChoice = 'q1';
+    // Keep all quotation files intact and persist the exact selected key (q1/q2/q3).
+    // This ensures UI reflects the HR-selected quotation correctly instead of forcing q1.
+    remark.approvedQuotationChoice = choice;
     serviceSub.remark = JSON.stringify(remark);
 }
 
@@ -256,19 +240,42 @@ async function mergeWorkflowServiceRecord(asset, serviceRecordId, body) {
         value,
         remark,
         invoice,
+        completionReport,
+        shopInvoice,
         attachment,
         quotation2,
         quotation3
     } = body;
 
-    let invoiceUrl = sub.invoice || null;
-    if (invoice && invoice.data) {
+    // Return-to-live files: workshop completion report vs shop invoice (legacy invoice key treated as completion when shopInvoice omitted).
+    const completionBlob =
+        completionReport?.data ? completionReport : !shopInvoice?.data && invoice?.data ? invoice : null;
+    const shopBlob = shopInvoice?.data ? shopInvoice : null;
+
+    let serviceCompletionReportUrl =
+        String(sub.serviceCompletionReport || '').trim() || null;
+    if (completionBlob?.data) {
         try {
-            const uploadResult = await uploadDocumentToS3(invoice.data, 'asset-service-invoices', invoice.name);
-            invoiceUrl = uploadResult.publicId;
+            const uploadResult = await uploadDocumentToS3(
+                completionBlob.data,
+                'asset-service-workflow-completion',
+                completionBlob.name || `service-completion-${Date.now()}.pdf`
+            );
+            serviceCompletionReportUrl = uploadResult.publicId;
         } catch (error) {
-            console.error('[mergeWorkflowServiceRecord] invoice upload:', error);
-            throw new Error('Failed to upload invoice');
+            console.error('[mergeWorkflowServiceRecord] completion report upload:', error);
+            throw new Error('Failed to upload service completion document');
+        }
+    }
+
+    let shopInvoiceDocUrl = String(sub.shopInvoice || '').trim() || null;
+    if (shopBlob?.data) {
+        try {
+            const uploadResult = await uploadDocumentToS3(shopBlob.data, 'asset-service-invoices', shopBlob.name || 'invoice');
+            shopInvoiceDocUrl = uploadResult.publicId;
+        } catch (error) {
+            console.error('[mergeWorkflowServiceRecord] shop invoice upload:', error);
+            throw new Error('Failed to upload shop invoice');
         }
     }
 
@@ -339,7 +346,8 @@ async function mergeWorkflowServiceRecord(asset, serviceRecordId, body) {
         r.adminServiceDurationDays = n;
         sub.remark = JSON.stringify(r);
     }
-    if (invoiceUrl != null) sub.invoice = invoiceUrl;
+    if (serviceCompletionReportUrl != null) sub.serviceCompletionReport = serviceCompletionReportUrl;
+    if (shopInvoiceDocUrl != null) sub.shopInvoice = shopInvoiceDocUrl;
     if (attachmentUrl != null) sub.attachment = attachmentUrl;
     if (quotation2Url != null) sub.quotation2 = quotation2Url;
     if (quotation3Url != null) sub.quotation3 = quotation3Url;
@@ -352,7 +360,7 @@ async function mergeWorkflowServiceRecord(asset, serviceRecordId, body) {
     asset.markModified('services');
 }
 
-async function pushWorkflowHistory(asset, { stage, action, note, byName }) {
+async function pushWorkflowHistory(asset, { stage, action, note, byName, bySignatureUrl }) {
     if (!asset.activeServiceWorkflow) asset.activeServiceWorkflow = {};
     if (!Array.isArray(asset.activeServiceWorkflow.history)) asset.activeServiceWorkflow.history = [];
     asset.activeServiceWorkflow.history.push({
@@ -360,6 +368,7 @@ async function pushWorkflowHistory(asset, { stage, action, note, byName }) {
         action,
         note: note || '',
         byName: byName || '',
+        bySignatureUrl: bySignatureUrl || '',
         at: new Date()
     });
 }
@@ -380,6 +389,7 @@ function persistWorkflowSnapshotToServiceSubdoc(asset) {
             action: h.action,
             note: h.note || '',
             byName: h.byName || '',
+            bySignatureUrl: h.bySignatureUrl || '',
             at: h.at,
         })),
     };
@@ -589,7 +599,14 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
             (await getRequesterName(req.user)) ||
             `${(await resolveActorEmployee(req.user))?.firstName || ''}`;
         const actorEmp = await resolveActorEmployee(req.user);
+        const actorSignatureUrl = String(actorEmp?.signature?.url || '').trim();
         const performedById = actorEmp?._id;
+
+        if (action === 'approve' && (stage === STAGE.HR || stage === STAGE.ACCOUNTS) && !actorSignatureUrl) {
+            return res.status(400).json({
+                message: 'Digital signature is required. Please add your signature in profile before approval.',
+            });
+        }
 
         if (action === 'hold') {
             if (stage !== STAGE.ACCOUNTS) {
@@ -625,7 +642,8 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
                 stage,
                 action: 'hold',
                 note: `${reason} (until ${holdUntil.toISOString().slice(0, 10)})`,
-                byName: actorName
+                byName: actorName,
+                bySignatureUrl: actorSignatureUrl,
             });
             await logVehicleServiceWorkflowToAssetHistory(asset, {
                 stage,
@@ -676,7 +694,8 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
                 stage,
                 action: 'unhold',
                 note: comment || 'Hold cleared',
-                byName: actorName
+                byName: actorName,
+                bySignatureUrl: actorSignatureUrl,
             });
             await logVehicleServiceWorkflowToAssetHistory(asset, {
                 stage,
@@ -759,7 +778,7 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
 
             asset.status = resolveStatusAfterService(asset, wf);
             asset.activeServiceWorkflow.stage = STAGE.REJECTED;
-            await pushWorkflowHistory(asset, { stage, action: 'reject', note: comment || '', byName: actorName });
+            await pushWorkflowHistory(asset, { stage, action: 'reject', note: comment || '', byName: actorName, bySignatureUrl: actorSignatureUrl });
             await logVehicleServiceWorkflowToAssetHistory(asset, {
                 stage,
                 workflowAction: 'reject',
@@ -822,7 +841,7 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
             });
         }
 
-        await pushWorkflowHistory(asset, { stage, action: 'approve', note: comment || '', byName: actorName });
+        await pushWorkflowHistory(asset, { stage, action: 'approve', note: comment || '', byName: actorName, bySignatureUrl: actorSignatureUrl });
         await logVehicleServiceWorkflowToAssetHistory(asset, {
             stage,
             workflowAction: 'approve',
@@ -1004,17 +1023,61 @@ function utcDayStart(d) {
     return Date.UTC(x.getUTCFullYear(), x.getUTCMonth(), x.getUTCDate());
 }
 
+/** Workshop completion report present (multipart body or previously saved on the service row / remark). */
+function workflowReturnCompletionSatisfied(subDoc, remarkMeta, body) {
+    const { completionReport, shopInvoice, invoice, serviceReport } = body || {};
+    if (completionReport?.data) return true;
+    if (serviceReport?.data) return true;
+    if (invoice?.data && !shopInvoice?.data) return true;
+    if (subDoc && String(subDoc.serviceCompletionReport || '').trim()) return true;
+    if (
+        subDoc &&
+        String(subDoc.invoice || '').trim() &&
+        (remarkMeta?.serviceReportName || remarkMeta?.serviceReportMime || remarkMeta?.serviceReportUpdatedAt)
+    ) {
+        return true;
+    }
+    return false;
+}
+
+/** Shop / VAT invoice present for workflow return-to-live. */
+function workflowReturnShopInvoiceSatisfied(subDoc, remarkMeta, body) {
+    const { shopInvoice } = body || {};
+    if (shopInvoice?.data) return true;
+    if (subDoc && String(subDoc.shopInvoice || '').trim()) return true;
+    if (remarkMeta?.shopInvoiceName || remarkMeta?.shopInvoiceUpdatedAt) return true;
+    return false;
+}
+
 /**
  * POST /api/AssetItem/:id/service-workflow/period
- * { action: 'extend' | 'go_live', extendDays?, invoice?, comment? }
- * — Asset Controller: extend the scheduled in-shop window, or mark live (invoice required) to complete the workflow.
+ * { action: 'extend' | 'go_live' | 'update_status' | 'change_service_start', extendDays?, scheduledServiceDate?, invoice?, comment?, ... }
+ * — Asset Controller: extend window, change first service day (after Admin schedule), mark live, etc.
  */
 export const respondVehicleServiceScheduledPeriod = async (req, res) => {
     try {
         const { id } = req.params;
-        const { action, extendDays, invoice, comment } = req.body || {};
-        if (!['extend', 'go_live', 'cancel', 'reject'].includes(String(action || ''))) {
-            return res.status(400).json({ message: 'action must be extend, go_live, cancel, or reject' });
+        const {
+            action,
+            extendDays,
+            scheduledServiceDate: scheduledServiceDateBody,
+            invoice,
+            completionReport,
+            shopInvoice,
+            comment,
+            serviceStatus,
+            serviceReport,
+            description,
+            returnMode,
+            returnDate,
+            returnStatus,
+        } = req.body || {};
+        if (!['extend', 'go_live', 'cancel', 'reject', 'update_status', 'change_service_start'].includes(String(action || ''))) {
+            return res
+                .status(400)
+                .json({
+                    message: 'action must be extend, go_live, cancel, reject, update_status, or change_service_start',
+                });
         }
 
         const asset = await AssetItem.findById(id).populate('assignedTo', 'firstName lastName employeeId');
@@ -1041,6 +1104,70 @@ export const respondVehicleServiceScheduledPeriod = async (req, res) => {
         const end = wf.serviceWindowEndDate ? utcDayStart(wf.serviceWindowEndDate) : NaN;
         const serviceRecordId = wf.serviceRecordId;
 
+        if (action === 'change_service_start') {
+            const hasAdminScheduled =
+                Array.isArray(wf.history) &&
+                wf.history.some((h) => h.stage === STAGE.ADMIN && h.action === 'approve');
+            if (!hasAdminScheduled) {
+                return res.status(400).json({
+                    message: 'The first service day can only be changed after Asset Controller approves the schedule.',
+                });
+            }
+            const newStartRaw = scheduledServiceDateBody;
+            if (!newStartRaw) {
+                return res.status(400).json({ message: 'scheduledServiceDate is required' });
+            }
+            const newStart = new Date(newStartRaw);
+            if (Number.isNaN(newStart.getTime())) {
+                return res.status(400).json({ message: 'Invalid scheduledServiceDate' });
+            }
+            const dur = Math.max(1, Math.floor(Number(wf.serviceDurationDays) || 1));
+            wf.scheduledServiceDate = newStart;
+            wf.serviceWindowEndDate = computeInclusiveWindowEnd(newStart, dur);
+            wf.serviceDurationEmailSentAt = null;
+
+            const startUtc = Date.UTC(newStart.getUTCFullYear(), newStart.getUTCMonth(), newStart.getUTCDate());
+            const endD = wf.serviceWindowEndDate;
+            const endUtc = endD
+                ? Date.UTC(endD.getUTCFullYear(), endD.getUTCMonth(), endD.getUTCDate())
+                : startUtc;
+            const now = new Date();
+            const todayUtc = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+            asset.status = todayUtc >= startUtc && todayUtc <= endUtc ? 'On Service' : 'Waiting for Service';
+
+            if (serviceRecordId) {
+                const isoDay = newStart.toISOString().slice(0, 10);
+                await mergeWorkflowServiceRecord(asset, serviceRecordId, {
+                    scheduledServiceDate: isoDay,
+                    serviceDurationDays: dur,
+                });
+            }
+
+            const noteExtra = String(comment || '').trim();
+            await pushWorkflowHistory(asset, {
+                stage: STAGE.SCHEDULED,
+                action: 'change_service_start',
+                note: noteExtra
+                    ? `First service day set to ${newStart.toISOString().slice(0, 10)}. ${noteExtra}`
+                    : `First service day set to ${newStart.toISOString().slice(0, 10)}`,
+                byName: actorName,
+            });
+            await logVehicleServiceWorkflowToAssetHistory(asset, {
+                stage: STAGE.SCHEDULED,
+                workflowAction: 'approve',
+                note: `Rescheduled service start to ${newStart.toISOString().slice(0, 10)}`,
+                byName: actorName,
+                performedById,
+                serviceTypeLabel: wf.serviceTypeLabel,
+                hasServiceUpdates: true,
+                serviceRecordId,
+            });
+            persistWorkflowSnapshotToServiceSubdoc(asset);
+            await asset.save();
+            const fresh = await AssetItem.findById(asset._id).populate('assignedTo', 'firstName lastName employeeId');
+            return res.json({ message: 'Scheduled first service date updated.', asset: fresh });
+        }
+
         if (action === 'extend') {
             const ext = Math.floor(Number(extendDays));
             if (!Number.isFinite(ext) || ext < 1) {
@@ -1066,7 +1193,13 @@ export const respondVehicleServiceScheduledPeriod = async (req, res) => {
                     const n = wf.serviceDurationDays;
                     sub.serviceDuration = `${n} day${n === 1 ? '' : 's'}`;
                     const r = parseRemarkMeta(sub.remark);
+                    const returnDateStr = newEnd.toISOString().slice(0, 10);
                     r.extendedByDays = (r.extendedByDays || 0) + ext;
+                    r.returnMode = 'extend';
+                    r.accidentExtendDays = ext;
+                    r.accidentServiceStatus = 'on_service';
+                    r.accidentReturnDate = returnDateStr;
+                    r.serviceReturnDate = returnDateStr;
                     if (String(comment || '').trim()) {
                         r.lastExtendNote = String(comment).trim();
                     }
@@ -1092,6 +1225,31 @@ export const respondVehicleServiceScheduledPeriod = async (req, res) => {
             });
             persistWorkflowSnapshotToServiceSubdoc(asset);
             await asset.save();
+            try {
+                const stakeholders = await resolveWorkflowStakeholders(asset, serviceRecordId);
+                const hr = await resolveAssigneeForStage(STAGE.HR);
+                const accounts = await resolveAssigneeForStage(STAGE.ACCOUNTS);
+                const admin = await resolveAssigneeForStage(STAGE.SCHEDULED);
+                for (const recipient of uniqRecipients([
+                    stakeholders.requester,
+                    stakeholders.assignedEmployee,
+                    stakeholders.primaryReportee,
+                    hr,
+                    accounts,
+                    admin,
+                ])) {
+                    await sendWorkflowEmailWithConsole({
+                        recipient,
+                        asset,
+                        stageLabel: 'Service extended',
+                        actionLabel: 'Vehicle service return date updated',
+                        detailLine: `Service window extended by ${ext} day(s). New expected return date: ${newEnd.toISOString().slice(0, 10)}.`,
+                        linkPath: vehicleServiceDetailsPath(asset._id, serviceRecordId),
+                    });
+                }
+            } catch (notifyErr) {
+                console.error('[VehicleServiceWorkflow] extend notify stakeholders failed:', notifyErr);
+            }
             const out = await AssetItem.findById(asset._id).populate('assignedTo', 'firstName lastName employeeId');
             return res.json({ message: 'Service window extended', asset: out });
         }
@@ -1104,18 +1262,53 @@ export const respondVehicleServiceScheduledPeriod = async (req, res) => {
             if (!goLiveNote) {
                 return res.status(400).json({ message: 'Description is required to mark live.' });
             }
-            if (invoice?.data && serviceRecordId) {
-                await mergeWorkflowServiceRecord(asset, serviceRecordId, { invoice });
+            if (!serviceRecordId) {
+                return res.status(400).json({ message: 'Missing service record for this workflow.' });
             }
-            if (serviceRecordId) {
-                const sub = asset.services?.id?.(serviceRecordId);
-                if (sub) {
-                    const r = parseRemarkMeta(sub.remark);
-                    r.vehicleServiceCompleted = 'live';
-                    r.vehicleServiceCompletedAt = new Date().toISOString();
-                    sub.remark = JSON.stringify(r);
-                    asset.markModified('services');
+            const subGo = asset.services?.id?.(serviceRecordId);
+            if (!subGo) {
+                return res.status(404).json({ message: 'Service record not found.' });
+            }
+            const rmGo = parseRemarkMeta(subGo.remark);
+            const goCompletionBody = { completionReport, shopInvoice, invoice };
+            if (!workflowReturnCompletionSatisfied(subGo, rmGo, goCompletionBody)) {
+                return res
+                    .status(400)
+                    .json({ message: 'Service completion report is required — upload under Return from service to live.' });
+            }
+            if (!workflowReturnShopInvoiceSatisfied(subGo, rmGo, goCompletionBody)) {
+                return res.status(400).json({ message: 'Shop invoice upload is required before marking live.' });
+            }
+            const completionBlob =
+                completionReport?.data ? completionReport : !shopInvoice?.data && invoice?.data ? invoice : null;
+            const mergeGo = {
+                ...(completionBlob?.data ? { completionReport: completionBlob } : {}),
+                ...(shopInvoice?.data ? { shopInvoice } : {}),
+            };
+            if (Object.keys(mergeGo).length) {
+                await mergeWorkflowServiceRecord(asset, serviceRecordId, mergeGo);
+            }
+            const subAfterMerge = asset.services?.id?.(serviceRecordId);
+            if (subAfterMerge) {
+                const r = parseRemarkMeta(subAfterMerge.remark);
+                r.vehicleServiceCompleted = 'live';
+                r.vehicleServiceCompletedAt = new Date().toISOString();
+                if (completionBlob?.name) {
+                    r.serviceReportName = String(completionBlob.name);
+                    if (completionBlob.mime != null && String(completionBlob.mime).trim() !== '') {
+                        r.serviceReportMime = String(completionBlob.mime);
+                    }
+                    r.serviceReportUpdatedAt = new Date().toISOString();
                 }
+                if (shopInvoice?.name) {
+                    r.shopInvoiceName = String(shopInvoice.name);
+                    if (shopInvoice.mime != null && String(shopInvoice.mime).trim() !== '') {
+                        r.shopInvoiceMime = String(shopInvoice.mime);
+                    }
+                    r.shopInvoiceUpdatedAt = new Date().toISOString();
+                }
+                subAfterMerge.remark = JSON.stringify(r);
+                asset.markModified('services');
             }
             asset.status = resolveStatusAfterService(asset, wf);
             wf.stage = STAGE.COMPLETE;
@@ -1140,7 +1333,7 @@ export const respondVehicleServiceScheduledPeriod = async (req, res) => {
             await logVehicleServiceWorkflowToAssetHistory(asset, {
                 stage: STAGE.SCHEDULED,
                 workflowAction: 'approve',
-                note: 'Workflow completed — vehicle marked live (invoice saved)',
+                note: 'Workflow completed — vehicle marked live (completion report & shop invoice saved)',
                 byName: actorName,
                 performedById,
                 serviceTypeLabel: wf.serviceTypeLabel,
@@ -1176,6 +1369,144 @@ export const respondVehicleServiceScheduledPeriod = async (req, res) => {
             await asset.save();
             const doneFresh = await AssetItem.findById(asset._id).populate('assignedTo', 'firstName lastName employeeId');
             return res.json({ message: 'Vehicle is back in normal use — service workflow completed.', asset: doneFresh });
+        }
+        if (action === 'update_status') {
+            if (!serviceRecordId) {
+                return res.status(400).json({ message: 'Missing service record for this workflow.' });
+            }
+            const requestedStatus = String(serviceStatus || '').trim();
+            const normalizedRequestedStatus = requestedStatus.toLowerCase().replace(/\s+/g, '_');
+            const isExtendMode = String(returnMode || 'date').trim().toLowerCase() === 'extend';
+            const statusText = isExtendMode
+                ? 'on_service'
+                : (normalizedRequestedStatus || '');
+            if (!statusText) {
+                return res.status(400).json({ message: 'Service status is required.' });
+            }
+            const sub = asset.services?.id?.(serviceRecordId);
+            if (!sub) {
+                return res.status(404).json({ message: 'Service record not found.' });
+            }
+            const r0 = parseRemarkMeta(sub.remark);
+            const updateBodyDocs = { serviceReport, shopInvoice };
+            if (!workflowReturnCompletionSatisfied(sub, r0, updateBodyDocs)) {
+                return res
+                    .status(400)
+                    .json({ message: 'Service completion report upload is required for this submit.' });
+            }
+            if (!workflowReturnShopInvoiceSatisfied(sub, r0, updateBodyDocs)) {
+                return res.status(400).json({ message: 'Shop invoice upload is required for this submit.' });
+            }
+            const mergeStatus = {};
+            if (serviceReport?.data) mergeStatus.completionReport = serviceReport;
+            if (shopInvoice?.data) mergeStatus.shopInvoice = shopInvoice;
+            if (Object.keys(mergeStatus).length) {
+                await mergeWorkflowServiceRecord(asset, serviceRecordId, mergeStatus);
+            }
+            if (description != null) {
+                sub.description = String(description || '').trim();
+            }
+            const r = parseRemarkMeta(sub.remark);
+            r.accidentServiceStatus = statusText;
+            r.returnMode = isExtendMode ? 'extend' : 'date';
+            if (r.returnMode === 'extend') {
+                const ext = Math.max(1, Math.floor(Number(extendDays) || 1));
+                r.accidentExtendDays = ext;
+                const currentBase = wf.serviceWindowEndDate ? new Date(wf.serviceWindowEndDate) : new Date();
+                currentBase.setDate(currentBase.getDate() + ext);
+                const updatedReturn = currentBase.toISOString().slice(0, 10);
+                wf.serviceWindowEndDate = currentBase;
+                wf.serviceDurationDays = Math.max(1, Math.floor(Number(wf.serviceDurationDays) || 1)) + ext;
+                r.accidentReturnDate = updatedReturn;
+                r.serviceReturnDate = updatedReturn;
+            } else {
+                r.accidentReturnDate = returnDate ? String(returnDate).slice(0, 10) : null;
+                r.accidentExtendDays = null;
+                r.serviceReturnDate = returnDate ? String(returnDate).slice(0, 10) : null;
+            }
+            r.accidentReturnStatus = String(returnStatus || '').trim();
+            if (serviceReport?.name) r.serviceReportName = String(serviceReport.name);
+            if (serviceReport?.mime) r.serviceReportMime = String(serviceReport.mime);
+            if (serviceReport?.data) r.serviceReportUpdatedAt = new Date().toISOString();
+            if (shopInvoice?.name) r.shopInvoiceName = String(shopInvoice.name);
+            if (shopInvoice?.mime) r.shopInvoiceMime = String(shopInvoice.mime);
+            if (shopInvoice?.data) r.shopInvoiceUpdatedAt = new Date().toISOString();
+            sub.remark = JSON.stringify(r);
+            asset.markModified('services');
+
+            const normalized = statusText.toLowerCase().replace(/\s+/g, '_');
+            if (normalized === 'complete' || normalized === 'completed') {
+                asset.status = resolveStatusAfterService(asset, wf);
+                wf.stage = STAGE.COMPLETE;
+                r.vehicleServiceCompleted = 'complete';
+                r.vehicleServiceCompletedAt = new Date().toISOString();
+                sub.remark = JSON.stringify(r);
+                asset.markModified('services');
+                if (assignee?._id) {
+                    await syncDashboardAction({
+                        requestId: asset._id,
+                        requestType: 'Vehicle Service Request',
+                        status: 'Approved',
+                        assignedTo: assignee._id,
+                        actionedBy: (await resolveActorEmployee(req.user))?._id,
+                        comment: 'Completed from status update',
+                        subjectEmployee: asset.assignedTo,
+                        requestedByName: actorName,
+                    });
+                }
+            } else if (normalized === 'on_service') {
+                asset.status = 'On Service';
+                wf.stage = STAGE.SCHEDULED;
+            }
+
+            await pushWorkflowHistory(asset, {
+                stage: STAGE.SCHEDULED,
+                action: 'status_update',
+                note: `Status updated: ${statusText}`,
+                byName: actorName,
+                bySignatureUrl: String(actorEmp?.signature?.url || '').trim(),
+            });
+            await logVehicleServiceWorkflowToAssetHistory(asset, {
+                stage: STAGE.SCHEDULED,
+                workflowAction: 'approve',
+                note: `Service status updated to ${statusText}`,
+                byName: actorName,
+                performedById,
+                serviceTypeLabel: wf.serviceTypeLabel,
+                hasServiceUpdates: true,
+                serviceRecordId,
+            });
+            persistWorkflowSnapshotToServiceSubdoc(asset);
+            await asset.save();
+            if (r.returnMode === 'extend') {
+                try {
+                    const stakeholders = await resolveWorkflowStakeholders(asset, serviceRecordId);
+                    const hr = await resolveAssigneeForStage(STAGE.HR);
+                    const accounts = await resolveAssigneeForStage(STAGE.ACCOUNTS);
+                    const admin = await resolveAssigneeForStage(STAGE.SCHEDULED);
+                    for (const recipient of uniqRecipients([
+                        stakeholders.requester,
+                        stakeholders.assignedEmployee,
+                        stakeholders.primaryReportee,
+                        hr,
+                        accounts,
+                        admin,
+                    ])) {
+                        await sendWorkflowEmailWithConsole({
+                            recipient,
+                            asset,
+                            stageLabel: 'Service extended',
+                            actionLabel: 'Vehicle service return date updated',
+                            detailLine: `Service remains On Service and return date is extended to ${r.accidentReturnDate || '—'}.`,
+                            linkPath: vehicleServiceDetailsPath(asset._id, serviceRecordId),
+                        });
+                    }
+                } catch (notifyErr) {
+                    console.error('[VehicleServiceWorkflow] update_status extend notify failed:', notifyErr);
+                }
+            }
+            const out = await AssetItem.findById(asset._id).populate('assignedTo', 'firstName lastName employeeId');
+            return res.json({ message: 'Service status saved successfully.', asset: out });
         }
         if (action === 'cancel') {
             asset.status = resolveStatusAfterService(asset, wf);
@@ -1227,6 +1558,12 @@ export const respondVehicleServiceScheduledPeriod = async (req, res) => {
         }
         return res.status(400).json({ message: 'Invalid action' });
     } catch (error) {
+        if (error?.name === 'VersionError') {
+            return res.status(409).json({
+                message:
+                    'This request was updated by another process at the same time. Please refresh and submit again.',
+            });
+        }
         console.error('[respondVehicleServiceScheduledPeriod]', error);
         res.status(500).json({ message: error.message || 'Server error' });
     }

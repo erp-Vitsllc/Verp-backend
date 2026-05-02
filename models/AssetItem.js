@@ -283,6 +283,7 @@ const assetItemSchema = new mongoose.Schema({
             action: { type: String },
             note: { type: String, default: '' },
             byName: { type: String, default: '' },
+            bySignatureUrl: { type: String, default: '' },
             at: { type: Date, default: Date.now }
         }]
     },
@@ -316,7 +317,11 @@ const assetItemSchema = new mongoose.Schema({
         paidBy: { type: String, enum: ['Company', 'Employee', 'Person'] },
         value: { type: Number },
         remark: { type: String },
-        invoice: { type: String },           // URL to uploaded invoice
+        invoice: { type: String },           // URL to uploaded invoice (legacy / other flows)
+        /** Workshop completion / service report file saved at workflow return-to-live */
+        serviceCompletionReport: { type: String },
+        /** Shop / VAT invoice file saved at workflow return-to-live */
+        shopInvoice: { type: String },
         attachment: { type: String },        // Primary quotation / combined attachment URL
         quotation2: { type: String },        // Optional 2nd quotation (Tire / Mechanical / Body / Accident)
         quotation3: { type: String },        // Optional 3rd quotation
@@ -334,6 +339,7 @@ const assetItemSchema = new mongoose.Schema({
                 action: { type: String },
                 note: { type: String, default: '' },
                 byName: { type: String, default: '' },
+                bySignatureUrl: { type: String, default: '' },
                 at: { type: Date, default: Date.now }
             }]
         }

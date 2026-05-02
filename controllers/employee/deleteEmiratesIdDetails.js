@@ -2,6 +2,7 @@ import EmployeeEmiratesId from "../../models/EmployeeEmiratesId.js";
 import { resolveEmployeeId } from "../../services/employeeService.js";
 import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
+import { cleanupEmployeeExpiryNotificationsByLabels } from "../../utils/cleanupEmployeeExpiryNotifications.js";
 
 export const deleteEmiratesIdDetails = async (req, res) => {
     const { id } = req.params;
@@ -13,6 +14,10 @@ export const deleteEmiratesIdDetails = async (req, res) => {
         if (!employee) return res.status(404).json({ message: "Employee not found." });
 
         await EmployeeEmiratesId.deleteOne({ employeeId: employee.employeeId });
+        await cleanupEmployeeExpiryNotificationsByLabels({
+            employeeObjectId: employee._id,
+            labels: ["Emirates ID"],
+        });
         await triggerProfileReactivationIfNeeded({
             employeeId: employee.employeeId,
             actor: req.user,

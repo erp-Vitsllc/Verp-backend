@@ -217,6 +217,7 @@ export const submitCompanyActivation = async ({
     company.status = "Inactive";
     company.activationStatus = "submitted";
     company.activationSubmittedTo = hr._id;
+    company.activationHold = undefined;
     if (!Array.isArray(company.activationWorkflow)) company.activationWorkflow = [];
     company.activationWorkflow.push({
         role: "HR",
@@ -243,9 +244,12 @@ export const submitCompanyActivation = async ({
             designation: company.nickName || "",
         },
         requestedByName,
-        extra1: extra1ForDashboard,
+        extra1: `[Company profile] ${extra1ForDashboard}`,
         extra2: company.companyId || "",
-        extra3: JSON.stringify({ companyActivationViewerRole: "approver" }),
+        extra3: JSON.stringify({
+            companyActivationViewerRole: "approver",
+            activationSubject: "company",
+        }),
     });
 
     if (actor?.employeeObjectId || actor?._id) {
@@ -261,9 +265,12 @@ export const submitCompanyActivation = async ({
                 designation: company.nickName || "",
             },
             requestedByName,
-            extra1: extra1ForDashboard,
+            extra1: `[Company profile] ${extra1ForDashboard}`,
             extra2: company.companyId || "",
-            extra3: JSON.stringify({ companyActivationViewerRole: "requester" }),
+            extra3: JSON.stringify({
+                companyActivationViewerRole: "requester",
+                activationSubject: "company",
+            }),
         });
     }
 

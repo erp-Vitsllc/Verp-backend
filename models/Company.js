@@ -112,6 +112,20 @@ const companySchema = new mongoose.Schema(
             }
         ],
 
+        /** HR partial hold — company stays activation submitted/inactive until full approve or resubmit. */
+        activationHold: {
+            type: new mongoose.Schema(
+                {
+                    heldAt: { type: Date },
+                    unapprovedEntryIds: [{ type: String }],
+                    unapprovedCards: [{ type: String }],
+                    comment: { type: String, default: "" },
+                },
+                { _id: false },
+            ),
+            default: undefined,
+        },
+
         // General Documents
         documents: [
             {

@@ -2,6 +2,7 @@ import EmployeePassport from "../../models/EmployeePassport.js";
 import { resolveEmployeeId } from "../../services/employeeService.js";
 import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
+import { cleanupEmployeeExpiryNotificationsByLabels } from "../../utils/cleanupEmployeeExpiryNotifications.js";
 
 export const deletePassportDetails = async (req, res) => {
     const { id } = req.params;
@@ -13,6 +14,10 @@ export const deletePassportDetails = async (req, res) => {
         if (!employee) return res.status(404).json({ message: "Employee not found." });
 
         await EmployeePassport.deleteOne({ employeeId: employee.employeeId });
+        await cleanupEmployeeExpiryNotificationsByLabels({
+            employeeObjectId: employee._id,
+            labels: ["Passport"],
+        });
         await triggerProfileReactivationIfNeeded({
             employeeId: employee.employeeId,
             actor: req.user,

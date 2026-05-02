@@ -27,6 +27,7 @@ export const rejectProfile = async (req, res) => {
             {
                 profileApprovalStatus: "rejected",
                 profileStatus: "inactive",
+                $unset: { profileActivationHold: 1 },
                 $set: {
                     "profileWorkflow.$[elem].status": "rejected",
                     "profileWorkflow.$[elem].actionedAt": new Date(),

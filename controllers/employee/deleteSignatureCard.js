@@ -1,7 +1,7 @@
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { resolveEmployeeId } from "../../services/employeeService.js";
 import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
-import { triggerProfileReactivationIfNeeded, shouldQueueProfileChange } from "../../utils/triggerProfileReactivation.js";
+import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
 
 export const deleteSignatureCard = async (req, res) => {
     const { id } = req.params;
@@ -16,40 +16,19 @@ export const deleteSignatureCard = async (req, res) => {
             return res.status(404).json({ message: "Employee not found." });
         }
 
-        const employeeDoc = await EmployeeBasic.findOne({ employeeId: employee.employeeId }).select("signature profileStatus profileWorkflow").lean();
-        const requiresApprovalQueue = shouldQueueProfileChange(employeeDoc);
-        if (requiresApprovalQueue) {
-            await triggerProfileReactivationIfNeeded({
-                employeeId: employee.employeeId,
-                actor: req.user,
-                reason: "Signature card deleted",
-                changeEntry: {
-                    card: "Digital Signature",
-                    reason: "Signature card deleted",
-                    section: "signature",
-                    changeType: "delete",
-                    targetIndex: null,
-                    previousData: employeeDoc?.signature || null,
-                    proposedData: null,
-                },
-            });
-        } else {
-            await EmployeeBasic.updateOne(
-                { employeeId: employee.employeeId },
-                { $set: { signature: null } }
-            );
+        await EmployeeBasic.updateOne(
+            { employeeId: employee.employeeId },
+            { $set: { signature: null } }
+        );
 
-            await triggerProfileReactivationIfNeeded({
-                employeeId: employee.employeeId,
-                actor: req.user,
-                reason: "Signature card deleted",
-            });
-        }
+        await triggerProfileReactivationIfNeeded({
+            employeeId: employee.employeeId,
+            actor: req.user,
+            reason: "Signature card deleted",
+        });
 
         return res.status(200).json({
-            message: requiresApprovalQueue
-                ? "Signature deletion queued for HR activation approval."
-                : "Signature deleted successfully."
+            message: "Signature deleted successfully."
         });
     } catch (error) {
         console.error("Failed to delete signature:", error);

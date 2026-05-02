@@ -95,11 +95,23 @@ export const getSignedFileUrl = async (key, expiresIn = 86400) => {
     try {
         if (!key) return null;
 
-        // If key is already a full URL, try to extract the Key
+        // If key is already a full URL, try to extract the object key
         if (typeof key === 'string' && key.startsWith('http')) {
             // Check if it's our storage URL and extract the key part
             // Match against common folders to find where the key starts
-            const folders = ['asset-invoices', 'asset-photos', 'employee-documents', 'profile-pictures', 'signatures', 'rewards', 'fines', 'company-documents'];
+            const folders = [
+                'asset-invoices',
+                'asset-photos',
+                'asset-service-invoices',
+                'asset-service-attachments',
+                'employee-documents',
+                'employee-signatures',
+                'profile-pictures',
+                'signatures',
+                'rewards',
+                'fines',
+                'company-documents'
+            ];
             for (const folder of folders) {
                 const index = key.indexOf(folder);
                 if (index !== -1) {
@@ -111,8 +123,22 @@ export const getSignedFileUrl = async (key, expiresIn = 86400) => {
                 }
             }
 
-            // If we still have a URL (wasn't one of ours or couldn't extract), return as is
-            if (key.startsWith('http')) return key;
+            // Fallback: parse any S3-compatible URL pathname as key.
+            if (typeof key === 'string' && key.startsWith('http')) {
+                try {
+                    const parsed = new URL(key);
+                    const pathKey = decodeURIComponent(String(parsed.pathname || '').replace(/^\/+/, ''));
+                    if (pathKey) {
+                        key = pathKey;
+                        console.log(`[S3Upload] Parsed key "${key}" from URL pathname`);
+                    }
+                } catch {
+                    // If URL parsing fails, keep old behavior.
+                }
+            }
+
+            // If we still have a URL (non-storage URL), return as-is.
+            if (typeof key === 'string' && key.startsWith('http')) return key;
         }
 
         // Handle base64 fallbacks (if any old data exists)

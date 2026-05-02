@@ -6,6 +6,7 @@ import { uploadDocumentToS3 } from "../../utils/s3Upload.js";
 import { isUserAdministrator } from "../../services/permissionService.js";
 import { archiveEmployeeDocument } from "../../utils/archiveEmployeeDocument.js";
 import { triggerProfileReactivationIfNeeded, shouldQueueProfileChange } from "../../utils/triggerProfileReactivation.js";
+import { markProfileActivationHoldResolvedForSection } from "../../utils/markProfileActivationHoldResolved.js";
 
 export const updateBasicDetails = async (req, res) => {
     try {
@@ -18,10 +19,12 @@ export const updateBasicDetails = async (req, res) => {
         }
 
         const employeeId = employee.employeeId;
+        const employeeBasicSnapSelect =
+            '-password -documents.document.data -trainingDetails.certificate.data';
         const [existingBank, existingSalary, existingBasic] = await Promise.all([
             EmployeeBank.findOne({ employeeId }).select("bankName accountName accountNumber ibanNumber swiftCode bankAttachment").lean(),
             EmployeeSalary.findOne({ employeeId }).select("offerLetter salaryHistory").lean(),
-            EmployeeBasic.findOne({ employeeId }).select("trainingDetails").lean(),
+            EmployeeBasic.findOne({ employeeId }).select(employeeBasicSnapSelect).lean(),
         ]);
 
         // 1. Define allowed fields and their target collections
@@ -349,6 +352,48 @@ export const updateBasicDetails = async (req, res) => {
             return res.status(400).json({ message: "Nothing to update" });
         }
 
+        /** Same snapshot for queued vs immediate save — avoids empty pending rows (no previous/proposed) in HR hold modals. */
+        const buildBasicDetailsReactivationEntry = () => ({
+            card: "Basic Details",
+            reason: "Basic details updated",
+            section: "basicDetails",
+            changeType: "update",
+            targetIndex: null,
+            previousData: (() => {
+                const keysForSnapshot = new Set([
+                    ...Object.keys(updatePayload),
+                    "firstName",
+                    "lastName",
+                    "email",
+                    "contactNumber",
+                    "gender",
+                    "maritalStatus",
+                    "nationality",
+                    "dateOfBirth",
+                    "country",
+                    "employeeId",
+                    "status",
+                    "probationPeriod",
+                ]);
+                const prev = {};
+                for (const k of keysForSnapshot) {
+                    if (
+                        allowedFields.includes(k) &&
+                        existingBasic &&
+                        Object.prototype.hasOwnProperty.call(existingBasic, k) &&
+                        existingBasic[k] !== undefined
+                    ) {
+                        prev[k] = existingBasic[k];
+                    }
+                }
+                if (existingBank?.bankAttachment) {
+                    prev.bankAttachment = existingBank.bankAttachment;
+                }
+                return prev;
+            })(),
+            proposedData: updatePayload,
+        });
+
         const requiresApprovalQueue = shouldQueueProfileChange(existingBasic);
         let updated = null;
         if (requiresApprovalQueue) {
@@ -356,24 +401,7 @@ export const updateBasicDetails = async (req, res) => {
                 employeeId,
                 actor: req.user,
                 reason: "Basic details updated",
-                changeEntry: {
-                    card: "Basic Details",
-                    reason: "Basic details updated",
-                    section: "basicDetails",
-                    changeType: "update",
-                    targetIndex: null,
-                    previousData: {
-                        firstName: existingBasic?.firstName || "",
-                        lastName: existingBasic?.lastName || "",
-                        email: existingBasic?.email || "",
-                        contactNumber: existingBasic?.contactNumber || "",
-                        gender: existingBasic?.gender || "",
-                        maritalStatus: existingBasic?.maritalStatus || "",
-                        nationality: existingBasic?.nationality || "",
-                        dateOfBirth: existingBasic?.dateOfBirth || null,
-                    },
-                    proposedData: updatePayload,
-                },
+                changeEntry: buildBasicDetailsReactivationEntry(),
             });
             updated = await getCompleteEmployee(employeeId);
         } else {
@@ -388,10 +416,21 @@ export const updateBasicDetails = async (req, res) => {
                 employeeId,
                 actor: req.user,
                 reason: "Basic details updated",
+                changeEntry: buildBasicDetailsReactivationEntry(),
             });
         }
 
-        // Remove password from response
+        try {
+            await markProfileActivationHoldResolvedForSection(employeeId, "basicDetails");
+        } catch (_e) {
+            /* non-fatal */
+        }
+
+        updated = await getCompleteEmployee(employeeId);
+        if (!updated) {
+            return res.status(404).json({ message: "Employee not found" });
+        }
+
         delete updated.password;
 
         // 7. Return success

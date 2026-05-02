@@ -163,7 +163,7 @@ export const getUserActivityStats = async (req, res) => {
             DashboardAction.find({
                 assignedTo: { $in: relevantIds },
                 requestType: 'Profile Activation',
-                status: { $in: ['Approved', 'Rejected'] }
+                status: { $in: ['Approved', 'Rejected', 'On Hold'] }
             })
                 .sort({ actionedDate: -1, updatedAt: -1 })
                 .limit(25)
@@ -606,6 +606,7 @@ export const getUserActivityStats = async (req, res) => {
                 status: item.status,
                 extra1: item.extra1 || item.subjectEmployeeId,
                 extra2: item.extra2,
+                extra3: item.extra3,
                 targetEmployeeId: item.subjectEmployeeId?.toString(),
                 employeeId: targetEmployeeId,
                 scope: isSelf ? 'outgoing' : 'inbox'
@@ -616,6 +617,15 @@ export const getUserActivityStats = async (req, res) => {
             );
             if (idx !== -1) {
                 const existing = activityList[idx];
+                if (
+                    item.status === 'On Hold' &&
+                    isSelf &&
+                    existing.status === 'Pending' &&
+                    existing.requestedBy === 'Me'
+                ) {
+                    activityList[idx] = { ...existing, ...activityItem };
+                    return;
+                }
                 // Do not replace a live Pending HR task with an older Approved/Rejected outcome row (same requestId).
                 if (existing.status === 'Pending' && ['Approved', 'Rejected'].includes(activityItem.status)) {
                     return;
@@ -897,17 +907,19 @@ export const getUserActivityStats = async (req, res) => {
             });
         });
 
+        const finalActivityList = activityList;
+
         // Final counts
-        const pendingCount = activityList.filter(i => i.status === 'Pending').length;
-        const approvedCount = activityList.filter(i => i.status === 'Approved').length;
-        const rejectedCount = activityList.filter(i => (i.status === 'Rejected' || i.status === 'rejected')).length;
+        const pendingCount = finalActivityList.filter(i => i.status === 'Pending').length;
+        const approvedCount = finalActivityList.filter(i => i.status === 'Approved').length;
+        const rejectedCount = finalActivityList.filter(i => (i.status === 'Rejected' || i.status === 'rejected')).length;
 
         res.status(200).json({
             pending: pendingCount,
             approved: approvedCount,
             rejected: rejectedCount,
-            total: activityList.length,
-            items: activityList.sort((a, b) => {
+            total: finalActivityList.length,
+            items: finalActivityList.sort((a, b) => {
                 const dateA = new Date(a.actionedDate || a.requestedDate || 0);
                 const dateB = new Date(b.actionedDate || b.requestedDate || 0);
                 return dateB - dateA;

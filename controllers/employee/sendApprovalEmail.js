@@ -52,6 +52,20 @@ export const sendApprovalEmail = async (req, res) => {
         if (!description || !String(description).trim()) {
             return res.status(400).json({ message: "Edited details are required for profile activation request." });
         }
+
+        const hold = employeeBasic.profileActivationHold;
+        const unapprovedHeld = Array.isArray(hold?.unapprovedEntryIds) ? hold.unapprovedEntryIds : [];
+        const resolvedHeld = new Set((hold?.resolvedEntryIds || []).map(String));
+        if (unapprovedHeld.length > 0) {
+            const allFixed = unapprovedHeld.every((id) => resolvedHeld.has(String(id)));
+            if (!allFixed) {
+                return res.status(400).json({
+                    message:
+                        "HR placed your activation on hold. Update every flagged item first (they turn green after you save), then submit again.",
+                });
+            }
+        }
+
         const reasonText = String(reason).trim();
         const descriptionText = String(description).trim();
         const attachmentText = attachment && String(attachment).trim() ? String(attachment).trim() : null;
@@ -148,6 +162,7 @@ export const sendApprovalEmail = async (req, res) => {
         await EmployeeBasic.findByIdAndUpdate(employeeBasic._id, {
             profileApprovalStatus: "submitted",
             profileSubmittedTo: hrEmployee._id,
+            $unset: { profileActivationHold: "" },
             $push: {
                 profileWorkflow: {
                     role: "HR",
@@ -179,8 +194,9 @@ export const sendApprovalEmail = async (req, res) => {
             status: "Pending",
             subjectEmployee: subjectForDashboard || employeeBasic,
             requestedByName,
-            extra1: `${activationTypeLabel} — ${reasonText}${pendingCardsText}`,
+            extra1: `[Employee profile] ${activationTypeLabel} — ${reasonText}${pendingCardsText}`,
             extra2: employeeBasic.designation || "",
+            extra3: JSON.stringify({ activationSubject: "employee", activationViewerRole: "hr" }),
         });
 
         return res.status(200).json({

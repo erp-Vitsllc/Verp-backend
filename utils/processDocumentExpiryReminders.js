@@ -9,6 +9,7 @@ import EmployeeMedicalInsurance from "../models/EmployeeMedicalInsurance.js";
 import EmployeeDrivingLicense from "../models/EmployeeDrivingLicense.js";
 import DashboardAction from "../models/DashboardAction.js";
 import ExpiryReminderLog from "../models/ExpiryReminderLog.js";
+import User from "../models/User.js";
 import { getDepartmentHOD } from "./getDepartmentHOD.js";
 import { getManagementHOD } from "./getManagementHOD.js";
 import { resolveEmployeeEmail } from "./resolveEmployeeEmail.js";
@@ -45,7 +46,7 @@ const getReminderStageLabel = (marker) => {
     return "3rd Reminder";
 };
 
-const formatExpiryDateLabel = (expiryDate) => {
+export const formatExpiryDateLabel = (expiryDate) => {
     if (!expiryDate) return "";
     try {
         const d = new Date(expiryDate);
@@ -194,22 +195,64 @@ const getFlowchartRecipientBundle = async () => {
 };
 
 /** Employee document expiry routing: Admin + HR + employee HOD (primary reportee). */
-const getEmployeeRecipientBundle = async (employee) => {
-    const [admin, hr, hod] = await Promise.all([
+let employeeStaticRecipientsCache = null;
+const getEmployeeStaticRecipientBundle = async () => {
+    if (employeeStaticRecipientsCache) return employeeStaticRecipientsCache;
+
+    const [adminFlowchart, hr] = await Promise.all([
         getDepartmentHOD("admincontroller"),
         getDepartmentHOD("hr"),
+    ]);
+
+    const adminUsers = await User.find({
+        isAdmin: true,
+        status: "Active",
+        employeeId: { $exists: true, $nin: ["", null] },
+    })
+        .select("employeeId")
+        .lean();
+
+    const adminEmployeeIds = [...new Set(adminUsers.map((u) => String(u.employeeId || "").trim()).filter(Boolean))];
+    const adminEmployees = adminEmployeeIds.length
+        ? await EmployeeBasic.find({ employeeId: { $in: adminEmployeeIds } })
+            .select("employeeId firstName lastName companyEmail workEmail personalEmail email")
+            .lean()
+        : [];
+
+    const recipientsByEmployeeId = new Map();
+    const pushRecipient = (person) => {
+        const key = String(person?.employeeId || "").trim();
+        if (!key) return;
+        if (!recipientsByEmployeeId.has(key)) recipientsByEmployeeId.set(key, person);
+    };
+
+    (adminEmployees || []).forEach(pushRecipient);
+    pushRecipient(adminFlowchart);
+
+    employeeStaticRecipientsCache = {
+        admins: [...recipientsByEmployeeId.values()],
+        hr: hr || null,
+    };
+    return employeeStaticRecipientsCache;
+};
+
+const getEmployeeRecipientBundle = async (employee) => {
+    const staticRecipients = await getEmployeeStaticRecipientBundle();
+    const [hod] = await Promise.all([
         employee?.primaryReportee
             ? EmployeeBasic.findById(employee.primaryReportee)
                 .select("employeeId firstName lastName companyEmail workEmail personalEmail email")
                 .lean()
             : null,
     ]);
+    const admins = staticRecipients?.admins || [];
+    const hr = staticRecipients?.hr || null;
     const emails = dedupeEmails([
-        pickCompanyAddress(admin || {}),
+        ...admins.map((a) => pickCompanyAddress(a || {})),
         pickCompanyAddress(hr || {}),
         pickCompanyAddress(hod || {}),
     ]);
-    return { admin, hr, hod, emails };
+    return { admins, hr, hod, emails };
 };
 
 const buildCompanyDocuments = (company) => {
@@ -389,7 +432,7 @@ const processCompanyReminders = async () => {
     }
 };
 
-const buildEmployeeDocumentMap = async (employeeIds) => {
+export const buildEmployeeDocumentMap = async (employeeIds) => {
     const [passports, visas, emiratesIds, labourCards, medicalIns, drivingLic] = await Promise.all([
         EmployeePassport.find({ employeeId: { $in: employeeIds } }).select("employeeId number expiryDate").lean(),
         EmployeeVisa.find({ employeeId: { $in: employeeIds } }).select("employeeId visit employment spouse").lean(),
@@ -477,12 +520,13 @@ const processEmployeeReminders = async () => {
             const extra1 = `Expiry follow-up required: ${doc.label}${expLabel ? ` (Exp: ${expLabel})` : ""}`;
             const extra2 = `${subjectName} (${employee.employeeId})`;
 
-            // Always ensure pending task exists while document is <=10 days or expired.
+            // Create pending inbox tasks for Admin + HR + reporting HOD.
             if (reminderStage === STAGE_3_MARKER) {
-                if (recipients.admin?._id) {
+                for (const adminRecipient of recipients.admins || []) {
+                    if (!adminRecipient?._id) continue;
                     await ensureDashboardAction({
-                        assignedTo: recipients.admin._id,
-                        assignedToEmpId: recipients.admin.employeeId,
+                        assignedTo: adminRecipient._id,
+                        assignedToEmpId: adminRecipient.employeeId,
                         requestId: employee._id,
                         subjectEmployeeId: employee.employeeId,
                         subjectName,
@@ -503,7 +547,6 @@ const processEmployeeReminders = async () => {
                         requestType: "Employee Document Expiry Reminder",
                     });
                 }
-
                 if (recipients.hod?._id) {
                     await ensureDashboardAction({
                         assignedTo: recipients.hod._id,

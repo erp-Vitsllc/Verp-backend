@@ -2,6 +2,7 @@ import EmployeeBasic from "../../models/EmployeeBasic.js";
 import User from "../../models/User.js";
 import { getCompleteEmployee } from "../../services/employeeService.js";
 import { triggerProfileReactivationIfNeeded, shouldQueueProfileChange } from "../../utils/triggerProfileReactivation.js";
+import { markProfileActivationHoldResolvedForSection } from "../../utils/markProfileActivationHoldResolved.js";
 
 export const updateWorkDetails = async (req, res) => {
     try {
@@ -127,6 +128,12 @@ export const updateWorkDetails = async (req, res) => {
                     { $set: { companyEmail: updatePayload.companyEmail } }
                 );
             }
+        }
+
+        try {
+            await markProfileActivationHoldResolvedForSection(employeeId, "workDetails");
+        } catch (_e) {
+            /* ignore */
         }
 
         // Get updated employee data

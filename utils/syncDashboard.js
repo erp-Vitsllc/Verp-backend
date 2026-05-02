@@ -28,40 +28,50 @@ export const syncDashboardAction = async (data) => {
             actionedBy,
             comment,
             requestedByName,
-            notifySubjectEmployee
+            notifySubjectEmployee,
+            /** When true, do not mark assignee Pending rows as completed (used for Profile hold: HR keeps the task open). */
+            skipPendingCompletion = false,
         } = data;
 
         // 1. If status is NOT pending, find and update any existing pending actions for this request
         if (status !== 'Pending') {
-            const query = { requestId: requestId, status: 'Pending' };
-            if (requestType) {
-                query.requestType = requestType;
-            }
-            // NEW: If assignedTo is provided for a non-pending status, only clear THAT person's action.
-            // This is critical for parallel workflows (Reward) where one person acting shouldn't clear everyone.
-            if (assignedTo) {
-                query.assignedTo = assignedTo;
-            }
-
-            await DashboardAction.updateMany(
-                query,
-                {
-                    status: status,
-                    actionedDate: new Date(),
-                    actionedBy: actionedBy,
-                    comment: comment
+            if (!skipPendingCompletion) {
+                const query = { requestId: requestId, status: 'Pending' };
+                if (requestType) {
+                    query.requestType = requestType;
                 }
-            );
+                // NEW: If assignedTo is provided for a non-pending status, only clear THAT person's action.
+                // This is critical for parallel workflows (Reward) where one person acting shouldn't clear everyone.
+                if (assignedTo) {
+                    query.assignedTo = assignedTo;
+                }
+
+                await DashboardAction.updateMany(
+                    query,
+                    {
+                        status: status,
+                        actionedDate: new Date(),
+                        actionedBy: actionedBy,
+                        comment: comment
+                    }
+                );
+            }
 
             // Profile Activation: give the subject employee their own completed row (inbox/outgoing merge in stats UI).
             if (
                 notifySubjectEmployee &&
                 requestType === 'Profile Activation' &&
                 subjectEmployee?._id &&
-                ['Approved', 'Rejected'].includes(status)
+                ['Approved', 'Rejected', 'On Hold'].includes(status)
             ) {
                 const subj = subjectEmployee;
                 const subjectName = `${subj.firstName || ''} ${subj.lastName || ''}`.trim() || 'Employee';
+                const outcomeExtra1 =
+                    status === 'Approved'
+                        ? '[Employee profile] Your profile has been activated'
+                        : status === 'Rejected'
+                            ? '[Employee profile] Your profile activation requires updates'
+                            : (extra1 || '[Employee profile] HR placed your activation on hold — please update the items listed in your email.');
                 await DashboardAction.findOneAndUpdate(
                     { requestId, assignedTo: subj._id, requestType },
                     {
@@ -74,11 +84,9 @@ export const syncDashboardAction = async (data) => {
                         subjectName: subjectName,
                         requestedByName: requestedByName || '',
                         requestedDate: new Date(),
-                        extra1:
-                            status === 'Approved'
-                                ? 'Your profile has been activated'
-                                : 'Your profile activation requires updates',
+                        extra1: outcomeExtra1,
                         extra2: subj.designation || '',
+                        extra3: extra3 ?? JSON.stringify({ activationSubject: 'employee', activationViewerRole: 'subject' }),
                         actionedDate: new Date(),
                         actionedBy: actionedBy || null,
                         comment: comment || ''
@@ -119,6 +127,13 @@ export const syncDashboardAction = async (data) => {
         }
 
         // Upsert the pending action
+        const pendingExtra3 =
+            extra3 !== undefined && extra3 !== null
+                ? String(extra3)
+                : requestType === 'Profile Activation'
+                    ? JSON.stringify({ activationSubject: 'employee', activationViewerRole: 'hr' })
+                    : undefined;
+
         await DashboardAction.findOneAndUpdate(
             { requestId: requestId, assignedTo: actualAssignedTo, status: 'Pending' },
             {
@@ -131,7 +146,7 @@ export const syncDashboardAction = async (data) => {
                 requestedDate: new Date(),
                 extra1: extra1,
                 extra2: extra2,
-                ...(extra3 !== undefined && extra3 !== null ? { extra3: String(extra3) } : {})
+                ...(pendingExtra3 ? { extra3: pendingExtra3 } : {})
             },
             { upsert: true, new: true }
         );

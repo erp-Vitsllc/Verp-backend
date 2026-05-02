@@ -3,6 +3,7 @@ import { resolveEmployeeId } from "../../services/employeeService.js";
 import { deleteDocumentFromS3 } from "../../utils/s3Upload.js";
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
 import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
+import { cleanupEmployeeExpiryNotificationsByLabels } from "../../utils/cleanupEmployeeExpiryNotifications.js";
 
 const ALLOWED_VISA_TYPES = ["visit", "employment", "spouse"];
 
@@ -50,6 +51,16 @@ export const deleteVisaDetails = async (req, res) => {
         if (!updatedVisa) {
             return res.status(404).json({ message: "Visa record not found." });
         }
+
+        const visaLabelByType = {
+            visit: "Visit Visa",
+            employment: "Employment Visa",
+            spouse: "Spouse Visa",
+        };
+        await cleanupEmployeeExpiryNotificationsByLabels({
+            employeeObjectId: employee._id,
+            labels: [visaLabelByType[type] || "Visa"],
+        });
 
         await triggerProfileReactivationIfNeeded({
             employeeId,

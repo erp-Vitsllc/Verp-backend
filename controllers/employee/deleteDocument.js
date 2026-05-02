@@ -2,6 +2,7 @@ import EmployeeBasic from "../../models/EmployeeBasic.js";
 import mongoose from "mongoose";
 import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeService.js";
 import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
+import { cleanupEmployeeExpiryNotificationsByLabels } from "../../utils/cleanupEmployeeExpiryNotifications.js";
 
 // @desc    Delete a document from employee's documents list
 // @route   DELETE /api/Employee/:id/document/:index
@@ -34,6 +35,7 @@ export const deleteDocument = async (req, res) => {
         }
 
         const documentToDelete = employee.documents[docIndex];
+        const deletedDocLabel = (documentToDelete?.type || "Employee Document").toString().trim();
         // Archive document before deleting from live list (default behavior).
         // Some actions (eg. "Not Renew") archive separately and must not double-archive.
         if (!skipArchive && documentToDelete) {
@@ -60,6 +62,11 @@ export const deleteDocument = async (req, res) => {
             // Remove document from array
             employee.documents.splice(docIndex, 1);
             await employee.save();
+
+        await cleanupEmployeeExpiryNotificationsByLabels({
+            employeeObjectId: employee._id,
+            labels: [deletedDocLabel],
+        });
         
         const completeEmployee = await getCompleteEmployee(employee.employeeId);
 

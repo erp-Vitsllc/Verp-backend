@@ -1,6 +1,7 @@
 import EmployeeMedicalInsurance from "../../models/EmployeeMedicalInsurance.js";
 import { resolveEmployeeId } from "../../services/employeeService.js";
 import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
+import { cleanupEmployeeExpiryNotificationsByLabels } from "../../utils/cleanupEmployeeExpiryNotifications.js";
 
 export const deleteMedicalInsuranceDetails = async (req, res) => {
     const { id } = req.params;
@@ -12,6 +13,10 @@ export const deleteMedicalInsuranceDetails = async (req, res) => {
         if (!employee) return res.status(404).json({ message: "Employee not found." });
 
         await EmployeeMedicalInsurance.deleteOne({ employeeId: employee.employeeId });
+        await cleanupEmployeeExpiryNotificationsByLabels({
+            employeeObjectId: employee._id,
+            labels: ["Medical Insurance"],
+        });
 
         return res.status(200).json({ message: "Medical Insurance details deleted successfully." });
     } catch (error) {
