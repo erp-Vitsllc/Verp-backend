@@ -1,6 +1,7 @@
 import mongoose from "mongoose";
 import DashboardAction from "../../models/DashboardAction.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
+import { viewerMayDeleteDashboardAction } from "../../utils/viewerMayDeleteDashboardAction.js";
 
 /**
  * Remove a single dashboard notification row (DashboardAction).
@@ -19,29 +20,16 @@ export const deleteDashboardAction = async (req, res) => {
         const action = await DashboardAction.findById(actionId).lean();
         if (!action) return res.status(404).json({ message: "Notification not found" });
 
-        const isAdmin =
-            ["Admin", "CEO", "Director", "General Manager"].includes(currentUser.role) ||
-            currentUser.isAdmin;
-
         const manager = await EmployeeBasic.findOne({
             $or: [
                 ...(currentUser.employeeObjectId ? [{ _id: currentUser.employeeObjectId }] : []),
                 ...(currentUser.employeeId ? [{ employeeId: currentUser.employeeId }] : []),
             ],
-        }).select("_id employeeId");
+        })
+            .select("_id employeeId")
+            .lean();
 
-        const relevantIds = [currentUser.employeeObjectId, manager?._id, currentUser._id].filter(Boolean);
-
-        const assigneeMatches = relevantIds.some(
-            (id) => id && action.assignedTo && id.toString() === action.assignedTo.toString()
-        );
-
-        const norm = (s) => (s || "").toString().trim().toLowerCase();
-        const empIdMatches =
-            (norm(currentUser.employeeId) && norm(action.assignedToEmpId) === norm(currentUser.employeeId)) ||
-            (manager?.employeeId && norm(action.assignedToEmpId) === norm(manager.employeeId));
-
-        if (!isAdmin && !assigneeMatches && !empIdMatches) {
+        if (!viewerMayDeleteDashboardAction(currentUser, manager, action)) {
             return res.status(403).json({ message: "Not allowed to remove this notification" });
         }
 

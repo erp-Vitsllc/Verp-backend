@@ -1,4 +1,5 @@
 import EmployeeBasic from "../../models/EmployeeBasic.js";
+import { sanitizeActivationHoldRowNotes } from "../../utils/sanitizeActivationHoldRowNotes.js";
 import { getCompleteEmployee } from "../../services/employeeService.js";
 import { syncDashboardAction } from "../../utils/syncDashboard.js";
 import { sendProfileActivationHoldEmail } from "../../utils/sendProfileActivationHoldEmail.js";
@@ -24,7 +25,9 @@ export const holdProfile = async (req, res) => {
 
         const employeeId = employeeOverview.employeeId;
 
-        if (employeeOverview.profileApprovalStatus !== "submitted") {
+        const isAdminOrHR = req.user && (/admin|root/i.test(req.user.role || "") || req.user.isAdmin === true || /hr/i.test(req.user.role || "") || /hr|admin|root/i.test(req.user.groupName || ""));
+
+        if (employeeOverview.profileApprovalStatus !== "submitted" && !isAdminOrHR) {
             return res.status(400).json({
                 message: "Profile must be submitted for HR review before it can be placed on hold.",
             });
@@ -72,6 +75,10 @@ export const holdProfile = async (req, res) => {
         const unapprovedEntries = entriesWithIds.filter((e) => !approved.has(e.__idStr));
 
         const unapprovedCards = [...new Set(unapprovedEntries.map((e) => String(e.sub?.card || "").trim()).filter(Boolean))];
+        const rowNotesByEntryId = sanitizeActivationHoldRowNotes(
+            req.body?.rowNotesByEntryId,
+            unapprovedEntries.map((e) => e.__idStr),
+        );
 
         /** Apply HR-approved queue rows immediately (live card data). */
         if (approvedEntries.length > 0) {
@@ -101,6 +108,7 @@ export const holdProfile = async (req, res) => {
                 unapprovedCards.length ? unapprovedCards : unapprovedEntries.map((_, i) => `Change ${i + 1}`),
             resolvedEntryIds: [],
             comment: comment || "",
+            ...(rowNotesByEntryId ? { rowNotesByEntryId } : {}),
         };
 
         await doc.save();
@@ -132,13 +140,33 @@ export const holdProfile = async (req, res) => {
             extra3: JSON.stringify({ activationSubject: "employee", activationViewerRole: "submitter" }),
         });
 
+        if (doc.profileSubmittedTo) {
+            try {
+                const DashboardAction = (await import("../../models/DashboardAction.js")).default;
+                await DashboardAction.deleteMany({
+                    requestId: doc._id,
+                    requestType: "Profile Activation",
+                    status: "Pending",
+                    assignedTo: doc.profileSubmittedTo,
+                });
+            } catch (_e) {
+                /* non-fatal */
+            }
+        }
+
         const completeForEmail = await getCompleteEmployee(employeeId);
 
+        const holdNotesMap = rowNotesByEntryId || {};
+        const holdLineItems = unapprovedEntries.map(({ __idStr, sub }) => ({
+            cardLabel: String(sub?.card || "").trim() || `Change (${__idStr})`,
+            note: holdNotesMap[__idStr] || "",
+        }));
         sendProfileActivationHoldEmail({
             subjectEmployee: completeForEmail,
             submitterEmployee: submitterForNotify,
             hrManager: req.user,
             unapprovedCards: doc.profileActivationHold.unapprovedCards || [],
+            holdLineItems,
             comment: doc.profileActivationHold.comment || "",
         }).catch(() => {});
 

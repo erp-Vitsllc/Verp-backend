@@ -11,6 +11,7 @@ import EmployeeEmergencyContact from "../models/EmployeeEmergencyContact.js";
 import EmployeeBasic from "../models/EmployeeBasic.js";
 import User from "../models/User.js";
 import { saveEmployeeData } from "../services/employeeService.js";
+import { archiveQueuedPassportOrVisaPreviousIfNeeded } from "./archiveEmployeeDocument.js";
 
 /**
  * Applies a subset of pendingReactivationChanges (HR-checked rows during partial hold).
@@ -125,12 +126,24 @@ export async function applyApprovedPendingProfileChanges(employeeId, basicDoc, c
             continue;
         }
         if (section === "passport") {
+            await archiveQueuedPassportOrVisaPreviousIfNeeded({
+                employeeId,
+                section,
+                previousData: change.previousData,
+                proposedData,
+            });
             await EmployeePassport.findOneAndUpdate({ employeeId }, proposedData, { upsert: true, new: true });
             continue;
         }
         if (section === "visa") {
             const visaType = String(proposedData?.visaType || "").trim();
             if (visaType) {
+                await archiveQueuedPassportOrVisaPreviousIfNeeded({
+                    employeeId,
+                    section,
+                    previousData: change.previousData,
+                    proposedData,
+                });
                 const visaPayload = { ...proposedData };
                 delete visaPayload.visaType;
                 await EmployeeVisa.findOneAndUpdate(

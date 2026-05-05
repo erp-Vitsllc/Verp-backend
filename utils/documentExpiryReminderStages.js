@@ -14,7 +14,7 @@ export const getDaysUntil = (expiryDate) => {
 
 /**
  * Email reminders only on exact lead times: 30, 20, and 10 days before expiry.
- * Not sent on adjacent days (e.g. 29 or 9).
+ * <10 days are task-only (no reminder email).
  */
 export const getEmailReminderStageMarker = (daysUntilExpiry) => {
     if (daysUntilExpiry == null) return null;

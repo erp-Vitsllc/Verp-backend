@@ -17,7 +17,7 @@ export const protect = async (req, res, next) => {
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
         // Check if user still exists and is active
-        const user = await User.findById(decoded.id).select('_id name status enablePortalAccess email isAdmin companyEmail employeeId');
+        const user = await User.findById(decoded.id).select('_id name status enablePortalAccess email isAdmin companyEmail employeeId groupName');
 
         if (!user) {
             return res.status(401).json({ message: "User not found" });
@@ -68,6 +68,8 @@ export const protect = async (req, res, next) => {
             companyEmail: user.companyEmail,
             employeeId: user.employeeId,
             employeeObjectId: employeeObjectId, // Linked EmployeeBasic ObjectId
+            role: user.groupName || decoded.role || null,
+            groupName: user.groupName,
             ...decoded
         };
 

@@ -30,6 +30,8 @@ export const syncDashboardAction = async (data) => {
             requestedByName,
             /** Profile Activation On Hold: outcome row for the submitter (dashboard / sidebar). */
             profileActivationNotifyAssignee,
+            /** Company Activation On Hold: outcome row for the submitter. */
+            companyActivationNotifyAssignee,
             /** When true, do not mark assignee Pending rows as completed (used for Profile hold: HR keeps the task open). */
             skipPendingCompletion = false,
         } = data;
@@ -92,6 +94,47 @@ export const syncDashboardAction = async (data) => {
                         actionedDate: new Date(),
                         actionedBy: actionedBy || null,
                         comment: comment || '',
+                    },
+                    { upsert: true, new: true, setDefaultsOnInsert: true },
+                );
+            }
+
+            if (
+                requestType === "Company Activation" &&
+                status === "On Hold" &&
+                subjectEmployee &&
+                companyActivationNotifyAssignee?._id
+            ) {
+                const assignee = companyActivationNotifyAssignee;
+                const subj = subjectEmployee;
+                const subjectNameDisplay =
+                    `${subj.firstName || ""} ${subj.lastName || ""}`.trim() || subj.name || "Company";
+                const outcomeExtra1 =
+                    extra1 ||
+                    "[Company profile] HR placed your activation on hold — please update the listed items.";
+                await DashboardAction.findOneAndUpdate(
+                    { requestId, assignedTo: assignee._id, requestType },
+                    {
+                        assignedTo: assignee._id,
+                        assignedToEmpId: assignee.employeeId,
+                        requestId,
+                        requestType: "Company Activation",
+                        status: "On Hold",
+                        subjectEmployeeId: subj.employeeId || subj.companyId || "",
+                        subjectName: subjectNameDisplay,
+                        requestedByName: requestedByName || "",
+                        requestedDate: new Date(),
+                        extra1: outcomeExtra1,
+                        extra2: extra2 || "",
+                        extra3:
+                            extra3 ??
+                            JSON.stringify({
+                                companyActivationViewerRole: "submitter",
+                                activationSubject: "company",
+                            }),
+                        actionedDate: new Date(),
+                        actionedBy: actionedBy || null,
+                        comment: comment || "",
                     },
                     { upsert: true, new: true, setDefaultsOnInsert: true },
                 );

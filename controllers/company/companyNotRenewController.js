@@ -40,6 +40,12 @@ const findCompanyByRouteId = async (id) =>
         $or: [{ _id: id.match(/^[0-9a-fA-F]{24}$/) ? id : null }, { companyId: id }],
     });
 
+const isHrLoggedInUser = async (req) => {
+    if (await isRequestUserDesignatedFlowchartHr(req)) return true;
+    const role = String(req?.user?.role || "").trim().toLowerCase();
+    return role === "hr" || role === "human resource" || role === "human resources";
+};
+
 const historyDescription = (base, reason) => {
     const r = (reason || "").trim();
     if (!r) return base;
@@ -47,6 +53,22 @@ const historyDescription = (base, reason) => {
 };
 
 const prependRows = (docs, rows) => [...(rows || []), ...(docs || [])];
+const escapeRegExp = (value = "") => String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const buildExtra1Regex = (label) => {
+    const escaped = escapeRegExp(label || "");
+    return new RegExp(`^Expiry follow-up required:\\s*${escaped}(?:\\s*\\(Exp:\\s*[^)]+\\))?\\s*$`, "i");
+};
+const cleanupCompanyExpiryNotificationsByLabels = async ({ companyObjectId, labels = [] }) => {
+    if (!companyObjectId) return;
+    const normalizedLabels = [...new Set((labels || []).map((x) => String(x || "").trim()).filter(Boolean))];
+    if (normalizedLabels.length === 0) return;
+    await DashboardAction.deleteMany({
+        requestId: companyObjectId,
+        requestType: "Document Expiry Reminder",
+        status: "Pending",
+        $or: normalizedLabels.map((label) => ({ extra1: { $regex: buildExtra1Regex(label) } })),
+    });
+};
 
 const resolveDocumentIndex = (company, entry) => {
     const arr = company.documents || [];
@@ -244,6 +266,7 @@ const closeDashboardAction = async (companyMongoId, notRenewRequestId, status, c
         requestType: "Company Document Not Renew",
         status: "Pending",
     }).select("_id extra3");
+    const matchedIds = [];
     for (const row of rows) {
         let meta = {};
         try {
@@ -252,13 +275,20 @@ const closeDashboardAction = async (companyMongoId, notRenewRequestId, status, c
             meta = {};
         }
         if (meta.notRenewRequestId !== notRenewRequestId) continue;
-        await DashboardAction.findByIdAndUpdate(row._id, {
+        matchedIds.push(row._id);
+    }
+    if (matchedIds.length === 0) return;
+    await DashboardAction.updateMany(
+        { _id: { $in: matchedIds } },
+        {
             status,
             comment: comment || "",
             actionedDate: new Date(),
             ...(actionedByEmpObjectId ? { actionedBy: actionedByEmpObjectId } : {}),
-        });
-        break;
+        }
+    );
+    if (status !== "Pending") {
+        await DashboardAction.deleteMany({ _id: { $in: matchedIds } });
     }
 };
 
@@ -318,6 +348,7 @@ export const submitCompanyNotRenewRequest = async (req, res) => {
             }
         }
 
+        const autoApprove = await isHrLoggedInUser(req);
         const requestId = crypto.randomUUID();
         const row = {
             requestId,
@@ -338,6 +369,22 @@ export const submitCompanyNotRenewRequest = async (req, res) => {
             submittedByEmployeeId: String(req.user.employeeId || "").trim(),
             submittedAt: new Date(),
         };
+
+        if (autoApprove) {
+            try {
+                applyApprovedArchive(company, row);
+            } catch (e) {
+                return res.status(400).json({
+                    message: e.message === "DOCUMENT_NOT_FOUND" ? "Document no longer exists." : "Could not apply not-renew.",
+                });
+            }
+            await company.save();
+            await cleanupCompanyExpiryNotificationsByLabels({
+                companyObjectId: company._id,
+                labels: [row.label || row.kind],
+            });
+            return res.status(201).json({ message: "Not renew applied and moved to Old Documents." });
+        }
 
         company.pendingNotRenewRequests = [...(company.pendingNotRenewRequests || []), row];
         await company.save();
@@ -373,7 +420,13 @@ export const submitCompanyNotRenewRequest = async (req, res) => {
                 requestedByName: row.submittedByName || "User",
                 extra1: `Not renew pending: ${row.label || kind}`,
                 extra2: reason.length > 220 ? `${reason.slice(0, 217)}...` : reason,
-                extra3: JSON.stringify({ notRenewRequestId: requestId }),
+                extra3: JSON.stringify({
+                    notRenewRequestId: requestId,
+                    kind: row.kind,
+                    label: row.label || row.kind,
+                    ownerIndex: row.ownerIndex,
+                    docKey: row.docKey || "",
+                }),
             });
         }
 
@@ -445,8 +498,28 @@ export const respondCompanyNotRenewRequest = async (req, res) => {
 
         company.pendingNotRenewRequests = list.filter((r) => r.requestId !== requestId);
         await company.save();
+        await cleanupCompanyExpiryNotificationsByLabels({
+            companyObjectId: company._id,
+            labels: [entry.label || entry.kind],
+        });
 
         await closeDashboardAction(company._id, requestId, "Approved", "", req.user.employeeObjectId);
+
+        const submitter = entry.submittedByUserId
+            ? await User.findById(entry.submittedByUserId).select("email companyEmail name").lean()
+            : null;
+        const to = (submitter?.companyEmail || submitter?.email || "").trim();
+        if (to) {
+            await sendMail({
+                to: [to],
+                subject: `Not renew request approved — ${company.companyId}`,
+                html: `<div style="font-family:Arial,sans-serif;line-height:1.6;">
+                    <p>Your request to mark <strong>${entry.label || entry.kind}</strong> as not renewed for
+                    <strong>${company.name}</strong> (${company.companyId}) was <strong>approved</strong>.</p>
+                    <p>The document has been archived.</p>
+                </div>`,
+            });
+        }
 
         return res.json({ message: "Not renew approved and archived." });
     } catch (error) {

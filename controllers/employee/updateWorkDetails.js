@@ -134,12 +134,10 @@ export const updateWorkDetails = async (req, res) => {
             });
         }
 
-        if (!skipLive) {
-            try {
-                await markProfileActivationHoldResolvedForSection(employeeId, "workDetails");
-            } catch (_e) {
-                /* ignore */
-            }
+        try {
+            await markProfileActivationHoldResolvedForSection(employeeId, "workDetails");
+        } catch (_e) {
+            /* ignore */
         }
 
         // Get updated employee data

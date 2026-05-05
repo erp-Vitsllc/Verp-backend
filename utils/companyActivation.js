@@ -1,8 +1,10 @@
 import nodemailer from "nodemailer";
 import Company from "../models/Company.js";
 import EmployeeBasic from "../models/EmployeeBasic.js";
+import { isActorDesignatedFlowchartHr } from "./isDesignatedFlowchartHr.js";
 import { resolveFlowchartHrEmployee } from "./resolveFlowchartHrEmployee.js";
 import { syncDashboardAction } from "./syncDashboard.js";
+import { clearCompanyActivationHoldDashboardRows } from "./clearCompanyActivationHoldDashboardRows.js";
 import { shortenUrlsInString } from "./shortenUrlsInString.js";
 
 const dedupeEmailList = (emails = []) => {
@@ -171,6 +173,23 @@ const getActorName = (actor = {}) => {
     return full || actor?.employeeId || "System";
 };
 
+/** Resolves `actor.employeeObjectId` or `actor._id` (User) to EmployeeBasic `_id` for DashboardAction.assignedTo. */
+const resolveActorDashboardEmployeeBasicId = async (actor) => {
+    if (!actor?.employeeObjectId && !actor?._id) return null;
+    const rawId = actor.employeeObjectId || actor._id;
+    const sid = String(rawId);
+    let emp = await EmployeeBasic.findById(sid).select("_id").lean();
+    if (emp?._id) return emp._id;
+    if (!/^[0-9a-fA-F]{24}$/.test(sid)) return null;
+    const User = (await import("../models/User.js")).default;
+    const user = await User.findById(sid).select("employeeId").lean();
+    if (!user?.employeeId) return null;
+    emp = await EmployeeBasic.findOne({ employeeId: user.employeeId }).select("_id").lean();
+    return emp?._id || null;
+};
+
+const companyPendingEntryId = (entry, idx) => String(entry?._id ?? idx);
+
 export const submitCompanyActivation = async ({
     companyId,
     actor = null,
@@ -182,11 +201,39 @@ export const submitCompanyActivation = async ({
     /** Shorter text for dashboard / notifications (full URL kept only in `reason` / workflow when provided). */
     dashboardSummary = null,
     force = false,
+    selectionProvided = false,
+    includedChangeEntryIds = null,
 }) => {
     const company = await Company.findById(companyId);
     if (!company) return { ok: false, message: "Company not found" };
 
     const progress = calculateCompanyActivationProgress(company.toObject());
+
+    if (selectionProvided) {
+        if (!Array.isArray(includedChangeEntryIds)) {
+            return {
+                ok: false,
+                blocked: true,
+                message: "includedChangeEntryIds array is required when selectionProvided is true.",
+                progress,
+            };
+        }
+        const pending = Array.isArray(company.pendingReactivationChanges) ? [...company.pendingReactivationChanges] : [];
+        const allSet = new Set(pending.map((entry, idx) => companyPendingEntryId(entry, idx)));
+        for (const wid of includedChangeEntryIds.map(String)) {
+            if (!allSet.has(wid)) {
+                return {
+                    ok: false,
+                    blocked: true,
+                    message: `Change entry id is not in the pending queue: ${wid}`,
+                    progress,
+                };
+            }
+        }
+        const keep = new Set(includedChangeEntryIds.map(String));
+        company.pendingReactivationChanges = pending.filter((entry, idx) => keep.has(companyPendingEntryId(entry, idx)));
+        company.markModified("pendingReactivationChanges");
+    }
     if (!force && progress.percentage < 100) {
         return {
             ok: false,
@@ -202,6 +249,16 @@ export const submitCompanyActivation = async ({
     }
 
     const hr = hrResolved.employee;
+    if (isActorDesignatedFlowchartHr(actor, hr)) {
+        return {
+            ok: false,
+            blocked: true,
+            code: "HR_CANNOT_QUEUE_SELF_ACTIVATION",
+            message:
+                "The designated Flowchart HR cannot send an activation request to themselves. Activate the company directly instead.",
+            progress,
+        };
+    }
     const requestedByName = getActorName(actor);
     const wasPreviouslyActive = Array.isArray(company.activationWorkflow)
         ? company.activationWorkflow.some((w) => String(w?.status || "").toLowerCase() === "active")
@@ -214,9 +271,12 @@ export const submitCompanyActivation = async ({
         ? `${activationTypeLabel} | ${dashboardSummary}${requestedChanges.length ? ` | Requested Changes: ${requestedChanges.join(", ")}` : ""}`
         : `${activationTypeLabel} | ${reason}${requestedChanges.length ? ` | Requested Changes: ${requestedChanges.join(", ")}` : ""}`;
 
+    const resubmitAfterHold = Boolean(company.activationHold);
+
     company.status = "Inactive";
     company.activationStatus = "submitted";
     company.activationSubmittedTo = hr._id;
+    company.activationSubmittedBy = actor?.employeeObjectId || null;
     company.activationHold = undefined;
     if (!Array.isArray(company.activationWorkflow)) company.activationWorkflow = [];
     company.activationWorkflow.push({
@@ -231,6 +291,8 @@ export const submitCompanyActivation = async ({
         attachmentName: attachmentName || "",
     });
     await company.save();
+
+    await clearCompanyActivationHoldDashboardRows(company._id);
 
     await syncDashboardAction({
         requestId: company._id,
@@ -253,25 +315,38 @@ export const submitCompanyActivation = async ({
     });
 
     if (actor?.employeeObjectId || actor?._id) {
-        await syncDashboardAction({
-            requestId: company._id,
-            requestType: "Company Activation",
-            assignedTo: String(actor.employeeObjectId || actor._id),
-            status: "Pending",
-            subjectEmployee: {
-                employeeId: company.companyId,
-                firstName: company.name,
-                lastName: "",
-                designation: company.nickName || "",
-            },
-            requestedByName,
-            extra1: `[Company profile] ${extra1ForDashboard}`,
-            extra2: company.companyId || "",
-            extra3: JSON.stringify({
-                companyActivationViewerRole: "requester",
-                activationSubject: "company",
-            }),
-        });
+        if (resubmitAfterHold) {
+            const actorEmpId = await resolveActorDashboardEmployeeBasicId(actor);
+            if (actorEmpId) {
+                const DashboardAction = (await import("../models/DashboardAction.js")).default;
+                await DashboardAction.deleteMany({
+                    requestId: company._id,
+                    requestType: "Company Activation",
+                    assignedTo: actorEmpId,
+                    status: "Pending",
+                });
+            }
+        } else {
+            await syncDashboardAction({
+                requestId: company._id,
+                requestType: "Company Activation",
+                assignedTo: String(actor.employeeObjectId || actor._id),
+                status: "Pending",
+                subjectEmployee: {
+                    employeeId: company.companyId,
+                    firstName: company.name,
+                    lastName: "",
+                    designation: company.nickName || "",
+                },
+                requestedByName,
+                extra1: `[Company profile] ${extra1ForDashboard}`,
+                extra2: company.companyId || "",
+                extra3: JSON.stringify({
+                    companyActivationViewerRole: "requester",
+                    activationSubject: "company",
+                }),
+            });
+        }
     }
 
     try {
@@ -298,8 +373,60 @@ export const submitCompanyActivation = async ({
     return { ok: true, progress };
 };
 
+/**
+ * Human-readable labels for which company "cards" an update touches (activation hold progress + queue card text).
+ */
+export const collectCompanyReactivationChangeLabels = (updateData = {}) => {
+    const changes = [];
+    const hasAny = (keys) => keys.some((k) => Object.prototype.hasOwnProperty.call(updateData, k));
+
+    if (hasAny(["name", "nickName", "email", "phone", "establishedDate", "companyId"])) {
+        changes.push("Basic Details");
+    }
+    if (
+        hasAny([
+            "tradeLicenseNumber",
+            "tradeLicenseIssueDate",
+            "tradeLicenseExpiry",
+            "tradeLicenseAttachment",
+            "tradeLicenseOwnerName",
+            "owners",
+        ])
+    ) {
+        changes.push("Trade License");
+    }
+    if (hasAny(["establishmentCardNumber", "establishmentCardIssueDate", "establishmentCardExpiry", "establishmentCardAttachment"])) {
+        changes.push("Establishment Card");
+    }
+    if (Object.prototype.hasOwnProperty.call(updateData, "documents")) {
+        const docs = Array.isArray(updateData.documents) ? updateData.documents : [];
+        if (docs.some((d) => String(d?.type || "").toLowerCase().includes("moa"))) {
+            changes.push("MOA");
+        }
+    }
+    if (Object.prototype.hasOwnProperty.call(updateData, "ejari")) {
+        changes.push("Ejari");
+    }
+    if (Object.prototype.hasOwnProperty.call(updateData, "insurance")) {
+        changes.push("Insurance");
+    }
+
+    return [...new Set(changes)];
+};
+
 export const shouldTriggerCompanyReactivation = (beforeCompany = {}, updateData = {}) => {
     if (String(beforeCompany?.status || "").toLowerCase() !== "active") return false;
+
+    let ownersStructuralChange = false;
+    if (Object.prototype.hasOwnProperty.call(updateData, "owners")) {
+        try {
+            const prev = JSON.parse(JSON.stringify(beforeCompany?.owners ?? []));
+            const next = JSON.parse(JSON.stringify(updateData?.owners ?? []));
+            ownersStructuralChange = JSON.stringify(prev) !== JSON.stringify(next);
+        } catch {
+            ownersStructuralChange = true;
+        }
+    }
 
     // Critical sections that require reactivation when changed after activation
     const hasTradeLicenseChange = [
@@ -325,5 +452,16 @@ export const shouldTriggerCompanyReactivation = (beforeCompany = {}, updateData 
         return t.includes("moa");
     });
 
-    return hasBasicDetailsChange || hasTradeLicenseChange || hasEstablishmentCardChange || hasMoaChange;
+    const hasEjariChange = Object.prototype.hasOwnProperty.call(updateData, "ejari");
+    const hasInsuranceChange = Object.prototype.hasOwnProperty.call(updateData, "insurance");
+
+    return (
+        ownersStructuralChange ||
+        hasBasicDetailsChange ||
+        hasTradeLicenseChange ||
+        hasEstablishmentCardChange ||
+        hasMoaChange ||
+        hasEjariChange ||
+        hasInsuranceChange
+    );
 };

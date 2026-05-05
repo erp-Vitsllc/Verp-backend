@@ -3,6 +3,9 @@ import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeService.js";
 import { uploadDocumentToS3, deleteDocumentFromS3 } from "../../utils/s3Upload.js";
 import { archiveEmployeeDocument } from "../../utils/archiveEmployeeDocument.js";
+import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
+import { skipLiveProfileWritesPendingHr, queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
+import { markProfileActivationHoldResolvedForSection } from "../../utils/markProfileActivationHoldResolved.js";
 
 const REQUIRED_FIELDS = ["number", "issueDate", "expiryDate", "document"];
 
@@ -66,6 +69,10 @@ export const updateDrivingLicenseDetails = async (req, res) => {
         }
 
         const employeeId = employee.employeeId;
+        const employeeBasic = await EmployeeBasic.findOne({ employeeId })
+            .select("company profileStatus profileWorkflow profileApprovalStatus")
+            .lean();
+        const skipLive = skipLiveProfileWritesPendingHr(employeeBasic);
 
         // Check if existing document exists in database (check for both url and data for backward compatibility)
         const existingDrivingLicense = await EmployeeDrivingLicense.findOne({ employeeId });
@@ -90,7 +97,8 @@ export const updateDrivingLicenseDetails = async (req, res) => {
         const previousDrivingLicense = existingDrivingLicense?.drivingLicenceDetails;
         const hasExistingDocument = Boolean(previousDrivingLicense?.document?.url || previousDrivingLicense?.document?.data);
         const hasNewDocumentUpload = Boolean(normalizedDocument);
-        if (hasExistingDocument && hasNewDocumentUpload) {
+        const shouldArchivePrevious = !skipLive && hasExistingDocument && hasNewDocumentUpload;
+        if (shouldArchivePrevious) {
             await archiveEmployeeDocument({
                 employeeId,
                 type: "Driving License",
@@ -122,7 +130,7 @@ export const updateDrivingLicenseDetails = async (req, res) => {
                 );
 
                 // Delete old file only when it is not archived in oldDocuments.
-                if (!(hasExistingDocument && hasNewDocumentUpload) && existingDrivingLicense?.drivingLicenceDetails?.document?.publicId) {
+                if (!shouldArchivePrevious && existingDrivingLicense?.drivingLicenceDetails?.document?.publicId) {
                     await deleteDocumentFromS3(existingDrivingLicense.drivingLicenceDetails.document.publicId);
                 }
 
@@ -140,7 +148,7 @@ export const updateDrivingLicenseDetails = async (req, res) => {
 
         // Build payload - preserve existing document if no new one provided
         const drivingLicensePayload = {
-            number: number.trim(),
+            number: typeof number === 'string' ? number.trim() : number,
             issueDate: parsedIssueDate,
             expiryDate: parsedExpiryDate,
             document: documentData,
@@ -148,20 +156,58 @@ export const updateDrivingLicenseDetails = async (req, res) => {
         };
 
         // Update or create Driving License record
-        const updatedDrivingLicense = await EmployeeDrivingLicense.findOneAndUpdate(
-            { employeeId },
-            {
-                $set: {
-                    drivingLicenceDetails: drivingLicensePayload,
+        let updatedDrivingLicense = existingDrivingLicense;
+        if (!skipLive) {
+            updatedDrivingLicense = await EmployeeDrivingLicense.findOneAndUpdate(
+                { employeeId },
+                {
+                    $set: {
+                        drivingLicenceDetails: drivingLicensePayload,
+                    },
                 },
-            },
-            { upsert: true, new: true }
-        );
+                { upsert: true, new: true }
+            );
+        }
+
+        const drivingChangeEntry = {
+            card: "Driving License",
+            reason: "Driving License details updated",
+            section: "drivingLicense",
+            changeType: "update",
+            targetIndex: null,
+            previousData: previousDrivingLicense || null,
+            proposedData: drivingLicensePayload,
+        };
+
+        if (skipLive) {
+            await queueOrTriggerProfileChange({
+                employeeId,
+                actor: req.user,
+                reason: "Driving License details updated",
+                employeeBasic,
+                changeEntry: drivingChangeEntry,
+            });
+        } else {
+            await triggerProfileReactivationIfNeeded({
+                employeeId,
+                actor: req.user,
+                reason: "Driving License details updated",
+                changeEntry: null,
+                trackDefaultChange: true,
+            });
+        }
+        try {
+            await markProfileActivationHoldResolvedForSection(employeeId, "drivingLicense");
+        } catch (_e) {
+            /* non-fatal */
+        }
         
         const completeEmployee = await getCompleteEmployee(employeeId);
 
         return res.json({
-            message: "Driving License details updated successfully.",
+            message: skipLive
+                ? "Driving License change queued for HR activation approval."
+                : "Driving License details updated successfully.",
             drivingLicenceDetails: updatedDrivingLicense?.drivingLicenceDetails || completeEmployee?.drivingLicenceDetails,
             employee: completeEmployee
         });

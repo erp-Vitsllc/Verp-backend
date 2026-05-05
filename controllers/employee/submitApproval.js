@@ -2,6 +2,8 @@ import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { getCompleteEmployee } from "../../services/employeeService.js";
 import { resolveFlowchartHrEmployee } from "../../utils/resolveFlowchartHrEmployee.js";
 import { resolveProfileActivationSubmitterId } from "../../utils/resolveProfileActivationSubmitterId.js";
+import { notifyHrProfileActivationRequestEmail } from "../../utils/notifyHrProfileActivationRequestEmail.js";
+import { clearProfileActivationHoldDashboardRows } from "../../utils/clearProfileActivationHoldDashboardRows.js";
 
 export const submitApproval = async (req, res) => {
     const { id } = req.params;
@@ -29,6 +31,7 @@ export const submitApproval = async (req, res) => {
         }
 
         const hrEmployee = hrResolved.employee;
+        const hrEmail = hrResolved.email;
         const employeeId = employeeBasic.employeeId;
         const wasPreviouslyActive = Array.isArray(employeeBasic.profileWorkflow)
             ? employeeBasic.profileWorkflow.some((w) => String(w?.status || "").toLowerCase() === "active")
@@ -73,11 +76,30 @@ export const submitApproval = async (req, res) => {
                 subjectEmployee: updated,
                 requestedByName: req.user?.name || "",
                 extra1: `${activationTypeLabel} — HR review${pendingCardsText}`,
-                extra2: updated.designation || ""
+                extra2: updated.designation || "",
+                extra3: JSON.stringify({ activationSubject: "employee", activationViewerRole: "hr" }),
             });
+            await clearProfileActivationHoldDashboardRows(updated._id);
         } catch (syncErr) {
             console.error("[SubmitApproval] Dashboard Sync Error:", syncErr);
         }
+
+        const employeeName =
+            `${employeeBasic.firstName || ""} ${employeeBasic.lastName || ""}`.trim() || "Employee";
+        const hrName =
+            `${hrEmployee.firstName || ""} ${hrEmployee.lastName || ""}`.trim() || "HR";
+        notifyHrProfileActivationRequestEmail({
+            hrEmail,
+            hrName,
+            employeeName,
+            employeeId,
+            activationTypeLabel,
+            pendingCardsText: pendingCards.length ? pendingCards.join(", ") : "",
+            submitterName:
+                req.user?.name ||
+                [req.user?.firstName, req.user?.lastName].filter(Boolean).join(" ").trim() ||
+                "",
+        }).catch((e) => console.error("[SubmitApproval] HR email error:", e));
 
         const completeEmployee = await getCompleteEmployee(employeeId);
         delete completeEmployee.password;

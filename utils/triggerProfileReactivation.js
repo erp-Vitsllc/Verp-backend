@@ -2,7 +2,10 @@ import EmployeeBasic from "../models/EmployeeBasic.js";
 
 export const shouldQueueProfileChange = (employee = {}) => {
     const profileStatus = String(employee?.profileStatus || "").toLowerCase();
+    const profileApprovalStatus = String(employee?.profileApprovalStatus || "").toLowerCase();
     if (profileStatus === "active") return true;
+    // Older / inconsistent records: HR approved lifecycle but profileStatus not flipped — still require queue + HR path
+    if (profileApprovalStatus === "active") return true;
     const workflow = Array.isArray(employee?.profileWorkflow) ? employee.profileWorkflow : [];
     const hasEverBeenActive = workflow.some((step) => String(step?.status || "").toLowerCase() === "active");
     return hasEverBeenActive;

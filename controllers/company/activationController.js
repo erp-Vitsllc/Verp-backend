@@ -1,10 +1,14 @@
 import Company from "../../models/Company.js";
 import DashboardAction from "../../models/DashboardAction.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
+import { isRequestUserDesignatedFlowchartHr } from "../../utils/isDesignatedFlowchartHr.js";
 import { calculateCompanyActivationProgress, submitCompanyActivation } from "../../utils/companyActivation.js";
 import { syncDashboardAction } from "../../utils/syncDashboard.js";
+import { archiveSupersededCompanyDocuments } from "../../utils/archiveCompanyDocument.js";
 import { formatActivationAttachmentLine, shortenUrlsInString } from "../../utils/shortenUrlsInString.js";
 import { sendCompanyActivationHoldEmail } from "../../utils/sendCompanyActivationHoldEmail.js";
+import { sanitizeActivationHoldRowNotes } from "../../utils/sanitizeActivationHoldRowNotes.js";
+import { sendCompanyActivationOutcomeEmail } from "../../utils/sendCompanyActivationOutcomeEmail.js";
 
 const resolveCompanyById = async (id) => {
     return Company.findOne({
@@ -12,12 +16,79 @@ const resolveCompanyById = async (id) => {
     });
 };
 
+/** Resolves submitter EmployeeBasic for emails and submitter dashboard rows (activationSubmittedBy first, then requester Dashboard row). */
+const resolveCompanyActivationSubmitterEmployee = async (company, pendingDashboardRows = []) => {
+    const selectFields = "companyEmail workEmail email personalEmail firstName lastName employeeId _id";
+
+    const findEmpByIdOrUserId = async (rawId) => {
+        if (!rawId) return null;
+        let emp = await EmployeeBasic.findById(String(rawId)).select(selectFields).lean();
+        if (emp) return emp;
+        const sid = String(rawId);
+        if (!/^[0-9a-fA-F]{24}$/.test(sid)) return null;
+        const User = (await import("../../models/User.js")).default;
+        const user = await User.findById(sid).select("employeeId").lean();
+        if (!user?.employeeId) return null;
+        emp = await EmployeeBasic.findOne({ employeeId: user.employeeId }).select(selectFields).lean();
+        return emp || null;
+    };
+
+    if (company?.activationSubmittedBy) {
+        const fromField = await findEmpByIdOrUserId(company.activationSubmittedBy);
+        if (fromField) return fromField;
+    }
+
+    const rows = Array.isArray(pendingDashboardRows) ? pendingDashboardRows : [];
+    for (const row of rows) {
+        let role = null;
+        try {
+            role = JSON.parse(row.extra3 || "{}")?.companyActivationViewerRole || null;
+        } catch {
+            /* ignore */
+        }
+        if (role === "requester" && row.assignedTo) {
+            const fromRow = await findEmpByIdOrUserId(row.assignedTo);
+            if (fromRow) return fromRow;
+        }
+    }
+
+    return null;
+};
+
+const canProcessCompanyActivation = async (req) => {
+    if (await isRequestUserDesignatedFlowchartHr(req)) return true;
+    if (req.user?.isAdmin === true) return true;
+    if (/^admin$/i.test(String(req.user?.role || "").trim())) return true;
+    return false;
+};
+
 export const submitCompanyActivationRequest = async (req, res) => {
     try {
         const { id } = req.params;
         const { reason, description, attachment, attachmentName } = req.body || {};
+        const selectionProvided = req.body?.selectionProvided === true;
+        const includedChangeEntryIds = Array.isArray(req.body?.includedChangeEntryIds)
+            ? req.body.includedChangeEntryIds.map(String)
+            : null;
         const company = await resolveCompanyById(id);
         if (!company) return res.status(404).json({ message: "Company not found" });
+
+        const progressQuick = calculateCompanyActivationProgress(company.toObject());
+        const isDesignatedHr = await isRequestUserDesignatedFlowchartHr(req);
+        if (isDesignatedHr) {
+            if (progressQuick.percentage < 100) {
+                return res.status(400).json({
+                    message: "Company profile is not 100% complete for activation.",
+                    activationProgress: progressQuick,
+                });
+            }
+            req.body = {
+                ...(typeof req.body === "object" && req.body ? req.body : {}),
+                approvedChangeIds: [],
+                selectionProvided: false,
+            };
+            return approveCompanyActivationRequest(req, res);
+        }
 
         if (!reason || !String(reason).trim() || !description || !String(description).trim()) {
             return res.status(400).json({
@@ -47,6 +118,8 @@ export const submitCompanyActivationRequest = async (req, res) => {
             attachmentName: attachmentName ? String(attachmentName).trim() : "",
             dashboardSummary,
             force: false,
+            selectionProvided,
+            includedChangeEntryIds,
         });
 
         if (!result.ok) {
@@ -77,6 +150,12 @@ export const approveCompanyActivationRequest = async (req, res) => {
         const company = await resolveCompanyById(id);
         if (!company) return res.status(404).json({ message: "Company not found" });
 
+        if (!(await canProcessCompanyActivation(req))) {
+            return res.status(403).json({
+                message: "Only the designated Flowchart HR or an administrator can approve company activation.",
+            });
+        }
+
         const pendingChanges = Array.isArray(company.pendingReactivationChanges)
             ? company.pendingReactivationChanges.map((entry) => entry?.toObject ? entry.toObject() : entry)
             : [];
@@ -99,6 +178,11 @@ export const approveCompanyActivationRequest = async (req, res) => {
         for (const change of selectedChanges) {
             const proposedData = change?.proposedData;
             if (!proposedData || typeof proposedData !== "object") continue;
+
+            // Archive documents being replaced by this approved change
+            const beforeChange = company.toObject();
+            await archiveSupersededCompanyDocuments(beforeChange, proposedData);
+
             Object.assign(company, proposedData);
         }
 
@@ -117,18 +201,48 @@ export const approveCompanyActivationRequest = async (req, res) => {
         });
         await company.save();
 
-        await Company.updateOne({ _id: company._id }, { $unset: { activationHold: 1 } });
+        const pendingRowsForSubmitter = await DashboardAction.find({
+            requestId: company._id,
+            requestType: "Company Activation",
+            status: { $in: ["Pending", "On Hold"] },
+        }).lean();
+        const submitterEmp = await resolveCompanyActivationSubmitterEmployee(company, pendingRowsForSubmitter);
+
+        await Company.updateOne(
+            { _id: company._id },
+            { $unset: { activationHold: 1, activationSubmittedBy: 1 } },
+        );
 
         try {
-            await syncDashboardAction({
-                requestId: company._id,
-                requestType: "Company Activation",
-                status: "Approved",
-                actionedBy: req.user?.employeeObjectId || req.user?._id,
-                comment: "Company activation approved",
-            });
+            const DashboardAction = (await import("../../models/DashboardAction.js")).default;
+            await DashboardAction.updateMany(
+                {
+                    requestId: company._id,
+                    requestType: "Company Activation",
+                    status: { $in: ["Pending", "On Hold"] },
+                },
+                {
+                    status: "Approved",
+                    actionedDate: new Date(),
+                    actionedBy: req.user?.employeeObjectId || req.user?._id,
+                    comment: "Company activation approved",
+                },
+            );
         } catch (syncErr) {
             console.error("[approveCompanyActivationRequest] Dashboard sync error:", syncErr);
+        }
+
+        try {
+            await sendCompanyActivationOutcomeEmail({
+                recipientEmployee: submitterEmp,
+                companyName: company.name,
+                companyCode: company.companyId || "",
+                companyMongoId: company._id.toString(),
+                manager: req.user,
+                status: "approved",
+            });
+        } catch (mailErr) {
+            console.error("[approveCompanyActivationRequest] Outcome email error:", mailErr);
         }
 
         return res.status(200).json({
@@ -151,6 +265,12 @@ export const holdCompanyActivationRequest = async (req, res) => {
         const company = await resolveCompanyById(id);
         if (!company) return res.status(404).json({ message: "Company not found" });
 
+        if (!(await canProcessCompanyActivation(req))) {
+            return res.status(403).json({
+                message: "Only the designated Flowchart HR or an administrator can hold company activation.",
+            });
+        }
+
         if (String(company.activationStatus || "").toLowerCase() !== "submitted") {
             return res.status(400).json({ message: "Company activation is not awaiting HR review." });
         }
@@ -162,8 +282,10 @@ export const holdCompanyActivationRequest = async (req, res) => {
             })
             : [];
 
-        if (!selectionProvided || !approvedChangeIds.length) {
-            return res.status(400).json({ message: "Select rows HR accepts, then Hold returns the remainder to the submitter." });
+        if (!selectionProvided) {
+            return res.status(400).json({
+                message: "Confirm your selection, then Hold returns unchecked items to the submitter.",
+            });
         }
 
         const allIds = pendingChanges.map((e) => e.__idStr);
@@ -180,20 +302,24 @@ export const holdCompanyActivationRequest = async (req, res) => {
 
         const approvedChoice = new Set(approvedChangeIds);
         const numRowsAccepted = allIds.filter((rowId) => approvedChoice.has(rowId)).length;
-        if (numRowsAccepted === 0 || numRowsAccepted >= allIds.length) {
+        if (numRowsAccepted >= allIds.length) {
             return res.status(400).json({
-                message: "Hold applies when some rows are accepted and others are not. Use Accept only when everything is acceptable.",
+                message: "Nothing left to hold. Use Accept when every change is acceptable.",
             });
         }
 
         const unapproved = pendingChanges.filter((e) => !approvedChoice.has(e.__idStr));
         const unapprovedCards = [...new Set(unapproved.map((e) => String(e.card || "").trim()).filter(Boolean))];
+        const rowNotesByEntryId = sanitizeActivationHoldRowNotes(req.body?.rowNotesByEntryId, unapproved.map((e) => e.__idStr));
 
         company.activationHold = {
             heldAt: new Date(),
             unapprovedEntryIds: unapproved.map((e) => e.__idStr),
             unapprovedCards: unapprovedCards.length ? unapprovedCards : unapproved.map((_, i) => `Change ${i + 1}`),
             comment,
+            resolvedEntryIds: [],
+            addressedLabelsByEntryId: {},
+            ...(rowNotesByEntryId ? { rowNotesByEntryId } : {}),
         };
 
         await company.save();
@@ -206,45 +332,75 @@ export const holdCompanyActivationRequest = async (req, res) => {
             status: "Pending",
         }).lean();
 
-        const requesterRow = pendingDashboardRows.find((row) => {
+        const submitterEmp = await resolveCompanyActivationSubmitterEmployee(company, pendingDashboardRows);
+
+        const mailTo =
+            submitterEmp?.companyEmail || submitterEmp?.workEmail || submitterEmp?.email || submitterEmp?.personalEmail || "";
+        const mailName = `${submitterEmp?.firstName || ""} ${submitterEmp?.lastName || ""}`.trim();
+
+        if (submitterEmp?._id) {
             try {
-                const meta = JSON.parse(row.extra3 || "{}");
-                return meta.companyActivationViewerRole === "requester";
-            } catch {
-                return false;
+                await syncDashboardAction({
+                    requestId: company._id,
+                    requestType: "Company Activation",
+                    assignedTo: String(company.activationSubmittedTo || ""),
+                    status: "On Hold",
+                    skipPendingCompletion: true,
+                    subjectEmployee: {
+                        _id: company._id,
+                        firstName: company.name,
+                        lastName: "",
+                        employeeId: company.companyId,
+                    },
+                    companyActivationNotifyAssignee: submitterEmp,
+                    requestedByName: req.user?.name || "",
+                    actionedBy: req.user?.employeeObjectId || req.user?._id,
+                    comment: comment || company.activationHold.unapprovedCards.join(", "),
+                    extra1: holdNotice.slice(0, 950),
+                    extra2: company.companyId || "",
+                    extra3: JSON.stringify({
+                        companyActivationViewerRole: "submitter",
+                        activationSubject: "company",
+                    }),
+                });
+            } catch (syncErr) {
+                console.error("[holdCompanyActivationRequest] Dashboard sync error:", syncErr);
             }
-        });
+        }
 
-        if (requesterRow?._id) {
-            await DashboardAction.findByIdAndUpdate(requesterRow._id, {
-                $set: { extra1: holdNotice.slice(0, 950) },
+        if (company.activationSubmittedTo) {
+            try {
+                await DashboardAction.deleteMany({
+                    requestId: company._id,
+                    requestType: "Company Activation",
+                    status: "Pending",
+                    assignedTo: company.activationSubmittedTo,
+                });
+            } catch (_e) {
+                /* non-fatal */
+            }
+        }
+
+        try {
+            const holdNotesMap = rowNotesByEntryId || {};
+            const holdLineItems = unapproved.map((e) => ({
+                cardLabel: String(e.card || "").trim() || `Change (${e.__idStr})`,
+                note: holdNotesMap[e.__idStr] || "",
+            }));
+            await sendCompanyActivationHoldEmail({
+                recipientEmail: mailTo,
+                recipientName: mailName,
+                companyName: company.name,
+                companyCode: company.companyId,
+                companyPageId: company._id.toString(),
+                hrManager: req.user,
+                unapprovedCards: company.activationHold.unapprovedCards || [],
+                holdLineItems,
+                comment,
             });
+        } catch (mailErr) {
+            console.error("[holdCompanyActivationRequest] Hold email error:", mailErr);
         }
-
-        const requesterEmpId = requesterRow?.assignedTo;
-        let mailTo = "";
-        let mailName = "";
-        if (requesterEmpId) {
-            const submitterEmp = await EmployeeBasic.findById(requesterEmpId)
-                .select("companyEmail workEmail email firstName lastName employeeId")
-                .lean();
-            if (submitterEmp) {
-                mailTo =
-                    submitterEmp.companyEmail || submitterEmp.workEmail || submitterEmp.email || "";
-                mailName = `${submitterEmp.firstName || ""} ${submitterEmp.lastName || ""}`.trim();
-            }
-        }
-
-        await sendCompanyActivationHoldEmail({
-            recipientEmail: mailTo,
-            recipientName: mailName,
-            companyName: company.name,
-            companyCode: company.companyId,
-            companyPageId: company._id.toString(),
-            hrManager: req.user,
-            unapprovedCards: company.activationHold.unapprovedCards || [],
-            comment,
-        });
 
         const refreshed = await Company.findById(company._id);
         return res.status(200).json({
@@ -269,6 +425,12 @@ export const rejectCompanyActivationRequest = async (req, res) => {
         const company = await resolveCompanyById(id);
         if (!company) return res.status(404).json({ message: "Company not found" });
 
+        if (!(await canProcessCompanyActivation(req))) {
+            return res.status(403).json({
+                message: "Only the designated Flowchart HR or an administrator can reject company activation.",
+            });
+        }
+
         company.status = "Inactive";
         company.activationStatus = "rejected";
         company.activationHold = undefined;
@@ -283,18 +445,49 @@ export const rejectCompanyActivationRequest = async (req, res) => {
         });
         await company.save();
 
-        await Company.updateOne({ _id: company._id }, { $unset: { activationHold: 1 } });
+        const pendingRowsForSubmitter = await DashboardAction.find({
+            requestId: company._id,
+            requestType: "Company Activation",
+            status: { $in: ["Pending", "On Hold"] },
+        }).lean();
+        const submitterEmp = await resolveCompanyActivationSubmitterEmployee(company, pendingRowsForSubmitter);
+
+        await Company.updateOne(
+            { _id: company._id },
+            { $unset: { activationHold: 1, activationSubmittedBy: 1 } },
+        );
 
         try {
-            await syncDashboardAction({
-                requestId: company._id,
-                requestType: "Company Activation",
-                status: "Rejected",
-                actionedBy: req.user?.employeeObjectId || req.user?._id,
-                comment: reasonText,
-            });
+            const DashboardAction = (await import("../../models/DashboardAction.js")).default;
+            await DashboardAction.updateMany(
+                {
+                    requestId: company._id,
+                    requestType: "Company Activation",
+                    status: { $in: ["Pending", "On Hold"] },
+                },
+                {
+                    status: "Rejected",
+                    actionedDate: new Date(),
+                    actionedBy: req.user?.employeeObjectId || req.user?._id,
+                    comment: reasonText,
+                },
+            );
         } catch (syncErr) {
             console.error("[rejectCompanyActivationRequest] Dashboard sync error:", syncErr);
+        }
+
+        try {
+            await sendCompanyActivationOutcomeEmail({
+                recipientEmployee: submitterEmp,
+                companyName: company.name,
+                companyCode: company.companyId || "",
+                companyMongoId: company._id.toString(),
+                manager: req.user,
+                status: "rejected",
+                reason: reasonText,
+            });
+        } catch (mailErr) {
+            console.error("[rejectCompanyActivationRequest] Outcome email error:", mailErr);
         }
 
         return res.status(200).json({

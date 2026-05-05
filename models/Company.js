@@ -85,6 +85,8 @@ const companySchema = new mongoose.Schema(
             default: "draft",
         },
         activationSubmittedTo: { type: mongoose.Schema.Types.ObjectId, ref: "EmployeeBasic", default: null },
+        /** EmployeeBasic _id of the portal user who last submitted company activation (for outcome emails). */
+        activationSubmittedBy: { type: mongoose.Schema.Types.ObjectId, ref: "EmployeeBasic", default: null },
         activationWorkflow: [
             {
                 role: { type: String, required: true }, // HR
@@ -120,6 +122,12 @@ const companySchema = new mongoose.Schema(
                     unapprovedEntryIds: [{ type: String }],
                     unapprovedCards: [{ type: String }],
                     comment: { type: String, default: "" },
+                    /** Submitter re-save progress: queue row ids fully addressed (mirrors employee profile hold). */
+                    resolvedEntryIds: [{ type: String }],
+                    /** entryId -> labels from HR card / proposedData that have been re-saved since hold. */
+                    addressedLabelsByEntryId: { type: mongoose.Schema.Types.Mixed, default: undefined },
+                    /** entryId (_id string) -> optional HR instructions for that unchecked requested-change row */
+                    rowNotesByEntryId: { type: mongoose.Schema.Types.Mixed, default: undefined },
                 },
                 { _id: false },
             ),
@@ -236,6 +244,28 @@ const companySchema = new mongoose.Schema(
                 actionedAt: { type: Date },
                 actionedByUserId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
             },
+        ],
+
+        // Archived versions of company documents (replaced/deleted)
+        oldDocuments: [
+            {
+                type: { type: String },
+                description: { type: String },
+                issueDate: { type: Date },
+                expiryDate: { type: Date },
+                cost: { type: Number, default: null },
+                archivedAt: { type: Date, default: Date.now },
+                // Why archived:
+                // - Replaced: superseded by renew action
+                // - Deleted: manually removed
+                // - Not Renewed: explicitly archived without renewal
+                archiveReason: { type: String, enum: ['Replaced', 'Deleted', 'Not Renewed'], default: 'Replaced' },
+                document: {
+                    url: { type: String },
+                    name: { type: String },
+                    mimeType: { type: String }
+                }
+            }
         ],
 
         createdBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" }

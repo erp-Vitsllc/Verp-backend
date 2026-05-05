@@ -1,9 +1,215 @@
+import mongoose from "mongoose";
 import Loan from "../../models/Loan.js";
 import Reward from "../../models/Reward.js";
 import Fine from "../../models/Fine.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import User from "../../models/User.js";
 import Company from "../../models/Company.js";
+import { getDaysUntil, isExpiryTaskWindow } from "../../utils/documentExpiryReminderStages.js";
+
+/** Matches owner-style company rows — allow ASCII/en/em dashes between name and document type (same intent as frontend). */
+const COMPANY_OWNER_EXPIRY_BODY_RE =
+    /\s[-\u2013\u2014]\s(Passport|Visa|Emirates ID|Medical Insurance|Driving License|Labour Card)\s*\(/i;
+
+const normalizeExpiryExtra1ForDedupe = (s) => String(s || "").trim().replace(/\s+/g, " ").toLowerCase();
+
+const parseExtra2TrailingCompanyHumanId = (extra2) => {
+    const m = String(extra2 || "").match(/\(([^)]*)\)\s*$/);
+    return m ? String(m[1]).trim() : "";
+};
+
+/**
+ * Owner document expiry uses the same `extra1` on every company copy; `requestId` differs per company.
+ * Collapse to one activity row: lowest human `companyId` in `extra2`, then lowest mongo `requestId`.
+ */
+const ownerDocumentExpiryReminderDedupeKey = (item) => {
+    if (item?.requestType !== "Document Expiry Reminder") return null;
+    const e1 = String(item.extra1 || "").trim();
+    if (!e1) return null;
+    let ownerHint = false;
+    if (item.extra3) {
+        try {
+            const m = JSON.parse(item.extra3);
+            ownerHint = m?.ownerExpiryDedupe === true;
+        } catch {
+            /* ignore */
+        }
+    }
+    if (!ownerHint && !COMPANY_OWNER_EXPIRY_BODY_RE.test(e1)) return null;
+    return `CDE|OWNER|${normalizeExpiryExtra1ForDedupe(e1)}`;
+};
+
+const pickCanonicalOwnerExpiryDashboardRow = (a, b) => {
+    const ah = parseExtra2TrailingCompanyHumanId(a.extra2);
+    const bh = parseExtra2TrailingCompanyHumanId(b.extra2);
+    if (ah && bh && ah !== bh) return ah.localeCompare(bh) < 0 ? a : b;
+    if (ah && !bh) return a;
+    if (!ah && bh) return b;
+    const am = String(a.requestId || "");
+    const bm = String(b.requestId || "");
+    return am.localeCompare(bm) < 0 ? a : b;
+};
+
+const dedupeOwnerLinkedDocumentExpiryReminders = (items) => {
+    if (!Array.isArray(items) || items.length < 2) return items;
+    const bestByKey = new Map();
+    for (const item of items) {
+        const key = ownerDocumentExpiryReminderDedupeKey(item);
+        if (!key) continue;
+        const prev = bestByKey.get(key);
+        bestByKey.set(key, prev ? pickCanonicalOwnerExpiryDashboardRow(prev, item) : item);
+    }
+    if (bestByKey.size === 0) return items;
+
+    const emitted = new Set();
+    const out = [];
+    for (const item of items) {
+        const key = ownerDocumentExpiryReminderDedupeKey(item);
+        if (!key) {
+            out.push(item);
+            continue;
+        }
+        const best = bestByKey.get(key);
+        const bestId = best?._id?.toString();
+        const itemId = item?._id?.toString();
+        if (bestId && itemId === bestId && !emitted.has(key)) {
+            emitted.add(key);
+            out.push(item);
+        }
+    }
+    return out;
+};
+
+const formatExpiryDateLabel = (expiryDate) => {
+    if (!expiryDate) return "";
+    const d = new Date(expiryDate);
+    if (Number.isNaN(d.getTime())) return "";
+    return d.toLocaleDateString("en-GB");
+};
+
+const isArchivedManualDoc = (doc = {}) => {
+    if (!doc || typeof doc !== "object") return false;
+    if (doc.archivedAt || doc.isArchived === true) return true;
+    const text = `${doc.type || ""} ${doc.description || ""}`.toLowerCase();
+    return text.includes("previous") || text.includes("not renew") || text.includes("not renewed");
+};
+
+const companyOwnerDocEntries = (company = {}) => {
+    const owners = Array.isArray(company?.owners) ? company.owners : [];
+    const fields = [
+        ["passport", "Passport"],
+        ["visa", "Visa"],
+        ["emiratesId", "Emirates ID"],
+        ["medical", "Medical Insurance"],
+        ["drivingLicense", "Driving License"],
+        ["labourCard", "Labour Card"],
+    ];
+    const rows = [];
+    owners.forEach((owner) => {
+        fields.forEach(([k, lbl]) => {
+            const exp = owner?.[k]?.expiryDate;
+            if (!exp) return;
+            rows.push({ label: `${owner?.name || "Owner"} - ${lbl}`, expiryDate: exp });
+        });
+    });
+    return rows;
+};
+
+const buildCompanyLiveExpiryExtra1Set = (company = {}) => {
+    const labels = [];
+    if (company?.tradeLicenseExpiry) labels.push({ label: "Trade License", expiryDate: company.tradeLicenseExpiry });
+    if (company?.establishmentCardExpiry)
+        labels.push({ label: "Establishment Card", expiryDate: company.establishmentCardExpiry });
+    (company?.documents || []).forEach((d) => {
+        if (!d?.expiryDate || isArchivedManualDoc(d)) return;
+        labels.push({ label: d?.type || "Company Document", expiryDate: d.expiryDate });
+    });
+    (company?.ejari || []).forEach((ej) => {
+        if (!ej?.expiryDate || isArchivedManualDoc(ej)) return;
+        labels.push({ label: ej?.type ? `Ejari — ${ej.type}` : "Ejari", expiryDate: ej.expiryDate });
+    });
+    (company?.insurance || []).forEach((ins) => {
+        if (!ins?.expiryDate || isArchivedManualDoc(ins)) return;
+        labels.push({ label: ins?.type ? `Insurance — ${ins.type}` : "Insurance", expiryDate: ins.expiryDate });
+    });
+    labels.push(...companyOwnerDocEntries(company));
+
+    const set = new Set();
+    labels.forEach((x) => {
+        const days = getDaysUntil(x.expiryDate);
+        if (days == null || !isExpiryTaskWindow(days)) return;
+        const exp = formatExpiryDateLabel(x.expiryDate);
+        set.add(`Expiry follow-up required: ${x.label}${exp ? ` (Exp: ${exp})` : ""}`);
+    });
+    return set;
+};
+
+const buildEmployeeLiveExpiryExtra1Set = (emp = {}) => {
+    const labels = [];
+    (emp?.documents || []).forEach((d) => {
+        if (!d?.expiryDate || isArchivedManualDoc(d)) return;
+        labels.push({ label: d?.type || "Employee Document", expiryDate: d.expiryDate });
+    });
+    if (emp?.contractExpiryDate) labels.push({ label: "Contract Expiry", expiryDate: emp.contractExpiryDate });
+    const set = new Set();
+    labels.forEach((x) => {
+        const days = getDaysUntil(x.expiryDate);
+        if (days == null || !isExpiryTaskWindow(days)) return;
+        const exp = formatExpiryDateLabel(x.expiryDate);
+        set.add(`Expiry follow-up required: ${x.label}${exp ? ` (Exp: ${exp})` : ""}`);
+    });
+    return set;
+};
+
+const EMPLOYEE_SYSTEM_EXPIRY_LABEL_RE =
+    /(passport|visa|emirates\s*id|labour\s*card|medical\s*insurance|driving\s*license|contract\s*expiry)/i;
+
+const filterStaleExpiryDashboardRows = async (items = []) => {
+    if (!Array.isArray(items) || items.length === 0) return items;
+    const candidateCompanyIds = new Set();
+    const candidateEmployeeIds = new Set();
+    items.forEach((it) => {
+        if (it?.requestType === "Document Expiry Reminder" && it?.requestId) {
+            candidateCompanyIds.add(String(it.requestId));
+        } else if (it?.requestType === "Employee Document Expiry Reminder" && it?.requestId) {
+            candidateEmployeeIds.add(String(it.requestId));
+        }
+    });
+
+    const [companies, employees] = await Promise.all([
+        candidateCompanyIds.size
+            ? Company.find({ _id: { $in: [...candidateCompanyIds] } })
+                  .select("_id tradeLicenseExpiry establishmentCardExpiry documents ejari insurance owners")
+                  .lean()
+            : [],
+        candidateEmployeeIds.size
+            ? EmployeeBasic.find({ _id: { $in: [...candidateEmployeeIds] } })
+                  .select("_id documents contractExpiryDate")
+                  .lean()
+            : [],
+    ]);
+
+    const companyLabelSetById = new Map(companies.map((c) => [String(c._id), buildCompanyLiveExpiryExtra1Set(c)]));
+    const employeeLabelSetById = new Map(employees.map((e) => [String(e._id), buildEmployeeLiveExpiryExtra1Set(e)]));
+
+    return items.filter((it) => {
+        const extra1 = String(it?.extra1 || "").trim();
+        if (!extra1.toLowerCase().startsWith("expiry follow-up required:")) return true;
+        if (it?.requestType === "Document Expiry Reminder") {
+            const set = companyLabelSetById.get(String(it.requestId || ""));
+            if (!set) return true;
+            return set.has(extra1);
+        }
+        if (it?.requestType === "Employee Document Expiry Reminder") {
+            // Keep system-card reminders; filter stale manual document reminders against active manual docs.
+            if (EMPLOYEE_SYSTEM_EXPIRY_LABEL_RE.test(extra1)) return true;
+            const set = employeeLabelSetById.get(String(it.requestId || ""));
+            if (!set) return true;
+            return set.has(extra1);
+        }
+        return true;
+    });
+};
 
 /**
  * Get Activity Stats for the Logged-in User (or a specific target user in their team)
@@ -119,12 +325,32 @@ export const getUserActivityStats = async (req, res) => {
 
         // 3. Define Queries for "Needs Action"
         const DashboardAction = await import("../../models/DashboardAction.js").then(m => m.default);
+        const { getDepartmentHOD } = await import("../../utils/getDepartmentHOD.js");
+        const flowchartHrEmp = await getDepartmentHOD("hr");
 
         const allAssetTypes = ['Asset', 'Asset Approval', 'Asset Assignment', 'Asset Transfer', 'Asset Loss Damage', 'Asset End of Life', 'Asset Accessory', 'Asset Accessory Approval', 'Asset Accessory Unattach', 'Vehicle Service Request'];
 
+        const normEmpForAssigneeEarly = (s) => (s || "").toString().trim().toLowerCase();
+        const dashboardAssigneeMongoIds = [...relevantIds].filter(Boolean);
+        if (flowchartHrEmp?._id) {
+            const fid = flowchartHrEmp._id.toString();
+            if (!dashboardAssigneeMongoIds.some((id) => id && id.toString() === fid)) {
+                const sameBusinessIdAsFlowchartHr =
+                    manager?.employeeId &&
+                    flowchartHrEmp.employeeId &&
+                    normEmpForAssigneeEarly(manager.employeeId) === normEmpForAssigneeEarly(flowchartHrEmp.employeeId);
+                if (sameBusinessIdAsFlowchartHr) {
+                    dashboardAssigneeMongoIds.push(flowchartHrEmp._id);
+                }
+            }
+        }
+
         const dashboardOrConditions = [
-            { assignedTo: { $in: relevantIds } },
+            { assignedTo: { $in: dashboardAssigneeMongoIds } },
         ];
+        if (currentUser?.employeeId && String(currentUser.employeeId).trim() !== '') {
+            dashboardOrConditions.push({ assignedToEmpId: String(currentUser.employeeId).trim() });
+        }
         if (targetEmployeeId && String(targetEmployeeId).trim() !== '') {
             dashboardOrConditions.push({ assignedToEmpId: targetEmployeeId });
         }
@@ -144,7 +370,7 @@ export const getUserActivityStats = async (req, res) => {
         const dashboardRowAssignedToViewer = (item) => {
             const assigneeId = item?.assignedTo?.toString();
             if (!assigneeId) return false;
-            if (relevantIds.some((id) => id && id.toString() === assigneeId)) return true;
+            if (dashboardAssigneeMongoIds.some((id) => id && id.toString() === assigneeId)) return true;
             if (
                 targetEmployeeId &&
                 item.assignedToEmpId &&
@@ -155,41 +381,65 @@ export const getUserActivityStats = async (req, res) => {
             return false;
         };
 
-        const profileActivationOutcomeOr = [{ assignedTo: { $in: relevantIds } }];
+        const profileActivationOutcomeOr = [{ assignedTo: { $in: dashboardAssigneeMongoIds } }];
         if (targetEmployeeId && String(targetEmployeeId).trim() !== '') {
             // Outcome rows for the profile subject use assignedTo = subject's EmployeeBasic _id and assignedToEmpId = subject employeeId.
             // Also match by employeeId so the submitting employee sees On Hold / outcomes even if id resolution differs from HR's queue row.
             profileActivationOutcomeOr.push({ assignedToEmpId: String(targetEmployeeId).trim() });
         }
 
-        const [dashboardPendingItemsRaw, profileActivationOutcomeItems] = await Promise.all([
-            DashboardAction.find({
-                $or: dashboardOrConditions,
-                status: 'Pending',
-            }).lean(),
-            DashboardAction.find({
-                requestType: 'Profile Activation',
-                status: { $in: ['Approved', 'Rejected', 'On Hold'] },
-                $or: profileActivationOutcomeOr,
-            })
-                .sort({ actionedDate: -1, updatedAt: -1 })
-                .limit(25)
-                .lean(),
-        ]);
+        const [dashboardPendingItemsRaw, profileActivationOutcomeItems, companyActivationOutcomeItems] =
+            await Promise.all([
+                DashboardAction.find({
+                    $or: dashboardOrConditions,
+                    status: 'Pending',
+                }).lean(),
+                DashboardAction.find({
+                    requestType: 'Profile Activation',
+                    status: { $in: ['Approved', 'Rejected', 'On Hold'] },
+                    $or: profileActivationOutcomeOr,
+                })
+                    .sort({ actionedDate: -1, updatedAt: -1 })
+                    .limit(25)
+                    .lean(),
+                DashboardAction.find({
+                    requestType: 'Company Activation',
+                    status: { $in: ['Approved', 'Rejected', 'On Hold'] },
+                    $or: profileActivationOutcomeOr,
+                })
+                    .sort({ actionedDate: -1, updatedAt: -1 })
+                    .limit(25)
+                    .lean(),
+            ]);
 
-        const dashboardPendingItems = dashboardPendingItemsRaw.filter((item) => {
-            if (!ASSIGNMENT_STRICT_TYPES.has(item.requestType)) return true;
-            return dashboardRowAssignedToViewer(item);
-        });
+        const dashboardPendingItems = await filterStaleExpiryDashboardRows(
+            dedupeOwnerLinkedDocumentExpiryReminders(
+            dashboardPendingItemsRaw.filter((item) => {
+                if (!ASSIGNMENT_STRICT_TYPES.has(item.requestType)) return true;
+                return dashboardRowAssignedToViewer(item);
+            })
+            )
+        );
 
         // 4. Fallback/Direct Queries for "Needs Action" (in case DashboardAction sync is delayed)
         const inboxQueries = [
             // Pending Profiles
             EmployeeBasic.find({
                 $or: [
-                    { profileSubmittedTo: { $in: relevantIds }, profileApprovalStatus: 'submitted' },
-                    ...(isAdmin ? [{ profileApprovalStatus: 'submitted' }] : []),
-                ]
+                    {
+                        profileSubmittedTo: { $in: relevantIds },
+                        profileApprovalStatus: 'submitted',
+                        'profileActivationHold.heldAt': { $exists: false },
+                    },
+                    ...(isAdmin
+                        ? [
+                              {
+                                  profileApprovalStatus: 'submitted',
+                                  'profileActivationHold.heldAt': { $exists: false },
+                              },
+                          ]
+                        : []),
+                ],
             }),
             // Pending Notices
             EmployeeBasic.find({
@@ -262,6 +512,37 @@ export const getUserActivityStats = async (req, res) => {
             myLoans, myRewards, myFines, myAssignedAssets
         ] = await Promise.all([...inboxQueries, ...outgoingQueries]);
 
+        const requestIdsForProfileDashLookup = new Set(pendingProfiles.map((p) => String(p._id)));
+        if (manager?._id && manager.profileApprovalStatus === "submitted" && !req.query.targetUserId) {
+            requestIdsForProfileDashLookup.add(String(manager._id));
+        }
+
+        let profileActivationDeletableActionIdByRequestId = new Map();
+        if (requestIdsForProfileDashLookup.size > 0) {
+            const oidList = [...requestIdsForProfileDashLookup]
+                .filter((id) => mongoose.Types.ObjectId.isValid(id))
+                .map((id) => new mongoose.Types.ObjectId(id));
+            if (oidList.length > 0) {
+                const paRows = await DashboardAction.find({
+                    requestType: "Profile Activation",
+                    status: { $in: ["Pending", "On Hold"] },
+                    requestId: { $in: oidList },
+                })
+                    .select("_id requestId assignedTo")
+                    .lean();
+                for (const r of paRows) {
+                    const rid = r.requestId?.toString();
+                    if (!rid) continue;
+                    const assigneeOk = relevantIds.some(
+                        (id) => id && r.assignedTo && id.toString() === r.assignedTo.toString(),
+                    );
+                    if (assigneeOk && !profileActivationDeletableActionIdByRequestId.has(rid)) {
+                        profileActivationDeletableActionIdByRequestId.set(rid, r._id.toString());
+                    }
+                }
+            }
+        }
+
         // 5. Build Unified Activity List for "Pending" (Using DashboardAction)
         const activityList = [];
         const seenRequests = new Map(); // requestId -> status to track and deduplicate
@@ -326,7 +607,8 @@ export const getUserActivityStats = async (req, res) => {
                     id: p._id.toString(), type: 'Profile Activation', requestedBy: `${p.firstName} ${p.lastName}`,
                     requestedDate: p.createdAt, actionedDate: null, status: 'Pending',
                     extra1: p.employeeId, extra2: p.designation, targetEmployeeId: p.employeeId,
-                    scope: 'inbox'
+                    scope: 'inbox',
+                    actionId: profileActivationDeletableActionIdByRequestId.get(reqIdStr) || undefined,
                 });
                 seenRequests.set(reqIdStr, 'Pending');
             }
@@ -568,7 +850,8 @@ export const getUserActivityStats = async (req, res) => {
                         extra1: p.employeeId, extra2: p.designation,
                         targetEmployeeId: p.employeeId,
                         employeeId: p.employeeId,
-                        scope: 'outgoing'
+                        scope: 'outgoing',
+                        actionId: profileActivationDeletableActionIdByRequestId.get(reqIdStr) || undefined,
                     });
                     seenRequests.set(reqIdStr, status);
                 }
@@ -632,8 +915,80 @@ export const getUserActivityStats = async (req, res) => {
                     activityList[idx] = { ...existing, ...activityItem };
                     return;
                 }
-                // Do not replace a live Pending HR task with an older Approved/Rejected outcome row (same requestId).
+                // If dashboard still had Pending but DashboardAction is already Approved/Rejected, prefer the outcome row
+                // so the notification list and counts drop the finished task after HR action.
+                // Do not replace a live Pending row with a *different* historical outcome document (same requestId, new cycle).
                 if (existing.status === 'Pending' && ['Approved', 'Rejected'].includes(activityItem.status)) {
+                    if (
+                        existing.actionId &&
+                        activityItem.actionId &&
+                        String(existing.actionId) !== String(activityItem.actionId)
+                    ) {
+                        return;
+                    }
+                    activityList[idx] = { ...existing, ...activityItem };
+                    seenRequests.set(reqIdStr, activityItem.status);
+                    return;
+                }
+                activityList[idx] = { ...existing, ...activityItem };
+            } else {
+                activityList.push(activityItem);
+                seenRequests.set(reqIdStr, item.status);
+            }
+        });
+
+        companyActivationOutcomeItems.forEach((item) => {
+            const reqIdStr = item.requestId?.toString();
+            if (!reqIdStr) return;
+            const isCompanyActSelf =
+                dashboardAssigneeMongoIds.some(
+                    (id) => id && item.assignedTo && id.toString() === item.assignedTo.toString(),
+                ) ||
+                (targetEmployeeId &&
+                    item.assignedToEmpId &&
+                    normEmpForAssignee(item.assignedToEmpId) === normEmpForAssignee(targetEmployeeId));
+            const activityItem = {
+                id: reqIdStr,
+                actionId: item._id.toString(),
+                type: 'Company Activation',
+                requestedBy: isCompanyActSelf ? 'Me' : item.subjectName || item.requestedByName || 'Company',
+                requestedDate: item.requestedDate,
+                actionedDate: item.actionedDate || item.updatedAt,
+                status: item.status,
+                extra1: item.extra1 || item.subjectEmployeeId,
+                extra2: item.extra2,
+                extra3: item.extra3,
+                targetEmployeeId: item.extra2 || item.subjectEmployeeId?.toString(),
+                employeeId: targetEmployeeId,
+                scope: isCompanyActSelf ? 'outgoing' : 'inbox',
+            };
+
+            const idx = activityList.findIndex(
+                (i) => i.id?.toString() === reqIdStr && i.type === 'Company Activation',
+            );
+            if (idx !== -1) {
+                const existing = activityList[idx];
+                if (item.status === 'On Hold' && isCompanyActSelf && existing.status === 'Pending') {
+                    // After resubmit, `clearCompanyActivationHoldDashboardRows` removes hold rows; if one remains
+                    // or the list still has an older On Hold document, prefer the fresh Pending (newer requestedDate).
+                    const pendingTs = new Date(existing.requestedDate || 0).getTime();
+                    const holdTs = new Date(
+                        item.actionedDate || item.updatedAt || item.requestedDate || 0,
+                    ).getTime();
+                    if (pendingTs >= holdTs) return;
+                    activityList[idx] = { ...existing, ...activityItem };
+                    return;
+                }
+                if (existing.status === 'Pending' && ['Approved', 'Rejected'].includes(activityItem.status)) {
+                    if (
+                        existing.actionId &&
+                        activityItem.actionId &&
+                        String(existing.actionId) !== String(activityItem.actionId)
+                    ) {
+                        return;
+                    }
+                    activityList[idx] = { ...existing, ...activityItem };
+                    seenRequests.set(reqIdStr, activityItem.status);
                     return;
                 }
                 activityList[idx] = { ...existing, ...activityItem };
@@ -919,9 +1274,6 @@ export const getUserActivityStats = async (req, res) => {
         const pendingCount = finalActivityList.filter(i => i.status === 'Pending').length;
         const approvedCount = finalActivityList.filter(i => i.status === 'Approved').length;
         const rejectedCount = finalActivityList.filter(i => (i.status === 'Rejected' || i.status === 'rejected')).length;
-
-        const { getDepartmentHOD } = await import("../../utils/getDepartmentHOD.js");
-        const flowchartHrEmp = await getDepartmentHOD("hr");
 
         res.status(200).json({
             pending: pendingCount,

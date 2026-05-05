@@ -1,5 +1,12 @@
 import nodemailer from "nodemailer";
 
+const escapeHtmlBasic = (s) =>
+    String(s || "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+
 export const sendCompanyActivationHoldEmail = async ({
     recipientEmail,
     recipientName,
@@ -8,6 +15,8 @@ export const sendCompanyActivationHoldEmail = async ({
     companyPageId,
     hrManager,
     unapprovedCards = [],
+    /** @type {{ cardLabel?: string; note?: string }[]} */
+    holdLineItems,
     comment = "",
 }) => {
     const to = String(recipientEmail || "").trim();
@@ -32,8 +41,19 @@ export const sendCompanyActivationHoldEmail = async ({
     })();
 
     const baseUrl = process.env.FRONTEND_URL || "http://localhost:3000";
-    const listHtml = unapprovedCards.length
-        ? `<ul style="margin:12px 0;padding-left:20px;"><li>${unapprovedCards.join("</li><li>")}</li></ul>`
+    const items =
+        Array.isArray(holdLineItems) && holdLineItems.some((x) => x && String(x.cardLabel || "").trim())
+            ? holdLineItems.filter((x) => x && String(x.cardLabel || "").trim())
+            : (unapprovedCards || []).filter(Boolean).map((card) => ({ cardLabel: String(card).trim(), note: "" }));
+
+    const listHtml = items.length
+        ? `<ul style="margin:12px 0;padding-left:20px;">${items
+              .map((it) => {
+                  const label = escapeHtmlBasic(it.cardLabel);
+                  const nt = escapeHtmlBasic(String(it.note || "").trim()).replace(/\n/g, "<br/>");
+                  return `<li style="margin:8px 0;"><strong>${label}</strong>${nt ? `<div style="margin-top:6px;color:#334155;font-size:14px;line-height:1.5;"><em>Instructions:</em> ${nt}</div>` : ""}</li>`;
+              })
+              .join("")}</ul>`
         : "<p>Open the company profile in VeRP for details.</p>";
     const commentBlock =
         comment && String(comment).trim()

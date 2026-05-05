@@ -12,11 +12,14 @@ import EmployeeEmergencyContact from "../../models/EmployeeEmergencyContact.js";
 import User from "../../models/User.js";
 import { getCompleteEmployee, saveEmployeeData } from "../../services/employeeService.js";
 import { sendProfileNotification } from "../../utils/sendProfileNotification.js";
+import { archiveQueuedPassportOrVisaPreviousIfNeeded } from "../../utils/archiveEmployeeDocument.js";
 
 export const approveProfile = async (req, res) => {
     const { id } = req.params;
     const approvedChangeIds = Array.isArray(req.body?.approvedChangeIds) ? req.body.approvedChangeIds.map(String) : [];
     const selectionProvided = req.body?.selectionProvided === true;
+    /** HR “Review Activation” direct path: any approval status; apply every queued card then set profile active (route already requires hrm_employees edit). */
+    const directHrBypass = req.body?.directHrBypass === true;
 
     try {
         // Get employeeId from employee record
@@ -26,9 +29,8 @@ export const approveProfile = async (req, res) => {
         }
 
         const employeeId = employee.employeeId;
-        const submittedToAssigneeId = employee.profileSubmittedTo;
 
-        if (employee.profileApprovalStatus !== "submitted") {
+        if (!directHrBypass && employee.profileApprovalStatus !== "submitted") {
             return res.status(400).json({
                 message:
                     "Profile must be submitted for HR review before it can be activated. Use Send for Activation first.",
@@ -44,7 +46,7 @@ export const approveProfile = async (req, res) => {
         const pendingChanges = Array.isArray(updated.pendingReactivationChanges)
             ? updated.pendingReactivationChanges
             : [];
-        const hasExplicitSelection = selectionProvided;
+        const hasExplicitSelection = selectionProvided === true && !directHrBypass;
 
         const sortedChanges = pendingChanges
             .map((entry, idx) => {
@@ -54,11 +56,13 @@ export const approveProfile = async (req, res) => {
             .sort((a, b) => new Date(a?.changedAt || 0) - new Date(b?.changedAt || 0));
 
         const allApplyIds = sortedChanges.map((e) => e.__applyId);
-        if (hasExplicitSelection) {
-            const allApprovedPresent = allApplyIds.length > 0 && allApplyIds.every((xid) => approvedChangeIds.includes(xid));
+        /** Empty queue: HR activates profile as-is (no card rows to approve). */
+        if (hasExplicitSelection && allApplyIds.length > 0) {
+            const approvedNorm = approvedChangeIds.map(String);
+            const allApprovedPresent = allApplyIds.every((xid) => approvedNorm.includes(String(xid)));
             const countsMatch =
-                approvedChangeIds.length === allApplyIds.length &&
-                [...approvedChangeIds].sort().join(",") === [...allApplyIds].sort().join(",");
+                approvedNorm.length === allApplyIds.length &&
+                [...approvedNorm].sort().join(",") === [...allApplyIds].sort().join(",");
             if (!allApprovedPresent || !countsMatch) {
                 return res.status(400).json({
                     message:
@@ -152,6 +156,12 @@ export const approveProfile = async (req, res) => {
                 continue;
             }
             if (section === "passport") {
+                await archiveQueuedPassportOrVisaPreviousIfNeeded({
+                    employeeId,
+                    section,
+                    previousData: change.previousData,
+                    proposedData,
+                });
                 await EmployeePassport.findOneAndUpdate(
                     { employeeId },
                     proposedData,
@@ -162,6 +172,12 @@ export const approveProfile = async (req, res) => {
             if (section === "visa") {
                 const visaType = String(proposedData?.visaType || "").trim();
                 if (visaType) {
+                    await archiveQueuedPassportOrVisaPreviousIfNeeded({
+                        employeeId,
+                        section,
+                        previousData: change.previousData,
+                        proposedData,
+                    });
                     const visaPayload = { ...proposedData };
                     delete visaPayload.visaType;
                     await EmployeeVisa.findOneAndUpdate(
@@ -317,26 +333,15 @@ export const approveProfile = async (req, res) => {
             { $unset: { profileActivationHold: 1, profileActivationSubmittedBy: 1 } },
         );
 
-        // === SYNC DASHBOARD ACTION ===
-        try {
-            const { syncDashboardAction } = await import("../../utils/syncDashboard.js");
-            await syncDashboardAction({
-                requestId: updated._id,
-                requestType: "Profile Activation",
-                status: "Approved",
-                assignedTo: submittedToAssigneeId ? String(submittedToAssigneeId) : undefined,
-                subjectEmployee: updated,
-                requestedByName: req.user?.name || "",
-                actionedBy: req.user?.employeeObjectId || req.user?._id,
-            });
-        } catch (syncErr) {
-            console.error("[ApproveProfile] Dashboard Sync Error:", syncErr);
-        }
-
+        // Close every open dashboard row for this activation (HR Pending + submitter On Hold, any assignee).
         try {
             const DashboardAction = (await import("../../models/DashboardAction.js")).default;
             await DashboardAction.updateMany(
-                { requestId: updated._id, requestType: "Profile Activation", status: "On Hold" },
+                {
+                    requestId: updated._id,
+                    requestType: "Profile Activation",
+                    status: { $in: ["Pending", "On Hold"] },
+                },
                 {
                     status: "Approved",
                     actionedDate: new Date(),
@@ -344,8 +349,8 @@ export const approveProfile = async (req, res) => {
                     comment: "",
                 },
             );
-        } catch (_clearErr) {
-            /* non-fatal */
+        } catch (syncErr) {
+            console.error("[ApproveProfile] Dashboard Sync Error:", syncErr);
         }
 
         // Get complete employee data for response

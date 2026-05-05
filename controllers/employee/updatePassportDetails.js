@@ -170,12 +170,10 @@ export const updatePassportDetails = async (req, res) => {
                 trackDefaultChange: true,
             });
         }
-        if (!skipLive) {
-            try {
-                await markProfileActivationHoldResolvedForSection(employeeId, "passport");
-            } catch (_e) {
-                /* ignore */
-            }
+        try {
+            await markProfileActivationHoldResolvedForSection(employeeId, "passport");
+        } catch (_e) {
+            /* ignore */
         }
         const completeEmployee = await getCompleteEmployee(employeeId);
 
@@ -183,6 +181,7 @@ export const updatePassportDetails = async (req, res) => {
             message: skipLive
                 ? "Passport change queued for HR activation approval."
                 : "Passport details updated successfully.",
+            queuedForHrApproval: !!skipLive,
             passportDetails: {
                 number: updatedPassport?.number,
                 nationality: updatedPassport?.nationality,

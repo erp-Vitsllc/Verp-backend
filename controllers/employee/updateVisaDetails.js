@@ -5,6 +5,7 @@ import { uploadDocumentToS3, deleteDocumentFromS3 } from "../../utils/s3Upload.j
 import { archiveEmployeeDocument } from "../../utils/archiveEmployeeDocument.js";
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
 import { skipLiveProfileWritesPendingHr, queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
+import { markProfileActivationHoldResolvedForSection } from "../../utils/markProfileActivationHoldResolved.js";
 
 const ALLOWED_VISA_TYPES = ["visit", "employment", "spouse"];
 
@@ -195,6 +196,11 @@ export const updateVisaDetails = async (req, res) => {
                 changeEntry: null,
                 trackDefaultChange: true,
             });
+        }
+        try {
+            await markProfileActivationHoldResolvedForSection(employeeId, "visa");
+        } catch (_e) {
+            /* non-fatal */
         }
 
         // Check for Visa Expiry and Update Status

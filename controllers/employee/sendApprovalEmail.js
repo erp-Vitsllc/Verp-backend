@@ -4,6 +4,7 @@ import { getCompleteEmployee } from "../../services/employeeService.js";
 import { resolveFlowchartHrEmployee } from "../../utils/resolveFlowchartHrEmployee.js";
 import { syncDashboardAction } from "../../utils/syncDashboard.js";
 import { resolveProfileActivationSubmitterId } from "../../utils/resolveProfileActivationSubmitterId.js";
+import { clearProfileActivationHoldDashboardRows } from "../../utils/clearProfileActivationHoldDashboardRows.js";
 
 const dedupeEmailList = (emails = []) => {
     const seen = new Set();
@@ -32,9 +33,16 @@ const buildProfileActivationCc = (emp, hrEmail) => {
     return dedupeEmailList(raw).filter((e) => !skip.has(e.toLowerCase()));
 };
 
+/** Subdocument id fallback must match frontend (String(entry._id || index)). */
+const pendingEntryId = (entry, idx) => String(entry?._id ?? idx);
+
 export const sendApprovalEmail = async (req, res) => {
     const { id } = req.params;
     const { reason, description, attachment, attachmentName } = req.body || {};
+    const selectionProvided = req.body?.selectionProvided === true;
+    const includedChangeEntryIds = Array.isArray(req.body?.includedChangeEntryIds)
+        ? req.body.includedChangeEntryIds.map(String)
+        : null;
 
     try {
         const employeeBasic = await getCompleteEmployee(id);
@@ -95,14 +103,39 @@ export const sendApprovalEmail = async (req, res) => {
             },
         });
 
+        const eb = await EmployeeBasic.findById(employeeBasic._id);
+        if (!eb) {
+            return res.status(404).json({ message: "Employee not found" });
+        }
+
+        if (selectionProvided) {
+            if (includedChangeEntryIds === null) {
+                return res.status(400).json({
+                    message: "includedChangeEntryIds array is required when selectionProvided is true.",
+                });
+            }
+            const pending = Array.isArray(eb.pendingReactivationChanges) ? [...eb.pendingReactivationChanges] : [];
+            const allSet = new Set(pending.map((entry, idx) => pendingEntryId(entry, idx)));
+            for (const wid of includedChangeEntryIds) {
+                if (!allSet.has(wid)) {
+                    return res.status(400).json({
+                        message: `Change entry id is not in the pending queue: ${wid}`,
+                    });
+                }
+            }
+            const keep = new Set(includedChangeEntryIds);
+            eb.pendingReactivationChanges = pending.filter((entry, idx) => keep.has(pendingEntryId(entry, idx)));
+            eb.markModified("pendingReactivationChanges");
+        }
+
         const employeeName = `${employeeBasic.firstName || ""} ${employeeBasic.lastName || ""}`.trim() || "Employee";
         const hrName = `${hrEmployee.firstName || ""} ${hrEmployee.lastName || ""}`.trim() || "HR";
         const wasPreviouslyActive = Array.isArray(employeeBasic.profileWorkflow)
             ? employeeBasic.profileWorkflow.some((w) => String(w?.status || "").toLowerCase() === "active")
             : false;
         const activationTypeLabel = wasPreviouslyActive ? "Reactivation" : "New Activation";
-        const pendingCards = Array.isArray(employeeBasic.pendingReactivationChanges)
-            ? [...new Set(employeeBasic.pendingReactivationChanges.map((x) => String(x?.card || "").trim()).filter(Boolean))]
+        const pendingCards = Array.isArray(eb.pendingReactivationChanges)
+            ? [...new Set(eb.pendingReactivationChanges.map((x) => String(x?.card || "").trim()).filter(Boolean))]
             : [];
         const pendingCardsHtml = pendingCards.length
             ? `<p style="margin: 8px 0 0 0;"><strong>Requested Changes:</strong><br/>${pendingCards.map((c) => `- ${c}`).join("<br/>")}</p>`
@@ -171,27 +204,25 @@ export const sendApprovalEmail = async (req, res) => {
             html,
         });
 
-        await EmployeeBasic.findByIdAndUpdate(employeeBasic._id, {
-                $set: {
-                    profileApprovalStatus: "submitted",
-                    profileSubmittedTo: hrEmployee._id,
-                    profileActivationSubmittedBy: submitterEmployeeId,
-                },
-            $unset: { profileActivationHold: "" },
-            $push: {
-                profileWorkflow: {
-                    role: "HR",
-                    assignedTo: hrEmployee._id,
-                    status: "submitted",
-                    assignedAt: new Date(),
-                    comment: `Type: ${activationTypeLabel} | Reason: ${reasonText}${descriptionText ? ` | Description: ${descriptionText}` : ""}${pendingCards.length ? ` | Requested Changes: ${pendingCards.join(", ")}` : ""}${attachmentText ? ` | Attachment: ${attachmentText}` : ""}`,
-                    reason: reasonText,
-                    description: descriptionText,
-                    attachment: attachmentText || "",
-                    attachmentName: attachmentNameText,
-                },
-            },
+        eb.profileApprovalStatus = "submitted";
+        eb.profileSubmittedTo = hrEmployee._id;
+        eb.profileActivationSubmittedBy = submitterEmployeeId;
+        eb.profileActivationHold = undefined;
+        if (!Array.isArray(eb.profileWorkflow)) eb.profileWorkflow = [];
+        eb.profileWorkflow.push({
+            role: "HR",
+            assignedTo: hrEmployee._id,
+            status: "submitted",
+            assignedAt: new Date(),
+            comment: `Type: ${activationTypeLabel} | Reason: ${reasonText}${descriptionText ? ` | Description: ${descriptionText}` : ""}${pendingCards.length ? ` | Requested Changes: ${pendingCards.join(", ")}` : ""}${attachmentText ? ` | Attachment: ${attachmentText}` : ""}`,
+            reason: reasonText,
+            description: descriptionText,
+            attachment: attachmentText || "",
+            attachmentName: attachmentNameText,
         });
+        eb.markModified("profileWorkflow");
+        await eb.save();
+        await EmployeeBasic.updateOne({ _id: eb._id }, { $unset: { profileActivationHold: "" } });
 
         const subjectForDashboard = await EmployeeBasic.findById(employeeBasic._id)
             .select("firstName lastName employeeId designation department")
@@ -213,6 +244,8 @@ export const sendApprovalEmail = async (req, res) => {
             extra2: employeeBasic.designation || "",
             extra3: JSON.stringify({ activationSubject: "employee", activationViewerRole: "hr" }),
         });
+
+        await clearProfileActivationHoldDashboardRows(employeeBasic._id);
 
         return res.status(200).json({
             message: "Approval request sent successfully.",

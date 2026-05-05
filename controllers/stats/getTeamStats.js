@@ -124,8 +124,12 @@ export const getTeamStats = async (req, res) => {
                 // Pending Profiles
                 EmployeeBasic.find({
                     $or: [
-                        { profileSubmittedTo: { $in: relevantIds }, profileApprovalStatus: 'submitted' },
-                    ]
+                        {
+                            profileSubmittedTo: { $in: relevantIds },
+                            profileApprovalStatus: 'submitted',
+                            'profileActivationHold.heldAt': { $exists: false },
+                        },
+                    ],
                 }),
                 // Pending Notices
                 EmployeeBasic.find({

@@ -28,6 +28,8 @@ export const updateBasicDetails = async (req, res) => {
             EmployeeBasic.findOne({ employeeId }).select(employeeBasicSnapSelect).lean(),
         ]);
 
+        const skipLive = skipLiveProfileWritesPendingHr(existingBasic);
+
         // 1. Define allowed fields and their target collections
         const allowedFields = [
             "employeeId",
@@ -257,66 +259,68 @@ export const updateBasicDetails = async (req, res) => {
             }
         }
 
-        const previousBankAttachment = existingBank?.bankAttachment;
-        const nextBankAttachment = updatePayload.bankAttachment;
-        const bankCoreFields = ["bankName", "accountName", "accountNumber", "ibanNumber", "swiftCode"];
-        const bankFieldsChanged = bankCoreFields.some((field) => updatePayload[field] !== undefined);
-        const bankAttachmentReplaced = Boolean(
-            previousBankAttachment?.url &&
-            nextBankAttachment?.url &&
-            previousBankAttachment.url !== nextBankAttachment.url
-        );
-        if (previousBankAttachment?.url && (bankAttachmentReplaced || bankFieldsChanged)) {
-            const prevSummary = [
-                existingBank?.bankName ? `Bank: ${existingBank.bankName}` : "",
-                existingBank?.accountName ? `Account: ${existingBank.accountName}` : "",
-                existingBank?.accountNumber ? `A/C: ${existingBank.accountNumber}` : "",
-                existingBank?.ibanNumber ? `IBAN: ${existingBank.ibanNumber}` : "",
-            ].filter(Boolean).join(" | ");
-            await archiveEmployeeDocument({
-                employeeId,
-                type: "Bank Attachment",
-                description: prevSummary || "Bank details attachment",
-                document: previousBankAttachment,
-            });
-        }
-
-        const previousOfferLetter = existingSalary?.offerLetter;
-        const nextOfferLetter = updatePayload.offerLetter;
-        if (previousOfferLetter?.url && nextOfferLetter?.url && previousOfferLetter.url !== nextOfferLetter.url) {
-            await archiveEmployeeDocument({
-                employeeId,
-                type: "Salary Offer Letter",
-                description: "Salary offer letter (previous version)",
-                document: previousOfferLetter,
-            });
-        }
-
-        if (Array.isArray(updatePayload.salaryHistory) && Array.isArray(existingSalary?.salaryHistory)) {
-            const prevActive = existingSalary.salaryHistory.find((entry) => !entry?.toDate);
-            const nextActive = updatePayload.salaryHistory.find((entry) => !entry?.toDate);
-            const prevActiveDoc = prevActive?.offerLetter;
-            const nextActiveDoc = nextActive?.offerLetter;
-            const sameDoc = Boolean(
-                prevActiveDoc?.url &&
-                nextActiveDoc?.url &&
-                prevActiveDoc.url === nextActiveDoc.url
+        if (!skipLive) {
+            const previousBankAttachment = existingBank?.bankAttachment;
+            const nextBankAttachment = updatePayload.bankAttachment;
+            const bankCoreFields = ["bankName", "accountName", "accountNumber", "ibanNumber", "swiftCode"];
+            const bankFieldsChanged = bankCoreFields.some((field) => updatePayload[field] !== undefined);
+            const bankAttachmentReplaced = Boolean(
+                previousBankAttachment?.url &&
+                nextBankAttachment?.url &&
+                previousBankAttachment.url !== nextBankAttachment.url
             );
-            if (prevActiveDoc?.url && nextActiveDoc?.url && !sameDoc) {
+            if (previousBankAttachment?.url && (bankAttachmentReplaced || bankFieldsChanged)) {
+                const prevSummary = [
+                    existingBank?.bankName ? `Bank: ${existingBank.bankName}` : "",
+                    existingBank?.accountName ? `Account: ${existingBank.accountName}` : "",
+                    existingBank?.accountNumber ? `A/C: ${existingBank.accountNumber}` : "",
+                    existingBank?.ibanNumber ? `IBAN: ${existingBank.ibanNumber}` : "",
+                ].filter(Boolean).join(" | ");
                 await archiveEmployeeDocument({
                     employeeId,
-                    type: "Salary Increment Letter",
-                    description: prevActive?.month ? `Previous active salary (${prevActive.month})` : "Previous active salary",
-                    issueDate: prevActive?.fromDate || null,
-                    expiryDate: prevActive?.toDate || null,
-                    basicSalary: prevActive?.basic ?? null,
-                    houseRentAllowance: prevActive?.houseRentAllowance ?? null,
-                    vehicleAllowance: prevActive?.vehicleAllowance ?? null,
-                    fuelAllowance: prevActive?.fuelAllowance ?? null,
-                    otherAllowance: prevActive?.otherAllowance ?? null,
-                    totalSalary: prevActive?.totalSalary ?? null,
-                    document: prevActiveDoc,
+                    type: "Bank Attachment",
+                    description: prevSummary || "Bank details attachment",
+                    document: previousBankAttachment,
                 });
+            }
+
+            const previousOfferLetter = existingSalary?.offerLetter;
+            const nextOfferLetter = updatePayload.offerLetter;
+            if (previousOfferLetter?.url && nextOfferLetter?.url && previousOfferLetter.url !== nextOfferLetter.url) {
+                await archiveEmployeeDocument({
+                    employeeId,
+                    type: "Salary Offer Letter",
+                    description: "Salary offer letter (previous version)",
+                    document: previousOfferLetter,
+                });
+            }
+
+            if (Array.isArray(updatePayload.salaryHistory) && Array.isArray(existingSalary?.salaryHistory)) {
+                const prevActive = existingSalary.salaryHistory.find((entry) => !entry?.toDate);
+                const nextActive = updatePayload.salaryHistory.find((entry) => !entry?.toDate);
+                const prevActiveDoc = prevActive?.offerLetter;
+                const nextActiveDoc = nextActive?.offerLetter;
+                const sameDoc = Boolean(
+                    prevActiveDoc?.url &&
+                    nextActiveDoc?.url &&
+                    prevActiveDoc.url === nextActiveDoc.url
+                );
+                if (prevActiveDoc?.url && nextActiveDoc?.url && !sameDoc) {
+                    await archiveEmployeeDocument({
+                        employeeId,
+                        type: "Salary Increment Letter",
+                        description: prevActive?.month ? `Previous active salary (${prevActive.month})` : "Previous active salary",
+                        issueDate: prevActive?.fromDate || null,
+                        expiryDate: prevActive?.toDate || null,
+                        basicSalary: prevActive?.basic ?? null,
+                        houseRentAllowance: prevActive?.houseRentAllowance ?? null,
+                        vehicleAllowance: prevActive?.vehicleAllowance ?? null,
+                        fuelAllowance: prevActive?.fuelAllowance ?? null,
+                        otherAllowance: prevActive?.otherAllowance ?? null,
+                        totalSalary: prevActive?.totalSalary ?? null,
+                        document: prevActiveDoc,
+                    });
+                }
             }
         }
 
@@ -395,7 +399,6 @@ export const updateBasicDetails = async (req, res) => {
             proposedData: updatePayload,
         });
 
-        const skipLive = skipLiveProfileWritesPendingHr(existingBasic);
         let updated = null;
         const basicChangeEntry = buildBasicDetailsReactivationEntry();
 
@@ -424,12 +427,10 @@ export const updateBasicDetails = async (req, res) => {
             updated = await getCompleteEmployee(employeeId);
         }
 
-        if (!skipLive) {
-            try {
-                await markProfileActivationHoldResolvedForSection(employeeId, "basicDetails");
-            } catch (_e) {
-                /* non-fatal */
-            }
+        try {
+            await markProfileActivationHoldResolvedForSection(employeeId, "basicDetails");
+        } catch (_e) {
+            /* non-fatal */
         }
 
         updated = await getCompleteEmployee(employeeId);

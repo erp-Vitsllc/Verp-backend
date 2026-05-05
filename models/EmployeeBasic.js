@@ -75,12 +75,21 @@ const employeeBasicSchema = new mongoose.Schema(
                 requestId: { type: String, required: true },
                 kind: {
                     type: String,
-                    enum: ["manualDocument"],
+                    enum: [
+                        "manualDocument",
+                        "passport",
+                        "visa",
+                        "emiratesId",
+                        "labourCard",
+                        "medicalInsurance",
+                        "drivingLicense",
+                    ],
                     required: true,
                 },
                 label: { type: String, default: "" },
                 documentIndex: { type: Number },
                 documentItemId: { type: String, default: "" },
+                visaType: { type: String, default: "" },
                 reason: { type: String, required: true },
                 supportingAttachmentKey: { type: String, default: "" },
                 supportingAttachmentName: { type: String, default: "" },
@@ -105,6 +114,8 @@ const employeeBasicSchema = new mongoose.Schema(
                     /** Queue entry ids (string) the employee has corrected by saving the matching section again. */
                     resolvedEntryIds: [{ type: String }],
                     comment: { type: String, default: "" },
+                    /** entryId (_id string) -> optional HR instructions for that unchecked requested-change row */
+                    rowNotesByEntryId: { type: mongoose.Schema.Types.Mixed, default: undefined },
                 },
                 { _id: false },
             ),

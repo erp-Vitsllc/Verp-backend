@@ -17,7 +17,6 @@ export const rejectProfile = async (req, res) => {
         }
 
         const employeeId = employee.employeeId;
-        const submittedToAssigneeId = employee.profileSubmittedTo;
         const activationSubmitterId = employee.profileActivationSubmittedBy || null;
 
         // Update EmployeeBasic
@@ -46,27 +45,15 @@ export const rejectProfile = async (req, res) => {
             return res.status(404).json({ message: "Employee submission not found" });
         }
 
-        // === SYNC DASHBOARD ACTION ===
-        try {
-            const { syncDashboardAction } = await import("../../utils/syncDashboard.js");
-            await syncDashboardAction({
-                requestId: updated._id,
-                requestType: "Profile Activation",
-                status: "Rejected",
-                assignedTo: submittedToAssigneeId ? String(submittedToAssigneeId) : undefined,
-                subjectEmployee: updated,
-                actionedBy: req.user?.employeeObjectId || req.user?._id,
-                requestedByName: req.user?.name || "",
-                comment: reason,
-            });
-        } catch (syncErr) {
-            console.error("[RejectProfile] Dashboard Sync Error:", syncErr);
-        }
-
+        // Close every open dashboard row for this activation (HR Pending + submitter On Hold).
         try {
             const DashboardAction = (await import("../../models/DashboardAction.js")).default;
             await DashboardAction.updateMany(
-                { requestId: updated._id, requestType: "Profile Activation", status: "On Hold" },
+                {
+                    requestId: updated._id,
+                    requestType: "Profile Activation",
+                    status: { $in: ["Pending", "On Hold"] },
+                },
                 {
                     status: "Rejected",
                     actionedDate: new Date(),
@@ -74,8 +61,8 @@ export const rejectProfile = async (req, res) => {
                     comment: reason || "",
                 },
             );
-        } catch (_clearErr) {
-            /* non-fatal */
+        } catch (syncErr) {
+            console.error("[RejectProfile] Dashboard Sync Error:", syncErr);
         }
 
         // Get complete employee data for response

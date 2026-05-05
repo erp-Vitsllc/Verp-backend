@@ -116,6 +116,8 @@ router.get("/loan-eligible", getLoanEligibleEmployees);
 import { getDashboardStats } from "../controllers/stats/getDashboardStats.js";
 import { getUserActivityStats } from "../controllers/stats/getUserActivityStats.js";
 import { deleteDashboardAction } from "../controllers/stats/deleteDashboardAction.js";
+import { deleteProfileActivationDashboardByRequest } from "../controllers/stats/deleteProfileActivationDashboardByRequest.js";
+import { deleteCompanyActivationDashboardByRequest } from "../controllers/stats/deleteCompanyActivationDashboardByRequest.js";
 import { getHierarchy } from "../controllers/employee/getHierarchy.js";
 import { getTeamStats } from "../controllers/stats/getTeamStats.js";
 
@@ -142,6 +144,15 @@ router.get("/dashboard/user-stats", getUserActivityStats);
 
 // Dismiss a dashboard notification row (own assignee or admin)
 router.delete("/dashboard/actions/:actionId", deleteDashboardAction);
+// Dismiss all Profile Activation rows for one employee request (when client only has requestId)
+router.delete(
+    "/dashboard/profile-activation/:requestId",
+    deleteProfileActivationDashboardByRequest,
+);
+router.delete(
+    "/dashboard/company-activation/:requestId",
+    deleteCompanyActivationDashboardByRequest,
+);
 
 // Add employee - requires create permission
 router.post("/", checkPermission('hrm_employees_add', 'create'), addEmployee);

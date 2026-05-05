@@ -2,113 +2,18 @@ import Company from "../../models/Company.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import User from "../../models/User.js";
 import DashboardAction from "../../models/DashboardAction.js";
+import { archiveSupersededCompanyDocuments } from "../../utils/archiveCompanyDocument.js";
+import { syncDashboardAction } from "../../utils/syncDashboard.js";
 import { sendResponsibilityApprovalEmail } from "../../utils/sendResponsibilityApprovalEmail.js";
 import { buildResponsibilityEmailData } from "../../utils/flowchartResponsibilityEmailData.js";
 import { getSignedFileUrl } from "../../utils/s3Upload.js";
-import { calculateCompanyActivationProgress, shouldTriggerCompanyReactivation } from "../../utils/companyActivation.js";
+import {
+    calculateCompanyActivationProgress,
+    shouldTriggerCompanyReactivation,
+    collectCompanyReactivationChangeLabels,
+} from "../../utils/companyActivation.js";
+import { markCompanyActivationHoldResolvedForUpdate } from "../../utils/markCompanyActivationHoldResolved.js";
 import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
-import { getDaysUntil, isExpiryTaskWindow } from "../../utils/documentExpiryReminderStages.js";
-
-const buildCompanyExpiringDocs = (company) => {
-    const docs = [];
-    if (company?.tradeLicenseExpiry) {
-        docs.push({ label: "Trade License", expiryDate: company.tradeLicenseExpiry });
-    }
-    if (company?.establishmentCardExpiry) {
-        docs.push({ label: "Establishment Card", expiryDate: company.establishmentCardExpiry });
-    }
-    (company?.documents || []).forEach((d) => {
-        if (!d?.expiryDate) return;
-        docs.push({ label: d?.type || "Company Document", expiryDate: d.expiryDate });
-    });
-    (company?.ejari || []).forEach((ej) => {
-        if (!ej?.expiryDate) return;
-        docs.push({ label: ej?.type ? `Ejari — ${ej.type}` : "Ejari", expiryDate: ej.expiryDate });
-    });
-    (company?.insurance || []).forEach((ins) => {
-        if (!ins?.expiryDate) return;
-        docs.push({ label: ins?.type ? `Insurance — ${ins.type}` : "Insurance", expiryDate: ins.expiryDate });
-    });
-    const ownerFields = [
-        { key: "passport", label: "Passport" },
-        { key: "visa", label: "Visa" },
-        { key: "emiratesId", label: "Emirates ID" },
-        { key: "medical", label: "Medical Insurance" },
-        { key: "drivingLicense", label: "Driving License" },
-        { key: "labourCard", label: "Labour Card" },
-    ];
-    (company?.owners || []).forEach((owner) => {
-        ownerFields.forEach((f) => {
-            const exp = owner?.[f.key]?.expiryDate;
-            if (!exp) return;
-            docs.push({ label: `${owner?.name || "Owner"} - ${f.label}`, expiryDate: exp });
-        });
-    });
-    return docs;
-};
-
-const formatExpiryDateLabel = (expiryDate) => {
-    if (!expiryDate) return "";
-    try {
-        const d = new Date(expiryDate);
-        if (Number.isNaN(d.getTime())) return "";
-        return d.toLocaleDateString("en-GB");
-    } catch {
-        return "";
-    }
-};
-
-const cleanupCompanyExpiryNotifications = async (company) => {
-    const docs = buildCompanyExpiringDocs(company);
-    const allowedExtra1Set = new Set(
-        docs
-            .filter((doc) => isExpiryTaskWindow(getDaysUntil(doc.expiryDate)))
-            .map((doc) => {
-                const expLabel = formatExpiryDateLabel(doc.expiryDate);
-                return `Expiry follow-up required: ${doc.label}${expLabel ? ` (Exp: ${expLabel})` : ""}`;
-            })
-    );
-    const pending = await DashboardAction.find({
-        requestId: company._id,
-        requestType: "Document Expiry Reminder",
-        status: "Pending",
-    })
-        .select("_id extra1")
-        .lean();
-    const staleIds = pending
-        .filter((row) => {
-            const extra1 = (row?.extra1 || "").trim();
-            if (!extra1.toLowerCase().startsWith("expiry follow-up required:")) return false;
-            return !allowedExtra1Set.has(extra1);
-        })
-        .map((row) => row._id);
-    if (staleIds.length > 0) {
-        await DashboardAction.deleteMany({ _id: { $in: staleIds } });
-    }
-};
-
-const collectCompanyReactivationChanges = (updateData = {}) => {
-    const changes = [];
-    const hasAny = (keys) => keys.some((k) => Object.prototype.hasOwnProperty.call(updateData, k));
-
-    if (hasAny(["name", "nickName", "email", "phone", "establishedDate"])) {
-        changes.push("Basic Details");
-    }
-    if (hasAny(["tradeLicenseNumber", "tradeLicenseIssueDate", "tradeLicenseExpiry", "tradeLicenseAttachment"])) {
-        changes.push("Trade License");
-    }
-    if (hasAny(["establishmentCardNumber", "establishmentCardIssueDate", "establishmentCardExpiry", "establishmentCardAttachment"])) {
-        changes.push("Establishment Card");
-    }
-    if (Object.prototype.hasOwnProperty.call(updateData, "documents")) {
-        const docs = Array.isArray(updateData.documents) ? updateData.documents : [];
-        if (docs.some((d) => String(d?.type || "").toLowerCase().includes("moa"))) {
-            changes.push("MOA");
-        }
-    }
-
-    return [...new Set(changes)];
-};
 
 const shouldQueueCompanyChange = (company = {}) => {
     const status = String(company?.status || "").toLowerCase();
@@ -261,10 +166,31 @@ export const updateCompany = async (req, res) => {
             return false;
         };
 
-        if (!requesterIsAdmin && isDocumentRemovalAttempt() && !isCompanyDocumentNotRenewArchive) {
-            return res.status(403).json({
-                message: "Only administrator can delete company profile documents/cards."
-            });
+        const ownersPayloadDiffers =
+            Object.prototype.hasOwnProperty.call(updateData, "owners") &&
+            (() => {
+                try {
+                    return (
+                        JSON.stringify(toSerializable(updateData.owners ?? [])) !==
+                        JSON.stringify(toSerializable(beforeCompany.owners ?? []))
+                    );
+                } catch {
+                    return true;
+                }
+            })();
+
+        if (
+            !requesterIsAdmin &&
+            isDocumentRemovalAttempt() &&
+            !isCompanyDocumentNotRenewArchive
+        ) {
+            const blockedNonOwnerPayload =
+                !shouldTriggerCompanyReactivation(beforeCompany, updateData) && !ownersPayloadDiffers;
+            if (blockedNonOwnerPayload) {
+                return res.status(403).json({
+                    message: "Only administrator can delete company profile documents/cards."
+                });
+            }
         }
 
         if (updateData.responsibilities && Array.isArray(updateData.responsibilities)) {
@@ -384,7 +310,7 @@ export const updateCompany = async (req, res) => {
         const queueForApproval = shouldTriggerCompanyReactivation(beforeCompany, updateData);
         let updatedCompany = null;
         if (queueForApproval) {
-            const changedCards = collectCompanyReactivationChanges(updateData);
+            const changedCards = collectCompanyReactivationChangeLabels(updateData);
             const cardLabel = changedCards.length ? changedCards.join(", ") : "Company Profile";
             const currentStatus = String(company?.status || "").toLowerCase();
             const currentActivation = String(company?.activationStatus || "").toLowerCase();
@@ -406,6 +332,7 @@ export const updateCompany = async (req, res) => {
             });
             updatedCompany = await company.save();
         } else {
+            await archiveSupersededCompanyDocuments(beforeCompany, updateData);
             updatedCompany = await Company.findByIdAndUpdate(
                 company._id,
                 { $set: updateData },
@@ -413,13 +340,36 @@ export const updateCompany = async (req, res) => {
             );
         }
 
-        // Remove stale expiry reminder notifications immediately after any company document/card edit.
+        try {
+            const { reconcileCompanyDocumentExpiryDashboard } = await import(
+                "../../utils/processDocumentExpiryReminders.js"
+            );
+            if (updatedCompany?._id) {
+                await reconcileCompanyDocumentExpiryDashboard(updatedCompany._id);
+            }
+        } catch (reconcileErr) {
+            console.warn("[updateCompany] reconcileCompanyDocumentExpiryDashboard:", reconcileErr?.message || reconcileErr);
+        }
+
         if (!queueForApproval) {
-            await cleanupCompanyExpiryNotifications(updatedCompany);
+            try {
+                await markCompanyActivationHoldResolvedForUpdate(company._id.toString(), updateData);
+                const refreshed = await Company.findById(company._id);
+                if (refreshed) updatedCompany = refreshed;
+            } catch (markErr) {
+                console.error("[updateCompany] markCompanyActivationHoldResolvedForUpdate:", markErr);
+            }
         }
 
         // Sync owner details across all other companies where the owner exists by name
         if (!queueForApproval && updateData.owners && Array.isArray(updateData.owners)) {
+            let reconcileExpiry = null;
+            try {
+                const mod = await import("../../utils/processDocumentExpiryReminders.js");
+                reconcileExpiry = mod.reconcileCompanyDocumentExpiryDashboard;
+            } catch (_) {
+                /* handled per peer below */
+            }
             for (const owner of updateData.owners) {
                 if (owner.name) {
                     const syncData = {};
@@ -434,10 +384,28 @@ export const updateCompany = async (req, res) => {
 
                     if (Object.keys(syncData).length > 0) {
                         try {
+                            const peerCompanies = await Company.find({
+                                _id: { $ne: updatedCompany._id },
+                                "owners.name": owner.name,
+                            })
+                                .select("_id")
+                                .lean();
                             await Company.updateMany(
                                 { _id: { $ne: updatedCompany._id }, "owners.name": owner.name },
                                 { $set: syncData }
                             );
+                            if (reconcileExpiry) {
+                                for (const p of peerCompanies) {
+                                    try {
+                                        await reconcileExpiry(p._id);
+                                    } catch (peerReconcileErr) {
+                                        console.warn(
+                                            "[updateCompany] peer reconcileCompanyDocumentExpiryDashboard:",
+                                            peerReconcileErr?.message || peerReconcileErr
+                                        );
+                                    }
+                                }
+                            }
                         } catch (syncErr) {
                             console.error(`Error syncing owner details for ${owner.name}:`, syncErr);
                         }

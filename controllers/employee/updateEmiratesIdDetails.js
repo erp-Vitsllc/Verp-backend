@@ -5,6 +5,7 @@ import { uploadDocumentToS3, deleteDocumentFromS3 } from "../../utils/s3Upload.j
 import { archiveEmployeeDocument } from "../../utils/archiveEmployeeDocument.js";
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
 import { skipLiveProfileWritesPendingHr, queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
+import { markProfileActivationHoldResolvedForSection } from "../../utils/markProfileActivationHoldResolved.js";
 
 const REQUIRED_FIELDS = ["number", "issueDate", "expiryDate", "upload"];
 
@@ -193,6 +194,11 @@ export const updateEmiratesIdDetails = async (req, res) => {
                 changeEntry: null,
                 trackDefaultChange: true,
             });
+        }
+        try {
+            await markProfileActivationHoldResolvedForSection(employeeId, "emiratesId");
+        } catch (_e) {
+            /* non-fatal */
         }
         const completeEmployee = await getCompleteEmployee(employeeId);
 

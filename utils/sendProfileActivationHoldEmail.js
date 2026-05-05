@@ -3,12 +3,27 @@ import nodemailer from "nodemailer";
 const pickEmployeeEmail = (emp) =>
     emp?.companyEmail || emp?.workEmail || emp?.personalEmail || emp?.email || "";
 
+const escapeHtmlBasic = (s) =>
+    String(s || "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+
 /**
  * Emails **only** the portal user who submitted for activation (`submitterEmployee` from `profileActivationSubmittedBy`).
  * Does not mail the profile subject. No-op if submitter record or email is missing.
  */
 export const sendProfileActivationHoldEmail = async (params) => {
-    const { subjectEmployee, submitterEmployee = null, hrManager, unapprovedCards = [], comment = "" } = params;
+    const {
+        subjectEmployee,
+        submitterEmployee = null,
+        hrManager,
+        unapprovedCards = [],
+        /** @type {{ cardLabel?: string; note?: string }[] | undefined} */
+        holdLineItems,
+        comment = "",
+    } = params;
     const employee = subjectEmployee;
     if (!employee) return;
 
@@ -54,8 +69,19 @@ export const sendProfileActivationHoldEmail = async (params) => {
 
         const baseUrl = process.env.FRONTEND_URL || "http://localhost:3000";
         const profileUrl = `${baseUrl}/emp/${employee.employeeId}`;
-        const listHtml = unapprovedCards.length
-            ? `<ul style="margin:12px 0;padding-left:20px;"><li>${unapprovedCards.join("</li><li>")}</li></ul>`
+        const items =
+            Array.isArray(holdLineItems) && holdLineItems.some((x) => x && String(x.cardLabel || "").trim())
+                ? holdLineItems.filter((x) => x && String(x.cardLabel || "").trim())
+                : (unapprovedCards || []).filter(Boolean).map((card) => ({ cardLabel: String(card).trim(), note: "" }));
+
+        const listHtml = items.length
+            ? `<ul style="margin:12px 0;padding-left:20px;">${items
+                  .map((it) => {
+                      const label = escapeHtmlBasic(it.cardLabel);
+                      const nt = escapeHtmlBasic(String(it.note || "").trim()).replace(/\n/g, "<br/>");
+                      return `<li style="margin:8px 0;"><strong>${label}</strong>${nt ? `<div style="margin-top:6px;color:#334155;font-size:14px;line-height:1.5;"><em>Instructions:</em> ${nt}</div>` : ""}</li>`;
+                  })
+                  .join("")}</ul>`
             : "<p>No specific cards were listed; please open the employee profile to review HR notes.</p>";
         const commentBlock =
             comment && String(comment).trim()
