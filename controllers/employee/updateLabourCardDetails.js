@@ -7,7 +7,7 @@ import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileRe
 import { skipLiveProfileWritesPendingHr, queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
 import { markProfileActivationHoldResolvedForSection } from "../../utils/markProfileActivationHoldResolved.js";
 
-const REQUIRED_FIELDS = ["number", "issueDate", "expiryDate", "upload", "contractUpload"];
+const REQUIRED_FIELDS = ["number", "expiryDate", "upload", "contractUpload"];
 
 const buildMissingFields = (body, existingDocument, existingContractDocument) => {
     return REQUIRED_FIELDS.filter((field) => {
@@ -109,12 +109,6 @@ export const updateLabourCardDetails = async (req, res) => {
 
         const parsedIssueDate = normalizeDate(issueDate);
         const parsedExpiryDate = normalizeDate(expiryDate);
-
-        if (!parsedIssueDate) {
-            return res.status(400).json({
-                message: "Invalid issue date provided.",
-            });
-        }
 
         // Validate expiry date.
         if (!parsedExpiryDate) {
