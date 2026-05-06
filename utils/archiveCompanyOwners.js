@@ -58,6 +58,18 @@ const normalizeOwnerForCompare = (owner) => {
     return out;
 };
 
+const ownerIdentityKey = (owner) => {
+    const o = normalizeOwnerForCompare(owner);
+    const name = String(o?.name || '').trim().toLowerCase();
+    const nationality = String(o?.nationality || '').trim().toLowerCase();
+    const share = String(o?.sharePercentage || '').trim().toLowerCase();
+    const passportNo = String(o?.passport?.number || '').trim().toLowerCase();
+    const visaNo = String(o?.visa?.number || '').trim().toLowerCase();
+    const emiratesNo = String(o?.emiratesId?.number || '').trim().toLowerCase();
+    const labourNo = String(o?.labourCard?.number || '').trim().toLowerCase();
+    return [name, nationality, share, passportNo, visaNo, emiratesNo, labourNo].join('|');
+};
+
 const sameJson = (a, b) => {
     try {
         return JSON.stringify(toPlain(a)) === JSON.stringify(toPlain(b));
@@ -93,9 +105,12 @@ export const archiveSupersededCompanyOwners = (beforeCompany = {}, updateData = 
     const next = Array.isArray(updateData?.owners) ? updateData.owners : [];
 
     const prevById = new Map();
+    const prevByIdentity = new Map();
     prev.forEach((o) => {
         const id = strId(o?._id);
         if (id) prevById.set(id, o);
+        const key = ownerIdentityKey(o);
+        if (key && !prevByIdentity.has(key)) prevByIdentity.set(key, o);
     });
 
     const nextIds = new Set(
@@ -103,6 +118,7 @@ export const archiveSupersededCompanyOwners = (beforeCompany = {}, updateData = 
             .map((o) => strId(o?._id))
             .filter(Boolean)
     );
+    const nextIdentityKeys = new Set(next.map((o) => ownerIdentityKey(o)).filter(Boolean));
 
     const archivedAt = new Date();
     const archives = [];
@@ -110,14 +126,19 @@ export const archiveSupersededCompanyOwners = (beforeCompany = {}, updateData = 
     const existingArchives = Array.isArray(beforeCompany?.oldOwners) ? beforeCompany.oldOwners : [];
 
     const hasExistingArchive = (ownerSnapshot, { archiveReason, previousOwnerId, replacedByName }) => {
+        const snapshotNorm = normalizeOwnerForCompare(ownerSnapshot);
+        const snapshotKey = ownerIdentityKey(ownerSnapshot);
         return existingArchives.some((row) => {
             if (String(row?.archiveReason || '') !== String(archiveReason || '')) return false;
-            if (strId(row?.previousOwnerId) !== strId(previousOwnerId)) return false;
             if (strId(row?.replacedByName) !== strId(replacedByName || '')) return false;
-            return sameJson(
-                normalizeOwnerForCompare(row),
-                normalizeOwnerForCompare(ownerSnapshot),
-            );
+            const strictIdMatch = strId(row?.previousOwnerId) === strId(previousOwnerId);
+            const sameSnapshot =
+                sameJson(normalizeOwnerForCompare(row), snapshotNorm) ||
+                (snapshotKey && ownerIdentityKey(row) === snapshotKey);
+            if (!sameSnapshot) return false;
+            // Keep strict behavior when IDs are available, but allow snapshot fallback for ID churn.
+            if (strId(previousOwnerId)) return strictIdMatch;
+            return true;
         });
     };
 
@@ -125,7 +146,11 @@ export const archiveSupersededCompanyOwners = (beforeCompany = {}, updateData = 
     next.forEach((o) => {
         const id = strId(o?._id);
         if (!id) return;
-        const prevOwner = prevById.get(id);
+        let prevOwner = prevById.get(id);
+        if (!prevOwner) {
+            // Fallback when UI payload regenerates owner IDs but the owner is the same person/doc set.
+            prevOwner = prevByIdentity.get(ownerIdentityKey(o));
+        }
         if (!prevOwner) return;
         if (!sameJson(normalizeOwnerForCompare(prevOwner), normalizeOwnerForCompare(o))) {
             const replacedByName = strId(o?.name);
@@ -154,6 +179,8 @@ export const archiveSupersededCompanyOwners = (beforeCompany = {}, updateData = 
         const id = strId(o?._id);
         if (!id) return;
         if (nextIds.has(id)) return;
+        // Treat same owner identity in next payload as the same row (handles _id churn on renew/edit).
+        if (nextIdentityKeys.has(ownerIdentityKey(o))) return;
         if (
             hasExistingArchive(o, {
                 archiveReason: 'Deleted',
