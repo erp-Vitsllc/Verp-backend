@@ -392,7 +392,7 @@ export const submitCompanyNotRenewRequest = async (req, res) => {
         const hr = await getDepartmentHOD("hr");
         const hrEmail = pickEmail(hr);
         const baseUrl = (process.env.FRONTEND_URL || "http://localhost:3000").replace(/\/$/, "");
-        const companyLink = `${baseUrl}/Company/${encodeURIComponent(company.companyId || company._id)}?tab=documents`;
+        const companyLink = `${baseUrl}/Company/${encodeURIComponent(company.companyId || company._id)}?tab=others`;
 
         if (hrEmail) {
             await sendMail({

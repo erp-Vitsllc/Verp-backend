@@ -136,7 +136,7 @@ export const sendAssetServiceEmail = async ({ asset, recipient, type, details, s
         `;
 
         await transporter.sendMail({
-            from: `"VeRP Asset Management" <${emailUser}>`,
+            fromName: sender ? `${sender.firstName} ${sender.lastName}` : "Asset Management",
             to: recipientEmail,
             subject,
             html

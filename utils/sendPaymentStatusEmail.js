@@ -101,7 +101,7 @@ export const sendPaymentStatusEmail = async (payment, status, comment = '') => {
         `;
 
         await transporter.sendMail({
-            from: `"VeRP Accounts" <${process.env.EMAIL_USER}>`,
+            fromName: "VeRP Accounts",
             to: toEmail,
             subject: subject,
             html: html

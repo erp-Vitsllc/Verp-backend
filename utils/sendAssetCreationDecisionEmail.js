@@ -52,7 +52,7 @@ export const sendAssetCreationDecisionEmail = async ({ asset, recipient, approve
         `;
 
         await transporter.sendMail({
-            from: `"VeRP Asset Management" <${emailUser}>`,
+            fromName: approvedByText,
             to: recipientEmail,
             subject,
             html
@@ -96,7 +96,7 @@ export const sendAssetCreatedByAdminInfoEmail = async ({ asset, recipient, creat
         `;
 
         await transporter.sendMail({
-            from: `"VeRP Asset Management" <${emailUser}>`,
+            fromName: creatorName,
             to: recipientEmail,
             subject,
             html

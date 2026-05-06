@@ -1,7 +1,7 @@
 import nodemailer from "nodemailer";
 
 const pickEmployeeEmail = (emp) =>
-    emp?.companyEmail || emp?.workEmail || emp?.personalEmail || emp?.email || "";
+    (emp?.companyEmail || "").trim();
 
 const escapeHtmlBasic = (s) =>
     String(s || "")
@@ -118,7 +118,10 @@ export const sendProfileActivationHoldEmail = async (params) => {
             `,
         };
 
-        await transporter.sendMail(mailOpts);
+        await transporter.sendMail({
+            ...mailOpts,
+            fromName: hrName,
+        });
     } catch (e) {
         console.error("[sendProfileActivationHoldEmail]", e?.message || e);
     }

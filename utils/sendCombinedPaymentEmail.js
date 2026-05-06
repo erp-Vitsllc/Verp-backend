@@ -414,7 +414,7 @@ export const sendPaymentNotificationEmail = async (payment, status, comment = ''
         `;
 
         const mailOptions = {
-            from: `"VeRP Accounts" <${process.env.EMAIL_USER}>`,
+            fromName: "VeRP Accounts",
             to: toEmail,
             subject: subject,
             html: html,

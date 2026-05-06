@@ -109,7 +109,7 @@ export const sendAssetActionApprovedEmail = async (asset, actionType, employee, 
         `;
 
         await transporter.sendMail({
-            from: `"VeRP Asset Management" <${emailUser}>`,
+            fromName: approver ? `${approver.firstName} ${approver.lastName}` : "Asset Controller",
             to: toEmails.join(','),
             subject: `Approved: Asset ${actionType} (${asset.assetId})`,
             html: htmlContent,
@@ -223,7 +223,7 @@ export const sendAssetBulkActionApprovedEmail = async (assets, actionType, emplo
 
         const assetIds = assets.map((a) => a.assetId).join(', ');
         await transporter.sendMail({
-            from: `"VeRP Asset Management" <${emailUser}>`,
+            fromName: approver ? `${approver.firstName} ${approver.lastName}` : "Asset Controller",
             to: toEmails.join(','),
             subject: `Approved: Bulk ${actionType} (${assets.length} assets) - ${assetIds}`,
             html: htmlContent,

@@ -27,26 +27,26 @@ function getTransport() {
     });
 }
 
-async function sendHtmlEmail(to, subject, html) {
+async function sendHtmlEmail(to, subject, html, fromName = "VeRP System") {
     if (!to) return;
     const transporter = getTransport();
     if (!transporter) return;
     const emailUser = process.env.EMAIL_USER || process.env.VERP_EMAIL || process.env.GMAIL_USER;
     await transporter.sendMail({
-        from: `"VeRP Asset Management" <${emailUser}>`,
+        fromName,
         to,
         subject,
         html
     });
 }
 
-export async function emailAssetControllerHtml(subject, htmlBody) {
+export async function emailAssetControllerHtml(subject, htmlBody, fromName = "VeRP System") {
     try {
         const ac = await getDepartmentHOD('assetcontroller');
         if (!ac) return;
         const { email } = resolveEmployeeEmail(ac);
         if (!email) return;
-        await sendHtmlEmail(email, subject, htmlBody);
+        await sendHtmlEmail(email, subject, htmlBody, fromName);
     } catch (e) {
         console.error('[emailAssetControllerHtml]', e?.message || e);
     }
@@ -145,7 +145,7 @@ export async function notifyAdminDeletedAssetTypeOrCategory({ kind, name, perfor
                 <p><strong>Performed by:</strong> ${performedBy}</p>
             </div>
         </div>`;
-    await emailAssetControllerHtml(subject, html);
+    await emailAssetControllerHtml(subject, html, performedBy);
 }
 
 export async function notifyAdminDeletedAccessoryCatalogEntry({ accessoryCatalogId, name, performedBy }) {
@@ -162,7 +162,7 @@ export async function notifyAdminDeletedAccessoryCatalogEntry({ accessoryCatalog
                 <p><strong>Performed by:</strong> ${performedBy}</p>
             </div>
         </div>`;
-    await emailAssetControllerHtml(subject, html);
+    await emailAssetControllerHtml(subject, html, performedBy);
 }
 
 export async function notifyAdminDeletedWholeAsset(req, asset) {
@@ -183,7 +183,7 @@ export async function notifyAdminDeletedWholeAsset(req, asset) {
                 <p><strong>Performed by:</strong> ${performedBy}</p>
             </div>
         </div>`;
-    await emailAssetControllerHtml(subject, html);
+    await emailAssetControllerHtml(subject, html, performedBy);
 
     await notifyAssignedPartyForAdminDeletion(req, asset, {
         actionLabel: 'Asset deleted',
@@ -211,7 +211,7 @@ export async function notifyAdminRemovedAccessoriesFromAssignedAsset(req, asset,
                 <p><strong>Performed by:</strong> ${performedBy}</p>
             </div>
         </div>`;
-    await emailAssetControllerHtml(subject, html);
+    await emailAssetControllerHtml(subject, html, performedBy);
 
     const hasAssignee = asset.assignedTo || (asset.assignedToType === 'Company' && asset.assignedCompany);
     if (!hasAssignee) return;
@@ -240,7 +240,7 @@ export async function notifyAdminDeletedBusinessRecordToManagement(req, { module
                     <p><strong>Performed by:</strong> ${performedBy}</p>
                 </div>
             </div>`;
-        await sendHtmlEmail(to, subject, html);
+        await sendHtmlEmail(to, subject, html, performedBy);
         return true;
     } catch (e) {
         console.error('[notifyAdminDeletedBusinessRecordToManagement]', e?.message || e);

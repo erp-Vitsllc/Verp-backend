@@ -32,7 +32,9 @@ export async function notifyHrProfileActivationRequestEmail({
         auth: { user: emailUser, pass: emailPass },
     });
 
-    const subject = `${activationTypeLabel} request: ${employeeName}`.trim();
+    const isResubmission = String(activationTypeLabel).toLowerCase() === "reactivation";
+    const typeForDisplay = isResubmission ? "Reactivation (Resubmission)" : "New Activation";
+    const subject = `${typeForDisplay} request: ${employeeName}`.trim();
     const html = `
         <div style="font-family:Segoe UI,Arial,sans-serif;color:#1e293b;line-height:1.55;max-width:600px;margin:0 auto;border:1px solid #e2e8f0;border-radius:10px;overflow:hidden;">
             <div style="background:#2563eb;color:#fff;padding:18px;text-align:center;">
@@ -40,8 +42,9 @@ export async function notifyHrProfileActivationRequestEmail({
             </div>
             <div style="padding:24px;">
                 <p>Hello <strong>${hrName}</strong>,</p>
-                <p>A profile activation request was submitted${submitterName ? ` by <strong>${submitterName}</strong>` : ""}.</p>
+                <p>A profile was submitted for <strong>${typeForDisplay}</strong>${submitterName ? ` by <strong>${submitterName}</strong>` : ""}.</p>
                 <p><strong>Employee:</strong> ${employeeName}<br/><strong>Employee ID:</strong> ${employeeId || "—"}</p>
+                <p><strong>Type:</strong> ${typeForDisplay}</p>
                 ${pendingCardsText ? `<p><strong>Requested changes:</strong> ${pendingCardsText}</p>` : ""}
                 <p style="text-align:center;margin:28px 0;">
                     <a href="${profileUrl}" style="background:#2563eb;color:#fff;padding:12px 24px;text-decoration:none;border-radius:6px;font-weight:bold;">Review in VeRP</a>
@@ -51,7 +54,7 @@ export async function notifyHrProfileActivationRequestEmail({
     `;
 
     await transporter.sendMail({
-        from: `"VeRP Portal" <${emailUser}>`,
+        fromName: submitterName || "VeRP Portal",
         to,
         subject,
         html,

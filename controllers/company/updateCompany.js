@@ -3,6 +3,7 @@ import EmployeeBasic from "../../models/EmployeeBasic.js";
 import User from "../../models/User.js";
 import DashboardAction from "../../models/DashboardAction.js";
 import { archiveSupersededCompanyDocuments } from "../../utils/archiveCompanyDocument.js";
+import { archiveSupersededCompanyOwners } from "../../utils/archiveCompanyOwners.js";
 import { syncDashboardAction } from "../../utils/syncDashboard.js";
 import { sendResponsibilityApprovalEmail } from "../../utils/sendResponsibilityApprovalEmail.js";
 import { buildResponsibilityEmailData } from "../../utils/flowchartResponsibilityEmailData.js";
@@ -333,9 +334,16 @@ export const updateCompany = async (req, res) => {
             updatedCompany = await company.save();
         } else {
             await archiveSupersededCompanyDocuments(beforeCompany, updateData);
+            const ownerArchives = archiveSupersededCompanyOwners(beforeCompany, updateData);
+            const updateOps = {
+                $set: updateData,
+                ...(ownerArchives.length
+                    ? { $push: { oldOwners: { $each: ownerArchives } } }
+                    : {}),
+            };
             updatedCompany = await Company.findByIdAndUpdate(
                 company._id,
-                { $set: updateData },
+                updateOps,
                 { new: true, runValidators: true }
             );
         }
@@ -431,6 +439,21 @@ export const updateCompany = async (req, res) => {
         // Owners Documents
         if (companyObj.owners && Array.isArray(companyObj.owners)) {
             companyObj.owners = await Promise.all(companyObj.owners.map(async (owner) => {
+                if (!owner || typeof owner !== "object") return owner;
+                if (owner.attachment) owner.attachment = await getSignedFileUrl(owner.attachment);
+                if (owner.passport?.attachment) owner.passport.attachment = await getSignedFileUrl(owner.passport.attachment);
+                if (owner.visa?.attachment) owner.visa.attachment = await getSignedFileUrl(owner.visa.attachment);
+                if (owner.emiratesId?.attachment) owner.emiratesId.attachment = await getSignedFileUrl(owner.emiratesId.attachment);
+                if (owner.medical?.attachment) owner.medical.attachment = await getSignedFileUrl(owner.medical.attachment);
+                if (owner.drivingLicense?.attachment) owner.drivingLicense.attachment = await getSignedFileUrl(owner.drivingLicense.attachment);
+                if (owner.labourCard?.attachment) owner.labourCard.attachment = await getSignedFileUrl(owner.labourCard.attachment);
+                return owner;
+            }));
+        }
+
+        // Archived Owners Documents
+        if (companyObj.oldOwners && Array.isArray(companyObj.oldOwners)) {
+            companyObj.oldOwners = await Promise.all(companyObj.oldOwners.map(async (owner) => {
                 if (!owner || typeof owner !== "object") return owner;
                 if (owner.attachment) owner.attachment = await getSignedFileUrl(owner.attachment);
                 if (owner.passport?.attachment) owner.passport.attachment = await getSignedFileUrl(owner.passport.attachment);

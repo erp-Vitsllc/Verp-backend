@@ -109,7 +109,10 @@ export const sendAssetCreationApprovalEmail = async ({ asset, recipient, creator
             );
         }
 
-        await transporter.sendMail(mailOpts);
+        await transporter.sendMail({
+            ...mailOpts,
+            fromName: creatorName || "Asset Management",
+        });
 
         console.log(`[Email Success] Asset creation approval email sent to ${recipientEmail}`);
         return true;

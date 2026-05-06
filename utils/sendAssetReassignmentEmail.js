@@ -121,7 +121,7 @@ export const sendAssetReassignmentEmail = async ({
         `;
 
         await transporter.sendMail({
-            from: `"VeRP Asset Management" <${emailUser}>`,
+            fromName: "Asset Management",
             to: recipientEmail,
             subject,
             html,

@@ -92,7 +92,7 @@ export const sendPaymentApprovalEmail = async (payment, accountsHOD) => {
         `;
 
         await transporter.sendMail({
-            from: `"VeRP Accounts" <${emailUser}>`,
+            fromName: payment.paidByName,
             to: accountsHOD.companyEmail || accountsHOD.email,
             subject: subject,
             html: html

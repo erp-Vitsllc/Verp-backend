@@ -198,7 +198,7 @@ export const sendPaymentInvoiceEmail = async (payment, relatedEntity = null) => 
             </div>
         `;
         await transporter.sendMail({
-            from: `"VERP System" <${process.env.EMAIL_USER}>`,
+            fromName: "VERP System",
             to: Array.from(toEmails).join(','),
             cc: Array.from(ccEmails).join(','),
             subject: subject,

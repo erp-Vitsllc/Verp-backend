@@ -85,7 +85,7 @@ export const sendAssetActionFinalAcknowledgeEmail = async (asset, actionType, em
         `;
 
         await transporter.sendMail({
-            from: `"VeRP Asset Management" <${emailUser}>`,
+            fromName: `${manager.firstName} ${manager.lastName}`,
             to: employeeEmail,
             subject: `Action Required: Finalize ${actionType} for Asset ${asset.assetId}`,
             html: htmlContent

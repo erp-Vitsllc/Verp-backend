@@ -101,7 +101,7 @@ export const sendHODAuthorizationEmail = async (type, item, hod, requester) => {
         `;
 
         await transporter.sendMail({
-            from: `"VeRP Notification" <${emailUser}>`,
+            fromName: requester.name,
             to: hEmail,
             subject: `Action Required: Authorize ${type} - ${subjectId}`,
             html: htmlContent

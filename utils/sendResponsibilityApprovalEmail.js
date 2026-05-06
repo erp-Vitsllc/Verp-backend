@@ -177,7 +177,7 @@ export const sendResponsibilityApprovalEmail = async ({
         }
 
         await transporter.sendMail({
-            from: `"VeRP System" <${emailUser}>`,
+            fromName: "VeRP System",
             to: recipientEmail,
             subject,
             html,

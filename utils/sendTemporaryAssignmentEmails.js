@@ -75,7 +75,7 @@ export const sendTemporaryAssignmentReminderEmail = async ({
             : 'Asset Controller';
 
         await transporter.sendMail({
-            from: `"VeRP Asset Management" <${emailUser}>`,
+            fromName: "Asset Management",
             to: to.join(','),
             subject: `Reminder: Temporary assignment ends on ${formatDate(endDate)} (${assetId})`,
             html: `
@@ -141,7 +141,7 @@ export const sendTemporaryAssignmentExpiredEmail = async ({
         const link = getAssetLink(asset);
         const endTxt = formatDate(endDate);
         await transporter.sendMail({
-            from: `"VeRP Asset Management" <${emailUser}>`,
+            fromName: "Asset Management",
             to: to.join(','),
             subject: `Temporary assignment ended (${assetId})`,
             html: `

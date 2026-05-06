@@ -89,14 +89,23 @@ export const setupEmailSubjectTag = () => {
 
         transporter.sendMail = (mailOptions = {}, ...rest) => {
             const tag = resolveEmailSubjectTag();
-            if (!tag) {
-                return originalSendMail(mailOptions, ...rest);
-            }
+            const emailUser = (process.env.EMAIL_USER || "").trim();
 
             const nextMailOptions = {
                 ...mailOptions,
                 subject: appendTagToSubject(mailOptions?.subject, tag),
             };
+
+            // Handle dynamic "from" name if provided
+            if (mailOptions.fromName) {
+                const name = String(mailOptions.fromName).trim();
+                if (name) {
+                    nextMailOptions.from = `"${name} via VeRP" <${emailUser}>`;
+                }
+            } else if (!mailOptions.from) {
+                // Default if 'from' is missing
+                nextMailOptions.from = `"VeRP Notifications" <${emailUser}>`;
+            }
 
             return originalSendMail(nextMailOptions, ...rest);
         };

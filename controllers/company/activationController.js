@@ -5,6 +5,7 @@ import { isRequestUserDesignatedFlowchartHr } from "../../utils/isDesignatedFlow
 import { calculateCompanyActivationProgress, submitCompanyActivation } from "../../utils/companyActivation.js";
 import { syncDashboardAction } from "../../utils/syncDashboard.js";
 import { archiveSupersededCompanyDocuments } from "../../utils/archiveCompanyDocument.js";
+import { archiveSupersededCompanyOwners } from "../../utils/archiveCompanyOwners.js";
 import { formatActivationAttachmentLine, shortenUrlsInString } from "../../utils/shortenUrlsInString.js";
 import { sendCompanyActivationHoldEmail } from "../../utils/sendCompanyActivationHoldEmail.js";
 import { sanitizeActivationHoldRowNotes } from "../../utils/sanitizeActivationHoldRowNotes.js";
@@ -18,7 +19,7 @@ const resolveCompanyById = async (id) => {
 
 /** Resolves submitter EmployeeBasic for emails and submitter dashboard rows (activationSubmittedBy first, then requester Dashboard row). */
 const resolveCompanyActivationSubmitterEmployee = async (company, pendingDashboardRows = []) => {
-    const selectFields = "companyEmail workEmail email personalEmail firstName lastName employeeId _id";
+    const selectFields = "companyEmail firstName lastName employeeId _id";
 
     const findEmpByIdOrUserId = async (rawId) => {
         if (!rawId) return null;
@@ -182,6 +183,11 @@ export const approveCompanyActivationRequest = async (req, res) => {
             // Archive documents being replaced by this approved change
             const beforeChange = company.toObject();
             await archiveSupersededCompanyDocuments(beforeChange, proposedData);
+            const ownerArchives = archiveSupersededCompanyOwners(beforeChange, proposedData);
+            if (ownerArchives.length > 0) {
+                if (!Array.isArray(company.oldOwners)) company.oldOwners = [];
+                company.oldOwners.push(...ownerArchives);
+            }
 
             Object.assign(company, proposedData);
         }
@@ -334,8 +340,7 @@ export const holdCompanyActivationRequest = async (req, res) => {
 
         const submitterEmp = await resolveCompanyActivationSubmitterEmployee(company, pendingDashboardRows);
 
-        const mailTo =
-            submitterEmp?.companyEmail || submitterEmp?.workEmail || submitterEmp?.email || submitterEmp?.personalEmail || "";
+        const mailTo = submitterEmp?.companyEmail || "";
         const mailName = `${submitterEmp?.firstName || ""} ${submitterEmp?.lastName || ""}`.trim();
 
         if (submitterEmp?._id) {

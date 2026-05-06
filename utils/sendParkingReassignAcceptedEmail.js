@@ -31,7 +31,7 @@ export const sendParkingReassignAcceptedEmail = async ({
         const link = `${frontendUrl}/HRM/Asset/details/${assetId}`;
 
         await transporter.sendMail({
-            from: `"VeRP Asset Management" <${emailUser}>`,
+            fromName: controllerName,
             to: recipientEmail,
             subject: `Asset Parking Reassigned: ${asset?.assetId || ''}`,
             html: `

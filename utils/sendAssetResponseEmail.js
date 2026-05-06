@@ -112,7 +112,7 @@ export const sendAssetResponseEmail = async ({ asset, actor, recipient, action, 
         `;
 
         await transporter.sendMail({
-            from: `"VeRP Asset Management" <${emailUser}>`,
+            fromName: actorName,
             to: recipientEmail,
             subject,
             html,

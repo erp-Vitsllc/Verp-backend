@@ -38,7 +38,7 @@ export const sendAssignedEmployeeActionEmail = async ({
         const link = `${frontendUrl}/HRM/Asset/details/${asset._id}`;
 
         await transporter.sendMail({
-            from: `"VeRP Asset Management" <${emailUser}>`,
+            fromName: performedBy || "Asset Management",
             to: email,
             subject: `Asset Update: ${action} (${asset.assetId || ''})`,
             ...(att.length ? { attachments: att } : {}),

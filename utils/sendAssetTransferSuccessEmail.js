@@ -83,7 +83,7 @@ export const sendAssetTransferSuccessEmail = async (asset, actionType, assetCont
         `;
 
         await transporter.sendMail({
-            from: `"VeRP Asset Management" <${emailUser}>`,
+            fromName: ctrlName,
             to: controllerEmail,
             subject: `Transfer successful: ${actionType} (${asset.assetId})`,
             text: textContent,

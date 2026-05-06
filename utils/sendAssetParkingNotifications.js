@@ -46,7 +46,7 @@ export const sendParkingReminderEmail = async ({ asset, assignedEmployee, assetC
 
         const emailUser = process.env.EMAIL_USER || process.env.VERP_EMAIL || process.env.GMAIL_USER;
         await transporter.sendMail({
-            from: `"VeRP Asset Management" <${emailUser}>`,
+            fromName: "Asset Management",
             to: to.join(','),
             subject: `Reminder: Parking ends in ${daysLeft} day(s) for ${asset.assetId}`,
             html: `<p>Asset <strong>${asset.assetId} - ${asset.name}</strong> is in parking (On Leave) and will expire in <strong>${daysLeft} day(s)</strong>.</p>
@@ -66,7 +66,7 @@ export const sendParkingExpiredEmail = async ({ asset, assignedEmployee, assetCo
 
         const emailUser = process.env.EMAIL_USER || process.env.VERP_EMAIL || process.env.GMAIL_USER;
         await transporter.sendMail({
-            from: `"VeRP Asset Management" <${emailUser}>`,
+            fromName: "Asset Management",
             to: to.join(','),
             subject: `Asset Auto-Unassigned: ${asset.assetId}`,
             html: `<p>Parking duration has completed for <strong>${asset.assetId} - ${asset.name}</strong>.</p>
@@ -94,7 +94,7 @@ export const sendParkingExtensionEmail = async ({
 
         const emailUser = process.env.EMAIL_USER || process.env.VERP_EMAIL || process.env.GMAIL_USER;
         await transporter.sendMail({
-            from: `"VeRP Asset Management" <${emailUser}>`,
+            fromName: "Asset Management",
             to: to.join(','),
             subject: `Parking Extension: ${asset.assetId} (+${extensionDays} days)`,
             html: `<p>Asset <strong>${asset.assetId} - ${asset.name}</strong> parking duration was extended.</p>

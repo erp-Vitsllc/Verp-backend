@@ -53,7 +53,7 @@ export async function sendVehicleServiceWorkflowEmail({
             </div>`;
 
         await transporter.sendMail({
-            from: `"VeRP Portal" <${emailUser}>`,
+            fromName: "VeRP Portal",
             to,
             subject,
             html

@@ -228,7 +228,7 @@ export const sendFineConfirmedEmail = async (fine, assignedEmployees, req = null
             `;
 
             await transporter.sendMail({
-                from: `"VERP System" <${process.env.EMAIL_USER}>`,
+                fromName: req?.user ? `${req.user.firstName || ""} ${req.user.lastName || ""}`.trim() : "VERP System",
                 to: toMail,
                 cc: ccRecipients,
                 subject: subject,

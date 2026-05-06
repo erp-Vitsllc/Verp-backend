@@ -61,7 +61,7 @@ export const sendCompanyActivationHoldEmail = async ({
             : "";
 
     await transporter.sendMail({
-        from: `"VeRP Portal" <${emailUser}>`,
+        fromName: hrName,
         to,
         subject: `Company activation on hold — ${companyName}`,
         html: `

@@ -84,7 +84,7 @@ export const sendAssetActionApprovalEmail = async (asset, actionType, manager, r
         `;
 
         await transporter.sendMail({
-            from: `"VeRP Asset Management" <${emailUser}>`,
+            fromName: requester.name || "Asset Management",
             to: managerEmail,
             ...(managerCc.length ? { cc: managerCc } : {}),
             subject: `Approval Required: ${actionType} Request for ${asset.assetId}`,

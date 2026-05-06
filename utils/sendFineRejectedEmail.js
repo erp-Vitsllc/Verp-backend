@@ -169,7 +169,7 @@ export const sendFineRejectedEmail = async (fine, assignedEmployees) => {
 
         // 4. Send Email
         await transporter.sendMail({
-            from: `"VERP System" <${process.env.EMAIL_USER}>`,
+            fromName: "HR Department",
             to: recipients,
             subject: subject,
             html: html,

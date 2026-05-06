@@ -45,7 +45,7 @@ export async function sendAssetBulkDispositionResultEmail({
         const att = normalizePdfAttachments(attachments);
 
         await transporter.sendMail({
-            from: `"VeRP Asset Management" <${emailUser}>`,
+            fromName: approverName,
             to: toEmails.join(','),
             subject: subjectLine || 'Bulk asset request — decision summary',
             html: `

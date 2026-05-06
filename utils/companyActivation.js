@@ -7,29 +7,6 @@ import { syncDashboardAction } from "./syncDashboard.js";
 import { clearCompanyActivationHoldDashboardRows } from "./clearCompanyActivationHoldDashboardRows.js";
 import { shortenUrlsInString } from "./shortenUrlsInString.js";
 
-const dedupeEmailList = (emails = []) => {
-    const seen = new Set();
-    return emails
-        .map((e) => (e || "").trim())
-        .filter((e) => {
-            if (!e) return false;
-            const k = e.toLowerCase();
-            if (seen.has(k)) return false;
-            seen.add(k);
-            return true;
-        });
-};
-
-const getActorCcEmails = async (actor, excludeLowerEmails = new Set()) => {
-    if (!actor?.employeeObjectId) return [];
-    const emp = await EmployeeBasic.findById(actor.employeeObjectId)
-        .select("companyEmail")
-        .lean();
-    if (!emp) return [];
-    const raw = [emp.companyEmail];
-    return dedupeEmailList(raw).filter((e) => !excludeLowerEmails.has(e.toLowerCase()));
-};
-
 const hasValue = (v) => !(v === undefined || v === null || (typeof v === "string" && v.trim() === ""));
 const hasAttachment = (v) => hasValue(v);
 
@@ -98,7 +75,6 @@ const sendCompanyActivationEmailToHr = async ({
     description = "",
     attachment = "",
     attachmentName = "",
-    ccEmails = [],
     activationTypeLabel = "New Activation",
     requestedChanges = [],
 }) => {
@@ -115,7 +91,9 @@ const sendCompanyActivationEmailToHr = async ({
 
     const baseUrl = process.env.FRONTEND_URL || "http://localhost:3000";
     const companyUrl = `${baseUrl}/Company/${company._id}`;
-    const subject = `${activationTypeLabel} request: ${company.name}`;
+    const isResubmission = String(activationTypeLabel).toLowerCase() === "reactivation";
+    const typeForDisplay = isResubmission ? "Reactivation (Resubmission)" : "New Activation";
+    const subject = `${typeForDisplay} request: ${company.name}`;
 
     const reasonHtml = shortenUrlsInString(reason || "Activation request");
     const descriptionHtml = shortenUrlsInString(description || "");
@@ -136,11 +114,11 @@ const sendCompanyActivationEmailToHr = async ({
             </div>
             <div style="padding:22px;">
                 <p>Hello <strong>${hrName}</strong>,</p>
-                <p>A company has been submitted for <strong>${activationTypeLabel.toLowerCase()}</strong> and requires HR authorization.</p>
+                <p>A company profile has been submitted for <strong>${typeForDisplay}</strong> and requires HR authorization.</p>
                 <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:14px 16px;margin:16px 0;">
                     <p style="margin:0;"><strong>Company:</strong> ${company.name || "N/A"}</p>
                     <p style="margin:6px 0 0;"><strong>Company ID:</strong> ${company.companyId || "N/A"}</p>
-                    <p style="margin:6px 0 0;"><strong>Type:</strong> ${activationTypeLabel}</p>
+                    <p style="margin:6px 0 0;"><strong>Type:</strong> ${typeForDisplay}</p>
                     <p style="margin:6px 0 0;"><strong>Requested by:</strong> ${requestedByName || "System"}</p>
                     <p style="margin:6px 0 0;"><strong>Reason:</strong> ${reasonHtml}</p>
                     ${descriptionHtml ? `<p style="margin:6px 0 0;"><strong>Edited Details:</strong> ${descriptionHtml}</p>` : ""}
@@ -154,14 +132,9 @@ const sendCompanyActivationEmailToHr = async ({
         </div>
     `;
 
-    const hrLower = (hrEmail || "").trim().toLowerCase();
-    const exclude = new Set([hrLower]);
-    const cc = dedupeEmailList(ccEmails).filter((e) => !exclude.has(e.toLowerCase()));
-
     await transporter.sendMail({
         from: `"VeRP Portal" <${emailUser}>`,
         to: hrEmail,
-        ...(cc.length ? { cc: cc.join(", ") } : {}),
         subject,
         html,
     });
@@ -351,8 +324,6 @@ export const submitCompanyActivation = async ({
 
     try {
         const hrName = `${hr.firstName || ""} ${hr.lastName || ""}`.trim() || "HR";
-        const hrMailLower = (hrResolved.email || "").trim().toLowerCase();
-        const actorCc = await getActorCcEmails(actor, new Set(hrMailLower ? [hrMailLower] : []));
         await sendCompanyActivationEmailToHr({
             company,
             hrEmail: hrResolved.email,
@@ -362,7 +333,6 @@ export const submitCompanyActivation = async ({
             description,
             attachment,
             attachmentName,
-            ccEmails: actorCc,
             activationTypeLabel,
             requestedChanges,
         });

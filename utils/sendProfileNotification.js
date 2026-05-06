@@ -1,7 +1,7 @@
 import nodemailer from "nodemailer";
 
 const pickEmployeeEmail = (emp) =>
-    emp?.companyEmail || emp?.workEmail || emp?.personalEmail || emp?.email || "";
+    (emp?.companyEmail || "").trim();
 
 /**
  * HR activation outcome email: **only** the submitter (`recipientEmployee`). Never mails the profile subject.
@@ -120,7 +120,7 @@ export const sendProfileNotification = async ({ employee, recipientEmployee = nu
         `;
 
         await transporter.sendMail({
-            from: `"VeRP Portal" <${emailUser}>`,
+            from: `"${managerName}" <${emailUser}>`,
             to: [recipientEmail],
             subject,
             html,

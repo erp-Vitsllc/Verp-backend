@@ -72,6 +72,62 @@ const companySchema = new mongoose.Schema(
             }
         ],
 
+        /**
+         * Archived company owners (deleted or replaced).
+         * Keeps full owner snapshot (including documents) so the UI can show "Old Owners".
+         */
+        oldOwners: [
+            {
+                archivedAt: { type: Date, default: Date.now },
+                archiveReason: { type: String, enum: ['Replaced', 'Deleted', 'Not Renewed'], default: 'Replaced' },
+                previousOwnerId: { type: String, default: '' },
+                replacedByName: { type: String, default: '' },
+                name: { type: String },
+                nationality: { type: String },
+                sharePercentage: { type: String },
+                attachment: { type: String },
+                passport: {
+                    number: { type: String },
+                    nationality: { type: String },
+                    issueDate: { type: Date },
+                    expiryDate: { type: Date },
+                    countryOfIssue: { type: String },
+                    placeOfIssue: { type: String },
+                    attachment: { type: String }
+                },
+                visa: {
+                    number: { type: String },
+                    type: { type: String },
+                    issueDate: { type: Date },
+                    sponsor: { type: String },
+                    expiryDate: { type: Date },
+                    attachment: { type: String }
+                },
+                emiratesId: {
+                    number: { type: String },
+                    issueDate: { type: Date },
+                    expiryDate: { type: Date },
+                    attachment: { type: String }
+                },
+                medical: {
+                    number: { type: String },
+                    expiryDate: { type: Date },
+                    attachment: { type: String }
+                },
+                drivingLicense: {
+                    number: { type: String },
+                    expiryDate: { type: Date },
+                    attachment: { type: String }
+                },
+                labourCard: {
+                    number: { type: String },
+                    expiryDate: { type: Date },
+                    lastUpdated: { type: Date },
+                    attachment: { type: String }
+                }
+            }
+        ],
+
         // Establishment Card Details
         establishmentCardNumber: { type: String },
         establishmentCardIssueDate: { type: Date },

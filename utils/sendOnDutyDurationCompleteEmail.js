@@ -88,7 +88,7 @@ export const sendOnDutyDurationCompleteEmail = async (asset, assignedUser, asset
         `;
 
         await transporter.sendMail({
-            from: `"VeRP Asset Management" <${emailUser}>`,
+            fromName: "Asset Management",
             to: toEmails.join(','),
             subject: `On Duty Duration Complete: Asset ${asset.assetId} (${duration} days)`,
             html: htmlContent

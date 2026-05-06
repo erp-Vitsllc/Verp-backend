@@ -1,7 +1,7 @@
 import nodemailer from "nodemailer";
 
 const pickEmployeeEmail = (emp) =>
-    emp?.companyEmail || emp?.workEmail || emp?.personalEmail || emp?.email || "";
+    (emp?.companyEmail || "").trim();
 
 /**
  * Email the company activation submitter when HR approves or rejects.
@@ -70,7 +70,7 @@ export async function sendCompanyActivationOutcomeEmail({
         `;
 
         await transporter.sendMail({
-            from: `"VeRP Portal" <${emailUser}>`,
+            fromName: managerName,
             to,
             subject,
             html,

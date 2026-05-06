@@ -89,7 +89,7 @@ export const sendFineStageEmail = async (fine, recipients, stageName, allAssigne
 
     try {
         await transporter.sendMail({
-            from: `"VeRP Notification" <${emailUser}>`,
+            fromName: "VeRP Fine System",
             to,
             subject,
             html

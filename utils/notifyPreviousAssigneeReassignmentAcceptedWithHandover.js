@@ -147,7 +147,7 @@ export async function notifyPreviousAssigneeReassignmentAcceptedWithHandover(req
         });
 
         await transporter.sendMail({
-            from: `"VeRP Asset Management" <${emailUser}>`,
+            fromName: acceptedByName,
             to: recipientEmail,
             subject: `Handover updated: ${current.assetId} — accepted by ${acceptedByName}`,
             html,

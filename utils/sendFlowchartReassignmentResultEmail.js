@@ -249,7 +249,7 @@ export async function sendFlowchartReassignmentResultEmail(
     });
 
     await transporter.sendMail({
-        from: `"VeRP System" <${emailUser}>`,
+        fromName: req.user ? `${req.user.firstName || ""} ${req.user.lastName || ""}`.trim() : "VeRP System",
         to: recipientEmail,
         subject,
         html,

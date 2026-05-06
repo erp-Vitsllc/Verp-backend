@@ -78,7 +78,7 @@ export async function notifyAssetControllerReassignmentAcceptedWithHandover(req,
         `;
 
         await transporter.sendMail({
-            from: `"VeRP Asset Management" <${emailUser}>`,
+            fromName: req.user ? `${req.user.firstName || ""} ${req.user.lastName || ""}`.trim() : "Asset Management",
             to: acEmail,
             ...(acCc.length ? { cc: acCc } : {}),
             subject: `Reassignment accepted: ${displayName} (${displayId})`,

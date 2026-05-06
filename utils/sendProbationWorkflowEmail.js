@@ -103,7 +103,7 @@ export const sendProbationWorkflowEmail = async ({
         if (phase === "request_created") {
             if (!stakeholderEmails.length) return;
             await transporter.sendMail({
-                from: `"VeRP Portal" <${process.env.EMAIL_USER}>`,
+                fromName: "VeRP Portal",
                 to: [...new Set(stakeholderEmails)],
                 subject: `Probation Change Request: ${employeeName}`,
                 html: `
@@ -121,7 +121,7 @@ export const sendProbationWorkflowEmail = async ({
             const recipients = [...new Set([employeeEmail, ...stakeholderEmails].filter(Boolean))];
             if (!recipients.length) return;
             await transporter.sendMail({
-                from: `"VeRP Portal" <${process.env.EMAIL_USER}>`,
+                fromName: "VeRP Portal",
                 to: recipients,
                 subject: `Probation Update Requires Employee Approval: ${employeeName}`,
                 html: `
@@ -137,7 +137,7 @@ export const sendProbationWorkflowEmail = async ({
         if (phase === "employee_approved") {
             if (!stakeholderEmails.length) return;
             await transporter.sendMail({
-                from: `"VeRP Portal" <${process.env.EMAIL_USER}>`,
+                fromName: actorName,
                 to: [...new Set(stakeholderEmails)],
                 subject: `Probation Approved by Employee: ${employeeName}`,
                 html: `
@@ -156,7 +156,7 @@ export const sendProbationWorkflowEmail = async ({
             if (!recipients.length) return;
             const isApproved = employee?.status === "Permanent";
             await transporter.sendMail({
-                from: `"VeRP Portal" <${process.env.EMAIL_USER}>`,
+                fromName: actorName,
                 to: recipients,
                 subject: `${isApproved ? "Probation Finalized" : "Probation Final Decision"}: ${employeeName}`,
                 html: `
@@ -229,7 +229,7 @@ export const ensureProbationRequestForEmployee = async (employeeDoc) => {
         const transporter = createTransporter();
         if (transporter) {
             await transporter.sendMail({
-                from: `"VeRP Portal" <${process.env.EMAIL_USER}>`,
+                fromName: "VeRP Portal",
                 to: primaryReporteeEmail,
                 subject: `Probation completion requires your review: ${employeeDoc.firstName || ""} ${employeeDoc.lastName || ""}`.trim(),
                 html: `

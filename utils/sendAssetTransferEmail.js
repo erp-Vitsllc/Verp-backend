@@ -78,7 +78,7 @@ export const sendAssetTransferEmail = async (asset, fromEmployee, toEmployee, ap
         `;
 
         await transporter.sendMail({
-            from: `"VeRP Asset Management" <${emailUser}>`,
+            fromName: `${requester.firstName} ${requester.lastName}`,
             to: approverEmail,
             subject: `Asset Transfer Approval: ${asset.assetId} to ${toEmployee.firstName} ${toEmployee.lastName}`,
             html: htmlContent
