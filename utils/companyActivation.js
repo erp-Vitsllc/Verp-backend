@@ -385,7 +385,17 @@ export const collectCompanyReactivationChangeLabels = (updateData = {}) => {
 };
 
 export const shouldTriggerCompanyReactivation = (beforeCompany = {}, updateData = {}) => {
-    if (String(beforeCompany?.status || "").toLowerCase() !== "active") return false;
+    const status = String(beforeCompany?.status || "").toLowerCase();
+    const activationStatus = String(beforeCompany?.activationStatus || "").toLowerCase();
+    const workflow = Array.isArray(beforeCompany?.activationWorkflow) ? beforeCompany.activationWorkflow : [];
+    const hasEverBeenActive = workflow.some((w) => String(w?.status || "").toLowerCase() === "active");
+
+    // Keep queuing reactivation changes not only when currently active, but also while
+    // an already-active company is in submitted/draft reactivation flow.
+    const canQueueReactivation =
+        status === "active" ||
+        (hasEverBeenActive && (activationStatus === "submitted" || activationStatus === "draft"));
+    if (!canQueueReactivation) return false;
 
     let ownersStructuralChange = false;
     if (Object.prototype.hasOwnProperty.call(updateData, "owners")) {
