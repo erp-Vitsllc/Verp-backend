@@ -12,6 +12,8 @@ import {
 } from "../controllers/company/companyNotRenewController.js";
 import { uploadCompanyDocument } from "../controllers/company/uploadCompanyDocument.js";
 import { deleteCompany } from "../controllers/company/deleteCompany.js";
+import { deleteOldDocument } from "../controllers/company/deleteOldDocument.js";
+import { deleteOldOwner } from "../controllers/company/deleteOldOwner.js";
 import { respondToResponsibility } from "../controllers/company/respondToResponsibility.js";
 import { getAllOwners } from "../controllers/company/getAllOwners.js";
 import {
@@ -39,6 +41,8 @@ router.post("/:id/hold-activation", holdCompanyActivationRequest);
 router.post("/:id/reject-activation", rejectCompanyActivationRequest);
 router.put("/:id/respond-responsibility", respondToResponsibility);
 router.post("/:id/upload", uploadCompanyDocument);
+router.delete("/:id/old-document/:target", deleteOldDocument);
+router.delete("/:id/old-owner/:target", deleteOldOwner);
 router.delete("/:id", deleteCompany);
 
 export default router;

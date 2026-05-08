@@ -49,6 +49,7 @@ import { addDocument } from "../controllers/employee/addDocument.js";
 import { updateDocument } from "../controllers/employee/updateDocument.js";
 import { protect } from "../middleware/authMiddleware.js";
 import { checkPermission } from "../middleware/permissionMiddleware.js";
+import { deleteOldDocument } from "../controllers/employee/deleteOldDocument.js";
 import { getEmployeeDocument } from "../controllers/employee/getEmployeeDocument.js";
 import { getReporteeOptions } from "../controllers/employee/getReporteeOptions.js";
 
@@ -201,6 +202,7 @@ router.post("/upload-document/:id", checkPermission('hrm_employees_view', 'edit'
 router.post("/:id/document", checkPermission('hrm_employees_view', 'edit'), addDocument);
 router.patch("/:id/document/:index", checkPermission('hrm_employees_view', 'edit'), updateDocument);
 router.delete("/:id/document/:index", checkPermission('hrm_employees_view', 'edit'), deleteDocument);
+router.delete("/:id/old-document/:target", checkPermission('hrm_employees_view', 'delete'), deleteOldDocument);
 router.post("/:id/document-not-renew-requests", submitEmployeeDocumentNotRenewRequest);
 router.post("/:id/document-not-renew-requests/:requestId/respond", respondEmployeeDocumentNotRenewRequest);
 

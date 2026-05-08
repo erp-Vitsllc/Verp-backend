@@ -124,6 +124,17 @@ export const getCompany = async (req, res) => {
             }));
         }
 
+        // Archived Documents (superseded/deleted)
+        if (companyObj.oldDocuments && Array.isArray(companyObj.oldDocuments)) {
+            companyObj.oldDocuments = await Promise.all(companyObj.oldDocuments.map(async (doc) => {
+                if (!doc || typeof doc !== "object") return doc;
+                if (doc?.document?.url) {
+                    doc.document.url = await getSignedFileUrl(doc.document.url);
+                }
+                return doc;
+            }));
+        }
+
         const viewerIsDesignatedFlowchartHr = await isRequestUserDesignatedFlowchartHr(req);
 
         if (Array.isArray(companyObj.pendingNotRenewRequests) && companyObj.pendingNotRenewRequests.length) {

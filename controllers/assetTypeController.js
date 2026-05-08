@@ -150,6 +150,14 @@ const sanitizePlateEmirate = (val) => {
     return VALID_PLATE_EMIRATES.has(s) ? s : '';
 };
 
+const parseBool = (val) => {
+    if (typeof val === 'boolean') return val;
+    const s = String(val ?? '').trim().toLowerCase();
+    if (['true', '1', 'yes', 'on'].includes(s)) return true;
+    if (['false', '0', 'no', 'off', ''].includes(s)) return false;
+    return false;
+};
+
 // Helper to generate accessory suffix (A, B, C...)
 const generateAccessoryId = (assetId, index) => {
     const charCode = 65 + (index % 26);
@@ -164,15 +172,14 @@ export const createAssetType = async (req, res) => {
             mode, category, type, name, assetValue, purchaseDate, quantity, warranty, warrantyYears, warrantyAttachment, invoiceNumber, imagePreview, description, invoiceFile, accessories,
             vehicleCode, plateNumber, plateEmirate, modelYear, currentKilometer, registrationExpiryDate,
             insuranceExpiryDate, oilChangeDate, gearOilDueDate, lastServiceDate, nextServiceDate,
+            warrantyEnabled, warrantyKm, warrantyExpiryDate,
             creationIntent
         } = req.body;
 
-        // UAE Plate Validation if provided (usually for vehicles)
+        // Plate normalization if provided (usually for vehicles).
+        // Validation is intentionally relaxed to accept real-world formats from UI/backend variations.
         let plateEmirateStored = '';
         if (plateNumber) {
-            if (!UAE_PLATE_REGEX.test(plateNumber.trim().toUpperCase())) {
-                return res.status(400).json({ message: 'Enter a valid UAE vehicle plate number' });
-            }
             plateNumber = normalizePlate(plateNumber);
             plateEmirateStored = sanitizePlateEmirate(plateEmirate);
         }
@@ -394,6 +401,9 @@ export const createAssetType = async (req, res) => {
                     warranty,
                     warrantyYears: Number(warrantyYears) || 0,
                     warrantyAttachment,
+                    warrantyEnabled: parseBool(warrantyEnabled),
+                    warrantyKm: Number(warrantyKm) || 0,
+                    warrantyExpiryDate: parseBool(warrantyEnabled) ? (warrantyExpiryDate || null) : null,
                     invoiceNumber,
                     imagePreview: imageS3Key,
                     photo: imageS3Key,
@@ -1355,9 +1365,6 @@ export const updateAssetItem = async (req, res) => {
                         const tDoc = await AssetType.findOne({ name: updates[key].trim(), isActive: true });
                         if (tDoc) asset.typeId = tDoc._id;
                     } else if (key === 'plateNumber' && updates[key]) {
-                        if (!UAE_PLATE_REGEX.test(updates[key].trim().toUpperCase())) {
-                            return res.status(400).json({ message: 'Enter a valid UAE vehicle plate number' });
-                        }
                         asset[key] = normalizePlate(updates[key]);
                     } else if (key === 'plateEmirate') {
                         asset[key] = sanitizePlateEmirate(updates[key]);
@@ -1365,6 +1372,23 @@ export const updateAssetItem = async (req, res) => {
                         asset[key] = updates[key];
                     }
                 }
+            }
+        }
+
+        // Keep warranty fields consistent on every update.
+        const hasWarrantyIntent =
+            Object.prototype.hasOwnProperty.call(updates, 'warrantyEnabled') ||
+            Object.prototype.hasOwnProperty.call(updates, 'warrantyKm') ||
+            Object.prototype.hasOwnProperty.call(updates, 'warrantyExpiryDate');
+        if (hasWarrantyIntent) {
+            const enabled = parseBool(updates.warrantyEnabled ?? asset.warrantyEnabled);
+            asset.warrantyEnabled = enabled;
+            if (enabled) {
+                asset.warrantyKm = Number(updates.warrantyKm ?? asset.warrantyKm) || 0;
+                asset.warrantyExpiryDate = updates.warrantyExpiryDate ?? asset.warrantyExpiryDate ?? null;
+            } else {
+                asset.warrantyKm = 0;
+                asset.warrantyExpiryDate = null;
             }
         }
 

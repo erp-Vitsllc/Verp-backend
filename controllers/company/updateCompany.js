@@ -499,6 +499,17 @@ export const updateCompany = async (req, res) => {
             }));
         }
 
+        // Archived Documents
+        if (companyObj.oldDocuments && Array.isArray(companyObj.oldDocuments)) {
+            companyObj.oldDocuments = await Promise.all(companyObj.oldDocuments.map(async (doc) => {
+                if (!doc || typeof doc !== "object") return doc;
+                if (doc.document?.url) {
+                    doc.document.url = await getSignedFileUrl(doc.document.url);
+                }
+                return doc;
+            }));
+        }
+
         res.status(200).json({
             message: queueForApproval
                 ? "Company change queued for HR activation approval."

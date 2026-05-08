@@ -45,6 +45,83 @@ const assetItemSchema = new mongoose.Schema({
         type: String,
         default: null
     },
+    /** Vehicle warranty toggle captured in Add Vehicle modal. */
+    warrantyEnabled: {
+        type: Boolean,
+        default: false
+    },
+    /** Warranty odometer threshold (KM) for vehicles. */
+    warrantyKm: {
+        type: Number,
+        default: 0
+    },
+    /** Warranty end date selected in Add Vehicle modal. */
+    warrantyExpiryDate: {
+        type: Date,
+        default: null
+    },
+    mortgageBankName: {
+        type: String,
+        trim: true,
+        default: ''
+    },
+    mortgageVehicleName: {
+        type: String,
+        trim: true,
+        default: ''
+    },
+    mortgageAmount: {
+        type: Number,
+        default: 0
+    },
+    downPayment: {
+        type: Number,
+        default: 0
+    },
+    interestRate: {
+        type: Number,
+        default: 0
+    },
+    loanTenureMonths: {
+        type: Number,
+        default: 0
+    },
+    mortgageStartDate: {
+        type: Date,
+        default: null
+    },
+    mortgageEndDate: {
+        type: Date,
+        default: null
+    },
+    monthlyPayment: {
+        type: Number,
+        default: 0
+    },
+    balancePayment: {
+        type: Number,
+        default: 0
+    },
+    processCharge: {
+        type: Number,
+        default: 0
+    },
+    mortgageBankDocument: {
+        type: mongoose.Schema.Types.Mixed,
+        default: null
+    },
+    mortgageSecurityCheckAttachment: {
+        type: mongoose.Schema.Types.Mixed,
+        default: null
+    },
+    mortgageScheduleListAttachment: {
+        type: mongoose.Schema.Types.Mixed,
+        default: null
+    },
+    mortgageExtraAttachments: [{
+        docName: { type: String, default: '', trim: true },
+        file: { type: mongoose.Schema.Types.Mixed, default: null }
+    }],
     invoiceNumber: {
         type: String,
         trim: true
