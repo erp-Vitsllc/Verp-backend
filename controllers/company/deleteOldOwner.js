@@ -1,5 +1,10 @@
+import mongoose from "mongoose";
 import Company from "../../models/Company.js";
 import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
+
+const companyMatch = (id) => ({
+    $or: [{ _id: id.match(/^[0-9a-fA-F]{24}$/) ? id : null }, { companyId: id }],
+});
 
 // @desc    Delete an owner record from company's oldOwners list (Archive)
 // @route   DELETE /api/Company/:id/old-owner/:target
@@ -11,12 +16,25 @@ export const deleteOldOwner = async (req, res) => {
             return res.status(403).json({ message: "Only administrator can delete archived company owners." });
         }
 
-        const { id, target } = req.params; // target can be an index or an _id
-        
-        // Find by _id or companyId
-        let company = await Company.findOne({
-            $or: [{ _id: id.match(/^[0-9a-fA-F]{24}$/) ? id : null }, { companyId: id }]
-        });
+        const { id, target } = req.params;
+        const decodedTarget = typeof target === "string" ? decodeURIComponent(target) : target;
+
+        /** Prefer $pull by subdoc _id so we never load/save a multi‑MB Company document in memory. */
+        if (typeof decodedTarget === "string" && /^[0-9a-fA-F]{24}$/.test(decodedTarget)) {
+            const oid = new mongoose.Types.ObjectId(decodedTarget);
+            const result = await Company.updateOne(companyMatch(id), { $pull: { oldOwners: { _id: oid } } });
+            if (!result.matchedCount) {
+                return res.status(404).json({ message: "Company not found" });
+            }
+            if (!result.modifiedCount) {
+                return res.status(404).json({ message: "Owner record not found in archive" });
+            }
+            return res.status(200).json({
+                message: "Archived company owner record deleted successfully",
+            });
+        }
+
+        let company = await Company.findOne(companyMatch(id));
 
         if (!company) {
             return res.status(404).json({ message: "Company not found" });
@@ -27,33 +45,21 @@ export const deleteOldOwner = async (req, res) => {
         }
 
         let ownerIndex = -1;
-
-        // Try to treat target as an ID first (24-char hex string)
-        if (target.match(/^[0-9a-fA-F]{24}$/)) {
-            ownerIndex = company.oldOwners.findIndex(o => String(o._id || o.id) === target);
-        }
-
-        // If not found by ID, try treating it as an index
-        if (ownerIndex === -1) {
-            const indexValue = parseInt(target);
-            if (!isNaN(indexValue) && indexValue >= 0 && indexValue < company.oldOwners.length) {
-                ownerIndex = indexValue;
-            }
+        const indexValue = parseInt(decodedTarget, 10);
+        if (!Number.isNaN(indexValue) && indexValue >= 0 && indexValue < company.oldOwners.length) {
+            ownerIndex = indexValue;
         }
 
         if (ownerIndex === -1) {
             return res.status(400).json({ message: "Owner record not found in archive" });
         }
 
-        // Remove owner from oldOwners array
         company.oldOwners.splice(ownerIndex, 1);
         await company.save();
 
         res.status(200).json({
             message: "Archived company owner record deleted successfully",
-            company: company
         });
-
     } catch (error) {
         console.error("Error deleting archived company owner:", error);
         res.status(500).json({ message: "Server error", error: error.message });

@@ -384,6 +384,31 @@ export const collectCompanyReactivationChangeLabels = (updateData = {}) => {
     return [...new Set(changes)];
 };
 
+/** Compare only MOA rows so deleting e.g. "Document with expiry" does not queue reactivation just because MOA still exists in the payload. */
+const serializeMoaDocumentsSlice = (documents) => {
+    const list = Array.isArray(documents) ? documents : [];
+    const moaRows = list.filter((d) => String(d?.type || "").toLowerCase().includes("moa"));
+    const iso = (v) => {
+        if (v == null || v === "") return "";
+        const d = v instanceof Date ? v : new Date(v);
+        return Number.isNaN(d.getTime()) ? "" : d.toISOString();
+    };
+    const norm = (d) => ({
+        id: d?._id != null ? String(d._id) : "",
+        type: String(d?.type || ""),
+        description: String(d?.description || ""),
+        issueDate: iso(d?.issueDate),
+        startDate: iso(d?.startDate),
+        expiryDate: iso(d?.expiryDate),
+        url: String(d?.document?.url || d?.attachment || "").split("?")[0],
+    });
+    try {
+        return JSON.stringify(moaRows.map(norm).sort((a, b) => a.id.localeCompare(b.id)));
+    } catch {
+        return String(moaRows.length);
+    }
+};
+
 export const shouldTriggerCompanyReactivation = (beforeCompany = {}, updateData = {}) => {
     const status = String(beforeCompany?.status || "").toLowerCase();
     const activationStatus = String(beforeCompany?.activationStatus || "").toLowerCase();
@@ -427,10 +452,9 @@ export const shouldTriggerCompanyReactivation = (beforeCompany = {}, updateData 
         "name", "nickName", "email", "phone", "establishedDate"
     ].some((k) => Object.prototype.hasOwnProperty.call(updateData, k));
 
-    const hasMoaChange = Array.isArray(updateData.documents) && updateData.documents.some((d) => {
-        const t = String(d?.type || "").toLowerCase();
-        return t.includes("moa");
-    });
+    const hasMoaChange =
+        Object.prototype.hasOwnProperty.call(updateData, "documents") &&
+        serializeMoaDocumentsSlice(beforeCompany.documents) !== serializeMoaDocumentsSlice(updateData.documents);
 
     const hasEjariChange = Object.prototype.hasOwnProperty.call(updateData, "ejari");
     const hasInsuranceChange = Object.prototype.hasOwnProperty.call(updateData, "insurance");

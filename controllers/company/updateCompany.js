@@ -1,3 +1,4 @@
+import mongoose from "mongoose";
 import Company from "../../models/Company.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import User from "../../models/User.js";
@@ -34,6 +35,17 @@ const toSerializable = (value) => {
     }
 };
 
+/** For $pull on company document sub-arrays without sending multi‑MB `documents` / `oldDocuments` bodies. */
+const parseValidSubdocObjectIds = (arr) => {
+    if (!Array.isArray(arr)) return [];
+    const out = [];
+    for (const id of arr) {
+        const s = id != null ? String(id).trim() : "";
+        if (s && mongoose.Types.ObjectId.isValid(s)) out.push(new mongoose.Types.ObjectId(s));
+    }
+    return out;
+};
+
 export const updateCompany = async (req, res) => {
     try {
         const { id } = req.params;
@@ -60,6 +72,86 @@ export const updateCompany = async (req, res) => {
             updateData.documents[0].description.toLowerCase().includes("not renewed");
         if (Object.prototype.hasOwnProperty.call(updateData, "companyDocumentNotRenew")) {
             delete updateData.companyDocumentNotRenew;
+        }
+
+        /** Old-tab hard deletes / admin cleanup send this so the PATCH applies immediately instead of queuing reactivation. */
+        let skipReactivationQueueForThisRequest = false;
+        if (Object.prototype.hasOwnProperty.call(updateData, "skipArchive") && updateData.skipArchive === true) {
+            skipReactivationQueueForThisRequest = true;
+            delete updateData.skipArchive;
+        }
+
+        const pullDocumentsByIds = parseValidSubdocObjectIds(updateData.pullDocumentsByIds);
+        const pullOldDocumentsByIds = parseValidSubdocObjectIds(updateData.pullOldDocumentsByIds);
+        const pullOwnersByIds = parseValidSubdocObjectIds(updateData.pullOwnersByIds);
+        delete updateData.pullDocumentsByIds;
+        delete updateData.pullOldDocumentsByIds;
+        delete updateData.pullOwnersByIds;
+
+        let retireLiveDocumentOid = null;
+        if (Object.prototype.hasOwnProperty.call(updateData, "retireLiveDocumentById")) {
+            const rs = updateData.retireLiveDocumentById != null ? String(updateData.retireLiveDocumentById).trim() : "";
+            if (rs && mongoose.Types.ObjectId.isValid(rs)) retireLiveDocumentOid = new mongoose.Types.ObjectId(rs);
+            delete updateData.retireLiveDocumentById;
+        }
+
+        let clearOldOwnerDocCard = null;
+        if (updateData.clearOldOwnerDocCard && typeof updateData.clearOldOwnerDocCard === "object") {
+            const raw = updateData.clearOldOwnerDocCard;
+            const oidStr = raw.ownerId != null ? String(raw.ownerId).trim() : "";
+            const docKey = raw.docKey != null ? String(raw.docKey).trim() : "";
+            const allowedOldOwnerDocKeys = new Set([
+                "attachment",
+                "passport",
+                "visa",
+                "emiratesId",
+                "medical",
+                "drivingLicense",
+                "labourCard",
+            ]);
+            if (oidStr && mongoose.Types.ObjectId.isValid(oidStr) && allowedOldOwnerDocKeys.has(docKey)) {
+                const ownerRow = (beforeCompany.oldOwners || []).find((o) => String(o?._id || o?.id) === oidStr);
+                if (ownerRow) {
+                    clearOldOwnerDocCard = { ownerId: new mongoose.Types.ObjectId(oidStr), docKey };
+                }
+            }
+            delete updateData.clearOldOwnerDocCard;
+        }
+
+        let clearLiveOwnerDocCard = null;
+        if (updateData.clearLiveOwnerDocCard && typeof updateData.clearLiveOwnerDocCard === "object") {
+            const raw = updateData.clearLiveOwnerDocCard;
+            const oidStr = raw.ownerId != null ? String(raw.ownerId).trim() : "";
+            const docKey = raw.docKey != null ? String(raw.docKey).trim() : "";
+            const allowedLiveOwnerDocKeys = new Set([
+                "attachment",
+                "passport",
+                "visa",
+                "emiratesId",
+                "medical",
+                "drivingLicense",
+                "labourCard",
+            ]);
+            if (oidStr && mongoose.Types.ObjectId.isValid(oidStr) && allowedLiveOwnerDocKeys.has(docKey)) {
+                const ownerRow = (beforeCompany.owners || []).find((o) => String(o?._id || o?.id) === oidStr);
+                if (ownerRow) {
+                    clearLiveOwnerDocCard = { ownerId: new mongoose.Types.ObjectId(oidStr), docKey };
+                }
+            }
+            delete updateData.clearLiveOwnerDocCard;
+        }
+
+        const compactCompanyDocMutation =
+            pullDocumentsByIds.length > 0 ||
+            pullOldDocumentsByIds.length > 0 ||
+            pullOwnersByIds.length > 0 ||
+            Boolean(retireLiveDocumentOid) ||
+            Boolean(clearOldOwnerDocCard) ||
+            Boolean(clearLiveOwnerDocCard);
+        if (compactCompanyDocMutation && !requesterIsAdmin) {
+            return res.status(403).json({
+                message: "Only administrator can remove or archive company documents this way.",
+            });
         }
 
         const collectAttachmentUrls = (items = [], path = "document.url") => {
@@ -308,7 +400,8 @@ export const updateCompany = async (req, res) => {
 
         // Queue reactivation only for critical profile changes (license/card/owner/MOA).
         // Operational docs like memo/other company documents should save immediately.
-        const queueForApproval = shouldTriggerCompanyReactivation(beforeCompany, updateData);
+        const queueForApproval =
+            !skipReactivationQueueForThisRequest && shouldTriggerCompanyReactivation(beforeCompany, updateData);
         let updatedCompany = null;
         if (queueForApproval) {
             const changedCards = collectCompanyReactivationChangeLabels(updateData);
@@ -335,17 +428,60 @@ export const updateCompany = async (req, res) => {
         } else {
             await archiveSupersededCompanyDocuments(beforeCompany, updateData);
             const ownerArchives = archiveSupersededCompanyOwners(beforeCompany, updateData);
-            const updateOps = {
-                $set: updateData,
-                ...(ownerArchives.length
-                    ? { $push: { oldOwners: { $each: ownerArchives } } }
-                    : {}),
-            };
-            updatedCompany = await Company.findByIdAndUpdate(
-                company._id,
-                updateOps,
-                { new: true, runValidators: true }
-            );
+            const updateOps = {};
+            if (Object.keys(updateData).length > 0) {
+                updateOps.$set = updateData;
+            }
+            if (pullDocumentsByIds.length || pullOldDocumentsByIds.length || pullOwnersByIds.length) {
+                updateOps.$pull = {};
+                if (pullDocumentsByIds.length) {
+                    updateOps.$pull.documents = { _id: { $in: pullDocumentsByIds } };
+                }
+                if (pullOldDocumentsByIds.length) {
+                    updateOps.$pull.oldDocuments = { _id: { $in: pullOldDocumentsByIds } };
+                }
+                if (pullOwnersByIds.length) {
+                    updateOps.$pull.owners = { _id: { $in: pullOwnersByIds } };
+                }
+            }
+            const mongoArrayFilters = [];
+            if (retireLiveDocumentOid) {
+                const prev = (beforeCompany.documents || []).find((d) => String(d._id) === String(retireLiveDocumentOid));
+                if (prev) {
+                    if (!updateOps.$set) updateOps.$set = {};
+                    const prevType = prev.type || "Document";
+                    const prevDesc = prev.description || "";
+                    updateOps.$set["documents.$[d].type"] = `Previous ${prevType}`;
+                    updateOps.$set["documents.$[d].description"] = `Deleted/Archived - ${prevDesc}`;
+                    mongoArrayFilters.push({ "d._id": retireLiveDocumentOid });
+                }
+            }
+            if (clearOldOwnerDocCard) {
+                if (!updateOps.$set) updateOps.$set = {};
+                const k = clearOldOwnerDocCard.docKey;
+                const path = k === "attachment" ? "oldOwners.$[o].attachment" : `oldOwners.$[o].${k}`;
+                updateOps.$set[path] = null;
+                mongoArrayFilters.push({ "o._id": clearOldOwnerDocCard.ownerId });
+            }
+            if (clearLiveOwnerDocCard) {
+                if (!updateOps.$set) updateOps.$set = {};
+                const k = clearLiveOwnerDocCard.docKey;
+                const path = k === "attachment" ? "owners.$[live].attachment" : `owners.$[live].${k}`;
+                updateOps.$set[path] = null;
+                mongoArrayFilters.push({ "live._id": clearLiveOwnerDocCard.ownerId });
+            }
+            if (ownerArchives.length) {
+                updateOps.$push = { oldOwners: { $each: ownerArchives } };
+            }
+
+            const findOpts = { new: true, runValidators: true };
+            if (mongoArrayFilters.length) findOpts.arrayFilters = mongoArrayFilters;
+
+            if (Object.keys(updateOps).length === 0) {
+                updatedCompany = company;
+            } else {
+                updatedCompany = await Company.findByIdAndUpdate(company._id, updateOps, findOpts);
+            }
         }
 
         try {
