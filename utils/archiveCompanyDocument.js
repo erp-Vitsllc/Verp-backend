@@ -1,10 +1,40 @@
 import Company from "../models/Company.js";
 
+/** Same logic as updateCompany.js — signed URLs vs stored keys must compare equal. */
+const FOLDER_MARKERS = [
+    "company-documents",
+    "employee-documents",
+    "asset-invoices",
+    "asset-photos",
+    "profile-pictures",
+    "signatures",
+    "rewards",
+    "fines",
+];
+
+const normalizeAttachmentKeyForCompare = (value) => {
+    if (typeof value !== "string" || !value.trim()) return "";
+    const noQuery = value.split("?")[0].trim();
+    const lower = noQuery.toLowerCase();
+    for (const folder of FOLDER_MARKERS) {
+        const idx = lower.indexOf(folder);
+        if (idx !== -1) return noQuery.slice(idx).toLowerCase();
+    }
+    return noQuery.toLowerCase();
+};
+
 const documentStorageFingerprint = (urlOrObj) => {
     if (!urlOrObj) return "";
-    if (typeof urlOrObj === "string") return `url:${urlOrObj.trim()}`;
-    if (typeof urlOrObj.url === "string") return `url:${urlOrObj.url.trim()}`;
+    if (typeof urlOrObj === "string") return `url:${normalizeAttachmentKeyForCompare(urlOrObj)}`;
+    if (typeof urlOrObj.url === "string") return `url:${normalizeAttachmentKeyForCompare(urlOrObj.url)}`;
     return "";
+};
+
+const attachmentUrlsDiffer = (prevUrl, nextUrl) => {
+    const a = normalizeAttachmentKeyForCompare(prevUrl || "");
+    const b = normalizeAttachmentKeyForCompare(nextUrl || "");
+    if (!a || !b) return false;
+    return a !== b;
 };
 
 /**
@@ -76,7 +106,7 @@ export const archiveSupersededCompanyDocuments = async (beforeCompany, updateDat
         const prevUrl = typeof prev === "string" ? prev.trim() : prev?.url?.trim();
         const nextUrl = typeof next === "string" ? next.trim() : next?.url?.trim();
 
-        if (prevUrl && nextUrl && prevUrl !== nextUrl) {
+        if (prevUrl && nextUrl && attachmentUrlsDiffer(prevUrl, nextUrl)) {
             await archiveCompanyDocument({
                 companyId,
                 type,
@@ -96,10 +126,14 @@ export const archiveSupersededCompanyDocuments = async (beforeCompany, updateDat
 
     // 3. Ejari (Array)
     if (Array.isArray(beforeCompany.ejari) && Array.isArray(updateData.ejari)) {
+        const archivedEjariIds = new Set();
         for (const nextEjari of updateData.ejari) {
             if (!nextEjari._id || !nextEjari.document?.url) continue;
+            const idStr = String(nextEjari._id);
+            if (archivedEjariIds.has(idStr)) continue;
             const prevEjari = beforeCompany.ejari.find(ej => String(ej._id) === String(nextEjari._id));
-            if (prevEjari && prevEjari.document?.url && prevEjari.document.url !== nextEjari.document.url) {
+            if (prevEjari && prevEjari.document?.url && attachmentUrlsDiffer(prevEjari.document.url, nextEjari.document.url)) {
+                archivedEjariIds.add(idStr);
                 await archiveCompanyDocument({
                     companyId,
                     type: prevEjari.type ? `Ejari - ${prevEjari.type}` : "Ejari",
@@ -114,10 +148,14 @@ export const archiveSupersededCompanyDocuments = async (beforeCompany, updateDat
 
     // 4. Insurance (Array)
     if (Array.isArray(beforeCompany.insurance) && Array.isArray(updateData.insurance)) {
+        const archivedInsuranceIds = new Set();
         for (const nextIns of updateData.insurance) {
             if (!nextIns._id || !nextIns.document?.url) continue;
+            const idStr = String(nextIns._id);
+            if (archivedInsuranceIds.has(idStr)) continue;
             const prevIns = beforeCompany.insurance.find(ins => String(ins._id) === String(nextIns._id));
-            if (prevIns && prevIns.document?.url && prevIns.document.url !== nextIns.document.url) {
+            if (prevIns && prevIns.document?.url && attachmentUrlsDiffer(prevIns.document.url, nextIns.document.url)) {
+                archivedInsuranceIds.add(idStr);
                 await archiveCompanyDocument({
                     companyId,
                     type: prevIns.type ? `Insurance - ${prevIns.type}` : "Insurance",
@@ -132,10 +170,14 @@ export const archiveSupersededCompanyDocuments = async (beforeCompany, updateDat
 
     // 5. Custom Documents array
     if (Array.isArray(beforeCompany.documents) && Array.isArray(updateData.documents)) {
+        const archivedCustomDocIds = new Set();
         for (const nextDoc of updateData.documents) {
             if (!nextDoc._id || !nextDoc.document?.url) continue;
+            const idStr = String(nextDoc._id);
+            if (archivedCustomDocIds.has(idStr)) continue;
             const prevDoc = beforeCompany.documents.find(d => String(d._id) === String(nextDoc._id));
-            if (prevDoc && prevDoc.document?.url && prevDoc.document.url !== nextDoc.document.url) {
+            if (prevDoc && prevDoc.document?.url && attachmentUrlsDiffer(prevDoc.document.url, nextDoc.document.url)) {
+                archivedCustomDocIds.add(idStr);
                 await archiveCompanyDocument({
                     companyId,
                     type: prevDoc.type || "Document",
@@ -160,7 +202,7 @@ export const archiveSupersededCompanyDocuments = async (beforeCompany, updateDat
                 const next = nextOwner[key]?.attachment;
                 const prevUrl = prev?.url?.trim();
                 const nextUrl = next?.url?.trim();
-                if (prevUrl && nextUrl && prevUrl !== nextUrl) {
+                if (prevUrl && nextUrl && attachmentUrlsDiffer(prevUrl, nextUrl)) {
                     await archiveCompanyDocument({
                         companyId,
                         type: `Owner ${typeLabel}`,
