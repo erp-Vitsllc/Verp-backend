@@ -290,18 +290,15 @@ export const updateBasicDetails = async (req, res) => {
 
             const previousOfferLetter = existingSalary?.offerLetter;
             const nextOfferLetter = updatePayload.offerLetter;
-            if (previousOfferLetter?.url && nextOfferLetter?.url && previousOfferLetter.url !== nextOfferLetter.url) {
-                await archiveEmployeeDocument({
-                    employeeId,
-                    type: "Salary Offer Letter",
-                    description: "Salary offer letter (previous version)",
-                    document: previousOfferLetter,
-                });
-            }
 
+            let isInPlaceActiveSalaryEdit = false;
             if (Array.isArray(updatePayload.salaryHistory) && Array.isArray(existingSalary?.salaryHistory)) {
                 const prevActive = existingSalary.salaryHistory.find((entry) => !entry?.toDate);
                 const nextActive = updatePayload.salaryHistory.find((entry) => !entry?.toDate);
+                const prevId = prevActive?._id != null ? String(prevActive._id) : "";
+                const nextId = nextActive?._id != null ? String(nextActive._id) : "";
+                isInPlaceActiveSalaryEdit = Boolean(prevId && nextId && prevId === nextId);
+
                 const prevActiveDoc = prevActive?.offerLetter;
                 const nextActiveDoc = nextActive?.offerLetter;
                 const sameDoc = Boolean(
@@ -309,7 +306,7 @@ export const updateBasicDetails = async (req, res) => {
                     nextActiveDoc?.url &&
                     prevActiveDoc.url === nextActiveDoc.url
                 );
-                if (prevActiveDoc?.url && nextActiveDoc?.url && !sameDoc) {
+                if (!isInPlaceActiveSalaryEdit && prevActiveDoc?.url && nextActiveDoc?.url && !sameDoc) {
                     await archiveEmployeeDocument({
                         employeeId,
                         type: "Salary Increment Letter",
@@ -325,6 +322,20 @@ export const updateBasicDetails = async (req, res) => {
                         document: prevActiveDoc,
                     });
                 }
+            }
+
+            if (
+                !isInPlaceActiveSalaryEdit &&
+                previousOfferLetter?.url &&
+                nextOfferLetter?.url &&
+                previousOfferLetter.url !== nextOfferLetter.url
+            ) {
+                await archiveEmployeeDocument({
+                    employeeId,
+                    type: "Salary Offer Letter",
+                    description: "Salary offer letter (previous version)",
+                    document: previousOfferLetter,
+                });
             }
         }
 
