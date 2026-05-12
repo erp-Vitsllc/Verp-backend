@@ -284,6 +284,8 @@ employeeBasicSchema.index({ status: 1 });
 employeeBasicSchema.index({ designation: 1 });
 employeeBasicSchema.index({ profileStatus: 1 });
 employeeBasicSchema.index({ createdAt: -1 }); // For sorting
+// Critical for Company.aggregate $lookup employee count — avoids COLLSCAN per company
+employeeBasicSchema.index({ company: 1, employeeId: 1 });
 // Compound indexes for common query patterns
 employeeBasicSchema.index({ department: 1, status: 1 });
 employeeBasicSchema.index({ status: 1, profileStatus: 1 });

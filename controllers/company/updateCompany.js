@@ -13,6 +13,7 @@ import {
     calculateCompanyActivationProgress,
     shouldTriggerCompanyReactivation,
     collectCompanyReactivationChangeLabels,
+    stripProposedDataKeysFromPendingReactivationEntries,
 } from "../../utils/companyActivation.js";
 import { markCompanyActivationHoldResolvedForUpdate } from "../../utils/markCompanyActivationHoldResolved.js";
 import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
@@ -46,6 +47,16 @@ const parseValidSubdocObjectIds = (arr) => {
     return out;
 };
 
+const COMPANY_UPDATE_READ_EXCLUSIONS = {
+    oldDocuments: 0,
+    oldOwners: 0,
+    "documents.document.data": 0,
+    "insurance.document.data": 0,
+    "ejari.document.data": 0,
+    "pendingReactivationChanges.previousData": 0,
+    "pendingReactivationChanges.proposedData": 0,
+};
+
 export const updateCompany = async (req, res) => {
     try {
         const { id } = req.params;
@@ -53,7 +64,9 @@ export const updateCompany = async (req, res) => {
         // Find by _id or companyId
         let company = await Company.findOne({
             $or: [{ _id: id.match(/^[0-9a-fA-F]{24}$/) ? id : null }, { companyId: id }]
-        });
+        })
+            .select(COMPANY_UPDATE_READ_EXCLUSIONS)
+            .maxTimeMS(5000);
 
         if (!company) {
             return res.status(404).json({ message: "Company not found" });
@@ -152,6 +165,54 @@ export const updateCompany = async (req, res) => {
             return res.status(403).json({
                 message: "Only administrator can remove or archive company documents this way.",
             });
+        }
+
+        /** Admin hard-clear + skipArchive: apply immediately and strip matching queued proposals so UI/progress do not keep showing removed cards. */
+        const adminEstablishmentHardClear =
+            requesterIsAdmin &&
+            skipReactivationQueueForThisRequest &&
+            Object.prototype.hasOwnProperty.call(updateData, "establishmentCardNumber") &&
+            updateData.establishmentCardNumber === null &&
+            Object.prototype.hasOwnProperty.call(updateData, "establishmentCardExpiry") &&
+            updateData.establishmentCardExpiry === null &&
+            Object.prototype.hasOwnProperty.call(updateData, "establishmentCardAttachment") &&
+            updateData.establishmentCardAttachment === null;
+
+        const adminTradeLicenseHardClear =
+            requesterIsAdmin &&
+            skipReactivationQueueForThisRequest &&
+            Object.prototype.hasOwnProperty.call(updateData, "tradeLicenseNumber") &&
+            updateData.tradeLicenseNumber === null &&
+            Object.prototype.hasOwnProperty.call(updateData, "tradeLicenseIssueDate") &&
+            updateData.tradeLicenseIssueDate === null &&
+            Object.prototype.hasOwnProperty.call(updateData, "tradeLicenseExpiry") &&
+            updateData.tradeLicenseExpiry === null &&
+            Object.prototype.hasOwnProperty.call(updateData, "tradeLicenseAttachment") &&
+            updateData.tradeLicenseAttachment === null;
+
+        const pendingStripKeys = [];
+        if (adminEstablishmentHardClear) {
+            pendingStripKeys.push(
+                "establishmentCardNumber",
+                "establishmentCardIssueDate",
+                "establishmentCardExpiry",
+                "establishmentCardAttachment",
+            );
+        }
+        if (adminTradeLicenseHardClear) {
+            pendingStripKeys.push(
+                "tradeLicenseNumber",
+                "tradeLicenseIssueDate",
+                "tradeLicenseExpiry",
+                "tradeLicenseAttachment",
+                "tradeLicenseOwnerName",
+            );
+        }
+        if (pendingStripKeys.length > 0) {
+            updateData.pendingReactivationChanges = stripProposedDataKeysFromPendingReactivationEntries(
+                beforeCompany.pendingReactivationChanges || [],
+                pendingStripKeys,
+            );
         }
 
         const collectAttachmentUrls = (items = [], path = "document.url") => {
@@ -474,7 +535,7 @@ export const updateCompany = async (req, res) => {
                 updateOps.$push = { oldOwners: { $each: ownerArchives } };
             }
 
-            const findOpts = { new: true, runValidators: true };
+            const findOpts = { new: true, runValidators: true, projection: COMPANY_UPDATE_READ_EXCLUSIONS };
             if (mongoArrayFilters.length) findOpts.arrayFilters = mongoArrayFilters;
 
             if (Object.keys(updateOps).length === 0) {
@@ -498,7 +559,9 @@ export const updateCompany = async (req, res) => {
         if (!queueForApproval) {
             try {
                 await markCompanyActivationHoldResolvedForUpdate(company._id.toString(), updateData);
-                const refreshed = await Company.findById(company._id);
+                const refreshed = await Company.findById(company._id)
+                    .select(COMPANY_UPDATE_READ_EXCLUSIONS)
+                    .maxTimeMS(5000);
                 if (refreshed) updatedCompany = refreshed;
             } catch (markErr) {
                 console.error("[updateCompany] markCompanyActivationHoldResolvedForUpdate:", markErr);

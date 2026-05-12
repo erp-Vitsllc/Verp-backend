@@ -14,7 +14,26 @@ import { sendCompanyActivationOutcomeEmail } from "../../utils/sendCompanyActiva
 const resolveCompanyById = async (id) => {
     return Company.findOne({
         $or: [{ _id: id.match(/^[0-9a-fA-F]{24}$/) ? id : null }, { companyId: id }],
-    });
+    }).maxTimeMS(15000);
+};
+
+/**
+ * Resolve company for activation flows, but drop the heaviest snapshot fields
+ * (oldDocuments / activationHold.snapshot / pendingReactivationChanges.previousData)
+ * so the read doesn't blow past socketTimeout on flaky network nodes.
+ * `oldOwners` stays loaded because the archive dedupe needs it and it's small.
+ */
+const ACTIVATION_HEAVY_EXCLUSIONS = {
+    oldDocuments: 0,
+    "activationHold.snapshot": 0,
+    "pendingReactivationChanges.previousData": 0,
+};
+const resolveCompanyForActivation = async (id) => {
+    return Company.findOne({
+        $or: [{ _id: id.match(/^[0-9a-fA-F]{24}$/) ? id : null }, { companyId: id }],
+    })
+        .select(ACTIVATION_HEAVY_EXCLUSIONS)
+        .maxTimeMS(15000);
 };
 
 /** Resolves submitter EmployeeBasic for emails and submitter dashboard rows (activationSubmittedBy first, then requester Dashboard row). */
@@ -71,7 +90,7 @@ export const submitCompanyActivationRequest = async (req, res) => {
         const includedChangeEntryIds = Array.isArray(req.body?.includedChangeEntryIds)
             ? req.body.includedChangeEntryIds.map(String)
             : null;
-        const company = await resolveCompanyById(id);
+        const company = await resolveCompanyForActivation(id);
         if (!company) return res.status(404).json({ message: "Company not found" });
 
         const progressQuick = calculateCompanyActivationProgress(company.toObject());
@@ -131,7 +150,9 @@ export const submitCompanyActivationRequest = async (req, res) => {
             });
         }
 
-        const refreshed = await Company.findById(company._id);
+        const refreshed = await Company.findById(company._id)
+            .select(ACTIVATION_HEAVY_EXCLUSIONS)
+            .maxTimeMS(15000);
         return res.status(200).json({
             message: "Company sent for HR activation review successfully.",
             company: refreshed,
@@ -148,7 +169,10 @@ export const approveCompanyActivationRequest = async (req, res) => {
         const { id } = req.params;
         const approvedChangeIds = Array.isArray(req.body?.approvedChangeIds) ? req.body.approvedChangeIds.map(String) : [];
         const selectionProvided = req.body?.selectionProvided === true;
-        const company = await resolveCompanyById(id);
+        // Light read: skips oldDocuments + previousData + activationHold.snapshot.
+        // Without this, a company with a long doc history could not be loaded over
+        // the flaky Atlas node (socket would time out before the doc finished streaming).
+        const company = await resolveCompanyForActivation(id);
         if (!company) return res.status(404).json({ message: "Company not found" });
 
         if (!(await canProcessCompanyActivation(req))) {
@@ -176,18 +200,18 @@ export const approveCompanyActivationRequest = async (req, res) => {
             return approvedChangeIds.includes(entryId);
         });
 
+        // Collect owner archives to push atomically via $push (the in-memory mutation
+        // path would clobber existing oldOwners since the field stayed loaded but
+        // we now prefer the same pattern used for oldDocuments archives — direct atomic writes).
+        const ownerArchivesToPush = [];
         for (const change of selectedChanges) {
             const proposedData = change?.proposedData;
             if (!proposedData || typeof proposedData !== "object") continue;
 
-            // Archive documents being replaced by this approved change
             const beforeChange = company.toObject();
             await archiveSupersededCompanyDocuments(beforeChange, proposedData);
             const ownerArchives = archiveSupersededCompanyOwners(beforeChange, proposedData);
-            if (ownerArchives.length > 0) {
-                if (!Array.isArray(company.oldOwners)) company.oldOwners = [];
-                company.oldOwners.push(...ownerArchives);
-            }
+            if (ownerArchives.length > 0) ownerArchivesToPush.push(...ownerArchives);
 
             Object.assign(company, proposedData);
         }
@@ -207,11 +231,22 @@ export const approveCompanyActivationRequest = async (req, res) => {
         });
         await company.save();
 
+        if (ownerArchivesToPush.length > 0) {
+            try {
+                await Company.updateOne(
+                    { _id: company._id },
+                    { $push: { oldOwners: { $each: ownerArchivesToPush } } },
+                );
+            } catch (archiveErr) {
+                console.error("[approveCompanyActivationRequest] Owner archive push error:", archiveErr);
+            }
+        }
+
         const pendingRowsForSubmitter = await DashboardAction.find({
             requestId: company._id,
             requestType: "Company Activation",
             status: { $in: ["Pending", "On Hold"] },
-        }).lean();
+        }).lean().maxTimeMS(6000);
         const submitterEmp = await resolveCompanyActivationSubmitterEmployee(company, pendingRowsForSubmitter);
 
         await Company.updateOne(
@@ -268,7 +303,7 @@ export const holdCompanyActivationRequest = async (req, res) => {
         const approvedChangeIds = Array.isArray(req.body?.approvedChangeIds) ? req.body.approvedChangeIds.map(String) : [];
         const selectionProvided = req.body?.selectionProvided === true;
         const comment = String(req.body?.comment || "").trim();
-        const company = await resolveCompanyById(id);
+        const company = await resolveCompanyForActivation(id);
         if (!company) return res.status(404).json({ message: "Company not found" });
 
         if (!(await canProcessCompanyActivation(req))) {
@@ -336,7 +371,7 @@ export const holdCompanyActivationRequest = async (req, res) => {
             requestId: company._id,
             requestType: "Company Activation",
             status: "Pending",
-        }).lean();
+        }).lean().maxTimeMS(6000);
 
         const submitterEmp = await resolveCompanyActivationSubmitterEmployee(company, pendingDashboardRows);
 
@@ -407,7 +442,9 @@ export const holdCompanyActivationRequest = async (req, res) => {
             console.error("[holdCompanyActivationRequest] Hold email error:", mailErr);
         }
 
-        const refreshed = await Company.findById(company._id);
+        const refreshed = await Company.findById(company._id)
+            .select(ACTIVATION_HEAVY_EXCLUSIONS)
+            .maxTimeMS(15000);
         return res.status(200).json({
             message: "Company activation placed on hold. The submitter was notified to update the listed items.",
             company: refreshed,
@@ -427,7 +464,7 @@ export const rejectCompanyActivationRequest = async (req, res) => {
             return res.status(400).json({ message: "Rejection reason is required." });
         }
         const reasonText = String(reason).trim();
-        const company = await resolveCompanyById(id);
+        const company = await resolveCompanyForActivation(id);
         if (!company) return res.status(404).json({ message: "Company not found" });
 
         if (!(await canProcessCompanyActivation(req))) {
@@ -454,7 +491,7 @@ export const rejectCompanyActivationRequest = async (req, res) => {
             requestId: company._id,
             requestType: "Company Activation",
             status: { $in: ["Pending", "On Hold"] },
-        }).lean();
+        }).lean().maxTimeMS(6000);
         const submitterEmp = await resolveCompanyActivationSubmitterEmployee(company, pendingRowsForSubmitter);
 
         await Company.updateOne(

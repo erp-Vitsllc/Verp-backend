@@ -24,7 +24,11 @@ export const updateBasicDetails = async (req, res) => {
             '-password -documents.document.data -trainingDetails.certificate.data';
         const [existingBank, existingSalary, existingBasic] = await Promise.all([
             EmployeeBank.findOne({ employeeId }).select("bankName accountName accountNumber ibanNumber swiftCode bankAttachment").lean(),
-            EmployeeSalary.findOne({ employeeId }).select("offerLetter salaryHistory").lean(),
+            EmployeeSalary.findOne({ employeeId })
+                .select(
+                    "offerLetter salaryHistory basic houseRentAllowance otherAllowance additionalAllowances monthlySalary totalSalary basicPercentage houseRentPercentage otherAllowancePercentage",
+                )
+                .lean(),
             EmployeeBasic.findOne({ employeeId }).select(employeeBasicSnapSelect).lean(),
         ]);
 
@@ -357,47 +361,68 @@ export const updateBasicDetails = async (req, res) => {
             return res.status(400).json({ message: "Nothing to update" });
         }
 
-        /** Same snapshot for queued vs immediate save — avoids empty pending rows (no previous/proposed) in HR hold modals. */
-        const buildBasicDetailsReactivationEntry = () => ({
-            card: "Basic Details",
-            reason: "Basic details updated",
-            section: "basicDetails",
-            changeType: "update",
-            targetIndex: null,
-            previousData: (() => {
-                const keysForSnapshot = new Set([
-                    ...Object.keys(updatePayload),
-                    "firstName",
-                    "lastName",
-                    "email",
-                    "contactNumber",
-                    "gender",
-                    "maritalStatus",
-                    "nationality",
-                    "dateOfBirth",
-                    "country",
-                    "employeeId",
-                    "status",
-                    "probationPeriod",
-                ]);
-                const prev = {};
-                for (const k of keysForSnapshot) {
-                    if (
-                        allowedFields.includes(k) &&
-                        existingBasic &&
-                        Object.prototype.hasOwnProperty.call(existingBasic, k) &&
-                        existingBasic[k] !== undefined
-                    ) {
-                        prev[k] = existingBasic[k];
-                    }
+        /**
+         * Queued HR preview: previousData must match the same fields as proposedData.
+         * Salary lives on EmployeeSalary; bank on EmployeeBank; identity on EmployeeBasic.
+         * (Old bug: always merged identity keys into previousData so "Current" showed name/email while "Edited" showed salary.)
+         */
+        const SALARY_PREVIOUS_KEYS = new Set([
+            "basic",
+            "houseRentAllowance",
+            "otherAllowance",
+            "additionalAllowances",
+            "salaryHistory",
+            "offerLetter",
+            "monthlySalary",
+            "totalSalary",
+            "basicPercentage",
+            "houseRentPercentage",
+            "otherAllowancePercentage",
+        ]);
+        const BANK_PREVIOUS_KEYS = new Set([
+            "bankName",
+            "accountName",
+            "accountNumber",
+            "ibanNumber",
+            "swiftCode",
+            "ifscCode",
+            "bankOtherDetails",
+            "bankAttachment",
+        ]);
+
+        const buildBasicDetailsReactivationEntry = () => {
+            const keysForSnapshot = Object.keys(updatePayload).filter((k) => allowedFields.includes(k));
+            const previousData = {};
+            for (const k of keysForSnapshot) {
+                let v;
+                if (SALARY_PREVIOUS_KEYS.has(k)) {
+                    v = existingSalary?.[k];
+                } else if (BANK_PREVIOUS_KEYS.has(k)) {
+                    v = existingBank?.[k];
+                } else if (existingBasic && Object.prototype.hasOwnProperty.call(existingBasic, k)) {
+                    v = existingBasic[k];
                 }
-                if (existingBank?.bankAttachment) {
-                    prev.bankAttachment = existingBank.bankAttachment;
+                if (v !== undefined) {
+                    previousData[k] = v;
                 }
-                return prev;
-            })(),
-            proposedData: updatePayload,
-        });
+            }
+
+            const allSalary =
+                keysForSnapshot.length > 0 && keysForSnapshot.every((k) => SALARY_PREVIOUS_KEYS.has(k));
+            const allBank = keysForSnapshot.length > 0 && keysForSnapshot.every((k) => BANK_PREVIOUS_KEYS.has(k));
+            const card = allSalary ? "Salary Details" : allBank ? "Bank Details" : "Basic Details";
+            const reason = allSalary ? "Salary updated" : allBank ? "Bank details updated" : "Basic details updated";
+
+            return {
+                card,
+                reason,
+                section: "basicDetails",
+                changeType: "update",
+                targetIndex: null,
+                previousData,
+                proposedData: updatePayload,
+            };
+        };
 
         let updated = null;
         const basicChangeEntry = buildBasicDetailsReactivationEntry();

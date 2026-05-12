@@ -3,6 +3,12 @@ import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { calculateCompanyActivationProgress } from "../../utils/companyActivation.js";
 import { isRequestUserDesignatedFlowchartHr } from "../../utils/isDesignatedFlowchartHr.js";
 
+// Exclude only the truly heavy fields. Everything else stays included so the
+// UI keeps showing attachments, owners, pending changes, and archived docs.
+const COMPANY_DETAIL_EXCLUSIONS = {
+    "pendingReactivationChanges.previousData": 0,
+};
+
 /**
  * Get a single company by its companyId (e.g., EST-001)
  */
@@ -11,10 +17,14 @@ export const getCompany = async (req, res) => {
         const { id } = req.params;
 
         // Try finding by companyId first, then by _id
-        let company = await Company.findOne({ companyId: id });
+        let company = await Company.findOne({ companyId: id })
+            .select(COMPANY_DETAIL_EXCLUSIONS)
+            .maxTimeMS(8000);
 
         if (!company && id.match(/^[0-9a-fA-F]{24}$/)) {
-            company = await Company.findById(id);
+            company = await Company.findById(id)
+                .select(COMPANY_DETAIL_EXCLUSIONS)
+                .maxTimeMS(8000);
         }
 
         if (!company) {

@@ -329,4 +329,7 @@ const companySchema = new mongoose.Schema(
     { timestamps: true }
 );
 
+companySchema.index({ createdAt: -1 });
+companySchema.index({ status: 1, createdAt: -1 });
+
 export default mongoose.model("Company", companySchema);

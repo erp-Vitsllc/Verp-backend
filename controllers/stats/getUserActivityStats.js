@@ -181,11 +181,13 @@ const filterStaleExpiryDashboardRows = async (items = []) => {
             ? Company.find({ _id: { $in: [...candidateCompanyIds] } })
                   .select("_id tradeLicenseExpiry establishmentCardExpiry documents ejari insurance owners")
                   .lean()
+                  .maxTimeMS(6000)
             : [],
         candidateEmployeeIds.size
             ? EmployeeBasic.find({ _id: { $in: [...candidateEmployeeIds] } })
                   .select("_id documents contractExpiryDate")
                   .lean()
+                  .maxTimeMS(6000)
             : [],
     ]);
 
@@ -227,9 +229,20 @@ export const getUserActivityStats = async (req, res) => {
         let targetEmployeeId = currentUser.employeeId;
         let targetEmail = currentUser.companyEmail;
 
+        // Tight projection for manager/target employee lookups — skip heavy doc arrays.
+        const MANAGER_FIELDS = {
+            _id: 1, employeeId: 1, companyEmail: 1, firstName: 1, lastName: 1,
+            department: 1, designation: 1, company: 1, companyId: 1, primaryReportee: 1,
+            profileApprovalStatus: 1, profileWorkflow: 1, profileSubmittedTo: 1,
+            profileActivationHold: 1, noticeRequest: 1, createdAt: 1, updatedAt: 1,
+        };
+
         // If a target user ID is provided (viewing as someone else)
         if (req.query.targetUserId) {
-            const targetEmp = await EmployeeBasic.findById(req.query.targetUserId);
+            const targetEmp = await EmployeeBasic.findById(req.query.targetUserId)
+                .select({ employeeId: 1, companyEmail: 1 })
+                .lean()
+                .maxTimeMS(5000);
             if (targetEmp) {
                 targetEmployeeId = targetEmp.employeeId;
                 targetEmail = targetEmp.companyEmail;
@@ -243,7 +256,10 @@ export const getUserActivityStats = async (req, res) => {
 
         if (req.query.targetUserId) {
             // Viewing someone else's dashboard - use their employee record
-            manager = await EmployeeBasic.findById(req.query.targetUserId);
+            manager = await EmployeeBasic.findById(req.query.targetUserId)
+                .select(MANAGER_FIELDS)
+                .lean()
+                .maxTimeMS(5000);
             if (!manager) {
                 console.warn(`[getUserActivityStats] No Employee record found for Target User ID: ${req.query.targetUserId}`);
                 return res.status(200).json({ pending: 0, approved: 0, rejected: 0, total: 0, items: [] });
@@ -255,7 +271,7 @@ export const getUserActivityStats = async (req, res) => {
                     ...(currentUser.employeeObjectId ? [{ _id: currentUser.employeeObjectId }] : []),
                     ...(currentUser.employeeId ? [{ employeeId: currentUser.employeeId }] : [])
                 ]
-            });
+            }).select(MANAGER_FIELDS).lean().maxTimeMS(5000);
         }
         if (!manager) {
             if (!isAdmin) {
@@ -270,7 +286,10 @@ export const getUserActivityStats = async (req, res) => {
         if (!req.query.targetUserId) {
             targetUser = currentUser;
         } else {
-            targetUser = await User.findOne({ employeeId: manager.employeeId });
+            targetUser = await User.findOne({ employeeId: manager.employeeId })
+                .select({ _id: 1, employeeId: 1, name: 1 })
+                .lean()
+                .maxTimeMS(5000);
             if (!targetUser) {
                 console.warn(`[getUserActivityStats] No User record found for Target Employee ID: ${manager.employeeId}`);
                 targetUser = { _id: manager._id, employeeId: manager.employeeId };
@@ -286,9 +305,10 @@ export const getUserActivityStats = async (req, res) => {
         }
 
         // Fetch Designated Responsibilities from Company
-        const responsibleCompanies = await Company.find({
-            "responsibilities.empObjectId": { $in: relevantIds }
-        }, { responsibilities: 1 });
+        const responsibleCompanies = await Company.find(
+            { "responsibilities.empObjectId": { $in: relevantIds } },
+            { responsibilities: 1 }
+        ).lean().maxTimeMS(6000);
 
         let isDesignatedHR = false;
         let isDesignatedAccounts = false;
@@ -320,7 +340,10 @@ export const getUserActivityStats = async (req, res) => {
         const isAssetController = isDesignatedAssetController;
 
         // 2. Find Reportees
-        const reportees = await EmployeeBasic.find({ primaryReportee: manager._id });
+        const reportees = await EmployeeBasic.find({ primaryReportee: manager._id })
+            .select({ employeeId: 1 })
+            .lean()
+            .maxTimeMS(5000);
         const reporteeCustomIds = reportees.map(r => r.employeeId);
 
         // 3. Define Queries for "Needs Action"
@@ -388,29 +411,37 @@ export const getUserActivityStats = async (req, res) => {
             profileActivationOutcomeOr.push({ assignedToEmpId: String(targetEmployeeId).trim() });
         }
 
+        const dashboardSettled = await Promise.allSettled([
+            DashboardAction.find({
+                $or: dashboardOrConditions,
+                status: 'Pending',
+            }).lean().maxTimeMS(6000),
+            DashboardAction.find({
+                requestType: 'Profile Activation',
+                status: { $in: ['Approved', 'Rejected', 'On Hold'] },
+                $or: profileActivationOutcomeOr,
+            })
+                .sort({ actionedDate: -1, updatedAt: -1 })
+                .limit(25)
+                .lean()
+                .maxTimeMS(6000),
+            DashboardAction.find({
+                requestType: 'Company Activation',
+                status: { $in: ['Approved', 'Rejected', 'On Hold'] },
+                $or: profileActivationOutcomeOr,
+            })
+                .sort({ actionedDate: -1, updatedAt: -1 })
+                .limit(25)
+                .lean()
+                .maxTimeMS(6000),
+        ]);
+        dashboardSettled.forEach((r, i) => {
+            if (r.status === "rejected") {
+                console.warn(`[getUserActivityStats] dashboard slot ${i} failed:`, r.reason?.message || r.reason);
+            }
+        });
         const [dashboardPendingItemsRaw, profileActivationOutcomeItems, companyActivationOutcomeItems] =
-            await Promise.all([
-                DashboardAction.find({
-                    $or: dashboardOrConditions,
-                    status: 'Pending',
-                }).lean(),
-                DashboardAction.find({
-                    requestType: 'Profile Activation',
-                    status: { $in: ['Approved', 'Rejected', 'On Hold'] },
-                    $or: profileActivationOutcomeOr,
-                })
-                    .sort({ actionedDate: -1, updatedAt: -1 })
-                    .limit(25)
-                    .lean(),
-                DashboardAction.find({
-                    requestType: 'Company Activation',
-                    status: { $in: ['Approved', 'Rejected', 'On Hold'] },
-                    $or: profileActivationOutcomeOr,
-                })
-                    .sort({ actionedDate: -1, updatedAt: -1 })
-                    .limit(25)
-                    .lean(),
-            ]);
+            dashboardSettled.map((r) => (r.status === "fulfilled" ? r.value : []));
 
         const dashboardPendingItems = await filterStaleExpiryDashboardRows(
             dedupeOwnerLinkedDocumentExpiryReminders(
@@ -422,6 +453,15 @@ export const getUserActivityStats = async (req, res) => {
         );
 
         // 4. Fallback/Direct Queries for "Needs Action" (in case DashboardAction sync is delayed)
+        // Keep projections tight: avoid pulling heavy EmployeeBasic fields (documents, oldDocuments,
+        // pendingReactivationChanges, etc.) which were causing socket timeouts on free-tier Atlas.
+        const PENDING_PROFILE_FIELDS = {
+            _id: 1, employeeId: 1, firstName: 1, lastName: 1, designation: 1,
+            createdAt: 1, updatedAt: 1, profileApprovalStatus: 1,
+        };
+        const NOTICE_FIELDS = {
+            _id: 1, employeeId: 1, firstName: 1, lastName: 1, noticeRequest: 1, updatedAt: 1,
+        };
         const inboxQueries = [
             // Pending Profiles
             EmployeeBasic.find({
@@ -440,7 +480,7 @@ export const getUserActivityStats = async (req, res) => {
                           ]
                         : []),
                 ],
-            }),
+            }).select(PENDING_PROFILE_FIELDS).lean().maxTimeMS(6000),
             // Pending Notices
             EmployeeBasic.find({
                 "noticeRequest.requestedAt": { $exists: true },
@@ -449,7 +489,7 @@ export const getUserActivityStats = async (req, res) => {
                     ...(isAdmin ? [{ 'noticeRequest.status': 'Pending' }] : []),
                     { 'noticeRequest.submittedTo': null, primaryReportee: manager._id, 'noticeRequest.status': 'Pending' }
                 ]
-            }),
+            }).select(NOTICE_FIELDS).lean().maxTimeMS(6000),
             // Pending Loans
             Loan.find({
                 $or: [
@@ -460,7 +500,7 @@ export const getUserActivityStats = async (req, res) => {
                     ...(isCEO ? [{ approvalStatus: 'Pending Authorization', status: 'Pending' }] : []),
                     ...(isAdmin ? [{ status: 'Pending' }] : [])
                 ]
-            }).populate('createdBy', 'name'),
+            }).populate('createdBy', 'name').lean().maxTimeMS(6000),
             // Pending Rewards
             Reward.find({
                 $or: [
@@ -471,7 +511,7 @@ export const getUserActivityStats = async (req, res) => {
                     ...(isAdmin ? [{ rewardStatus: 'Pending' }] : []),
                     { submittedTo: null, employeeId: targetEmployeeId, rewardStatus: 'Pending' }
                 ]
-            }).populate('createdBy', 'name'),
+            }).populate('createdBy', 'name').lean().maxTimeMS(6000),
             // Pending Fines
             Fine.find({
                 $or: [
@@ -481,20 +521,20 @@ export const getUserActivityStats = async (req, res) => {
                     ...(isCEO ? [{ fineStatus: 'Pending Authorization' }] : []),
                     ...(isAdmin ? [{ fineStatus: { $in: ['Pending', 'Pending HR', 'Pending Accounts', 'Pending Authorization'] } }] : [])
                 ]
-            }).populate('createdBy', 'name')
+            }).populate('createdBy', 'name').lean().maxTimeMS(6000)
         ];
 
         // Queries for "MY OWN REQUESTS"
         const outgoingQueries = [
             Loan.find({ $or: [{ employeeId: targetEmployeeId }, { createdBy: targetUser?._id }] })
                 .populate('createdBy', 'name')
-                .sort({ createdAt: -1 }).limit(15),
+                .sort({ createdAt: -1 }).limit(15).lean().maxTimeMS(6000),
             Reward.find({ $or: [{ employeeId: targetEmployeeId }, { createdBy: targetUser?._id }] })
                 .populate('createdBy', 'name')
-                .sort({ createdAt: -1 }).limit(15),
+                .sort({ createdAt: -1 }).limit(15).lean().maxTimeMS(6000),
             Fine.find({ $or: [{ "assignedEmployees.employeeId": targetEmployeeId }, { createdBy: targetUser?._id }] })
                 .populate('createdBy', 'name')
-                .sort({ createdAt: -1 }).limit(15),
+                .sort({ createdAt: -1 }).limit(15).lean().maxTimeMS(6000),
             // Outgoing Assets (Assigned by me)
             import("../../models/AssetItem.js").then(m => m.default).then(Model =>
                 Model.find({
@@ -503,14 +543,23 @@ export const getUserActivityStats = async (req, res) => {
                         { createdBy: currentUser?._id },
                         { "pendingActionDetails.requestedBy": { $in: relevantIds } }
                     ]
-                }).sort({ createdAt: -1 }).limit(15)
+                }).sort({ createdAt: -1 }).limit(15).lean().maxTimeMS(6000)
             )
         ];
 
+        // Use allSettled so one slow/failed read (flaky Atlas node) does not
+        // wipe out the entire dashboard. Fallback to empty array per slot.
+        const settledInboxOutgoing = await Promise.allSettled([...inboxQueries, ...outgoingQueries]);
+        settledInboxOutgoing.forEach((r, i) => {
+            if (r.status === "rejected") {
+                console.warn(`[getUserActivityStats] inbox/outgoing slot ${i} failed:`, r.reason?.message || r.reason);
+            }
+        });
+        const settledValues = settledInboxOutgoing.map((r) => (r.status === "fulfilled" ? r.value : []));
         const [
             pendingProfiles, pendingNotices, pendingLoans, pendingRewards, pendingFines,
             myLoans, myRewards, myFines, myAssignedAssets
-        ] = await Promise.all([...inboxQueries, ...outgoingQueries]);
+        ] = settledValues;
 
         const requestIdsForProfileDashLookup = new Set(pendingProfiles.map((p) => String(p._id)));
         if (manager?._id && manager.profileApprovalStatus === "submitted" && !req.query.targetUserId) {
@@ -529,7 +578,8 @@ export const getUserActivityStats = async (req, res) => {
                     requestId: { $in: oidList },
                 })
                     .select("_id requestId assignedTo")
-                    .lean();
+                    .lean()
+                    .maxTimeMS(5000);
                 for (const r of paRows) {
                     const rid = r.requestId?.toString();
                     if (!rid) continue;
@@ -660,7 +710,10 @@ export const getUserActivityStats = async (req, res) => {
         });
 
         // Batch fetch employee company details
-        const fineEmployees = await EmployeeBasic.find({ employeeId: { $in: Array.from(fineEmpIds) } }, { employeeId: 1, company: 1, companyId: 1 });
+        const fineEmployees = await EmployeeBasic.find(
+            { employeeId: { $in: Array.from(fineEmpIds) } },
+            { employeeId: 1, company: 1, companyId: 1 }
+        ).lean().maxTimeMS(5000);
         const empCompanyMap = {};
         const uniqueCompanyIds = new Set();
 
@@ -673,7 +726,10 @@ export const getUserActivityStats = async (req, res) => {
         });
 
         // Fetch Company Responsibilities
-        const involvedCompanies = await Company.find({ _id: { $in: Array.from(uniqueCompanyIds) } }, { responsibilities: 1 });
+        const involvedCompanies = await Company.find(
+            { _id: { $in: Array.from(uniqueCompanyIds) } },
+            { responsibilities: 1 }
+        ).lean().maxTimeMS(5000);
         const companyRespMap = {};
         involvedCompanies.forEach(c => {
             companyRespMap[c._id.toString()] = c.responsibilities || [];
@@ -1007,7 +1063,15 @@ export const getUserActivityStats = async (req, res) => {
         // 6. Actioned History (Items this user approved/rejected)
         // Already calculated relevantIds above
 
-        const [myActionedLoans, myActionedRewards, myActionedFines] = await Promise.all([
+        const ACTIONED_PROFILE_FIELDS = {
+            _id: 1, employeeId: 1, firstName: 1, lastName: 1, profileWorkflow: 1, updatedAt: 1,
+        };
+        const ACTIONED_NOTICE_FIELDS = {
+            _id: 1, employeeId: 1, firstName: 1, lastName: 1, noticeRequest: 1, updatedAt: 1,
+        };
+
+        // Actioned history reads run in parallel; allow any to fail without blanking the dashboard.
+        const actionedHistorySettled = await Promise.allSettled([
             Loan.find({
                 workflow: {
                     $elemMatch: {
@@ -1020,7 +1084,7 @@ export const getUserActivityStats = async (req, res) => {
                         status: { $in: ['Approved', 'Rejected'] }
                     }
                 }
-            }).populate('createdBy', 'name').sort({ updatedAt: -1 }).limit(20),
+            }).populate('createdBy', 'name').sort({ updatedAt: -1 }).limit(20).lean().maxTimeMS(6000),
             Reward.find({
                 $or: [
                     {
@@ -1036,7 +1100,7 @@ export const getUserActivityStats = async (req, res) => {
                     },
                     ...(isCEO ? [{ approvedBy: { $in: relevantIds } }] : [])
                 ]
-            }).sort({ updatedAt: -1 }).limit(20).populate('createdBy', 'name'),
+            }).sort({ updatedAt: -1 }).limit(20).populate('createdBy', 'name').lean().maxTimeMS(6000),
             Fine.find({
                 workflow: {
                     $elemMatch: {
@@ -1049,35 +1113,41 @@ export const getUserActivityStats = async (req, res) => {
                         status: { $in: ['Approved', 'Rejected'] }
                     }
                 }
-            }).populate('createdBy', 'name').sort({ updatedAt: -1 }).limit(20)
+            }).populate('createdBy', 'name').sort({ updatedAt: -1 }).limit(20).lean().maxTimeMS(6000),
+            // 6b. GET ACTIONED PROFILES (History)
+            EmployeeBasic.find({
+                profileWorkflow: {
+                    $elemMatch: {
+                        assignedTo: { $in: relevantIds },
+                        status: { $in: ['active', 'rejected'] }
+                    }
+                }
+            }).select(ACTIONED_PROFILE_FIELDS).sort({ updatedAt: -1 }).limit(10).lean().maxTimeMS(6000),
+            // Notice Workflow History
+            EmployeeBasic.find({
+                'noticeRequest.workflow': {
+                    $elemMatch: {
+                        assignedTo: { $in: relevantIds },
+                        status: { $in: ['Approved', 'Rejected'] }
+                    }
+                }
+            }).select(ACTIONED_NOTICE_FIELDS).sort({ 'noticeRequest.actionedAt': -1 }).limit(10).lean().maxTimeMS(6000),
+            // 6c. ACTIONED ASSETS (History)
+            DashboardAction.find({
+                assignedTo: { $in: relevantIds },
+                requestType: { $in: allAssetTypes },
+                status: { $in: ['Approved', 'Rejected'] }
+            }).sort({ actionedDate: -1, updatedAt: -1 }).limit(20).lean().maxTimeMS(6000),
         ]);
-
-        // 6b. GET ACTIONED PROFILES (History)
-        const myActionedProfiles = await EmployeeBasic.find({
-            profileWorkflow: {
-                $elemMatch: {
-                    assignedTo: { $in: relevantIds },
-                    status: { $in: ['active', 'rejected'] }
-                }
+        actionedHistorySettled.forEach((r, i) => {
+            if (r.status === "rejected") {
+                console.warn(`[getUserActivityStats] actioned history slot ${i} failed:`, r.reason?.message || r.reason);
             }
-        }).sort({ updatedAt: -1 }).limit(10);
-
-        // Helper to query Notice Workflow for History
-        const myActionedNotices = await EmployeeBasic.find({
-            'noticeRequest.workflow': {
-                $elemMatch: {
-                    assignedTo: { $in: relevantIds },
-                    status: { $in: ['Approved', 'Rejected'] }
-                }
-            }
-        }).sort({ 'noticeRequest.actionedAt': -1 }).limit(10);
-
-        // 6c. GET ACTIONED ASSETS (History) — allAssetTypes already declared above
-        const myActionedAssetActions = await DashboardAction.find({
-            assignedTo: { $in: relevantIds },
-            requestType: { $in: allAssetTypes },
-            status: { $in: ['Approved', 'Rejected'] }
-        }).sort({ actionedDate: -1, updatedAt: -1 }).limit(20).lean();
+        });
+        const [
+            myActionedLoans, myActionedRewards, myActionedFines,
+            myActionedProfiles, myActionedNotices, myActionedAssetActions,
+        ] = actionedHistorySettled.map((r) => (r.status === "fulfilled" ? r.value : []));
 
         // Process these history items
         // We add these ONLY if not already in the list as Pending. 

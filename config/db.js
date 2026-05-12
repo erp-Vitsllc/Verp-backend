@@ -1,19 +1,56 @@
 import mongoose from "mongoose";
 import Group from "../models/Group.js";
+import EmployeeBasic from "../models/EmployeeBasic.js";
 import { getAllPermissions } from "../services/permissionService.js";
 import { ensureAssetCategoryIndexes } from "../utils/ensureAssetCategoryIndexes.js";
 
 export const connectDB = async () => {
     try {
         await mongoose.connect(process.env.MONGO_URI, {
-            // authSource: "VERP",
-            serverSelectionTimeoutMS: 10000, // Timeout after 10 seconds if server selection fails
-            socketTimeoutMS: 45000, // Close sockets after 45 seconds of inactivity
-            connectTimeoutMS: 10000, // Give up initial connection after 10 seconds
+            // Short timeouts + a single driver retry let us skip the flaky
+            // 159.41.242.147 Atlas node without the 120s waits we saw earlier
+            // (those came from socketTimeoutMS=60s x 2 retries).
+            // Worst case now is 2 x socketTimeoutMS = ~40s before bubbling up.
+            serverSelectionTimeoutMS: 8000,
+            socketTimeoutMS: 20000,
+            connectTimeoutMS: 8000,
+            maxPoolSize: 10,
+            minPoolSize: 0,
+            maxIdleTimeMS: 10000,
+            waitQueueTimeoutMS: 8000,
+            retryWrites: true,
+            retryReads: true,
+            heartbeatFrequencyMS: 5000,
+            readPreference: "primaryPreferred",
+            family: 4,
+            appName: "VERP-Backend",
         });
         console.log("MongoDB Connected Successfully");
 
+        mongoose.connection.on("disconnected", () => {
+            console.warn("⚠️  MongoDB disconnected");
+        });
+        mongoose.connection.on("reconnected", () => {
+            console.log("✅ MongoDB reconnected");
+        });
+        mongoose.connection.on("error", (err) => {
+            console.error("❌ MongoDB connection error:", err.message);
+        });
+
         await ensureAssetCategoryIndexes();
+
+        // Ensure the critical EmployeeBasic.company index exists before serving traffic.
+        // getCompanies hangs without this index because $lookup runs COLLSCAN per company.
+        try {
+            const tIdx = Date.now();
+            await EmployeeBasic.collection.createIndex(
+                { company: 1, employeeId: 1 },
+                { name: "company_1_employeeId_1", background: true }
+            );
+            console.log(`✅ EmployeeBasic company index ready (${Date.now() - tIdx}ms)`);
+        } catch (err) {
+            console.error("❌ Failed to ensure EmployeeBasic.company index:", err.message);
+        }
 
         // Initialize default Admin group
         await initializeAdminGroup();

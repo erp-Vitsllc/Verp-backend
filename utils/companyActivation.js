@@ -20,41 +20,82 @@ const hasMoaDocument = (company = {}) => {
     });
 };
 
+/** Same keys as activation progress checks — overlay queued HR proposals onto the snapshot. */
+const ACTIVATION_PROGRESS_OVERLAY_KEYS = [
+    "name",
+    "nickName",
+    "companyId",
+    "email",
+    "phone",
+    "establishedDate",
+    "tradeLicenseNumber",
+    "tradeLicenseIssueDate",
+    "tradeLicenseExpiry",
+    "tradeLicenseAttachment",
+    "establishmentCardNumber",
+    "establishmentCardIssueDate",
+    "establishmentCardExpiry",
+    "establishmentCardAttachment",
+    "documents",
+];
+
+const overlayProposedFieldsForActivation = (base, proposed) => {
+    if (!proposed || typeof proposed !== "object") return base;
+    const out = { ...base };
+    for (const k of ACTIVATION_PROGRESS_OVERLAY_KEYS) {
+        if (Object.prototype.hasOwnProperty.call(proposed, k)) {
+            out[k] = proposed[k];
+        }
+    }
+    return out;
+};
+
+export const mergePendingReactivationForActivationSnapshot = (company = {}) => {
+    const co = typeof company.toObject === "function" ? company.toObject() : { ...company };
+    const pending = Array.isArray(co.pendingReactivationChanges) ? co.pendingReactivationChanges : [];
+    let merged = { ...co };
+    for (const entry of pending) {
+        merged = overlayProposedFieldsForActivation(merged, entry?.proposedData);
+    }
+    return merged;
+};
+
 export const calculateCompanyActivationProgress = (company = {}) => {
+    const co = mergePendingReactivationForActivationSnapshot(company);
     const checks = [
         {
             key: "basicDetails",
             label: "Basic details",
             completed: [
-                company.name,
-                company.nickName,
-                company.companyId,
-                company.email,
-                company.phone,
-                company.establishedDate,
+                co.name,
+                co.nickName,
+                co.companyId,
+                co.email,
+                co.phone,
+                co.establishedDate,
             ].every(hasValue),
         },
         {
             key: "tradeLicense",
             label: "Trade License",
             completed: [
-                company.tradeLicenseNumber,
-                company.tradeLicenseIssueDate,
-                company.tradeLicenseExpiry,
-            ].every(hasValue) && hasAttachment(company.tradeLicenseAttachment),
+                co.tradeLicenseNumber,
+                co.tradeLicenseIssueDate,
+                co.tradeLicenseExpiry,
+            ].every(hasValue) && hasAttachment(co.tradeLicenseAttachment),
         },
         {
             key: "establishmentCard",
             label: "Establishment Card Details",
             completed: [
-                company.establishmentCardNumber,
-                company.establishmentCardExpiry,
-            ].every(hasValue) && hasAttachment(company.establishmentCardAttachment),
+                co.establishmentCardNumber,
+                co.establishmentCardExpiry,
+            ].every(hasValue) && hasAttachment(co.establishmentCardAttachment),
         },
         {
             key: "moa",
             label: "MOA",
-            completed: hasMoaDocument(company),
+            completed: hasMoaDocument(co),
         },
     ];
 
@@ -382,6 +423,56 @@ export const collectCompanyReactivationChangeLabels = (updateData = {}) => {
     }
 
     return [...new Set(changes)];
+};
+
+/**
+ * Remove given top-level keys from each queued `proposedData`. Drops entries that become empty
+ * so admin hard-deletes (e.g. establishment card) are not resurrected by activation-progress merge.
+ */
+export const stripProposedDataKeysFromPendingReactivationEntries = (entries = [], keysToRemove = []) => {
+    if (!Array.isArray(entries) || !Array.isArray(keysToRemove) || keysToRemove.length === 0) return Array.isArray(entries) ? [...entries] : [];
+    const drop = new Set(keysToRemove);
+    const out = [];
+    for (const entry of entries) {
+        if (!entry || typeof entry !== "object") continue;
+        let pd;
+        try {
+            pd =
+                entry.proposedData && typeof entry.proposedData === "object"
+                    ? JSON.parse(JSON.stringify(entry.proposedData))
+                    : null;
+        } catch {
+            out.push(entry);
+            continue;
+        }
+        if (!pd) {
+            out.push(entry);
+            continue;
+        }
+        let touched = false;
+        for (const k of drop) {
+            if (Object.prototype.hasOwnProperty.call(pd, k)) {
+                delete pd[k];
+                touched = true;
+            }
+        }
+        if (!touched) {
+            out.push(entry);
+            continue;
+        }
+        if (Object.keys(pd).length === 0) {
+            continue;
+        }
+        const newLabels = collectCompanyReactivationChangeLabels(pd);
+        const cardLabel = newLabels.length ? newLabels.join(", ") : "Company Profile";
+        out.push({
+            ...entry,
+            proposedData: pd,
+            card: cardLabel,
+            reason: cardLabel,
+        });
+    }
+    return out;
 };
 
 /** Compare only MOA rows so deleting e.g. "Document with expiry" does not queue reactivation just because MOA still exists in the payload. */
