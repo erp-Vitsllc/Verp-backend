@@ -1,7 +1,7 @@
 import User from "../models/User.js";
 import EmployeeBasic from "../models/EmployeeBasic.js";
 import Group from "../models/Group.js";
-import { HRM_MODULE } from "../../VERP_frontend/src/constants/hrmModulePermissions.js";
+import { HRM_MODULE } from "../constants/hrmModulePermissions.js";
 
 /**
  * Get user permissions
