@@ -26,6 +26,7 @@ import {
     markCatalogInstancesDetachedFromAsset
 } from '../utils/syncAssetAccessoryCatalog.js';
 import { cleanupDashboardActionsForDeletedAsset } from '../utils/cleanupAssetDashboardActions.js';
+import { isTransientMongoError } from '../utils/mongoTransientRetry.js';
 
 /** Collapse duplicate accessory rows in a PUT payload (match by Mongo subdoc _id or accessoryId, not name). */
 function dedupeAccessoryPayloadById(arr) {
@@ -91,7 +92,9 @@ export const getAssetTypeRoleMeta = async (req, res) => {
             isDeptAssetControllerMeta = norm(req.user.employeeId) === norm(acHodMeta.employeeId);
         }
         isAssetController = isAssetController || isDeptAssetControllerMeta;
-        res.status(200).json({ isAdmin, isAssetController });
+        // Flowchart "Admin" alone gets isAdmin for catalog/assign UI, but not direct-to-unassigned asset creation (same as normal users).
+        const canDirectAddAsset = isJwtOrEnvAdmin || isAssetController;
+        res.status(200).json({ isAdmin, isAssetController, canDirectAddAsset });
     } catch (error) {
         console.error('getAssetTypeRoleMeta:', error);
         res.status(500).json({ message: 'Server Error' });
@@ -567,7 +570,8 @@ export const createAssetType = async (req, res) => {
 // @route   GET /api/AssetType
 // @access  Private
 export const getAssetTypes = async (req, res) => {
-    try {
+    for (let attempt = 0; attempt < 3; attempt++) {
+        try {
         // Fix: Drop the index causing 500 errors if it was created accidentally
         try { await AssetType.collection.dropIndex('assetId_1'); } catch (e) { /* ignore */ }
 
@@ -697,10 +701,22 @@ export const getAssetTypes = async (req, res) => {
             })))
         ];
 
-        res.status(200).json(unifiedList);
+        return res.status(200).json(unifiedList);
     } catch (error) {
+        const canRetry = attempt < 2 && isTransientMongoError(error);
+        if (canRetry) {
+            console.warn(`[getAssetTypes] transient Mongo error, retry ${attempt + 1}/3:`, error.message);
+            await new Promise((r) => setTimeout(r, 450 * (attempt + 1)));
+            continue;
+        }
         console.error('Error fetching asset entities:', error);
-        res.status(500).json({ message: 'Server Error', error: error.message });
+        const transient = isTransientMongoError(error);
+        return res.status(transient ? 503 : 500).json({
+            message: transient ? 'Database temporarily unavailable. Please try again.' : 'Server Error',
+            error: error.message,
+            retryable: transient,
+        });
+    }
     }
 };
 

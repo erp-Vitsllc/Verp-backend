@@ -11,13 +11,15 @@ export const connectDB = async () => {
             // 159.41.242.147 Atlas node without the 120s waits we saw earlier
             // (those came from socketTimeoutMS=60s x 2 retries).
             // Worst case now is 2 x socketTimeoutMS = ~40s before bubbling up.
-            serverSelectionTimeoutMS: 8000,
-            socketTimeoutMS: 20000,
-            connectTimeoutMS: 8000,
-            maxPoolSize: 10,
+            serverSelectionTimeoutMS: 10000,
+            socketTimeoutMS: 45000,
+            connectTimeoutMS: 10000,
+            // Asset list + dashboard stats run many parallel reads; a slightly larger pool reduces
+            // "connection … timed out" / wait-queue failures under concurrent users (stay under Atlas limit).
+            maxPoolSize: 25,
             minPoolSize: 0,
-            maxIdleTimeMS: 10000,
-            waitQueueTimeoutMS: 8000,
+            maxIdleTimeMS: 60000,
+            waitQueueTimeoutMS: 12000,
             retryWrites: true,
             retryReads: true,
             heartbeatFrequencyMS: 5000,

@@ -195,6 +195,7 @@ const companySchema = new mongoose.Schema(
             {
                 type: { type: String },
                 description: { type: String },
+                /** Drives UI sections: memo, moa, certificate, document_with_expiry, document_without_expiry, ejari, insurance, … */
                 context: { type: String },
                 provider: { type: String },
                 issueDate: { type: Date },
@@ -307,6 +308,9 @@ const companySchema = new mongoose.Schema(
             {
                 type: { type: String },
                 description: { type: String },
+                /** Copied from live row when archived so Memo / MOA / Certificate tabs stay separated. */
+                context: { type: String },
+                provider: { type: String },
                 issueDate: { type: Date },
                 expiryDate: { type: Date },
                 cost: { type: Number, default: null },

@@ -64,6 +64,8 @@ export const archiveCompanyDocument = async ({
     expiryDate = null,
     cost = null,
     document, // can be string (URL) or { url, name, mimeType }
+    context = "",
+    provider = "",
 }) => {
     if (!companyId || !document) return;
 
@@ -73,20 +75,24 @@ export const archiveCompanyDocument = async ({
 
     const docObj = typeof document === "string" ? { url: document } : document;
 
+    const archivedRow = {
+        type: type || "Document",
+        description,
+        issueDate: issueDate || null,
+        expiryDate: expiryDate || null,
+        cost: cost ?? null,
+        archivedAt: new Date(),
+        archiveReason: "Replaced",
+        document: docObj,
+    };
+    if (context) archivedRow.context = context;
+    if (provider) archivedRow.provider = provider;
+
     await Company.updateOne(
         { _id: companyId },
         {
             $push: {
-                oldDocuments: {
-                    type: type || "Document",
-                    description,
-                    issueDate: issueDate || null,
-                    expiryDate: expiryDate || null,
-                    cost: cost ?? null,
-                    archivedAt: new Date(),
-                    archiveReason: "Replaced",
-                    document: docObj,
-                },
+                oldDocuments: archivedRow,
             },
         }
     );
@@ -185,6 +191,8 @@ export const archiveSupersededCompanyDocuments = async (beforeCompany, updateDat
                     issueDate: prevDoc.issueDate || null,
                     expiryDate: prevDoc.expiryDate || null,
                     document: prevDoc.document,
+                    context: prevDoc.context || "",
+                    provider: prevDoc.provider || "",
                 });
             }
         }

@@ -2,6 +2,7 @@ import mongoose from "mongoose";
 import Loan from "../../models/Loan.js";
 import Reward from "../../models/Reward.js";
 import Fine from "../../models/Fine.js";
+import AssetItem from "../../models/AssetItem.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import User from "../../models/User.js";
 import Company from "../../models/Company.js";
@@ -535,16 +536,18 @@ export const getUserActivityStats = async (req, res) => {
             Fine.find({ $or: [{ "assignedEmployees.employeeId": targetEmployeeId }, { createdBy: targetUser?._id }] })
                 .populate('createdBy', 'name')
                 .sort({ createdAt: -1 }).limit(15).lean().maxTimeMS(6000),
-            // Outgoing Assets (Assigned by me)
-            import("../../models/AssetItem.js").then(m => m.default).then(Model =>
-                Model.find({
-                    $or: [
-                        { assignedBy: { $in: relevantIds } },
-                        { createdBy: currentUser?._id },
-                        { "pendingActionDetails.requestedBy": { $in: relevantIds } }
-                    ]
-                }).sort({ createdAt: -1 }).limit(15).lean().maxTimeMS(6000)
-            )
+            // Outgoing Assets (Assigned by me) — static model import avoids extra async hop during parallel reads.
+            AssetItem.find({
+                $or: [
+                    { assignedBy: { $in: relevantIds } },
+                    { createdBy: currentUser?._id },
+                    { "pendingActionDetails.requestedBy": { $in: relevantIds } },
+                ],
+            })
+                .sort({ createdAt: -1 })
+                .limit(15)
+                .lean()
+                .maxTimeMS(6000),
         ];
 
         // Use allSettled so one slow/failed read (flaky Atlas node) does not
@@ -1054,11 +1057,13 @@ export const getUserActivityStats = async (req, res) => {
             }
         });
 
-        console.log("Stats Debug:", {
-            mode: req.query.targetUserId ? "Manager View" : "Self View",
-            currentUserId: currentUser._id,
-            totalItems: activityList.length
-        });
+        if (process.env.DEBUG_USER_ACTIVITY_STATS === "1") {
+            console.log("Stats Debug:", {
+                mode: req.query.targetUserId ? "Manager View" : "Self View",
+                currentUserId: currentUser._id,
+                totalItems: activityList.length,
+            });
+        }
 
         // 6. Actioned History (Items this user approved/rejected)
         // Already calculated relevantIds above

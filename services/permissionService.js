@@ -1,6 +1,7 @@
 import User from "../models/User.js";
 import EmployeeBasic from "../models/EmployeeBasic.js";
 import Group from "../models/Group.js";
+import { HRM_MODULE } from "../../VERP_frontend/src/constants/hrmModulePermissions.js";
 
 /**
  * Get user permissions
@@ -197,51 +198,7 @@ export const hasPermission = async (userId, moduleId, permissionType) => {
 const MODULES_STRUCTURE = [
     { id: 'login', label: 'Login', parent: null },
     { id: 'dashboard', label: 'Dashboard', parent: null },
-    {
-        id: 'hrm',
-        label: 'HRM',
-        parent: null,
-        children: [
-            {
-                id: 'hrm_employees',
-                label: 'Employees',
-                parent: 'hrm',
-                children: [
-                    { id: 'hrm_employees_add', label: 'Add Employee', parent: 'hrm_employees' },
-                    { id: 'hrm_employees_list', label: 'Employee List', parent: 'hrm_employees' },
-                    {
-                        id: 'hrm_employees_view',
-                        label: 'View Employee',
-                        parent: 'hrm_employees',
-                        children: [
-                            { id: 'hrm_employees_view_basic', label: 'Basic Details', parent: 'hrm_employees_view' },
-                            { id: 'hrm_employees_view_personal', label: 'Personal Details', parent: 'hrm_employees_view' },
-                            { id: 'hrm_employees_view_passport', label: 'Passport', parent: 'hrm_employees_view' },
-                            { id: 'hrm_employees_view_visa', label: 'Visa', parent: 'hrm_employees_view' },
-                            { id: 'hrm_employees_view_education', label: 'Education', parent: 'hrm_employees_view' },
-                            { id: 'hrm_employees_view_experience', label: 'Experience', parent: 'hrm_employees_view' },
-                            { id: 'hrm_employees_view_work', label: 'Work Details', parent: 'hrm_employees_view' },
-                            { id: 'hrm_employees_view_salary', label: 'Salary', parent: 'hrm_employees_view' },
-                            { id: 'hrm_employees_view_salary_history', label: 'Salary History', parent: 'hrm_employees_view' },
-                            { id: 'hrm_employees_view_bank', label: 'Bank Details', parent: 'hrm_employees_view' },
-                            { id: 'hrm_employees_view_emergency', label: 'Emergency Contacts', parent: 'hrm_employees_view' },
-                            { id: 'hrm_employees_view_permanent_address', label: 'Permanent Address', parent: 'hrm_employees_view' },
-                            { id: 'hrm_employees_view_current_address', label: 'Current Address', parent: 'hrm_employees_view' },
-                            { id: 'hrm_employees_view_documents', label: 'Documents', parent: 'hrm_employees_view' },
-                            { id: 'hrm_employees_view_training', label: 'Training Details', parent: 'hrm_employees_view' },
-                            { id: 'hrm_employees_view_emirates_id', label: 'Emirates ID', parent: 'hrm_employees_view' },
-                            { id: 'hrm_employees_view_labour_card', label: 'Labour Card', parent: 'hrm_employees_view' },
-                            { id: 'hrm_employees_view_medical_insurance', label: 'Medical Insurance', parent: 'hrm_employees_view' },
-                            { id: 'hrm_employees_view_driving_license', label: 'Driving License', parent: 'hrm_employees_view' },
-                        ]
-                    }
-                ]
-            },
-            { id: 'hrm_attendance', label: 'Attendance', parent: 'hrm' },
-            { id: 'hrm_leave', label: 'Leave', parent: 'hrm' },
-            { id: 'hrm_ncr', label: 'NCR', parent: 'hrm' },
-        ]
-    },
+    HRM_MODULE,
     { id: 'crm', label: 'CRM', parent: null },
     { id: 'purchases', label: 'Purchases', parent: null },
     { id: 'accounts', label: 'Accounts', parent: null },
