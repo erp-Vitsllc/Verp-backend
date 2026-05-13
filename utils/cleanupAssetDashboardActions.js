@@ -17,7 +17,8 @@ export const ASSET_DASHBOARD_INBOX_TYPES = [
     'Asset Leave',
     'Asset Bulk Action',
     'Asset Overdue',
-    'Vehicle Service Request'
+    'Vehicle Service Request',
+    'Vehicle Profile Activation',
 ];
 
 /** Tools / equipment Asset Management inbox — excludes fleet-only vehicle service workflow. */

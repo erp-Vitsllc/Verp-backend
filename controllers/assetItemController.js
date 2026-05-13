@@ -3036,6 +3036,9 @@ export const getAssetItemDetail = async (req, res) => {
         if (itemObj.warrantyAttachment) {
             itemObj.warrantyAttachment = await getSignedFileUrl(itemObj.warrantyAttachment);
         }
+        if (itemObj.accidentReportAttachment) {
+            itemObj.accidentReportAttachment = await getSignedFileUrl(itemObj.accidentReportAttachment);
+        }
         if (itemObj.typeId?.imagePreview) {
             itemObj.typeId.imagePreview = await getSignedFileUrl(itemObj.typeId.imagePreview);
         }
@@ -9428,7 +9431,7 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
         const scope = String(req.query.scope || '').trim().toLowerCase();
         let requestTypeFilter;
         if (scope === 'vehicle') {
-            requestTypeFilter = 'Vehicle Service Request';
+            requestTypeFilter = { $in: ['Vehicle Service Request', 'Vehicle Profile Activation'] };
         } else if (scope === 'tools') {
             requestTypeFilter = { $in: ASSET_TOOLS_INBOX_TYPES };
         } else {

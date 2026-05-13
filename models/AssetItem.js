@@ -326,6 +326,32 @@ const assetItemSchema = new mongoose.Schema({
     plateNumber: { type: String, trim: true },
     modelYear: { type: String, trim: true },
     currentKilometer: { type: Number, default: 0 },
+    /** Lifecycle for fleet reporting — separate from operational `status` (Assigned, etc.). */
+    vehicleDispositionStatus: {
+        type: String,
+        enum: ['active', 'sold', 'total loss'],
+        default: 'active',
+    },
+    soldValue: {
+        type: Number,
+        default: null,
+    },
+    currentLoanAmount: {
+        type: Number,
+        default: 0,
+    },
+    balanceInHand: {
+        type: Number,
+        default: 0,
+    },
+    totalLossValue: {
+        type: Number,
+        default: null,
+    },
+    accidentReportAttachment: {
+        type: String,
+        default: null,
+    },
     registrationExpiryDate: { type: Date, default: null },
     insuranceExpiryDate: { type: Date, default: null },
     oilChangeDate: { type: Date, default: null },
@@ -363,6 +389,23 @@ const assetItemSchema = new mongoose.Schema({
             bySignatureUrl: { type: String, default: '' },
             at: { type: Date, default: Date.now }
         }]
+    },
+    /** Fleet vehicle: submit completed profile to Asset Controller (email + dashboard task). */
+    vehicleProfileActivationStatus: {
+        type: String,
+        enum: ['none', 'submitted', 'active'],
+        default: 'none',
+    },
+    vehicleProfileActivationSubmittedAt: { type: Date, default: null },
+    vehicleProfileActivationSubmittedBy: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'EmployeeBasic',
+        default: null,
+    },
+    vehicleProfileActivationDescription: { type: String, default: '', trim: true },
+    vehicleProfileActivationSections: {
+        type: [String],
+        default: [],
     },
     documents: [{
         type: { type: String },

@@ -29,17 +29,11 @@ const employeeBasicChildren = [
     { id: 'hrm_employees_view_medical_insurance', label: 'Medical Insurance', parent: 'hrm_employees_view_basic_details', hasDownload: true },
 ];
 
+/** Salary tab in profile: Reward/Fine/NCR/Loan/Advance/Asset use top-level HRM modules (hrm_*), not duplicate rows here. */
 const employeeSalaryChildren = [
     { id: 'hrm_employees_view_salary', label: 'Salary', parent: 'hrm_employees_view_salary_section', hasDownload: true },
     { id: 'hrm_employees_view_bank', label: 'Bank Details', parent: 'hrm_employees_view_salary_section', hasDownload: false },
     { id: 'hrm_employees_view_salary_history', label: 'Salary History', parent: 'hrm_employees_view_salary_section', hasDownload: true },
-    { id: 'hrm_employees_view_salary_fine', label: 'Fine', parent: 'hrm_employees_view_salary_section', hasDownload: true },
-    { id: 'hrm_employees_view_salary_reward', label: 'Reward', parent: 'hrm_employees_view_salary_section', hasDownload: true },
-    { id: 'hrm_employees_view_salary_ncr', label: 'NCR', parent: 'hrm_employees_view_salary_section', hasDownload: true },
-    { id: 'hrm_employees_view_salary_loans', label: 'Loans', parent: 'hrm_employees_view_salary_section', hasDownload: true },
-    { id: 'hrm_employees_view_salary_advance', label: 'Advance', parent: 'hrm_employees_view_salary_section', hasDownload: true },
-    { id: 'hrm_employees_view_salary_assets', label: 'Assets', parent: 'hrm_employees_view_salary_section', hasDownload: true },
-    { id: 'hrm_employees_view_salary_ctc', label: 'CTC', parent: 'hrm_employees_view_salary_section', hasDownload: true },
     { id: 'hrm_employees_view_salary_certificate', label: 'Certificate', parent: 'hrm_employees_view_salary_section', hasDownload: true },
 ];
 
@@ -52,11 +46,20 @@ const employeePersonalChildren = [
     { id: 'hrm_employees_view_experience', label: 'Experience', parent: 'hrm_employees_view_personal_details', hasDownload: true },
 ];
 
+const employeeDocumentsLiveChildren = [
+    { id: 'hrm_employees_view_documents_live_with_expiry', label: 'Document with expiry', parent: 'hrm_employees_view_documents_live', hasDownload: true },
+    { id: 'hrm_employees_view_documents_live_without_expiry', label: 'Document without expiry', parent: 'hrm_employees_view_documents_live', hasDownload: true },
+];
+
 const employeeDocumentsChildren = [
-    { id: 'hrm_employees_view_documents_live', label: 'Live Documents', parent: 'hrm_employees_view_documents', hasDownload: true },
+    {
+        id: 'hrm_employees_view_documents_live',
+        label: 'Live document',
+        parent: 'hrm_employees_view_documents',
+        hasDownload: false,
+        children: employeeDocumentsLiveChildren,
+    },
     { id: 'hrm_employees_view_documents_old', label: 'Old Documents', parent: 'hrm_employees_view_documents', hasDownload: true },
-    { id: 'hrm_employees_view_documents_memo', label: 'Memo', parent: 'hrm_employees_view_documents', hasDownload: true },
-    { id: 'hrm_employees_view_documents_certificate', label: 'Certificate', parent: 'hrm_employees_view_documents', hasDownload: true },
 ];
 
 /** Full HRM node for group permission UI (merged into MODULES array). */
@@ -154,6 +157,12 @@ export const HRM_MODULE = {
                                     parent: 'hrm_employees_view_work_details',
                                     hasDownload: false,
                                 },
+                                {
+                                    id: 'hrm_employees_view_work_employee',
+                                    label: 'Work Details',
+                                    parent: 'hrm_employees_view_work_details',
+                                    hasDownload: false,
+                                },
                             ],
                         },
                         {
@@ -242,20 +251,18 @@ export const EMPLOYEE_MAIN_TAB_MODULES = {
         'hrm_employees_view_medical_insurance',
         'hrm_employees_view_driving_license',
     ],
-    'work-details': ['hrm_employees_view_work_details', 'hrm_employees_view_work'],
+    'work-details': ['hrm_employees_view_work_details', 'hrm_employees_view_work', 'hrm_employees_view_work_employee'],
     salary: [
         'hrm_employees_view_salary_section',
         'hrm_employees_view_salary',
         'hrm_employees_view_bank',
         'hrm_employees_view_salary_history',
-        'hrm_employees_view_salary_fine',
-        'hrm_employees_view_salary_reward',
-        'hrm_employees_view_salary_ncr',
-        'hrm_employees_view_salary_loans',
-        'hrm_employees_view_salary_advance',
-        'hrm_employees_view_salary_assets',
-        'hrm_employees_view_salary_ctc',
         'hrm_employees_view_salary_certificate',
+        'hrm_reward',
+        'hrm_fine',
+        'hrm_ncr',
+        'hrm_loan',
+        'hrm_asset',
     ],
     personal: [
         'hrm_employees_view_personal_details',
@@ -269,9 +276,9 @@ export const EMPLOYEE_MAIN_TAB_MODULES = {
     documents: [
         'hrm_employees_view_documents',
         'hrm_employees_view_documents_live',
+        'hrm_employees_view_documents_live_with_expiry',
+        'hrm_employees_view_documents_live_without_expiry',
         'hrm_employees_view_documents_old',
-        'hrm_employees_view_documents_memo',
-        'hrm_employees_view_documents_certificate',
     ],
     training: ['hrm_employees_view_training'],
 };

@@ -1059,6 +1059,24 @@ export const updateAssetItem = async (req, res) => {
         }
         const isAssetControllerEffective = isAssetController || isDeptAssetController;
 
+        const vehicleTypeCheck = await AssetItem.findById(id)
+            .populate('typeId', 'name')
+            .select('plateNumber typeId')
+            .lean()
+            .catch(() => null);
+        const isFleetVehicleAssetForCollaborativeEdit = (() => {
+            if (!vehicleTypeCheck) return false;
+            const plate = String(vehicleTypeCheck.plateNumber || '').trim();
+            if (plate) return true;
+            const tn = String(vehicleTypeCheck.typeId?.name || '').toLowerCase();
+            return (
+                tn.includes('vehicle') ||
+                tn.includes('car') ||
+                tn.includes('fleet') ||
+                tn.includes('truck')
+            );
+        })();
+
         if (isSubmittedForApproval) {
             if (isCreator && !isAdmin) {
                 return res.status(403).json({
@@ -1080,7 +1098,12 @@ export const updateAssetItem = async (req, res) => {
                     message: 'Only the creator, Asset Controller, or Admin can edit a rejected asset.'
                 });
             }
-        } else if (!isAdmin && !isAssetControllerEffective && !isAssignedEditAllowed) {
+        } else if (
+            !isAdmin &&
+            !isAssetControllerEffective &&
+            !isAssignedEditAllowed &&
+            !isFleetVehicleAssetForCollaborativeEdit
+        ) {
             return res.status(403).json({ message: "Access denied. Only Asset Controller/Admin or assigned owner/delegate can edit this asset." });
         }
 
@@ -1094,6 +1117,22 @@ export const updateAssetItem = async (req, res) => {
             !isAdmin &&
             !isAssetControllerEffective &&
             (initialAssetStatus === 'Draft' || initialAssetStatus === 'Rejected');
+
+        if (updates.accidentReportDocument && typeof updates.accidentReportDocument === 'object' && updates.accidentReportDocument.data) {
+            try {
+                const ar = updates.accidentReportDocument;
+                const uploadResult = await uploadDocumentToS3(
+                    ar.data,
+                    'asset-documents',
+                    ar.name || 'accident-report'
+                );
+                asset.accidentReportAttachment = uploadResult.publicId;
+            } catch (uploadErr) {
+                console.error('[updateAssetItem] accident report upload failed:', uploadErr);
+                return res.status(500).json({ message: 'Failed to upload accident report' });
+            }
+        }
+        delete updates.accidentReportDocument;
 
         // Apply updates
         for (const key of Object.keys(updates)) {
@@ -1461,6 +1500,9 @@ export const updateAssetItem = async (req, res) => {
         }
         if (assetObj.warrantyAttachment) {
             assetObj.warrantyAttachment = await getSignedFileUrl(assetObj.warrantyAttachment);
+        }
+        if (assetObj.accidentReportAttachment) {
+            assetObj.accidentReportAttachment = await getSignedFileUrl(assetObj.accidentReportAttachment);
         }
 
         if (assetObj.accessories && Array.isArray(assetObj.accessories)) {

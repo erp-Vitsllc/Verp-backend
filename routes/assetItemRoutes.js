@@ -3,6 +3,7 @@ import EmployeeBasic from '../models/EmployeeBasic.js';
 import User from '../models/User.js';
 import { createAssetItem, getAssetItems, getVehicleFleetDashboard, getVehicleFleetServiceRequests, getAllAssignedAssets, getMyAssignedAssetsForReturn, getUnassignedAssetsForEmployee, getHRCompanyAssets, getOnLeaveAssetsForEmployee, getOnServiceAssetsForEmployee, handleOnLeaveAction, bulkHandleOnLeaveAction, handleOnServiceAction, bulkHandleOnServiceAction, getAssetItemDetail, assignAssetItem, bulkAssignAssetItems, downloadHandoverPdf, downloadHistoryHandoverPdf, respondToAssignment, bulkRespondToAssignment, getBulkAssignmentPendingGroup, respondBulkAssignmentGroup, getAssetHistory, getHistoryRecord, returnAssetItem, updateAssetStatus, addAssetDocument, updateAssetDocument, deleteAssetDocument, addAssetService, deleteAssetService, submitAssetServiceDraft, addAssetImage, deleteAssetImage, transferAssetAccessory, manageAccessoryStatus, updateAssetItem, deleteAssetItem, endOfLifeAsset, requestAssetAction, bulkRequestAssetAction, handleAssetActionApproval, finalizeAssetAction, uploadAccessoriesAttachment, requestAccessoryAction, respondAccessoryAction, finalizeAccessoryAction, respondToAssetCreation, bulkRespondToAssetCreation, getBulkAssetDetails, getBulkAssetInventoryForPrint, transferAsset, submitDraftForCreationApproval, getPendingAssetDashboardInbox, deletePendingAssetDashboardInboxItem, getEmployeePreviousAssets } from '../controllers/assetItemController.js';
 import { respondVehicleServiceWorkflow, respondVehicleServiceScheduledPeriod } from '../controllers/vehicleServiceWorkflowController.js';
+import { submitVehicleProfileActivation } from '../controllers/vehicleProfileActivationController.js';
 import { protect } from '../middleware/authMiddleware.js';
 import {
     isUserInFlowchart,
@@ -13,6 +14,27 @@ import {
 import { isUserAdministrator } from '../services/permissionService.js';
 
 const normEmp = (s) => (s || '').toString().toLowerCase().replace(/\s+/g, '');
+
+/**
+ * Fleet vehicle assets (plate or vehicle-like category). Used to relax middleware so
+ * profile/document edits are not limited to Asset Controller + assignee only.
+ */
+const isVehicleAssetLean = (assetQuick) => {
+    if (!assetQuick) return false;
+    const plate = String(assetQuick.plateNumber || '').trim();
+    const typeName =
+        assetQuick.typeId && typeof assetQuick.typeId === 'object' && assetQuick.typeId.name
+            ? String(assetQuick.typeId.name)
+            : '';
+    const tn = typeName.toLowerCase();
+    return (
+        !!plate ||
+        tn.includes('vehicle') ||
+        tn.includes('car') ||
+        tn.includes('fleet') ||
+        tn.includes('truck')
+    );
+};
 
 /** JWT / env system admin — aligned with asset controllers (not only isAdmin boolean). */
 const isAdminForAssetRoutes = async (user) => {
@@ -47,8 +69,21 @@ const requireAssetControllerOrAdmin = async (req, res, next) => {
 
         if (isAdminUser || isAssetControllerUser) return next();
 
-        // If not controller, check if they are the assigned user (for certain operations like transfer request)
         const { id } = req.params;
+        const pathNoQueryAc = String(req.originalUrl || req.url || '').split('?')[0];
+        const isVehicleDocumentDelete = req.method === 'DELETE' && id && /\/document\/[^/]+$/.test(pathNoQueryAc);
+        const isVehicleImageDelete = req.method === 'DELETE' && id && /\/images\/[^/]+$/.test(pathNoQueryAc);
+        if (isVehicleDocumentDelete || isVehicleImageDelete) {
+            const AssetItem = (await import('../models/AssetItem.js')).default;
+            const assetQuick = await AssetItem.findById(id)
+                .populate('typeId', 'name')
+                .select('plateNumber typeId')
+                .lean()
+                .catch(() => null);
+            if (isVehicleAssetLean(assetQuick)) return next();
+        }
+
+        // If not controller, check if they are the assigned user (for certain operations like transfer request)
         const { fromId, assetId: bodyAssetId, assetIds } = req.body;
         const targetId = id || fromId || bodyAssetId;
 
@@ -212,6 +247,22 @@ const requireAssetFullAccess = async (req, res, next) => {
         // Admin / designated Asset Controller always have full access.
         if (isAdminUser || isAssetControllerUser) return next();
 
+        if (id) {
+            const AssetItem = (await import('../models/AssetItem.js')).default;
+            const assetQuickVehicle = await AssetItem.findById(id)
+                .populate('typeId', 'name')
+                .select('plateNumber typeId')
+                .lean()
+                .catch(() => null);
+            if (isVehicleAssetLean(assetQuickVehicle)) {
+                const pathNoQuery = String(req.originalUrl || req.url || '').split('?')[0];
+                const isDocumentWrite =
+                    /\/document/.test(pathNoQuery) && (req.method === 'POST' || req.method === 'PUT');
+                const isAddImage = req.method === 'POST' && pathNoQuery.endsWith('/images');
+                if (isDocumentWrite || isAddImage) return next();
+            }
+        }
+
         // Vehicle fleet "Add service request": any logged-in user may POST (controller enforces
         // `serviceRequestSource === 'vehicle_fleet_dashboard'` for vehicles). Avoids blocking
         // unassigned fleet vehicles that only AC could touch before.
@@ -223,21 +274,7 @@ const requireAssetFullAccess = async (req, res, next) => {
                     .populate('typeId', 'name')
                     .select('plateNumber typeId')
                     .lean();
-                if (assetQuick) {
-                    const plate = String(assetQuick.plateNumber || '').trim();
-                    const typeName =
-                        assetQuick.typeId && typeof assetQuick.typeId === 'object' && assetQuick.typeId.name
-                            ? String(assetQuick.typeId.name)
-                            : '';
-                    const tn = typeName.toLowerCase();
-                    const isVehicle =
-                        !!plate ||
-                        tn.includes('vehicle') ||
-                        tn.includes('car') ||
-                        tn.includes('fleet') ||
-                        tn.includes('truck');
-                    if (isVehicle) return next();
-                }
+                if (assetQuick && isVehicleAssetLean(assetQuick)) return next();
             }
         }
 
@@ -553,6 +590,7 @@ router.post('/transfer', protect, requireAssetControllerOrAdmin, transferAsset);
 router.put('/bulk/approve-creation', protect, requireAssetControllerOrAdmin, bulkRespondToAssetCreation);
 router.put('/:id/approve-creation', protect, requireAssetCreationApprover, respondToAssetCreation);
 router.put('/:id/submit-creation', protect, submitDraftForCreationApproval);
+router.post('/:id/submit-vehicle-profile-activation', protect, submitVehicleProfileActivation);
 router.put('/:id/return', protect, requireReturnAssetAccess, returnAssetItem);
 router.put('/:id/on-leave-action', protect, requireParkingAssetAccess, (req, res, next) => {
     console.log(`[Route] PUT /${req.params.id}/on-leave-action hit`);
