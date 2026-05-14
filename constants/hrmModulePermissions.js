@@ -20,7 +20,7 @@ const companyDocumentsChildren = [
 ];
 
 const employeeBasicChildren = [
-    { id: 'hrm_employees_view_basic', label: 'Basic (identity & company)', parent: 'hrm_employees_view_basic_details', hasDownload: false },
+    { id: 'hrm_employees_view_basic', label: 'Basic details card', parent: 'hrm_employees_view_basic_details', hasDownload: false },
     { id: 'hrm_employees_view_passport', label: 'Passport', parent: 'hrm_employees_view_basic_details', hasDownload: true },
     { id: 'hrm_employees_view_visa', label: 'Visa', parent: 'hrm_employees_view_basic_details', hasDownload: true },
     { id: 'hrm_employees_view_emirates_id', label: 'Emirates ID', parent: 'hrm_employees_view_basic_details', hasDownload: true },
@@ -33,7 +33,6 @@ const employeeBasicChildren = [
 const employeeSalaryChildren = [
     { id: 'hrm_employees_view_salary', label: 'Salary', parent: 'hrm_employees_view_salary_section', hasDownload: true },
     { id: 'hrm_employees_view_bank', label: 'Bank Details', parent: 'hrm_employees_view_salary_section', hasDownload: false },
-    { id: 'hrm_employees_view_salary_history', label: 'Salary History', parent: 'hrm_employees_view_salary_section', hasDownload: true },
     { id: 'hrm_employees_view_salary_certificate', label: 'Certificate', parent: 'hrm_employees_view_salary_section', hasDownload: true },
 ];
 
@@ -153,7 +152,7 @@ export const HRM_MODULE = {
                             children: [
                                 {
                                     id: 'hrm_employees_view_work',
-                                    label: 'Digital Signature / Work',
+                                    label: 'Digital Signature',
                                     parent: 'hrm_employees_view_work_details',
                                     hasDownload: false,
                                 },
@@ -186,7 +185,6 @@ export const HRM_MODULE = {
                             hasDownload: false,
                             children: employeeDocumentsChildren,
                         },
-                        { id: 'hrm_employees_view_training', label: 'Training', parent: 'hrm_employees_view', hasDownload: true },
                     ],
                 },
             ],
@@ -256,7 +254,6 @@ export const EMPLOYEE_MAIN_TAB_MODULES = {
         'hrm_employees_view_salary_section',
         'hrm_employees_view_salary',
         'hrm_employees_view_bank',
-        'hrm_employees_view_salary_history',
         'hrm_employees_view_salary_certificate',
         'hrm_reward',
         'hrm_fine',
@@ -280,5 +277,5 @@ export const EMPLOYEE_MAIN_TAB_MODULES = {
         'hrm_employees_view_documents_live_without_expiry',
         'hrm_employees_view_documents_old',
     ],
-    training: ['hrm_employees_view_training'],
+    training: ['hrm_employees_view', 'hrm_employees_list'],
 };

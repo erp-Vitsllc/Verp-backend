@@ -223,9 +223,9 @@ router.patch("/:id/experience/:experienceId", checkPermission('hrm_employees_vie
 router.delete("/:id/experience/:experienceId", checkPermission('hrm_employees_view_experience', 'delete'), deleteExperience);
 
 // Training - requires edit permission
-router.post("/:id/training", checkPermission('hrm_employees_view_training', 'create'), addTraining);
-router.patch("/:id/training/:trainingId", checkPermission('hrm_employees_view_training', 'edit'), updateTraining);
-router.delete("/:id/training/:trainingId", checkPermission('hrm_employees_view_training', 'delete'), deleteTraining);
+router.post("/:id/training", checkPermission('hrm_employees_list', 'edit'), addTraining);
+router.patch("/:id/training/:trainingId", checkPermission('hrm_employees_list', 'edit'), updateTraining);
+router.delete("/:id/training/:trainingId", checkPermission('hrm_employees_list', 'edit'), deleteTraining);
 
 // Send approval email - requires edit permission
 router.post("/:id/send-approval-email", checkPermission('hrm_employees', 'edit'), sendApprovalEmail);

@@ -393,7 +393,7 @@ const assetItemSchema = new mongoose.Schema({
     /** Fleet vehicle: submit completed profile to Asset Controller (email + dashboard task). */
     vehicleProfileActivationStatus: {
         type: String,
-        enum: ['none', 'submitted', 'active'],
+        enum: ['none', 'submitted', 'active', 'rejected'],
         default: 'none',
     },
     vehicleProfileActivationSubmittedAt: { type: Date, default: null },
@@ -406,6 +406,13 @@ const assetItemSchema = new mongoose.Schema({
     vehicleProfileActivationSections: {
         type: [String],
         default: [],
+    },
+    /** Asset Controller partial review: unchecked sections return to submitter (mirrors HR profile hold). */
+    vehicleProfileActivationHold: {
+        heldAt: { type: Date, default: null },
+        unapprovedSections: { type: [String], default: [] },
+        comment: { type: String, default: '', trim: true },
+        rowNotesBySectionId: { type: mongoose.Schema.Types.Mixed, default: undefined },
     },
     documents: [{
         type: { type: String },

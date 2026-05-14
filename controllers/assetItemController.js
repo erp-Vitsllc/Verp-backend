@@ -5935,10 +5935,14 @@ export const addAssetService = async (req, res) => {
             return t.includes('vehicle') || t.includes('car') || t.includes('fleet') || t.includes('truck');
         };
 
-        if (isVehicleAssetForServiceGate() && serviceRequestSource !== 'vehicle_fleet_dashboard') {
+        const vehicleServiceRequestSourcesAllowed = new Set(['vehicle_fleet_dashboard', 'vehicle_asset_detail']);
+        if (
+            isVehicleAssetForServiceGate() &&
+            !vehicleServiceRequestSourcesAllowed.has(String(serviceRequestSource || '').trim())
+        ) {
             return res.status(403).json({
                 message:
-                    'Vehicle service requests must be created from the Vehicle Asset Fleet Dashboard (Add service request).',
+                    'Vehicle service requests must be raised from the vehicle asset page or the Vehicle Fleet dashboard.',
             });
         }
 

@@ -1,13 +1,25 @@
 import rateLimit from 'express-rate-limit';
 
+const windowMs = Number(process.env.RATE_LIMIT_WINDOW_MS);
+const maxRequests = Number(process.env.RATE_LIMIT_MAX);
+
+const commonWindowMs =
+    Number.isFinite(windowMs) && windowMs > 0 ? windowMs : 15 * 60 * 1000;
+const commonMax =
+    Number.isFinite(maxRequests) && maxRequests > 0 ? maxRequests : 2000;
+
+const rateLimitDisabled =
+    process.env.RATE_LIMIT_DISABLED === '1' || process.env.RATE_LIMIT_DISABLED === 'true';
+
 export const commonLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 2000, // Limit each IP to 2000 requests per `window` (here, per 15 minutes)
-    standardHeaders: true, // Return rate limit info in the `RateLimit-*` headers
-    legacyHeaders: false, // Disable the `X-RateLimit-*` headers
+    windowMs: commonWindowMs,
+    max: commonMax,
+    standardHeaders: true,
+    legacyHeaders: false,
+    skip: () => rateLimitDisabled,
     message: {
-        message: "Too many requests from this IP, please try again after 15 minutes"
-    }
+        message: "Too many requests from this IP, please try again after 15 minutes",
+    },
 });
 
 export const sensitiveActionLimiter = rateLimit({

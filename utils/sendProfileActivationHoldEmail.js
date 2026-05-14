@@ -1,7 +1,16 @@
 import nodemailer from "nodemailer";
 
-const pickEmployeeEmail = (emp) =>
-    (emp?.companyEmail || "").trim();
+/** Prefer company email; fall back to other fields on file so the submitter is notified. */
+const pickSubmitterEmail = (emp) => {
+    if (!emp) return "";
+    const c = (emp.companyEmail || "").trim();
+    if (c) return c;
+    const w = (emp.workEmail || "").trim();
+    if (w) return w;
+    const e = (emp.email || "").trim();
+    if (e) return e;
+    return (emp.personalEmail || "").trim();
+};
 
 const escapeHtmlBasic = (s) =>
     String(s || "")
@@ -34,7 +43,7 @@ export const sendProfileActivationHoldEmail = async (params) => {
         return;
     }
 
-    const toEmail = pickEmployeeEmail(submitterEmployee).trim();
+    const toEmail = pickSubmitterEmail(submitterEmployee).trim();
     if (!toEmail) {
         console.warn(
             `[hold email] Skipped — submitter has no email (subject employeeId ${employee.employeeId})`,

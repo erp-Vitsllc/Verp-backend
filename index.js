@@ -43,6 +43,17 @@ console.log("MONGO_URI:", process.env.MONGO_URI);
 const app = express();
 app.disable("x-powered-by");
 
+/**
+ * When the API sits behind nginx / a load balancer / Cloudflare, the TCP peer is the proxy.
+ * Without `trust proxy`, `req.ip` is often the same for every user → one shared rate-limit bucket
+ * (see `commonLimiter`) and legitimate traffic gets 429 quickly.
+ * Set TRUST_PROXY=1 on the server (and TRUST_PROXY_HOPS if you have multiple proxy layers).
+ */
+if (process.env.TRUST_PROXY === '1' || process.env.TRUST_PROXY === 'true') {
+    const hops = Number(process.env.TRUST_PROXY_HOPS);
+    app.set('trust proxy', Number.isFinite(hops) && hops > 0 ? hops : 1);
+}
+
 // Run parking lifecycle checks (reminders + auto-unassign) periodically.
 setTimeout(() => { processParkingAssets(); }, 30 * 1000);
 setInterval(() => { processParkingAssets(); }, 6 * 60 * 60 * 1000);

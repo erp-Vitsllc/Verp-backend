@@ -351,6 +351,7 @@ export const getUserActivityStats = async (req, res) => {
         const DashboardAction = await import("../../models/DashboardAction.js").then(m => m.default);
         const { getDepartmentHOD } = await import("../../utils/getDepartmentHOD.js");
         const flowchartHrEmp = await getDepartmentHOD("hr");
+        const flowchartAdminEmp = await getDepartmentHOD("admincontroller");
 
         const allAssetTypes = ['Asset', 'Asset Approval', 'Asset Assignment', 'Asset Transfer', 'Asset Loss Damage', 'Asset End of Life', 'Asset Accessory', 'Asset Accessory Approval', 'Asset Accessory Unattach', 'Vehicle Service Request'];
 
@@ -365,6 +366,18 @@ export const getUserActivityStats = async (req, res) => {
                     normEmpForAssigneeEarly(manager.employeeId) === normEmpForAssigneeEarly(flowchartHrEmp.employeeId);
                 if (sameBusinessIdAsFlowchartHr) {
                     dashboardAssigneeMongoIds.push(flowchartHrEmp._id);
+                }
+            }
+        }
+        if (flowchartAdminEmp?._id) {
+            const aid = flowchartAdminEmp._id.toString();
+            if (!dashboardAssigneeMongoIds.some((id) => id && id.toString() === aid)) {
+                const sameBusinessIdAsFlowchartAdmin =
+                    manager?.employeeId &&
+                    flowchartAdminEmp.employeeId &&
+                    normEmpForAssigneeEarly(manager.employeeId) === normEmpForAssigneeEarly(flowchartAdminEmp.employeeId);
+                if (sameBusinessIdAsFlowchartAdmin) {
+                    dashboardAssigneeMongoIds.push(flowchartAdminEmp._id);
                 }
             }
         }
@@ -389,6 +402,7 @@ export const getUserActivityStats = async (req, res) => {
             'Document Expiry Reminder',
             'Employee Document Expiry Reminder',
             'Company Activation',
+            'Vehicle Profile Activation',
         ]);
         const normEmpForAssignee = (s) => (s || '').toString().trim().toLowerCase();
         const dashboardRowAssignedToViewer = (item) => {
@@ -435,13 +449,22 @@ export const getUserActivityStats = async (req, res) => {
                 .limit(25)
                 .lean()
                 .maxTimeMS(6000),
+            DashboardAction.find({
+                requestType: 'Vehicle Profile Activation',
+                status: { $in: ['Approved', 'Rejected', 'On Hold'] },
+                $or: profileActivationOutcomeOr,
+            })
+                .sort({ actionedDate: -1, updatedAt: -1 })
+                .limit(25)
+                .lean()
+                .maxTimeMS(6000),
         ]);
         dashboardSettled.forEach((r, i) => {
             if (r.status === "rejected") {
                 console.warn(`[getUserActivityStats] dashboard slot ${i} failed:`, r.reason?.message || r.reason);
             }
         });
-        const [dashboardPendingItemsRaw, profileActivationOutcomeItems, companyActivationOutcomeItems] =
+        const [dashboardPendingItemsRaw, profileActivationOutcomeItems, companyActivationOutcomeItems, vehicleProfileActivationOutcomeItems] =
             dashboardSettled.map((r) => (r.status === "fulfilled" ? r.value : []));
 
         const dashboardPendingItems = await filterStaleExpiryDashboardRows(
@@ -631,9 +654,21 @@ export const getUserActivityStats = async (req, res) => {
                     companyActivationViewerRole = null;
                 }
             }
+            let vehicleActivationViewerRole = null;
+            if (item.requestType === 'Vehicle Profile Activation' && item.extra3) {
+                try {
+                    vehicleActivationViewerRole = JSON.parse(item.extra3).activationViewerRole || null;
+                } catch {
+                    vehicleActivationViewerRole = null;
+                }
+            }
             const isCompanyActivationRequesterCopy =
                 item.requestType === 'Company Activation' &&
                 companyActivationViewerRole === 'requester';
+
+            const isVehicleActivationRequesterCopy =
+                item.requestType === 'Vehicle Profile Activation' &&
+                vehicleActivationViewerRole === 'requester';
 
             activityList.push({
                 id: displayId,
@@ -647,7 +682,7 @@ export const getUserActivityStats = async (req, res) => {
                 extra2: item.extra2,
                 extra3: item.extra3,
                 targetEmployeeId: item.subjectEmployeeId?.toString(),
-                scope: (isCreatorSideAssetApproval || isCompanyActivationRequesterCopy) ? 'outgoing' : 'inbox'
+                scope: (isCreatorSideAssetApproval || isCompanyActivationRequesterCopy || isVehicleActivationRequesterCopy) ? 'outgoing' : 'inbox'
             });
             if (reqIdStr) seenRequests.set(reqIdStr, 'Pending');
         });
@@ -943,12 +978,19 @@ export const getUserActivityStats = async (req, res) => {
         profileActivationOutcomeItems.forEach((item) => {
             const reqIdStr = item.requestId?.toString();
             if (!reqIdStr) return;
-            const isSelf = targetEmpNorm && normEmpId(item.subjectEmployeeId) === targetEmpNorm;
+            /** Outcome rows (On Hold / Approved / Rejected) are assigned to the activation submitter — not always the profile subject. */
+            const isProfileActAssignee =
+                dashboardAssigneeMongoIds.some(
+                    (id) => id && item.assignedTo && id.toString() === item.assignedTo.toString(),
+                ) ||
+                (targetEmployeeId &&
+                    item.assignedToEmpId &&
+                    normEmpForAssignee(item.assignedToEmpId) === normEmpForAssignee(targetEmployeeId));
             const activityItem = {
                 id: reqIdStr,
                 actionId: item._id.toString(),
                 type: 'Profile Activation',
-                requestedBy: isSelf ? 'Me' : item.subjectName || item.requestedByName || 'Employee',
+                requestedBy: isProfileActAssignee ? 'Me' : item.subjectName || item.requestedByName || 'Employee',
                 requestedDate: item.requestedDate,
                 actionedDate: item.actionedDate || item.updatedAt,
                 status: item.status,
@@ -957,7 +999,7 @@ export const getUserActivityStats = async (req, res) => {
                 extra3: item.extra3,
                 targetEmployeeId: item.subjectEmployeeId?.toString(),
                 employeeId: targetEmployeeId,
-                scope: isSelf ? 'outgoing' : 'inbox'
+                scope: isProfileActAssignee ? 'outgoing' : 'inbox',
             };
 
             const idx = activityList.findIndex(
@@ -967,7 +1009,7 @@ export const getUserActivityStats = async (req, res) => {
                 const existing = activityList[idx];
                 if (
                     item.status === 'On Hold' &&
-                    isSelf &&
+                    isProfileActAssignee &&
                     existing.status === 'Pending' &&
                     existing.requestedBy === 'Me'
                 ) {
@@ -1030,6 +1072,65 @@ export const getUserActivityStats = async (req, res) => {
                 if (item.status === 'On Hold' && isCompanyActSelf && existing.status === 'Pending') {
                     // After resubmit, `clearCompanyActivationHoldDashboardRows` removes hold rows; if one remains
                     // or the list still has an older On Hold document, prefer the fresh Pending (newer requestedDate).
+                    const pendingTs = new Date(existing.requestedDate || 0).getTime();
+                    const holdTs = new Date(
+                        item.actionedDate || item.updatedAt || item.requestedDate || 0,
+                    ).getTime();
+                    if (pendingTs >= holdTs) return;
+                    activityList[idx] = { ...existing, ...activityItem };
+                    return;
+                }
+                if (existing.status === 'Pending' && ['Approved', 'Rejected'].includes(activityItem.status)) {
+                    if (
+                        existing.actionId &&
+                        activityItem.actionId &&
+                        String(existing.actionId) !== String(activityItem.actionId)
+                    ) {
+                        return;
+                    }
+                    activityList[idx] = { ...existing, ...activityItem };
+                    seenRequests.set(reqIdStr, activityItem.status);
+                    return;
+                }
+                activityList[idx] = { ...existing, ...activityItem };
+            } else {
+                activityList.push(activityItem);
+                seenRequests.set(reqIdStr, item.status);
+            }
+        });
+
+        vehicleProfileActivationOutcomeItems.forEach((item) => {
+            const reqIdStr = item.requestId?.toString();
+            if (!reqIdStr) return;
+            const isVehicleActSelf =
+                dashboardAssigneeMongoIds.some(
+                    (id) => id && item.assignedTo && id.toString() === item.assignedTo.toString(),
+                ) ||
+                (targetEmployeeId &&
+                    item.assignedToEmpId &&
+                    normEmpForAssignee(item.assignedToEmpId) === normEmpForAssignee(targetEmployeeId));
+            const activityItem = {
+                id: reqIdStr,
+                actionId: item._id.toString(),
+                type: 'Vehicle Profile Activation',
+                requestedBy: isVehicleActSelf ? 'Me' : item.subjectName || item.requestedByName || 'Vehicle',
+                requestedDate: item.requestedDate,
+                actionedDate: item.actionedDate || item.updatedAt,
+                status: item.status,
+                extra1: item.extra1 || item.subjectEmployeeId,
+                extra2: item.extra2,
+                extra3: item.extra3,
+                targetEmployeeId: item.subjectEmployeeId?.toString(),
+                employeeId: targetEmployeeId,
+                scope: isVehicleActSelf ? 'outgoing' : 'inbox',
+            };
+
+            const idx = activityList.findIndex(
+                (i) => i.id?.toString() === reqIdStr && i.type === 'Vehicle Profile Activation',
+            );
+            if (idx !== -1) {
+                const existing = activityList[idx];
+                if (item.status === 'On Hold' && isVehicleActSelf && existing.status === 'Pending') {
                     const pendingTs = new Date(existing.requestedDate || 0).getTime();
                     const holdTs = new Date(
                         item.actionedDate || item.updatedAt || item.requestedDate || 0,

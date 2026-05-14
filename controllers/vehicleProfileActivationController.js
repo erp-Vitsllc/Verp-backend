@@ -1,11 +1,27 @@
 import nodemailer from 'nodemailer';
 import AssetItem from '../models/AssetItem.js';
-import { getDepartmentHOD } from '../utils/getDepartmentHOD.js';
+import EmployeeBasic from '../models/EmployeeBasic.js';
+import { getDepartmentHOD, isUserInFlowchart } from '../utils/getDepartmentHOD.js';
 import { resolveEmployeeEmail } from '../utils/resolveEmployeeEmail.js';
 import { syncDashboardAction } from '../utils/syncDashboard.js';
 import { resolveProfileActivationSubmitterId } from '../utils/resolveProfileActivationSubmitterId.js';
+import { clearVehicleProfileActivationHoldDashboardRows } from '../utils/clearVehicleProfileActivationHoldDashboardRows.js';
+import {
+    sendVehicleProfileActivationHoldEmail,
+    sendVehicleProfileActivationOutcomeEmail,
+} from '../utils/sendVehicleProfileActivationEmails.js';
 
 const normType = (t) => String(t || '').toLowerCase().trim();
+
+const ALLOWED_SECTIONS = new Set(['basic', 'registration', 'insurance', 'warranty', 'documents']);
+
+const SECTION_LABEL = {
+    basic: 'Basic details',
+    registration: 'Registration (card)',
+    insurance: 'Insurance',
+    warranty: 'Warranty',
+    documents: 'Documents summary',
+};
 
 const isFleetVehicleAsset = (asset) => {
     if (!asset) return false;
@@ -20,9 +36,54 @@ const isFleetVehicleAsset = (asset) => {
     );
 };
 
+const canProcessVehicleProfileActivation = async (req) =>
+    isUserInFlowchart(req.user, 'admincontroller').catch(() => false);
+
+const trimDesc = (d) => String(d || '').trim();
+
+const sanitizeRowNotesBySectionId = (raw, allowedSectionIds) => {
+    const allowed = new Set((allowedSectionIds || []).map(String));
+    if (!raw || typeof raw !== 'object' || allowed.size === 0) return null;
+    const out = {};
+    for (const [k, v] of Object.entries(raw)) {
+        const key = String(k || '').trim();
+        if (!allowed.has(key)) continue;
+        const note = String(v ?? '').trim();
+        if (note) out[key] = note.slice(0, 2000);
+    }
+    return Object.keys(out).length ? out : null;
+};
+
+const assertSubmitPrerequisites = (asset) => {
+    const docs = asset.documents || [];
+    const registrationDoc = docs.find((d) => normType(d.type) === 'registration');
+    const insuranceDoc = docs.find((d) => normType(d.type) === 'insurance');
+    const warrantyDoc = docs.find((d) => normType(d.type) === 'warranty');
+
+    if (!registrationDoc?.expiryDate) {
+        return 'Registration with an expiry date must be on file before submitting.';
+    }
+    if (!insuranceDoc?.expiryDate) {
+        return 'Insurance with an expiry date must be on file before submitting.';
+    }
+    if (asset.warrantyEnabled) {
+        const hasWarrantyExpiry = !!(warrantyDoc?.expiryDate || asset.warrantyExpiryDate);
+        if (!hasWarrantyExpiry) {
+            return 'Warranty is enabled for this vehicle — add warranty coverage with an end date before submitting.';
+        }
+    }
+    return null;
+};
+
+const vehicleSubjectForDashboard = (asset) => ({
+    firstName: asset.name || 'Vehicle',
+    lastName: `(${asset.assetId || ''})`.trim(),
+    employeeId: asset.assetId || '',
+    designation: asset.typeId?.name || '',
+});
+
 /**
  * POST /api/AssetItem/:id/submit-vehicle-profile-activation
- * Email + dashboard task for flowchart Asset Controller; stores submitted state on asset.
  */
 export const submitVehicleProfileActivation = async (req, res) => {
     try {
@@ -32,9 +93,8 @@ export const submitVehicleProfileActivation = async (req, res) => {
             ? [...new Set(includedSections.map((s) => String(s || '').trim()).filter(Boolean))]
             : [];
 
-        const allowed = new Set(['basic', 'registration', 'insurance', 'warranty', 'documents']);
         for (const s of sections) {
-            if (!allowed.has(s)) {
+            if (!ALLOWED_SECTIONS.has(s)) {
                 return res.status(400).json({ message: `Invalid section: ${s}` });
             }
         }
@@ -42,10 +102,7 @@ export const submitVehicleProfileActivation = async (req, res) => {
             return res.status(400).json({ message: 'Select at least one item to include in this request.' });
         }
 
-        const asset = await AssetItem.findById(id)
-            .populate('typeId', 'name')
-            .populate('assignedTo', 'firstName lastName employeeId')
-            .lean();
+        const asset = await AssetItem.findById(id).populate('typeId', 'name').populate('assignedTo', 'firstName lastName employeeId').lean();
 
         if (!asset) {
             return res.status(404).json({ message: 'Asset not found' });
@@ -54,27 +111,22 @@ export const submitVehicleProfileActivation = async (req, res) => {
             return res.status(400).json({ message: 'Vehicle profile activation is only available for fleet vehicle assets.' });
         }
 
-        if (String(asset.vehicleProfileActivationStatus || 'none') === 'submitted') {
+        const status = String(asset.vehicleProfileActivationStatus || 'none').toLowerCase();
+        if (status === 'active') {
+            return res.status(400).json({ message: 'This vehicle profile is already activated.' });
+        }
+
+        const hold = asset.vehicleProfileActivationHold || null;
+        const heldSectionList = Array.isArray(hold?.unapprovedSections) ? hold.unapprovedSections.map(String) : [];
+        const isResubmitAfterHold = status === 'submitted' && heldSectionList.length > 0;
+        const isFreshAfterReject = status === 'rejected';
+
+        if (status === 'submitted' && !isResubmitAfterHold) {
             return res.status(400).json({ message: 'This vehicle is already submitted for profile activation review.' });
         }
 
-        const docs = asset.documents || [];
-        const registrationDoc = docs.find((d) => normType(d.type) === 'registration');
-        const insuranceDoc = docs.find((d) => normType(d.type) === 'insurance');
-        const warrantyDoc = docs.find((d) => normType(d.type) === 'warranty');
-
-        if (!registrationDoc?.expiryDate) {
-            return res.status(400).json({ message: 'Registration with an expiry date must be on file before submitting.' });
-        }
-        if (!insuranceDoc?.expiryDate) {
-            return res.status(400).json({ message: 'Insurance with an expiry date must be on file before submitting.' });
-        }
-        if (asset.warrantyEnabled) {
-            const hasWarrantyExpiry = !!(warrantyDoc?.expiryDate || asset.warrantyExpiryDate);
-            if (!hasWarrantyExpiry) {
-                return res.status(400).json({ message: 'Warranty is enabled for this vehicle — add warranty coverage with an end date before submitting.' });
-            }
-        }
+        const prereqErr = assertSubmitPrerequisites(asset);
+        if (prereqErr) return res.status(400).json({ message: prereqErr });
 
         const submitterId = await resolveProfileActivationSubmitterId(req);
         if (!submitterId) {
@@ -84,13 +136,29 @@ export const submitVehicleProfileActivation = async (req, res) => {
             });
         }
 
-        const ac = await getDepartmentHOD('assetcontroller');
-        if (!ac?._id) {
-            return res.status(400).json({ message: 'No Asset Controller is configured in the company flowchart.' });
+        if (isResubmitAfterHold) {
+            if (String(asset.vehicleProfileActivationSubmittedBy || '') !== String(submitterId)) {
+                return res.status(403).json({ message: 'Only the employee who submitted this request can resubmit after a hold.' });
+            }
+            const missing = heldSectionList.filter((s) => !sections.includes(String(s)));
+            if (missing.length) {
+                return res.status(400).json({
+                    message: `This resubmission must include every section that was on hold: ${missing.join(', ')}.`,
+                });
+            }
         }
-        const { email: acEmail } = resolveEmployeeEmail(ac);
-        if (!acEmail || !String(acEmail).trim()) {
-            return res.status(400).json({ message: 'Asset Controller does not have a resolvable email address.' });
+
+        const designatedAdmin = await getDepartmentHOD('admincontroller');
+        if (!designatedAdmin?._id) {
+            return res.status(400).json({
+                message: 'No Administrator (Admin Controller) is configured in the company flowchart for this workflow.',
+            });
+        }
+        const { email: adminEmail } = resolveEmployeeEmail(designatedAdmin);
+        if (!adminEmail || !String(adminEmail).trim()) {
+            return res.status(400).json({
+                message: 'The flowchart Administrator does not have a resolvable email address.',
+            });
         }
 
         const emailUser = process.env.EMAIL_USER?.trim();
@@ -107,12 +175,12 @@ export const submitVehicleProfileActivation = async (req, res) => {
         });
 
         const vehicleLabel = `${asset.name || 'Vehicle'} (${asset.assetId || id})`;
-        const acName = `${ac.firstName || ''} ${ac.lastName || ''}`.trim() || 'Asset Controller';
+        const adminGreetingName = `${designatedAdmin.firstName || ''} ${designatedAdmin.lastName || ''}`.trim() || 'Administrator';
         const origin = req.headers.origin || (req.headers.referer ? new URL(req.headers.referer).origin : null);
         const baseUrl = process.env.FRONTEND_URL || origin || 'http://localhost:3000';
         const detailUrl = `${baseUrl}/HRM/Asset/Vehicle/details/${id}`;
         const descText = String(description || '').trim();
-        const sectionsHtml = sections.map((s) => `<li>${s}</li>`).join('');
+        const sectionsHtml = sections.map((s) => `<li>${SECTION_LABEL[s] || s}</li>`).join('');
 
         const html = `
             <div style="font-family: Arial, sans-serif; color: #333; line-height: 1.6; max-width: 640px; margin: 0 auto; border: 1px solid #eee; border-radius: 10px; overflow: hidden;">
@@ -120,8 +188,8 @@ export const submitVehicleProfileActivation = async (req, res) => {
                     <h2 style="margin: 0;">Vehicle profile — activation review</h2>
                 </div>
                 <div style="padding: 28px;">
-                    <p>Hello <strong>${acName}</strong>,</p>
-                    <p>A colleague completed the vehicle profile checklist and submitted it for <strong>Asset Controller</strong> review.</p>
+                    <p>Hello <strong>${adminGreetingName}</strong>,</p>
+                    <p>A colleague ${isResubmitAfterHold || isFreshAfterReject ? '<strong>re-submitted</strong> ' : ''}completed the vehicle profile checklist and sent it for <strong>your review</strong> as the company <strong>Administrator</strong> (flowchart).</p>
                     <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 16px; margin: 18px 0;">
                         <p style="margin:0;"><strong>Vehicle:</strong> ${vehicleLabel}</p>
                         <p style="margin:8px 0 0 0;"><strong>Sections in this request:</strong></p>
@@ -137,8 +205,8 @@ export const submitVehicleProfileActivation = async (req, res) => {
 
         await transporter.sendMail({
             from: `"VeRP Portal" <${emailUser}>`,
-            to: acEmail,
-            subject: `Vehicle profile review: ${vehicleLabel}`,
+            to: adminEmail,
+            subject: `${isResubmitAfterHold || isFreshAfterReject ? 'Re-submitted: ' : ''}Vehicle profile review: ${vehicleLabel}`,
             html,
         });
 
@@ -148,26 +216,31 @@ export const submitVehicleProfileActivation = async (req, res) => {
             req.user?.employeeId ||
             '';
 
-        const subjectForDash = {
-            firstName: asset.name || 'Vehicle',
-            lastName: `(${asset.assetId || ''})`.trim(),
-            employeeId: asset.assetId || '',
-            designation: asset.typeId?.name || '',
-        };
+        const subjectForDash = vehicleSubjectForDashboard(asset);
+
+        if (isResubmitAfterHold || isFreshAfterReject) {
+            await clearVehicleProfileActivationHoldDashboardRows(asset._id);
+            const DashboardAction = (await import('../models/DashboardAction.js')).default;
+            await DashboardAction.deleteMany({
+                requestId: asset._id,
+                requestType: 'Vehicle Profile Activation',
+            });
+        }
 
         await syncDashboardAction({
             requestId: asset._id,
             requestType: 'Vehicle Profile Activation',
-            assignedTo: String(ac._id),
+            assignedTo: String(designatedAdmin._id),
             status: 'Pending',
             subjectEmployee: subjectForDash,
             requestedByName,
-            extra1: `[Fleet] ${vehicleLabel} — profile submitted (${sections.join(', ')})`,
+            extra1: `[Fleet] ${vehicleLabel} — profile submitted (${sections.map((s) => SECTION_LABEL[s] || s).join(', ')})`,
             extra2: descText || '',
             extra3: JSON.stringify({
                 activationSubject: 'vehicle',
-                activationViewerRole: 'asset_controller',
+                activationViewerRole: 'flowchart_admin',
                 includedSections: sections,
+                vehicleMongoId: String(asset._id),
             }),
         });
 
@@ -181,7 +254,8 @@ export const submitVehicleProfileActivation = async (req, res) => {
                     vehicleProfileActivationDescription: descText || '',
                     vehicleProfileActivationSections: sections,
                 },
-            }
+                $unset: { vehicleProfileActivationHold: 1 },
+            },
         );
 
         try {
@@ -190,19 +264,455 @@ export const submitVehicleProfileActivation = async (req, res) => {
                 assetId: asset._id,
                 action: 'Update',
                 performedBy: submitterId,
-                comments: `Vehicle profile submitted for activation review (${sections.join(', ')}).`,
-                details: { type: 'VehicleProfileActivationSubmit', sections, description: descText },
+                comments: `${isResubmitAfterHold || isFreshAfterReject ? 'Re-submitted' : 'Submitted'} vehicle profile for activation review (${sections.join(', ')}).`,
+                details: { type: 'VehicleProfileActivationSubmit', sections, description: descText, resubmitAfterHold: !!(isResubmitAfterHold || isFreshAfterReject) },
             });
         } catch (hErr) {
             console.error('[submitVehicleProfileActivation] history log failed:', hErr?.message || hErr);
         }
 
         return res.status(200).json({
-            message: 'Submitted for review. The Asset Controller has been emailed and will see a task on the dashboard.',
+            message:
+                'Submitted for review. The flowchart Administrator has been emailed and will see the task on their dashboard.',
             vehicleProfileActivationStatus: 'submitted',
         });
     } catch (err) {
         console.error('submitVehicleProfileActivation:', err);
         return res.status(500).json({ message: err.message || 'Failed to submit vehicle profile activation.' });
+    }
+};
+
+/**
+ * POST /api/AssetItem/:id/approve-vehicle-profile-activation
+ */
+export const approveVehicleProfileActivation = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const approvedSections = Array.isArray(req.body?.approvedSections)
+            ? req.body.approvedSections.map((s) => String(s || '').trim()).filter(Boolean)
+            : [];
+        const selectionProvided = req.body?.selectionProvided === true;
+
+        if (!(await canProcessVehicleProfileActivation(req))) {
+            return res.status(403).json({
+                message: 'Only the flowchart Administrator assigned on the company flowchart can approve this request.',
+            });
+        }
+
+        const asset = await AssetItem.findById(id).populate('typeId', 'name').lean();
+        if (!asset) return res.status(404).json({ message: 'Asset not found' });
+        if (!isFleetVehicleAsset(asset)) {
+            return res.status(400).json({ message: 'Not a fleet vehicle asset.' });
+        }
+        if (String(asset.vehicleProfileActivationStatus || '').toLowerCase() !== 'submitted') {
+            return res.status(400).json({ message: 'This vehicle is not awaiting profile activation review.' });
+        }
+
+        const requested = [...new Set((asset.vehicleProfileActivationSections || []).map(String))].filter((s) => ALLOWED_SECTIONS.has(s));
+        if (!selectionProvided) {
+            return res.status(400).json({
+                message: 'Confirm acceptance with the section checklist (all items must be checked to accept).',
+            });
+        }
+        if (selectionProvided) {
+            const sortedReq = [...requested].sort().join(',');
+            const sortedApr = [...new Set(approvedSections)].sort().join(',');
+            if (!requested.length || sortedReq !== sortedApr) {
+                return res.status(400).json({
+                    message: 'Accept requires every section in this request to be checked, or use Hold when only some are acceptable.',
+                });
+            }
+        }
+
+        const submitterId = asset.vehicleProfileActivationSubmittedBy || null;
+        const reviewerDisplayName =
+            req.user?.name ||
+            [req.user?.firstName, req.user?.lastName].filter(Boolean).join(' ').trim() ||
+            'Administrator';
+
+        await AssetItem.updateOne(
+            { _id: id },
+            {
+                $set: {
+                    vehicleProfileActivationStatus: 'active',
+                },
+                $unset: {
+                    vehicleProfileActivationHold: 1,
+                    vehicleProfileActivationSubmittedAt: 1,
+                    vehicleProfileActivationSubmittedBy: 1,
+                    vehicleProfileActivationDescription: 1,
+                    vehicleProfileActivationSections: 1,
+                },
+            },
+        );
+
+        try {
+            const DashboardAction = (await import('../models/DashboardAction.js')).default;
+            await DashboardAction.updateMany(
+                {
+                    requestId: asset._id,
+                    requestType: 'Vehicle Profile Activation',
+                    status: { $in: ['Pending', 'On Hold'] },
+                },
+                {
+                    status: 'Approved',
+                    actionedDate: new Date(),
+                    actionedBy: req.user?.employeeObjectId || req.user?._id,
+                    comment: 'Vehicle profile activation approved',
+                },
+            );
+        } catch (e) {
+            console.error('[approveVehicleProfileActivation] dashboard', e);
+        }
+
+        const submitterEmp = submitterId
+            ? await EmployeeBasic.findById(submitterId)
+                  .select('_id employeeId firstName lastName companyEmail workEmail email personalEmail')
+                  .lean()
+            : null;
+        const origin = req.headers.origin || (req.headers.referer ? new URL(req.headers.referer).origin : null);
+        const baseUrl = process.env.FRONTEND_URL || origin || 'http://localhost:3000';
+        const detailUrl = `${baseUrl}/HRM/Asset/Vehicle/details/${id}`;
+        const vehicleLabel = `${asset.name || 'Vehicle'} (${asset.assetId || id})`;
+        sendVehicleProfileActivationOutcomeEmail({
+            submitterEmployee: submitterEmp,
+            acName: reviewerDisplayName,
+            vehicleLabel,
+            detailUrl,
+            status: 'approved',
+        }).catch(() => {});
+
+        try {
+            const AssetHistory = (await import('../models/AssetHistory.js')).default;
+            await AssetHistory.create({
+                assetId: asset._id,
+                action: 'Update',
+                performedBy: req.user?.employeeObjectId || req.user?._id || null,
+                comments: 'Vehicle profile activation approved by flowchart Administrator.',
+                details: { type: 'VehicleProfileActivationApprove' },
+            });
+        } catch (_h) {
+            /* non-fatal */
+        }
+
+        const refreshed = await AssetItem.findById(id).populate('typeId', 'name').populate('assignedTo', 'firstName lastName employeeId').lean();
+        return res.status(200).json({
+            message: 'Vehicle profile activation approved.',
+            asset: refreshed,
+            vehicleProfileActivationStatus: 'active',
+        });
+    } catch (err) {
+        console.error('approveVehicleProfileActivation:', err);
+        return res.status(500).json({ message: err.message || 'Failed to approve vehicle profile activation.' });
+    }
+};
+
+/**
+ * POST /api/AssetItem/:id/hold-vehicle-profile-activation
+ */
+export const holdVehicleProfileActivation = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const approvedSections = Array.isArray(req.body?.approvedSections)
+            ? req.body.approvedSections.map((s) => String(s || '').trim()).filter(Boolean)
+            : [];
+        const selectionProvided = req.body?.selectionProvided === true;
+        const comment = String(req.body?.comment || '').trim();
+
+        if (!(await canProcessVehicleProfileActivation(req))) {
+            return res.status(403).json({
+                message: 'Only the flowchart Administrator assigned on the company flowchart can hold this request.',
+            });
+        }
+
+        const asset = await AssetItem.findById(id).populate('typeId', 'name').lean();
+        if (!asset) return res.status(404).json({ message: 'Asset not found' });
+        if (!isFleetVehicleAsset(asset)) {
+            return res.status(400).json({ message: 'Not a fleet vehicle asset.' });
+        }
+        if (String(asset.vehicleProfileActivationStatus || '').toLowerCase() !== 'submitted') {
+            return res.status(400).json({ message: 'This vehicle is not awaiting profile activation review.' });
+        }
+
+        const requested = [...new Set((asset.vehicleProfileActivationSections || []).map(String))].filter((s) => ALLOWED_SECTIONS.has(s));
+        if (!selectionProvided) {
+            return res.status(400).json({
+                message: 'Confirm which sections you accept (checked); unchecked sections return to the submitter.',
+            });
+        }
+        if (!requested.length) {
+            return res.status(400).json({ message: 'There are no sections in this submission to hold against.' });
+        }
+
+        const invalid = approvedSections.filter((s) => !requested.includes(String(s)));
+        if (invalid.length) {
+            return res.status(400).json({ message: 'Approved selection references sections that are not part of this request.' });
+        }
+
+        const approvedSet = new Set(approvedSections);
+        const unapproved = requested.filter((s) => !approvedSet.has(s));
+        if (!unapproved.length) {
+            return res.status(400).json({
+                message: 'Nothing left to hold — use Accept when every section in this request is acceptable.',
+            });
+        }
+
+        const rowNotesBySectionId = sanitizeRowNotesBySectionId(req.body?.rowNotesBySectionId, unapproved);
+
+        await AssetItem.updateOne(
+            { _id: id },
+            {
+                $set: {
+                    vehicleProfileActivationHold: {
+                        heldAt: new Date(),
+                        unapprovedSections: unapproved,
+                        comment: comment || '',
+                        ...(rowNotesBySectionId ? { rowNotesBySectionId } : {}),
+                    },
+                },
+            },
+        );
+
+        const designatedAdmin = await getDepartmentHOD('admincontroller');
+        const submitterId = asset.vehicleProfileActivationSubmittedBy || null;
+        const submitterEmp = submitterId
+            ? await EmployeeBasic.findById(submitterId)
+                  .select('_id employeeId firstName lastName companyEmail workEmail email personalEmail')
+                  .lean()
+            : null;
+
+        const subjectForDash = vehicleSubjectForDashboard(asset);
+        const vehicleLabel = `${asset.name || 'Vehicle'} (${asset.assetId || id})`;
+        const sectionLabels = unapproved.map((s) => SECTION_LABEL[s] || s);
+        const holdExtra1 = `[Fleet] On hold — update: ${sectionLabels.join(', ')}`;
+
+        try {
+            const DashboardAction = (await import('../models/DashboardAction.js')).default;
+            await DashboardAction.deleteMany({
+                requestId: asset._id,
+                requestType: 'Vehicle Profile Activation',
+                status: 'Pending',
+            });
+        } catch (_e) {
+            /* non-fatal */
+        }
+
+        const reviewerDisplayName =
+            req.user?.name ||
+            [req.user?.firstName, req.user?.lastName].filter(Boolean).join(' ').trim() ||
+            'Administrator';
+
+        await syncDashboardAction({
+            requestId: asset._id,
+            requestType: 'Vehicle Profile Activation',
+            assignedTo: designatedAdmin?._id ? String(designatedAdmin._id) : '',
+            status: 'On Hold',
+            skipPendingCompletion: true,
+            subjectEmployee: { ...subjectForDash, _id: asset._id },
+            vehicleProfileActivationNotifyAssignee: submitterEmp || undefined,
+            requestedByName: reviewerDisplayName,
+            actionedBy: req.user?.employeeObjectId || req.user?._id,
+            comment: comment || sectionLabels.join(', '),
+            extra1: holdExtra1,
+            extra2: trimDesc(asset.vehicleProfileActivationDescription),
+            extra3: JSON.stringify({
+                activationSubject: 'vehicle',
+                activationViewerRole: 'submitter',
+                unapprovedSections: unapproved,
+                vehicleMongoId: String(asset._id),
+            }),
+        });
+
+        const origin = req.headers.origin || (req.headers.referer ? new URL(req.headers.referer).origin : null);
+        const baseUrl = process.env.FRONTEND_URL || origin || 'http://localhost:3000';
+        const detailUrl = `${baseUrl}/HRM/Asset/Vehicle/details/${id}`;
+        const notesObj = rowNotesBySectionId || {};
+        const holdItems = unapproved.map((sid) => ({
+            sectionId: sid,
+            label: SECTION_LABEL[sid] || sid,
+            note: notesObj[sid] || '',
+        }));
+
+        sendVehicleProfileActivationHoldEmail({
+            submitterEmployee: submitterEmp,
+            acName: reviewerDisplayName,
+            vehicleLabel,
+            detailUrl,
+            holdItems,
+            comment,
+        }).catch(() => {});
+
+        try {
+            const AssetHistory = (await import('../models/AssetHistory.js')).default;
+            await AssetHistory.create({
+                assetId: asset._id,
+                action: 'Update',
+                performedBy: req.user?.employeeObjectId || req.user?._id || null,
+                comments: `Vehicle profile activation on hold — sections: ${unapproved.join(', ')}.`,
+                details: { type: 'VehicleProfileActivationHold', unapprovedSections: unapproved, comment },
+            });
+        } catch (_h) {
+            /* non-fatal */
+        }
+
+        const refreshed = await AssetItem.findById(id).populate('typeId', 'name').populate('assignedTo', 'firstName lastName employeeId').lean();
+        return res.status(200).json({
+            message: 'Request placed on hold. The submitter was notified by email and dashboard.',
+            asset: refreshed,
+        });
+    } catch (err) {
+        console.error('holdVehicleProfileActivation:', err);
+        return res.status(500).json({ message: err.message || 'Failed to hold vehicle profile activation.' });
+    }
+};
+
+/**
+ * POST /api/AssetItem/:id/reject-vehicle-profile-activation
+ */
+export const rejectVehicleProfileActivation = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const reason = String(req.body?.reason || '').trim();
+        if (!reason) {
+            return res.status(400).json({ message: 'Rejection reason is required.' });
+        }
+
+        if (!(await canProcessVehicleProfileActivation(req))) {
+            return res.status(403).json({
+                message: 'Only the flowchart Administrator assigned on the company flowchart can reject this request.',
+            });
+        }
+
+        const asset = await AssetItem.findById(id).populate('typeId', 'name').lean();
+        if (!asset) return res.status(404).json({ message: 'Asset not found' });
+        if (!isFleetVehicleAsset(asset)) {
+            return res.status(400).json({ message: 'Not a fleet vehicle asset.' });
+        }
+        if (String(asset.vehicleProfileActivationStatus || '').toLowerCase() !== 'submitted') {
+            return res.status(400).json({ message: 'This vehicle is not awaiting profile activation review.' });
+        }
+
+        const submitterId = asset.vehicleProfileActivationSubmittedBy || null;
+        const submitterEmp = submitterId
+            ? await EmployeeBasic.findById(submitterId)
+                  .select('_id employeeId firstName lastName companyEmail workEmail email personalEmail')
+                  .lean()
+            : null;
+
+        const reviewerDisplayName =
+            req.user?.name ||
+            [req.user?.firstName, req.user?.lastName].filter(Boolean).join(' ').trim() ||
+            'Administrator';
+
+        await AssetItem.updateOne(
+            { _id: id },
+            {
+                $set: {
+                    vehicleProfileActivationStatus: 'rejected',
+                },
+                $unset: {
+                    vehicleProfileActivationHold: 1,
+                    vehicleProfileActivationSubmittedAt: 1,
+                    vehicleProfileActivationSubmittedBy: 1,
+                    vehicleProfileActivationDescription: 1,
+                    vehicleProfileActivationSections: 1,
+                },
+            },
+        );
+
+        try {
+            const DashboardAction = (await import('../models/DashboardAction.js')).default;
+            await DashboardAction.updateMany(
+                {
+                    requestId: asset._id,
+                    requestType: 'Vehicle Profile Activation',
+                    status: { $in: ['Pending', 'On Hold'] },
+                },
+                {
+                    status: 'Rejected',
+                    actionedDate: new Date(),
+                    actionedBy: req.user?.employeeObjectId || req.user?._id,
+                    comment: reason,
+                },
+            );
+        } catch (e) {
+            console.error('[rejectVehicleProfileActivation] dashboard', e);
+        }
+
+        const subjectForDash = vehicleSubjectForDashboard(asset);
+        const vehicleLabel = `${asset.name || 'Vehicle'} (${asset.assetId || id})`;
+        if (submitterEmp?._id) {
+            try {
+                const DashboardAction = (await import('../models/DashboardAction.js')).default;
+                await DashboardAction.findOneAndUpdate(
+                    {
+                        requestId: asset._id,
+                        assignedTo: submitterEmp._id,
+                        requestType: 'Vehicle Profile Activation',
+                        status: 'Rejected',
+                    },
+                    {
+                        assignedTo: submitterEmp._id,
+                        assignedToEmpId: submitterEmp.employeeId,
+                        requestId: asset._id,
+                        requestType: 'Vehicle Profile Activation',
+                        status: 'Rejected',
+                        subjectEmployeeId: subjectForDash.employeeId || '',
+                        subjectName: `${subjectForDash.firstName} ${subjectForDash.lastName}`.trim() || 'Vehicle',
+                        requestedByName: reviewerDisplayName,
+                        requestedDate: new Date(),
+                        extra1: '[Fleet] Vehicle profile request rejected — you can update and send again when ready.',
+                        extra2: reason.slice(0, 500),
+                        extra3: JSON.stringify({
+                            activationSubject: 'vehicle',
+                            activationViewerRole: 'submitter',
+                            vehicleMongoId: String(asset._id),
+                            outcome: 'reject',
+                        }),
+                        actionedDate: new Date(),
+                        actionedBy: req.user?.employeeObjectId || req.user?._id,
+                        comment: reason,
+                    },
+                    { upsert: true, new: true, setDefaultsOnInsert: true },
+                );
+            } catch (_e) {
+                /* non-fatal */
+            }
+        }
+
+        const origin = req.headers.origin || (req.headers.referer ? new URL(req.headers.referer).origin : null);
+        const baseUrl = process.env.FRONTEND_URL || origin || 'http://localhost:3000';
+        const detailUrl = `${baseUrl}/HRM/Asset/Vehicle/details/${id}`;
+        sendVehicleProfileActivationOutcomeEmail({
+            submitterEmployee: submitterEmp,
+            acName: reviewerDisplayName,
+            vehicleLabel,
+            detailUrl,
+            status: 'rejected',
+            reason,
+        }).catch(() => {});
+
+        try {
+            const AssetHistory = (await import('../models/AssetHistory.js')).default;
+            await AssetHistory.create({
+                assetId: asset._id,
+                action: 'Update',
+                performedBy: req.user?.employeeObjectId || req.user?._id || null,
+                comments: `Vehicle profile activation rejected: ${reason}`,
+                details: { type: 'VehicleProfileActivationReject', reason },
+            });
+        } catch (_h) {
+            /* non-fatal */
+        }
+
+        const refreshed = await AssetItem.findById(id).populate('typeId', 'name').populate('assignedTo', 'firstName lastName employeeId').lean();
+        return res.status(200).json({
+            message: 'Vehicle profile activation request rejected.',
+            asset: refreshed,
+            vehicleProfileActivationStatus: 'rejected',
+        });
+    } catch (err) {
+        console.error('rejectVehicleProfileActivation:', err);
+        return res.status(500).json({ message: err.message || 'Failed to reject vehicle profile activation.' });
     }
 };

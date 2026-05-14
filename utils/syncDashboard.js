@@ -32,6 +32,8 @@ export const syncDashboardAction = async (data) => {
             profileActivationNotifyAssignee,
             /** Company Activation On Hold: outcome row for the submitter. */
             companyActivationNotifyAssignee,
+            /** Vehicle Profile Activation On Hold: outcome row for the submitter. */
+            vehicleProfileActivationNotifyAssignee,
             /** When true, do not mark assignee Pending rows as completed (used for Profile hold: HR keeps the task open). */
             skipPendingCompletion = false,
         } = data;
@@ -140,6 +142,46 @@ export const syncDashboardAction = async (data) => {
                 );
             }
 
+            if (
+                requestType === 'Vehicle Profile Activation' &&
+                status === 'On Hold' &&
+                subjectEmployee &&
+                vehicleProfileActivationNotifyAssignee?._id
+            ) {
+                const assignee = vehicleProfileActivationNotifyAssignee;
+                const subj = subjectEmployee;
+                const subjectNameDisplay = `${subj.firstName || ''} ${subj.lastName || ''}`.trim() || 'Vehicle';
+                const outcomeExtra1 =
+                    extra1 ||
+                    '[Fleet] Asset Controller placed your vehicle profile review on hold — please update the listed sections.';
+                await DashboardAction.findOneAndUpdate(
+                    { requestId, assignedTo: assignee._id, requestType },
+                    {
+                        assignedTo: assignee._id,
+                        assignedToEmpId: assignee.employeeId,
+                        requestId,
+                        requestType: 'Vehicle Profile Activation',
+                        status: 'On Hold',
+                        subjectEmployeeId: subj.employeeId || '',
+                        subjectName: subjectNameDisplay,
+                        requestedByName: requestedByName || '',
+                        requestedDate: new Date(),
+                        extra1: outcomeExtra1,
+                        extra2: extra2 || '',
+                        extra3:
+                            extra3 ??
+                            JSON.stringify({
+                                activationSubject: 'vehicle',
+                                activationViewerRole: 'submitter',
+                            }),
+                        actionedDate: new Date(),
+                        actionedBy: actionedBy || null,
+                        comment: comment || '',
+                    },
+                    { upsert: true, new: true, setDefaultsOnInsert: true },
+                );
+            }
+
             // If it's fully completed and no next step, we stop here.
             // But usually, an action's completion triggers a NEW pending action for the next person.
             // That would be a separate call to syncDashboardAction with the new 'assignedTo'.
@@ -177,7 +219,9 @@ export const syncDashboardAction = async (data) => {
                 ? String(extra3)
                 : requestType === 'Profile Activation'
                     ? JSON.stringify({ activationSubject: 'employee', activationViewerRole: 'hr' })
-                    : undefined;
+                    : requestType === 'Vehicle Profile Activation'
+                        ? JSON.stringify({ activationSubject: 'vehicle', activationViewerRole: 'flowchart_admin' })
+                        : undefined;
 
         await DashboardAction.findOneAndUpdate(
             { requestId: requestId, assignedTo: actualAssignedTo, status: 'Pending' },

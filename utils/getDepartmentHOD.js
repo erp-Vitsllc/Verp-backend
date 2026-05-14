@@ -27,21 +27,68 @@ export const getDepartmentHOD = async (departmentType) => {
             category = 'management';
         }
 
-        // Look for active HOD in Flowchart collection with regex to handle spaces in DB
         const categoryRegex = new RegExp(`^${category.split('').join('\\s*')}$`, 'i');
-        let responsibility = await Flowchart.findOne({
-            category: { $regex: categoryRegex },
-            status: 'Active'
-        }).populate('empObjectId', 'employeeId firstName lastName companyEmail workEmail personalEmail email designation department profileStatus signature');
 
-        // During reassignment (status Pending), keep previous active holder effective
-        // until the invited user accepts.
-        if (!responsibility) {
-            const pending = await Flowchart.findOne({
+        const empPopulateSelect =
+            'employeeId firstName lastName companyEmail workEmail personalEmail email designation department profileStatus signature';
+
+        // For org "Administrator" workflows, Settings labels the row **Admin** (schema category `admin`).
+        // Legacy rows may still use `admincontroller`. Prefer `admin` / `administrator` first so email + dashboard
+        // go to Marwan (flowchart Admin), not an obsolete `admincontroller` row bound to a portal super-user.
+        let responsibility = null;
+        if (category === 'admincontroller') {
+            responsibility = await Flowchart.findOne({
+                category: { $regex: /^admin$/i },
+                status: 'Active',
+            }).populate('empObjectId', empPopulateSelect);
+            if (!responsibility) {
+                responsibility = await Flowchart.findOne({
+                    category: { $regex: /^administrator$/i },
+                    status: 'Active',
+                }).populate('empObjectId', empPopulateSelect);
+            }
+            if (!responsibility) {
+                responsibility = await Flowchart.findOne({
+                    category: { $regex: categoryRegex },
+                    status: 'Active',
+                }).populate('empObjectId', empPopulateSelect);
+            }
+        } else {
+            responsibility = await Flowchart.findOne({
                 category: { $regex: categoryRegex },
-                status: 'Pending',
-                reassignmentSnapshot: { $ne: null }
-            }).lean();
+                status: 'Active',
+            }).populate('empObjectId', empPopulateSelect);
+        }
+
+        if (!responsibility) {
+            let pending = null;
+            if (category === 'admincontroller') {
+                pending = await Flowchart.findOne({
+                    category: { $regex: /^admin$/i },
+                    status: 'Pending',
+                    reassignmentSnapshot: { $ne: null },
+                }).lean();
+                if (!pending) {
+                    pending = await Flowchart.findOne({
+                        category: { $regex: /^administrator$/i },
+                        status: 'Pending',
+                        reassignmentSnapshot: { $ne: null },
+                    }).lean();
+                }
+                if (!pending) {
+                    pending = await Flowchart.findOne({
+                        category: { $regex: categoryRegex },
+                        status: 'Pending',
+                        reassignmentSnapshot: { $ne: null },
+                    }).lean();
+                }
+            } else {
+                pending = await Flowchart.findOne({
+                    category: { $regex: categoryRegex },
+                    status: 'Pending',
+                    reassignmentSnapshot: { $ne: null },
+                }).lean();
+            }
             if (pending?.reassignmentSnapshot?.empObjectId || pending?.reassignmentSnapshot?.employeeId) {
                 const snapshotEmpObjectId = pending.reassignmentSnapshot.empObjectId;
                 const snapshotEmployeeId = pending.reassignmentSnapshot.employeeId;
@@ -136,40 +183,50 @@ export const isUserInFlowchart = async (user, category) => {
         const normalizedCategory = (category || '').toLowerCase().replace(/\s+/g, '');
         const categoryRegex = new RegExp(`^${normalizedCategory.split('').join('\\s*')}$`, 'i');
 
-        const query = {
-            category: { $regex: categoryRegex },
-            $or: []
-        };
+        const categoryBranches =
+            normalizedCategory === 'admincontroller'
+                ? [
+                      { category: { $regex: categoryRegex } },
+                      { category: { $regex: /^admin$/i } },
+                      { category: { $regex: /^administrator$/i } },
+                  ]
+                : [{ category: { $regex: categoryRegex } }];
 
-        // Active holder is always authorized.
-        if (user.employeeObjectId) query.$or.push({ status: 'Active', empObjectId: user.employeeObjectId });
-        if (user.employeeId) {
-            const safeEmployeeIdRegex = buildWhitespaceAgnosticExactRegex(user.employeeId);
-            if (safeEmployeeIdRegex) query.$or.push({ status: 'Active', employeeId: { $regex: safeEmployeeIdRegex } });
-        }
-
-        // For Pending reassignment rows, keep previous holder authorized until approval.
-        if (user.employeeObjectId) {
-            query.$or.push({
-                status: 'Pending',
-                reassignmentSnapshot: { $ne: null },
-                'reassignmentSnapshot.empObjectId': user.employeeObjectId
-            });
-        }
-        if (user.employeeId) {
-            const safeEmployeeIdRegex = buildWhitespaceAgnosticExactRegex(user.employeeId);
-            if (safeEmployeeIdRegex) {
-                query.$or.push({
+        const orClauses = [];
+        for (const cat of categoryBranches) {
+            if (user.employeeObjectId) {
+                orClauses.push({ ...cat, status: 'Active', empObjectId: user.employeeObjectId });
+            }
+            if (user.employeeId) {
+                const safeEmployeeIdRegex = buildWhitespaceAgnosticExactRegex(user.employeeId);
+                if (safeEmployeeIdRegex) {
+                    orClauses.push({ ...cat, status: 'Active', employeeId: { $regex: safeEmployeeIdRegex } });
+                }
+            }
+            if (user.employeeObjectId) {
+                orClauses.push({
+                    ...cat,
                     status: 'Pending',
                     reassignmentSnapshot: { $ne: null },
-                    'reassignmentSnapshot.employeeId': { $regex: safeEmployeeIdRegex }
+                    'reassignmentSnapshot.empObjectId': user.employeeObjectId,
                 });
+            }
+            if (user.employeeId) {
+                const safeEmployeeIdRegex = buildWhitespaceAgnosticExactRegex(user.employeeId);
+                if (safeEmployeeIdRegex) {
+                    orClauses.push({
+                        ...cat,
+                        status: 'Pending',
+                        reassignmentSnapshot: { $ne: null },
+                        'reassignmentSnapshot.employeeId': { $regex: safeEmployeeIdRegex },
+                    });
+                }
             }
         }
 
-        if (query.$or.length === 0) return false;
+        if (orClauses.length === 0) return false;
 
-        const exists = await Flowchart.exists(query);
+        const exists = await Flowchart.exists({ $or: orClauses });
         return !!exists;
     } catch (error) {
         console.error(`[isUserInFlowchart] Error:`, error);
@@ -188,21 +245,31 @@ export const isUserActiveInFlowchart = async (user, category) => {
         const normalizedCategory = (category || '').toLowerCase().replace(/\s+/g, '');
         const categoryRegex = new RegExp(`^${normalizedCategory.split('').join('\\s*')}$`, 'i');
 
-        const query = {
-            category: { $regex: categoryRegex },
-            status: 'Active',
-            $or: []
-        };
+        const categoryBranches =
+            normalizedCategory === 'admincontroller'
+                ? [
+                      { category: { $regex: categoryRegex } },
+                      { category: { $regex: /^admin$/i } },
+                      { category: { $regex: /^administrator$/i } },
+                  ]
+                : [{ category: { $regex: categoryRegex } }];
 
-        if (user.employeeObjectId) query.$or.push({ empObjectId: user.employeeObjectId });
-        if (user.employeeId) {
-            const safeEmployeeIdRegex = buildWhitespaceAgnosticExactRegex(user.employeeId);
-            if (safeEmployeeIdRegex) query.$or.push({ employeeId: { $regex: safeEmployeeIdRegex } });
+        const orClauses = [];
+        for (const cat of categoryBranches) {
+            if (user.employeeObjectId) {
+                orClauses.push({ ...cat, status: 'Active', empObjectId: user.employeeObjectId });
+            }
+            if (user.employeeId) {
+                const safeEmployeeIdRegex = buildWhitespaceAgnosticExactRegex(user.employeeId);
+                if (safeEmployeeIdRegex) {
+                    orClauses.push({ ...cat, status: 'Active', employeeId: { $regex: safeEmployeeIdRegex } });
+                }
+            }
         }
 
-        if (query.$or.length === 0) return false;
+        if (orClauses.length === 0) return false;
 
-        const exists = await Flowchart.exists(query);
+        const exists = await Flowchart.exists({ $or: orClauses });
         return !!exists;
     } catch (error) {
         console.error(`[isUserActiveInFlowchart] Error:`, error);

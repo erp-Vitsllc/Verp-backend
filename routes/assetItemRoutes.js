@@ -3,7 +3,12 @@ import EmployeeBasic from '../models/EmployeeBasic.js';
 import User from '../models/User.js';
 import { createAssetItem, getAssetItems, getVehicleFleetDashboard, getVehicleFleetServiceRequests, getAllAssignedAssets, getMyAssignedAssetsForReturn, getUnassignedAssetsForEmployee, getHRCompanyAssets, getOnLeaveAssetsForEmployee, getOnServiceAssetsForEmployee, handleOnLeaveAction, bulkHandleOnLeaveAction, handleOnServiceAction, bulkHandleOnServiceAction, getAssetItemDetail, assignAssetItem, bulkAssignAssetItems, downloadHandoverPdf, downloadHistoryHandoverPdf, respondToAssignment, bulkRespondToAssignment, getBulkAssignmentPendingGroup, respondBulkAssignmentGroup, getAssetHistory, getHistoryRecord, returnAssetItem, updateAssetStatus, addAssetDocument, updateAssetDocument, deleteAssetDocument, addAssetService, deleteAssetService, submitAssetServiceDraft, addAssetImage, deleteAssetImage, transferAssetAccessory, manageAccessoryStatus, updateAssetItem, deleteAssetItem, endOfLifeAsset, requestAssetAction, bulkRequestAssetAction, handleAssetActionApproval, finalizeAssetAction, uploadAccessoriesAttachment, requestAccessoryAction, respondAccessoryAction, finalizeAccessoryAction, respondToAssetCreation, bulkRespondToAssetCreation, getBulkAssetDetails, getBulkAssetInventoryForPrint, transferAsset, submitDraftForCreationApproval, getPendingAssetDashboardInbox, deletePendingAssetDashboardInboxItem, getEmployeePreviousAssets } from '../controllers/assetItemController.js';
 import { respondVehicleServiceWorkflow, respondVehicleServiceScheduledPeriod } from '../controllers/vehicleServiceWorkflowController.js';
-import { submitVehicleProfileActivation } from '../controllers/vehicleProfileActivationController.js';
+import {
+    submitVehicleProfileActivation,
+    approveVehicleProfileActivation,
+    holdVehicleProfileActivation,
+    rejectVehicleProfileActivation,
+} from '../controllers/vehicleProfileActivationController.js';
 import { protect } from '../middleware/authMiddleware.js';
 import {
     isUserInFlowchart,
@@ -263,9 +268,9 @@ const requireAssetFullAccess = async (req, res, next) => {
             }
         }
 
-        // Vehicle fleet "Add service request": any logged-in user may POST (controller enforces
-        // `serviceRequestSource === 'vehicle_fleet_dashboard'` for vehicles). Avoids blocking
-        // unassigned fleet vehicles that only AC could touch before.
+        // Vehicle fleet / vehicle asset detail "Add service request": any logged-in user may POST
+        // (controller enforces `serviceRequestSource` in `vehicle_fleet_dashboard` | `vehicle_asset_detail`
+        // for vehicles). Avoids blocking unassigned fleet vehicles that only AC could touch before.
         if (id && req.method === 'POST') {
             const pathNoQuery = String(req.originalUrl || req.url || '').split('?')[0];
             if (pathNoQuery.endsWith('/service') && !pathNoQuery.includes('service-workflow')) {
@@ -591,6 +596,9 @@ router.put('/bulk/approve-creation', protect, requireAssetControllerOrAdmin, bul
 router.put('/:id/approve-creation', protect, requireAssetCreationApprover, respondToAssetCreation);
 router.put('/:id/submit-creation', protect, submitDraftForCreationApproval);
 router.post('/:id/submit-vehicle-profile-activation', protect, submitVehicleProfileActivation);
+router.post('/:id/approve-vehicle-profile-activation', protect, approveVehicleProfileActivation);
+router.post('/:id/hold-vehicle-profile-activation', protect, holdVehicleProfileActivation);
+router.post('/:id/reject-vehicle-profile-activation', protect, rejectVehicleProfileActivation);
 router.put('/:id/return', protect, requireReturnAssetAccess, returnAssetItem);
 router.put('/:id/on-leave-action', protect, requireParkingAssetAccess, (req, res, next) => {
     console.log(`[Route] PUT /${req.params.id}/on-leave-action hit`);

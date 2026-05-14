@@ -75,8 +75,23 @@ export const holdProfile = async (req, res) => {
         const unapprovedEntries = entriesWithIds.filter((e) => !approved.has(e.__idStr));
 
         const unapprovedCards = [...new Set(unapprovedEntries.map((e) => String(e.sub?.card || "").trim()).filter(Boolean))];
+
+        const rawRowNotes = req.body?.rowNotesByEntryId;
+        for (const { __idStr } of unapprovedEntries) {
+            const t =
+                rawRowNotes && typeof rawRowNotes === "object"
+                    ? String(rawRowNotes[__idStr] ?? rawRowNotes[String(__idStr)] ?? "").trim()
+                    : "";
+            if (!t) {
+                return res.status(400).json({
+                    message:
+                        "Instructions are required for every unchecked change row before activation can be placed on hold.",
+                });
+            }
+        }
+
         const rowNotesByEntryId = sanitizeActivationHoldRowNotes(
-            req.body?.rowNotesByEntryId,
+            rawRowNotes,
             unapprovedEntries.map((e) => e.__idStr),
         );
 
@@ -87,11 +102,11 @@ export const holdProfile = async (req, res) => {
             );
             await applyApprovedPendingProfileChanges(employeeId, doc, changesPlain);
 
-            approvedEntries.forEach(({ sub }) => {
-                if (sub?._id) {
-                    doc.pendingReactivationChanges.pull(sub._id);
-                }
-            });
+            const approvedIdStrSet = new Set(approvedEntries.map((e) => e.__idStr));
+            doc.pendingReactivationChanges = (doc.pendingReactivationChanges || []).filter(
+                (sub, idx) => !approvedIdStrSet.has(idStrSub(sub, idx)),
+            );
+            doc.markModified("pendingReactivationChanges");
         }
 
         doc.profileApprovalStatus = "submitted";
@@ -128,7 +143,7 @@ export const holdProfile = async (req, res) => {
         await syncDashboardAction({
             requestId: doc._id,
             requestType: "Profile Activation",
-            assignedTo: String(doc.profileSubmittedTo || ""),
+            assignedTo: String(submitterForNotify?._id || doc.profileSubmittedTo || ""),
             status: "On Hold",
             skipPendingCompletion: true,
             subjectEmployee: subjectLean || doc,
