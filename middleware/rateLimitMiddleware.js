@@ -6,7 +6,7 @@ const maxRequests = Number(process.env.RATE_LIMIT_MAX);
 const commonWindowMs =
     Number.isFinite(windowMs) && windowMs > 0 ? windowMs : 15 * 60 * 1000;
 const commonMax =
-    Number.isFinite(maxRequests) && maxRequests > 0 ? maxRequests : 2000;
+    Number.isFinite(maxRequests) && maxRequests > 0 ? maxRequests : 8000;
 
 const rateLimitDisabled =
     process.env.RATE_LIMIT_DISABLED === '1' || process.env.RATE_LIMIT_DISABLED === 'true';
