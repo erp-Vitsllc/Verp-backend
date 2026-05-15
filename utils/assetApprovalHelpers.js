@@ -1,4 +1,5 @@
 import EmployeeBasic from '../models/EmployeeBasic.js';
+import User from '../models/User.js';
 
 const escapeRegExp = (value) => {
     return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -71,4 +72,27 @@ export async function getAssetRequesterDisplayName(req) {
         /* use fallback */
     }
     return fallback;
+}
+
+/** Resolve asset creator (User ref on AssetItem.createdBy) to EmployeeBasic for notifications. */
+export async function resolveAssetCreatorEmployee(createdByUserId) {
+    if (!createdByUserId) return null;
+    try {
+        const user = await User.findById(createdByUserId).select('employeeId name email companyEmail').lean();
+        if (!user) return null;
+
+        if (user.employeeId) {
+            const safeEmployeeIdRegex = buildWhitespaceAgnosticExactRegex(user.employeeId);
+            if (safeEmployeeIdRegex) {
+                const emp = await EmployeeBasic.findOne({ employeeId: { $regex: safeEmployeeIdRegex } })
+                    .select('_id employeeId firstName lastName companyEmail workEmail personalEmail email primaryReportee')
+                    .populate('primaryReportee', 'companyEmail workEmail personalEmail email')
+                    .lean();
+                if (emp) return emp;
+            }
+        }
+    } catch (e) {
+        console.error('[resolveAssetCreatorEmployee]', e?.message || e);
+    }
+    return null;
 }

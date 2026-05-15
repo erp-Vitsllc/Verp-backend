@@ -12,11 +12,39 @@ const ownerCompanyDocs = [
     { id: 'hrm_company_view_owner_driving_license', label: 'Driving License', parent: 'hrm_company_view_owner', hasDownload: true },
 ];
 
+/** Company Documents → Live: granular rows (keep in sync with frontend). */
+export const COMPANY_DOCUMENTS_LIVE_GRANULAR_IDS = [
+    'hrm_company_view_documents_live_with_expiry',
+    'hrm_company_view_documents_live_without_expiry',
+];
+
+const companyDocumentsLiveChildren = [
+    {
+        id: 'hrm_company_view_documents_live_with_expiry',
+        label: 'Document with expiry',
+        parent: 'hrm_company_view_documents_live',
+        hasDownload: true,
+    },
+    {
+        id: 'hrm_company_view_documents_live_without_expiry',
+        label: 'Document without expiry',
+        parent: 'hrm_company_view_documents_live',
+        hasDownload: true,
+    },
+];
+
 const companyDocumentsChildren = [
-    { id: 'hrm_company_view_documents_live', label: 'Live Documents', parent: 'hrm_company_view_documents', hasDownload: true },
-    { id: 'hrm_company_view_documents_old', label: 'Old Documents', parent: 'hrm_company_view_documents', hasDownload: true },
+    {
+        id: 'hrm_company_view_documents_live',
+        label: 'Live document',
+        parent: 'hrm_company_view_documents',
+        hasDownload: false,
+        children: companyDocumentsLiveChildren,
+    },
+    { id: 'hrm_company_view_documents_moa', label: 'MOA', parent: 'hrm_company_view_documents', hasDownload: true },
     { id: 'hrm_company_view_documents_memo', label: 'Memo', parent: 'hrm_company_view_documents', hasDownload: true },
     { id: 'hrm_company_view_documents_certificate', label: 'Certificate', parent: 'hrm_company_view_documents', hasDownload: true },
+    { id: 'hrm_company_view_documents_old', label: 'Old Documents', parent: 'hrm_company_view_documents', hasDownload: true },
 ];
 
 const employeeBasicChildren = [
@@ -86,7 +114,7 @@ export const HRM_MODULE = {
                             id: 'hrm_company_view_basic',
                             label: 'Basic Details',
                             parent: 'hrm_company_view',
-                            hasDownload: false,
+                            hasDownload: true,
                             children: [
                                 {
                                     id: 'hrm_company_view_basic_trade_license',
@@ -110,8 +138,8 @@ export const HRM_MODULE = {
                             hasDownload: false,
                             children: ownerCompanyDocs,
                         },
-                        { id: 'hrm_company_view_assets', label: 'Assets', parent: 'hrm_company_view', hasDownload: true },
-                        { id: 'hrm_company_view_fine', label: 'Fine', parent: 'hrm_company_view', hasDownload: true },
+                        { id: 'hrm_company_view_assets', label: 'Assets', parent: 'hrm_company_view', hasDownload: false },
+                        { id: 'hrm_company_view_fine', label: 'Fine', parent: 'hrm_company_view', hasDownload: false },
                         {
                             id: 'hrm_company_view_documents',
                             label: 'Documents',
@@ -221,9 +249,11 @@ export const COMPANY_MAIN_TAB_MODULES = {
     documents: [
         'hrm_company_view_documents',
         'hrm_company_view_documents_live',
-        'hrm_company_view_documents_old',
+        ...COMPANY_DOCUMENTS_LIVE_GRANULAR_IDS,
+        'hrm_company_view_documents_moa',
         'hrm_company_view_documents_memo',
         'hrm_company_view_documents_certificate',
+        'hrm_company_view_documents_old',
     ],
     /** Company profile reuses the employee shell; "Work Details" maps to owner cards. */
     'work-details': [

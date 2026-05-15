@@ -134,7 +134,8 @@ export const holdProfile = async (req, res) => {
 
         const submitterForNotify = doc.profileActivationSubmittedBy
             ? await EmployeeBasic.findById(doc.profileActivationSubmittedBy)
-                  .select("_id employeeId firstName lastName designation companyEmail workEmail email personalEmail")
+                  .select("_id employeeId firstName lastName designation companyEmail workEmail email personalEmail primaryReportee")
+                  .populate("primaryReportee", "firstName lastName companyEmail workEmail email")
                   .lean()
             : null;
 

@@ -458,14 +458,28 @@ export const getUserActivityStats = async (req, res) => {
                 .limit(25)
                 .lean()
                 .maxTimeMS(6000),
+            DashboardAction.find({
+                requestType: 'Asset Approval',
+                status: 'Rejected',
+                $or: profileActivationOutcomeOr,
+            })
+                .sort({ actionedDate: -1, updatedAt: -1 })
+                .limit(25)
+                .lean()
+                .maxTimeMS(6000),
         ]);
         dashboardSettled.forEach((r, i) => {
             if (r.status === "rejected") {
                 console.warn(`[getUserActivityStats] dashboard slot ${i} failed:`, r.reason?.message || r.reason);
             }
         });
-        const [dashboardPendingItemsRaw, profileActivationOutcomeItems, companyActivationOutcomeItems, vehicleProfileActivationOutcomeItems] =
-            dashboardSettled.map((r) => (r.status === "fulfilled" ? r.value : []));
+        const [
+            dashboardPendingItemsRaw,
+            profileActivationOutcomeItems,
+            companyActivationOutcomeItems,
+            vehicleProfileActivationOutcomeItems,
+            assetCreationOutcomeItems,
+        ] = dashboardSettled.map((r) => (r.status === "fulfilled" ? r.value : []));
 
         const dashboardPendingItems = await filterStaleExpiryDashboardRows(
             dedupeOwnerLinkedDocumentExpiryReminders(
@@ -670,6 +684,18 @@ export const getUserActivityStats = async (req, res) => {
                 item.requestType === 'Vehicle Profile Activation' &&
                 vehicleActivationViewerRole === 'requester';
 
+            let assetCreationViewerRole = null;
+            if (item.requestType === 'Asset Approval' && item.extra3) {
+                try {
+                    assetCreationViewerRole = JSON.parse(item.extra3).assetCreationViewerRole || null;
+                } catch {
+                    assetCreationViewerRole = null;
+                }
+            }
+            const isAssetCreationCreatorCopy =
+                item.requestType === 'Asset Approval' &&
+                assetCreationViewerRole === 'creator';
+
             activityList.push({
                 id: displayId,
                 actionId: item._id.toString(),
@@ -682,7 +708,7 @@ export const getUserActivityStats = async (req, res) => {
                 extra2: item.extra2,
                 extra3: item.extra3,
                 targetEmployeeId: item.subjectEmployeeId?.toString(),
-                scope: (isCreatorSideAssetApproval || isCompanyActivationRequesterCopy || isVehicleActivationRequesterCopy) ? 'outgoing' : 'inbox'
+                scope: (isCreatorSideAssetApproval || isCompanyActivationRequesterCopy || isVehicleActivationRequesterCopy || isAssetCreationCreatorCopy) ? 'outgoing' : 'inbox'
             });
             if (reqIdStr) seenRequests.set(reqIdStr, 'Pending');
         });
@@ -1140,6 +1166,56 @@ export const getUserActivityStats = async (req, res) => {
                     return;
                 }
                 if (existing.status === 'Pending' && ['Approved', 'Rejected'].includes(activityItem.status)) {
+                    if (
+                        existing.actionId &&
+                        activityItem.actionId &&
+                        String(existing.actionId) !== String(activityItem.actionId)
+                    ) {
+                        return;
+                    }
+                    activityList[idx] = { ...existing, ...activityItem };
+                    seenRequests.set(reqIdStr, activityItem.status);
+                    return;
+                }
+                activityList[idx] = { ...existing, ...activityItem };
+            } else {
+                activityList.push(activityItem);
+                seenRequests.set(reqIdStr, item.status);
+            }
+        });
+
+        assetCreationOutcomeItems.forEach((item) => {
+            const reqIdStr = item.requestId?.toString();
+            if (!reqIdStr) return;
+            const isAssetCreationSelf =
+                dashboardAssigneeMongoIds.some(
+                    (id) => id && item.assignedTo && id.toString() === item.assignedTo.toString(),
+                ) ||
+                (targetEmployeeId &&
+                    item.assignedToEmpId &&
+                    normEmpForAssignee(item.assignedToEmpId) === normEmpForAssignee(targetEmployeeId));
+            const activityItem = {
+                id: reqIdStr,
+                actionId: item._id.toString(),
+                type: 'Asset Approval',
+                requestedBy: isAssetCreationSelf ? 'Me' : item.subjectName || item.requestedByName || 'Asset',
+                requestedDate: item.requestedDate,
+                actionedDate: item.actionedDate || item.updatedAt,
+                status: item.status,
+                extra1: item.extra1 || item.subjectEmployeeId,
+                extra2: item.extra2,
+                extra3: item.extra3,
+                targetEmployeeId: item.subjectEmployeeId?.toString(),
+                employeeId: targetEmployeeId,
+                scope: isAssetCreationSelf ? 'outgoing' : 'inbox',
+            };
+
+            const idx = activityList.findIndex(
+                (i) => i.id?.toString() === reqIdStr && i.type === 'Asset Approval',
+            );
+            if (idx !== -1) {
+                const existing = activityList[idx];
+                if (existing.status === 'Pending' && activityItem.status === 'Rejected') {
                     if (
                         existing.actionId &&
                         activityItem.actionId &&

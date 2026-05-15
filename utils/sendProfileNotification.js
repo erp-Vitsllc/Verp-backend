@@ -1,7 +1,6 @@
 import nodemailer from "nodemailer";
 
-const pickEmployeeEmail = (emp) =>
-    (emp?.companyEmail || "").trim();
+import { pickEffectiveEmail as pickEmployeeEmail } from "./pickEffectiveEmail.js";
 
 /**
  * HR activation outcome email: **only** the submitter (`recipientEmployee`). Never mails the profile subject.

@@ -26,6 +26,9 @@ import {
 } from '../utils/getDepartmentHOD.js';
 import { getManagementHOD } from '../utils/getManagementHOD.js';
 import { sendAssetCreationApprovalEmail } from '../utils/sendAssetCreationApprovalEmail.js';
+import { sendAssetCreationDecisionEmail } from '../utils/sendAssetCreationDecisionEmail.js';
+import { notifyAssetCreationRejectedToCreator } from '../utils/notifyAssetCreationRejectedToCreator.js';
+import { resolveAssetCreatorEmployee } from '../utils/assetApprovalHelpers.js';
 import { isUserAdministrator } from '../services/permissionService.js';
 import { sendAssetServiceEmail } from '../utils/sendAssetServiceEmail.js';
 import { resolveAssetControllerEmployee, getAssetRequesterDisplayName } from '../utils/assetApprovalHelpers.js';
@@ -2408,14 +2411,22 @@ export const respondToAssetCreation = async (req, res) => {
             return res.status(403).json({ message: 'Only the designated approver or an administrator can approve this asset.' });
         }
 
+        const reviewerDisplayName =
+            req.user?.name ||
+            [req.user?.firstName, req.user?.lastName].filter(Boolean).join(' ').trim() ||
+            'Asset Controller';
+        const approverRole = isJwtAdmin || isSysAdmin ? 'admin' : 'assetcontroller';
+
         if (actionNorm === 'Approve') {
             item.status = 'Unassigned';
             item.actionRequiredBy = null;
+            item.creationReturnedToDraftAt = null;
         } else {
-            item.status = 'Rejected';
+            item.status = 'Draft';
             item.actionRequiredBy = null;
             item.pendingAction = null;
             item.pendingActionDetails = null;
+            item.creationReturnedToDraftAt = new Date();
         }
 
         // This endpoint is "asset creation approval" (draft/pending). However, the asset
@@ -2441,7 +2452,7 @@ export const respondToAssetCreation = async (req, res) => {
             const userStory =
                 actionNorm === 'Approve'
                     ? `${apprName} approved this asset on ${whenStr}. It is ready to assign.`
-                    : `${apprName} did not approve this asset on ${whenStr}.`;
+                    : `${apprName} did not approve this asset on ${whenStr}. It was returned to Draft so the creator can edit and resubmit.`;
 
             await AssetHistory.create({
                 assetId: item._id,
@@ -2463,11 +2474,46 @@ export const respondToAssetCreation = async (req, res) => {
         try {
             await DashboardAction.findOneAndUpdate(
                 { requestId: item._id, requestType: 'Asset Approval', status: 'Pending' },
-                { status: actionNorm === 'Approve' ? 'Approved' : 'Rejected' }
+                {
+                    status: actionNorm === 'Approve' ? 'Approved' : 'Rejected',
+                    actionedDate: new Date(),
+                    actionedBy: req.user?.employeeObjectId || req.user?._id,
+                    comment:
+                        actionNorm === 'Reject'
+                            ? String(req.body?.reason || req.body?.comment || '').trim()
+                            : ''
+                }
             );
             console.log(`[Dashboard] Updated asset approval action to ${actionNorm === 'Approve' ? 'Approved' : 'Rejected'}`);
         } catch (err) {
             console.error('[Dashboard Error] Failed to update asset approval action:', err);
+        }
+
+        if (actionNorm === 'Reject' && item.createdBy) {
+            await notifyAssetCreationRejectedToCreator({
+                asset: item,
+                createdByUserId: item.createdBy,
+                reviewerDisplayName,
+                actionedBy: req.user?.employeeObjectId || req.user?._id,
+                rejectReason: String(req.body?.reason || req.body?.comment || '').trim(),
+                approverRole
+            });
+        }
+
+        if (actionNorm === 'Approve' && item.createdBy) {
+            try {
+                const creatorEmp = await resolveAssetCreatorEmployee(item.createdBy);
+                if (creatorEmp) {
+                    await sendAssetCreationDecisionEmail({
+                        asset: item,
+                        recipient: creatorEmp,
+                        approverRole,
+                        creatorName: reviewerDisplayName
+                    });
+                }
+            } catch (emailErr) {
+                console.error('[respondToAssetCreation] approval email failed:', emailErr?.message || emailErr);
+            }
         }
 
         const refreshed = await AssetItem.findById(item._id)
@@ -2485,7 +2531,7 @@ export const respondToAssetCreation = async (req, res) => {
 // @desc    Bulk respond to asset creation approval (Approve / Reject / Draft)
 // @route   PUT /api/AssetItem/bulk/approve-creation
 // @access  Private (Asset Controller or Admin)
-// Draft = return to creator as Draft (e.g. unchecked rows in bulk review); Reject = terminal Rejected status.
+// Draft = return unchecked rows to creator as Draft; Reject = same Draft return + creator notifications.
 export const bulkRespondToAssetCreation = async (req, res) => {
     try {
         const { assetIds, action: rawBulkAction } = req.body;
@@ -2535,6 +2581,12 @@ export const bulkRespondToAssetCreation = async (req, res) => {
         const rejectedIds = [];
         const returnedToDraftIds = [];
         const skipped = [];
+        const reviewerDisplayName =
+            req.user?.name ||
+            [req.user?.firstName, req.user?.lastName].filter(Boolean).join(' ').trim() ||
+            'Asset Controller';
+        const approverRole = isAdmin ? 'admin' : 'assetcontroller';
+        const rejectReason = String(req.body?.reason || req.body?.comment || '').trim();
 
         for (const id of uniqueIds) {
             const item = byId.get(id);
@@ -2570,10 +2622,11 @@ export const bulkRespondToAssetCreation = async (req, res) => {
 
             if (bulkActionNorm === 'Approve') {
                 item.status = 'Unassigned';
-            } else if (bulkActionNorm === 'Draft') {
-                item.status = 'Draft';
+                item.creationReturnedToDraftAt = null;
             } else {
-                item.status = 'Rejected';
+                item.status = 'Draft';
+                item.creationReturnedToDraftAt =
+                    bulkActionNorm === 'Reject' ? new Date() : null;
             }
             item.actionRequiredBy = null;
             if (bulkActionNorm === 'Reject' || bulkActionNorm === 'Draft') {
@@ -2584,8 +2637,24 @@ export const bulkRespondToAssetCreation = async (req, res) => {
 
             await DashboardAction.findOneAndUpdate(
                 { requestId: item._id, requestType: 'Asset Approval', status: 'Pending' },
-                { status: bulkActionNorm === 'Approve' ? 'Approved' : 'Rejected' }
+                {
+                    status: bulkActionNorm === 'Approve' ? 'Approved' : 'Rejected',
+                    actionedDate: new Date(),
+                    actionedBy: req.user?.employeeObjectId || req.user?._id,
+                    comment: bulkActionNorm === 'Reject' ? rejectReason : ''
+                }
             );
+
+            if (bulkActionNorm === 'Reject' && item.createdBy) {
+                await notifyAssetCreationRejectedToCreator({
+                    asset: item,
+                    createdByUserId: item.createdBy,
+                    reviewerDisplayName,
+                    actionedBy: req.user?.employeeObjectId || req.user?._id,
+                    rejectReason,
+                    approverRole
+                });
+            }
 
             if (bulkActionNorm === 'Approve') {
                 await AssetHistory.create({
@@ -2612,7 +2681,8 @@ export const bulkRespondToAssetCreation = async (req, res) => {
                     assetId: item._id,
                     action: 'Rejected',
                     performedBy: req.user.employeeObjectId || req.user._id,
-                    comments: 'Bulk asset creation rejected by Asset Controller/Admin.',
+                    comments:
+                        'Bulk asset creation not approved — returned to Draft so the creator can edit and resubmit.',
                     details: { approvalAction: 'Reject', mode: 'BulkCreationApproval' },
                     date: new Date()
                 });
@@ -2625,7 +2695,7 @@ export const bulkRespondToAssetCreation = async (req, res) => {
                 ? 'Bulk creation approval completed.'
                 : bulkActionNorm === 'Draft'
                     ? 'Bulk creation: assets returned to draft.'
-                    : 'Bulk creation rejection completed.';
+                    : 'Bulk creation not approved. Creators were notified to edit and resubmit.';
 
         res.status(200).json({
             message,
@@ -9290,6 +9360,7 @@ export const submitDraftForCreationApproval = async (req, res) => {
         const previousStatusForHistory = item.status;
         item.status = 'Submitted for Approval';
         item.actionRequiredBy = assetController._id;
+        item.creationReturnedToDraftAt = null;
         await item.save();
 
         const requesterDisplayName = await getAssetRequesterDisplayName(req);

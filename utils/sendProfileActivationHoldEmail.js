@@ -1,16 +1,6 @@
 import nodemailer from "nodemailer";
 
-/** Prefer company email; fall back to other fields on file so the submitter is notified. */
-const pickSubmitterEmail = (emp) => {
-    if (!emp) return "";
-    const c = (emp.companyEmail || "").trim();
-    if (c) return c;
-    const w = (emp.workEmail || "").trim();
-    if (w) return w;
-    const e = (emp.email || "").trim();
-    if (e) return e;
-    return (emp.personalEmail || "").trim();
-};
+import { pickEffectiveEmail as pickSubmitterEmail } from "./pickEffectiveEmail.js";
 
 const escapeHtmlBasic = (s) =>
     String(s || "")

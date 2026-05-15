@@ -10,13 +10,34 @@ import { shortenUrlsInString } from "./shortenUrlsInString.js";
 const hasValue = (v) => !(v === undefined || v === null || (typeof v === "string" && v.trim() === ""));
 const hasAttachment = (v) => hasValue(v);
 
+const isArchivedCompanyDocumentRow = (d) => {
+    if (!d || typeof d !== "object") return false;
+    const t = String(d?.type || "").toLowerCase();
+    const desc = String(d?.description || "").toLowerCase();
+    if (t.includes("previous")) return true;
+    if (desc.includes("not renewed")) return true;
+    if (d?.archivedAt) return true;
+    if (String(d?.archiveReason || "").toLowerCase().includes("not renew")) return true;
+    return false;
+};
+
+/** MOA row: explicit context (Add MOA flow) or legacy type match. */
+const documentIsMoaForActivation = (d) => {
+    if (!d || typeof d !== "object") return false;
+    const ctx = String(d?.context || "").toLowerCase();
+    if (ctx === "moa") return true;
+    const t = String(d?.type || "").toLowerCase();
+    return t.includes("moa");
+};
+
+/** Live MOA only — archived / not-renew rows in `oldDocuments` do not satisfy activation. */
 const hasMoaDocument = (company = {}) => {
     const docs = Array.isArray(company.documents) ? company.documents : [];
     return docs.some((d) => {
-        const t = String(d?.type || "").toLowerCase();
-        const looksLikeMoa = t.includes("moa");
+        if (isArchivedCompanyDocumentRow(d)) return false;
         const docUrl = d?.document?.url;
-        return looksLikeMoa && hasValue(docUrl);
+        if (!hasValue(docUrl)) return false;
+        return documentIsMoaForActivation(d);
     });
 };
 
@@ -411,7 +432,7 @@ export const collectCompanyReactivationChangeLabels = (updateData = {}) => {
     }
     if (Object.prototype.hasOwnProperty.call(updateData, "documents")) {
         const docs = Array.isArray(updateData.documents) ? updateData.documents : [];
-        if (docs.some((d) => String(d?.type || "").toLowerCase().includes("moa"))) {
+        if (docs.some((d) => documentIsMoaForActivation(d))) {
             changes.push("MOA");
         }
     }
@@ -478,7 +499,7 @@ export const stripProposedDataKeysFromPendingReactivationEntries = (entries = []
 /** Compare only MOA rows so deleting e.g. "Document with expiry" does not queue reactivation just because MOA still exists in the payload. */
 const serializeMoaDocumentsSlice = (documents) => {
     const list = Array.isArray(documents) ? documents : [];
-    const moaRows = list.filter((d) => String(d?.type || "").toLowerCase().includes("moa"));
+    const moaRows = list.filter((d) => documentIsMoaForActivation(d));
     const iso = (v) => {
         if (v == null || v === "") return "";
         const d = v instanceof Date ? v : new Date(v);

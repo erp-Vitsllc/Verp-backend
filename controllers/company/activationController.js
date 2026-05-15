@@ -515,8 +515,38 @@ export const rejectCompanyActivationRequest = async (req, res) => {
                 },
             );
         } catch (syncErr) {
-            console.error("[rejectCompanyActivationRequest] Dashboard sync error:", syncErr);
+            console.error("[rejectCompanyActivationRequest] Dashboard update error:", syncErr);
         }
+
+        if (submitterEmp?._id) {
+            try {
+                await syncDashboardAction({
+                    requestId: company._id,
+                    requestType: "Company Activation",
+                    assignedTo: String(submitterEmp._id),
+                    status: "Rejected",
+                    skipPendingCompletion: true,
+                    subjectEmployee: {
+                        _id: company._id,
+                        firstName: company.name,
+                        lastName: "",
+                        employeeId: company.companyId,
+                    },
+                    companyActivationNotifyAssignee: submitterEmp,
+                    requestedByName: req.user?.name || "",
+                    actionedBy: req.user?.employeeObjectId || req.user?._id,
+                    comment: reasonText,
+                    extra2: company.companyId || "",
+                    extra3: JSON.stringify({
+                        companyActivationViewerRole: "submitter",
+                        activationSubject: "company",
+                    }),
+                });
+            } catch (syncErr) {
+                console.error("[rejectCompanyActivationRequest] Dashboard sync error:", syncErr);
+            }
+        }
+
 
         try {
             await sendCompanyActivationOutcomeEmail({

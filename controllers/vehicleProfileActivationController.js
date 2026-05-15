@@ -643,40 +643,27 @@ export const rejectVehicleProfileActivation = async (req, res) => {
         const vehicleLabel = `${asset.name || 'Vehicle'} (${asset.assetId || id})`;
         if (submitterEmp?._id) {
             try {
-                const DashboardAction = (await import('../models/DashboardAction.js')).default;
-                await DashboardAction.findOneAndUpdate(
-                    {
-                        requestId: asset._id,
-                        assignedTo: submitterEmp._id,
-                        requestType: 'Vehicle Profile Activation',
-                        status: 'Rejected',
-                    },
-                    {
-                        assignedTo: submitterEmp._id,
-                        assignedToEmpId: submitterEmp.employeeId,
-                        requestId: asset._id,
-                        requestType: 'Vehicle Profile Activation',
-                        status: 'Rejected',
-                        subjectEmployeeId: subjectForDash.employeeId || '',
-                        subjectName: `${subjectForDash.firstName} ${subjectForDash.lastName}`.trim() || 'Vehicle',
-                        requestedByName: reviewerDisplayName,
-                        requestedDate: new Date(),
-                        extra1: '[Fleet] Vehicle profile request rejected — you can update and send again when ready.',
-                        extra2: reason.slice(0, 500),
-                        extra3: JSON.stringify({
-                            activationSubject: 'vehicle',
-                            activationViewerRole: 'submitter',
-                            vehicleMongoId: String(asset._id),
-                            outcome: 'reject',
-                        }),
-                        actionedDate: new Date(),
-                        actionedBy: req.user?.employeeObjectId || req.user?._id,
-                        comment: reason,
-                    },
-                    { upsert: true, new: true, setDefaultsOnInsert: true },
-                );
-            } catch (_e) {
-                /* non-fatal */
+                await syncDashboardAction({
+                    requestId: asset._id,
+                    requestType: 'Vehicle Profile Activation',
+                    assignedTo: String(submitterEmp._id),
+                    status: 'Rejected',
+                    skipPendingCompletion: true,
+                    subjectEmployee: { ...subjectForDash, _id: asset._id },
+                    vehicleProfileActivationNotifyAssignee: submitterEmp,
+                    requestedByName: reviewerDisplayName,
+                    actionedBy: req.user?.employeeObjectId || req.user?._id,
+                    comment: reason,
+                    extra2: reason.slice(0, 500),
+                    extra3: JSON.stringify({
+                        activationSubject: 'vehicle',
+                        activationViewerRole: 'submitter',
+                        vehicleMongoId: String(asset._id),
+                        outcome: 'reject',
+                    }),
+                });
+            } catch (_syncErr) {
+                console.error('[rejectVehicleProfileActivation] sync error:', _syncErr);
             }
         }
 

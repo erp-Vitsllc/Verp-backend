@@ -358,7 +358,8 @@ export const approveProfile = async (req, res) => {
 
         const recipientForActivationEmail = activationSubmitterId
             ? await EmployeeBasic.findById(activationSubmitterId)
-                  .select("firstName lastName employeeId companyEmail workEmail email personalEmail")
+                  .select("firstName lastName employeeId companyEmail workEmail email personalEmail primaryReportee")
+                  .populate("primaryReportee", "firstName lastName companyEmail workEmail email")
                   .lean()
             : null;
 

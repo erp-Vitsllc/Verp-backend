@@ -34,6 +34,8 @@ export const syncDashboardAction = async (data) => {
             companyActivationNotifyAssignee,
             /** Vehicle Profile Activation On Hold: outcome row for the submitter. */
             vehicleProfileActivationNotifyAssignee,
+            /** Asset creation rejected: outcome row for the creator (resubmit). */
+            assetCreationNotifyAssignee,
             /** When true, do not mark assignee Pending rows as completed (used for Profile hold: HR keeps the task open). */
             skipPendingCompletion = false,
         } = data;
@@ -62,11 +64,11 @@ export const syncDashboardAction = async (data) => {
                 );
             }
 
-            // Profile Activation — On Hold only: dashboard / task row for the **submitter** (not the profile subject).
-            // Approve / Reject: email only; no outcome row here (callers omit profileActivationNotifyAssignee).
+            // Profile Activation — On Hold / Rejected: dashboard / task row for the **submitter** (not the profile subject).
+            // Approve: email only; no outcome row here (callers omit profileActivationNotifyAssignee).
             if (
                 requestType === 'Profile Activation' &&
-                status === 'On Hold' &&
+                (status === 'On Hold' || status === 'Rejected') &&
                 subjectEmployee?._id &&
                 profileActivationNotifyAssignee?._id
             ) {
@@ -75,7 +77,7 @@ export const syncDashboardAction = async (data) => {
                 const subjectNameDisplay = `${subj.firstName || ''} ${subj.lastName || ''}`.trim() || 'Employee';
                 const outcomeExtra1 =
                     extra1 ||
-                    '[Employee profile] HR placed your activation on hold — please update the listed items.';
+                    `[Employee profile] HR ${status.toLowerCase()} your activation — please review the comments and update the profile.`;
                 await DashboardAction.findOneAndUpdate(
                     { requestId, assignedTo: assignee._id, requestType },
                     {
@@ -83,7 +85,7 @@ export const syncDashboardAction = async (data) => {
                         assignedToEmpId: assignee.employeeId,
                         requestId,
                         requestType,
-                        status: 'On Hold',
+                        status: status,
                         subjectEmployeeId: subj.employeeId,
                         subjectName: subjectNameDisplay,
                         requestedByName: requestedByName || '',
@@ -103,7 +105,7 @@ export const syncDashboardAction = async (data) => {
 
             if (
                 requestType === "Company Activation" &&
-                status === "On Hold" &&
+                (status === "On Hold" || status === "Rejected") &&
                 subjectEmployee &&
                 companyActivationNotifyAssignee?._id
             ) {
@@ -113,7 +115,7 @@ export const syncDashboardAction = async (data) => {
                     `${subj.firstName || ""} ${subj.lastName || ""}`.trim() || subj.name || "Company";
                 const outcomeExtra1 =
                     extra1 ||
-                    "[Company profile] HR placed your activation on hold — please update the listed items.";
+                    `[Company profile] HR ${status.toLowerCase()} your activation — please review the comments and update the profile.`;
                 await DashboardAction.findOneAndUpdate(
                     { requestId, assignedTo: assignee._id, requestType },
                     {
@@ -121,7 +123,7 @@ export const syncDashboardAction = async (data) => {
                         assignedToEmpId: assignee.employeeId,
                         requestId,
                         requestType: "Company Activation",
-                        status: "On Hold",
+                        status: status,
                         subjectEmployeeId: subj.employeeId || subj.companyId || "",
                         subjectName: subjectNameDisplay,
                         requestedByName: requestedByName || "",
@@ -144,7 +146,7 @@ export const syncDashboardAction = async (data) => {
 
             if (
                 requestType === 'Vehicle Profile Activation' &&
-                status === 'On Hold' &&
+                (status === 'On Hold' || status === 'Rejected') &&
                 subjectEmployee &&
                 vehicleProfileActivationNotifyAssignee?._id
             ) {
@@ -153,7 +155,7 @@ export const syncDashboardAction = async (data) => {
                 const subjectNameDisplay = `${subj.firstName || ''} ${subj.lastName || ''}`.trim() || 'Vehicle';
                 const outcomeExtra1 =
                     extra1 ||
-                    '[Fleet] Asset Controller placed your vehicle profile review on hold — please update the listed sections.';
+                    `[Fleet] HR ${status.toLowerCase()} your vehicle activation — please review the comments and update the profile.`;
                 await DashboardAction.findOneAndUpdate(
                     { requestId, assignedTo: assignee._id, requestType },
                     {
@@ -161,7 +163,7 @@ export const syncDashboardAction = async (data) => {
                         assignedToEmpId: assignee.employeeId,
                         requestId,
                         requestType: 'Vehicle Profile Activation',
-                        status: 'On Hold',
+                        status: status,
                         subjectEmployeeId: subj.employeeId || '',
                         subjectName: subjectNameDisplay,
                         requestedByName: requestedByName || '',
@@ -179,6 +181,47 @@ export const syncDashboardAction = async (data) => {
                         comment: comment || '',
                     },
                     { upsert: true, new: true, setDefaultsOnInsert: true },
+                );
+            }
+
+            if (
+                requestType === 'Asset Approval' &&
+                status === 'Rejected' &&
+                subjectEmployee?._id &&
+                assetCreationNotifyAssignee?._id
+            ) {
+                const assignee = assetCreationNotifyAssignee;
+                const subj = subjectEmployee;
+                const subjectNameDisplay =
+                    `${subj.firstName || ''} ${subj.lastName || ''}`.trim() || 'Employee';
+                const outcomeExtra1 =
+                    extra1 ||
+                    '[Asset creation] Your asset was not approved — update the draft and resubmit for Asset Controller review.';
+                await DashboardAction.findOneAndUpdate(
+                    { requestId, assignedTo: assignee._id, requestType: 'Asset Approval' },
+                    {
+                        assignedTo: assignee._id,
+                        assignedToEmpId: assignee.employeeId,
+                        requestId,
+                        requestType: 'Asset Approval',
+                        status: 'Rejected',
+                        subjectEmployeeId: subj.employeeId || '',
+                        subjectName: subjectNameDisplay,
+                        requestedByName: requestedByName || '',
+                        requestedDate: new Date(),
+                        extra1: outcomeExtra1,
+                        extra2: extra2 || '',
+                        extra3:
+                            extra3 ??
+                            JSON.stringify({
+                                assetCreationViewerRole: 'creator',
+                                outcome: 'reject'
+                            }),
+                        actionedDate: new Date(),
+                        actionedBy: actionedBy || null,
+                        comment: comment || ''
+                    },
+                    { upsert: true, new: true, setDefaultsOnInsert: true }
                 );
             }
 

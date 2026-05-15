@@ -1,7 +1,6 @@
 import nodemailer from 'nodemailer';
 
-const pickEmployeeEmail = (emp) =>
-    String(emp?.companyEmail || emp?.workEmail || emp?.email || emp?.personalEmail || '').trim();
+import { pickEffectiveEmail as pickEmployeeEmail } from "./pickEffectiveEmail.js";
 
 const escapeHtmlBasic = (s) =>
     String(s || '')

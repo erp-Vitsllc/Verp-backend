@@ -5,6 +5,7 @@ import { resolveFlowchartHrEmployee } from "../../utils/resolveFlowchartHrEmploy
 import { syncDashboardAction } from "../../utils/syncDashboard.js";
 import { resolveProfileActivationSubmitterId } from "../../utils/resolveProfileActivationSubmitterId.js";
 import { clearProfileActivationHoldDashboardRows } from "../../utils/clearProfileActivationHoldDashboardRows.js";
+import { pickEffectiveEmail } from "../../utils/pickEffectiveEmail.js";
 
 /** Subdocument id fallback must match frontend (String(entry._id || index)). */
 const pendingEntryId = (entry, idx) => String(entry?._id ?? idx);
@@ -21,11 +22,6 @@ export const sendApprovalEmail = async (req, res) => {
         const employeeBasic = await getCompleteEmployee(id);
         if (!employeeBasic) {
             return res.status(404).json({ message: "Employee not found" });
-        }
-        if (!employeeBasic.companyEmail || !String(employeeBasic.companyEmail).trim()) {
-            return res.status(400).json({
-                message: "Employee company email is required. First add company email address."
-            });
         }
 
         const submitterEmployeeId = await resolveProfileActivationSubmitterId(req);
@@ -108,6 +104,7 @@ export const sendApprovalEmail = async (req, res) => {
             ? `<p style="margin: 8px 0 0 0;"><strong>Requested Changes:</strong><br/>${pendingCards.map((c) => `- ${c}`).join("<br/>")}</p>`
             : "";
         const pendingCardsText = pendingCards.length ? ` | Requested Changes: ${pendingCards.join(", ")}` : "";
+        const employeeEmail = pickEffectiveEmail(employeeBasic);
         const subject = `${typeForDisplay} request: ${employeeName}`;
 
         const origin = req.headers.origin || (req.headers.referer ? new URL(req.headers.referer).origin : null);
@@ -129,6 +126,7 @@ export const sendApprovalEmail = async (req, res) => {
                         <p style="margin: 8px 0 0 0;"><strong>Employee ID:</strong> ${employeeBasic.employeeId || "N/A"}</p>
                         <p style="margin: 8px 0 0 0;"><strong>Department:</strong> ${employeeBasic.department || "N/A"}</p>
                         <p style="margin: 8px 0 0 0;"><strong>Designation:</strong> ${employeeBasic.designation || "N/A"}</p>
+                        ${employeeEmail ? `<p style="margin: 8px 0 0 0;"><strong>Contact Email:</strong> ${employeeEmail}</p>` : ""}
                     </div>
                     
                     <p style="text-align: center; margin: 35px 0;">

@@ -184,6 +184,11 @@ const assetItemSchema = new mongoose.Schema({
         ],
         default: 'Unassigned'
     },
+    /** Set when creation approval is rejected and the asset is returned to Draft for resubmission. */
+    creationReturnedToDraftAt: {
+        type: Date,
+        default: null
+    },
     ownership: {
         type: String,
         default: 'Unassigned'

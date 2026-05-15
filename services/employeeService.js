@@ -251,7 +251,7 @@ export const getCompleteEmployee = async (id) => {
         const linkedUser = userResult.status === 'fulfilled' ? userResult.value : null;
 
         // Update enablePortalAccess based on linked user existence, status, and existence of company email
-        employeeBasic.enablePortalAccess = !!(linkedUser && linkedUser.enablePortalAccess && employeeBasic.companyEmail);
+        employeeBasic.enablePortalAccess = !!(linkedUser && linkedUser.enablePortalAccess);
 
         // Actually, just handle it properly in the destruction
         // Re-assigning results to be clearer

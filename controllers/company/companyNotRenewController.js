@@ -6,6 +6,7 @@ import DashboardAction from "../../models/DashboardAction.js";
 import { getDepartmentHOD } from "../../utils/getDepartmentHOD.js";
 import { resolveEmployeeEmail } from "../../utils/resolveEmployeeEmail.js";
 import { isRequestUserDesignatedFlowchartHr } from "../../utils/isDesignatedFlowchartHr.js";
+import { calculateCompanyActivationProgress } from "../../utils/companyActivation.js";
 
 const KINDS = new Set(["tradeLicense", "establishmentCard", "document", "ownerDoc", "ejari", "insurance"]);
 
@@ -190,17 +191,28 @@ const applyApprovedArchive = (company, entry) => {
         const plain = itemToRemove.toObject ? itemToRemove.toObject() : { ...itemToRemove };
         delete plain._id;
         const historyDoc = {
-            ...plain,
             type: plain.type ? `Previous ${plain.type}` : "Previous Document",
             description: historyDescription(
                 `Not Renewed - ${plain.description || plain.type || ""}`,
                 reason
             ),
+            context: plain.context || undefined,
+            provider: plain.provider || undefined,
+            issueDate: plain.issueDate || plain.startDate || null,
+            expiryDate: plain.expiryDate || null,
+            cost: plain.value != null ? plain.value : plain.cost != null ? plain.cost : null,
+            archivedAt: new Date(),
+            archiveReason: "Not Renewed",
+            document:
+                plain.document ||
+                (plain.attachment ? { url: plain.attachment, mimeType: "application/pdf", name: plain.fileName } : null),
         };
         const next = [...(company.documents || [])];
         next.splice(idx, 1);
-        const merged = prependRows(next, [historyDoc, ...supportingRows]);
-        company.set("documents", merged);
+        const oldList = [...(company.oldDocuments || [])];
+        oldList.push(historyDoc);
+        company.set("oldDocuments", oldList);
+        company.set("documents", supportingRows.length ? prependRows(next, supportingRows) : next);
         return;
     }
 
@@ -383,7 +395,11 @@ export const submitCompanyNotRenewRequest = async (req, res) => {
                 companyObjectId: company._id,
                 labels: [row.label || row.kind],
             });
-            return res.status(201).json({ message: "Not renew applied and moved to Old Documents." });
+            const companyObj = company.toObject ? company.toObject() : company;
+            return res.status(201).json({
+                message: "Not renew applied and moved to Old Documents.",
+                activationProgress: calculateCompanyActivationProgress(companyObj),
+            });
         }
 
         company.pendingNotRenewRequests = [...(company.pendingNotRenewRequests || []), row];
@@ -521,7 +537,11 @@ export const respondCompanyNotRenewRequest = async (req, res) => {
             });
         }
 
-        return res.json({ message: "Not renew approved and archived." });
+        const companyObj = company.toObject ? company.toObject() : company;
+        return res.json({
+            message: "Not renew approved and archived.",
+            activationProgress: calculateCompanyActivationProgress(companyObj),
+        });
     } catch (error) {
         console.error("respondCompanyNotRenewRequest", error);
         return res.status(500).json({ message: error.message || "Server error" });

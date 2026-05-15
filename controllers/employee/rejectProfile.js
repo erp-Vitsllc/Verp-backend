@@ -1,6 +1,7 @@
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { getCompleteEmployee } from "../../services/employeeService.js";
 import { sendProfileNotification } from "../../utils/sendProfileNotification.js";
+import { syncDashboardAction } from "../../utils/syncDashboard.js";
 
 export const rejectProfile = async (req, res) => {
     const { id } = req.params;
@@ -62,17 +63,42 @@ export const rejectProfile = async (req, res) => {
                 },
             );
         } catch (syncErr) {
-            console.error("[RejectProfile] Dashboard Sync Error:", syncErr);
+            console.error("[RejectProfile] Dashboard Update Error:", syncErr);
+        }
+
+        const subjectLean = await EmployeeBasic.findOne({ employeeId })
+            .select("_id employeeId firstName lastName designation companyEmail workEmail email personalEmail")
+            .lean();
+
+        const submitterForNotify = activationSubmitterId
+            ? await EmployeeBasic.findById(activationSubmitterId)
+                  .select("_id employeeId firstName lastName designation companyEmail workEmail email personalEmail primaryReportee")
+                  .populate("primaryReportee", "firstName lastName companyEmail workEmail email")
+                  .lean()
+            : null;
+
+        if (submitterForNotify?._id) {
+            try {
+                await syncDashboardAction({
+                    requestId: updated._id,
+                    requestType: "Profile Activation",
+                    assignedTo: String(submitterForNotify._id),
+                    status: "Rejected",
+                    skipPendingCompletion: true,
+                    subjectEmployee: subjectLean || updated,
+                    profileActivationNotifyAssignee: submitterForNotify,
+                    requestedByName: req.user?.name || "",
+                    actionedBy: req.user?.employeeObjectId || req.user?._id,
+                    comment: reason || "",
+                });
+            } catch (syncErr) {
+                console.error("[RejectProfile] Dashboard Sync Error:", syncErr);
+            }
         }
 
         // Get complete employee data for response
         const completeEmployee = await getCompleteEmployee(employeeId);
-
-        const recipientForActivationEmail = activationSubmitterId
-            ? await EmployeeBasic.findById(activationSubmitterId)
-                  .select("firstName lastName employeeId companyEmail workEmail email personalEmail")
-                  .lean()
-            : null;
+        const recipientForActivationEmail = submitterForNotify;
 
         // Trigger Email Notification (Background)
         const manager = req.user; // The person who rejected

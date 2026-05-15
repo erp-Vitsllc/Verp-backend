@@ -1,7 +1,6 @@
 import nodemailer from "nodemailer";
 
-const pickEmployeeEmail = (emp) =>
-    (emp?.companyEmail || "").trim();
+import { pickEffectiveEmail as pickEmployeeEmail } from "./pickEffectiveEmail.js";
 
 /**
  * Email the company activation submitter when HR approves or rejects.
