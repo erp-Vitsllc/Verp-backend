@@ -2391,9 +2391,22 @@ export const respondToAssetCreation = async (req, res) => {
             }
         }
 
-        // Designated approver, department asset controller (draft with no actionRequiredBy), or admin
-        if (!isJwtAdmin && !isSysAdmin && !isDesignatedApprover && !isDeptAssetControllerFallback) {
+        const creatorId = item.createdBy?.toString?.() || null;
+        const isCreator =
+            creatorId &&
+            (creatorId === req.user?._id?.toString() || creatorId === req.user?.id?.toString());
+
+        // Designated approver, department asset controller (draft with no actionRequiredBy), or admin — not the submitter
+        if (
+            !isJwtAdmin &&
+            !isSysAdmin &&
+            !isDesignatedApprover &&
+            !isDeptAssetControllerFallback
+        ) {
             return res.status(403).json({ message: 'Only the designated approver or an administrator can approve this asset.' });
+        }
+        if (isCreator && !isJwtAdmin && !isSysAdmin) {
+            return res.status(403).json({ message: 'You cannot approve or reject an asset you submitted for approval.' });
         }
 
         const reviewerDisplayName =
@@ -3280,14 +3293,17 @@ export const getAssetItemDetail = async (req, res) => {
         );
         const isDesignatedCreationApprover = matchesActionByObjectId || matchesActionByEmployeeId;
 
-        // Save-only drafts (no actionRequiredBy) must be submitted for approval first — no direct AC approve via dept fallback.
+        // Save-only drafts (no actionRequiredBy) may be approved by department AC before submit.
         let canApproveAsDeptAssetController = false;
+        if (!item.actionRequiredBy && item.status === 'Draft') {
+            canApproveAsDeptAssetController = !!isDeptAssetController;
+        }
 
-        // Important: "awaiting creation approval" must be shown/approved only by the actual
-        // designated approver (stored in `actionRequiredBy`), not by anyone who happens to be
-        // an Asset Controller. This prevents HR-only company flows from appearing on AC UI.
+        // Only the designated approver (actionRequiredBy), dept AC for save-only drafts, or admin —
+        // never the asset creator (submitter).
         itemObj.canApproveAssetCreation = !!(
             isAwaitingCreationApproval &&
+            !isCreator &&
             (isAdmin ||
                 isPortalAdmin ||
                 isDesignatedCreationApprover ||
