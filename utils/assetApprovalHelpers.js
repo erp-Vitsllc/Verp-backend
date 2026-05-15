@@ -1,5 +1,9 @@
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import User from '../models/User.js';
+import { isUserActiveInFlowchart } from './getDepartmentHOD.js';
+import { isUserAdministrator } from '../services/permissionService.js';
+
+const normEmpId = (s) => (s || '').toString().toLowerCase().replace(/\s+/g, '');
 
 const escapeRegExp = (value) => {
     return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -95,4 +99,162 @@ export async function resolveAssetCreatorEmployee(createdByUserId) {
         console.error('[resolveAssetCreatorEmployee]', e?.message || e);
     }
     return null;
+}
+
+/** JWT/system admin or active flowchart Asset Controller (incl. department HOD row). */
+export async function userCanDirectAddAssetToPool(req, assetControllerEmp = null) {
+    const isJwtAdmin = req.user?.isAdmin === true || req.user?.role === 'Admin' || req.user?.role === 'ROOT';
+    const isSysAdmin = await isUserAdministrator(req.user?.id);
+    if (isJwtAdmin || isSysAdmin) return true;
+
+    let isAssetController = false;
+    try {
+        isAssetController = await isUserActiveInFlowchart(req.user, 'assetcontroller');
+    } catch {
+        isAssetController = false;
+    }
+
+    const ac = assetControllerEmp;
+    if (ac?._id && req.user?.employeeObjectId) {
+        if (ac._id.toString() === req.user.employeeObjectId.toString()) isAssetController = true;
+    }
+    if (!isAssetController && ac?.employeeId && req.user?.employeeId) {
+        if (normEmpId(ac.employeeId) === normEmpId(req.user.employeeId)) isAssetController = true;
+    }
+    return isAssetController;
+}
+
+/**
+ * New asset creation: regular users → Draft or Submitted for Approval only.
+ * Asset Controller / Admin → Unassigned pool on createUnassigned (or omit intent), optional draft / submit paths.
+ */
+export async function resolveNewAssetCreationStatus(req, { creationIntent, assetController }) {
+    const canDirect = await userCanDirectAddAssetToPool(req, assetController);
+    const intent = String(creationIntent ?? '').trim();
+
+    if (!canDirect) {
+        if (intent === 'createUnassigned') {
+            return {
+                error: 'Only Asset Controller or Administrator can add assets directly as Unassigned.',
+                status: 403
+            };
+        }
+        if (!assetController?._id) {
+            return {
+                error: 'Asset controller is not assigned in the ERP flowchart.',
+                status: 403
+            };
+        }
+        if (intent === 'saveDraft') {
+            return { initialStatus: 'Draft', actionRequiredBy: null, canDirectAddAsset: false };
+        }
+        return {
+            initialStatus: 'Submitted for Approval',
+            actionRequiredBy: assetController._id,
+            canDirectAddAsset: false
+        };
+    }
+
+    if (intent === 'saveDraft') {
+        return { initialStatus: 'Draft', actionRequiredBy: null, canDirectAddAsset: true };
+    }
+    if (intent === 'submitForApproval') {
+        if (!assetController?._id) {
+            return {
+                error: 'Asset controller is not assigned in the ERP flowchart.',
+                status: 403
+            };
+        }
+        return {
+            initialStatus: 'Submitted for Approval',
+            actionRequiredBy: assetController._id,
+            canDirectAddAsset: true
+        };
+    }
+    if (intent && intent !== 'createUnassigned') {
+        return {
+            error: 'Invalid creationIntent. Use saveDraft, submitForApproval, or createUnassigned.',
+            status: 400
+        };
+    }
+    return { initialStatus: 'Unassigned', actionRequiredBy: null, canDirectAddAsset: true };
+}
+
+/** JWT/system admin or active flowchart Asset Controller (incl. department HOD row). */
+export async function userCanDirectAddAssetToPool(req, assetControllerEmp = null) {
+    const isJwtAdmin = req.user?.isAdmin === true || req.user?.role === 'Admin' || req.user?.role === 'ROOT';
+    const isSysAdmin = await isUserAdministrator(req.user?.id);
+    if (isJwtAdmin || isSysAdmin) return true;
+
+    let isAssetController = false;
+    try {
+        isAssetController = await isUserActiveInFlowchart(req.user, 'assetcontroller');
+    } catch {
+        isAssetController = false;
+    }
+
+    const ac = assetControllerEmp;
+    if (ac?._id && req.user?.employeeObjectId) {
+        if (ac._id.toString() === req.user.employeeObjectId.toString()) isAssetController = true;
+    }
+    if (!isAssetController && ac?.employeeId && req.user?.employeeId) {
+        if (normEmpId(ac.employeeId) === normEmpId(req.user.employeeId)) isAssetController = true;
+    }
+    return isAssetController;
+}
+
+/**
+ * New asset creation: regular users → Draft or Submitted for Approval only.
+ * Asset Controller / Admin → Unassigned pool on createUnassigned (or omit intent), optional draft / submit paths.
+ */
+export async function resolveNewAssetCreationStatus(req, { creationIntent, assetController }) {
+    const canDirect = await userCanDirectAddAssetToPool(req, assetController);
+    const intent = String(creationIntent ?? '').trim();
+
+    if (!canDirect) {
+        if (intent === 'createUnassigned') {
+            return {
+                error: 'Only Asset Controller or Administrator can add assets directly as Unassigned.',
+                status: 403
+            };
+        }
+        if (!assetController?._id) {
+            return {
+                error: 'Asset controller is not assigned in the ERP flowchart.',
+                status: 403
+            };
+        }
+        if (intent === 'saveDraft') {
+            return { initialStatus: 'Draft', actionRequiredBy: null, canDirectAddAsset: false };
+        }
+        return {
+            initialStatus: 'Submitted for Approval',
+            actionRequiredBy: assetController._id,
+            canDirectAddAsset: false
+        };
+    }
+
+    if (intent === 'saveDraft') {
+        return { initialStatus: 'Draft', actionRequiredBy: null, canDirectAddAsset: true };
+    }
+    if (intent === 'submitForApproval') {
+        if (!assetController?._id) {
+            return {
+                error: 'Asset controller is not assigned in the ERP flowchart.',
+                status: 403
+            };
+        }
+        return {
+            initialStatus: 'Submitted for Approval',
+            actionRequiredBy: assetController._id,
+            canDirectAddAsset: true
+        };
+    }
+    if (intent && intent !== 'createUnassigned') {
+        return {
+            error: 'Invalid creationIntent. Use saveDraft, submitForApproval, or createUnassigned.',
+            status: 400
+        };
+    }
+    return { initialStatus: 'Unassigned', actionRequiredBy: null, canDirectAddAsset: true };
 }

@@ -14,7 +14,12 @@ import { sendAssetActionApprovalEmail } from '../utils/sendAssetActionApprovalEm
 import { sendAssignedEmployeeActionEmail } from '../utils/sendAssignedEmployeeActionEmail.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import User from '../models/User.js';
-import { resolveAssetControllerEmployee, getAssetRequesterDisplayName } from '../utils/assetApprovalHelpers.js';
+import {
+    resolveAssetControllerEmployee,
+    getAssetRequesterDisplayName,
+    resolveNewAssetCreationStatus,
+    userCanDirectAddAssetToPool
+} from '../utils/assetApprovalHelpers.js';
 import {
     notifyAdminDeletedAssetTypeOrCategory,
     notifyAdminDeletedWholeAsset,
@@ -58,42 +63,10 @@ export const getAssetTypeRoleMeta = async (req, res) => {
         const isJwtOrEnvAdmin = await isAdminUser(req.user);
         const isFlowchartOrgAdmin = await isUserInFlowchart(req.user, 'admincontroller').catch(() => false);
         const isAdmin = isJwtOrEnvAdmin || isFlowchartOrgAdmin;
-        let isAssetController = await isUserInFlowchart(req.user, 'assetcontroller').catch(() => false);
-        const norm = (s) => (s || '').toString().toLowerCase().replace(/\s+/g, '');
-        let currentEmpObjectId = req.user?.employeeObjectId?.toString?.() || null;
-        if (!currentEmpObjectId && req.user?.employeeId) {
-            const userNorm = norm(req.user.employeeId);
-            if (userNorm) {
-                const empRow = await EmployeeBasic.findOne({
-                    $expr: {
-                        $eq: [
-                            {
-                                $replaceAll: {
-                                    input: { $toLower: { $ifNull: ['$employeeId', ''] } },
-                                    find: ' ',
-                                    replacement: ''
-                                }
-                            },
-                            userNorm
-                        ]
-                    }
-                })
-                    .select('_id')
-                    .lean();
-                if (empRow?._id) currentEmpObjectId = empRow._id.toString();
-            }
-        }
         const acHodMeta = await getDepartmentHOD('assetcontroller');
-        let isDeptAssetControllerMeta = false;
-        if (acHodMeta?._id && currentEmpObjectId) {
-            isDeptAssetControllerMeta = acHodMeta._id.toString() === currentEmpObjectId;
-        }
-        if (!isDeptAssetControllerMeta && acHodMeta?.employeeId && req.user?.employeeId) {
-            isDeptAssetControllerMeta = norm(req.user.employeeId) === norm(acHodMeta.employeeId);
-        }
-        isAssetController = isAssetController || isDeptAssetControllerMeta;
-        // Flowchart "Admin" alone gets isAdmin for catalog/assign UI, but not direct-to-unassigned asset creation (same as normal users).
-        const canDirectAddAsset = isJwtOrEnvAdmin || isAssetController;
+        const acEmpMeta = acHodMeta ? await resolveAssetControllerEmployee(acHodMeta) : null;
+        const isAssetController = await userCanDirectAddAssetToPool(req, acEmpMeta);
+        const canDirectAddAsset = isAssetController;
         res.status(200).json({ isAdmin, isAssetController, canDirectAddAsset });
     } catch (error) {
         console.error('getAssetTypeRoleMeta:', error);
@@ -295,63 +268,19 @@ export const createAssetType = async (req, res) => {
                 });
             }
 
+            const creationResolved = await resolveNewAssetCreationStatus(req, {
+                creationIntent,
+                assetController
+            });
+            if (creationResolved.error) {
+                return res.status(creationResolved.status || 400).json({ message: creationResolved.error });
+            }
+            const { initialStatus, actionRequiredBy } = creationResolved;
             const isJwtAdmin = req.user.isAdmin === true || req.user.role === 'Admin' || req.user.role === 'ROOT';
             const isSysAdmin = await isUserAdministrator(req.user?.id);
-            const isAssetController = await isUserInFlowchart(req.user, 'assetcontroller');
-
-            let initialStatus = 'Draft';
-            let actionRequiredBy = null;
-
-            const isPrivilegedCreator = isJwtAdmin || isSysAdmin || isAssetController;
-
-            if (isPrivilegedCreator) {
-                if (creationIntent === 'saveDraft') {
-                    initialStatus = 'Draft';
-                    actionRequiredBy = null;
-                    console.log(
-                        `[Asset creation] Draft saved by privileged user (${isJwtAdmin || isSysAdmin ? 'Admin' : 'Asset Controller'})`
-                    );
-                } else if (creationIntent === 'submitForApproval') {
-                    initialStatus = 'Submitted for Approval';
-                    actionRequiredBy = assetController._id;
-                    console.log(
-                        `[Asset creation] Submitted for approval by privileged user → Asset Controller (${req.user.employeeId || ''})`
-                    );
-                } else if (
-                    creationIntent === 'createUnassigned' ||
-                    creationIntent === undefined ||
-                    creationIntent === null ||
-                    creationIntent === ''
-                ) {
-                    initialStatus = 'Unassigned';
-                    actionRequiredBy = null;
-                    console.log(
-                        `[Asset creation] Created as Unassigned by privileged user (${isJwtAdmin || isSysAdmin ? 'Admin' : 'Asset Controller'})`
-                    );
-                } else {
-                    return res.status(400).json({
-                        message:
-                            'Invalid creationIntent. Use saveDraft, submitForApproval, or createUnassigned (omit for direct Unassigned).'
-                    });
-                }
-            } else if (assetController) {
-                // Regular creator: saveDraft = Draft with no approver/email; submitForApproval = new status + AC workflow
-                const intent = creationIntent === 'saveDraft' ? 'saveDraft' : 'submitForApproval';
-                if (intent === 'saveDraft') {
-                    initialStatus = 'Draft';
-                    actionRequiredBy = null;
-                    console.log(`[Asset creation (Bulk/Type)] Saved as Draft (no AC notification) by ${req.user.employeeId}`);
-                } else {
-                    initialStatus = 'Submitted for Approval';
-                    actionRequiredBy = assetController._id;
-                    console.log(`[Asset creation (Bulk/Type)] Submitted for approval by ${req.user.employeeId} → Asset Controller`);
-                }
-            } else {
-                // No asset controller defined & user is not admin
-                return res.status(403).json({
-                    message: "Asset controller is not assigned in the ERP flowchart. ERP cannot create an asset without an asset controller."
-                });
-            }
+            console.log(
+                `[Asset creation] ${initialStatus} by ${req.user.employeeId || req.user?.id || 'user'} (intent=${creationIntent || 'default'})`
+            );
 
             const qty = Math.max(1, Number(quantity) || 1);
             const createdAssets = [];
@@ -455,7 +384,7 @@ export const createAssetType = async (req, res) => {
                     date: new Date()
                 });
 
-                // If admin created directly as Unassigned, notify asset controller (info email).
+                // If administrator created directly as Unassigned, notify asset controller (info email).
                 if (initialStatus === 'Unassigned' && (isJwtAdmin || isSysAdmin) && assetController?._id) {
                     await sendAssetCreatedByAdminInfoEmail({
                         asset: newAsset,

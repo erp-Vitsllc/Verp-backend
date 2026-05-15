@@ -31,7 +31,11 @@ import { notifyAssetCreationRejectedToCreator } from '../utils/notifyAssetCreati
 import { resolveAssetCreatorEmployee } from '../utils/assetApprovalHelpers.js';
 import { isUserAdministrator } from '../services/permissionService.js';
 import { sendAssetServiceEmail } from '../utils/sendAssetServiceEmail.js';
-import { resolveAssetControllerEmployee, getAssetRequesterDisplayName } from '../utils/assetApprovalHelpers.js';
+import {
+    resolveAssetControllerEmployee,
+    getAssetRequesterDisplayName,
+    resolveNewAssetCreationStatus
+} from '../utils/assetApprovalHelpers.js';
 import AssetAccessoryCatalog from '../models/AssetAccessoryCatalog.js';
 import { sendAssignedEmployeeActionEmail } from '../utils/sendAssignedEmployeeActionEmail.js';
 import { processParkingAssets } from '../utils/processParkingAssets.js';
@@ -2178,36 +2182,17 @@ export const createAssetItem = async (req, res) => {
         const assetControllerRaw = await getDepartmentHOD('assetcontroller');
         const assetController = assetControllerRaw ? await resolveAssetControllerEmployee(assetControllerRaw) : null;
 
-        const isJwtAdmin = req.user.isAdmin === true || req.user.role === 'Admin' || req.user.role === 'ROOT';
-        const isSysAdmin = await isUserAdministrator(req.user?.id);
-        const isAssetController = await isUserInFlowchart(req.user, 'assetcontroller');
-
-        let initialStatus = 'Draft';
-        let actionRequiredBy = null;
-
-        if (isJwtAdmin || isSysAdmin || isAssetController) {
-            initialStatus = 'Unassigned';
-            console.log(`[Asset creation] Created directly as Unassigned by ${isJwtAdmin || isSysAdmin ? 'Admin' : 'Asset Controller'}`);
-        } else if (assetController?._id) {
-            const intent = creationIntent === 'saveDraft' ? 'saveDraft' : 'submitForApproval';
-            if (intent === 'saveDraft') {
-                initialStatus = 'Draft';
-                actionRequiredBy = null;
-                console.log(`[Asset creation] Saved as Draft (no AC notification) by ${req.user.employeeId}`);
-            } else {
-                initialStatus = 'Submitted for Approval';
-                actionRequiredBy = assetController._id;
-                console.log(`[Asset creation] Submitted for approval by ${req.user.employeeId} → Asset Controller`);
-            }
-        } else if (assetControllerRaw) {
-            return res.status(403).json({
-                message: 'Asset creation denied: Asset Controller in Flowchart must be linked to an employee record. Update Settings > Flowchart or fix the employee ID.'
-            });
-        } else {
-            return res.status(403).json({
-                message: "Asset creation denied: No Asset Controller has been assigned in the organization flow. Please assign an Asset Controller in Settings > Flowchart before performing this operation."
-            });
+        const creationResolved = await resolveNewAssetCreationStatus(req, {
+            creationIntent,
+            assetController
+        });
+        if (creationResolved.error) {
+            return res.status(creationResolved.status || 400).json({ message: creationResolved.error });
         }
+        const { initialStatus, actionRequiredBy } = creationResolved;
+        console.log(
+            `[Asset creation] ${initialStatus} by ${req.user.employeeId || req.user?.id || 'user'} (intent=${creationIntent || 'default'})`
+        );
 
         const requesterDisplayName = await getAssetRequesterDisplayName(req);
 
