@@ -213,6 +213,12 @@ export const HRM_MODULE = {
                             hasDownload: false,
                             children: employeeDocumentsChildren,
                         },
+                        {
+                            id: 'hrm_employees_view_activation',
+                            label: 'Activation / Add',
+                            parent: 'hrm_employees_view',
+                            hasDownload: false,
+                        },
                     ],
                 },
             ],

@@ -13,12 +13,17 @@ import User from "../../models/User.js";
 import { getCompleteEmployee, saveEmployeeData } from "../../services/employeeService.js";
 import { sendProfileNotification } from "../../utils/sendProfileNotification.js";
 import { archiveQueuedPassportOrVisaPreviousIfNeeded } from "../../utils/archiveEmployeeDocument.js";
+import {
+    documentStorageFingerprint,
+    purgeEmployeeOldDocuments,
+} from "../../utils/purgeEmployeeOldDocuments.js";
+import { isEmployeeProfileActivationDesignatedHr } from "../../utils/isEmployeeProfileActivationDesignatedHr.js";
 
 export const approveProfile = async (req, res) => {
     const { id } = req.params;
     const approvedChangeIds = Array.isArray(req.body?.approvedChangeIds) ? req.body.approvedChangeIds.map(String) : [];
     const selectionProvided = req.body?.selectionProvided === true;
-    /** HR “Review Activation” direct path: any approval status; apply every queued card then set profile active (route already requires hrm_employees edit). */
+    /** HR “Review Activation” direct path: any approval status; apply every queued card then set profile active (server checks designated HR). */
     const directHrBypass = req.body?.directHrBypass === true;
 
     try {
@@ -26,6 +31,23 @@ export const approveProfile = async (req, res) => {
         const employee = await getCompleteEmployee(id);
         if (!employee) {
             return res.status(404).json({ message: "Employee not found" });
+        }
+
+        const canActAsHr = await isEmployeeProfileActivationDesignatedHr(req, employee);
+        if (directHrBypass) {
+            if (!canActAsHr) {
+                return res.status(403).json({
+                    message:
+                        "Only designated HR (Flowchart HR or the assigned reviewer), an administrator, or a user with Employees (Edit) can activate before Send for Activation. Others must use Send for Activation so HR receives the request.",
+                });
+            }
+        } else if (employee.profileApprovalStatus === "submitted") {
+            if (!canActAsHr) {
+                return res.status(403).json({
+                    message:
+                        "Only designated HR or an administrator can approve this activation request after it has been submitted for review.",
+                });
+            }
         }
 
         const employeeId = employee.employeeId;
@@ -106,14 +128,14 @@ export const approveProfile = async (req, res) => {
             if (changeType === "delete" && targetIndex !== null) {
                 const deletingDoc = updated.documents[targetIndex];
                 if (deletingDoc) {
-                    updated.oldDocuments = Array.isArray(updated.oldDocuments) ? updated.oldDocuments : [];
-                    updated.oldDocuments.push({
-                        ...deletingDoc.toObject(),
-                        archivedAt: new Date(),
-                        archiveReason: "Deleted",
-                        createdAt: deletingDoc.createdAt || null,
-                    });
+                    const docType = deletingDoc.type || "Document";
+                    const fp = documentStorageFingerprint(deletingDoc.document);
                     updated.documents.splice(targetIndex, 1);
+                    await purgeEmployeeOldDocuments(employeeId, {
+                        types: [docType],
+                        documentFingerprints: [fp],
+                        purgeDeletedArchiveReason: true,
+                    });
                 }
             }
         }

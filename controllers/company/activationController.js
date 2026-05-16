@@ -499,25 +499,6 @@ export const rejectCompanyActivationRequest = async (req, res) => {
             { $unset: { activationHold: 1, activationSubmittedBy: 1 } },
         );
 
-        try {
-            const DashboardAction = (await import("../../models/DashboardAction.js")).default;
-            await DashboardAction.updateMany(
-                {
-                    requestId: company._id,
-                    requestType: "Company Activation",
-                    status: { $in: ["Pending", "On Hold"] },
-                },
-                {
-                    status: "Rejected",
-                    actionedDate: new Date(),
-                    actionedBy: req.user?.employeeObjectId || req.user?._id,
-                    comment: reasonText,
-                },
-            );
-        } catch (syncErr) {
-            console.error("[rejectCompanyActivationRequest] Dashboard update error:", syncErr);
-        }
-
         if (submitterEmp?._id) {
             try {
                 await syncDashboardAction({
@@ -545,6 +526,26 @@ export const rejectCompanyActivationRequest = async (req, res) => {
             } catch (syncErr) {
                 console.error("[rejectCompanyActivationRequest] Dashboard sync error:", syncErr);
             }
+        }
+
+        try {
+            const DashboardAction = (await import("../../models/DashboardAction.js")).default;
+            const closeQuery = {
+                requestId: company._id,
+                requestType: "Company Activation",
+                status: { $in: ["Pending", "On Hold"] },
+            };
+            if (submitterEmp?._id) {
+                closeQuery.assignedTo = { $ne: submitterEmp._id };
+            }
+            await DashboardAction.updateMany(closeQuery, {
+                status: "Rejected",
+                actionedDate: new Date(),
+                actionedBy: req.user?.employeeObjectId || req.user?._id,
+                comment: reasonText,
+            });
+        } catch (syncErr) {
+            console.error("[rejectCompanyActivationRequest] Dashboard update error:", syncErr);
         }
 
 

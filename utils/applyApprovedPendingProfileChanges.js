@@ -12,6 +12,10 @@ import EmployeeBasic from "../models/EmployeeBasic.js";
 import User from "../models/User.js";
 import { saveEmployeeData } from "../services/employeeService.js";
 import { archiveQueuedPassportOrVisaPreviousIfNeeded } from "./archiveEmployeeDocument.js";
+import {
+    documentStorageFingerprint,
+    purgeEmployeeOldDocuments,
+} from "./purgeEmployeeOldDocuments.js";
 
 /**
  * Applies a subset of pendingReactivationChanges (HR-checked rows during partial hold).
@@ -57,14 +61,14 @@ export async function applyApprovedPendingProfileChanges(employeeId, basicDoc, c
         if (changeType === "delete" && targetIndex !== null) {
             const deletingDoc = updated.documents[targetIndex];
             if (deletingDoc) {
-                updated.oldDocuments = Array.isArray(updated.oldDocuments) ? updated.oldDocuments : [];
-                updated.oldDocuments.push({
-                    ...deletingDoc.toObject(),
-                    archivedAt: new Date(),
-                    archiveReason: "Deleted",
-                    createdAt: deletingDoc.createdAt || null,
-                });
+                const docType = deletingDoc.type || "Document";
+                const fp = documentStorageFingerprint(deletingDoc.document);
                 updated.documents.splice(targetIndex, 1);
+                await purgeEmployeeOldDocuments(employeeId, {
+                    types: [docType],
+                    documentFingerprints: [fp],
+                    purgeDeletedArchiveReason: true,
+                });
             }
         }
     }

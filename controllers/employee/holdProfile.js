@@ -3,7 +3,9 @@ import { sanitizeActivationHoldRowNotes } from "../../utils/sanitizeActivationHo
 import { getCompleteEmployee } from "../../services/employeeService.js";
 import { syncDashboardAction } from "../../utils/syncDashboard.js";
 import { sendProfileActivationHoldEmail } from "../../utils/sendProfileActivationHoldEmail.js";
+import { resolveProfileActivationSubmitterEmployee } from "../../utils/resolveProfileActivationSubmitterEmployee.js";
 import { applyApprovedPendingProfileChanges } from "../../utils/applyApprovedPendingProfileChanges.js";
+import { isEmployeeProfileActivationDesignatedHr } from "../../utils/isEmployeeProfileActivationDesignatedHr.js";
 
 const idStrSub = (sub, idx) => String(sub._id ?? idx);
 
@@ -25,9 +27,13 @@ export const holdProfile = async (req, res) => {
 
         const employeeId = employeeOverview.employeeId;
 
-        const isAdminOrHR = req.user && (/admin|root/i.test(req.user.role || "") || req.user.isAdmin === true || /hr/i.test(req.user.role || "") || /hr|admin|root/i.test(req.user.groupName || ""));
+        if (!(await isEmployeeProfileActivationDesignatedHr(req, employeeOverview))) {
+            return res.status(403).json({
+                message: "Only designated HR or an administrator can place activation on hold.",
+            });
+        }
 
-        if (employeeOverview.profileApprovalStatus !== "submitted" && !isAdminOrHR) {
+        if (employeeOverview.profileApprovalStatus !== "submitted") {
             return res.status(400).json({
                 message: "Profile must be submitted for HR review before it can be placed on hold.",
             });
@@ -132,12 +138,27 @@ export const holdProfile = async (req, res) => {
             .select("_id employeeId firstName lastName designation companyEmail workEmail email personalEmail")
             .lean();
 
-        const submitterForNotify = doc.profileActivationSubmittedBy
-            ? await EmployeeBasic.findById(doc.profileActivationSubmittedBy)
-                  .select("_id employeeId firstName lastName designation companyEmail workEmail email personalEmail primaryReportee")
-                  .populate("primaryReportee", "firstName lastName companyEmail workEmail email")
-                  .lean()
-            : null;
+        const DashboardAction = (await import("../../models/DashboardAction.js")).default;
+        const pendingRowsForSubmitter = await DashboardAction.find({
+            requestId: doc._id,
+            requestType: "Profile Activation",
+            status: { $in: ["Pending", "On Hold"] },
+        })
+            .lean()
+            .maxTimeMS(6000);
+
+        const submitterForNotify = await resolveProfileActivationSubmitterEmployee(
+            doc,
+            pendingRowsForSubmitter,
+        );
+
+        let submitterForEmail = submitterForNotify;
+        if (submitterForNotify?._id) {
+            submitterForEmail = await EmployeeBasic.findById(submitterForNotify._id)
+                .select("_id employeeId firstName lastName designation companyEmail workEmail email personalEmail primaryReportee")
+                .populate("primaryReportee", "firstName lastName companyEmail workEmail email")
+                .lean();
+        }
 
         const outcomeExtra1 = `[Employee profile] On hold — update: ${(doc.profileActivationHold.unapprovedCards || []).join(", ")}`;
 
@@ -179,7 +200,7 @@ export const holdProfile = async (req, res) => {
         }));
         sendProfileActivationHoldEmail({
             subjectEmployee: completeForEmail,
-            submitterEmployee: submitterForNotify,
+            submitterEmployee: submitterForEmail,
             hrManager: req.user,
             unapprovedCards: doc.profileActivationHold.unapprovedCards || [],
             holdLineItems,

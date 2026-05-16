@@ -1028,9 +1028,19 @@ export const getUserActivityStats = async (req, res) => {
                 scope: isProfileActAssignee ? 'outgoing' : 'inbox',
             };
 
-            const idx = activityList.findIndex(
-                (i) => i.id?.toString() === reqIdStr && i.type === 'Profile Activation' && !i.isNotice
-            );
+            const idx = activityList.findIndex((i) => {
+                if (i.id?.toString() !== reqIdStr || i.type !== 'Profile Activation' || i.isNotice) return false;
+                if (
+                    activityItem.actionId &&
+                    i.actionId &&
+                    String(i.actionId) === String(activityItem.actionId)
+                ) {
+                    return true;
+                }
+                if (isProfileActAssignee && i.scope === 'outgoing') return true;
+                if (!isProfileActAssignee && i.scope !== 'outgoing') return true;
+                return false;
+            });
             if (idx !== -1) {
                 const existing = activityList[idx];
                 if (
@@ -1051,6 +1061,10 @@ export const getUserActivityStats = async (req, res) => {
                         activityItem.actionId &&
                         String(existing.actionId) !== String(activityItem.actionId)
                     ) {
+                        if (isProfileActAssignee && activityItem.scope === 'outgoing') {
+                            activityList.push(activityItem);
+                            seenRequests.set(reqIdStr, activityItem.status);
+                        }
                         return;
                     }
                     activityList[idx] = { ...existing, ...activityItem };
@@ -1090,9 +1104,19 @@ export const getUserActivityStats = async (req, res) => {
                 scope: isCompanyActSelf ? 'outgoing' : 'inbox',
             };
 
-            const idx = activityList.findIndex(
-                (i) => i.id?.toString() === reqIdStr && i.type === 'Company Activation',
-            );
+            const idx = activityList.findIndex((i) => {
+                if (i.id?.toString() !== reqIdStr || i.type !== 'Company Activation') return false;
+                if (
+                    activityItem.actionId &&
+                    i.actionId &&
+                    String(i.actionId) === String(activityItem.actionId)
+                ) {
+                    return true;
+                }
+                if (isCompanyActSelf && i.scope === 'outgoing') return true;
+                if (!isCompanyActSelf && i.scope !== 'outgoing') return true;
+                return false;
+            });
             if (idx !== -1) {
                 const existing = activityList[idx];
                 if (item.status === 'On Hold' && isCompanyActSelf && existing.status === 'Pending') {
@@ -1112,6 +1136,10 @@ export const getUserActivityStats = async (req, res) => {
                         activityItem.actionId &&
                         String(existing.actionId) !== String(activityItem.actionId)
                     ) {
+                        if (isCompanyActSelf && activityItem.scope === 'outgoing') {
+                            activityList.push(activityItem);
+                            seenRequests.set(reqIdStr, activityItem.status);
+                        }
                         return;
                     }
                     activityList[idx] = { ...existing, ...activityItem };
@@ -1151,9 +1179,19 @@ export const getUserActivityStats = async (req, res) => {
                 scope: isVehicleActSelf ? 'outgoing' : 'inbox',
             };
 
-            const idx = activityList.findIndex(
-                (i) => i.id?.toString() === reqIdStr && i.type === 'Vehicle Profile Activation',
-            );
+            const idx = activityList.findIndex((i) => {
+                if (i.id?.toString() !== reqIdStr || i.type !== 'Vehicle Profile Activation') return false;
+                if (
+                    activityItem.actionId &&
+                    i.actionId &&
+                    String(i.actionId) === String(activityItem.actionId)
+                ) {
+                    return true;
+                }
+                if (isVehicleActSelf && i.scope === 'outgoing') return true;
+                if (!isVehicleActSelf && i.scope !== 'outgoing') return true;
+                return false;
+            });
             if (idx !== -1) {
                 const existing = activityList[idx];
                 if (item.status === 'On Hold' && isVehicleActSelf && existing.status === 'Pending') {
@@ -1171,6 +1209,10 @@ export const getUserActivityStats = async (req, res) => {
                         activityItem.actionId &&
                         String(existing.actionId) !== String(activityItem.actionId)
                     ) {
+                        if (isVehicleActSelf && activityItem.scope === 'outgoing') {
+                            activityList.push(activityItem);
+                            seenRequests.set(reqIdStr, activityItem.status);
+                        }
                         return;
                     }
                     activityList[idx] = { ...existing, ...activityItem };

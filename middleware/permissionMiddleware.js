@@ -17,10 +17,13 @@ export const checkPermission = (moduleId, permissionType = 'view') => {
             // Import here to avoid circular dependency
             const { hasPermission, isUserAdministrator } = await import("../services/permissionService.js");
 
-            // First check if user is admin - admins bypass all permission checks
+            // System admin, JWT Admin/ROOT — bypass permission checks
             const isAdmin = await isUserAdministrator(userId);
-            if (isAdmin) {
-                // Admin has all permissions, proceed
+            const isJwtAdmin =
+                req.user?.isAdmin === true ||
+                req.user?.role === "Admin" ||
+                req.user?.role === "ROOT";
+            if (isAdmin || isJwtAdmin) {
                 return next();
             }
 
@@ -37,6 +40,55 @@ export const checkPermission = (moduleId, permissionType = 'view') => {
             next();
         } catch (error) {
             console.error('Error checking permission:', error);
+            return res.status(500).json({ message: "Error checking permissions" });
+        }
+    };
+};
+
+/**
+ * Profile activation workflow (submit to HR, approve, hold, reject, status).
+ * Matches frontend: Flowchart often grants `hrm_employees_view_activation` (view/create) without parent `hrm_employees` edit.
+ * Allows any of: hrm_employees edit|create, hrm_employees_view_activation edit|create (each still requires module view per hasPermission).
+ */
+export const checkEmployeeProfileActivationAction = () => {
+    return async (req, res, next) => {
+        try {
+            const userId = req.user?.id;
+
+            if (!userId) {
+                return res.status(401).json({ message: "Not authorized, no user found" });
+            }
+
+            const { hasPermission, isUserAdministrator } = await import("../services/permissionService.js");
+
+            const isAdmin = await isUserAdministrator(userId);
+            const isJwtAdmin =
+                req.user?.isAdmin === true ||
+                req.user?.role === "Admin" ||
+                req.user?.role === "ROOT";
+            if (isAdmin || isJwtAdmin) {
+                return next();
+            }
+
+            const pairs = [
+                ["hrm_employees", "edit"],
+                ["hrm_employees", "create"],
+                ["hrm_employees_view_activation", "edit"],
+                ["hrm_employees_view_activation", "create"],
+            ];
+
+            for (const [moduleId, permissionType] of pairs) {
+                if (await hasPermission(userId, moduleId, permissionType)) {
+                    return next();
+                }
+            }
+
+            return res.status(403).json({
+                message:
+                    "Access denied. Profile activation requires Employees (Edit or Create) or Profile Activation (Edit or Create), with View enabled for that module.",
+            });
+        } catch (error) {
+            console.error("Error checking profile activation permission:", error);
             return res.status(500).json({ message: "Error checking permissions" });
         }
     };

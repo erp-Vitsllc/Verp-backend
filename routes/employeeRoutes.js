@@ -27,6 +27,7 @@ import { deleteMedicalInsuranceDetails } from "../controllers/employee/deleteMed
 import { deleteDrivingLicenseDetails } from "../controllers/employee/deleteDrivingLicenseDetails.js";
 import { deleteWorkDetailsCard } from "../controllers/employee/deleteWorkDetailsCard.js";
 import { deleteSignatureCard } from "../controllers/employee/deleteSignatureCard.js";
+import { deleteSalaryHistoryEntry } from "../controllers/employee/deleteSalaryHistoryEntry.js";
 import { updateWorkDetails } from "../controllers/employee/updateWorkDetails.js";
 import { addEducation } from "../controllers/employee/addEducation.js";
 import { updateEducation } from "../controllers/employee/updateEducation.js";
@@ -48,7 +49,7 @@ import {
 import { addDocument } from "../controllers/employee/addDocument.js";
 import { updateDocument } from "../controllers/employee/updateDocument.js";
 import { protect } from "../middleware/authMiddleware.js";
-import { checkPermission } from "../middleware/permissionMiddleware.js";
+import { checkPermission, checkEmployeeProfileActivationAction } from "../middleware/permissionMiddleware.js";
 import { deleteOldDocument } from "../controllers/employee/deleteOldDocument.js";
 import { getEmployeeDocument } from "../controllers/employee/getEmployeeDocument.js";
 import { getReporteeOptions } from "../controllers/employee/getReporteeOptions.js";
@@ -162,6 +163,13 @@ router.post("/", checkPermission('hrm_employees_add', 'create'), addEmployee);
 // Update basic details - requires edit permission
 router.patch("/basic-details/:id", checkPermission('hrm_employees_view_basic', 'edit'), updateBasicDetails);
 
+// Salary history row delete — salary delete permission (not basic-details patch)
+router.delete(
+    "/:id/salary-history/:historyId",
+    checkPermission("hrm_employees_view_salary", "delete"),
+    deleteSalaryHistoryEntry,
+);
+
 // Update work details - requires edit permission
 router.patch("/work-details/:id", checkPermission('hrm_employees_view_work', 'edit'), updateWorkDetails);
 router.delete("/work-details/:id", checkPermission('hrm_employees_view_work', 'delete'), deleteWorkDetailsCard);
@@ -227,20 +235,17 @@ router.post("/:id/training", checkPermission('hrm_employees_list', 'edit'), addT
 router.patch("/:id/training/:trainingId", checkPermission('hrm_employees_list', 'edit'), updateTraining);
 router.delete("/:id/training/:trainingId", checkPermission('hrm_employees_list', 'edit'), deleteTraining);
 
-// Send approval email - requires edit permission
-router.post("/:id/send-approval-email", checkPermission('hrm_employees', 'edit'), sendApprovalEmail);
+// Send for activation (notify HR) — view + create on Employees or Profile Activation (see middleware)
+router.post("/:id/send-approval-email", checkEmployeeProfileActivationAction(), sendApprovalEmail);
 
-// Approve profile - requires edit permission
-router.post("/:id/approve-profile", checkPermission('hrm_employees', 'edit'), approveProfile);
+// Approve / hold / reject — designated HR enforced in controllers; still require some employee access
+router.post("/:id/approve-profile", checkPermission("hrm_employees_view", "view"), approveProfile);
 
-// Hold profile activation (partial HR review) - requires edit permission
-router.post("/:id/hold-profile", checkPermission('hrm_employees', 'edit'), holdProfile);
+router.post("/:id/hold-profile", checkPermission("hrm_employees_view", "view"), holdProfile);
 
-// Reject profile - requires edit permission
-router.post("/:id/reject-profile", checkPermission('hrm_employees', 'edit'), rejectProfile);
+router.post("/:id/reject-profile", checkPermission("hrm_employees_view", "view"), rejectProfile);
 
-// Update profile status (Downgrade/Reset) - requires edit permission
-router.patch("/:id/profile-status", checkPermission('hrm_employees', 'edit'), updateProfileStatus);
+router.patch("/:id/profile-status", checkEmployeeProfileActivationAction(), updateProfileStatus);
 
 // Notice Request - requires work details edit permission
 router.post("/:id/request-notice", checkPermission('hrm_employees_view_work', 'edit'), requestNotice);

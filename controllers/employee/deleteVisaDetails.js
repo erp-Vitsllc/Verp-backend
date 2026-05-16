@@ -4,6 +4,7 @@ import { deleteDocumentFromS3 } from "../../utils/s3Upload.js";
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
 import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
 import { cleanupEmployeeExpiryNotificationsByLabels } from "../../utils/cleanupEmployeeExpiryNotifications.js";
+import { PURGE_TYPES, purgeEmployeeOldDocuments } from "../../utils/purgeEmployeeOldDocuments.js";
 
 const ALLOWED_VISA_TYPES = ["visit", "employment", "spouse"];
 
@@ -51,6 +52,11 @@ export const deleteVisaDetails = async (req, res) => {
         if (!updatedVisa) {
             return res.status(404).json({ message: "Visa record not found." });
         }
+
+        await purgeEmployeeOldDocuments(employeeId, {
+            types: PURGE_TYPES.visa(type),
+            purgeDeletedArchiveReason: true,
+        });
 
         const visaLabelByType = {
             visit: "Visit Visa",

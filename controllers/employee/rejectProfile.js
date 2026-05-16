@@ -2,6 +2,8 @@ import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { getCompleteEmployee } from "../../services/employeeService.js";
 import { sendProfileNotification } from "../../utils/sendProfileNotification.js";
 import { syncDashboardAction } from "../../utils/syncDashboard.js";
+import { resolveProfileActivationSubmitterEmployee } from "../../utils/resolveProfileActivationSubmitterEmployee.js";
+import { isEmployeeProfileActivationDesignatedHr } from "../../utils/isEmployeeProfileActivationDesignatedHr.js";
 
 export const rejectProfile = async (req, res) => {
     const { id } = req.params;
@@ -17,8 +19,27 @@ export const rejectProfile = async (req, res) => {
             return res.status(404).json({ message: "Employee not found" });
         }
 
+        if (!(await isEmployeeProfileActivationDesignatedHr(req, employee))) {
+            return res.status(403).json({
+                message: "Only designated HR or an administrator can reject this activation request.",
+            });
+        }
+
         const employeeId = employee.employeeId;
-        const activationSubmitterId = employee.profileActivationSubmittedBy || null;
+
+        const DashboardAction = (await import("../../models/DashboardAction.js")).default;
+        const pendingRowsForSubmitter = await DashboardAction.find({
+            requestId: employee._id,
+            requestType: "Profile Activation",
+            status: { $in: ["Pending", "On Hold"] },
+        })
+            .lean()
+            .maxTimeMS(6000);
+
+        const submitterForNotify = await resolveProfileActivationSubmitterEmployee(
+            employee,
+            pendingRowsForSubmitter,
+        );
 
         // Update EmployeeBasic
         // Set profileApprovalStatus to 'rejected'
@@ -46,36 +67,17 @@ export const rejectProfile = async (req, res) => {
             return res.status(404).json({ message: "Employee submission not found" });
         }
 
-        // Close every open dashboard row for this activation (HR Pending + submitter On Hold).
-        try {
-            const DashboardAction = (await import("../../models/DashboardAction.js")).default;
-            await DashboardAction.updateMany(
-                {
-                    requestId: updated._id,
-                    requestType: "Profile Activation",
-                    status: { $in: ["Pending", "On Hold"] },
-                },
-                {
-                    status: "Rejected",
-                    actionedDate: new Date(),
-                    actionedBy: req.user?.employeeObjectId || req.user?._id,
-                    comment: reason || "",
-                },
-            );
-        } catch (syncErr) {
-            console.error("[RejectProfile] Dashboard Update Error:", syncErr);
-        }
-
         const subjectLean = await EmployeeBasic.findOne({ employeeId })
             .select("_id employeeId firstName lastName designation companyEmail workEmail email personalEmail")
             .lean();
 
-        const submitterForNotify = activationSubmitterId
-            ? await EmployeeBasic.findById(activationSubmitterId)
-                  .select("_id employeeId firstName lastName designation companyEmail workEmail email personalEmail primaryReportee")
-                  .populate("primaryReportee", "firstName lastName companyEmail workEmail email")
-                  .lean()
-            : null;
+        let submitterForEmail = submitterForNotify;
+        if (submitterForNotify?._id) {
+            submitterForEmail = await EmployeeBasic.findById(submitterForNotify._id)
+                .select("_id employeeId firstName lastName designation companyEmail workEmail email personalEmail primaryReportee")
+                .populate("primaryReportee", "firstName lastName companyEmail workEmail email")
+                .lean();
+        }
 
         if (submitterForNotify?._id) {
             try {
@@ -90,15 +92,39 @@ export const rejectProfile = async (req, res) => {
                     requestedByName: req.user?.name || "",
                     actionedBy: req.user?.employeeObjectId || req.user?._id,
                     comment: reason || "",
+                    extra3: JSON.stringify({
+                        activationSubject: "employee",
+                        activationViewerRole: "submitter",
+                    }),
                 });
             } catch (syncErr) {
                 console.error("[RejectProfile] Dashboard Sync Error:", syncErr);
             }
         }
 
+        // Close HR / interim rows (submitter outcome row is upserted above).
+        try {
+            const closeQuery = {
+                requestId: updated._id,
+                requestType: "Profile Activation",
+                status: { $in: ["Pending", "On Hold"] },
+            };
+            if (submitterForNotify?._id) {
+                closeQuery.assignedTo = { $ne: submitterForNotify._id };
+            }
+            await DashboardAction.updateMany(closeQuery, {
+                status: "Rejected",
+                actionedDate: new Date(),
+                actionedBy: req.user?.employeeObjectId || req.user?._id,
+                comment: reason || "",
+            });
+        } catch (syncErr) {
+            console.error("[RejectProfile] Dashboard Update Error:", syncErr);
+        }
+
         // Get complete employee data for response
         const completeEmployee = await getCompleteEmployee(employeeId);
-        const recipientForActivationEmail = submitterForNotify;
+        const recipientForActivationEmail = submitterForEmail;
 
         // Trigger Email Notification (Background)
         const manager = req.user; // The person who rejected

@@ -2,6 +2,7 @@ import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { resolveEmployeeId } from "../../services/employeeService.js";
 import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
+import { PURGE_TYPES, purgeEmployeeOldDocuments } from "../../utils/purgeEmployeeOldDocuments.js";
 
 export const deleteSignatureCard = async (req, res) => {
     const { id } = req.params;
@@ -20,6 +21,10 @@ export const deleteSignatureCard = async (req, res) => {
             { employeeId: employee.employeeId },
             { $set: { signature: null } }
         );
+        await purgeEmployeeOldDocuments(employee.employeeId, {
+            types: PURGE_TYPES.signature,
+            purgeDeletedArchiveReason: true,
+        });
 
         await triggerProfileReactivationIfNeeded({
             employeeId: employee.employeeId,

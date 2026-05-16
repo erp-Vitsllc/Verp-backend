@@ -2,6 +2,7 @@ import EmployeeDrivingLicense from "../../models/EmployeeDrivingLicense.js";
 import { resolveEmployeeId } from "../../services/employeeService.js";
 import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
 import { cleanupEmployeeExpiryNotificationsByLabels } from "../../utils/cleanupEmployeeExpiryNotifications.js";
+import { PURGE_TYPES, purgeEmployeeOldDocuments } from "../../utils/purgeEmployeeOldDocuments.js";
 
 export const deleteDrivingLicenseDetails = async (req, res) => {
     const { id } = req.params;
@@ -13,6 +14,10 @@ export const deleteDrivingLicenseDetails = async (req, res) => {
         if (!employee) return res.status(404).json({ message: "Employee not found." });
 
         await EmployeeDrivingLicense.deleteOne({ employeeId: employee.employeeId });
+        await purgeEmployeeOldDocuments(employee.employeeId, {
+            types: PURGE_TYPES.driving,
+            purgeDeletedArchiveReason: true,
+        });
         await cleanupEmployeeExpiryNotificationsByLabels({
             employeeObjectId: employee._id,
             labels: ["Driving License"],

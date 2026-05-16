@@ -487,8 +487,12 @@ export const updateCompany = async (req, res) => {
             });
             updatedCompany = await company.save();
         } else {
-            await archiveSupersededCompanyDocuments(beforeCompany, updateData);
-            const ownerArchives = archiveSupersededCompanyOwners(beforeCompany, updateData);
+            if (!skipReactivationQueueForThisRequest) {
+                await archiveSupersededCompanyDocuments(beforeCompany, updateData);
+            }
+            const ownerArchives = skipReactivationQueueForThisRequest
+                ? []
+                : archiveSupersededCompanyOwners(beforeCompany, updateData);
             const updateOps = {};
             if (Object.keys(updateData).length > 0) {
                 updateOps.$set = updateData;

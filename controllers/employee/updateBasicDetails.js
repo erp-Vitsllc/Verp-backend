@@ -3,11 +3,12 @@ import EmployeeBasic from "../../models/EmployeeBasic.js";
 import EmployeeBank from "../../models/EmployeeBank.js";
 import EmployeeSalary from "../../models/EmployeeSalary.js";
 import { uploadDocumentToS3 } from "../../utils/s3Upload.js";
-import { isUserAdministrator } from "../../services/permissionService.js";
+import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
 import { archiveEmployeeDocument } from "../../utils/archiveEmployeeDocument.js";
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
 import { skipLiveProfileWritesPendingHr, queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
 import { markProfileActivationHoldResolvedForSection } from "../../utils/markProfileActivationHoldResolved.js";
+import { PURGE_TYPES, purgeEmployeeOldDocuments } from "../../utils/purgeEmployeeOldDocuments.js";
 
 export const updateBasicDetails = async (req, res) => {
     try {
@@ -33,6 +34,9 @@ export const updateBasicDetails = async (req, res) => {
         ]);
 
         const skipLive = skipLiveProfileWritesPendingHr(existingBasic);
+        const skipArchiveOnRequest =
+            req.body?.skipArchive === true ||
+            String(req.query?.skipArchive || "").toLowerCase() === "true";
 
         // 1. Define allowed fields and their target collections
         const allowedFields = [
@@ -96,6 +100,9 @@ export const updateBasicDetails = async (req, res) => {
                 updatePayload[field] = req.body[field];
             }
         });
+        if (skipArchiveOnRequest) {
+            delete updatePayload.skipArchive;
+        }
 
         // 3. Handle documents - if URL is provided, use it; if data is base64, upload to S3 (IDrive)
 
@@ -263,7 +270,7 @@ export const updateBasicDetails = async (req, res) => {
             }
         }
 
-        if (!skipLive) {
+        if (!skipLive && !skipArchiveOnRequest) {
             const previousBankAttachment = existingBank?.bankAttachment;
             const nextBankAttachment = updatePayload.bankAttachment;
             const bankCoreFields = ["bankName", "accountName", "accountNumber", "ibanNumber", "swiftCode"];
@@ -339,8 +346,7 @@ export const updateBasicDetails = async (req, res) => {
             }
         }
 
-        const userId = req.user?.id;
-        const isAdminUser = req.user?.isAdmin === true || (userId ? await isUserAdministrator(userId) : false);
+        const isAdminUser = await isReqUserAdmin(req.user);
 
         // 4. Enforce admin-only delete on salary history and training records.
         // If salaryHistory is being updated, check if it's a deletion (array length decreased)
@@ -438,11 +444,36 @@ export const updateBasicDetails = async (req, res) => {
         let updated = null;
         const basicChangeEntry = buildBasicDetailsReactivationEntry();
 
-        if (!skipLive) {
+        const applyLiveNow = !skipLive || skipArchiveOnRequest;
+
+        if (applyLiveNow) {
             updated = await saveEmployeeData(employeeId, updatePayload);
 
             if (!updated) {
                 return res.status(404).json({ message: "Employee not found" });
+            }
+
+            if (skipArchiveOnRequest) {
+                const purgeTypes = [];
+                const bankTouched = [...BANK_PREVIOUS_KEYS].some((k) =>
+                    Object.prototype.hasOwnProperty.call(updatePayload, k),
+                );
+                const salaryTouched = [...SALARY_PREVIOUS_KEYS].some((k) =>
+                    Object.prototype.hasOwnProperty.call(updatePayload, k),
+                );
+
+                if (bankTouched) purgeTypes.push(...PURGE_TYPES.bank);
+                if (salaryTouched) purgeTypes.push(...PURGE_TYPES.salary);
+                if (Object.prototype.hasOwnProperty.call(updatePayload, "trainingDetails")) {
+                    purgeTypes.push(...PURGE_TYPES.training);
+                }
+
+                if (purgeTypes.length) {
+                    await purgeEmployeeOldDocuments(employeeId, {
+                        types: purgeTypes,
+                        purgeDeletedArchiveReason: true,
+                    });
+                }
             }
 
             await triggerProfileReactivationIfNeeded({
