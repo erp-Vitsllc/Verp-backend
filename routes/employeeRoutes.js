@@ -51,6 +51,7 @@ import { updateDocument } from "../controllers/employee/updateDocument.js";
 import { protect } from "../middleware/authMiddleware.js";
 import {
     checkPermission,
+    checkBasicDetailsPatchPermission,
     checkEmployeeProfileActivationAction,
     checkEmployeeManualDocumentEdit,
     checkEmployeeOldDocumentDelete,
@@ -166,7 +167,7 @@ router.post("/", checkPermission('hrm_employees_add', 'create'), addEmployee);
 
 // Specific routes MUST come before generic :id routes
 // Update basic details - requires edit permission
-router.patch("/basic-details/:id", checkPermission('hrm_employees_view_basic', 'edit'), updateBasicDetails);
+router.patch("/basic-details/:id", checkBasicDetailsPatchPermission(), updateBasicDetails);
 
 // Salary history row delete — salary delete permission (not basic-details patch)
 router.delete(

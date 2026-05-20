@@ -4,7 +4,10 @@ import EmployeeBasic from "../models/EmployeeBasic.js";
 import { isActorDesignatedFlowchartHr } from "./isDesignatedFlowchartHr.js";
 import { resolveFlowchartHrEmployee } from "./resolveFlowchartHrEmployee.js";
 import { syncDashboardAction } from "./syncDashboard.js";
-import { clearCompanyActivationHoldDashboardRows } from "./clearCompanyActivationHoldDashboardRows.js";
+import {
+    clearCompanyActivationHoldDashboardRows,
+    clearStaleCompanyActivationOutcomeRows,
+} from "./clearCompanyActivationHoldDashboardRows.js";
 import { shortenUrlsInString } from "./shortenUrlsInString.js";
 
 const hasValue = (v) => !(v === undefined || v === null || (typeof v === "string" && v.trim() === ""));
@@ -328,6 +331,7 @@ export const submitCompanyActivation = async ({
     await company.save();
 
     await clearCompanyActivationHoldDashboardRows(company._id);
+    await clearStaleCompanyActivationOutcomeRows(company._id);
 
     await syncDashboardAction({
         requestId: company._id,

@@ -1,6 +1,6 @@
 import mongoose from "mongoose";
 import EmployeeSalary from "../../models/EmployeeSalary.js";
-import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeService.js";
+import { resolveEmployeeId, getCompleteEmployee, syncSalaryTopLevelFromHistory } from "../../services/employeeService.js";
 import {
     isReqUserAdmin,
     scheduleManagementAdminDeletionEmail,
@@ -94,6 +94,8 @@ export const deleteSalaryHistoryEntry = async (req, res) => {
             types: [...PURGE_TYPES.salary, `salary (${target.month || ""})`],
             purgeDeletedArchiveReason: true,
         });
+
+        await syncSalaryTopLevelFromHistory(employee.employeeId);
 
         const completeEmployee = await getCompleteEmployee(employee.employeeId);
         if (!completeEmployee) {

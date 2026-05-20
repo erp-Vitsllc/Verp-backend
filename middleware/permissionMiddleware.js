@@ -45,6 +45,163 @@ export const checkPermission = (moduleId, permissionType = 'view') => {
     };
 };
 
+/** Card-level field groups for PATCH /Employee/basic-details/:id (matches frontend profile cards). */
+const BASIC_DETAILS_PATCH_GROUPS = [
+    {
+        fields: [
+            "employeeId",
+            "firstName",
+            "lastName",
+            "country",
+            "status",
+            "probationPeriod",
+            "reportingAuthority",
+            "profileApprovalStatus",
+            "profileStatus",
+            "profilePicture",
+            "enablePortalAccess",
+        ],
+        modules: ["hrm_employees_view_basic"],
+    },
+    {
+        fields: [
+            "email",
+            "contactNumber",
+            "dateOfBirth",
+            "maritalStatus",
+            "numberOfDependents",
+            "fathersName",
+            "nationality",
+        ],
+        modules: ["hrm_employees_view_basic", "hrm_employees_view_personal"],
+    },
+    {
+        fields: ["gender"],
+        modules: ["hrm_employees_view_personal"],
+    },
+    {
+        fields: ["addressLine1", "addressLine2", "city", "state", "postalCode"],
+        modules: ["hrm_employees_view_permanent_address"],
+    },
+    {
+        fields: [
+            "currentAddressLine1",
+            "currentAddressLine2",
+            "currentCity",
+            "currentState",
+            "currentCountry",
+            "currentPostalCode",
+        ],
+        modules: ["hrm_employees_view_current_address"],
+    },
+    {
+        fields: [
+            "bankName",
+            "accountName",
+            "accountNumber",
+            "ibanNumber",
+            "swiftCode",
+            "ifscCode",
+            "bankOtherDetails",
+            "bankAttachment",
+        ],
+        modules: ["hrm_employees_view_bank"],
+    },
+    {
+        fields: [
+            "basic",
+            "houseRentAllowance",
+            "otherAllowance",
+            "additionalAllowances",
+            "salaryHistory",
+            "offerLetter",
+            "monthlySalary",
+            "totalSalary",
+            "basicPercentage",
+            "houseRentPercentage",
+            "otherAllowancePercentage",
+        ],
+        modules: ["hrm_employees_view_salary"],
+    },
+    {
+        fields: ["trainingDetails"],
+        modules: ["hrm_employees_list"],
+    },
+    {
+        fields: ["documents"],
+        modules: [
+            "hrm_employees_view",
+            "hrm_employees_view_documents_live",
+            "hrm_employees_view_documents_live_with_expiry",
+            "hrm_employees_view_documents_live_without_expiry",
+        ],
+    },
+    {
+        fields: ["oldDocuments"],
+        modules: ["hrm_employees_view", "hrm_employees_view_documents_old"],
+    },
+];
+
+const BASIC_DETAILS_PATCH_META_KEYS = new Set(["skipArchive"]);
+
+const touchedBasicDetailsPatchGroups = (body = {}) =>
+    BASIC_DETAILS_PATCH_GROUPS.filter((group) =>
+        group.fields.some((field) => body[field] !== undefined && !BASIC_DETAILS_PATCH_META_KEYS.has(field)),
+    );
+
+const hasEditOrCreateAccess = async (userId, moduleId, hasPermission) =>
+    (await hasPermission(userId, moduleId, "edit")) || (await hasPermission(userId, moduleId, "create"));
+
+/**
+ * PATCH /Employee/basic-details/:id — permission follows the card(s) being updated
+ * (bank → hrm_employees_view_bank, salary → hrm_employees_view_salary, etc.).
+ */
+export const checkBasicDetailsPatchPermission = () => {
+    return async (req, res, next) => {
+        try {
+            const userId = req.user?.id;
+
+            if (!userId) {
+                return res.status(401).json({ message: "Not authorized, no user found" });
+            }
+
+            const { hasPermission, isUserAdministrator } = await import("../services/permissionService.js");
+
+            const isAdmin = await isUserAdministrator(userId);
+            const isJwtAdmin =
+                req.user?.isAdmin === true ||
+                req.user?.role === "Admin" ||
+                req.user?.role === "ROOT";
+            if (isAdmin || isJwtAdmin) {
+                return next();
+            }
+
+            const body = req.body && typeof req.body === "object" ? req.body : {};
+            const groups = touchedBasicDetailsPatchGroups(body);
+
+            if (groups.length === 0) {
+                return res.status(400).json({ message: "Nothing to update" });
+            }
+
+            for (const group of groups) {
+                const allowed = await Promise.all(
+                    group.modules.map((moduleId) => hasEditOrCreateAccess(userId, moduleId, hasPermission)),
+                );
+                if (!allowed.some(Boolean)) {
+                    return res.status(403).json({
+                        message: `Access denied. You don't have edit permission for ${group.modules.join(" or ")}`,
+                    });
+                }
+            }
+
+            next();
+        } catch (error) {
+            console.error("Error checking basic details patch permission:", error);
+            return res.status(500).json({ message: "Error checking permissions" });
+        }
+    };
+};
+
 /**
  * Manual employee documents (live list + S3 upload helper).
  * Matches frontend Documents tab: `DocumentsTab` gates add/edit with
@@ -69,6 +226,29 @@ export const checkEmployeeManualDocumentEdit = () => {
                 req.user?.role === "ROOT";
             if (isAdmin || isJwtAdmin) {
                 return next();
+            }
+
+            const body = req.body && typeof req.body === "object" ? req.body : {};
+            const folder = String(body.folder || "").toLowerCase();
+
+            /** Salary letter / bank attachment uploads use the same card permissions as PATCH basic-details. */
+            const cardUploadPairs = [];
+            if (folder.includes("/salary")) {
+                cardUploadPairs.push(
+                    ["hrm_employees_view_salary", "edit"],
+                    ["hrm_employees_view_salary", "create"],
+                );
+            }
+            if (folder.includes("/bank")) {
+                cardUploadPairs.push(
+                    ["hrm_employees_view_bank", "edit"],
+                    ["hrm_employees_view_bank", "create"],
+                );
+            }
+            for (const [moduleId, permissionType] of cardUploadPairs) {
+                if (await hasPermission(userId, moduleId, permissionType)) {
+                    return next();
+                }
             }
 
             const pairs = [

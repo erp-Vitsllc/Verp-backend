@@ -1166,6 +1166,10 @@ export const saveEmployeeData = async (employeeId, updatePayload) => {
 
         await Promise.all(updatePromises);
 
+        if (Object.prototype.hasOwnProperty.call(salaryUpdate, 'salaryHistory')) {
+            await syncSalaryTopLevelFromHistory(employeeId);
+        }
+
         // Sync companyEmail, enablePortalAccess and Name to User model if updated
         if (basicUpdate.companyEmail !== undefined ||
             basicUpdate.enablePortalAccess !== undefined ||
@@ -1210,6 +1214,105 @@ export const saveEmployeeData = async (employeeId, updatePayload) => {
         console.error('Error in saveEmployeeData:', error);
         throw error;
     }
+};
+
+/**
+ * Keep EmployeeSalary top-level fields aligned with the active salary history entry.
+ * Clears top-level salary when history is empty.
+ */
+export const syncSalaryTopLevelFromHistory = async (employeeId) => {
+    const salaryDoc = await EmployeeSalary.findOne({ employeeId }).lean();
+    if (!salaryDoc) return;
+
+    const history = Array.isArray(salaryDoc.salaryHistory) ? salaryDoc.salaryHistory : [];
+
+    const parseFrom = (entry) => {
+        const d = entry?.fromDate ? new Date(entry.fromDate) : null;
+        return d && !Number.isNaN(d.getTime()) ? d : null;
+    };
+
+    let active = history.find((entry) => !entry?.toDate);
+    if (!active && history.length > 0) {
+        active = [...history].sort((a, b) => {
+            const ta = parseFrom(a)?.getTime() ?? 0;
+            const tb = parseFrom(b)?.getTime() ?? 0;
+            return tb - ta;
+        })[0];
+    }
+
+    if (!active) {
+        if (history.length === 0) {
+            await EmployeeSalary.updateOne(
+                { employeeId },
+                {
+                    $set: {
+                        basic: 0,
+                        houseRentAllowance: 0,
+                        otherAllowance: 0,
+                        additionalAllowances: [],
+                        monthlySalary: 0,
+                        totalSalary: 0,
+                        offerLetter: null,
+                    },
+                },
+            );
+        }
+        return;
+    }
+
+    const basic = parseFloat(active.basic) || 0;
+    const houseRentAllowance = parseFloat(active.houseRentAllowance) || 0;
+    const otherAllowance = parseFloat(active.otherAllowance) || 0;
+    const vehicleAllowance = parseFloat(active.vehicleAllowance) || 0;
+    const fuelAllowance = parseFloat(active.fuelAllowance) || 0;
+
+    const additionalAllowances = [];
+    if (vehicleAllowance > 0) {
+        additionalAllowances.push({ type: 'Vehicle', amount: vehicleAllowance });
+    }
+    if (fuelAllowance > 0) {
+        additionalAllowances.push({ type: 'Fuel', amount: fuelAllowance });
+    }
+    if (Array.isArray(active.additionalAllowances)) {
+        active.additionalAllowances.forEach((item) => {
+            const typeLower = String(item?.type || '').toLowerCase();
+            if (!typeLower.includes('vehicle') && !typeLower.includes('fuel') && (parseFloat(item?.amount) || 0) > 0) {
+                additionalAllowances.push(item);
+            }
+        });
+    }
+
+    const additionalOther = additionalAllowances
+        .filter((item) => {
+            const typeLower = String(item?.type || '').toLowerCase();
+            return !typeLower.includes('vehicle') && !typeLower.includes('fuel');
+        })
+        .reduce((sum, item) => sum + (parseFloat(item.amount) || 0), 0);
+
+    const totalSalary =
+        parseFloat(active.totalSalary) ||
+        basic + houseRentAllowance + otherAllowance + vehicleAllowance + fuelAllowance + additionalOther;
+
+    const offerLetterFromHistory =
+        history.find((entry) => entry?.offerLetter?.url)?.offerLetter ||
+        active.offerLetter?.url
+            ? active.offerLetter
+            : null;
+
+    await EmployeeSalary.updateOne(
+        { employeeId },
+        {
+            $set: {
+                basic,
+                houseRentAllowance,
+                otherAllowance,
+                additionalAllowances,
+                monthlySalary: totalSalary,
+                totalSalary,
+                offerLetter: offerLetterFromHistory || salaryDoc.offerLetter || null,
+            },
+        },
+    );
 };
 
 /**

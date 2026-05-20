@@ -27,6 +27,7 @@ import { processAccidentAssets } from "./utils/processAccidentAssets.js";
 import { processDocumentExpiryReminders } from "./utils/processDocumentExpiryReminders.js";
 import { processVehicleServiceHoldReminders } from "./utils/processVehicleServiceHoldReminders.js";
 import { processVehicleServiceScheduledPhase } from "./utils/processVehicleServiceScheduledPhase.js";
+import { processAssetServiceOverdue } from "./utils/processAssetServiceOverdue.js";
 import { setupEmailSubjectTag } from "./utils/setupEmailSubjectTag.js";
 import { purgeExpiredAdminDeletionArchives } from "./services/adminDeletionArchiveService.js";
 import { rerouteAllPendingAssetCreationApprovals } from "./utils/assetApprovalHelpers.js";
@@ -79,6 +80,18 @@ setInterval(() => { processVehicleServiceHoldReminders(); }, 6 * 60 * 60 * 1000)
 // Scheduled vehicle service window: flip to "On Service" on the first day, email AC after window ends.
 setTimeout(() => { processVehicleServiceScheduledPhase(); }, 150 * 1000);
 setInterval(() => { processVehicleServiceScheduledPhase(); }, 2 * 60 * 60 * 1000);
+
+// Tools/equipment on service: expiry-day email, overdue tasks for bell + dashboard.
+setTimeout(() => {
+    processAssetServiceOverdue().catch((e) =>
+        console.error('[processAssetServiceOverdue] startup failed:', e?.message || e),
+    );
+}, 210 * 1000);
+setInterval(() => {
+    processAssetServiceOverdue().catch((e) =>
+        console.error('[processAssetServiceOverdue] scheduled run failed:', e?.message || e),
+    );
+}, 2 * 60 * 60 * 1000);
 
 setTimeout(() => {
     purgeExpiredAdminDeletionArchives().catch((e) =>

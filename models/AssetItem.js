@@ -502,6 +502,10 @@ const assetItemSchema = new mongoose.Schema({
         lastWarningSentAt: { type: Date, default: null },
         reminderSentAt: { type: Date, default: null },
         durationCompleteSentAt: { type: Date, default: null },
+        /** Email sent once when service expiry date is today (calendar day). */
+        expiryDayEmailSentAt: { type: Date, default: null },
+        /** Set when an overdue dashboard task was created for this service period. */
+        serviceOverdueTaskAt: { type: Date, default: null },
         /** Frozen copy of multi-step approval when workflow completes/rejects (fleet tracker per row). */
         workflowSnapshot: {
             stage: { type: String, default: null },

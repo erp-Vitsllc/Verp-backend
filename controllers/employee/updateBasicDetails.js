@@ -33,7 +33,8 @@ export const updateBasicDetails = async (req, res) => {
             EmployeeBasic.findOne({ employeeId }).select(employeeBasicSnapSelect).lean(),
         ]);
 
-        const skipLive = skipLiveProfileWritesPendingHr(existingBasic);
+        const isAdminUser = await isReqUserAdmin(req.user);
+        const skipLive = !isAdminUser && skipLiveProfileWritesPendingHr(existingBasic);
         const skipArchiveOnRequest =
             req.body?.skipArchive === true ||
             String(req.query?.skipArchive || "").toLowerCase() === "true";
@@ -346,10 +347,7 @@ export const updateBasicDetails = async (req, res) => {
             }
         }
 
-        const isAdminUser = await isReqUserAdmin(req.user);
-
         // 4. Enforce admin-only delete on salary history and training records.
-        // If salaryHistory is being updated, check if it's a deletion (array length decreased)
         if (updatePayload.salaryHistory !== undefined && Array.isArray(updatePayload.salaryHistory)) {
             // Get current salary history from EmployeeSalary model
             const employeeSalary = await EmployeeSalary.findOne({ employeeId });

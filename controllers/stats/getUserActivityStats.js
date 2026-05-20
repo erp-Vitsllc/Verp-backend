@@ -214,6 +214,35 @@ const filterStaleExpiryDashboardRows = async (items = []) => {
     });
 };
 
+/** Hide company activation notifications once the company is fully activated. */
+const filterCompletedCompanyActivationItems = async (activityList = []) => {
+    if (!Array.isArray(activityList) || activityList.length === 0) return activityList;
+
+    const companyMongoIds = new Set();
+    activityList.forEach((item) => {
+        if (item?.type !== "Company Activation" || !item?.id) return;
+        const idStr = String(item.id);
+        if (mongoose.Types.ObjectId.isValid(idStr)) {
+            companyMongoIds.add(idStr);
+        }
+    });
+    if (!companyMongoIds.size) return activityList;
+
+    const activatedCompanies = await Company.find({
+        _id: { $in: [...companyMongoIds] },
+        $or: [{ activationStatus: "active" }, { status: "Active" }],
+    })
+        .select("_id")
+        .lean()
+        .maxTimeMS(6000);
+
+    const activatedIdSet = new Set(activatedCompanies.map((c) => String(c._id)));
+    return activityList.filter((item) => {
+        if (item?.type !== "Company Activation") return true;
+        return !activatedIdSet.has(String(item.id));
+    });
+};
+
 /**
  * Get Activity Stats for the Logged-in User (or a specific target user in their team)
  * aggregates data from Loans, Rewards, Fines, Profile Approvals, and Notices
@@ -353,7 +382,7 @@ export const getUserActivityStats = async (req, res) => {
         const flowchartHrEmp = await getDepartmentHOD("hr");
         const flowchartAdminEmp = await getDepartmentHOD("admincontroller");
 
-        const allAssetTypes = ['Asset', 'Asset Approval', 'Asset Assignment', 'Asset Transfer', 'Asset Loss Damage', 'Asset End of Life', 'Asset Accessory', 'Asset Accessory Approval', 'Asset Accessory Unattach', 'Vehicle Service Request'];
+        const allAssetTypes = ['Asset', 'Asset Overdue', 'Asset Approval', 'Asset Assignment', 'Asset Transfer', 'Asset Loss Damage', 'Asset End of Life', 'Asset Accessory', 'Asset Accessory Approval', 'Asset Accessory Unattach', 'Vehicle Service Request'];
 
         const normEmpForAssigneeEarly = (s) => (s || "").toString().trim().toLowerCase();
         const dashboardAssigneeMongoIds = [...relevantIds].filter(Boolean);
@@ -1614,7 +1643,7 @@ export const getUserActivityStats = async (req, res) => {
             });
         });
 
-        const finalActivityList = activityList;
+        const finalActivityList = await filterCompletedCompanyActivationItems(activityList);
 
         // Final counts
         const pendingCount = finalActivityList.filter(i => i.status === 'Pending').length;

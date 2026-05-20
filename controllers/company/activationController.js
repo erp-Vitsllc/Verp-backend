@@ -4,6 +4,7 @@ import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { isRequestUserDesignatedFlowchartHr } from "../../utils/isDesignatedFlowchartHr.js";
 import { calculateCompanyActivationProgress, submitCompanyActivation } from "../../utils/companyActivation.js";
 import { syncDashboardAction } from "../../utils/syncDashboard.js";
+import { clearAllCompanyActivationDashboardRows } from "../../utils/clearCompanyActivationHoldDashboardRows.js";
 import { archiveSupersededCompanyDocuments } from "../../utils/archiveCompanyDocument.js";
 import { archiveSupersededCompanyOwners } from "../../utils/archiveCompanyOwners.js";
 import { formatActivationAttachmentLine, shortenUrlsInString } from "../../utils/shortenUrlsInString.js";
@@ -255,20 +256,7 @@ export const approveCompanyActivationRequest = async (req, res) => {
         );
 
         try {
-            const DashboardAction = (await import("../../models/DashboardAction.js")).default;
-            await DashboardAction.updateMany(
-                {
-                    requestId: company._id,
-                    requestType: "Company Activation",
-                    status: { $in: ["Pending", "On Hold"] },
-                },
-                {
-                    status: "Approved",
-                    actionedDate: new Date(),
-                    actionedBy: req.user?.employeeObjectId || req.user?._id,
-                    comment: "Company activation approved",
-                },
-            );
+            await clearAllCompanyActivationDashboardRows(company._id);
         } catch (syncErr) {
             console.error("[approveCompanyActivationRequest] Dashboard sync error:", syncErr);
         }
