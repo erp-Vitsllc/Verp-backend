@@ -37,7 +37,7 @@ const isFleetVehicleAsset = (asset) => {
 };
 
 const canProcessVehicleProfileActivation = async (req) =>
-    isUserInFlowchart(req.user, 'admincontroller').catch(() => false);
+    isUserInFlowchart(req.user, 'hr').catch(() => false);
 
 const trimDesc = (d) => String(d || '').trim();
 
@@ -111,7 +111,7 @@ export const submitVehicleProfileActivation = async (req, res) => {
             return res.status(400).json({ message: 'Vehicle profile activation is only available for fleet vehicle assets.' });
         }
 
-        const status = String(asset.vehicleProfileActivationStatus || 'none').toLowerCase();
+        const status = String(asset.vehicleProfileActivationStatus || 'inactive').toLowerCase();
         if (status === 'active') {
             return res.status(400).json({ message: 'This vehicle profile is already activated.' });
         }
@@ -148,16 +148,16 @@ export const submitVehicleProfileActivation = async (req, res) => {
             }
         }
 
-        const designatedAdmin = await getDepartmentHOD('admincontroller');
-        if (!designatedAdmin?._id) {
+        const designatedHr = await getDepartmentHOD('hr');
+        if (!designatedHr?._id) {
             return res.status(400).json({
-                message: 'No Administrator (Admin Controller) is configured in the company flowchart for this workflow.',
+                message: 'No HR assignee is configured in the company flowchart for this workflow.',
             });
         }
-        const { email: adminEmail } = resolveEmployeeEmail(designatedAdmin);
-        if (!adminEmail || !String(adminEmail).trim()) {
+        const { email: hrEmail } = resolveEmployeeEmail(designatedHr);
+        if (!hrEmail || !String(hrEmail).trim()) {
             return res.status(400).json({
-                message: 'The flowchart Administrator does not have a resolvable email address.',
+                message: 'The flowchart HR assignee does not have a resolvable email address.',
             });
         }
 
@@ -175,7 +175,7 @@ export const submitVehicleProfileActivation = async (req, res) => {
         });
 
         const vehicleLabel = `${asset.name || 'Vehicle'} (${asset.assetId || id})`;
-        const adminGreetingName = `${designatedAdmin.firstName || ''} ${designatedAdmin.lastName || ''}`.trim() || 'Administrator';
+        const hrGreetingName = `${designatedHr.firstName || ''} ${designatedHr.lastName || ''}`.trim() || 'HR';
         const origin = req.headers.origin || (req.headers.referer ? new URL(req.headers.referer).origin : null);
         const baseUrl = process.env.FRONTEND_URL || origin || 'http://localhost:3000';
         const detailUrl = `${baseUrl}/HRM/Asset/Vehicle/details/${id}`;
@@ -188,8 +188,8 @@ export const submitVehicleProfileActivation = async (req, res) => {
                     <h2 style="margin: 0;">Vehicle profile — activation review</h2>
                 </div>
                 <div style="padding: 28px;">
-                    <p>Hello <strong>${adminGreetingName}</strong>,</p>
-                    <p>A colleague ${isResubmitAfterHold || isFreshAfterReject ? '<strong>re-submitted</strong> ' : ''}completed the vehicle profile checklist and sent it for <strong>your review</strong> as the company <strong>Administrator</strong> (flowchart).</p>
+                    <p>Hello <strong>${hrGreetingName}</strong>,</p>
+                    <p>A colleague ${isResubmitAfterHold || isFreshAfterReject ? '<strong>re-submitted</strong> ' : ''}completed the vehicle profile checklist and sent it for <strong>your review</strong> as <strong>HR</strong> (flowchart).</p>
                     <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 16px; margin: 18px 0;">
                         <p style="margin:0;"><strong>Vehicle:</strong> ${vehicleLabel}</p>
                         <p style="margin:8px 0 0 0;"><strong>Sections in this request:</strong></p>
@@ -205,7 +205,7 @@ export const submitVehicleProfileActivation = async (req, res) => {
 
         await transporter.sendMail({
             from: `"VeRP Portal" <${emailUser}>`,
-            to: adminEmail,
+            to: hrEmail,
             subject: `${isResubmitAfterHold || isFreshAfterReject ? 'Re-submitted: ' : ''}Vehicle profile review: ${vehicleLabel}`,
             html,
         });
@@ -230,7 +230,7 @@ export const submitVehicleProfileActivation = async (req, res) => {
         await syncDashboardAction({
             requestId: asset._id,
             requestType: 'Vehicle Profile Activation',
-            assignedTo: String(designatedAdmin._id),
+            assignedTo: String(designatedHr._id),
             status: 'Pending',
             subjectEmployee: subjectForDash,
             requestedByName,
@@ -238,7 +238,7 @@ export const submitVehicleProfileActivation = async (req, res) => {
             extra2: descText || '',
             extra3: JSON.stringify({
                 activationSubject: 'vehicle',
-                activationViewerRole: 'flowchart_admin',
+                activationViewerRole: 'flowchart_hr',
                 includedSections: sections,
                 vehicleMongoId: String(asset._id),
             }),
@@ -273,7 +273,7 @@ export const submitVehicleProfileActivation = async (req, res) => {
 
         return res.status(200).json({
             message:
-                'Submitted for review. The flowchart Administrator has been emailed and will see the task on their dashboard.',
+                'Submitted for review. HR has been emailed and will see the task on their dashboard.',
             vehicleProfileActivationStatus: 'submitted',
         });
     } catch (err) {
@@ -295,7 +295,7 @@ export const approveVehicleProfileActivation = async (req, res) => {
 
         if (!(await canProcessVehicleProfileActivation(req))) {
             return res.status(403).json({
-                message: 'Only the flowchart Administrator assigned on the company flowchart can approve this request.',
+                message: 'Only the flowchart HR assignee can approve this request.',
             });
         }
 
@@ -328,7 +328,7 @@ export const approveVehicleProfileActivation = async (req, res) => {
         const reviewerDisplayName =
             req.user?.name ||
             [req.user?.firstName, req.user?.lastName].filter(Boolean).join(' ').trim() ||
-            'Administrator';
+            'HR';
 
         await AssetItem.updateOne(
             { _id: id },
@@ -388,7 +388,7 @@ export const approveVehicleProfileActivation = async (req, res) => {
                 assetId: asset._id,
                 action: 'Update',
                 performedBy: req.user?.employeeObjectId || req.user?._id || null,
-                comments: 'Vehicle profile activation approved by flowchart Administrator.',
+                comments: 'Vehicle profile activation approved by HR.',
                 details: { type: 'VehicleProfileActivationApprove' },
             });
         } catch (_h) {
@@ -421,7 +421,7 @@ export const holdVehicleProfileActivation = async (req, res) => {
 
         if (!(await canProcessVehicleProfileActivation(req))) {
             return res.status(403).json({
-                message: 'Only the flowchart Administrator assigned on the company flowchart can hold this request.',
+                message: 'Only the flowchart HR assignee can hold this request.',
             });
         }
 
@@ -473,7 +473,7 @@ export const holdVehicleProfileActivation = async (req, res) => {
             },
         );
 
-        const designatedAdmin = await getDepartmentHOD('admincontroller');
+        const designatedHr = await getDepartmentHOD('hr');
         const submitterId = asset.vehicleProfileActivationSubmittedBy || null;
         const submitterEmp = submitterId
             ? await EmployeeBasic.findById(submitterId)
@@ -500,12 +500,12 @@ export const holdVehicleProfileActivation = async (req, res) => {
         const reviewerDisplayName =
             req.user?.name ||
             [req.user?.firstName, req.user?.lastName].filter(Boolean).join(' ').trim() ||
-            'Administrator';
+            'HR';
 
         await syncDashboardAction({
             requestId: asset._id,
             requestType: 'Vehicle Profile Activation',
-            assignedTo: designatedAdmin?._id ? String(designatedAdmin._id) : '',
+            assignedTo: designatedHr?._id ? String(designatedHr._id) : '',
             status: 'On Hold',
             skipPendingCompletion: true,
             subjectEmployee: { ...subjectForDash, _id: asset._id },
@@ -579,7 +579,7 @@ export const rejectVehicleProfileActivation = async (req, res) => {
 
         if (!(await canProcessVehicleProfileActivation(req))) {
             return res.status(403).json({
-                message: 'Only the flowchart Administrator assigned on the company flowchart can reject this request.',
+                message: 'Only the flowchart HR assignee can reject this request.',
             });
         }
 
@@ -602,7 +602,7 @@ export const rejectVehicleProfileActivation = async (req, res) => {
         const reviewerDisplayName =
             req.user?.name ||
             [req.user?.firstName, req.user?.lastName].filter(Boolean).join(' ').trim() ||
-            'Administrator';
+            'HR';
 
         await AssetItem.updateOne(
             { _id: id },

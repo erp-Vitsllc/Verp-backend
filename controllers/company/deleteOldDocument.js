@@ -1,6 +1,9 @@
 import Company from "../../models/Company.js";
 import mongoose from "mongoose";
-import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
+import {
+    isReqUserAdmin,
+    scheduleManagementAdminDeletionEmail,
+} from "../../utils/sendAdminDeletionNotificationEmails.js";
 
 // @desc    Delete a document from company's oldDocuments list (Archive)
 // @route   DELETE /api/Company/:id/old-document/:target
@@ -19,6 +22,33 @@ export const deleteOldDocument = async (req, res) => {
                 { companyId: id },
             ],
         };
+        const company = await Company.findOne(filter).lean();
+        if (!company) {
+            return res.status(404).json({ message: "Company not found" });
+        }
+
+        let deletedDoc = null;
+        if (mongoose.Types.ObjectId.isValid(target)) {
+            deletedDoc = (company.oldDocuments || []).find((d) => String(d._id) === String(target));
+        } else {
+            const docIndex = Number.parseInt(target, 10);
+            if (Number.isInteger(docIndex) && docIndex >= 0 && company.oldDocuments?.[docIndex]) {
+                deletedDoc = company.oldDocuments[docIndex];
+            }
+        }
+        if (deletedDoc) {
+            scheduleManagementAdminDeletionEmail(req, {
+                moduleName: "Company Old Document",
+                recordId: company.companyId || String(company._id),
+                details: (deletedDoc?.type || "Archived company document").toString(),
+                deletedPayload: {
+                    companyId: company.companyId,
+                    companyName: company.name,
+                    document: deletedDoc,
+                },
+            });
+        }
+
         let result;
 
         if (mongoose.Types.ObjectId.isValid(target)) {

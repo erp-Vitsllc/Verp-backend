@@ -11,6 +11,7 @@ import { buildBulkAssetInventoryPdfAttachment } from "../utils/generateBulkAsset
 import { sendFlowchartReassignmentResultEmail } from "../utils/sendFlowchartReassignmentResultEmail.js";
 import { isUserAdministrator } from "../services/permissionService.js";
 import { resolveFlowchartHrEmployee } from "../utils/resolveFlowchartHrEmployee.js";
+import { rerouteAllPendingAssetCreationApprovals } from "../utils/assetApprovalHelpers.js";
 import AssetHistory from "../models/AssetHistory.js";
 
 /**
@@ -542,6 +543,19 @@ export const respondToResponsibility = async (req, res) => {
             dashboardAction.resolvedAt = new Date();
             dashboardAction.resolvedBy = req.user._id;
             await dashboardAction.save();
+        }
+
+        // Re-route every pending Asset Approval (creation flow) to the new role holder so the bell + email
+        // recipient catches up. Fleet vehicles → new HR, tools → new Asset Controller.
+        if (action === 'Approve' && ['hr', 'assetcontroller'].includes(catNorm)) {
+            try {
+                const counts = await rerouteAllPendingAssetCreationApprovals({ category: catNorm });
+                console.log(
+                    `[Flowchart] Re-routed pending asset creation approvals after ${catNorm} change: ${JSON.stringify(counts)}`
+                );
+            } catch (rerouteErr) {
+                console.error('[Flowchart] Failed to re-route pending asset creation approvals:', rerouteErr?.message || rerouteErr);
+            }
         }
 
         // Trigger asset handover if HR responsibility approved

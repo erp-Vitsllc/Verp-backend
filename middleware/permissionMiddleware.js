@@ -46,6 +46,102 @@ export const checkPermission = (moduleId, permissionType = 'view') => {
 };
 
 /**
+ * Manual employee documents (live list + S3 upload helper).
+ * Matches frontend Documents tab: `DocumentsTab` gates add/edit with
+ * `hrm_employees_view_documents_live` or `hrm_employees_view_documents_old` edit,
+ * not necessarily parent `hrm_employees_view` edit.
+ */
+export const checkEmployeeManualDocumentEdit = () => {
+    return async (req, res, next) => {
+        try {
+            const userId = req.user?.id;
+
+            if (!userId) {
+                return res.status(401).json({ message: "Not authorized, no user found" });
+            }
+
+            const { hasPermission, isUserAdministrator } = await import("../services/permissionService.js");
+
+            const isAdmin = await isUserAdministrator(userId);
+            const isJwtAdmin =
+                req.user?.isAdmin === true ||
+                req.user?.role === "Admin" ||
+                req.user?.role === "ROOT";
+            if (isAdmin || isJwtAdmin) {
+                return next();
+            }
+
+            const pairs = [
+                ["hrm_employees_view", "edit"],
+                ["hrm_employees_view_documents_live", "edit"],
+                ["hrm_employees_view_documents_live_with_expiry", "edit"],
+                ["hrm_employees_view_documents_live_without_expiry", "edit"],
+                ["hrm_employees_view_documents_old", "edit"],
+            ];
+
+            for (const [moduleId, permissionType] of pairs) {
+                if (await hasPermission(userId, moduleId, permissionType)) {
+                    return next();
+                }
+            }
+
+            return res.status(403).json({
+                message:
+                    "Access denied. Editing employee documents requires View Employee (Edit) or Documents Live / Old (or granular live document) Edit, with View enabled for that module.",
+            });
+        } catch (error) {
+            console.error("Error checking manual document edit permission:", error);
+            return res.status(500).json({ message: "Error checking permissions" });
+        }
+    };
+};
+
+/**
+ * Deleting archived / old document rows — align with old-documents delete or parent view delete.
+ */
+export const checkEmployeeOldDocumentDelete = () => {
+    return async (req, res, next) => {
+        try {
+            const userId = req.user?.id;
+
+            if (!userId) {
+                return res.status(401).json({ message: "Not authorized, no user found" });
+            }
+
+            const { hasPermission, isUserAdministrator } = await import("../services/permissionService.js");
+
+            const isAdmin = await isUserAdministrator(userId);
+            const isJwtAdmin =
+                req.user?.isAdmin === true ||
+                req.user?.role === "Admin" ||
+                req.user?.role === "ROOT";
+            if (isAdmin || isJwtAdmin) {
+                return next();
+            }
+
+            const pairs = [
+                ["hrm_employees_view", "delete"],
+                ["hrm_employees_view_documents_old", "delete"],
+            ];
+
+            for (const [moduleId, permissionType] of pairs) {
+                if (await hasPermission(userId, moduleId, permissionType)) {
+                    return next();
+                }
+            }
+
+            return res.status(403).json({
+                message:
+                    "Access denied. Removing old employee documents requires View Employee (Delete) or Old Documents (Delete), with View enabled for that module.",
+            });
+        } catch (error) {
+            console.error("Error checking old document delete permission:", error);
+            return res.status(500).json({ message: "Error checking permissions" });
+        }
+    };
+};
+
+/**
  * Profile activation workflow (submit to HR, approve, hold, reject, status).
  * Matches frontend: Flowchart often grants `hrm_employees_view_activation` (view/create) without parent `hrm_employees` edit.
  * Allows any of: hrm_employees edit|create, hrm_employees_view_activation edit|create (each still requires module view per hasPermission).

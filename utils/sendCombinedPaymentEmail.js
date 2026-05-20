@@ -4,30 +4,20 @@ import EmployeeBasic from '../models/EmployeeBasic.js';
 import Fine from '../models/Fine.js';
 import Loan from '../models/Loan.js';
 import Payment from '../models/Payment.js';
+import { resolveEmployeeEmail } from './resolveEmployeeEmail.js';
 
-// Payment recipient rule:
-// 1) companyEmail (preferred)
-// 2) personalEmail fallback
-// 3) workEmail/email as last resort
+const isUsableEmail = (value) => {
+    const v = String(value || '').trim().toLowerCase();
+    if (!v) return false;
+    if (v === 'n/a@company.com' || v === 'na@company.com') return false;
+    if (v === 'n/a' || v === 'na' || v === '-') return false;
+    return true;
+};
+
+/** Company email, else primary reportee business email — never personal. */
 const resolvePaymentRecipientEmail = (employee) => {
-    const isUsableEmail = (value) => {
-        const v = String(value || '').trim().toLowerCase();
-        if (!v) return false;
-        if (v === 'n/a@company.com' || v === 'na@company.com') return false;
-        if (v === 'n/a' || v === 'na' || v === '-') return false;
-        return true;
-    };
-
-    if (!employee) return null;
-    const company = (employee.companyEmail || '').trim();
-    if (isUsableEmail(company)) return company;
-    const personal = (employee.personalEmail || '').trim();
-    if (isUsableEmail(personal)) return personal;
-    const work = (employee.workEmail || '').trim();
-    if (isUsableEmail(work)) return work;
-    const email = (employee.email || '').trim();
-    if (isUsableEmail(email)) return email;
-    return null;
+    const { email } = resolveEmployeeEmail(employee);
+    return isUsableEmail(email) ? email : null;
 };
 
 /**
@@ -263,7 +253,7 @@ export const sendPaymentNotificationEmail = async (payment, status, comment = ''
         
         const employee = await EmployeeBasic.findById(employeeId)
             .select('employeeId firstName lastName companyEmail personalEmail workEmail email primaryReportee')
-            .populate('primaryReportee', 'firstName lastName companyEmail personalEmail');
+            .populate('primaryReportee', 'firstName lastName companyEmail workEmail');
 
         if (!employee) return;
 

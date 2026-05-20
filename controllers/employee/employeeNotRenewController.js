@@ -528,7 +528,7 @@ export const respondEmployeeDocumentNotRenewRequest = async (req, res) => {
             const submitter = entry.submittedByUserId
                 ? await User.findById(entry.submittedByUserId).select("email companyEmail name").lean()
                 : null;
-            const to = (submitter?.companyEmail || submitter?.email || "").trim();
+            const to = resolveEmployeeEmail(submitter || {}).email || "";
             if (to) {
                 await sendMail({
                     to: [to],
@@ -575,7 +575,7 @@ export const respondEmployeeDocumentNotRenewRequest = async (req, res) => {
         const submitter = entry.submittedByUserId
             ? await User.findById(entry.submittedByUserId).select("email companyEmail name").lean()
             : null;
-        const to = (submitter?.companyEmail || submitter?.email || "").trim();
+        const to = resolveEmployeeEmail(submitter || {}).email || "";
         if (to) {
             await sendMail({
                 to: [to],

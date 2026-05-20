@@ -3,6 +3,7 @@ import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { getCompleteEmployee } from "../../services/employeeService.js";
 import mongoose from "mongoose";
 import { getDepartmentHOD } from "../../utils/getDepartmentHOD.js";
+import { resolveEmployeeEmail } from "../../utils/resolveEmployeeEmail.js";
 
 // Helper to send email
 const sendEmail = async (to, subject, html) => {
@@ -28,7 +29,7 @@ const sendEmail = async (to, subject, html) => {
     });
 };
 
-const resolveEmail = (emp) => emp?.companyEmail || emp?.workEmail || emp?.personalEmail || emp?.email || null;
+const resolveEmail = (emp) => resolveEmployeeEmail(emp || {}).email || null;
 
 const dedupeEmails = (items = []) => {
     const seen = new Set();

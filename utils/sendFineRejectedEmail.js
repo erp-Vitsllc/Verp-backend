@@ -2,7 +2,7 @@ import nodemailer from 'nodemailer';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import User from '../models/User.js';
 import axios from 'axios';
-import { resolveEmployeeEmail } from './resolveEmployeeEmail.js';
+import { resolveEmployeeEmail, addEmployeeEmailToSet } from './resolveEmployeeEmail.js';
 
 /**
  * Sends a rejection email to assigned employees when a fine is rejected by CEO/Admin.
@@ -28,7 +28,7 @@ export const sendFineRejectedEmail = async (fine, assignedEmployees) => {
         const [fullEmployees, previousApproverUsers, creatorUser] = await Promise.all([
             EmployeeBasic.find({ employeeId: { $in: employeeIds } })
                 .select('employeeId firstName lastName companyEmail personalEmail primaryReportee')
-                .populate('primaryReportee', 'companyEmail personalEmail'),
+                .populate('primaryReportee', 'companyEmail workEmail'),
             User.find({ _id: { $in: previousApproverIds } })
                 .select('email companyEmail'),
             creatorId ? User.findById(creatorId).select('email companyEmail') : null
@@ -41,21 +41,17 @@ export const sendFineRejectedEmail = async (fine, assignedEmployees) => {
             const { email } = resolveEmployeeEmail(emp);
             if (email) recipientEmails.add(email);
 
-            if (emp.primaryReportee) {
-                const managerMail = emp.primaryReportee.companyEmail || emp.primaryReportee.personalEmail;
-                if (managerMail) recipientEmails.add(managerMail);
-            }
+            addEmployeeEmailToSet(recipientEmails, emp.primaryReportee);
         });
 
         // Add Previous Approvers
         previousApproverUsers.forEach(u => {
-            const mail = u.companyEmail || u.email;
+            const mail = (u.companyEmail || '').trim();
             if (mail) recipientEmails.add(mail);
         });
 
-        // Add Creator
-        if (creatorUser) {
-            const creatorMail = creatorUser.companyEmail || creatorUser.email;
+        if (creatorUser?.companyEmail) {
+            const creatorMail = String(creatorUser.companyEmail).trim();
             if (creatorMail) recipientEmails.add(creatorMail);
         }
 

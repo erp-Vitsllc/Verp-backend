@@ -1,7 +1,7 @@
 import nodemailer from 'nodemailer';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import axios from 'axios';
-import { resolveEmployeeEmail, getFallbackEmailNote } from './resolveEmployeeEmail.js';
+import { resolveEmployeeEmail, addEmployeeEmailToSet } from './resolveEmployeeEmail.js';
 
 /**
  * Sends a confirmation email to assigned employees when a fine is fully approved.
@@ -18,9 +18,9 @@ export const sendFineConfirmedEmail = async (fine, assignedEmployees, req = null
         const employeeIds = assignedEmployees.map(e => e.employeeId);
         const fullEmployees = await EmployeeBasic.find({ employeeId: { $in: employeeIds } })
             .select('employeeId firstName lastName companyEmail personalEmail primaryReportee secondaryReportee reportingAuthority')
-            .populate('primaryReportee', 'companyEmail personalEmail')
-            .populate('secondaryReportee', 'companyEmail personalEmail')
-            .populate('reportingAuthority', 'companyEmail personalEmail');
+            .populate('primaryReportee', 'companyEmail workEmail')
+            .populate('secondaryReportee', 'companyEmail workEmail')
+            .populate('reportingAuthority', 'companyEmail workEmail');
 
         // Fetch Creator Email (Need User model)
         const User = await import("../models/User.js").then(m => m.default);
@@ -35,20 +35,13 @@ export const sendFineConfirmedEmail = async (fine, assignedEmployees, req = null
             if (email) toEmails.add(email);
 
             // 2. Add Manager Emails (His Reportee/Supervisor)
-            const addCC = (m) => {
-                if (!m) return;
-                const mail = m.companyEmail || m.personalEmail;
-                if (mail) ccEmails.add(mail);
-            };
-
-            addCC(emp.primaryReportee);
-            addCC(emp.secondaryReportee);
-            addCC(emp.reportingAuthority);
+            addEmployeeEmailToSet(ccEmails, emp.primaryReportee);
+            addEmployeeEmailToSet(ccEmails, emp.secondaryReportee);
+            addEmployeeEmailToSet(ccEmails, emp.reportingAuthority);
         });
 
-        // 3. Add Creator Email
-        if (creator) {
-            const creatorMail = creator.companyEmail || creator.email;
+        if (creator?.companyEmail) {
+            const creatorMail = String(creator.companyEmail).trim();
             if (creatorMail) ccEmails.add(creatorMail);
         }
 
@@ -60,19 +53,13 @@ export const sendFineConfirmedEmail = async (fine, assignedEmployees, req = null
             const { getManagementHOD } = await import("./getManagementHOD.js");
 
             const hrHOD = await getDepartmentHOD('hr', employeeIds[0]);
-            if (hrHOD && (hrHOD.companyEmail || hrHOD.personalEmail || hrHOD.email)) {
-                ccEmails.add(hrHOD.companyEmail || hrHOD.personalEmail || hrHOD.email);
-            }
+            addEmployeeEmailToSet(ccEmails, hrHOD);
 
             const accountsHOD = await getDepartmentHOD('finance', employeeIds[0]);
-            if (accountsHOD && (accountsHOD.companyEmail || accountsHOD.personalEmail || accountsHOD.email)) {
-                ccEmails.add(accountsHOD.companyEmail || accountsHOD.personalEmail || accountsHOD.email);
-            }
+            addEmployeeEmailToSet(ccEmails, accountsHOD);
 
             const managementHOD = await getManagementHOD(employeeIds[0]);
-            if (managementHOD && (managementHOD.companyEmail || managementHOD.personalEmail || managementHOD.email)) {
-                ccEmails.add(managementHOD.companyEmail || managementHOD.personalEmail || managementHOD.email);
-            }
+            addEmployeeEmailToSet(ccEmails, managementHOD);
         } catch (err) {
             console.warn("[FineConfirmedEmail] Could not fetch HOD emails for CC", err.message);
         }

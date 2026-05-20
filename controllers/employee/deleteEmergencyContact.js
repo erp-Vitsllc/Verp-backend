@@ -3,6 +3,10 @@ import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { getCompleteEmployee } from "../../services/employeeService.js";
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
 import { skipLiveProfileWritesPendingHr, queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
+import {
+    isReqUserAdmin,
+    scheduleManagementAdminDeletionEmail,
+} from "../../utils/sendAdminDeletionNotificationEmails.js";
 
 export const deleteEmergencyContact = async (req, res) => {
     const { id, contactId } = req.params;
@@ -12,6 +16,10 @@ export const deleteEmergencyContact = async (req, res) => {
     }
 
     try {
+        const isAdmin = await isReqUserAdmin(req.user);
+        if (!isAdmin) {
+            return res.status(403).json({ message: "Only administrator can delete emergency contacts." });
+        }
         // Get employeeId from employee record
         const employee = await getCompleteEmployee(id);
         if (!employee) {
@@ -55,6 +63,13 @@ export const deleteEmergencyContact = async (req, res) => {
                 changeEntry: emergencyDeleteEntry,
             });
         } else {
+            const contactSnapshot = contact.toObject ? contact.toObject() : { ...contact };
+            scheduleManagementAdminDeletionEmail(req, {
+                moduleName: "Employee Emergency Contact",
+                recordId: employeeId,
+                details: contactSnapshot?.name || "Emergency contact",
+                deletedPayload: { employeeId, contact: contactSnapshot },
+            });
             contact.deleteOne();
             const primaryContact = contactRecord.emergencyContacts?.[0];
             if (primaryContact) {

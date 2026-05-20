@@ -52,6 +52,9 @@ export const syncDashboardAction = async (data) => {
                 if (assignedTo) {
                     query.assignedTo = assignedTo;
                 }
+                if (requestType === 'Vehicle Disposition Request' && extra3) {
+                    query.extra3 = String(extra3);
+                }
 
                 await DashboardAction.updateMany(
                     query,
@@ -263,11 +266,21 @@ export const syncDashboardAction = async (data) => {
                 : requestType === 'Profile Activation'
                     ? JSON.stringify({ activationSubject: 'employee', activationViewerRole: 'hr' })
                     : requestType === 'Vehicle Profile Activation'
-                        ? JSON.stringify({ activationSubject: 'vehicle', activationViewerRole: 'flowchart_admin' })
+                        ? JSON.stringify({ activationSubject: 'vehicle', activationViewerRole: 'flowchart_hr' })
                         : undefined;
 
+        const pendingUpsertFilter = {
+            requestId: requestId,
+            assignedTo: actualAssignedTo,
+            status: 'Pending',
+        };
+        // Parallel disposition: Accounts + Management may share the same assignee — keep separate bell rows.
+        if (requestType === 'Vehicle Disposition Request' && pendingExtra3) {
+            pendingUpsertFilter.extra3 = pendingExtra3;
+        }
+
         await DashboardAction.findOneAndUpdate(
-            { requestId: requestId, assignedTo: actualAssignedTo, status: 'Pending' },
+            pendingUpsertFilter,
             {
                 assignedToEmpId: assignee.employeeId,
                 requestType: requestType,

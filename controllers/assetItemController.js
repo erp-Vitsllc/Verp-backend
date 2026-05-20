@@ -34,7 +34,12 @@ import { sendAssetServiceEmail } from '../utils/sendAssetServiceEmail.js';
 import {
     resolveAssetControllerEmployee,
     getAssetRequesterDisplayName,
-    resolveNewAssetCreationStatus
+    resolveNewAssetCreationStatus,
+    resolveAssetCreationApproverEmployee,
+    creationApproverRoleLabel,
+    isFleetVehicleAssetFields,
+    syncStaleAssetCreationApprover,
+    rerouteAllPendingAssetCreationApprovals,
 } from '../utils/assetApprovalHelpers.js';
 import AssetAccessoryCatalog from '../models/AssetAccessoryCatalog.js';
 import { sendAssignedEmployeeActionEmail } from '../utils/sendAssignedEmployeeActionEmail.js';
@@ -47,13 +52,36 @@ import { ASSET_HANDOVER_PDF_SELECTOR } from '../utils/assetHandoverPdfConstants.
 import {
     buildBulkAssetInventoryPdfAttachment,
     requireBulkAssetInventoryPdfAttachment,
-    buildBulkAssigneeDispositionPdfAttachment
+    requireBulkAssignmentHandoverPdfAttachment,
+    buildBulkAssignmentHandoverPdfAttachment,
+    buildBulkAssigneeDispositionPdfAttachment,
+    generateBulkAssignmentHandoverPdf,
+    resolveSignatureUrlForPdf,
 } from '../utils/generateBulkAssetInventoryPdf.js';
 import { sendAssetBulkDispositionResultEmail } from '../utils/sendAssetBulkDispositionResultEmail.js';
+
+/** Upload server-generated handover PDF bytes to S3; store returned key on AssetHistory.file */
+async function persistHandoverPdfBufferToHistory(pdfBuffer, filename) {
+    if (!pdfBuffer || !Buffer.isBuffer(pdfBuffer) || pdfBuffer.length === 0) return null;
+    try {
+        const payload = `data:application/pdf;base64,${pdfBuffer.toString('base64')}`;
+        const safe = String(filename || 'handover.pdf').replace(/[^a-zA-Z0-9._-]/g, '_');
+        const { publicId } = await uploadDocumentToS3(payload, 'asset-history', safe);
+        return publicId;
+    } catch (e) {
+        console.error('[persistHandoverPdfBufferToHistory]', e?.message || e);
+        return null;
+    }
+}
+
+function frontendBaseUrl() {
+    return String(process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/+$/, '');
+}
 import {
     notifyAdminDeletedWholeAsset,
     isReqUserAdmin,
-    getAssetControllerNotificationEmail
+    getAssetControllerNotificationEmail,
+    scheduleManagementAdminDeletionEmail,
 } from '../utils/sendAdminDeletionNotificationEmails.js';
 import {
     cleanupDashboardActionsForDeletedAsset,
@@ -311,6 +339,7 @@ const notifyEmployeesGroupedControllerBulkDirect = async (req, employeeSnapshots
 // - Assignee: allowed
 // - Assigner (asset.assignedBy): allowed with full permissions
 // - If assignee has NO `companyEmail` OR no portal/login access: allow primaryReportee as delegate
+// - Pending assignment: whoever is `actionRequiredBy` (assignee or reportee when no company email) may act
 // ─────────────────────────────────────────────────────────────────────────────
 const getActorPermissionFlagsForAsset = async (reqUser, asset) => {
     const currentEmpObjectId = reqUser?.employeeObjectId?.toString?.() || null;
@@ -354,7 +383,7 @@ const getActorPermissionFlagsForAsset = async (reqUser, asset) => {
                 .catch(() => assigneeDoc);
         }
 
-        const hasCompanyEmail = !!(assigneeDoc?.companyEmail && String(assigneeDoc.companyEmail).trim().length > 0);
+        const assigneeHasCompanyEmail = !!(assigneeDoc?.companyEmail && String(assigneeDoc.companyEmail).trim().length > 0);
         const primaryReporteeId = toIdString(assigneeDoc?.primaryReportee);
 
         // Portal access check (ERP login-enabled user)
@@ -371,9 +400,20 @@ const getActorPermissionFlagsForAsset = async (reqUser, asset) => {
         isPrimaryReporteeDelegate = !!(
             primaryReporteeId &&
             primaryReporteeId === currentEmpObjectId &&
-            (!hasCompanyEmail || hasPortalAccess === false)
+            (!assigneeHasCompanyEmail || hasPortalAccess === false)
         );
     }
+
+    const actionRequiredById = toIdString(asset?.actionRequiredBy);
+    const isPendingAssignmentActor = !!(
+        asset?.assignedToType === 'Employee' &&
+        String(asset?.acceptanceStatus || '') === 'Pending' &&
+        (String(asset?.status || '') === 'Pending' || String(asset?.status || '') === 'Assigned') &&
+        !asset?.pendingAction &&
+        currentEmpObjectId &&
+        actionRequiredById &&
+        actionRequiredById === currentEmpObjectId
+    );
 
     const canAct =
         isAdmin ||
@@ -381,7 +421,8 @@ const getActorPermissionFlagsForAsset = async (reqUser, asset) => {
         isCompanyCoordinator ||
         isAssigner ||
         isAssignee ||
-        isPrimaryReporteeDelegate;
+        isPrimaryReporteeDelegate ||
+        isPendingAssignmentActor;
     return {
         canAct,
         isAdmin,
@@ -389,7 +430,8 @@ const getActorPermissionFlagsForAsset = async (reqUser, asset) => {
         isCompanyCoordinator,
         isAssigner,
         isAssignee,
-        isPrimaryReporteeDelegate
+        isPrimaryReporteeDelegate,
+        isPendingAssignmentActor
     };
 };
 
@@ -453,12 +495,25 @@ export const getVehicleFleetDashboard = async (req, res) => {
     try {
         const fallbackAssetController = await getDepartmentHOD('assetcontroller');
         const draftVis = buildDraftVisibilityQuery(req.user);
-        const items = await AssetItem.find({ $and: [draftVis] })
+        const vehicleTypeDocs = await AssetType.find({
+            isActive: true,
+            name: { $regex: /vehicle|car|fleet|truck/i },
+        })
+            .select('_id')
+            .lean();
+        const vehicleTypeIds = vehicleTypeDocs.map((t) => t._id);
+        const fleetScope = {
+            $or: [
+                { plateNumber: { $exists: true, $nin: [null, ''] } },
+                ...(vehicleTypeIds.length ? [{ typeId: { $in: vehicleTypeIds } }] : []),
+            ],
+        };
+        const items = await AssetItem.find({ $and: [draftVis, fleetScope] })
             .populate('typeId', 'name')
             .populate('assignedTo', 'firstName lastName employeeId')
             .populate('actionRequiredBy', 'firstName lastName employeeId')
             .select(
-                'assetId name plateEmirate plateNumber modelYear assetValue status registrationExpiryDate insuranceExpiryDate nextServiceDate oilChangeDate gearOilDueDate lastServiceDate currentKilometer assignedTo acceptanceStatus pendingAction services documents actionRequiredBy'
+                'assetId name plateEmirate plateNumber modelYear assetValue status registrationExpiryDate insuranceExpiryDate nextServiceDate oilChangeDate gearOilDueDate lastServiceDate currentKilometer assignedTo acceptanceStatus pendingAction services documents actionRequiredBy createdBy vehicleProfileActivationStatus vehicleDispositionStatus assignedCompany assignmentType temporaryEndDate warrantyEnabled warrantyExpiryDate warrantyYears accessories parkingExtendedDays parkingReminderSentAt parkingDurationCompleteSentAt'
             )
             .lean();
 
@@ -576,6 +631,8 @@ export const getVehicleFleetDashboard = async (req, res) => {
                 assetValue: Number(v.assetValue || 0),
                 modelYear: v.modelYear || '',
                 status: v.status,
+                vehicleDispositionStatus: v.vehicleDispositionStatus || 'active',
+                vehicleProfileActivationStatus: v.vehicleProfileActivationStatus || '',
                 assignedTo: v.assignedTo,
                 assetController: controllerPayload,
                 assetControllerId: controllerPayload?._id || null,
@@ -2327,6 +2384,74 @@ export const createAssetItem = async (req, res) => {
     }
 };
 
+async function runPostAssetCreationApprovalWork(req, work) {
+    const item = await AssetItem.findById(work.itemId);
+    if (!item) return;
+
+    await notifyAssignedEmployeeIfController(
+        req,
+        item,
+        work.isReassignment ? 'Reassign Asset' : 'Assign Asset',
+        work.isReassignment
+            ? 'Asset was reassigned by Asset Controller.'
+            : 'Asset assignment was updated by Asset Controller.'
+    );
+
+    try {
+        const snapshotItem = await AssetItem.findById(item._id).populate('categoryId typeId createdBy');
+        const appr = work.performedBy
+            ? await EmployeeBasic.findById(work.performedBy).select('firstName lastName').lean()
+            : null;
+        const apprName = appr ? `${appr.firstName || ''} ${appr.lastName || ''}`.trim() : 'The approver';
+        const whenStr = new Date().toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+        const userStory =
+            work.actionNorm === 'Approve'
+                ? `${apprName} approved this asset on ${whenStr}. It is ready to assign.`
+                : `${apprName} did not approve this asset on ${whenStr}. It was returned to Draft so the creator can edit and resubmit.`;
+
+        await AssetHistory.create({
+            assetId: item._id,
+            action: work.actionNorm === 'Approve' ? 'Accepted' : 'Rejected',
+            performedBy: work.performedBy,
+            comments: userStory,
+            details: {
+                ...snapshotItem.toObject(),
+                approvalAction: work.actionNorm,
+                userStory,
+            },
+        });
+    } catch (histErr) {
+        console.error(`[History Error] Failed to record creation response history for ${work.assetId}:`, histErr.message);
+    }
+
+    if (work.actionNorm === 'Reject' && work.createdBy) {
+        await notifyAssetCreationRejectedToCreator({
+            asset: item,
+            createdByUserId: work.createdBy,
+            reviewerDisplayName: work.reviewerDisplayName,
+            actionedBy: work.performedBy || work.userId,
+            rejectReason: work.rejectReason,
+            approverRole: work.approverRole,
+        });
+    }
+
+    if (work.actionNorm === 'Approve' && work.createdBy) {
+        try {
+            const creatorEmp = await resolveAssetCreatorEmployee(work.createdBy);
+            if (creatorEmp) {
+                await sendAssetCreationDecisionEmail({
+                    asset: item,
+                    recipient: creatorEmp,
+                    approverRole: work.approverRole,
+                    creatorName: work.reviewerDisplayName,
+                });
+            }
+        } catch (emailErr) {
+            console.error('[respondToAssetCreation] approval email failed:', emailErr?.message || emailErr);
+        }
+    }
+}
+
 // @desc    Respond to asset creation approval (Approve/Reject)
 // @route   PUT /api/AssetItem/:id/approve-creation
 // @access  Private (Asset Controller or Admin)
@@ -2409,16 +2534,20 @@ export const respondToAssetCreation = async (req, res) => {
             return res.status(403).json({ message: 'You cannot approve or reject an asset you submitted for approval.' });
         }
 
+        const fleetVehicle = isFleetVehicleAssetFields({ plateNumber: item.plateNumber });
         const reviewerDisplayName =
             req.user?.name ||
             [req.user?.firstName, req.user?.lastName].filter(Boolean).join(' ').trim() ||
-            'Asset Controller';
-        const approverRole = isJwtAdmin || isSysAdmin ? 'admin' : 'assetcontroller';
+            (fleetVehicle ? 'HR' : 'Asset Controller');
+        const approverRole = isJwtAdmin || isSysAdmin ? 'admin' : fleetVehicle ? 'hr' : 'assetcontroller';
 
         if (actionNorm === 'Approve') {
             item.status = 'Unassigned';
             item.actionRequiredBy = null;
             item.creationReturnedToDraftAt = null;
+            if (isFleetVehicleAssetFields({ plateNumber: item.plateNumber, typeName: item.typeId?.name })) {
+                item.vehicleProfileActivationStatus = 'inactive';
+            }
         } else {
             item.status = 'Draft';
             item.actionRequiredBy = null;
@@ -2433,42 +2562,7 @@ export const respondToAssetCreation = async (req, res) => {
         const isReassignment = !!(item.assignedTo || item.assignedCompany);
 
         await item.save();
-        await notifyAssignedEmployeeIfController(
-            req,
-            item,
-            isReassignment ? 'Reassign Asset' : 'Assign Asset',
-            isReassignment ? 'Asset was reassigned by Asset Controller.' : 'Asset assignment was updated by Asset Controller.'
-        );
 
-        // Record History
-        try {
-            const snapshotItem = await AssetItem.findById(item._id)
-                .populate('categoryId typeId createdBy');
-            const appr = await EmployeeBasic.findById(req.user.employeeObjectId).select('firstName lastName').lean();
-            const apprName = appr ? `${appr.firstName || ''} ${appr.lastName || ''}`.trim() : 'The approver';
-            const whenStr = new Date().toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
-            const userStory =
-                actionNorm === 'Approve'
-                    ? `${apprName} approved this asset on ${whenStr}. It is ready to assign.`
-                    : `${apprName} did not approve this asset on ${whenStr}. It was returned to Draft so the creator can edit and resubmit.`;
-
-            await AssetHistory.create({
-                assetId: item._id,
-                action: actionNorm === 'Approve' ? 'Accepted' : 'Rejected',
-                performedBy: req.user.employeeObjectId,
-                comments: userStory,
-                details: {
-                    ...snapshotItem.toObject(),
-                    approvalAction: actionNorm,
-                    userStory
-                }
-            });
-            console.log(`[History] Recorded ${actionNorm} for asset creation ${item.assetId}`);
-        } catch (histErr) {
-            console.error(`[History Error] Failed to record creation response history for ${item.assetId}:`, histErr.message);
-        }
-
-        // Update Dashboard Action
         try {
             await DashboardAction.findOneAndUpdate(
                 { requestId: item._id, requestType: 'Asset Approval', status: 'Pending' },
@@ -2482,36 +2576,34 @@ export const respondToAssetCreation = async (req, res) => {
                             : ''
                 }
             );
-            console.log(`[Dashboard] Updated asset approval action to ${actionNorm === 'Approve' ? 'Approved' : 'Rejected'}`);
         } catch (err) {
             console.error('[Dashboard Error] Failed to update asset approval action:', err);
         }
 
-        if (actionNorm === 'Reject' && item.createdBy) {
-            await notifyAssetCreationRejectedToCreator({
-                asset: item,
-                createdByUserId: item.createdBy,
-                reviewerDisplayName,
-                actionedBy: req.user?.employeeObjectId || req.user?._id,
-                rejectReason: String(req.body?.reason || req.body?.comment || '').trim(),
-                approverRole
-            });
-        }
-
-        if (actionNorm === 'Approve' && item.createdBy) {
+        const postWork = {
+            itemId: item._id,
+            assetId: item.assetId,
+            actionNorm,
+            isReassignment,
+            createdBy: item.createdBy,
+            reviewerDisplayName,
+            approverRole,
+            rejectReason: String(req.body?.reason || req.body?.comment || '').trim(),
+            performedBy: req.user?.employeeObjectId,
+            userId: req.user?._id,
+        };
+        if (actionNorm === 'Reject') {
             try {
-                const creatorEmp = await resolveAssetCreatorEmployee(item.createdBy);
-                if (creatorEmp) {
-                    await sendAssetCreationDecisionEmail({
-                        asset: item,
-                        recipient: creatorEmp,
-                        approverRole,
-                        creatorName: reviewerDisplayName
-                    });
-                }
-            } catch (emailErr) {
-                console.error('[respondToAssetCreation] approval email failed:', emailErr?.message || emailErr);
+                await runPostAssetCreationApprovalWork(req, postWork);
+            } catch (err) {
+                console.error('[respondToAssetCreation] post-work failed:', err?.message || err);
             }
+        } else {
+            setImmediate(() => {
+                runPostAssetCreationApprovalWork(req, postWork).catch((err) => {
+                    console.error('[respondToAssetCreation] post-work failed:', err?.message || err);
+                });
+            });
         }
 
         const refreshed = await AssetItem.findById(item._id)
@@ -2727,13 +2819,28 @@ export const getBulkAssetDetails = async (req, res) => {
 
         const pendingAccessoryCtx = await buildPendingAccessoryVisibilityCtx(req);
 
+        const [isAdminBd, isAcBd, deptAcBd] = await Promise.all([
+            isUserAdministrator(req.user?.id),
+            isUserInFlowchart(req.user, 'assetcontroller').catch(() => false),
+            getDepartmentHOD('assetcontroller'),
+        ]);
+        const isPortalAdminBd =
+            req.user?.isAdmin === true || req.user?.role === 'Admin' || req.user?.role === 'ROOT';
+        const currentEmpBd = req.user?.employeeObjectId?.toString?.() || null;
+        const isDeptAcBd = !!(deptAcBd?._id && currentEmpBd && deptAcBd._id.toString() === currentEmpBd);
+        const normIdBulk = (ref) => {
+            if (ref == null) return '';
+            if (typeof ref === 'object' && ref._id != null) return String(ref._id);
+            return String(ref);
+        };
+        const viewerStrBd = normIdBulk(req.user?._id) || normIdBulk(req.user?.id);
+
         const assets = await AssetItem.find({ _id: { $in: ids } })
             .select('assetId name status pendingAction accessories actionRequiredBy createdBy assignedTo')
             .populate('actionRequiredBy', 'firstName lastName employeeId')
             .populate('assignedTo', 'employeeId')
             .lean();
         const byId = new Map(assets.map((a) => [a._id.toString(), a]));
-        const viewerIdBulk = req.user?._id?.toString() || req.user?.id?.toString();
         const notFoundStub = (id) => ({
             _id: id,
             assetId: '—',
@@ -2746,8 +2853,11 @@ export const getBulkAssetDetails = async (req, res) => {
             const a = byId.get(String(id));
             if (!a) return notFoundStub(id);
             if (String(a.status || '').trim() === 'Draft') {
-                const cid = a.createdBy?.toString?.();
-                if (!cid || cid !== viewerIdBulk) return notFoundStub(id);
+                const createdByNorm = normIdBulk(a.createdBy);
+                const isDraftCreator = !!(viewerStrBd && createdByNorm && viewerStrBd === createdByNorm);
+                const allowDraftView =
+                    isDraftCreator || isPortalAdminBd || isAdminBd || isAcBd || isDeptAcBd;
+                if (!allowDraftView) return notFoundStub(id);
             }
             const canSeePending = computeCanSeePendingAddsForAsset(pendingAccessoryCtx, a);
             return {
@@ -2973,14 +3083,6 @@ export const getAssetItemDetail = async (req, res) => {
             return res.status(404).json({ message: 'Asset not found' });
         }
 
-        const viewerUserIdEarly = req.user?._id?.toString() || req.user?.id?.toString();
-        const draftCreatorIdEarly = item.createdBy?._id?.toString() || item.createdBy?.toString();
-        if (String(item.status || '').trim() === 'Draft') {
-            if (!draftCreatorIdEarly || draftCreatorIdEarly !== viewerUserIdEarly) {
-                return res.status(404).json({ message: 'Asset not found' });
-            }
-        }
-
         // Populate sometimes leaves a bare ObjectId; load EmployeeBasic so UI + canApprove match correctly
         if (item.actionRequiredBy) {
             const arRaw = item.actionRequiredBy;
@@ -2992,6 +3094,15 @@ export const getAssetItemDetail = async (req, res) => {
                     item.actionRequiredBy = arEmp;
                 }
             }
+        }
+
+        // If a creation approval is in flight, ensure actionRequiredBy + DashboardAction route to the
+        // CURRENT role holder (HR for fleet, AC for tools). Heals stale routing after a flowchart swap.
+        let currentCreationApprover = null;
+        try {
+            currentCreationApprover = await syncStaleAssetCreationApprover(item);
+        } catch (syncErr) {
+            console.error('[getAssetItemDetail] creation approver sync failed:', syncErr?.message || syncErr);
         }
 
         // acceptedBy (e.g. HR who acknowledged company allocation): ensure names + signature for handover form
@@ -3009,13 +3120,21 @@ export const getAssetItemDetail = async (req, res) => {
 
         // Visibility: system admin (env username) / portal Admin+ROOT / Flowchart asset controller / dept AC HOD /
         // creator / assignee / person who must act (draft approval, accept assignment, etc.)
-        const isAdmin = await isUserAdministrator(req.user?.id);
+        const [isAdmin, isAssetController, assetController] = await Promise.all([
+            isUserAdministrator(req.user?.id),
+            isUserInFlowchart(req.user, 'assetcontroller'),
+            getDepartmentHOD('assetcontroller'),
+        ]);
         const isPortalAdmin =
             req.user?.isAdmin === true || req.user?.role === 'Admin' || req.user?.role === 'ROOT';
-        const isAssetController = await isUserInFlowchart(req.user, 'assetcontroller');
-        const assetController = await getDepartmentHOD('assetcontroller');
-        const creatorId = item.createdBy?._id?.toString() || item.createdBy?.toString();
-        const isCreator = creatorId && creatorId === (req.user?._id?.toString() || req.user?.id);
+        const normUserRefId = (ref) => {
+            if (ref == null) return '';
+            if (typeof ref === 'object' && ref._id != null) return String(ref._id);
+            return String(ref);
+        };
+        const viewerUserStr = normUserRefId(req.user?._id) || normUserRefId(req.user?.id);
+        const createdByStr = normUserRefId(item.createdBy);
+        const isCreator = !!(viewerUserStr && createdByStr && viewerUserStr === createdByStr);
 
         const currentEmpId = req.user?.employeeObjectId?.toString();
         const normEmpView = (s) => (s || '').toString().toLowerCase().replace(/\s+/g, '');
@@ -3077,8 +3196,19 @@ export const getAssetItemDetail = async (req, res) => {
             currentEmpId &&
             assetController._id.toString() === currentEmpId;
 
-        // Draft detail access is enforced above (creator only). Other statuses: no blanket block by role here;
-        // mutations stay protected on their endpoints.
+        // Draft (e.g. after creation reject): creator, admins, and Asset Controller roles may view the record.
+        const statusTrimmed = String(item.status || '').trim();
+        if (statusTrimmed === 'Draft') {
+            const canViewDraft =
+                isCreator ||
+                isPortalAdmin ||
+                isAdmin ||
+                isAssetController ||
+                isDeptAssetController;
+            if (!canViewDraft) {
+                return res.status(404).json({ message: 'Asset not found' });
+            }
+        }
 
         const itemObj = item.toObject();
 
@@ -3097,139 +3227,123 @@ export const getAssetItemDetail = async (req, res) => {
             );
         }
 
-        // Sign URLs
-        if (itemObj.invoiceFile) {
-            itemObj.invoiceFile = await getSignedFileUrl(itemObj.invoiceFile);
-        }
-        if (itemObj.warrantyAttachment) {
-            itemObj.warrantyAttachment = await getSignedFileUrl(itemObj.warrantyAttachment);
-        }
-        if (itemObj.accidentReportAttachment) {
-            itemObj.accidentReportAttachment = await getSignedFileUrl(itemObj.accidentReportAttachment);
-        }
-        if (itemObj.typeId?.imagePreview) {
-            itemObj.typeId.imagePreview = await getSignedFileUrl(itemObj.typeId.imagePreview);
-        }
-        if (itemObj.categoryId?.imagePreview) {
-            itemObj.categoryId.imagePreview = await getSignedFileUrl(itemObj.categoryId.imagePreview);
-        }
-        if (itemObj.imagePreview) {
-            itemObj.imagePreview = await getSignedFileUrl(itemObj.imagePreview);
-        }
-        if (itemObj.photo) {
-            itemObj.photo = await getSignedFileUrl(itemObj.photo);
-        }
-        if (itemObj.accessories && itemObj.accessories.length > 0) {
-            for (let acc of itemObj.accessories) {
-                if (acc.attachment) {
-                    acc.attachment = await getSignedFileUrl(acc.attachment);
-                }
-            }
-        }
+        const signKey = (key) => (key ? getSignedFileUrl(key) : Promise.resolve(key));
 
-        if (itemObj.assignedBy?.signature?.url) {
-            itemObj.assignedBy.signature.url = await getSignedFileUrl(itemObj.assignedBy.signature.url);
-        }
-
-        if (itemObj.assignedTo?.signature?.url) {
-            itemObj.assignedTo.signature.url = await getSignedFileUrl(itemObj.assignedTo.signature.url);
-        }
-
-        if (itemObj.acceptedBy?.signature?.url) {
-            itemObj.acceptedBy.signature.url = await getSignedFileUrl(itemObj.acceptedBy.signature.url);
-        }
-
-        if (itemObj.documents && itemObj.documents.length > 0) {
-            for (let doc of itemObj.documents) {
-                if (doc.attachment) {
-                    doc.attachment = await getSignedFileUrl(doc.attachment);
-                }
-            }
-        }
-
-        if (itemObj.services && itemObj.services.length > 0) {
-            for (let service of itemObj.services) {
-                if (service.invoice) {
-                    service.invoice = await getSignedFileUrl(service.invoice);
-                }
-                if (service.serviceCompletionReport) {
-                    service.serviceCompletionReport = await getSignedFileUrl(service.serviceCompletionReport);
-                }
-                if (service.shopInvoice) {
-                    service.shopInvoice = await getSignedFileUrl(service.shopInvoice);
-                }
-                if (service.attachment) {
-                    service.attachment = await getSignedFileUrl(service.attachment);
-                }
-                if (service.quotation2) {
-                    service.quotation2 = await getSignedFileUrl(service.quotation2);
-                }
-                if (service.quotation3) {
-                    service.quotation3 = await getSignedFileUrl(service.quotation3);
-                }
-
-                // Sign image/file keys stored inside remark JSON (e.g. accident/body work images).
-                if (service.remark && typeof service.remark === 'string') {
-                    try {
-                        const remarkObj = JSON.parse(service.remark);
-                        if (remarkObj && typeof remarkObj === 'object') {
-                            const signRemarkImages = async (arr) => {
-                                if (!Array.isArray(arr)) return arr;
-                                const next = [];
-                                for (const img of arr) {
-                                    if (!img) continue;
-                                    if (typeof img === 'string') {
-                                        next.push(await getSignedFileUrl(img));
-                                        continue;
-                                    }
-                                    if (typeof img === 'object') {
-                                        const rawUrl = img.url || img.publicId || '';
-                                        if (rawUrl) {
-                                            next.push({
-                                                ...img,
-                                                url: await getSignedFileUrl(rawUrl),
-                                            });
-                                        } else {
-                                            next.push(img);
-                                        }
-                                    }
-                                }
-                                return next;
-                            };
-
-                            if (Array.isArray(remarkObj.accidentImages)) {
-                                remarkObj.accidentImages = await signRemarkImages(remarkObj.accidentImages);
-                            }
-                            if (Array.isArray(remarkObj.bodyWorkImages)) {
-                                remarkObj.bodyWorkImages = await signRemarkImages(remarkObj.bodyWorkImages);
-                            }
-
-                            service.remark = JSON.stringify(remarkObj);
-                        }
-                    } catch (_e) {
-                        // keep original remark when JSON parse fails
+        const signRemarkImages = async (arr) => {
+            if (!Array.isArray(arr)) return arr;
+            return Promise.all(
+                arr.map(async (img) => {
+                    if (!img) return img;
+                    if (typeof img === 'string') return signKey(img);
+                    if (typeof img === 'object') {
+                        const rawUrl = img.url || img.publicId || '';
+                        if (!rawUrl) return img;
+                        return { ...img, url: await signKey(rawUrl) };
                     }
-                }
+                    return img;
+                }),
+            );
+        };
 
-                // Sign workflow snapshot signature URLs on service history rows.
-                if (Array.isArray(service?.workflowSnapshot?.history)) {
-                    for (const h of service.workflowSnapshot.history) {
-                        if (h?.bySignatureUrl) {
-                            h.bySignatureUrl = await getSignedFileUrl(h.bySignatureUrl);
+        const signOneService = async (service) => {
+            const fileKeys = [
+                'invoice',
+                'serviceCompletionReport',
+                'shopInvoice',
+                'attachment',
+                'quotation2',
+                'quotation3',
+            ];
+            await Promise.all(
+                fileKeys.map(async (field) => {
+                    if (service[field]) service[field] = await signKey(service[field]);
+                }),
+            );
+
+            if (service.remark && typeof service.remark === 'string') {
+                try {
+                    const remarkObj = JSON.parse(service.remark);
+                    if (remarkObj && typeof remarkObj === 'object') {
+                        if (Array.isArray(remarkObj.accidentImages)) {
+                            remarkObj.accidentImages = await signRemarkImages(remarkObj.accidentImages);
                         }
+                        if (Array.isArray(remarkObj.bodyWorkImages)) {
+                            remarkObj.bodyWorkImages = await signRemarkImages(remarkObj.bodyWorkImages);
+                        }
+                        service.remark = JSON.stringify(remarkObj);
                     }
+                } catch (_e) {
+                    /* keep original remark */
                 }
+            }
+
+            if (Array.isArray(service?.workflowSnapshot?.history)) {
+                await Promise.all(
+                    service.workflowSnapshot.history.map(async (h) => {
+                        if (h?.bySignatureUrl) h.bySignatureUrl = await signKey(h.bySignatureUrl);
+                    }),
+                );
+            }
+        };
+
+        const deferHeavyServiceSigning =
+            String(req.query.deferServiceSigning || '').toLowerCase() === '1' ||
+            String(req.query.deferServiceSigning || '').toLowerCase() === 'true';
+
+        const headerSignTasks = [
+            itemObj.typeId?.imagePreview
+                ? signKey(itemObj.typeId.imagePreview).then((u) => { itemObj.typeId.imagePreview = u; })
+                : null,
+            itemObj.categoryId?.imagePreview
+                ? signKey(itemObj.categoryId.imagePreview).then((u) => { itemObj.categoryId.imagePreview = u; })
+                : null,
+            itemObj.imagePreview ? signKey(itemObj.imagePreview).then((u) => { itemObj.imagePreview = u; }) : null,
+            itemObj.photo ? signKey(itemObj.photo).then((u) => { itemObj.photo = u; }) : null,
+        ];
+
+        let signTasks;
+        if (deferHeavyServiceSigning) {
+            itemObj.deferredAttachmentSigning = true;
+            signTasks = headerSignTasks;
+        } else {
+            signTasks = [
+                itemObj.invoiceFile ? signKey(itemObj.invoiceFile).then((u) => { itemObj.invoiceFile = u; }) : null,
+                itemObj.warrantyAttachment
+                    ? signKey(itemObj.warrantyAttachment).then((u) => { itemObj.warrantyAttachment = u; })
+                    : null,
+                itemObj.accidentReportAttachment
+                    ? signKey(itemObj.accidentReportAttachment).then((u) => { itemObj.accidentReportAttachment = u; })
+                    : null,
+                ...headerSignTasks,
+                itemObj.assignedBy?.signature?.url
+                    ? signKey(itemObj.assignedBy.signature.url).then((u) => { itemObj.assignedBy.signature.url = u; })
+                    : null,
+                itemObj.assignedTo?.signature?.url
+                    ? signKey(itemObj.assignedTo.signature.url).then((u) => { itemObj.assignedTo.signature.url = u; })
+                    : null,
+                itemObj.acceptedBy?.signature?.url
+                    ? signKey(itemObj.acceptedBy.signature.url).then((u) => { itemObj.acceptedBy.signature.url = u; })
+                    : null,
+                ...(itemObj.accessories || []).map((acc) =>
+                    acc.attachment ? signKey(acc.attachment).then((u) => { acc.attachment = u; }) : null,
+                ),
+                ...(itemObj.documents || []).map((doc) =>
+                    doc.attachment ? signKey(doc.attachment).then((u) => { doc.attachment = u; }) : null,
+                ),
+                ...(Array.isArray(itemObj?.activeServiceWorkflow?.history)
+                    ? itemObj.activeServiceWorkflow.history.map((h) =>
+                        h?.bySignatureUrl
+                            ? signKey(h.bySignatureUrl).then((u) => { h.bySignatureUrl = u; })
+                            : null,
+                    )
+                    : []),
+            ];
+            if (itemObj.services?.length) {
+                signTasks.push(...itemObj.services.map((s) => signOneService(s)));
             }
         }
 
-        // Sign active workflow history signature URLs (HR/Accounts signature display).
-        if (Array.isArray(itemObj?.activeServiceWorkflow?.history)) {
-            for (const h of itemObj.activeServiceWorkflow.history) {
-                if (h?.bySignatureUrl) {
-                    h.bySignatureUrl = await getSignedFileUrl(h.bySignatureUrl);
-                }
-            }
-        }
+        await Promise.all(signTasks.filter(Boolean));
 
         // Reuse assetController from visibility check above
         if (assetController) {
@@ -3244,6 +3358,35 @@ export const getAssetItemDetail = async (req, res) => {
         } else {
             itemObj.assetController = null;
             itemObj.assetControllerId = null;
+        }
+
+        // Role-based creation approver (current flowchart holder) — used for the banner so the UI shows
+        // HR for fleet vehicles and Asset Controller for tools, regardless of stored actionRequiredBy.
+        try {
+            const approverPerson = currentCreationApprover
+                || (await resolveAssetCreationApproverEmployee({
+                    plateNumber: item.plateNumber,
+                    typeName: item?.typeId?.name || '',
+                }));
+            if (approverPerson?._id) {
+                itemObj.creationApprover = {
+                    _id: approverPerson._id,
+                    firstName: approverPerson.firstName,
+                    lastName: approverPerson.lastName,
+                    employeeId: approverPerson.employeeId,
+                    companyEmail: approverPerson.companyEmail,
+                };
+            } else {
+                itemObj.creationApprover = null;
+            }
+            itemObj.creationApproverRole = creationApproverRoleLabel({
+                plateNumber: item.plateNumber,
+                typeName: item?.typeId?.name || '',
+            });
+        } catch (apprErr) {
+            console.error('[getAssetItemDetail] creation approver resolve failed:', apprErr?.message || apprErr);
+            itemObj.creationApprover = null;
+            itemObj.creationApproverRole = null;
         }
 
         // Special handling for Abbas Raza case:
@@ -3440,6 +3583,7 @@ export const assignAssetItem = async (req, res) => {
         let actionRecipient = null;
         let subjectName = "";
         let subjectEmpId = "";
+        let employeeToAssign = null;
 
         if (assignedToType === 'Company') {
             // Assigning to a Company
@@ -3468,21 +3612,48 @@ export const assignAssetItem = async (req, res) => {
 
         } else {
             // Assigning to an Employee (Default)
-            const employeeToAssign = await EmployeeBasic.findById(assignedTo).select(
-                'employeeId firstName lastName companyEmail workEmail personalEmail email primaryReportee'
-            );
+            employeeToAssign = await EmployeeBasic.findById(assignedTo).select(
+                'employeeId firstName lastName companyEmail workEmail personalEmail email primaryReportee department'
+            ).populate({
+                path: 'primaryReportee',
+                select: '_id firstName lastName employeeId companyEmail workEmail',
+            });
             if (!employeeToAssign) return res.status(404).json({ message: "Target employee not found" });
+
+            const assigneeHasCompanyEmail = !!(
+                employeeToAssign.companyEmail && String(employeeToAssign.companyEmail).trim().length > 0
+            );
 
             item.assignedToType = 'Employee';
             item.assignedTo = assignedTo;
             item.assignedCompany = null;
+
+            let pendingActionActorId = assignedTo;
+            let actionRecipientDoc = employeeToAssign;
+
             item.status = 'Pending';
             item.acceptanceStatus = 'Pending';
-            // Acknowledgment always belongs to the assignee (not manager, not asset controller, not assigner)
-            item.actionRequiredBy = assignedTo;
+            if (!assigneeHasCompanyEmail && employeeToAssign.primaryReportee) {
+                pendingActionActorId =
+                    employeeToAssign.primaryReportee._id || employeeToAssign.primaryReportee;
+                const pr = employeeToAssign.primaryReportee;
+                if (pr && typeof pr === 'object' && pr.employeeId) {
+                    actionRecipientDoc = pr;
+                } else {
+                    actionRecipientDoc = await EmployeeBasic.findById(pendingActionActorId)
+                        .select(
+                            'employeeId firstName lastName companyEmail workEmail personalEmail email primaryReportee department',
+                        )
+                        .populate({
+                            path: 'primaryReportee',
+                            select: '_id firstName lastName employeeId companyEmail workEmail',
+                        });
+                }
+            }
+            item.actionRequiredBy = pendingActionActorId;
+            actionRequiredBy = pendingActionActorId;
 
-            actionRequiredBy = assignedTo;
-            actionRecipient = employeeToAssign;
+            actionRecipient = actionRecipientDoc;
             subjectName = `${employeeToAssign.firstName} ${employeeToAssign.lastName}`;
             subjectEmpId = employeeToAssign.employeeId;
             newAssignee = employeeToAssign;
@@ -3508,6 +3679,7 @@ export const assignAssetItem = async (req, res) => {
             item.temporaryReminderSentAt = null;
             item.temporaryExpiredSentAt = null;
         }
+
         item.negotiationHistory = [];
 
         await item.save();
@@ -3534,26 +3706,71 @@ export const assignAssetItem = async (req, res) => {
             }
         }
 
-        // Email: notify assignee (or company coordinator) — not the assigner/controller
+        // Email: assignee (or company coordinator) pending flow
+        let assignmentHistoryPdfKey = null;
         try {
             const itemForEmail = await AssetItem.findById(item._id).populate('categoryId', 'name');
             let assignAttachments = [];
+            const fe = frontendBaseUrl();
+            const assignerSigAbs = resolveSignatureUrlForPdf(assigner.signature, fe) || undefined;
+
             try {
-                assignAttachments = await buildBulkAssetInventoryPdfAttachment(req, [item._id.toString()], 'assignment-inventory');
+                const hodFromReportee =
+                    assignedToType === 'Company' ? null : actionRecipient?.primaryReportee;
+                const hodDisplay =
+                    hodFromReportee && typeof hodFromReportee === 'object'
+                        ? `${hodFromReportee.firstName || ''} ${hodFromReportee.lastName || ''}`.trim() ||
+                        hodFromReportee.employeeId ||
+                        '—'
+                        : '—';
+                const deptDisplay =
+                    assignedToType === 'Company'
+                        ? '—'
+                        : (actionRecipient?.department && String(actionRecipient.department).trim()) || '—';
+                const codeDisplay =
+                    assignedToType === 'Company' ? subjectEmpId : actionRecipient?.employeeId || '—';
+
+                const pdfBuf = await generateBulkAssignmentHandoverPdf(req, [item._id.toString()], {
+                    assigneeName: subjectName,
+                    employeeCode: codeDisplay,
+                    department: deptDisplay,
+                    hodName: hodDisplay,
+                    assignerName: `${assigner?.firstName || ''} ${assigner?.lastName || ''}`.trim() || '—',
+                    handoverDate: new Date(),
+                    assignerSignatureUrl: assignerSigAbs,
+                    showAssigneeSignature: false,
+                });
+                if (pdfBuf?.length) {
+                    assignmentHistoryPdfKey = await persistHandoverPdfBufferToHistory(
+                        pdfBuf,
+                        `assignment-${item.assetId || item._id}.pdf`,
+                    );
+                    assignAttachments = [
+                        {
+                            filename: `assignment-handover-${item.assetId || item._id}.pdf`,
+                            content: pdfBuf,
+                            contentType: 'application/pdf',
+                            contentDisposition: 'attachment',
+                        },
+                    ];
+                }
             } catch (pdfErr) {
-                console.error('Assignment PDF attachment failed (non-fatal):', pdfErr?.message || pdfErr);
+                console.error('Assignment handover PDF attachment failed (non-fatal):', pdfErr?.message || pdfErr);
             }
             await sendAssetAssignmentEmail({
                 asset: itemForEmail || item,
-                employee: assignedToType === 'Company' ? { firstName: subjectName, lastName: '', isCompany: true } : actionRecipient,
+                employee:
+                    assignedToType === 'Company'
+                        ? { firstName: subjectName, lastName: '', isCompany: true }
+                        : employeeToAssign,
                 recipient: actionRecipient,
-                attachments: assignAttachments
+                attachments: assignAttachments,
             });
         } catch (err) {
             console.error(`[Email Error] Failed to send assignment email: `, err);
         }
 
-        // Dashboard inbox for assignee (employee) or company coordinator — same as actionRequiredBy
+        // Dashboard inbox for assignee (employee) or company coordinator
         try {
             await DashboardAction.findOneAndUpdate(
                 { requestId: item._id, requestType: 'Asset Assignment', status: 'Pending' },
@@ -3592,7 +3809,8 @@ export const assignAssetItem = async (req, res) => {
             assignedTo: item.assignedTo,
             assignedCompany: item.assignedCompany,
             performedBy: req.user.employeeObjectId,
-            details: snapshotItem.toObject()
+            details: snapshotItem.toObject(),
+            ...(assignmentHistoryPdfKey ? { file: assignmentHistoryPdfKey } : {}),
         });
 
         await updateAssetTypeCounts(item.typeId);
@@ -3659,20 +3877,22 @@ export const bulkAssignAssetItems = async (req, res) => {
         }
 
         const employeeToAssign = await EmployeeBasic.findById(assignedTo).select(
-            'employeeId companyEmail workEmail personalEmail email primaryReportee firstName lastName'
-        );
+            'employeeId companyEmail workEmail personalEmail email primaryReportee firstName lastName department'
+        ).populate({ path: 'primaryReportee', select: '_id firstName lastName employeeId companyEmail workEmail' });
         if (!employeeToAssign) {
             return res.status(404).json({ message: 'Target employee not found' });
         }
 
-        // Acknowledgment queue + dashboard always target the assignee
-        const actionRequiredBy = assignedTo;
+        const assigneeHasCompanyEmail = !!(
+            employeeToAssign.companyEmail && String(employeeToAssign.companyEmail).trim().length > 0
+        );
+        const pendingActionActorId =
+            assigneeHasCompanyEmail || !employeeToAssign.primaryReportee
+                ? assignedTo
+                : employeeToAssign.primaryReportee._id || employeeToAssign.primaryReportee;
 
         const empName = `${employeeToAssign?.firstName || ''} ${employeeToAssign?.lastName || ''}`.trim() || 'Unknown Employee';
 
-        // Update all items — always normalize employee assignment (bulk AC path is never company-pool).
-        // Without this, assets that previously had assignedToType: 'Company' stayed Company and the
-        // assignee failed canUserActAsAssigneeForBulkItem (strict Employee check) on pending review.
         const updateData = {
             assignedTo,
             assignedToType: 'Employee',
@@ -3684,9 +3904,6 @@ export const bulkAssignAssetItems = async (req, res) => {
             temporaryEndDate: null,
             temporaryReminderSentAt: null,
             temporaryExpiredSentAt: null,
-            status: 'Pending',
-            acceptanceStatus: 'Pending',
-            actionRequiredBy,
             ownership: empName,
             negotiationHistory: []
         };
@@ -3697,29 +3914,19 @@ export const bulkAssignAssetItems = async (req, res) => {
                 return res.status(400).json({ message: 'Temporary duration must be an integer between 1 and 60 days.' });
             }
             updateData.assignedDays = parsedDays;
-            // Start the duration when the assignment is accepted (status becomes "Assigned").
+        }
+
+        Object.assign(updateData, {
+            status: 'Pending',
+            acceptanceStatus: 'Pending',
+            actionRequiredBy: pendingActionActorId,
+        });
+        if (assignmentType === 'Temporary') {
             updateData.assignedDate = null;
             updateData.temporaryEndDate = null;
         }
 
-        let bulkAssignmentAttachments;
-        try {
-            bulkAssignmentAttachments = await requireBulkAssetInventoryPdfAttachment(
-                req,
-                assetIds.map(String),
-                'bulk-assignment-inventory'
-            );
-            console.log(
-                `[bulkAssignAssetItems] PDF attachments prepared: ${Array.isArray(bulkAssignmentAttachments) ? bulkAssignmentAttachments.length : 0}`
-            );
-        } catch (pdfErr) {
-            console.error('[bulkAssignAssetItems] PDF required for email:', pdfErr?.message || pdfErr);
-            return res.status(503).json({
-                message:
-                    pdfErr?.message ||
-                    'Could not generate the asset list PDF. Assignment was not saved. Try again or contact support.'
-            });
-        }
+        const actionRequiredBy = pendingActionActorId;
 
         const existingItems = await AssetItem.find({ _id: { $in: assetIds } }).select('status assetId');
         if (existingItems.length !== assetIds.length) {
@@ -3735,6 +3942,52 @@ export const bulkAssignAssetItems = async (req, res) => {
 
         const bulkAssignmentGroupId = new mongoose.Types.ObjectId();
         const assetIdStrings = assetIds.map((id) => String(id));
+
+        let bulkAssignmentAttachments = [];
+        let bulkAssignmentHandoverS3Key = null;
+        const feBulk = frontendBaseUrl();
+        const assignerSigBulk = resolveSignatureUrlForPdf(assigner.signature, feBulk) || undefined;
+
+        try {
+            const hodFromReportee = employeeToAssign.primaryReportee;
+            const hodDisplay =
+                hodFromReportee && typeof hodFromReportee === 'object'
+                    ? `${hodFromReportee.firstName || ''} ${hodFromReportee.lastName || ''}`.trim() ||
+                    hodFromReportee.employeeId ||
+                    '—'
+                    : '—';
+            bulkAssignmentAttachments = await requireBulkAssignmentHandoverPdfAttachment(
+                req,
+                assetIdStrings,
+                {
+                    assigneeName: empName,
+                    employeeCode: employeeToAssign.employeeId || '—',
+                    department: (employeeToAssign.department && String(employeeToAssign.department).trim()) || '—',
+                    hodName: hodDisplay,
+                    assignerName: `${assigner?.firstName || ''} ${assigner?.lastName || ''}`.trim() || '—',
+                    handoverDate: new Date(),
+                    assignerSignatureUrl: assignerSigBulk,
+                    showAssigneeSignature: false,
+                },
+                'bulk-assignment-handover',
+            );
+            if (bulkAssignmentAttachments[0]?.content) {
+                bulkAssignmentHandoverS3Key = await persistHandoverPdfBufferToHistory(
+                    bulkAssignmentAttachments[0].content,
+                    `bulk-assignment-${bulkAssignmentGroupId}.pdf`,
+                );
+            }
+            console.log(
+                `[bulkAssignAssetItems] PDF attachments prepared: ${Array.isArray(bulkAssignmentAttachments) ? bulkAssignmentAttachments.length : 0}`,
+            );
+        } catch (pdfErr) {
+            console.error('[bulkAssignAssetItems] PDF required for email:', pdfErr?.message || pdfErr);
+            return res.status(503).json({
+                message:
+                    pdfErr?.message ||
+                    'Could not generate the assignment handover PDF. Assignment was not saved. Try again or contact support.',
+            });
+        }
 
         for (const aid of assetIds) {
             let revertToEmployeeId = null;
@@ -3759,34 +4012,36 @@ export const bulkAssignAssetItems = async (req, res) => {
                 }
             }
 
+            const setPayload = {
+                ...updateData,
+                pendingActionDetails: {
+                    bulkAssignment: {
+                        groupId: bulkAssignmentGroupId.toString(),
+                        assetIds: assetIdStrings,
+                        revertToEmployeeId,
+                        revertToDisplayName,
+                    },
+                },
+            };
+
             await AssetItem.updateOne(
                 { _id: aid },
-                {
-                    $set: {
-                        ...updateData,
-                        pendingActionDetails: {
-                            bulkAssignment: {
-                                groupId: bulkAssignmentGroupId.toString(),
-                                assetIds: assetIdStrings,
-                                revertToEmployeeId,
-                                revertToDisplayName
-                            }
-                        }
-                    }
-                }
+                { $set: setPayload },
             );
         }
 
         // One dashboard / inbox row for the whole bulk batch (assignee acknowledges via bulk modal)
         try {
-            const actionRecipient = await EmployeeBasic.findById(assignedTo).select('employeeId firstName lastName');
-            const subjectEmp = actionRecipient;
+            const dashboardActor = await EmployeeBasic.findById(pendingActionActorId).select(
+                'employeeId firstName lastName',
+            );
+            const subjectEmp = await EmployeeBasic.findById(assignedTo).select('employeeId firstName lastName');
             const assets = await AssetItem.find({ _id: { $in: assetIds } }).select('assetId name assignmentType');
 
             if (assetIds.length > 1) {
                 await DashboardAction.create({
                     assignedTo: actionRequiredBy,
-                    assignedToEmpId: actionRecipient?.employeeId,
+                    assignedToEmpId: dashboardActor?.employeeId,
                     requestId: assetIds[0],
                     requestType: 'Asset',
                     subjectEmployeeId: subjectEmp?.employeeId,
@@ -3797,16 +4052,18 @@ export const bulkAssignAssetItems = async (req, res) => {
                     extra3: JSON.stringify({
                         isBulkAssignment: true,
                         bulkAssignmentGroupId: bulkAssignmentGroupId.toString(),
-                        bulkAssetIds: assetIdStrings
+                        bulkAssetIds: assetIdStrings,
                     }),
-                    status: 'Pending'
+                    status: 'Pending',
                 });
-                console.log(`[Dashboard] Created 1 bulk assignment action (${assetIds.length} assets) for ${actionRecipient?.employeeId}`);
+                console.log(
+                    `[Dashboard] Created 1 bulk assignment action (${assetIds.length} assets) for ${dashboardActor?.employeeId}`,
+                );
             } else if (assets.length === 1) {
                 const one = assets[0];
                 await DashboardAction.create({
                     assignedTo: actionRequiredBy,
-                    assignedToEmpId: actionRecipient?.employeeId,
+                    assignedToEmpId: dashboardActor?.employeeId,
                     requestId: one._id,
                     requestType: 'Asset',
                     subjectEmployeeId: subjectEmp?.employeeId,
@@ -3814,7 +4071,7 @@ export const bulkAssignAssetItems = async (req, res) => {
                     requestedByName: `${assigner?.firstName || 'System'} ${assigner?.lastName || ''}`.trim(),
                     extra1: `${one.assetId} - ${one.name} `,
                     extra2: one.assignmentType,
-                    status: 'Pending'
+                    status: 'Pending',
                 });
             }
         } catch (err) {
@@ -3839,7 +4096,8 @@ export const bulkAssignAssetItems = async (req, res) => {
             assignedTo,
             performedBy: req.user.employeeObjectId,
             date: new Date(),
-            details: asset.toObject()
+            details: asset.toObject(),
+            ...(bulkAssignmentHandoverS3Key ? { file: bulkAssignmentHandoverS3Key } : {}),
         }));
         await AssetHistory.insertMany(historyEntries);
 
@@ -3851,28 +4109,28 @@ export const bulkAssignAssetItems = async (req, res) => {
             await updateAssetTypeCounts(typeId);
         }
 
-        // Send email to assignee only (HTML table + PDF inventory)
+        // Assignee pending flow email
         try {
-            const employee = await EmployeeBasic.findById(assignedTo).select(
-                'employeeId firstName lastName companyEmail workEmail personalEmail email'
-            );
-            const firstAsset = await AssetItem.findById(assetIds[0]).populate('categoryId');
             const assetsForEmail = await AssetItem.find({ _id: { $in: assetIds } })
                 .populate('categoryId', 'name')
                 .lean();
             const orderMap = new Map(assetIds.map((id, i) => [String(id), i]));
             assetsForEmail.sort((a, b) => (orderMap.get(String(a._id)) ?? 0) - (orderMap.get(String(b._id)) ?? 0));
 
-            if (employee && firstAsset) {
+            const emailRecipient = await EmployeeBasic.findById(pendingActionActorId).select(
+                'employeeId firstName lastName companyEmail workEmail personalEmail email primaryReportee',
+            ).populate('primaryReportee', 'firstName lastName employeeId companyEmail workEmail');
+            const firstAsset = await AssetItem.findById(assetIds[0]).populate('categoryId');
+            if (employeeToAssign && firstAsset) {
                 await sendAssetAssignmentEmail({
                     asset: firstAsset,
                     assets: assetsForEmail,
-                    employee,
-                    recipient: employee,
+                    employee: employeeToAssign,
+                    recipient: emailRecipient || employeeToAssign,
                     isBulk: true,
                     assetCount: assetIds.length,
                     attachments: bulkAssignmentAttachments,
-                    bulkAssignmentGroupId: bulkAssignmentGroupId.toString()
+                    bulkAssignmentGroupId: bulkAssignmentGroupId.toString(),
                 });
             }
         } catch (emailErr) {
@@ -3972,7 +4230,7 @@ export const downloadHandoverPdf = async (req, res) => {
         const pdfBuffer = await generatePdf(printUrl, token, userPayload, permissions, ASSET_HANDOVER_PDF_SELECTOR);
 
         res.setHeader('Content-Type', 'application/pdf');
-        res.setHeader('Content-Disposition', `attachment; filename = "HandoverForm-${asset.assetId}.pdf"`);
+        res.setHeader('Content-Disposition', `attachment; filename="HandoverForm-${asset.assetId}.pdf"`);
         res.send(pdfBuffer);
 
     } catch (error) {
@@ -3993,7 +4251,13 @@ export const respondToAssignment = async (req, res) => {
             return res.status(400).json({ message: 'Invalid action.' });
         }
 
-        const item = await AssetItem.findById(id).populate('assignedTo assignedBy assignedCompany');
+        const item = await AssetItem.findById(id)
+            .populate({
+                path: 'assignedTo',
+                select: 'employeeId firstName lastName companyEmail enablePortalAccess primaryReportee',
+                populate: { path: 'primaryReportee', select: '_id firstName lastName employeeId companyEmail workEmail' },
+            })
+            .populate('assignedBy assignedCompany');
         if (!item) {
             return res.status(404).json({ message: 'Asset not found' });
         }
@@ -4019,7 +4283,12 @@ export const respondToAssignment = async (req, res) => {
         const isHR =
             item.assignedToType === 'Company' && item.actionRequiredBy?.toString() === cur;
 
-        // If assignee has NO ERP login access, allow assignee.primaryReportee to act as delegate
+        const actionRequiredByStr = item.actionRequiredBy
+            ? (item.actionRequiredBy._id || item.actionRequiredBy).toString()
+            : null;
+        const isDesignatedResponder = !!actionRequiredByStr && actionRequiredByStr === cur;
+
+        // If assignee has NO company email OR NO ERP login access, allow assignee.primaryReportee to act as delegate
         let isPrimaryReporteeDelegate = false;
         let primaryReportee = null;
         if (item.assignedToType === 'Employee' && item.assignedTo && item.assignedTo.primaryReportee) {
@@ -4037,10 +4306,15 @@ export const respondToAssignment = async (req, res) => {
                     assigneeHasPortalAccess = !!(linkedUser && linkedUser.enablePortalAccess);
                 }
             }
-            // If we can't determine, don't delegate
-            const allowDelegate = assigneeHasPortalAccess === false;
+            const assigneeHasCompanyEmail = !!(
+                item.assignedTo.companyEmail && String(item.assignedTo.companyEmail).trim().length > 0
+            );
             const managerId = item.assignedTo.primaryReportee._id || item.assignedTo.primaryReportee;
-            if (allowDelegate && managerId && managerId.toString() === cur) {
+            const allowDelegate =
+                managerId &&
+                managerId.toString() === cur &&
+                (assigneeHasPortalAccess === false || !assigneeHasCompanyEmail);
+            if (allowDelegate) {
                 isPrimaryReporteeDelegate = true;
                 // Fetch manager details for notifications
                 primaryReportee = await EmployeeBasic.findById(managerId)
@@ -4058,7 +4332,7 @@ export const respondToAssignment = async (req, res) => {
                 return res.status(403).json({ message: 'It is not your turn (designated company coordinator) to respond.' });
             }
         } else {
-            if (!isAssignee && !isAssigner && !isPrimaryReporteeDelegate) {
+            if (!isAssignee && !isAssigner && !isPrimaryReporteeDelegate && !isDesignatedResponder) {
                 return res.status(403).json({ message: 'You are not authorized to respond to this assignment.' });
             }
             // If actionRequiredBy is not the current user, allow assigner or delegated primaryReportee to act too.
@@ -4067,6 +4341,7 @@ export const respondToAssignment = async (req, res) => {
                 const isActingOnAssignedTurn =
                     isAssigner ||
                     isPrimaryReporteeDelegate ||
+                    isDesignatedResponder ||
                     (isAssignee && assigneeId && item.actionRequiredBy.toString() === assigneeId);
 
                 if (!isActingOnAssignedTurn) {
@@ -4079,9 +4354,15 @@ export const respondToAssignment = async (req, res) => {
 
         // Determine actor for notifications
         let actor =
-            isAssignee ? item.assignedTo :
-                (isPrimaryReporteeDelegate ? (primaryReportee || await EmployeeBasic.findById(currentUser).catch(() => null)) :
-                    (isHR ? await EmployeeBasic.findById(currentUser) : item.assignedBy));
+            isAssignee
+                ? item.assignedTo
+                : isPrimaryReporteeDelegate
+                    ? primaryReportee || (await EmployeeBasic.findById(currentUser).catch(() => null))
+                    : isDesignatedResponder
+                        ? await EmployeeBasic.findById(currentUser).catch(() => null)
+                        : isHR
+                            ? await EmployeeBasic.findById(currentUser)
+                            : item.assignedBy;
 
         // Notify all relevant parties
         const notifyParties = async () => {
@@ -4122,11 +4403,6 @@ export const respondToAssignment = async (req, res) => {
                 }
 
                 let responseInvPdf = [];
-                try {
-                    responseInvPdf = await buildBulkAssetInventoryPdfAttachment(req, [item._id.toString()], 'assignment-response-inventory');
-                } catch (pdfErr) {
-                    console.error('[respondToAssignment] Response PDF failed (non-fatal):', pdfErr?.message || pdfErr);
-                }
 
                 for (let recipient of recipients) {
                     await sendAssetResponseEmail({
@@ -4319,7 +4595,7 @@ export const respondToAssignment = async (req, res) => {
                 });
 
                 // Pass the ball: assignee/coordinator → assigner; assigner → assignee (or company coordinator)
-                if (isAssignee || isHR) {
+                if (isAssignee || isHR || isPrimaryReporteeDelegate || isDesignatedResponder) {
                     item.actionRequiredBy = item.assignedBy._id || item.assignedBy;
                 } else {
                     if (item.assignedToType === 'Company') {
@@ -4458,7 +4734,7 @@ export const respondToAssignment = async (req, res) => {
                 !!primaryReporteeId &&
                 primaryReporteeId.toString() === cur;
 
-            await AssetHistory.create({
+            const acceptHistDoc = await AssetHistory.create({
                 assetId: item._id,
                 action: 'Accepted',
                 assignedToType: item.assignedToType,
@@ -4476,6 +4752,121 @@ export const respondToAssignment = async (req, res) => {
                     isAcceptedByHR: isHR
                 }
             });
+
+            try {
+                const signerEmp = await EmployeeBasic.findById(currentUser).select('firstName lastName signature');
+                const fe = frontendBaseUrl();
+                const assignSig =
+                    snapshotItem.assignedBy?.signature &&
+                    resolveSignatureUrlForPdf(snapshotItem.assignedBy.signature, fe);
+                const acceptorSig =
+                    signerEmp?.signature && resolveSignatureUrlForPdf(signerEmp.signature, fe);
+                const ackNameStr =
+                    `${signerEmp?.firstName || ''} ${signerEmp?.lastName || ''}`.trim() || '—';
+
+                let subjectEmployeeName = '';
+                let subjectCode = '';
+                let subjectDept = '';
+                let hodDisplay = '—';
+                if (item.assignedToType === 'Company') {
+                    const comp = await Company.findById(item.assignedCompany).select('name companyId').lean();
+                    subjectEmployeeName = comp?.name || '—';
+                    subjectCode = comp?.companyId || '—';
+                    subjectDept = '—';
+                } else {
+                    const ato = snapshotItem.assignedTo;
+                    subjectEmployeeName = ato ? `${ato.firstName || ''} ${ato.lastName || ''}`.trim() : '—';
+                    subjectCode = ato?.employeeId || '—';
+                    subjectDept = (ato?.department && String(ato.department).trim()) || '—';
+                    const hodFromReportee = ato?.primaryReportee;
+                    if (hodFromReportee && typeof hodFromReportee === 'object') {
+                        hodDisplay =
+                            `${hodFromReportee.firstName || ''} ${hodFromReportee.lastName || ''}`.trim() ||
+                            hodFromReportee.employeeId ||
+                            '—';
+                    }
+                }
+                const assignerNameStr = snapshotItem.assignedBy
+                    ? `${snapshotItem.assignedBy.firstName || ''} ${snapshotItem.assignedBy.lastName || ''}`.trim()
+                    : '—';
+
+                const pdfBuf = await generateBulkAssignmentHandoverPdf(req, [item._id.toString()], {
+                    assigneeName: subjectEmployeeName,
+                    employeeCode: subjectCode,
+                    department: subjectDept,
+                    hodName: hodDisplay,
+                    assignerName: assignerNameStr,
+                    handoverDate: new Date(),
+                    assignerSignatureUrl: assignSig || undefined,
+                    showAssigneeSignature: !!(acceptorSig && ackNameStr),
+                    assigneeSignatureUrl: acceptorSig || undefined,
+                    assigneeAcknowledgeName: ackNameStr,
+                });
+
+                let acceptPdfAttachments = [];
+                if (pdfBuf?.length) {
+                    const fk = await persistHandoverPdfBufferToHistory(
+                        pdfBuf,
+                        `accept-${item.assetId}-${acceptHistDoc._id}.pdf`,
+                    );
+                    if (fk) {
+                        await AssetHistory.updateOne({ _id: acceptHistDoc._id }, { $set: { file: fk } });
+                    }
+                    acceptPdfAttachments = [
+                        {
+                            filename: `handover-accept-${item.assetId}.pdf`,
+                            content: pdfBuf,
+                            contentType: 'application/pdf',
+                            contentDisposition: 'attachment',
+                        },
+                    ];
+                }
+
+                const recipients = [];
+                if (item.assignedBy) recipients.push(item.assignedBy);
+                if (item.assignedToType === 'Employee' && item.assignedTo && item.assignedTo._id.toString() !== currentUser.toString()) {
+                    const assigneeHasPortalAccess =
+                        typeof item.assignedTo.enablePortalAccess === 'boolean'
+                            ? item.assignedTo.enablePortalAccess
+                            : null;
+                    if (assigneeHasPortalAccess === true) {
+                        recipients.push(item.assignedTo);
+                    } else {
+                        const managerId = item.assignedTo.primaryReportee?._id || item.assignedTo.primaryReportee;
+                        if (managerId) {
+                            const manager =
+                                primaryReportee ||
+                                (await EmployeeBasic.findById(managerId)
+                                    .select('firstName lastName employeeId companyEmail enablePortalAccess primaryReportee')
+                                    .lean()
+                                    .catch(() => null));
+                            if (manager) recipients.push(manager);
+                        }
+                    }
+                }
+                if (item.assignedToType === 'Employee' && item.assignedTo?.primaryReportee) {
+                    const managerId = item.assignedTo.primaryReportee._id || item.assignedTo.primaryReportee;
+                    if (!recipients.some((r) => r._id?.toString() === managerId.toString()) && managerId.toString() !== currentUser.toString()) {
+                        const manager = await EmployeeBasic.findById(managerId);
+                        if (manager) recipients.push(manager);
+                    }
+                }
+
+                for (const recipient of recipients) {
+                    await sendAssetResponseEmail({
+                        asset: item,
+                        actor: signerEmp,
+                        recipient,
+                        action: 'Accept',
+                        comment: comments,
+                        assignedToType: item.assignedToType,
+                        assignedCompany: item.assignedCompany,
+                        attachments: acceptPdfAttachments,
+                    });
+                }
+            } catch (acceptNotifyErr) {
+                console.error('[respondToAssignment] Accept notification failed (non-fatal):', acceptNotifyErr?.message || acceptNotifyErr);
+            }
 
             if (priorAcceptedCountForReassign >= 1) {
                 void notifyAssetControllerReassignmentAcceptedWithHandover(req, { assetMongoId: item._id });
@@ -4508,7 +4899,13 @@ export const bulkRespondToAssignment = async (req, res) => {
         }
 
         const currentUser = req.user.employeeObjectId;
-        const items = await AssetItem.find({ _id: { $in: assetIds } }).populate('assignedTo assignedBy assignedCompany');
+        const items = await AssetItem.find({ _id: { $in: assetIds } })
+            .populate({
+                path: 'assignedTo',
+                select: 'employeeId companyEmail primaryReportee enablePortalAccess',
+                populate: { path: 'primaryReportee', select: '_id' },
+            })
+            .populate('assignedBy assignedCompany');
 
         const results = { success: [], failed: [] };
 
@@ -4531,11 +4928,28 @@ export const bulkRespondToAssignment = async (req, res) => {
 
                 let isPrimaryReporteeDelegate = false;
                 if (item.assignedToType === 'Employee' && item.assignedTo && item.assignedTo.primaryReportee) {
-                    const assigneeHasCompanyEmail = !!(item.assignedTo.companyEmail && String(item.assignedTo.companyEmail).trim().length > 0);
+                    const assigneeHasCompanyEmail = !!(
+                        item.assignedTo.companyEmail && String(item.assignedTo.companyEmail).trim().length > 0
+                    );
                     const managerId = item.assignedTo.primaryReportee._id || item.assignedTo.primaryReportee;
-                    if (!assigneeHasCompanyEmail && managerId && managerId.toString() === curBulk) {
-                        isPrimaryReporteeDelegate = true;
+                    let assigneeHasPortalAccess = null;
+                    if (typeof item.assignedTo.enablePortalAccess === 'boolean') {
+                        assigneeHasPortalAccess = item.assignedTo.enablePortalAccess;
+                    } else {
+                        const assigneeEmpId = item.assignedTo.employeeId;
+                        if (assigneeEmpId) {
+                            const linkedUser = await User.findOne({ employeeId: assigneeEmpId, status: 'Active' })
+                                .select('enablePortalAccess')
+                                .lean()
+                                .catch(() => null);
+                            assigneeHasPortalAccess = !!(linkedUser && linkedUser.enablePortalAccess);
+                        }
                     }
+                    const allowDelegate =
+                        managerId &&
+                        managerId.toString() === curBulk &&
+                        (assigneeHasPortalAccess === false || !assigneeHasCompanyEmail);
+                    if (allowDelegate) isPrimaryReporteeDelegate = true;
                 }
 
                 if (!isAssignee && !isHR && !isActionRequired && !isAssigner && !isPrimaryReporteeDelegate) {
@@ -4688,17 +5102,29 @@ const canUserActAsAssigneeForBulkItem = (currentUserStr, item) => {
     const isCompanyPoolAsset = item.assignedToType === 'Company' && item.assignedCompany;
     const assigneeMatchesUser = assigneeId && assigneeId === curBulk;
     const isAssignee = assigneeMatchesUser && !isCompanyPoolAsset;
+
+    const actionRequiredId =
+        item.actionRequiredBy?._id?.toString?.() || item.actionRequiredBy?.toString?.() || '';
+    const isDesignatedResponder =
+        !isCompanyPoolAsset && !!actionRequiredId && actionRequiredId === curBulk;
+
     let isPrimaryReporteeDelegate = false;
     if (!isCompanyPoolAsset && item.assignedTo && item.assignedTo.primaryReportee) {
         const assigneeHasCompanyEmail = !!(
             item.assignedTo.companyEmail && String(item.assignedTo.companyEmail).trim().length > 0
         );
         const managerId = item.assignedTo.primaryReportee._id || item.assignedTo.primaryReportee;
-        if (!assigneeHasCompanyEmail && managerId && managerId.toString() === curBulk) {
-            isPrimaryReporteeDelegate = true;
-        }
+        const assigneeHasPortalAccess =
+            typeof item.assignedTo.enablePortalAccess === 'boolean'
+                ? item.assignedTo.enablePortalAccess
+                : null;
+        const allowDelegate =
+            managerId &&
+            managerId.toString() === curBulk &&
+            (assigneeHasPortalAccess === false || !assigneeHasCompanyEmail);
+        if (allowDelegate) isPrimaryReporteeDelegate = true;
     }
-    return { isAssignee, isPrimaryReporteeDelegate };
+    return { isAssignee, isPrimaryReporteeDelegate, isDesignatedResponder };
 };
 
 /** Complete the single DashboardAction row created for AC bulk assignment (extra3.isBulkAssignment). */
@@ -4790,11 +5216,12 @@ export const getBulkAssignmentPendingGroup = async (req, res) => {
 
         const firstAsDoc = await AssetItem.findById(allInGroup[0]._id).populate({
             path: 'assignedTo',
-            populate: { path: 'primaryReportee', select: '_id' }
+            select: 'employeeId companyEmail primaryReportee enablePortalAccess',
+            populate: { path: 'primaryReportee', select: '_id' },
         });
         const wrapItem = firstAsDoc ? firstAsDoc.toObject() : allInGroup[0];
-        const { isAssignee, isPrimaryReporteeDelegate } = canUserActAsAssigneeForBulkItem(cur, wrapItem);
-        if (!isAssignee && !isPrimaryReporteeDelegate) {
+        const { isAssignee, isPrimaryReporteeDelegate, isDesignatedResponder } = canUserActAsAssigneeForBulkItem(cur, wrapItem);
+        if (!isAssignee && !isPrimaryReporteeDelegate && !isDesignatedResponder) {
             return res.status(403).json({ message: 'You are not authorized to review this batch.' });
         }
 
@@ -4851,7 +5278,8 @@ export const respondBulkAssignmentGroup = async (req, res) => {
             acceptanceStatus: 'Pending'
         }).populate({
             path: 'assignedTo',
-            populate: { path: 'primaryReportee', select: '_id companyEmail' }
+            select: 'employeeId companyEmail primaryReportee enablePortalAccess',
+            populate: { path: 'primaryReportee', select: '_id companyEmail' },
         });
 
         if (!allInGroup.length) {
@@ -4869,13 +5297,23 @@ export const respondBulkAssignmentGroup = async (req, res) => {
         }
 
         const first = allInGroup[0];
-        const { isAssignee, isPrimaryReporteeDelegate } = canUserActAsAssigneeForBulkItem(cur, first);
-        if (!isAssignee && !isPrimaryReporteeDelegate) {
+        const { isAssignee, isPrimaryReporteeDelegate, isDesignatedResponder } = canUserActAsAssigneeForBulkItem(cur, first);
+        if (!isAssignee && !isPrimaryReporteeDelegate && !isDesignatedResponder) {
             return res.status(403).json({ message: 'You are not authorized to respond to this batch.' });
         }
 
         const byId = new Map(allInGroup.map((a) => [a._id.toString(), a]));
         const results = { accepted: [], rejected: [] };
+
+        const signerBulkAccept = await EmployeeBasic.findById(currentUser)
+            .select('firstName lastName signature')
+            .lean();
+        const feBulkAcceptResp = frontendBaseUrl();
+        const acceptorSigUrlBulkResp = signerBulkAccept?.signature
+            ? resolveSignatureUrlForPdf(signerBulkAccept.signature, feBulkAcceptResp)
+            : '';
+        const ackNameBulkResp =
+            `${signerBulkAccept?.firstName || ''} ${signerBulkAccept?.lastName || ''}`.trim() || '—';
 
         const applyTempDatesOnAccept = (item) => {
             if (item.assignmentType === 'Temporary' && item.assignedDays) {
@@ -4914,7 +5352,37 @@ export const respondBulkAssignmentGroup = async (req, res) => {
                 })
                 .populate({ path: 'assignedBy', select: 'firstName lastName employeeId signature' });
 
-            await AssetHistory.create({
+            const snap = snapshotItem ? snapshotItem.toObject() : {};
+            let subjectEmployeeName = '—';
+            let subjectCode = '—';
+            let subjectDept = '—';
+            let hodDisplay = '—';
+            if (item.assignedToType === 'Company') {
+                const comp = await Company.findById(item.assignedCompany).select('name companyId').lean();
+                subjectEmployeeName = comp?.name || '—';
+                subjectCode = comp?.companyId || '—';
+                subjectDept = '—';
+            } else {
+                const ato = snap.assignedTo;
+                subjectEmployeeName = ato ? `${ato.firstName || ''} ${ato.lastName || ''}`.trim() : '—';
+                subjectCode = ato?.employeeId || '—';
+                subjectDept = (ato?.department && String(ato.department).trim()) || '—';
+                const hodFromReportee = ato?.primaryReportee;
+                if (hodFromReportee && typeof hodFromReportee === 'object') {
+                    hodDisplay =
+                        `${hodFromReportee.firstName || ''} ${hodFromReportee.lastName || ''}`.trim() ||
+                        hodFromReportee.employeeId ||
+                        '—';
+                }
+            }
+            const assignerNameStr = snap.assignedBy
+                ? `${snap.assignedBy.firstName || ''} ${snap.assignedBy.lastName || ''}`.trim()
+                : '—';
+            const assignSigB =
+                snap.assignedBy?.signature &&
+                resolveSignatureUrlForPdf(snap.assignedBy.signature, feBulkAcceptResp);
+
+            const acceptHistDoc = await AssetHistory.create({
                 assetId: item._id,
                 action: 'Accepted',
                 assignedToType: item.assignedToType,
@@ -4924,8 +5392,37 @@ export const respondBulkAssignmentGroup = async (req, res) => {
                 comments: isPrimaryReporteeDelegate
                     ? `Accepted by manager on behalf of employee (bulk). ${comments || ''}`
                     : comments || 'Accepted (bulk batch)',
-                details: snapshotItem ? snapshotItem.toObject() : {}
+                details: snap,
             });
+
+            try {
+                const pdfBuf = await generateBulkAssignmentHandoverPdf(req, [item._id.toString()], {
+                    assigneeName: subjectEmployeeName,
+                    employeeCode: subjectCode,
+                    department: subjectDept,
+                    hodName: hodDisplay,
+                    assignerName: assignerNameStr,
+                    handoverDate: new Date(),
+                    assignerSignatureUrl: assignSigB || undefined,
+                    showAssigneeSignature: !!(acceptorSigUrlBulkResp && ackNameBulkResp),
+                    assigneeSignatureUrl: acceptorSigUrlBulkResp || undefined,
+                    assigneeAcknowledgeName: ackNameBulkResp,
+                });
+                if (pdfBuf?.length) {
+                    const fk = await persistHandoverPdfBufferToHistory(
+                        pdfBuf,
+                        `bulk-accept-${item.assetId}-${acceptHistDoc._id}.pdf`,
+                    );
+                    if (fk) {
+                        await AssetHistory.updateOne({ _id: acceptHistDoc._id }, { $set: { file: fk } });
+                    }
+                }
+            } catch (bulkAcceptPdfErr) {
+                console.error(
+                    '[respondBulkAssignmentGroup] Acceptance PDF/history file failed (non-fatal):',
+                    bulkAcceptPdfErr?.message || bulkAcceptPdfErr,
+                );
+            }
 
             const priorAcceptedCount = await AssetHistory.countDocuments({ assetId: item._id, action: 'Accepted' });
             if (priorAcceptedCount >= 1) {
@@ -5610,7 +6107,7 @@ export const updateAssetStatus = async (req, res) => {
                 if (item.assignedTo) {
                     const assignedPerson = await EmployeeBasic.findById(item.assignedTo);
                     if (assignedPerson) {
-                        const hasEmail = assignedPerson.companyEmail || assignedPerson.workEmail || assignedPerson.email;
+                        const hasEmail = !!(assignedPerson.companyEmail || '').trim();
 
                         let targetRecipient = assignedPerson;
                         if (!hasEmail && assignedPerson.primaryReportee) {
@@ -5946,6 +6443,10 @@ export const updateAssetDocument = async (req, res) => {
 // @access  Private
 export const deleteAssetDocument = async (req, res) => {
     try {
+        if (!(await isReqUserAdmin(req.user))) {
+            return res.status(403).json({ message: 'Only administrator can delete asset documents.' });
+        }
+
         const { id, docId } = req.params;
 
         const asset = await AssetItem.findById(id);
@@ -5959,6 +6460,18 @@ export const deleteAssetDocument = async (req, res) => {
         }
 
         const docName = doc.name;
+        const docSnapshot = doc.toObject ? doc.toObject() : { ...doc };
+        scheduleManagementAdminDeletionEmail(req, {
+            moduleName: 'Asset Document',
+            recordId: asset.assetId || String(asset._id),
+            details: `${docName || docSnapshot?.type || 'Document'} on ${asset.name || asset.assetId}`,
+            deletedPayload: {
+                assetId: asset.assetId,
+                mongoAssetId: asset._id,
+                assetName: asset.name,
+                document: docSnapshot,
+            },
+        });
         asset.documents.pull({ _id: docId });
         await asset.save();
 
@@ -6302,6 +6815,18 @@ export const deleteAssetService = async (req, res) => {
         }
 
         const removedServiceType = serviceSubdoc.serviceType || 'Service';
+        const serviceSnapshot = serviceSubdoc.toObject ? serviceSubdoc.toObject() : { ...serviceSubdoc };
+        scheduleManagementAdminDeletionEmail(req, {
+            moduleName: 'Vehicle Service Record',
+            recordId: asset.assetId || String(asset._id),
+            details: `${removedServiceType} service (${serviceId})`,
+            deletedPayload: {
+                assetId: asset.assetId,
+                mongoAssetId: asset._id,
+                assetName: asset.name,
+                service: serviceSnapshot,
+            },
+        });
         serviceSubdoc.deleteOne();
         asset.markModified('services');
 
@@ -9352,15 +9877,16 @@ export const submitDraftForCreationApproval = async (req, res) => {
             return res.status(403).json({ message: 'Only the asset creator or an administrator can submit this draft.' });
         }
 
-        const assetControllerRaw = await getDepartmentHOD('assetcontroller');
-        const assetController = assetControllerRaw ? await resolveAssetControllerEmployee(assetControllerRaw) : null;
-        if (!assetController?._id) {
-            return res.status(400).json({ message: 'Asset Controller is not configured in Flowchart.' });
+        const approverLabel = creationApproverRoleLabel({ plateNumber: item.plateNumber });
+        const creationApprover = await resolveAssetCreationApproverEmployee({ plateNumber: item.plateNumber });
+        if (!creationApprover?._id) {
+            return res.status(400).json({ message: `${approverLabel} is not configured in Flowchart.` });
         }
 
+        const fleetVehicle = isFleetVehicleAssetFields({ plateNumber: item.plateNumber });
         const previousStatusForHistory = item.status;
         item.status = 'Submitted for Approval';
-        item.actionRequiredBy = assetController._id;
+        item.actionRequiredBy = creationApprover._id;
         item.creationReturnedToDraftAt = null;
         await item.save();
 
@@ -9369,15 +9895,21 @@ export const submitDraftForCreationApproval = async (req, res) => {
         await DashboardAction.findOneAndUpdate(
             { requestId: item._id, requestType: 'Asset Approval', status: 'Pending' },
             {
-                assignedTo: assetController._id,
-                assignedToEmpId: assetController.employeeId,
+                assignedTo: creationApprover._id,
+                assignedToEmpId: creationApprover.employeeId,
                 requestId: item._id,
                 requestType: 'Asset Approval',
                 subjectEmployeeId: req.user.employeeId,
                 subjectName: requesterDisplayName,
                 requestedByName: requesterDisplayName,
                 extra1: `${item.assetId} — ${item.name}`,
-                extra2: `Asset creation — requested by ${requesterDisplayName}`,
+                extra2: fleetVehicle
+                    ? `Vehicle creation — HR review (${requesterDisplayName})`
+                    : `Asset creation — requested by ${requesterDisplayName}`,
+                extra3: JSON.stringify({
+                    isFleetVehicle: fleetVehicle,
+                    vehicleMongoId: fleetVehicle ? String(item._id) : undefined,
+                }),
                 status: 'Pending'
             },
             { upsert: true, new: true, setDefaultsOnInsert: true }
@@ -9391,7 +9923,7 @@ export const submitDraftForCreationApproval = async (req, res) => {
         }
         await sendAssetCreationApprovalEmail({
             asset: item,
-            recipient: assetController,
+            recipient: creationApprover,
             creatorName: requesterDisplayName,
             attachments: creationAttachments
         });
@@ -9507,7 +10039,14 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
         const scope = String(req.query.scope || '').trim().toLowerCase();
         let requestTypeFilter;
         if (scope === 'vehicle') {
-            requestTypeFilter = { $in: ['Vehicle Service Request', 'Vehicle Profile Activation'] };
+            requestTypeFilter = {
+                $in: [
+                    'Vehicle Service Request',
+                    'Vehicle Profile Activation',
+                    'Vehicle Disposition Request',
+                    'Asset Approval',
+                ],
+            };
         } else if (scope === 'tools') {
             requestTypeFilter = { $in: ASSET_TOOLS_INBOX_TYPES };
         } else {
@@ -9524,21 +10063,33 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
             ...(relevantIds.length ? [{ assignedTo: { $in: relevantIds } }] : []),
             ...(targetEmployeeId ? [{ assignedToEmpId: targetEmployeeId }] : [])
         ];
+
+        // Role-aware fallback: a freshly-appointed HR (or AC) should see in-flight Asset Approvals
+        // even when DashboardAction.assignedTo is still the previous role holder (until the boot
+        // re-route runs). Match by role + fleet flag stored on extra3 (set at creation time).
+        const [isHrRoleHolder, isAcRoleHolder, isAccountsRoleHolder, isManagementRoleHolder] = await Promise.all([
+            isUserActiveInFlowchart(currentUser, 'hr'),
+            isUserActiveInFlowchart(currentUser, 'assetcontroller'),
+            isUserActiveInFlowchart(currentUser, 'accounts'),
+            isUserInFlowchart(currentUser, 'management').catch(() => false),
+        ]);
+        if (isHrRoleHolder) {
+            assigneeClauses.push({
+                requestType: 'Asset Approval',
+                extra3: { $regex: '"isFleetVehicle"\\s*:\\s*true', $options: 'i' },
+            });
+        }
+        if (isAcRoleHolder) {
+            assigneeClauses.push({
+                requestType: 'Asset Approval',
+                extra3: { $not: { $regex: '"isFleetVehicle"\\s*:\\s*true', $options: 'i' } },
+            });
+        }
+
         if (assigneeClauses.length === 0) {
             return res.json({ count: 0, items: [] });
         }
         match.$or = assigneeClauses;
-
-        const dashboardPendingItems = await DashboardAction.find(match).sort({ requestedDate: -1 }).limit(200).lean();
-
-        const seen = new Set();
-        const unique = [];
-        for (const it of dashboardPendingItems) {
-            const k = `${it.requestId?.toString()}-${it.requestType}-${it.extra1 || ''}`;
-            if (seen.has(k)) continue;
-            seen.add(k);
-            unique.push(it);
-        }
 
         const parseExtra3 = (raw) => {
             if (raw == null || raw === '') return null;
@@ -9550,6 +10101,31 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
                 return null;
             }
         };
+
+        const dashboardPendingItems = await DashboardAction.find(match).sort({ requestedDate: -1 }).limit(200).lean();
+
+        let creatorOutcomeItems = [];
+        if (scope === 'vehicle' && assigneeClauses.length) {
+            const creatorMatch = {
+                status: 'Rejected',
+                requestType: 'Asset Approval',
+                $or: assigneeClauses,
+            };
+            const rejectedRows = await DashboardAction.find(creatorMatch).sort({ actionedDate: -1 }).limit(50).lean();
+            creatorOutcomeItems = rejectedRows.filter((da) => {
+                const meta = parseExtra3(da.extra3);
+                return meta?.assetCreationViewerRole === 'creator' && meta?.isFleetVehicle === true;
+            });
+        }
+
+        const seen = new Set();
+        const unique = [];
+        for (const it of [...dashboardPendingItems, ...creatorOutcomeItems]) {
+            const k = `${it._id?.toString()}-${it.requestId?.toString()}-${it.requestType}-${it.status}-${it.extra1 || ''}`;
+            if (seen.has(k)) continue;
+            seen.add(k);
+            unique.push(it);
+        }
 
         const oidStr = (x) => String(x ?? '').trim();
         const validOid = (id) => mongoose.Types.ObjectId.isValid(oidStr(id));
@@ -9598,7 +10174,7 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
         const allIds = [...allIdSet].filter(Boolean);
         const assets = await AssetItem.find({ _id: { $in: allIds } })
             .select(
-                'assetId name status assignedTo assignedToType assignedCompany pendingAction actionRequiredBy accessories acceptanceStatus pendingActionDetails'
+                'assetId name status plateNumber assignedTo assignedToType assignedCompany pendingAction actionRequiredBy accessories acceptanceStatus pendingActionDetails'
             )
             .populate('assignedTo', 'firstName lastName employeeId')
             .populate('assignedCompany', 'name companyId')
@@ -9681,6 +10257,7 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
                 _id: asset._id,
                 assetId: asset.assetId,
                 name: asset.name,
+                plateNumber: asset.plateNumber || '',
                 status: asset.status,
                 pendingAction: asset.pendingAction,
                 assignedTo: asset.assignedTo,
@@ -9696,7 +10273,7 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
             };
         };
 
-        const items = unique.map((da) => {
+        let items = unique.map((da) => {
             const aid = da.requestId?.toString();
             const asset = assetById[aid] || null;
             const { isBulk, bulkKind, bulkAssetIds } = resolveBulkForInboxItem(da);
@@ -9721,10 +10298,13 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
                 });
             }
 
+            const meta = parseExtra3(da.extra3);
             return {
                 dashboardActionId: da._id,
                 requestType: da.requestType,
                 requestedDate: da.requestedDate,
+                actionedDate: da.actionedDate,
+                dashboardStatus: da.status,
                 requestedByName: da.requestedByName,
                 subjectName: da.subjectName,
                 extra1: da.extra1,
@@ -9736,8 +10316,50 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
                 bulkKind,
                 bulkAssetIds,
                 bulkAssets,
+                isCreatorOutcome: meta?.assetCreationViewerRole === 'creator',
                 asset: formatAsset(asset)
             };
+        });
+
+        if (scope === 'vehicle') {
+            items = items.filter((row) => {
+                if (row.requestType !== 'Asset Approval') return true;
+                const plate = String(row.asset?.plateNumber || '').trim();
+                if (plate) return true;
+                try {
+                    const meta = typeof row.extra3 === 'string' ? JSON.parse(row.extra3) : row.extra3;
+                    return meta?.isFleetVehicle === true;
+                } catch {
+                    return false;
+                }
+            });
+        }
+
+        // Sold / Total loss: Accounts and Management each have their own bell row (parallel).
+        // Only show the row that matches the viewer's flowchart role so one approval does not
+        // imply the other role's task disappeared from their inbox incorrectly.
+        items = items.filter((row) => {
+            if (row.requestType !== 'Vehicle Disposition Request') return true;
+            let meta = null;
+            try {
+                meta = typeof row.extra3 === 'string' ? JSON.parse(row.extra3) : row.extra3;
+            } catch {
+                meta = null;
+            }
+            let viewerRole = meta?.dispositionViewerRole
+                ? String(meta.dispositionViewerRole).toLowerCase()
+                : '';
+            if (!viewerRole) {
+                const e1 = String(row.extra1 || '').trim();
+                if (/\(\s*Accounts\s*\)\s*$/i.test(e1)) viewerRole = 'accounts';
+                else if (/\(\s*Management\s*\)\s*$/i.test(e1)) viewerRole = 'management';
+                else if (/\(HR review\)\s*$/i.test(e1)) viewerRole = 'hr';
+                else return false;
+            }
+            if (viewerRole === 'hr') return isHrRoleHolder;
+            if (viewerRole === 'accounts') return isAccountsRoleHolder;
+            if (viewerRole === 'management') return isManagementRoleHolder;
+            return false;
         });
 
         res.json({ count: items.length, items });

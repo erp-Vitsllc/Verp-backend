@@ -1,6 +1,9 @@
 import mongoose from "mongoose";
 import Company from "../../models/Company.js";
-import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
+import {
+    isReqUserAdmin,
+    scheduleManagementAdminDeletionEmail,
+} from "../../utils/sendAdminDeletionNotificationEmails.js";
 
 const CARD_FIELD_MAP = {
     tradeLicense: [
@@ -37,6 +40,28 @@ export const clearCompanyCard = async (req, res) => {
         if (!fields) {
             return res.status(400).json({ message: "Unknown company card." });
         }
+
+        const companyBefore = await Company.findOne(buildCompanyFilter(id)).lean();
+        if (!companyBefore) {
+            return res.status(404).json({ message: "Company not found." });
+        }
+
+        const snapshot = fields.reduce((acc, field) => {
+            acc[field] = companyBefore[field];
+            return acc;
+        }, {});
+
+        scheduleManagementAdminDeletionEmail(req, {
+            moduleName: `Company ${card}`,
+            recordId: companyBefore.companyId || String(companyBefore._id),
+            details: `${card} card cleared for ${companyBefore.name || companyBefore.companyId}`,
+            deletedPayload: {
+                companyId: companyBefore.companyId,
+                companyName: companyBefore.name,
+                card,
+                fields: snapshot,
+            },
+        });
 
         const unsetOps = fields.reduce((acc, field) => {
             acc[field] = 1;

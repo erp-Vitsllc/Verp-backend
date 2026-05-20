@@ -45,6 +45,45 @@ async function renderPdfWithFallback(page, primaryOptions) {
     }
 }
 
+/**
+ * Wait for fonts and <img> resources inside the PDF capture root.
+ * Handover signatures load from the API (cross-origin); Puppeteer often printed before they finished,
+ * so previews looked correct but PDFs omitted signatures. Clearing body too early also aborts in-flight loads.
+ */
+async function waitForFontsAndImages(page, rootSelector, perImageTimeoutMs = 20000) {
+    await page.evaluate(async (sel, perImageTimeoutMs) => {
+        const root = document.querySelector(sel);
+        if (!root) return;
+        const delay = (ms) => new Promise((r) => setTimeout(r, ms));
+        try {
+            if (document.fonts?.ready) {
+                await Promise.race([document.fonts.ready, delay(Math.min(perImageTimeoutMs, 8000))]);
+            }
+        } catch {
+            /* ignore */
+        }
+        const imgs = Array.from(root.querySelectorAll('img'));
+        await Promise.all(
+            imgs.map(
+                (img) =>
+                    new Promise((resolve) => {
+                        const finish = () => resolve();
+                        if (img.complete) return finish();
+                        img.addEventListener('load', finish, { once: true });
+                        img.addEventListener('error', finish, { once: true });
+                        setTimeout(finish, perImageTimeoutMs);
+                    })
+            )
+        );
+        await Promise.all(
+            imgs.map((img) => {
+                if (typeof img.decode !== 'function' || img.naturalWidth === 0) return Promise.resolve();
+                return img.decode().catch(() => {});
+            })
+        );
+    }, rootSelector, perImageTimeoutMs);
+}
+
 async function launchPdfBrowser(attempt = 1) {
     const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH?.trim();
     const headlessMode = process.env.PUPPETEER_HEADLESS || 'new';
@@ -124,9 +163,10 @@ export const generatePdf = async (url, token, user, permissions = {}, selector =
 
         // Navigate to the page
             console.log(`[generatePdf] Navigating to URL...`);
+            // Next.js / SPAs often keep connections open; networkidle2 may never resolve and times out.
             await page.goto(url, {
-                waitUntil: 'networkidle2',
-                timeout: 60000
+                waitUntil: 'load',
+                timeout: 90000
             });
             console.log(`[generatePdf] Navigation complete. Waiting for selector: ${selector}`);
 
@@ -143,6 +183,9 @@ export const generatePdf = async (url, token, user, permissions = {}, selector =
                 console.error(`[generatePdf] Timeout waiting for ${selector}. Current URL: ${currentUrl}, Title: ${title}`);
                 throw new Error(`Failed to find ${selector} on page after 30s. Current URL: ${currentUrl}, Title: ${title}`);
             }
+
+            console.log(`[generatePdf] Waiting for fonts and images inside capture root...`);
+            await waitForFontsAndImages(page, selector);
 
         // Isolate the form container: Remove everything else from the body
             await page.evaluate((sel) => {
@@ -180,6 +223,14 @@ export const generatePdf = async (url, token, user, permissions = {}, selector =
                 body { -ms-overflow-style: none; scrollbar-width: none; }
             `
             });
+
+            await page.evaluate(
+                () =>
+                    new Promise((resolve) => {
+                        requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+                    })
+            );
+            await new Promise((r) => setTimeout(r, 300));
 
         // Calculate the height of the content dynamically
             const height = await page.evaluate((sel) => {

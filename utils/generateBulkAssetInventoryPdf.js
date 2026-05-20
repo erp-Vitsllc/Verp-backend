@@ -5,7 +5,8 @@ import {
     BULK_ASSET_INVENTORY_PDF_SELECTOR,
     ASSET_CONTROLLER_RESPONSIBILITY_PDF_SELECTOR,
     ASSET_CONTROLLER_OUTCOME_PDF_SELECTOR,
-    BULK_ASSIGNEE_DISPOSITION_PDF_SELECTOR
+    BULK_ASSIGNEE_DISPOSITION_PDF_SELECTOR,
+    BULK_ASSIGNMENT_HANDOVER_PDF_SELECTOR,
 } from './assetHandoverPdfConstants.js';
 
 function escapeHtml(s) {
@@ -472,6 +473,306 @@ export async function requireBulkAssetInventoryPdfAttachment(req, assetIds, file
             throw new Error(msg);
         }
         console.error(`[requireBulkAssetInventoryPdfAttachment] ${msg} Proceeding without attachment.`);
+        return [];
+    }
+    return att;
+}
+
+/**
+ * Absolute URL for signature / upload images inside server-generated handover PDFs (Puppeteer).
+ * Mirrors frontend HandoverFormView getSignatureUrl behavior.
+ */
+export function resolveSignatureUrlForPdf(sig, frontendBase) {
+    const fe = String(frontendBase || process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/+$/, '');
+    const apiRoot = String(
+        process.env.BACKEND_PUBLIC_URL || process.env.SERVER_URL || process.env.API_URL || 'http://localhost:5000',
+    )
+        .replace(/\/api\/?$/i, '')
+        .replace(/\/+$/, '');
+    let url = null;
+    if (!sig) return '';
+    if (typeof sig === 'string') url = sig;
+    else if (typeof sig === 'object') {
+        url =
+            sig.url ||
+            sig.data ||
+            sig.path ||
+            (typeof sig.signature === 'string' ? sig.signature : sig.signature?.url || sig.signature?.data) ||
+            null;
+    }
+    if (!url || typeof url !== 'string' || url === 'undefined' || url === 'null') return '';
+    if (url.startsWith('data:')) return url;
+    if (/^https?:\/\//i.test(url)) return url;
+    let normalizedPath = url.startsWith('/') ? url : `/${url}`;
+    const isUpload = normalizedPath.includes('uploads') || normalizedPath.includes('signatures');
+    if (isUpload || !normalizedPath.startsWith('/assets')) {
+        return `${apiRoot}${normalizedPath}`.replace(/([^:]\/)\/+/g, '$1');
+    }
+    return `${fe}${normalizedPath}`;
+}
+
+/** @typedef {{ assigneeName?: string, employeeCode?: string, department?: string, hodName?: string, assignerName?: string, handoverDate?: Date, assignerSignatureUrl?: string, showAssigneeSignature?: boolean, assigneeSignatureUrl?: string, assigneeAcknowledgeName?: string }} BulkAssignmentHandoverMeta */
+
+function formatAccessoriesPlainSummary(accList) {
+    if (!accList?.length) return '—';
+    return accList
+        .map((acc) => {
+            const nm = escapeHtml(acc?.name || '—');
+            const id =
+                acc?.accessoryId != null && String(acc.accessoryId).trim() !== ''
+                    ? escapeHtml(String(acc.accessoryId).trim())
+                    : '';
+            return id ? `${nm} (${id})` : nm;
+        })
+        .join('; ');
+}
+
+async function loadBulkAssignmentHandoverRows(assetIds) {
+    const ids = [...new Set((assetIds || []).map(String).filter(Boolean))];
+    const assets = await AssetItem.find({ _id: { $in: ids } })
+        .select('assetId name assetValue assignedDate accessories quantity')
+        .lean();
+    const order = new Map(ids.map((v, i) => [v, i]));
+    assets.sort((a, b) => (order.get(a._id.toString()) ?? 0) - (order.get(b._id.toString()) ?? 0));
+    return assets.map((a) => ({
+        assetId: a.assetId || '—',
+        name: a.name || '—',
+        assetValue: Number(a.assetValue) || 0,
+        assignedDate: a.assignedDate || null,
+        quantity: Number(a.quantity) >= 1 && Number.isFinite(Number(a.quantity)) ? Math.floor(Number(a.quantity)) : 1,
+        accessories: Array.isArray(a.accessories) ? a.accessories : [],
+    }));
+}
+
+function formatMoneyAed(n) {
+    const x = Number(n);
+    if (!Number.isFinite(x)) return '—';
+    return `AED ${x.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`;
+}
+
+function formatDateEnGb(d) {
+    if (!d) return '—';
+    try {
+        const t = new Date(d);
+        if (Number.isNaN(t.getTime())) return '—';
+        return t.toLocaleDateString('en-GB', { day: '2-digit', month: '2-digit', year: 'numeric' });
+    } catch {
+        return '—';
+    }
+}
+
+function filterAttachedAccessoriesForHandover(accList) {
+    if (!Array.isArray(accList)) return [];
+    return accList.filter((acc) => {
+        const st = String(acc?.status || '').trim();
+        return !st || st === 'Attached';
+    });
+}
+
+function buildBulkAssignmentHandoverHtmlDoc(rows, ctx) {
+    const TD_LABEL =
+        "border:1px solid #9ca3af;padding:8px;width:25%;background:rgba(249,250,251,0.65);font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.04em;color:#4b5563;font-family:Georgia,'Times New Roman',serif;";
+    const TD_VAL =
+        "border:1px solid #9ca3af;padding:8px;width:25%;font-size:11px;font-weight:700;color:#111827;font-family:Georgia,'Times New Roman',serif;";
+    const TH =
+        "border:1px solid #9ca3af;padding:8px;background:rgba(249,250,251,0.9);font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.06em;color:#374151;font-family:Georgia,'Times New Roman',serif;";
+
+    const assigneeName = escapeHtml(ctx.assigneeName || '—');
+    const employeeCode = escapeHtml(ctx.employeeCode || '—');
+    const department = escapeHtml(ctx.department || '—');
+    const hodName = escapeHtml(ctx.hodName || '—');
+    const assignerName = escapeHtml(ctx.assignerName || '—');
+    const handoverDate = ctx.handoverDate instanceof Date && !Number.isNaN(ctx.handoverDate.getTime())
+        ? ctx.handoverDate
+        : new Date();
+    const handoverDateDisplay = formatDateEnGb(handoverDate);
+    const generatedWhen = escapeHtml(
+        handoverDate.toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' }),
+    );
+
+    const rowList = rows || [];
+    if (rowList.length === 0) {
+        return `<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"/><title>Asset Handover Form</title></head>
+<body style="margin:0;background:#fff;"><div id="bulk-assignment-handover-pdf" data-bulk-handover-ready="true" style="padding:24px;font-family:Georgia,serif;"><p>No assets in this assignment.</p></div></body></html>`;
+    }
+
+    let sumQty = 0;
+    let sumValue = 0;
+    for (const r of rowList) {
+        sumQty += r.quantity || 1;
+        sumValue += Number(r.assetValue) || 0;
+    }
+
+    const frontendBase = String(process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/+$/, '');
+    const handoverBgUrl = `${frontendBase}/assets/loan_bg_clean.jpg`;
+    const handoverBgCssUrl = JSON.stringify(handoverBgUrl);
+
+    const assignerSigUrl = ctx.assignerSignatureUrl ? escapeHtml(String(ctx.assignerSignatureUrl)) : '';
+    const assignerSigBlock = assignerSigUrl
+        ? `<div style="margin-top:8px;"><img src="${assignerSigUrl}" alt="" style="max-height:52px;max-width:240px;object-fit:contain;object-position:left center;" /></div>`
+        : `<div style="margin-top:10px;min-height:48px;border-bottom:1px solid #374151;max-width:280px;"></div>`;
+
+    const showAckSig = ctx.showAssigneeSignature === true && ctx.assigneeSignatureUrl;
+    const ackNameRaw = ctx.assigneeAcknowledgeName || ctx.assigneeName || '';
+    const ackName = escapeHtml(ackNameRaw || '—');
+    const assigneeSigUrl = showAckSig ? escapeHtml(String(ctx.assigneeSignatureUrl)) : '';
+    const receivedBlock = showAckSig
+        ? `<div style="margin-top:8px;display:flex;align-items:center;gap:16px;flex-wrap:wrap;">
+            <span style="text-transform:uppercase;font-weight:700;">${ackName}</span>
+            <img src="${assigneeSigUrl}" alt="" style="max-height:52px;max-width:240px;object-fit:contain;object-position:left center;" />
+          </div>`
+        : `<div style="margin-top:10px;min-height:48px;border-bottom:1px solid #374151;max-width:280px;"></div>`;
+
+    const assignmentRowsHtml = rowList
+        .map((row, idx) => {
+            const receivedLabel = row.assignedDate
+                ? formatDateEnGb(row.assignedDate)
+                : '<span style="color:#6b7280;font-size:10px;">Pending acceptance</span>';
+            const accListHtml = formatAccessoriesPlainSummary(filterAttachedAccessoriesForHandover(row.accessories));
+            return `<tr>
+          <td style="border:1px solid #9ca3af;padding:8px;text-align:center;font-weight:600;">${idx + 1}</td>
+          <td style="border:1px solid #9ca3af;padding:8px;font-family:ui-monospace,monospace;font-size:10px;font-weight:700;color:#1e40af;">${escapeHtml(row.assetId)}</td>
+          <td style="border:1px solid #9ca3af;padding:8px;">${escapeHtml(row.name)}</td>
+          <td style="border:1px solid #9ca3af;padding:8px;text-align:center;">${row.quantity || 1}</td>
+          <td style="border:1px solid #9ca3af;padding:8px;font-size:9px;line-height:1.45;">${accListHtml}</td>
+          <td style="border:1px solid #9ca3af;padding:8px;font-size:10px;">${receivedLabel}</td>
+          <td style="border:1px solid #9ca3af;padding:8px;text-align:right;white-space:nowrap;font-weight:600;">${escapeHtml(formatMoneyAed(row.assetValue))}</td>
+        </tr>`;
+        })
+        .join('');
+
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<title>Asset Handover Form</title>
+</head>
+<body style="margin:0;background:#fff;">
+<div id="bulk-assignment-handover-pdf" data-bulk-handover-ready="true" style="box-sizing:border-box;max-width:210mm;margin:0 auto;padding:25mm 20mm 30mm 20mm;font-family:Georgia,'Times New Roman',serif;color:#333;line-height:1.45;background-color:#fff;background-image:url(${handoverBgCssUrl});background-size:100% 100%;background-position:center;background-repeat:no-repeat;min-height:297mm;-webkit-print-color-adjust:exact;print-color-adjust:exact;">
+  <p style="font-size:9px;color:#9ca3af;text-align:right;margin:0 0 8px 0;">VeRP · ${generatedWhen}</p>
+  <h1 style="text-align:center;font-size:22px;font-weight:600;text-decoration:underline;letter-spacing:0.12em;text-transform:uppercase;margin:0 0 22px 0;color:#111827;">Asset Handover Form</h1>
+
+  <div style="border:1px solid #9ca3af;margin-bottom:22px;">
+    <table style="width:100%;border-collapse:collapse;font-size:10px;">
+      <tbody>
+        <tr>
+          <td style="${TD_LABEL}">Employee Name</td>
+          <td style="${TD_VAL}">${assigneeName}</td>
+          <td style="${TD_LABEL}">Handover By</td>
+          <td style="${TD_VAL}">${assignerName}</td>
+        </tr>
+        <tr>
+          <td style="${TD_LABEL}">Employee Code</td>
+          <td style="${TD_VAL}">${employeeCode}</td>
+          <td style="${TD_LABEL}">Handover Date</td>
+          <td style="${TD_VAL}">${escapeHtml(handoverDateDisplay)}</td>
+        </tr>
+        <tr>
+          <td style="${TD_LABEL}">HOD Name</td>
+          <td style="${TD_VAL}">${hodName}</td>
+          <td style="${TD_LABEL}">Department</td>
+          <td style="${TD_VAL}">${department}</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p style="font-size:13px;font-style:italic;margin:0 0 16px 0;color:#4b5563;">Please find the below assets handed over to you to carry out your assignment:</p>
+
+  <div style="margin-bottom:24px;page-break-inside:avoid;">
+    <table style="width:100%;border-collapse:collapse;border:1px solid #9ca3af;font-size:10px;">
+      <thead><tr>
+        <th style="${TH}width:36px;text-align:center;">SI</th>
+        <th style="${TH}text-align:left;">Asset ID</th>
+        <th style="${TH}text-align:left;">Asset name</th>
+        <th style="${TH}width:44px;text-align:center;">Qty</th>
+        <th style="${TH}text-align:left;">Accessory list</th>
+        <th style="${TH}text-align:left;">Asset received date</th>
+        <th style="${TH}text-align:right;">Asset value</th>
+      </tr></thead>
+      <tbody>
+        ${assignmentRowsHtml}
+        <tr style="background:rgba(243,244,246,0.95);font-weight:700;">
+          <td colspan="3" style="border:1px solid #9ca3af;padding:10px;text-align:right;">Total Qty</td>
+          <td style="border:1px solid #9ca3af;padding:10px;text-align:center;">${sumQty}</td>
+          <td colspan="2" style="border:1px solid #9ca3af;padding:10px;text-align:right;">Total value</td>
+          <td style="border:1px solid #9ca3af;padding:10px;text-align:right;">${escapeHtml(formatMoneyAed(sumValue))}</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div style="margin-bottom:20px;font-size:13px;font-weight:700;color:#000;">
+    <span style="display:block;font-size:11px;color:#6b7280;font-weight:600;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:6px;">Handover By</span>
+    <span style="display:inline-block;min-height:22px;">${assignerName}</span>
+    ${assignerSigBlock}
+  </div>
+
+  <div style="margin-bottom:16px;">
+    <h3 style="font-size:13px;font-weight:700;text-decoration:underline;text-transform:uppercase;letter-spacing:0.06em;margin:0 0 10px 0;color:#111827;">Acknowledgment &amp; Declaration:</h3>
+    <p style="font-size:13px;text-align:justify;color:#6b7280;line-height:1.65;margin:0;">
+      I, <span style="font-weight:700;border-bottom:1px dashed #374151;padding:0 4px;">${assigneeName}</span>, acknowledge receipt of the above-mentioned asset(s) for use in the course of my assignment with the company,
+      subject to company policy on care, loss, and damage of company property.
+    </p>
+  </div>
+
+  <div style="margin-bottom:20px;font-size:13px;font-weight:700;color:#000;">
+    <span style="display:block;font-size:11px;color:#6b7280;font-weight:600;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:6px;">Received and Acknowledge</span>
+    ${receivedBlock}
+  </div>
+
+  <div style="margin-top:28px;padding-top:12px;border-top:1px solid #e5e7eb;display:flex;justify-content:space-between;font-size:9px;color:#9ca3af;font-style:italic;">
+    <span>Document generated: ${generatedWhen}</span>
+    <span>Handover date: ${escapeHtml(handoverDateDisplay)}</span>
+  </div>
+</div>
+</body>
+</html>`;
+}
+
+export async function generateBulkAssignmentHandoverPdf(_req, assetIds, ctx = {}) {
+    const ids = [...new Set((assetIds || []).map(String).filter(Boolean))];
+    if (ids.length === 0) return null;
+    for (const id of ids) {
+        if (!mongoose.Types.ObjectId.isValid(id)) {
+            console.warn('[generateBulkAssignmentHandoverPdf] Invalid id skipped:', id);
+            return null;
+        }
+    }
+    try {
+        const rows = await loadBulkAssignmentHandoverRows(ids);
+        const html = buildBulkAssignmentHandoverHtmlDoc(rows, ctx);
+        const raw = await generatePdfFromHtml(html, BULK_ASSIGNMENT_HANDOVER_PDF_SELECTOR);
+        const buf = pdfOutputToBuffer(raw);
+        if (!buf?.length) return null;
+        return buf;
+    } catch (e) {
+        console.error('[generateBulkAssignmentHandoverPdf]', e?.message || e);
+        return null;
+    }
+}
+
+export async function buildBulkAssignmentHandoverPdfAttachment(req, assetIds, ctx, filenameBase = 'bulk-asset-handover') {
+    const buf = await generateBulkAssignmentHandoverPdf(req, assetIds, ctx);
+    if (!buf?.length) {
+        console.warn(`[bulkAssignmentHandoverPdf] Empty PDF buffer for ${assetIds?.length || 0} asset(s).`);
+        return [];
+    }
+    const safe = `${String(filenameBase).replace(/[^a-zA-Z0-9._-]/g, '_')}-${assetIds.length}.pdf`;
+    console.log(`[bulkAssignmentHandoverPdf] ${safe} (${buf.length} bytes)`);
+    return [{ filename: safe, content: buf, contentType: 'application/pdf', contentDisposition: 'attachment' }];
+}
+
+export async function requireBulkAssignmentHandoverPdfAttachment(req, assetIds, ctx, filenameBase = 'bulk-asset-handover') {
+    const att = await buildBulkAssignmentHandoverPdfAttachment(req, assetIds, ctx, filenameBase);
+    if (!Array.isArray(att) || att.length === 0) {
+        const msg =
+            'Bulk assignment handover PDF could not be generated. Ensure asset IDs are valid and the PDF service is available.';
+        if (String(process.env.STRICT_PDF_ATTACHMENTS || '').toLowerCase() === 'true') {
+            throw new Error(msg);
+        }
+        console.error(`[requireBulkAssignmentHandoverPdfAttachment] ${msg} Proceeding without attachment.`);
         return [];
     }
     return att;

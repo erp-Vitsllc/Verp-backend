@@ -1,7 +1,7 @@
 import Loan from "../../models/Loan.js";
 import {
     isReqUserAdmin,
-    notifyAdminDeletedBusinessRecordToManagement
+    scheduleManagementAdminDeletionEmail,
 } from "../../utils/sendAdminDeletionNotificationEmails.js";
 
 export const deleteLoan = async (req, res) => {
@@ -18,12 +18,14 @@ export const deleteLoan = async (req, res) => {
             return res.status(404).json({ message: "Loan/Advance not found" });
         }
 
-        await Loan.findByIdAndDelete(id);
-        await notifyAdminDeletedBusinessRecordToManagement(req, {
+        const loanSnapshot = loan.toObject ? loan.toObject() : loan;
+        scheduleManagementAdminDeletionEmail(req, {
             moduleName: loan.type || 'Loan/Advance',
             recordId: loan.loanId || loan._id?.toString?.(),
-            details: loan.reason || loan.notes || `${loan.type || 'Loan/Advance'} record`
+            details: loan.reason || loan.notes || `${loan.type || 'Loan/Advance'} record`,
+            deletedPayload: loanSnapshot,
         });
+        await Loan.findByIdAndDelete(id);
 
         return res.status(200).json({
             message: `${loan.type} deleted successfully`

@@ -15,3 +15,6 @@ export const ASSET_CONTROLLER_OUTCOME_PDF_SELECTOR = '#asset-controller-outcome-
 
 /** Assignee summary after bulk AC decision — processed vs not processed (see generateBulkAssetInventoryPdf.js). */
 export const BULK_ASSIGNEE_DISPOSITION_PDF_SELECTOR = '#bulk-assignee-disposition-pdf[data-inventory-ready="true"]';
+
+/** Bulk employee assignment — handover PDF for emails (see generateBulkAssetInventoryPdf.js, buildBulkAssignmentHandoverHtmlDoc). */
+export const BULK_ASSIGNMENT_HANDOVER_PDF_SELECTOR = '#bulk-assignment-handover-pdf[data-bulk-handover-ready="true"]';

@@ -1,5 +1,9 @@
 import nodemailer from 'nodemailer';
-import { resolveEmployeeEmail } from './resolveEmployeeEmail.js';
+import {
+    resolveEmployeeEmailWithReporteeLoaded,
+    getFallbackEmailNote,
+    employeeDisplayName,
+} from './resolveEmployeeEmail.js';
 import { normalizePdfAttachments } from './normalizeEmailAttachments.js';
 
 export const sendAssignedEmployeeActionEmail = async ({
@@ -9,7 +13,6 @@ export const sendAssignedEmployeeActionEmail = async ({
     performedBy,
     details = '',
     attachments = [],
-    /** Replaces the default “Asset Controller completed…” line when set */
     customIntro = ''
 }) => {
     try {
@@ -17,7 +20,8 @@ export const sendAssignedEmployeeActionEmail = async ({
 
         const att = normalizePdfAttachments(attachments);
 
-        const { email } = resolveEmployeeEmail(employee);
+        const { email, isFallbackToReportee, employee: resolvedEmployee } =
+            await resolveEmployeeEmailWithReporteeLoaded(employee);
         if (!email) return;
 
         const emailUser = process.env.EMAIL_USER || process.env.VERP_EMAIL || process.env.GMAIL_USER;
@@ -37,6 +41,18 @@ export const sendAssignedEmployeeActionEmail = async ({
         const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
         const link = `${frontendUrl}/HRM/Asset/details/${asset._id}`;
 
+        const subjectEmployee = resolvedEmployee || employee;
+        const helloName = isFallbackToReportee
+            ? employeeDisplayName(subjectEmployee.primaryReportee)
+            : employeeDisplayName(subjectEmployee);
+        const fallbackNote =
+            isFallbackToReportee && subjectEmployee.primaryReportee
+                ? getFallbackEmailNote(
+                      employeeDisplayName(subjectEmployee),
+                      employeeDisplayName(subjectEmployee.primaryReportee)
+                  )
+                : '';
+
         await transporter.sendMail({
             fromName: performedBy || "Asset Management",
             to: email,
@@ -48,7 +64,8 @@ export const sendAssignedEmployeeActionEmail = async ({
                         <h3 style="margin:0">Asset Action Notification</h3>
                     </div>
                     <div style="padding:20px">
-                        <p>Hello ${employee.firstName || 'User'},</p>
+                        ${fallbackNote}
+                        <p>Hello ${helloName},</p>
                         <p>${customIntro || 'Asset Controller completed this action on your asset:'}</p>
                         <p><b>${action}</b></p>
                         <p><b>Asset:</b> ${asset.assetId || '-'} - ${asset.name || '-'}</p>

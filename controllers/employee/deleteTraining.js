@@ -1,7 +1,10 @@
 import EmployeeTraining from "../../models/EmployeeTraining.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { getCompleteEmployee } from "../../services/employeeService.js";
-import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
+import {
+    isReqUserAdmin,
+    scheduleManagementAdminDeletionEmail,
+} from "../../utils/sendAdminDeletionNotificationEmails.js";
 
 export const deleteTraining = async (req, res) => {
     const { id, trainingId } = req.params;
@@ -37,8 +40,15 @@ export const deleteTraining = async (req, res) => {
             return res.status(404).json({ message: "Training record not found" });
         }
 
-            training.deleteOne();
-            await trainingRecord.save();
+        const trainingSnapshot = training.toObject ? training.toObject() : { ...training };
+        scheduleManagementAdminDeletionEmail(req, {
+            moduleName: "Employee Training",
+            recordId: employeeId,
+            details: trainingSnapshot?.trainingName || trainingSnapshot?.course || "Training record",
+            deletedPayload: { employeeId, training: trainingSnapshot },
+        });
+        training.deleteOne();
+        await trainingRecord.save();
         
         const completeEmployee = await getCompleteEmployee(employeeId);
 

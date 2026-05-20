@@ -1,7 +1,10 @@
 import EmployeeExperience from "../../models/EmployeeExperience.js";
 import { getCompleteEmployee } from "../../services/employeeService.js";
 
-import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
+import {
+    isReqUserAdmin,
+    scheduleManagementAdminDeletionEmail,
+} from "../../utils/sendAdminDeletionNotificationEmails.js";
 
 export const deleteExperience = async (req, res) => {
     const { id, experienceId } = req.params;
@@ -36,6 +39,13 @@ export const deleteExperience = async (req, res) => {
             return res.status(404).json({ message: "Experience record not found" });
         }
 
+        const experienceSnapshot = experience.toObject ? experience.toObject() : { ...experience };
+        scheduleManagementAdminDeletionEmail(req, {
+            moduleName: "Employee Experience",
+            recordId: employeeId,
+            details: experienceSnapshot?.companyName || experienceSnapshot?.designation || "Experience record",
+            deletedPayload: { employeeId, experience: experienceSnapshot },
+        });
         experience.deleteOne();
         await experienceRecord.save();
         const completeEmployee = await getCompleteEmployee(employeeId);

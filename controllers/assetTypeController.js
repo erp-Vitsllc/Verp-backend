@@ -18,13 +18,17 @@ import {
     resolveAssetControllerEmployee,
     getAssetRequesterDisplayName,
     resolveNewAssetCreationStatus,
-    userCanDirectAddAssetToPool
+    userCanDirectAddAssetToPool,
+    resolveAssetCreationApproverEmployee,
+    creationApproverRoleLabel,
+    isFleetVehicleAssetFields,
 } from '../utils/assetApprovalHelpers.js';
 import {
     notifyAdminDeletedAssetTypeOrCategory,
     notifyAdminDeletedWholeAsset,
     notifyAdminRemovedAccessoriesFromAssignedAsset,
-    getAssetControllerNotificationEmail
+    getAssetControllerNotificationEmail,
+    scheduleManagementAdminDeletionEmail,
 } from '../utils/sendAdminDeletionNotificationEmails.js';
 import {
     syncAllAccessoryInstancesForAsset,
@@ -258,19 +262,21 @@ export const createAssetType = async (req, res) => {
                 return res.status(400).json({ message: 'Valid Category is required for individual assets.' });
             }
 
-            // Approval Logic: Check if creator is Asset Controller or Admin
+            const approverLabel = creationApproverRoleLabel({ plateNumber, typeName: type });
+            const creationApprover = await resolveAssetCreationApproverEmployee({ plateNumber, typeName: type });
             const assetControllerRaw = await getDepartmentHOD('assetcontroller');
             const assetController = assetControllerRaw ? await resolveAssetControllerEmployee(assetControllerRaw) : null;
 
-            if (!assetController) {
+            if (!creationApprover) {
                 return res.status(403).json({
-                    message: "Asset controller is not assigned in the ERP flowchart. ERP cannot create an asset without an asset controller."
+                    message: `${approverLabel} is not assigned in the ERP flowchart. Cannot create this asset until ${approverLabel} is configured.`,
                 });
             }
 
             const creationResolved = await resolveNewAssetCreationStatus(req, {
                 creationIntent,
-                assetController
+                approverEmp: creationApprover,
+                approverLabel,
             });
             if (creationResolved.error) {
                 return res.status(creationResolved.status || 400).json({ message: creationResolved.error });
@@ -354,7 +360,10 @@ export const createAssetType = async (req, res) => {
                     oilChangeDate,
                     gearOilDueDate,
                     lastServiceDate,
-                    nextServiceDate
+                    nextServiceDate,
+                    ...(plateNumber && String(plateNumber).trim()
+                        ? { vehicleProfileActivationStatus: 'inactive', vehicleDispositionStatus: 'active' }
+                        : {}),
                 };
 
                 const newAsset = await AssetItem.create(assetData);
@@ -395,17 +404,18 @@ export const createAssetType = async (req, res) => {
             }
 
             // Submitted for approval (single or bulk): create one dashboard request and one email. (Draft / Unassigned skip this.)
-            if (actionRequiredBy && assetController?._id && createdAssets.length > 0) {
+            if (actionRequiredBy && creationApprover?._id && createdAssets.length > 0) {
                 const first = createdAssets[0];
                 const createdObjectIds = createdAssets.map((a) => a._id?.toString()).filter(Boolean);
                 const createdCodes = createdAssets.map((a) => a.assetId).filter(Boolean);
                 const isBulkCreation = createdAssets.length > 1;
+                const fleetVehicle = isFleetVehicleAssetFields({ plateNumber, typeName: type });
 
                 await DashboardAction.findOneAndUpdate(
                     { requestId: first._id, requestType: 'Asset Approval', status: 'Pending' },
                     {
                         assignedTo: actionRequiredBy,
-                        assignedToEmpId: assetController.employeeId,
+                        assignedToEmpId: creationApprover.employeeId,
                         requestId: first._id,
                         requestType: 'Asset Approval',
                         subjectEmployeeId: req.user.employeeId,
@@ -414,11 +424,15 @@ export const createAssetType = async (req, res) => {
                         extra1: isBulkCreation
                             ? `Bulk creation (${createdAssets.length}) — ${name}`
                             : `${first.assetId} — ${first.name}`,
-                        extra2: `Asset creation — requested by ${requesterDisplayName}`,
+                        extra2: fleetVehicle
+                            ? `Vehicle creation — HR review (${requesterDisplayName})`
+                            : `Asset creation — requested by ${requesterDisplayName}`,
                         extra3: JSON.stringify({
                             isBulkCreation,
                             bulkAssetIds: createdObjectIds,
-                            bulkAssetCodes: createdCodes
+                            bulkAssetCodes: createdCodes,
+                            isFleetVehicle: fleetVehicle,
+                            vehicleMongoId: fleetVehicle ? String(first._id) : undefined,
                         }),
                         status: 'Pending'
                     },
@@ -456,7 +470,7 @@ export const createAssetType = async (req, res) => {
                 }
                 await sendAssetCreationApprovalEmail({
                     asset: first,
-                    recipient: assetController,
+                    recipient: creationApprover,
                     creatorName: requesterDisplayName,
                     isBulk: isBulkCreation,
                     assetCount: createdAssets.length,
@@ -499,14 +513,49 @@ export const createAssetType = async (req, res) => {
 // @route   GET /api/AssetType
 // @access  Private
 export const getAssetTypes = async (req, res) => {
+    const scope = String(req.query.scope || '').toLowerCase().trim();
+    const catalogOnly = scope === 'catalog';
+    const toolsOnly = scope === 'tools';
+
     for (let attempt = 0; attempt < 3; attempt++) {
         try {
-        // Fix: Drop the index causing 500 errors if it was created accidentally
-        try { await AssetType.collection.dropIndex('assetId_1'); } catch (e) { /* ignore */ }
+        if (!catalogOnly && !toolsOnly) {
+            // Fix: Drop the index causing 500 errors if it was created accidentally
+            try { await AssetType.collection.dropIndex('assetId_1'); } catch (e) { /* ignore */ }
+        }
 
         // We aggregate all 3 collections into a unified list for the frontend
         const categories = await AssetCategory.find({ isActive: true }).populate('typeId');
         const types = await AssetType.find({ isActive: true });
+
+        if (catalogOnly) {
+            const typeCategoryCounts = {};
+            categories.forEach((c) => {
+                if (c.typeId) {
+                    const typeIdStr = c.typeId._id.toString();
+                    typeCategoryCounts[typeIdStr] = (typeCategoryCounts[typeIdStr] || 0) + 1;
+                }
+            });
+            const unifiedList = [
+                ...categories.map((c) => ({
+                    _id: c._id,
+                    assetId: c.categoryId,
+                    category: c.name,
+                    imagePreview: c.imagePreview || null,
+                    type: c.typeId?.name || null,
+                })),
+                ...types.map((t) => ({
+                    _id: t._id,
+                    assetId: t.typeId,
+                    type: t.name,
+                    category: null,
+                    categoryCount: typeCategoryCounts[t._id.toString()] || 0,
+                    imagePreview: t.imagePreview || null,
+                    description: t.description,
+                })),
+            ];
+            return res.status(200).json(unifiedList);
+        }
 
         // Draft assets are visible only to the creating user (User id), for every role.
         const uid = req.user?._id || req.user?.id;
@@ -518,6 +567,17 @@ export const getAssetTypes = async (req, res) => {
             ];
         } else {
             assetQuery.status = { $ne: 'Draft' };
+        }
+
+        if (toolsOnly) {
+            assetQuery.$and = assetQuery.$and || [];
+            assetQuery.$and.push({
+                $or: [
+                    { plateNumber: { $exists: false } },
+                    { plateNumber: null },
+                    { plateNumber: '' },
+                ],
+            });
         }
 
         const assets = await AssetItem.find(assetQuery)
@@ -532,7 +592,8 @@ export const getAssetTypes = async (req, res) => {
                     { path: 'primaryReportee', select: 'firstName lastName' },
                     { path: 'reportingAuthority', select: 'firstName lastName' }
                 ]
-            });
+            })
+            .lean();
 
         const flowAc = await getDepartmentHOD('assetcontroller');
         let designatedAssetController = null;
@@ -575,59 +636,67 @@ export const getAssetTypes = async (req, res) => {
                 imagePreview: await getSignedFileUrl(t.imagePreview),
                 description: t.description
             }))),
-            ...await Promise.all(assets.map(async (a) => ({
-                _id: a._id,
-                assetId: a.assetId,
-                name: a.name,
-                type: a.typeId?.name || '-',
-                category: a.categoryId?.name || '-',
-                /** Required for bulk assign / filters: keys use id:${type|category} from catalog rows. */
-                typeId: a.typeId
-                    ? { _id: a.typeId._id, name: a.typeId.name }
-                    : null,
-                categoryId: a.categoryId
-                    ? { _id: a.categoryId._id, name: a.categoryId.name }
-                    : null,
-                assetValue: a.assetValue,
-                purchaseDate: a.purchaseDate,
-                quantity: a.quantity || 1,
-                warranty: a.warranty,
-                warrantyYears: a.warrantyYears,
-                warrantyAttachment: await getSignedFileUrl(a.warrantyAttachment),
-                invoiceNumber: a.invoiceNumber,
-                imagePreview: await getSignedFileUrl(a.imagePreview),
-                photo: await getSignedFileUrl(a.photo),
-                status: a.status,
-                acceptanceStatus: a.acceptanceStatus,
-                assignedToType: a.assignedToType,
-                assigned: a.status === 'Assigned' ? 1 : 0,
-                unassigned: a.status === 'Unassigned' ? 1 : 0,
-                invoiceFile: await getSignedFileUrl(a.invoiceFile),
-                actionRequiredBy: a.actionRequiredBy,
-                assignedCompany: a.assignedCompany,
-                designatedAssetController,
-                pendingAction: a.pendingAction,
-                accessories: await Promise.all((a.accessories || []).map(async (acc) => {
-                    const accObj = acc.toObject ? acc.toObject() : acc;
+            ...await Promise.all(
+                assets.map(async (a) => {
+                    const accList = (a.accessories || []).map((acc) => ({ ...acc }));
+                    const lostList = (a.lostDetachedAccessories || []).map((x) => ({ ...x }));
+                    const signIf = async (key) => (key ? getSignedFileUrl(key) : null);
+                    const imagePreview = await signIf(a.imagePreview);
+                    const photo = await signIf(a.photo);
                     return {
-                        ...accObj,
-                        attachment: accObj.attachment ? await getSignedFileUrl(accObj.attachment) : null
+                        _id: a._id,
+                        assetId: a.assetId,
+                        name: a.name,
+                        type: a.typeId?.name || '-',
+                        category: a.categoryId?.name || '-',
+                        typeId: a.typeId ? { _id: a.typeId._id, name: a.typeId.name } : null,
+                        categoryId: a.categoryId ? { _id: a.categoryId._id, name: a.categoryId.name } : null,
+                        assetValue: a.assetValue,
+                        purchaseDate: a.purchaseDate,
+                        quantity: a.quantity || 1,
+                        warranty: a.warranty,
+                        warrantyYears: a.warrantyYears,
+                        warrantyAttachment: toolsOnly ? a.warrantyAttachment : await signIf(a.warrantyAttachment),
+                        invoiceNumber: a.invoiceNumber,
+                        imagePreview,
+                        photo,
+                        status: a.status,
+                        acceptanceStatus: a.acceptanceStatus,
+                        assignedToType: a.assignedToType,
+                        assigned: a.status === 'Assigned' ? 1 : 0,
+                        unassigned: a.status === 'Unassigned' ? 1 : 0,
+                        invoiceFile: toolsOnly ? a.invoiceFile : await signIf(a.invoiceFile),
+                        actionRequiredBy: a.actionRequiredBy,
+                        assignedCompany: a.assignedCompany,
+                        designatedAssetController,
+                        pendingAction: a.pendingAction,
+                        createdBy: a.createdBy,
+                        accessories: toolsOnly
+                            ? accList
+                            : await Promise.all(
+                                  accList.map(async (accObj) => ({
+                                      ...accObj,
+                                      attachment: accObj.attachment
+                                          ? await getSignedFileUrl(accObj.attachment)
+                                          : null,
+                                  })),
+                              ),
+                        lostDetachedAccessories: lostList,
+                        assignedTo: a.assignedTo,
+                        vehicleCode: a.vehicleCode,
+                        plateEmirate: a.plateEmirate,
+                        plateNumber: a.plateNumber,
+                        modelYear: a.modelYear,
+                        currentKilometer: a.currentKilometer,
+                        registrationExpiryDate: a.registrationExpiryDate,
+                        insuranceExpiryDate: a.insuranceExpiryDate,
+                        oilChangeDate: a.oilChangeDate,
+                        gearOilDueDate: a.gearOilDueDate,
+                        lastServiceDate: a.lastServiceDate,
+                        nextServiceDate: a.nextServiceDate,
                     };
-                })),
-                lostDetachedAccessories: (a.lostDetachedAccessories || []).map((x) => (x.toObject ? x.toObject() : { ...x })),
-                assignedTo: a.assignedTo,
-                vehicleCode: a.vehicleCode,
-                plateEmirate: a.plateEmirate,
-                plateNumber: a.plateNumber,
-                modelYear: a.modelYear,
-                currentKilometer: a.currentKilometer,
-                registrationExpiryDate: a.registrationExpiryDate,
-                insuranceExpiryDate: a.insuranceExpiryDate,
-                oilChangeDate: a.oilChangeDate,
-                gearOilDueDate: a.gearOilDueDate,
-                lastServiceDate: a.lastServiceDate,
-                nextServiceDate: a.nextServiceDate
-            })))
+                }),
+            ),
         ];
 
         return res.status(200).json(unifiedList);
@@ -697,12 +766,19 @@ export const deleteAssetType = async (req, res) => {
             }
             const categoryName = category.name;
             const performedBy = req.user?.name || req.user?.employeeId || 'Administrator';
-            await AssetCategory.findByIdAndDelete(id);
+            const categorySnapshot = category.toObject ? category.toObject() : category;
+            scheduleManagementAdminDeletionEmail(req, {
+                moduleName: 'Asset Category',
+                recordId: categoryName,
+                details: `Asset category deleted`,
+                deletedPayload: categorySnapshot,
+            });
             void notifyAdminDeletedAssetTypeOrCategory({
                 kind: 'Category',
                 name: categoryName,
                 performedBy
             }).catch((e) => console.error('[notify category delete]', e?.message || e));
+            await AssetCategory.findByIdAndDelete(id);
             return res.status(200).json({ message: 'Category deleted successfully' });
         }
 
@@ -719,12 +795,19 @@ export const deleteAssetType = async (req, res) => {
             }
             const typeName = assetType.name;
             const performedBy = req.user?.name || req.user?.employeeId || 'Administrator';
-            await AssetType.findByIdAndDelete(id);
+            const typeSnapshot = assetType.toObject ? assetType.toObject() : assetType;
+            scheduleManagementAdminDeletionEmail(req, {
+                moduleName: 'Asset Type',
+                recordId: typeName,
+                details: `Asset type deleted`,
+                deletedPayload: typeSnapshot,
+            });
             void notifyAdminDeletedAssetTypeOrCategory({
                 kind: 'Type',
                 name: typeName,
                 performedBy
             }).catch((e) => console.error('[notify type delete]', e?.message || e));
+            await AssetType.findByIdAndDelete(id);
             return res.status(200).json({ message: 'Type deleted successfully' });
         }
 
@@ -1062,6 +1145,17 @@ export const updateAssetItem = async (req, res) => {
             }
         }
         delete updates.accidentReportDocument;
+
+        if (updates.vehicleDispositionStatus != null) {
+            const nextDisp = String(updates.vehicleDispositionStatus || '').toLowerCase().trim();
+            const curDisp = String(asset.vehicleDispositionStatus || 'active').toLowerCase().trim();
+            if (['sold', 'total loss'].includes(nextDisp) && nextDisp !== curDisp) {
+                return res.status(400).json({
+                    message:
+                        'To mark a vehicle Sold or Total loss, use Edit basic details → change status → Send request (HR approval workflow).',
+                });
+            }
+        }
 
         // Apply updates
         for (const key of Object.keys(updates)) {

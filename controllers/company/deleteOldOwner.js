@@ -1,6 +1,9 @@
 import mongoose from "mongoose";
 import Company from "../../models/Company.js";
-import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
+import {
+    isReqUserAdmin,
+    scheduleManagementAdminDeletionEmail,
+} from "../../utils/sendAdminDeletionNotificationEmails.js";
 
 const companyMatch = (id) => ({
     $or: [{ _id: id.match(/^[0-9a-fA-F]{24}$/) ? id : null }, { companyId: id }],
@@ -22,6 +25,25 @@ export const deleteOldOwner = async (req, res) => {
         /** Prefer $pull by subdoc _id so we never load/save a multi‑MB Company document in memory. */
         if (typeof decodedTarget === "string" && /^[0-9a-fA-F]{24}$/.test(decodedTarget)) {
             const oid = new mongoose.Types.ObjectId(decodedTarget);
+            const companySnap = await Company.findOne(companyMatch(id))
+                .select("companyId name oldOwners")
+                .lean();
+            const ownerSnap = (companySnap?.oldOwners || []).find(
+                (o) => String(o._id) === String(decodedTarget)
+            );
+            if (ownerSnap) {
+                scheduleManagementAdminDeletionEmail(req, {
+                    moduleName: "Company Archived Owner",
+                    recordId: companySnap.companyId || String(companySnap._id),
+                    details: ownerSnap?.name || "Archived owner",
+                    deletedPayload: {
+                        companyId: companySnap.companyId,
+                        companyName: companySnap.name,
+                        owner: ownerSnap,
+                        ownerTarget: 'oldOwners',
+                    },
+                });
+            }
             const result = await Company.updateOne(companyMatch(id), { $pull: { oldOwners: { _id: oid } } });
             if (!result.matchedCount) {
                 return res.status(404).json({ message: "Company not found" });
@@ -53,6 +75,19 @@ export const deleteOldOwner = async (req, res) => {
         if (ownerIndex === -1) {
             return res.status(400).json({ message: "Owner record not found in archive" });
         }
+
+        const ownerSnap = company.oldOwners[ownerIndex];
+        scheduleManagementAdminDeletionEmail(req, {
+            moduleName: "Company Archived Owner",
+            recordId: company.companyId || String(company._id),
+            details: ownerSnap?.name || "Archived owner",
+            deletedPayload: {
+                companyId: company.companyId,
+                companyName: company.name,
+                owner: ownerSnap?.toObject ? ownerSnap.toObject() : ownerSnap,
+                ownerTarget: 'oldOwners',
+            },
+        });
 
         company.oldOwners.splice(ownerIndex, 1);
         await company.save();

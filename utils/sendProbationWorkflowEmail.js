@@ -2,9 +2,7 @@ import nodemailer from "nodemailer";
 import { getDepartmentHOD } from "./getDepartmentHOD.js";
 import DashboardAction from "../models/DashboardAction.js";
 import EmployeeBasic from "../models/EmployeeBasic.js";
-
-const resolveEmployeeEmail = (emp) =>
-    emp?.companyEmail || emp?.workEmail || emp?.personalEmail || emp?.email || null;
+import { resolveEmployeeEmail, addEmployeeEmailToSet } from "./resolveEmployeeEmail.js";
 
 const createTransporter = () => {
     const emailUser = process.env.EMAIL_USER?.trim();
@@ -89,8 +87,10 @@ export const sendProbationWorkflowEmail = async ({
         if (!transporter || !employee) return;
 
         const stakeholders = await getStakeholders(employee);
-        const stakeholderEmails = stakeholders.map(resolveEmployeeEmail).filter(Boolean);
-        const employeeEmail = resolveEmployeeEmail(employee);
+        const stakeholderEmails = stakeholders
+            .map((s) => resolveEmployeeEmail(s).email)
+            .filter(Boolean);
+        const employeeEmail = resolveEmployeeEmail(employee).email;
 
         const employeeName = `${employee.firstName || ""} ${employee.lastName || ""}`.trim();
         const probText = probationEndDate
@@ -193,7 +193,7 @@ export const ensureProbationRequestForEmployee = async (employeeDoc) => {
     const stakeholders = await getStakeholders(employeeDoc);
     await employeeDoc.populate("primaryReportee", "firstName lastName employeeId companyEmail workEmail personalEmail email");
     const primaryReportee = employeeDoc.primaryReportee;
-    const primaryReporteeEmail = resolveEmployeeEmail(primaryReportee || {});
+    const primaryReporteeEmail = resolveEmployeeEmail(primaryReportee || {}).email;
     const primaryReporteeName = `${primaryReportee?.firstName || ""} ${primaryReportee?.lastName || ""}`.trim() || primaryReportee?.employeeId || "Primary reportee";
     const baseUrl = process.env.FRONTEND_URL || "http://localhost:3000";
     const workDetailsUrl = `${baseUrl}/emp/${employeeDoc.employeeId}?tab=work-details`;

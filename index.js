@@ -15,7 +15,8 @@ import companyRoute from "./routes/companyRoutes.js";
 import assetTypeRoute from "./routes/assetTypeRoutes.js";
 import assetItemRoute from "./routes/assetItemRoutes.js"; // <-- Add asset item routes
 import assetAccessoryCatalogRoute from "./routes/assetAccessoryCatalogRoutes.js";
-import flowchartRoute from "./routes/flowchartRoutes.js"; // <-- Add flowchart routes
+import flowchartRoute from "./routes/flowchartRoutes.js";
+import adminDeletionArchiveRoute from "./routes/adminDeletionArchiveRoutes.js"; // <-- Add flowchart routes
 import { commonLimiter } from "./middleware/rateLimitMiddleware.js";
 import dotenv from "dotenv";
 import { connectDB } from "./config/db.js";
@@ -27,6 +28,8 @@ import { processDocumentExpiryReminders } from "./utils/processDocumentExpiryRem
 import { processVehicleServiceHoldReminders } from "./utils/processVehicleServiceHoldReminders.js";
 import { processVehicleServiceScheduledPhase } from "./utils/processVehicleServiceScheduledPhase.js";
 import { setupEmailSubjectTag } from "./utils/setupEmailSubjectTag.js";
+import { purgeExpiredAdminDeletionArchives } from "./services/adminDeletionArchiveService.js";
+import { rerouteAllPendingAssetCreationApprovals } from "./utils/assetApprovalHelpers.js";
 
 dotenv.config();
 setupEmailSubjectTag();
@@ -76,6 +79,29 @@ setInterval(() => { processVehicleServiceHoldReminders(); }, 6 * 60 * 60 * 1000)
 // Scheduled vehicle service window: flip to "On Service" on the first day, email AC after window ends.
 setTimeout(() => { processVehicleServiceScheduledPhase(); }, 150 * 1000);
 setInterval(() => { processVehicleServiceScheduledPhase(); }, 2 * 60 * 60 * 1000);
+
+setTimeout(() => {
+    purgeExpiredAdminDeletionArchives().catch((e) =>
+        console.error('[AdminDeletionArchive] startup purge failed:', e?.message || e),
+    );
+}, 180 * 1000);
+
+setTimeout(() => {
+    rerouteAllPendingAssetCreationApprovals()
+        .then((counts) => {
+            console.log(
+                `[AssetApproval] startup re-route: fleet=${counts.fleetUpdated} tools=${counts.toolsUpdated}`
+            );
+        })
+        .catch((e) =>
+            console.error('[AssetApproval] startup re-route failed:', e?.message || e),
+        );
+}, 20 * 1000);
+setInterval(() => {
+    purgeExpiredAdminDeletionArchives().catch((e) =>
+        console.error('[AdminDeletionArchive] scheduled purge failed:', e?.message || e),
+    );
+}, 24 * 60 * 60 * 1000);
 
 // CORS Configuration - MUST BE FIRST
 const staticAllowedOrigins = [
@@ -140,6 +166,7 @@ app.use("/api/AssetType", assetTypeRoute);
 app.use("/api/AssetItem", assetItemRoute);
 app.use("/api/AssetAccessoryCatalog", assetAccessoryCatalogRoute);
 app.use("/api/Flowchart", flowchartRoute);
+app.use("/api/AdminDeletionArchive", adminDeletionArchiveRoute);
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`Server running at http://localhost:${PORT}`));

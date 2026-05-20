@@ -1,7 +1,10 @@
 import mongoose from "mongoose";
 import EmployeeSalary from "../../models/EmployeeSalary.js";
 import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeService.js";
-import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
+import {
+    isReqUserAdmin,
+    scheduleManagementAdminDeletionEmail,
+} from "../../utils/sendAdminDeletionNotificationEmails.js";
 import { hasPermission } from "../../services/permissionService.js";
 import { PURGE_TYPES, purgeEmployeeOldDocuments } from "../../utils/purgeEmployeeOldDocuments.js";
 
@@ -56,6 +59,16 @@ export const deleteSalaryHistoryEntry = async (req, res) => {
 
         const targetId = target._id;
         const monthKey = monthKeyFromDate(target.fromDate);
+        const targetSnapshot = target.toObject ? target.toObject() : { ...target };
+
+        if (isAdminUser) {
+            scheduleManagementAdminDeletionEmail(req, {
+                moduleName: "Employee Salary History",
+                recordId: employee.employeeId,
+                details: `Salary history ${targetSnapshot?.month || monthKey || historyId}`,
+                deletedPayload: { employeeId: employee.employeeId, salaryHistoryEntry: targetSnapshot },
+            });
+        }
 
         await EmployeeSalary.updateOne(
             { employeeId: employee.employeeId },

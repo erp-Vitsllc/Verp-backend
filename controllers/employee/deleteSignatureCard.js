@@ -1,6 +1,9 @@
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { resolveEmployeeId } from "../../services/employeeService.js";
-import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
+import {
+    isReqUserAdmin,
+    scheduleManagementAdminDeletionEmail,
+} from "../../utils/sendAdminDeletionNotificationEmails.js";
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
 import { PURGE_TYPES, purgeEmployeeOldDocuments } from "../../utils/purgeEmployeeOldDocuments.js";
 
@@ -17,6 +20,17 @@ export const deleteSignatureCard = async (req, res) => {
             return res.status(404).json({ message: "Employee not found." });
         }
 
+        const sigEmployee = await EmployeeBasic.findOne({ employeeId: employee.employeeId })
+            .select("employeeId signature")
+            .lean();
+        if (sigEmployee?.signature) {
+            scheduleManagementAdminDeletionEmail(req, {
+                moduleName: "Employee Signature",
+                recordId: employee.employeeId,
+                details: `Digital signature for ${employee.employeeId}`,
+                deletedPayload: { employeeId: employee.employeeId, signature: sigEmployee.signature },
+            });
+        }
         await EmployeeBasic.updateOne(
             { employeeId: employee.employeeId },
             { $set: { signature: null } }

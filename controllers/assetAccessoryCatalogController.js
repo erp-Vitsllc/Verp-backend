@@ -5,7 +5,11 @@ import DashboardAction from '../models/DashboardAction.js';
 import { getDepartmentHOD, isUserInFlowchart } from '../utils/getDepartmentHOD.js';
 import { sendAssetActionApprovalEmail } from '../utils/sendAssetActionApprovalEmail.js';
 import { buildBulkAssetInventoryPdfAttachment } from '../utils/generateBulkAssetInventoryPdf.js';
-import { notifyAdminDeletedAccessoryCatalogEntry, isReqUserAdmin } from '../utils/sendAdminDeletionNotificationEmails.js';
+import {
+    notifyAdminDeletedAccessoryCatalogEntry,
+    isReqUserAdmin,
+    scheduleManagementAdminDeletionEmail,
+} from '../utils/sendAdminDeletionNotificationEmails.js';
 import { generateVegaAccessoryCatalogId, syncAllAccessoryInstancesForAsset } from '../utils/syncAssetAccessoryCatalog.js';
 
 const generateAccessoryCatalogId = generateVegaAccessoryCatalogId;
@@ -240,6 +244,13 @@ export const deleteAccessoryCatalog = async (req, res) => {
         await doc.save();
         if (await isReqUserAdmin(req.user)) {
             const performedBy = req.user?.name || req.user?.employeeId || 'Administrator';
+            const catalogSnapshot = doc.toObject ? doc.toObject() : doc;
+            scheduleManagementAdminDeletionEmail(req, {
+                moduleName: 'Accessory catalog',
+                recordId: doc.accessoryCatalogId || String(doc._id),
+                details: doc.name || 'Accessory catalog entry',
+                deletedPayload: catalogSnapshot,
+            });
             void notifyAdminDeletedAccessoryCatalogEntry({
                 accessoryCatalogId: doc.accessoryCatalogId,
                 name: doc.name,

@@ -2,7 +2,10 @@ import EmployeeVisa from "../../models/EmployeeVisa.js";
 import { resolveEmployeeId } from "../../services/employeeService.js";
 import { deleteDocumentFromS3 } from "../../utils/s3Upload.js";
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
-import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
+import {
+    isReqUserAdmin,
+    scheduleManagementAdminDeletionEmail,
+} from "../../utils/sendAdminDeletionNotificationEmails.js";
 import { cleanupEmployeeExpiryNotificationsByLabels } from "../../utils/cleanupEmployeeExpiryNotifications.js";
 import { PURGE_TYPES, purgeEmployeeOldDocuments } from "../../utils/purgeEmployeeOldDocuments.js";
 
@@ -28,7 +31,15 @@ export const deleteVisaDetails = async (req, res) => {
         const employeeId = employee.employeeId;
 
         // Find existing record to delete document from S3 if exists
-        const existingVisa = await EmployeeVisa.findOne({ employeeId });
+        const existingVisa = await EmployeeVisa.findOne({ employeeId }).lean();
+        if (existingVisa?.[type]) {
+            scheduleManagementAdminDeletionEmail(req, {
+                moduleName: `Employee Visa (${type})`,
+                recordId: employeeId,
+                details: `Visa type ${type} for ${employeeId}`,
+                deletedPayload: { employeeId, visaType: type, visa: existingVisa[type] },
+            });
+        }
         if (existingVisa?.[type]?.document?.publicId) {
             try {
                 await deleteDocumentFromS3(existingVisa[type].document.publicId);

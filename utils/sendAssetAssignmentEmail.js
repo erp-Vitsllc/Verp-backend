@@ -1,29 +1,9 @@
 import nodemailer from "nodemailer";
-import User from "../models/User.js";
 import { normalizePdfAttachments } from "./normalizeEmailAttachments.js";
-
-/** Email only the targeted employee (assignee or HR); never substitute the manager. */
-async function resolveEmailForAssignee(recipient) {
-    if (!recipient) return null;
-    const empId = String(recipient.employeeId || '').trim();
-
-    // Always target the assignee's own emails first.
-    const empCompanyEmail = (recipient.companyEmail || "").trim();
-    if (empCompanyEmail) return empCompanyEmail;
-
-    const fallbackEmpEmail = (
-        recipient.workEmail ||
-        recipient.personalEmail ||
-        recipient.email ||
-        ""
-    ).trim();
-    if (fallbackEmpEmail) return fallbackEmpEmail;
-
-    if (!empId) return null;
-    const u = await User.findOne({ employeeId: empId, status: "Active" }).select("email companyEmail").lean();
-    if (!u) return null;
-    return (u.email || u.companyEmail || "").trim() || null;
-}
+import {
+    resolveEmployeeEmailWithReporteeLoaded,
+    employeeDisplayName,
+} from "./resolveEmployeeEmail.js";
 
 export const sendAssetAssignmentEmail = async ({
     asset,
@@ -36,9 +16,13 @@ export const sendAssetAssignmentEmail = async ({
     bulkAssignmentGroupId = null
 }) => {
     try {
-        const recipientEmail = await resolveEmailForAssignee(recipient);
+        const { email: recipientEmail, isFallbackToReportee, employee: resolvedRecipient } =
+            await resolveEmployeeEmailWithReporteeLoaded(recipient);
+
         if (!recipientEmail) {
-            console.warn(`[Email Warning] No email for assignee ${recipient?.employeeId || recipient?._id} (employee record or portal user)`);
+            console.warn(
+                `[Email Warning] No company/work email for assignee ${recipient?.employeeId || recipient?._id} and no primary reportee business email`,
+            );
             return;
         }
 
@@ -69,13 +53,15 @@ export const sendAssetAssignmentEmail = async ({
         const assetName = isBulk ? `${assetCount} Assets` : asset.name;
         const assetIdDisplay = isBulk ? "Multiple Assets" : asset.assetId;
 
+        const recipientRecord = resolvedRecipient || recipient;
         const isSelfAssignment =
-            !employee?.isCompany && recipient?._id?.toString() === employee?._id?.toString();
+            !employee?.isCompany && recipientRecord?._id?.toString() === employee?._id?.toString();
         const isPrimaryReporteeRecipient =
-            !employee?.isCompany &&
-            !!recipient?._id &&
-            !!employee?._id &&
-            recipient._id?.toString() !== employee._id?.toString();
+            isFallbackToReportee ||
+            (!employee?.isCompany &&
+                !!recipientRecord?._id &&
+                !!employee?._id &&
+                recipientRecord._id?.toString() !== employee._id?.toString());
 
         const subject = employee?.isCompany
             ? (isBulk ? `Asset Allocation for ${employeeName}: ${assetCount} Items` : `Asset Allocated to ${employeeName}: ${asset.name} (${asset.assetId})`)
@@ -92,16 +78,13 @@ export const sendAssetAssignmentEmail = async ({
                   ? `${frontendUrl}/HRM/Asset`
                   : `${frontendUrl}/HRM/Asset/details/${assetId}`;
 
-        console.log(`[Email Debug] Generating button URL: ${buttonUrl}`);
-
-        const recipientName = `${recipient?.firstName || ""} ${recipient?.lastName || ""}`.trim() || recipient?.employeeId || "User";
+        const recipientName = employeeDisplayName(recipientRecord);
         const fallbackNote = isPrimaryReporteeRecipient
             ? `
                 <div style="background-color: #fffbeb; border: 1px solid #f59e0b; color: #92400e; padding: 12px; border-radius: 8px; margin-bottom: 18px; font-size: 13px;">
                     <strong>Primary Reportee Notice:</strong> This asset is assigned under your reportee
                     <strong> ${employeeName}</strong>${employee?.employeeId ? ` (${employee.employeeId})` : ''}.
-                    You are receiving this request because the assignee does not have active portal/login access.
-                    This is your under employee's asset request.
+                    You are receiving this because the assignee has no company email on file; please respond on their behalf.
                 </div>
             `
             : "";
@@ -162,26 +145,17 @@ export const sendAssetAssignmentEmail = async ({
                         </table>
                     </div>
 
-                    ${att.length ? `<p style="font-size: 13px; color: #64748b; margin-bottom: 12px;">A PDF attachment lists the assets included in this notification.</p>` : ''}
+                    ${att.length ? `<p style="font-size: 13px; color: #64748b; margin-bottom: 12px;">The attached PDF matches the portal asset handover layout (summary table with accessories, received dates, values, and totals).</p>` : ''}
 
                     <p style="font-size: 14px; color: #64748b; margin-bottom: 30px;">
                         ${isBulk && bulkAssignmentGroupId ? 'Use the button below to open the batch review: tick the assets you accept. Unticked assets are declined (returned to Unassigned, or to the prior assignee when applicable).' : 'Please log in to the portal to view the details and confirm receipt.'}
                     </p>
 
                     <div style="text-align: center; margin-top: 30px; margin-bottom: 20px;">
-                        <!--[if mso]>
-                        <v:roundrect xmlns:v="urn:schemas-microsoft-com:vml" xmlns:w="urn:schemas-microsoft-com:office:word" href="${buttonUrl}" style="height:50px;v-text-anchor:middle;width:250px;" arcsize="16%" stroke="f" fillcolor="#2563eb">
-                          <w:anchorlock/>
-                          <center>
-                        <![endif]-->
                         <a href="${buttonUrl}" 
                            style="background-color: #2563eb; color: #ffffff; padding: 16px 36px; text-decoration: none; border-radius: 10px; font-weight: bold; display: inline-block; font-size: 15px; box-shadow: 0 4px 15px rgba(37, 99, 235, 0.3);">
                            View Assignment Details
                         </a>
-                        <!--[if mso]>
-                          </center>
-                        </v:roundrect>
-                        <![endif]-->
                     </div>
                 </div>
                 <div style="background-color: #f8fafc; padding: 20px; text-align: center; font-size: 12px; color: #64748b; border-top: 1px solid #e2e8f0;">
@@ -191,11 +165,11 @@ export const sendAssetAssignmentEmail = async ({
         `;
 
         await transporter.sendMail({
-            fromName: "Asset Management",
+            from: `"Asset Management" <${emailUser}>`,
             to: recipientEmail,
             subject,
             html,
-            ...(att.length ? { attachments: att } : {})
+            ...(att.length ? { attachments: att } : {}),
         });
 
         console.log(`[Email Success] Asset assignment notification sent to ${recipientEmail}`);

@@ -7,7 +7,7 @@ import { getManagementHOD } from "../../utils/getManagementHOD.js";
 import { sendHODAuthorizationEmail } from "../../utils/sendHODAuthorizationEmail.js";
 import { getDepartmentHOD } from "../../utils/getDepartmentHOD.js";
 import { getCompleteEmployee } from "../../services/employeeService.js";
-import { resolveEmployeeEmail, getFallbackEmailNote } from "../../utils/resolveEmployeeEmail.js";
+import { resolveEmployeeEmail, getFallbackEmailNote, addEmployeeEmailToSet } from "../../utils/resolveEmployeeEmail.js";
 
 export const approveLoan = async (req, res) => {
     try {
@@ -510,32 +510,24 @@ export const approveLoan = async (req, res) => {
 
                         // 2. Manager Email (His Reportee/Supervisor) - only if not already added from fallback
                         if (applicant.primaryReportee) {
-                            const managerEmail = applicant.primaryReportee.companyEmail || applicant.primaryReportee.email;
+                            const { email: managerEmail } = resolveEmployeeEmail(applicant.primaryReportee);
                             if (managerEmail && !toEmails.has(managerEmail)) ccEmails.add(managerEmail);
                         }
 
-                        // 3. Creator Email
-                        if (creator) {
-                            const creatorEmail = creator.companyEmail || creator.email;
+                        if (creator?.companyEmail) {
+                            const creatorEmail = String(creator.companyEmail).trim();
                             if (creatorEmail) ccEmails.add(creatorEmail);
                         }
 
-                        // 4. Fetch HR, Accounts, Management
                         try {
                             const hrHOD = await import("../../utils/getDepartmentHOD.js").then(m => m.getDepartmentHOD('hr', loan.employeeId));
-                            if (hrHOD && (hrHOD.companyEmail || hrHOD.personalEmail || hrHOD.email)) {
-                                ccEmails.add(hrHOD.companyEmail || hrHOD.personalEmail || hrHOD.email);
-                            }
+                            addEmployeeEmailToSet(ccEmails, hrHOD);
 
                             const accountsHOD = await import("../../utils/getDepartmentHOD.js").then(m => m.getDepartmentHOD('finance', loan.employeeId));
-                            if (accountsHOD && (accountsHOD.companyEmail || accountsHOD.personalEmail || accountsHOD.email)) {
-                                ccEmails.add(accountsHOD.companyEmail || accountsHOD.personalEmail || accountsHOD.email);
-                            }
+                            addEmployeeEmailToSet(ccEmails, accountsHOD);
 
                             const managementHOD = await import("../../utils/getManagementHOD.js").then(m => m.getManagementHOD(loan.employeeId));
-                            if (managementHOD && (managementHOD.companyEmail || managementHOD.personalEmail || managementHOD.email)) {
-                                ccEmails.add(managementHOD.companyEmail || managementHOD.personalEmail || managementHOD.email);
-                            }
+                            addEmployeeEmailToSet(ccEmails, managementHOD);
                         } catch (e) {
                             console.warn("[ApproveLoan] Could not fetch HOD emails for CC", e.message);
                         }

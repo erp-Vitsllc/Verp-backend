@@ -398,11 +398,48 @@ export const getUserActivityStats = async (req, res) => {
             dashboardOrConditions.push({ requestType: { $in: allAssetTypes } });
         }
 
+        // Role-aware fallback so a freshly-appointed HR sees in-flight fleet Asset Approvals immediately
+        // (without waiting for the boot/flowchart re-route to rewrite DashboardAction.assignedTo).
+        const { isUserActiveInFlowchart, isUserInFlowchart } = await import("../../utils/getDepartmentHOD.js");
+        const isCurrentHrHolder = await isUserActiveInFlowchart(currentUser, 'hr').catch(() => false);
+        if (isCurrentHrHolder) {
+            dashboardOrConditions.push({
+                requestType: 'Asset Approval',
+                extra3: { $regex: '"isFleetVehicle"\\s*:\\s*true', $options: 'i' },
+            });
+        }
+        const isCurrentAcHolder = await isUserActiveInFlowchart(currentUser, 'assetcontroller').catch(() => false);
+        if (isCurrentAcHolder) {
+            dashboardOrConditions.push({
+                requestType: 'Asset Approval',
+                extra3: { $not: { $regex: '"isFleetVehicle"\\s*:\\s*true', $options: 'i' } },
+            });
+        }
+        const isCurrentAccountsHolder = await isUserActiveInFlowchart(currentUser, 'accounts').catch(() => false);
+        const isCurrentManagementHolder = await isUserInFlowchart(currentUser, 'management').catch(() => false);
+
+        const dispositionRowVisibleToViewer = (item) => {
+            if (item?.requestType !== 'Vehicle Disposition Request') return true;
+            let meta = null;
+            try {
+                meta = typeof item.extra3 === 'string' ? JSON.parse(item.extra3) : item.extra3;
+            } catch {
+                meta = null;
+            }
+            const viewerRole = meta?.dispositionViewerRole;
+            if (!viewerRole) return true;
+            if (viewerRole === 'hr') return isCurrentHrHolder;
+            if (viewerRole === 'accounts') return isCurrentAccountsHolder;
+            if (viewerRole === 'management') return isCurrentManagementHolder;
+            return false;
+        };
+
         const ASSIGNMENT_STRICT_TYPES = new Set([
             'Document Expiry Reminder',
             'Employee Document Expiry Reminder',
             'Company Activation',
             'Vehicle Profile Activation',
+            'Vehicle Disposition Request',
         ]);
         const normEmpForAssignee = (s) => (s || '').toString().trim().toLowerCase();
         const dashboardRowAssignedToViewer = (item) => {
@@ -424,6 +461,17 @@ export const getUserActivityStats = async (req, res) => {
             // Outcome rows for the profile subject use assignedTo = subject's EmployeeBasic _id and assignedToEmpId = subject employeeId.
             // Also match by employeeId so the submitting employee sees On Hold / outcomes even if id resolution differs from HR's queue row.
             profileActivationOutcomeOr.push({ assignedToEmpId: String(targetEmployeeId).trim() });
+        }
+
+        const assetApprovalRejectedOr = [{ assignedTo: { $in: dashboardAssigneeMongoIds } }];
+        if (targetEmployeeId && String(targetEmployeeId).trim() !== '') {
+            assetApprovalRejectedOr.push({ assignedToEmpId: String(targetEmployeeId).trim() });
+        }
+        if (currentUser?.employeeId && String(currentUser.employeeId).trim() !== '') {
+            const cid = String(currentUser.employeeId).trim();
+            if (!assetApprovalRejectedOr.some((c) => c.assignedToEmpId === cid)) {
+                assetApprovalRejectedOr.push({ assignedToEmpId: cid });
+            }
         }
 
         const dashboardSettled = await Promise.allSettled([
@@ -461,7 +509,7 @@ export const getUserActivityStats = async (req, res) => {
             DashboardAction.find({
                 requestType: 'Asset Approval',
                 status: 'Rejected',
-                $or: profileActivationOutcomeOr,
+                $or: assetApprovalRejectedOr,
             })
                 .sort({ actionedDate: -1, updatedAt: -1 })
                 .limit(25)
@@ -484,6 +532,7 @@ export const getUserActivityStats = async (req, res) => {
         const dashboardPendingItems = await filterStaleExpiryDashboardRows(
             dedupeOwnerLinkedDocumentExpiryReminders(
             dashboardPendingItemsRaw.filter((item) => {
+                if (!dispositionRowVisibleToViewer(item)) return false;
                 if (!ASSIGNMENT_STRICT_TYPES.has(item.requestType)) return true;
                 return dashboardRowAssignedToViewer(item);
             })
@@ -1235,7 +1284,10 @@ export const getUserActivityStats = async (req, res) => {
                 ) ||
                 (targetEmployeeId &&
                     item.assignedToEmpId &&
-                    normEmpForAssignee(item.assignedToEmpId) === normEmpForAssignee(targetEmployeeId));
+                    normEmpForAssignee(item.assignedToEmpId) === normEmpForAssignee(targetEmployeeId)) ||
+                (currentUser?.employeeId &&
+                    item.assignedToEmpId &&
+                    normEmpForAssignee(item.assignedToEmpId) === normEmpForAssignee(currentUser.employeeId));
             const activityItem = {
                 id: reqIdStr,
                 actionId: item._id.toString(),

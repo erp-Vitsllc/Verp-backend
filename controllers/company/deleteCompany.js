@@ -3,13 +3,22 @@ import Fine from "../../models/Fine.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import User from "../../models/User.js";
 import { deleteEmployeeData } from "../../services/employeeService.js";
+import {
+    isReqUserAdmin,
+    scheduleManagementAdminDeletionEmail,
+} from "../../utils/sendAdminDeletionNotificationEmails.js";
 
 export const deleteCompany = async (req, res) => {
     try {
+        const isAdmin = await isReqUserAdmin(req.user);
+        if (!isAdmin) {
+            return res.status(403).json({ message: "Only administrator can delete companies." });
+        }
+
         const { id } = req.params;
 
         // Check if company exists
-        const company = await Company.findById(id);
+        const company = await Company.findById(id).lean();
         if (!company) {
             return res.status(404).json({ message: "Company not found" });
         }
@@ -48,6 +57,13 @@ export const deleteCompany = async (req, res) => {
             // Remove linked user accounts for deleted employees to avoid orphaned logins.
             await User.deleteMany({ employeeId: { $in: employeeIds } });
         }
+
+        scheduleManagementAdminDeletionEmail(req, {
+            moduleName: "Company",
+            recordId: company.companyId || String(company._id),
+            details: `${company.name || "Company"} (${employeeIds.length} linked employees removed)`,
+            deletedPayload: company,
+        });
 
         await Company.findByIdAndDelete(id);
 

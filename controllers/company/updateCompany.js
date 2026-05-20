@@ -16,7 +16,52 @@ import {
     stripProposedDataKeysFromPendingReactivationEntries,
 } from "../../utils/companyActivation.js";
 import { markCompanyActivationHoldResolvedForUpdate } from "../../utils/markCompanyActivationHoldResolved.js";
-import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
+import {
+    isReqUserAdmin,
+    scheduleManagementAdminDeletionEmail,
+} from "../../utils/sendAdminDeletionNotificationEmails.js";
+
+function scheduleAdminCompanyPullArchives(
+    req,
+    company,
+    { pullDocumentsByIds = [], pullOldDocumentsByIds = [], pullOwnersByIds = [] } = {}
+) {
+    const companyId = company.companyId;
+    const companyName = company.name || companyId;
+
+    for (const oid of pullDocumentsByIds) {
+        const document = (company.documents || []).find((d) => String(d._id) === String(oid));
+        if (!document) continue;
+        scheduleManagementAdminDeletionEmail(req, {
+            moduleName: 'Company Document',
+            recordId: companyId,
+            details: `${document.type || 'Document'} removed from ${companyName}`,
+            deletedPayload: { companyId, companyName, document },
+        });
+    }
+
+    for (const oid of pullOldDocumentsByIds) {
+        const document = (company.oldDocuments || []).find((d) => String(d._id) === String(oid));
+        if (!document) continue;
+        scheduleManagementAdminDeletionEmail(req, {
+            moduleName: 'Company Old Document',
+            recordId: companyId,
+            details: `${document.type || 'Archived document'} removed from ${companyName}`,
+            deletedPayload: { companyId, companyName, document },
+        });
+    }
+
+    for (const oid of pullOwnersByIds) {
+        const owner = (company.owners || []).find((o) => String(o._id) === String(oid));
+        if (!owner) continue;
+        scheduleManagementAdminDeletionEmail(req, {
+            moduleName: 'Company Owner',
+            recordId: companyId,
+            details: `Owner removed from ${companyName}`,
+            deletedPayload: { companyId, companyName, owner, ownerTarget: 'owners' },
+        });
+    }
+}
 
 const shouldQueueCompanyChange = (company = {}) => {
     const status = String(company?.status || "").toLowerCase();
@@ -498,6 +543,13 @@ export const updateCompany = async (req, res) => {
                 updateOps.$set = updateData;
             }
             if (pullDocumentsByIds.length || pullOldDocumentsByIds.length || pullOwnersByIds.length) {
+                if (requesterIsAdmin) {
+                    scheduleAdminCompanyPullArchives(req, beforeCompany, {
+                        pullDocumentsByIds,
+                        pullOldDocumentsByIds,
+                        pullOwnersByIds,
+                    });
+                }
                 updateOps.$pull = {};
                 if (pullDocumentsByIds.length) {
                     updateOps.$pull.documents = { _id: { $in: pullDocumentsByIds } };

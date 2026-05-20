@@ -1,6 +1,9 @@
 import mongoose from "mongoose";
 import Company from "../../models/Company.js";
-import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
+import {
+    isReqUserAdmin,
+    scheduleManagementAdminDeletionEmail,
+} from "../../utils/sendAdminDeletionNotificationEmails.js";
 
 const buildCompanyFilter = (id) => ({
     $or: [
@@ -18,29 +21,51 @@ export const deleteDocument = async (req, res) => {
 
         const { id, target } = req.params;
         const filter = buildCompanyFilter(id);
-        let result;
+        const company = await Company.findOne(filter).lean();
+        if (!company) {
+            return res.status(404).json({ message: "Company not found." });
+        }
 
+        let deletedDoc = null;
+        if (mongoose.Types.ObjectId.isValid(target)) {
+            deletedDoc = (company.documents || []).find(
+                (d) => String(d._id) === String(target)
+            );
+        } else {
+            const index = Number.parseInt(target, 10);
+            if (Number.isInteger(index) && index >= 0 && company.documents?.[index]) {
+                deletedDoc = company.documents[index];
+            }
+        }
+
+        if (!deletedDoc) {
+            return res.status(400).json({ message: "Invalid document target." });
+        }
+
+        scheduleManagementAdminDeletionEmail(req, {
+            moduleName: "Company Document",
+            recordId: company.companyId || String(company._id),
+            details: (deletedDoc?.type || "Company document").toString(),
+            deletedPayload: {
+                companyId: company.companyId,
+                companyName: company.name,
+                document: deletedDoc,
+            },
+        });
+
+        let result;
         if (mongoose.Types.ObjectId.isValid(target)) {
             result = await Company.updateOne(filter, {
                 $pull: { documents: { _id: new mongoose.Types.ObjectId(target) } },
             });
         } else {
             const index = Number.parseInt(target, 10);
-            if (!Number.isInteger(index) || index < 0) {
-                return res.status(400).json({ message: "Invalid document target." });
-            }
-
             result = await Company.updateOne(filter, {
                 $unset: { [`documents.${index}`]: 1 },
             });
-
             if (result.matchedCount) {
                 await Company.updateOne(filter, { $pull: { documents: null } });
             }
-        }
-
-        if (!result.matchedCount) {
-            return res.status(404).json({ message: "Company not found." });
         }
 
         return res.status(200).json({ message: "Company document deleted successfully." });

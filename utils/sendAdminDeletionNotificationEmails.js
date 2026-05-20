@@ -5,6 +5,17 @@ import EmployeeBasic from '../models/EmployeeBasic.js';
 import Company from '../models/Company.js';
 import { sendAssignedEmployeeActionEmail } from './sendAssignedEmployeeActionEmail.js';
 import { isUserAdministrator } from '../services/permissionService.js';
+import { buildAdminDeletionEmailAttachments } from './buildAdminDeletionEmailAttachments.js';
+import { createAdminDeletionArchiveFromDeletion } from '../services/adminDeletionArchiveService.js';
+
+function getFrontendRestoreBaseUrl() {
+    const base =
+        process.env.FRONTEND_URL ||
+        process.env.CLIENT_URL ||
+        process.env.NEXT_PUBLIC_APP_URL ||
+        'http://localhost:3000';
+    return String(base).replace(/\/$/, '');
+}
 
 export async function isReqUserAdmin(reqUser) {
     if (!reqUser) return false;
@@ -27,16 +38,17 @@ function getTransport() {
     });
 }
 
-async function sendHtmlEmail(to, subject, html, fromName = "VeRP System") {
+async function sendHtmlEmail(to, subject, html, fromName = "VeRP System", attachments = []) {
     if (!to) return;
     const transporter = getTransport();
     if (!transporter) return;
     const emailUser = process.env.EMAIL_USER || process.env.VERP_EMAIL || process.env.GMAIL_USER;
     await transporter.sendMail({
-        fromName,
+        from: `"${fromName}" <${emailUser}>`,
         to,
         subject,
-        html
+        html,
+        ...(Array.isArray(attachments) && attachments.length ? { attachments } : {}),
     });
 }
 
@@ -185,6 +197,13 @@ export async function notifyAdminDeletedWholeAsset(req, asset) {
         </div>`;
     await emailAssetControllerHtml(subject, html, performedBy);
 
+    scheduleManagementAdminDeletionEmail(req, {
+        moduleName: 'Asset',
+        recordId: assetId,
+        details: `Asset ${assetName} permanently deleted`,
+        deletedPayload: asset,
+    });
+
     await notifyAssignedPartyForAdminDeletion(req, asset, {
         actionLabel: 'Asset deleted',
         details: `The asset ${assetId} (${assetName}) was permanently deleted by an administrator.`
@@ -197,6 +216,20 @@ export async function notifyAdminRemovedAccessoriesFromAssignedAsset(req, asset,
         removedAccessories.map((r) => r.name || r.accessoryId).filter(Boolean).join(', ') || '—';
     const assetId = asset.assetId || '—';
     const assetName = asset.name || '—';
+
+    if (req && removedAccessories?.length) {
+        scheduleManagementAdminDeletionEmail(req, {
+            moduleName: 'Asset Accessories',
+            recordId: assetId,
+            details: `Removed from ${assetName}: ${names}`,
+            deletedPayload: {
+                assetId: asset.assetId,
+                mongoAssetId: asset._id,
+                assetName,
+                removedAccessories,
+            },
+        });
+    }
 
     const subject = `Accessories removed (admin): ${assetId}`;
     const html = `
@@ -222,28 +255,68 @@ export async function notifyAdminRemovedAccessoriesFromAssignedAsset(req, asset,
     });
 }
 
-export async function notifyAdminDeletedBusinessRecordToManagement(req, { moduleName, recordId, details }) {
+export async function notifyAdminDeletedBusinessRecordToManagement(
+    req,
+    { moduleName, recordId, details, deletedPayload, archiveId } = {}
+) {
     try {
         const to = await getManagementNotificationEmail();
         if (!to) return false;
         const performedBy = performedByLine(req);
         const subject = `${moduleName} deleted (admin): ${recordId || 'record'}`;
+        const restoreLink = archiveId
+            ? `${getFrontendRestoreBaseUrl()}/Settings/DeletedRecords?item=${archiveId}`
+            : `${getFrontendRestoreBaseUrl()}/Settings/DeletedRecords`;
+        const restoreBlock = `
+            <div style="margin-top:20px;padding:16px;background:#f8fafc;border-radius:8px;border:1px solid #e2e8f0">
+                <p style="margin:0 0 12px;font-size:14px;color:#334155">
+                    This deletion is held in recovery. You may restore the record or permanently remove it from recovery.
+                </p>
+                <a href="${restoreLink}" style="display:inline-block;background:#0ea5e9;color:#fff;text-decoration:none;padding:10px 18px;border-radius:6px;font-weight:600;font-size:14px">
+                    Open Deleted Records
+                </a>
+            </div>`;
         const html = `
             <div style="font-family:Arial,sans-serif;color:#334155;max-width:600px;margin:0 auto;border:1px solid #e2e8f0;border-radius:10px;overflow:hidden">
                 <div style="background:#b91c1c;color:#fff;padding:16px 20px">
                     <h3 style="margin:0">${moduleName} deleted</h3>
                 </div>
                 <div style="padding:20px">
-                    <p>An administrator deleted a ${moduleName} record.</p>
+                    <p>An administrator deleted a ${moduleName} record from the ERP (not moved to Old Documents). It remains in recovery until restored or permanently removed.</p>
                     <p><strong>Record ID:</strong> ${recordId || '—'}</p>
                     <p><strong>Details:</strong> ${details || '—'}</p>
                     <p><strong>Performed by:</strong> ${performedBy}</p>
+                    <p id="mgmt-del-attach-note" style="font-size:12px;color:#64748b;"></p>
+                    ${restoreBlock}
                 </div>
             </div>`;
-        await sendHtmlEmail(to, subject, html, performedBy);
+        const attachments =
+            deletedPayload != null ? await buildAdminDeletionEmailAttachments(deletedPayload) : [];
+        const attachLine =
+            attachments.length > 0
+                ? `<p style="font-size:12px;color:#64748b;">Uploaded file(s) from this record are attached (${attachments.length}).</p>`
+                : '';
+        const htmlFinal = html.replace(
+            '<p id="mgmt-del-attach-note" style="font-size:12px;color:#64748b;"></p>',
+            attachLine
+        );
+        await sendHtmlEmail(to, subject, htmlFinal, performedBy, attachments);
         return true;
     } catch (e) {
         console.error('[notifyAdminDeletedBusinessRecordToManagement]', e?.message || e);
         return false;
     }
+}
+
+export function scheduleManagementAdminDeletionEmail(req, opts) {
+    void (async () => {
+        let archiveId = null;
+        try {
+            const archive = await createAdminDeletionArchiveFromDeletion(req, opts);
+            archiveId = archive?._id?.toString?.() || String(archive?._id || '');
+        } catch (e) {
+            console.error('[scheduleManagementAdminDeletionEmail] archive:', e?.message || e);
+        }
+        await notifyAdminDeletedBusinessRecordToManagement(req, { ...opts, archiveId });
+    })().catch((e) => console.error('[scheduleManagementAdminDeletionEmail]', e?.message || e));
 }

@@ -79,7 +79,7 @@ export const sendAssetResponseEmail = async ({ asset, actor, recipient, action, 
                     </div>
                     ` : ''}
 
-                    ${att.length ? `<p style="font-size: 13px; color: #64748b; margin: 0 0 12px;">A PDF attachment lists the asset(s) included in this update.</p>` : ''}
+                    ${att.length ? `<p style="font-size: 13px; color: #64748b; margin: 0 0 12px;">The attached PDF is the signed handover summary (assigner and acceptor signatures when applicable).</p>` : ''}
 
                     <div style="background-color: #f8fafc; padding: 25px; border-radius: 8px; margin: 25px 0; border: 1px solid #e2e8f0;">
                         <table style="width: 100%; border-collapse: collapse;">
@@ -112,7 +112,7 @@ export const sendAssetResponseEmail = async ({ asset, actor, recipient, action, 
         `;
 
         await transporter.sendMail({
-            fromName: actorName,
+            from: `"${String(actorName || 'VeRP').replace(/"/g, "'")}" <${emailUser}>`,
             to: recipientEmail,
             subject,
             html,

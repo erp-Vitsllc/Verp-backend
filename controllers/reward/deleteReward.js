@@ -1,7 +1,7 @@
 import Reward from "../../models/Reward.js";
 import {
     isReqUserAdmin,
-    notifyAdminDeletedBusinessRecordToManagement
+    scheduleManagementAdminDeletionEmail,
 } from "../../utils/sendAdminDeletionNotificationEmails.js";
 
 export const deleteReward = async (req, res) => {
@@ -18,12 +18,14 @@ export const deleteReward = async (req, res) => {
             return res.status(404).json({ message: "Reward not found" });
         }
 
-        await Reward.findByIdAndDelete(id);
-        await notifyAdminDeletedBusinessRecordToManagement(req, {
+        const rewardSnapshot = reward.toObject ? reward.toObject() : reward;
+        scheduleManagementAdminDeletionEmail(req, {
             moduleName: 'Reward',
             recordId: reward.rewardId || reward._id?.toString?.(),
-            details: reward.title || reward.description || 'Reward record'
+            details: reward.title || reward.description || 'Reward record',
+            deletedPayload: rewardSnapshot,
         });
+        await Reward.findByIdAndDelete(id);
 
         return res.status(200).json({
             message: "Reward deleted successfully"

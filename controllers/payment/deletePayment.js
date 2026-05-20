@@ -2,7 +2,7 @@ import Payment from "../../models/Payment.js";
 import {
     isReqUserAdmin,
     getManagementNotificationEmail,
-    notifyAdminDeletedBusinessRecordToManagement
+    scheduleManagementAdminDeletionEmail,
 } from "../../utils/sendAdminDeletionNotificationEmails.js";
 
 export const deletePayment = async (req, res) => {
@@ -34,12 +34,14 @@ export const deletePayment = async (req, res) => {
             });
         }
 
-        await Payment.findByIdAndDelete(id);
-        await notifyAdminDeletedBusinessRecordToManagement(req, {
+        const paymentSnapshot = payment.toObject ? payment.toObject() : payment;
+        scheduleManagementAdminDeletionEmail(req, {
             moduleName: 'Payment',
             recordId: payment.paymentId || payment._id?.toString?.(),
-            details: payment.description || payment.referenceId || 'Payment record'
+            details: payment.description || payment.referenceId || 'Payment record',
+            deletedPayload: paymentSnapshot,
         });
+        await Payment.findByIdAndDelete(id);
 
         res.status(200).json({
             success: true,
@@ -49,7 +51,7 @@ export const deletePayment = async (req, res) => {
         console.error('Error deleting payment:', error);
         res.status(500).json({
             success: false,
-            message: error.message || 'Failed to delete payment'
+            message: 'Failed to delete payment record'
         });
     }
 };

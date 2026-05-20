@@ -349,6 +349,15 @@ const assetItemSchema = new mongoose.Schema({
         type: Number,
         default: 0,
     },
+    /** Sold disposition: AED amounts (not registration card expiry). */
+    registrationExpense: {
+        type: Number,
+        default: null,
+    },
+    otherExpense: {
+        type: Number,
+        default: null,
+    },
     totalLossValue: {
         type: Number,
         default: null,
@@ -395,11 +404,11 @@ const assetItemSchema = new mongoose.Schema({
             at: { type: Date, default: Date.now }
         }]
     },
-    /** Fleet vehicle: submit completed profile to Asset Controller (email + dashboard task). */
+    /** Fleet vehicle: submit completed profile to HR (email + dashboard task). */
     vehicleProfileActivationStatus: {
         type: String,
-        enum: ['none', 'submitted', 'active', 'rejected'],
-        default: 'none',
+        enum: ['none', 'inactive', 'submitted', 'active', 'rejected'],
+        default: 'inactive',
     },
     vehicleProfileActivationSubmittedAt: { type: Date, default: null },
     vehicleProfileActivationSubmittedBy: {
@@ -418,6 +427,38 @@ const assetItemSchema = new mongoose.Schema({
         unapprovedSections: { type: [String], default: [] },
         comment: { type: String, default: '', trim: true },
         rowNotesBySectionId: { type: mongoose.Schema.Types.Mixed, default: undefined },
+    },
+    /** Sold / Total loss: requester → HR → Accounts + Management (parallel) → company email → disposition applied. */
+    vehicleDispositionWorkflow: {
+        targetStatus: { type: String, enum: ['sold', 'total loss'], default: null },
+        stage: {
+            type: String,
+            enum: ['pending_hr', 'pending_finance', 'complete', 'rejected'],
+            default: null,
+        },
+        requestedAt: { type: Date, default: null },
+        requestedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'EmployeeBasic', default: null },
+        requestedByName: { type: String, default: '' },
+        note: { type: String, default: '', trim: true },
+        soldValue: { type: Number, default: null },
+        totalLossValue: { type: Number, default: null },
+        currentLoanAmount: { type: Number, default: null },
+        balanceInHand: { type: Number, default: null },
+        registrationExpiryDate: { type: Date, default: null },
+        registrationExpense: { type: Number, default: null },
+        otherExpense: { type: Number, default: null },
+        accidentReportAttachment: { type: String, default: null },
+        accountsCompletedAt: { type: Date, default: null },
+        accountsCompletedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'EmployeeBasic', default: null },
+        managementCompletedAt: { type: Date, default: null },
+        managementCompletedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'EmployeeBasic', default: null },
+        history: [{
+            stage: { type: String },
+            action: { type: String },
+            note: { type: String, default: '' },
+            byName: { type: String, default: '' },
+            at: { type: Date, default: Date.now },
+        }],
     },
     documents: [{
         type: { type: String },

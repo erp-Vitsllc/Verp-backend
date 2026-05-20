@@ -9,6 +9,11 @@ import {
     holdVehicleProfileActivation,
     rejectVehicleProfileActivation,
 } from '../controllers/vehicleProfileActivationController.js';
+import {
+    submitVehicleDispositionRequest,
+    respondVehicleDispositionHr,
+    submitVehicleDispositionFinance,
+} from '../controllers/vehicleDispositionWorkflowController.js';
 import { protect } from '../middleware/authMiddleware.js';
 import {
     isUserInFlowchart,
@@ -57,6 +62,16 @@ const isDesignatedAssetController = async (user) => {
     if (!user) return false;
     if (await isUserInFlowchart(user, 'assetcontroller')) return true;
     const hod = await getDepartmentHOD('assetcontroller');
+    if (!hod) return false;
+    if (hod._id && user.employeeObjectId && hod._id.toString() === user.employeeObjectId.toString()) return true;
+    if (hod.employeeId && user.employeeId && normEmp(hod.employeeId) === normEmp(user.employeeId)) return true;
+    return false;
+};
+
+const isDesignatedHr = async (user) => {
+    if (!user) return false;
+    if (await isUserInFlowchart(user, 'hr')) return true;
+    const hod = await getDepartmentHOD('hr');
     if (!hod) return false;
     if (hod._id && user.employeeObjectId && hod._id.toString() === user.employeeObjectId.toString()) return true;
     if (hod.employeeId && user.employeeId && normEmp(hod.employeeId) === normEmp(user.employeeId)) return true;
@@ -157,6 +172,7 @@ const requireAssetCreationApprover = async (req, res, next) => {
     try {
         const isAdminUser = await isAdminForAssetRoutes(req.user);
         const isAssetControllerUser = await isDesignatedAssetController(req.user);
+        const isHrUser = await isDesignatedHr(req.user);
 
         if (isAdminUser || isAssetControllerUser) return next();
 
@@ -166,21 +182,31 @@ const requireAssetCreationApprover = async (req, res, next) => {
         }
 
         const AssetItem = (await import('../models/AssetItem.js')).default;
-        const asset = await AssetItem.findById(id).select('status actionRequiredBy createdBy').lean();
+        const asset = await AssetItem.findById(id).select('status actionRequiredBy createdBy plateNumber').lean();
         if (!asset) return res.status(404).json({ message: 'Asset not found' });
 
-        // If there is no actionRequiredBy, only asset controller/admin should approve drafts.
-        if (!asset.actionRequiredBy) return res.status(403).json({ message: 'Access denied' });
+        const awaitingCreation =
+            asset.status === 'Submitted for Approval' ||
+            asset.status === 'Pending' ||
+            (asset.status === 'Draft' && asset.actionRequiredBy);
+        if (!awaitingCreation) {
+            return res.status(409).json({ message: 'This approval request was already processed.' });
+        }
+
+        const fleetVehicle = !!(asset.plateNumber && String(asset.plateNumber).trim());
+        if (fleetVehicle && isHrUser) return next();
+
+        if (!asset.actionRequiredBy) {
+            return res.status(403).json({ message: 'Access denied' });
+        }
 
         const currentEmpObjId = req.user?.employeeObjectId?.toString?.() || null;
         const currentEmpId = req.user?.employeeId || null;
 
-        // Match by EmployeeBasic _id (actionRequiredBy stores EmployeeBasic._id)
         if (currentEmpObjId && asset.actionRequiredBy.toString() === currentEmpObjId) {
             return next();
         }
 
-        // Match by employeeId string (controller uses this fallback too)
         if (currentEmpId) {
             const approverEmp = await EmployeeBasic.findById(asset.actionRequiredBy)
                 .select('employeeId')
@@ -599,6 +625,9 @@ router.post('/:id/submit-vehicle-profile-activation', protect, submitVehicleProf
 router.post('/:id/approve-vehicle-profile-activation', protect, approveVehicleProfileActivation);
 router.post('/:id/hold-vehicle-profile-activation', protect, holdVehicleProfileActivation);
 router.post('/:id/reject-vehicle-profile-activation', protect, rejectVehicleProfileActivation);
+router.post('/:id/submit-vehicle-disposition-request', protect, submitVehicleDispositionRequest);
+router.post('/:id/respond-vehicle-disposition-hr', protect, respondVehicleDispositionHr);
+router.post('/:id/submit-vehicle-disposition-finance', protect, submitVehicleDispositionFinance);
 router.put('/:id/return', protect, requireReturnAssetAccess, returnAssetItem);
 router.put('/:id/on-leave-action', protect, requireParkingAssetAccess, (req, res, next) => {
     console.log(`[Route] PUT /${req.params.id}/on-leave-action hit`);

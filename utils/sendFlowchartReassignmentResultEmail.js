@@ -4,6 +4,7 @@ import User from "../models/User.js";
 import { generatePdf } from "./generatePdf.js";
 import { buildResponsibilityEmailData } from "./flowchartResponsibilityEmailData.js";
 import { buildAssetControllerHandoverOutcomePdfAttachment } from "./generateBulkAssetInventoryPdf.js";
+import { resolveEmployeeEmail } from "./resolveEmployeeEmail.js";
 
 /**
  * Notify the previous role holder when a reassignment request is accepted or rejected.
@@ -51,8 +52,8 @@ export async function sendFlowchartReassignmentResultEmail(
     }
 
     const recipientEmail =
-        (oldEmp?.companyEmail || oldEmp?.email || oldEmp?.workEmail || oldEmp?.personalEmail || "").trim() ||
-        (oldSnapshot.email || oldSnapshot.companyEmail || "").trim() ||
+        resolveEmployeeEmail(oldEmp || {}).email ||
+        (oldSnapshot.companyEmail || "").trim() ||
         null;
 
     if (!recipientEmail) {

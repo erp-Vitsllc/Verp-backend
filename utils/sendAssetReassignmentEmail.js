@@ -1,5 +1,5 @@
 import nodemailer from "nodemailer";
-import { resolveEmployeeEmail } from "./resolveEmployeeEmail.js";
+import { resolveEmployeeEmailWithReporteeLoaded } from "./resolveEmployeeEmail.js";
 import { normalizePdfAttachments } from "./normalizeEmailAttachments.js";
 
 /**
@@ -23,7 +23,7 @@ export const sendAssetReassignmentEmail = async ({
             recipientEmail = previousAssignee?.email || previousAssignee?.companyEmail;
             recipientName = previousAssignee?.name || 'Company';
         } else {
-            const resolved = resolveEmployeeEmail(previousAssignee);
+            const resolved = await resolveEmployeeEmailWithReporteeLoaded(previousAssignee);
             recipientEmail = resolved.email;
             recipientName = `${previousAssignee?.firstName || ''} ${previousAssignee?.lastName || ''}`.trim() || 'Employee';
         }

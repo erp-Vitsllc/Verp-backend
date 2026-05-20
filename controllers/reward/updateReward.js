@@ -8,7 +8,7 @@ import { getDepartmentHOD } from "../../utils/getDepartmentHOD.js";
 import { sendHODAuthorizationEmail } from "../../utils/sendHODAuthorizationEmail.js";
 import { generatePdf } from "../../utils/generatePdf.js";
 import { uploadDocumentToS3 } from "../../utils/s3Upload.js";
-import { resolveEmployeeEmail, getFallbackEmailNote } from "../../utils/resolveEmployeeEmail.js";
+import { resolveEmployeeEmail, getFallbackEmailNote, addEmployeeEmailToSet } from "../../utils/resolveEmployeeEmail.js";
 
 export const updateReward = async (req, res) => {
     try {
@@ -696,35 +696,27 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
 
                         // 2. Manager Email (His Reportee/Supervisor)
                         if (employeeForEmail.primaryReportee) {
-                            const managerEmail = employeeForEmail.primaryReportee.companyEmail || employeeForEmail.primaryReportee.email;
+                            const { email: managerEmail } = resolveEmployeeEmail(employeeForEmail.primaryReportee);
                             if (managerEmail && !toEmails.has(managerEmail)) ccEmails.add(managerEmail);
                         }
 
-                        // 3. Creator Email
-                        if (creator) {
-                            const creatorEmail = creator.companyEmail || creator.email;
+                        if (creator?.companyEmail) {
+                            const creatorEmail = String(creator.companyEmail).trim();
                             if (creatorEmail) ccEmails.add(creatorEmail);
                         }
 
-                        // 4. Fetch HR, Accounts, Management
                         try {
                             const { getDepartmentHOD } = await import("../../utils/getDepartmentHOD.js");
                             const { getManagementHOD } = await import("../../utils/getManagementHOD.js");
 
                             const hrHOD = await getDepartmentHOD('hr', reward.employeeId);
-                            if (hrHOD && (hrHOD.companyEmail || hrHOD.personalEmail || hrHOD.email)) {
-                                ccEmails.add(hrHOD.companyEmail || hrHOD.personalEmail || hrHOD.email);
-                            }
+                            addEmployeeEmailToSet(ccEmails, hrHOD);
 
                             const accountsHOD = await getDepartmentHOD('finance', reward.employeeId);
-                            if (accountsHOD && (accountsHOD.companyEmail || accountsHOD.personalEmail || accountsHOD.email)) {
-                                ccEmails.add(accountsHOD.companyEmail || accountsHOD.personalEmail || accountsHOD.email);
-                            }
+                            addEmployeeEmailToSet(ccEmails, accountsHOD);
 
                             const managementHOD = await getManagementHOD(reward.employeeId);
-                            if (managementHOD && (managementHOD.companyEmail || managementHOD.personalEmail || managementHOD.email)) {
-                                ccEmails.add(managementHOD.companyEmail || managementHOD.personalEmail || managementHOD.email);
-                            }
+                            addEmployeeEmailToSet(ccEmails, managementHOD);
                         } catch (e) {
                             console.warn("[UpdateReward] Could not fetch HOD emails for CC", e.message);
                         }

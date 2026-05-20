@@ -1,6 +1,9 @@
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { resolveEmployeeId } from "../../services/employeeService.js";
-import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
+import {
+    isReqUserAdmin,
+    scheduleManagementAdminDeletionEmail,
+} from "../../utils/sendAdminDeletionNotificationEmails.js";
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
 
 export const deleteWorkDetailsCard = async (req, res) => {
@@ -15,6 +18,18 @@ export const deleteWorkDetailsCard = async (req, res) => {
         if (!employee) {
             return res.status(404).json({ message: "Employee not found." });
         }
+
+        const workSnapshot = await EmployeeBasic.findOne({ employeeId: employee.employeeId })
+            .select(
+                "employeeId reportingAuthority primaryReportee secondaryReportee overtime department designation role company companyEmail contractJoiningDate dateOfJoining probationPeriod"
+            )
+            .lean();
+        scheduleManagementAdminDeletionEmail(req, {
+            moduleName: "Employee Work Details",
+            recordId: employee.employeeId,
+            details: `Work details for ${employee.employeeId}`,
+            deletedPayload: workSnapshot,
+        });
 
         await EmployeeBasic.updateOne(
             { employeeId: employee.employeeId },

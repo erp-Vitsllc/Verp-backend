@@ -1,6 +1,8 @@
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import User from '../models/User.js';
-import { isUserActiveInFlowchart } from './getDepartmentHOD.js';
+import AssetItem from '../models/AssetItem.js';
+import DashboardAction from '../models/DashboardAction.js';
+import { getDepartmentHOD, isUserActiveInFlowchart } from './getDepartmentHOD.js';
 import { isUserAdministrator } from '../services/permissionService.js';
 
 const normEmpId = (s) => (s || '').toString().toLowerCase().replace(/\s+/g, '');
@@ -124,12 +126,186 @@ export async function userCanDirectAddAssetToPool(req, assetControllerEmp = null
     return isAssetController;
 }
 
+export function isFleetVehicleAssetFields({ plateNumber, typeName } = {}) {
+    const plate = String(plateNumber || '').trim();
+    if (plate) return true;
+    const tn = String(typeName || '').toLowerCase();
+    return (
+        tn.includes('vehicle') ||
+        tn.includes('car') ||
+        tn.includes('fleet') ||
+        tn.includes('truck')
+    );
+}
+
+/** Fleet vehicles: creation approval goes to HR; other assets use Asset Controller. */
+export async function resolveAssetCreationApproverEmployee({ plateNumber, typeName } = {}) {
+    const fleet = isFleetVehicleAssetFields({ plateNumber, typeName });
+    if (fleet) {
+        const hrRaw = await getDepartmentHOD('hr');
+        return hrRaw ? resolveAssetControllerEmployee(hrRaw) : null;
+    }
+    const acRaw = await getDepartmentHOD('assetcontroller');
+    return acRaw ? resolveAssetControllerEmployee(acRaw) : null;
+}
+
+export function creationApproverRoleLabel({ plateNumber, typeName } = {}) {
+    return isFleetVehicleAssetFields({ plateNumber, typeName }) ? 'HR' : 'Asset Controller';
+}
+
+/**
+ * Resolve the current role-based creation approver for an asset (HR for fleet, AC for tools).
+ * Returns null if no approver is configured. The result is fresh from the flowchart, so the
+ * UI banner / inbox can show the *current* approver even when stored references are stale.
+ */
+export async function resolveCurrentCreationApproverForAsset(asset) {
+    if (!asset) return null;
+    return resolveAssetCreationApproverEmployee({
+        plateNumber: asset.plateNumber,
+        typeName: asset?.typeId?.name || asset?.type || '',
+    });
+}
+
+/**
+ * For an asset awaiting creation approval, re-point `actionRequiredBy` and any pending
+ * Asset Approval DashboardAction at the *current* role holder when the stored approver is stale.
+ *
+ * Returns the canonical approver Employee (current role holder) or null when no approver is
+ * configured. Safe no-op when the asset is not awaiting creation approval.
+ */
+export async function syncStaleAssetCreationApprover(asset) {
+    if (!asset || !asset._id) return null;
+
+    const awaiting =
+        asset.status === 'Submitted for Approval' ||
+        asset.status === 'Pending' ||
+        (asset.status === 'Draft' && asset.actionRequiredBy);
+    if (!awaiting) return null;
+
+    const currentApprover = await resolveCurrentCreationApproverForAsset(asset);
+    if (!currentApprover?._id) return null;
+
+    const storedRef = asset.actionRequiredBy;
+    const storedId = storedRef?._id?.toString?.() || storedRef?.toString?.() || null;
+    const currentId = currentApprover._id.toString();
+
+    if (storedId === currentId) return currentApprover;
+
+    try {
+        await AssetItem.updateOne(
+            { _id: asset._id },
+            { $set: { actionRequiredBy: currentApprover._id } }
+        );
+        asset.actionRequiredBy = currentApprover;
+    } catch (err) {
+        console.error('[syncStaleAssetCreationApprover] AssetItem update failed:', err?.message || err);
+    }
+
+    try {
+        await DashboardAction.updateMany(
+            { requestId: asset._id, requestType: 'Asset Approval', status: 'Pending' },
+            {
+                $set: {
+                    assignedTo: currentApprover._id,
+                    assignedToEmpId: currentApprover.employeeId,
+                },
+            }
+        );
+    } catch (err) {
+        console.error('[syncStaleAssetCreationApprover] DashboardAction update failed:', err?.message || err);
+    }
+
+    return currentApprover;
+}
+
+/**
+ * Bulk re-route every pending Asset Approval to the current role holder for that asset
+ * (HR for fleet vehicles, Asset Controller for everything else).
+ *
+ * Uses two `updateMany` writes (one per role) so it is O(1) round-trips regardless of how many
+ * pending requests exist. Run from boot + on flowchart approve — NOT on read paths.
+ */
+export async function rerouteAllPendingAssetCreationApprovals({ category } = {}) {
+    const wantsHr = !category || category === 'hr';
+    const wantsAc = !category || category === 'assetcontroller';
+
+    const [hrHod, acHod] = await Promise.all([
+        wantsHr ? getDepartmentHOD('hr').then((r) => (r ? resolveAssetControllerEmployee(r) : null)) : null,
+        wantsAc ? getDepartmentHOD('assetcontroller').then((r) => (r ? resolveAssetControllerEmployee(r) : null)) : null,
+    ]);
+
+    const pendingActions = await DashboardAction.find({
+        requestType: 'Asset Approval',
+        status: 'Pending',
+    })
+        .select('_id requestId')
+        .lean();
+
+    if (!pendingActions.length) return { fleetUpdated: 0, toolsUpdated: 0 };
+
+    const requestIds = pendingActions.map((da) => da.requestId).filter(Boolean);
+    const assets = await AssetItem.find({ _id: { $in: requestIds } })
+        .select('_id plateNumber typeId')
+        .populate('typeId', 'name')
+        .lean();
+
+    const fleetAssetIds = [];
+    const toolsAssetIds = [];
+    for (const asset of assets) {
+        const fleet = isFleetVehicleAssetFields({
+            plateNumber: asset.plateNumber,
+            typeName: asset?.typeId?.name || '',
+        });
+        if (fleet) fleetAssetIds.push(asset._id);
+        else toolsAssetIds.push(asset._id);
+    }
+
+    const tasks = [];
+    if (wantsHr && hrHod?._id && fleetAssetIds.length) {
+        tasks.push(
+            AssetItem.updateMany(
+                { _id: { $in: fleetAssetIds } },
+                { $set: { actionRequiredBy: hrHod._id } }
+            ),
+            DashboardAction.updateMany(
+                { requestType: 'Asset Approval', status: 'Pending', requestId: { $in: fleetAssetIds } },
+                { $set: { assignedTo: hrHod._id, assignedToEmpId: hrHod.employeeId } }
+            )
+        );
+    }
+    if (wantsAc && acHod?._id && toolsAssetIds.length) {
+        tasks.push(
+            AssetItem.updateMany(
+                { _id: { $in: toolsAssetIds } },
+                { $set: { actionRequiredBy: acHod._id } }
+            ),
+            DashboardAction.updateMany(
+                { requestType: 'Asset Approval', status: 'Pending', requestId: { $in: toolsAssetIds } },
+                { $set: { assignedTo: acHod._id, assignedToEmpId: acHod.employeeId } }
+            )
+        );
+    }
+
+    if (!tasks.length) return { fleetUpdated: 0, toolsUpdated: 0 };
+
+    try {
+        await Promise.all(tasks);
+    } catch (err) {
+        console.error('[rerouteAllPendingAssetCreationApprovals] bulk update failed:', err?.message || err);
+    }
+
+    return {
+        fleetUpdated: wantsHr && hrHod?._id ? fleetAssetIds.length : 0,
+        toolsUpdated: wantsAc && acHod?._id ? toolsAssetIds.length : 0,
+    };
+}
+
 /**
  * New asset creation: regular users → Draft or Submitted for Approval only.
  * Asset Controller / Admin → Unassigned pool on createUnassigned (or omit intent), optional draft / submit paths.
  */
-export async function resolveNewAssetCreationStatus(req, { creationIntent, assetController }) {
-    const canDirect = await userCanDirectAddAssetToPool(req, assetController);
+export async function resolveNewAssetCreationStatus(req, { creationIntent, approverEmp, approverLabel = 'Asset Controller' }) {
+    const canDirect = await userCanDirectAddAssetToPool(req, approverEmp);
     const intent = String(creationIntent ?? '').trim();
 
     if (!canDirect) {
@@ -139,9 +315,9 @@ export async function resolveNewAssetCreationStatus(req, { creationIntent, asset
                 status: 403
             };
         }
-        if (!assetController?._id) {
+        if (!approverEmp?._id) {
             return {
-                error: 'Asset controller is not assigned in the ERP flowchart.',
+                error: `${approverLabel} is not assigned in the ERP flowchart.`,
                 status: 403
             };
         }
@@ -150,7 +326,7 @@ export async function resolveNewAssetCreationStatus(req, { creationIntent, asset
         }
         return {
             initialStatus: 'Submitted for Approval',
-            actionRequiredBy: assetController._id,
+            actionRequiredBy: approverEmp._id,
             canDirectAddAsset: false
         };
     }
@@ -159,15 +335,15 @@ export async function resolveNewAssetCreationStatus(req, { creationIntent, asset
         return { initialStatus: 'Draft', actionRequiredBy: null, canDirectAddAsset: true };
     }
     if (intent === 'submitForApproval') {
-        if (!assetController?._id) {
+        if (!approverEmp?._id) {
             return {
-                error: 'Asset controller is not assigned in the ERP flowchart.',
+                error: `${approverLabel} is not assigned in the ERP flowchart.`,
                 status: 403
             };
         }
         return {
             initialStatus: 'Submitted for Approval',
-            actionRequiredBy: assetController._id,
+            actionRequiredBy: approverEmp._id,
             canDirectAddAsset: true
         };
     }

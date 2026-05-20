@@ -49,7 +49,12 @@ import {
 import { addDocument } from "../controllers/employee/addDocument.js";
 import { updateDocument } from "../controllers/employee/updateDocument.js";
 import { protect } from "../middleware/authMiddleware.js";
-import { checkPermission, checkEmployeeProfileActivationAction } from "../middleware/permissionMiddleware.js";
+import {
+    checkPermission,
+    checkEmployeeProfileActivationAction,
+    checkEmployeeManualDocumentEdit,
+    checkEmployeeOldDocumentDelete,
+} from "../middleware/permissionMiddleware.js";
 import { deleteOldDocument } from "../controllers/employee/deleteOldDocument.js";
 import { getEmployeeDocument } from "../controllers/employee/getEmployeeDocument.js";
 import { getReporteeOptions } from "../controllers/employee/getReporteeOptions.js";
@@ -206,11 +211,11 @@ router.post("/:id/upload-signature", checkPermission('hrm_employees_view_work', 
 router.delete("/:id/signature", checkPermission('hrm_employees_view_work', 'delete'), deleteSignatureCard);
 
 // Upload document to Cloudinary - requires edit permission
-router.post("/upload-document/:id", checkPermission('hrm_employees_view', 'edit'), uploadDocument);
-router.post("/:id/document", checkPermission('hrm_employees_view', 'edit'), addDocument);
-router.patch("/:id/document/:index", checkPermission('hrm_employees_view', 'edit'), updateDocument);
-router.delete("/:id/document/:index", checkPermission('hrm_employees_view', 'edit'), deleteDocument);
-router.delete("/:id/old-document/:target", checkPermission('hrm_employees_view', 'delete'), deleteOldDocument);
+router.post("/upload-document/:id", checkEmployeeManualDocumentEdit(), uploadDocument);
+router.post("/:id/document", checkEmployeeManualDocumentEdit(), addDocument);
+router.patch("/:id/document/:index", checkEmployeeManualDocumentEdit(), updateDocument);
+router.delete("/:id/document/:index", checkEmployeeManualDocumentEdit(), deleteDocument);
+router.delete("/:id/old-document/:target", checkEmployeeOldDocumentDelete(), deleteOldDocument);
 router.post("/:id/document-not-renew-requests", submitEmployeeDocumentNotRenewRequest);
 router.post("/:id/document-not-renew-requests/:requestId/respond", respondEmployeeDocumentNotRenewRequest);
 

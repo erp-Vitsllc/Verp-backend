@@ -2,6 +2,7 @@ import nodemailer from 'nodemailer';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import User from '../models/User.js';
 import { getDepartmentHOD } from './getDepartmentHOD.js';
+import { resolveEmployeeEmail } from './resolveEmployeeEmail.js';
 
 /**
  * Sends fine approval notification emails to the assigned approver (usually HR).
@@ -83,7 +84,7 @@ export const sendFineApprovalEmail = async (fine, assignedEmployees) => {
             if (user) {
                 const emp = await EmployeeBasic.findOne({ employeeId: user.employeeId }).select('companyEmail email firstName lastName').lean();
                 if (emp) {
-                    targetEmail = emp.companyEmail || emp.email;
+                    targetEmail = resolveEmployeeEmail(emp).email;
                     approverName = `${emp.firstName} ${emp.lastName}`;
                 }
             }

@@ -41,16 +41,21 @@ export const sendAssetCreationApprovalEmail = async ({ asset, recipient, creator
 
         // Redirection button: for bulk creation, deep-link with selected IDs.
         const bulkIds = Array.isArray(bulkAssetIds) ? bulkAssetIds.filter(Boolean).map(String) : [];
+        const plate = String(asset?.plateNumber || '').trim();
+        const isFleetVehicle = !!plate;
         const buttonUrl = isBulk && bulkIds.length > 0
             ? `${frontendUrl}/HRM/Asset/details/${assetId}?bulkCreation=1&bulkAssetIds=${encodeURIComponent(bulkIds.join(','))}`
-            : `${frontendUrl}/HRM/Asset/details/${assetId}`;
+            : isFleetVehicle
+                ? `${frontendUrl}/HRM/Asset/Vehicle/details/${assetId}`
+                : `${frontendUrl}/HRM/Asset/details/${assetId}`;
 
-        const recipientName = recipient.firstName || "Asset Controller";
+        const recipientName = recipient.firstName || (isFleetVehicle ? 'HR' : 'Asset Controller');
+        const approvalTitle = isFleetVehicle ? 'Vehicle Creation Approval' : 'Asset Creation Approval';
 
         const html = `
             <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; color: #1e293b; line-height: 1.6; max-width: 600px; margin: 0 auto; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden; background-color: #ffffff;">
                 <div style="background-color: #f59e0b; color: white; padding: 30px; text-align: center;">
-                    <h1 style="margin: 0; font-size: 24px;">Asset Creation Approval</h1>
+                    <h1 style="margin: 0; font-size: 24px;">${approvalTitle}</h1>
                 </div>
                 <div style="padding: 40px;">
                     <p style="font-size: 16px;">Hello ${recipientName},</p>

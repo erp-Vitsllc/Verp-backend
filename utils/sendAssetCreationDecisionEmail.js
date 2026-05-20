@@ -30,8 +30,13 @@ export const sendAssetCreationDecisionEmail = async ({ asset, recipient, approve
         const { transporter, emailUser } = setup;
         const frontendUrl = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/'/g, '');
         const assetId = asset?._id?.toString() || asset?.id?.toString();
-        const buttonUrl = `${frontendUrl}/HRM/Asset/details/${assetId}`;
-        const approvedByText = approverRole === 'admin' ? 'Administrator' : 'Asset Controller';
+        const plate = String(asset?.plateNumber || '').trim();
+        const isFleetVehicle = !!plate;
+        const buttonUrl = isFleetVehicle
+            ? `${frontendUrl}/HRM/Asset/Vehicle/details/${assetId}`
+            : `${frontendUrl}/HRM/Asset/details/${assetId}`;
+        const approvedByText =
+            approverRole === 'admin' ? 'Administrator' : approverRole === 'hr' ? 'HR' : 'Asset Controller';
         const subject = `Asset Creation Approved: ${asset?.assetId || asset?.name || 'Asset'}`;
 
         const html = `
@@ -52,7 +57,7 @@ export const sendAssetCreationDecisionEmail = async ({ asset, recipient, approve
         `;
 
         await transporter.sendMail({
-            fromName: approvedByText,
+            from: `"VeRP Assets" <${emailUser}>`,
             to: recipientEmail,
             subject,
             html
@@ -81,8 +86,13 @@ export const sendAssetCreationRejectedEmail = async ({
         const { transporter } = setup;
         const frontendUrl = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/'/g, '');
         const assetId = asset?._id?.toString() || asset?.id?.toString();
-        const buttonUrl = `${frontendUrl}/HRM/Asset/details/${assetId}`;
-        const rejectedByText = approverRole === 'admin' ? 'Administrator' : 'Asset Controller';
+        const plate = String(asset?.plateNumber || '').trim();
+        const isFleetVehicle = !!plate;
+        const buttonUrl = isFleetVehicle
+            ? `${frontendUrl}/HRM/Asset/Vehicle/details/${assetId}`
+            : `${frontendUrl}/HRM/Asset/details/${assetId}`;
+        const rejectedByText =
+            approverRole === 'admin' ? 'Administrator' : approverRole === 'hr' ? 'HR' : 'Asset Controller';
         const subject = `Asset Creation Not Approved: ${asset?.assetId || asset?.name || 'Asset'}`;
         const reasonBlock = rejectReason
             ? `<p><strong>Comments:</strong> ${String(rejectReason).replace(/</g, '&lt;')}</p>`
@@ -106,7 +116,7 @@ export const sendAssetCreationRejectedEmail = async ({
         `;
 
         await transporter.sendMail({
-            fromName: rejectedByText,
+            from: `"VeRP Assets" <${emailUser}>`,
             to: recipientEmail,
             subject,
             html

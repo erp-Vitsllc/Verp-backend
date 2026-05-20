@@ -1,7 +1,10 @@
 import EmployeeEducation from "../../models/EmployeeEducation.js";
 import { getCompleteEmployee } from "../../services/employeeService.js";
 
-import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
+import {
+    isReqUserAdmin,
+    scheduleManagementAdminDeletionEmail,
+} from "../../utils/sendAdminDeletionNotificationEmails.js";
 
 export const deleteEducation = async (req, res) => {
     const { id, educationId } = req.params;
@@ -36,6 +39,13 @@ export const deleteEducation = async (req, res) => {
             return res.status(404).json({ message: "Education record not found" });
         }
 
+        const educationSnapshot = education.toObject ? education.toObject() : { ...education };
+        scheduleManagementAdminDeletionEmail(req, {
+            moduleName: "Employee Education",
+            recordId: employeeId,
+            details: educationSnapshot?.qualification || educationSnapshot?.institution || "Education record",
+            deletedPayload: { employeeId, education: educationSnapshot },
+        });
         education.deleteOne();
         await educationRecord.save();
         const completeEmployee = await getCompleteEmployee(employeeId);

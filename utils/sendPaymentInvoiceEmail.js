@@ -1,6 +1,6 @@
 import nodemailer from 'nodemailer';
 import EmployeeBasic from '../models/EmployeeBasic.js';
-import { resolveEmployeeEmail, getFallbackEmailNote } from './resolveEmployeeEmail.js';
+import { resolveEmployeeEmail } from './resolveEmployeeEmail.js';
 
 /**
  * Sends a neat invoice email after a payment is made.
@@ -16,7 +16,7 @@ export const sendPaymentInvoiceEmail = async (payment, relatedEntity = null) => 
         const employeeId = payment.paidBy._id || payment.paidBy;
         const employee = await EmployeeBasic.findById(employeeId)
             .select('employeeId firstName lastName companyEmail personalEmail primaryReportee')
-            .populate('primaryReportee', 'firstName lastName companyEmail personalEmail');
+            .populate('primaryReportee', 'firstName lastName companyEmail workEmail');
 
         if (!employee) {
             console.error(`[PaymentInvoiceEmail] Employee not found: ${employeeId}`);
@@ -34,7 +34,7 @@ export const sendPaymentInvoiceEmail = async (payment, relatedEntity = null) => 
 
         // Primary Reportee (Supervisor/Manager) - only add if not already in toEmails (from fallback)
         if (employee.primaryReportee) {
-            const reporteeEmail = employee.primaryReportee.companyEmail || employee.primaryReportee.personalEmail;
+            const { email: reporteeEmail } = resolveEmployeeEmail(employee.primaryReportee);
             if (reporteeEmail && !toEmails.has(reporteeEmail)) {
                 ccEmails.add(reporteeEmail);
             }
@@ -127,7 +127,7 @@ export const sendPaymentInvoiceEmail = async (payment, relatedEntity = null) => 
                                 <p style="margin: 0 0 8px 0; color: #999; font-size: 12px; text-transform: uppercase; font-weight: bold;">Bill To</p>
                                 <p style="margin: 0; font-size: 16px; font-weight: 700;">${employee.firstName} ${employee.lastName}</p>
                                 <p style="margin: 4px 0 0 0; font-size: 14px; color: #666;">Employee ID: ${employee.employeeId}</p>
-                                <p style="margin: 2px 0 0 0; font-size: 14px; color: #666;">${employee.companyEmail || employee.personalEmail || ''}</p>
+                                <p style="margin: 2px 0 0 0; font-size: 14px; color: #666;">${employee.companyEmail || ''}</p>
                             </td>
                             <td style="width: 50%; vertical-align: top; text-align: right;">
                                 <p style="margin: 0 0 8px 0; color: #999; font-size: 12px; text-transform: uppercase; font-weight: bold;">Details</p>

@@ -1,6 +1,9 @@
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeService.js";
-import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
+import {
+    isReqUserAdmin,
+    scheduleManagementAdminDeletionEmail,
+} from "../../utils/sendAdminDeletionNotificationEmails.js";
 
 // @desc    Delete a document from employee's oldDocuments list (Archive)
 // @route   DELETE /api/Employee/:id/old-document/:target
@@ -45,6 +48,14 @@ export const deleteOldDocument = async (req, res) => {
         if (docIndex === -1) {
             return res.status(400).json({ message: "Document not found in archive" });
         }
+
+        const archivedDoc = employee.oldDocuments[docIndex];
+        scheduleManagementAdminDeletionEmail(req, {
+            moduleName: "Employee Old Document",
+            recordId: employee.employeeId,
+            details: (archivedDoc?.type || "Archived document").toString(),
+            deletedPayload: { employeeId: employee.employeeId, document: archivedDoc },
+        });
 
         // Remove document from oldDocuments array
         employee.oldDocuments.splice(docIndex, 1);

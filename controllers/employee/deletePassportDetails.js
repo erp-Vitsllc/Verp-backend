@@ -1,6 +1,9 @@
 import EmployeePassport from "../../models/EmployeePassport.js";
 import { resolveEmployeeId } from "../../services/employeeService.js";
-import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
+import {
+    isReqUserAdmin,
+    scheduleManagementAdminDeletionEmail,
+} from "../../utils/sendAdminDeletionNotificationEmails.js";
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
 import { cleanupEmployeeExpiryNotificationsByLabels } from "../../utils/cleanupEmployeeExpiryNotifications.js";
 import { PURGE_TYPES, purgeEmployeeOldDocuments } from "../../utils/purgeEmployeeOldDocuments.js";
@@ -14,6 +17,13 @@ export const deletePassportDetails = async (req, res) => {
         const employee = await resolveEmployeeId(id);
         if (!employee) return res.status(404).json({ message: "Employee not found." });
 
+        const passport = await EmployeePassport.findOne({ employeeId: employee.employeeId }).lean();
+        scheduleManagementAdminDeletionEmail(req, {
+            moduleName: "Employee Passport",
+            recordId: employee.employeeId,
+            details: `Passport card for ${employee.employeeId}`,
+            deletedPayload: { employeeId: employee.employeeId, passport },
+        });
         await EmployeePassport.deleteOne({ employeeId: employee.employeeId });
         await purgeEmployeeOldDocuments(employee.employeeId, {
             types: PURGE_TYPES.passport,
