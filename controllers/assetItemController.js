@@ -60,6 +60,17 @@ import {
     resolveSignatureUrlForPdf,
 } from '../utils/generateBulkAssetInventoryPdf.js';
 import { sendAssetBulkDispositionResultEmail } from '../utils/sendAssetBulkDispositionResultEmail.js';
+import {
+    buildServiceExtendHistoryDetails,
+    buildServiceReceiveHistoryDetails,
+    buildServiceSendHistoryDetails,
+} from '../utils/buildAssetServiceHistoryDetails.js';
+import {
+    buildAssignmentHandoverEmailAttachments,
+    hodDisplayFromEmployee,
+} from '../utils/buildAssignmentHandoverEmailAttachments.js';
+import { sendAssetTransferHandoverEmails } from '../utils/sendAssetTransferHandoverEmails.js';
+import { notifyBulkAssignmentResponseEmails } from '../utils/sendAssetBulkAssignmentOutcomeEmails.js';
 
 /** Upload server-generated handover PDF bytes to S3; store returned key on AssetHistory.file */
 async function persistHandoverPdfBufferToHistory(pdfBuffer, filename) {
@@ -291,9 +302,20 @@ const notifyAssignedEmployeeIfController = async (req, assetDoc, action, details
     }
 };
 
-/** One email + consolidated PDF per employee after AC bulk-direct Leave/EOS (employee-assigned rows only). */
+/** One email + consolidated handover-form PDF per employee after AC bulk-direct Leave/EOS (same template as bulk assign). */
 const notifyEmployeesGroupedControllerBulkDirect = async (req, employeeSnapshots, actionSummary) => {
     try {
+        const assigner = req.user?.employeeObjectId
+            ? await EmployeeBasic.findById(req.user.employeeObjectId)
+                .select('firstName lastName employeeId signature department')
+                .lean()
+                .catch(() => null)
+            : null;
+        const assignerDisplay =
+            `${assigner?.firstName || ''} ${assigner?.lastName || ''}`.trim() ||
+            req.user?.name ||
+            'Asset Controller';
+
         const byEmp = new Map();
         for (const s of employeeSnapshots || []) {
             if (!s?._id || !s.assignedTo) continue;
@@ -305,15 +327,26 @@ const notifyEmployeesGroupedControllerBulkDirect = async (req, employeeSnapshots
         for (const [eid, ids] of byEmp) {
             if (!ids.length || !eid) continue;
             const employee = await EmployeeBasic.findById(eid)
-                .select('firstName lastName employeeId companyEmail workEmail personalEmail email primaryReportee')
-                .populate('primaryReportee', 'firstName lastName companyEmail workEmail personalEmail email')
+                .select('firstName lastName employeeId companyEmail workEmail personalEmail email primaryReportee department')
+                .populate('primaryReportee', 'firstName lastName employeeId companyEmail workEmail personalEmail email')
                 .lean();
             if (!employee) continue;
             let pdf = [];
+            const handoverFilenameBase = actionSummary.handoverFilenameBase
+                || `${String(actionSummary.pdfBase || 'bulk-action').replace(/-inventory$/i, '')}-handover`;
             try {
-                pdf = await buildBulkAssetInventoryPdfAttachment(req, ids, actionSummary.pdfBase);
+                pdf = await buildAssignmentHandoverEmailAttachments(req, ids, {
+                    assigneeName: `${employee.firstName || ''} ${employee.lastName || ''}`.trim() || 'Employee',
+                    employeeCode: employee.employeeId || '—',
+                    department: (employee.department && String(employee.department).trim()) || '—',
+                    hodName: hodDisplayFromEmployee(employee),
+                    assigner,
+                    assignerName: assignerDisplay,
+                    handoverDate: new Date(),
+                    filenameBase: handoverFilenameBase,
+                });
             } catch (e) {
-                console.error('[notifyEmployeesGroupedControllerBulkDirect] PDF:', e?.message || e);
+                console.error('[notifyEmployeesGroupedControllerBulkDirect] Handover PDF:', e?.message || e);
             }
             const firstSnap = employeeSnapshots.find((x) => x._id.toString() === ids[0]);
             await sendAssignedEmployeeActionEmail({
@@ -332,6 +365,65 @@ const notifyEmployeesGroupedControllerBulkDirect = async (req, employeeSnapshots
     } catch (e) {
         console.error('[notifyEmployeesGroupedControllerBulkDirect] Non-fatal:', e?.message || e);
     }
+};
+
+/** Handover-form PDF for Leave / EOL / loss approval emails to Asset Controller (same template as bulk assign). */
+const buildAssetActionApprovalHandoverAttachments = async (req, assets) => {
+    const list = Array.isArray(assets) ? assets : [assets];
+    const ids = list.map((a) => String(a._id)).filter((id) => mongoose.Types.ObjectId.isValid(id));
+    if (!ids.length) return [];
+
+    const primary = list[0];
+    const assigner = req.user?.employeeObjectId
+        ? await EmployeeBasic.findById(req.user.employeeObjectId)
+              .select('firstName lastName employeeId signature department')
+              .lean()
+              .catch(() => null)
+        : null;
+    const assignerDisplay =
+        `${assigner?.firstName || ''} ${assigner?.lastName || ''}`.trim() ||
+        req.user?.name ||
+        'Requester';
+
+    if (primary.assignedToType === 'Company' && primary.assignedCompany) {
+        const comp = await Company.findById(primary.assignedCompany).select('name companyId').lean();
+        return buildAssignmentHandoverEmailAttachments(req, ids, {
+            assigneeName: comp?.name || 'Company',
+            employeeCode: comp?.companyId || '—',
+            department: '—',
+            hodName: '—',
+            assigner,
+            assignerName: assignerDisplay,
+            handoverDate: new Date(),
+            filenameBase: `asset-action-request-${ids.length}-handover`,
+        });
+    }
+
+    let assignee = primary.assignedTo;
+    if (assignee && (!assignee.firstName || !assignee.department)) {
+        assignee = await EmployeeBasic.findById(assignee._id || assignee)
+            .select('firstName lastName employeeId department primaryReportee')
+            .populate('primaryReportee', 'firstName lastName employeeId')
+            .lean()
+            .catch(() => assignee);
+    } else if (!assignee?.firstName && primary.assignedTo) {
+        assignee = await EmployeeBasic.findById(primary.assignedTo)
+            .select('firstName lastName employeeId department primaryReportee')
+            .populate('primaryReportee', 'firstName lastName employeeId')
+            .lean()
+            .catch(() => null);
+    }
+
+    return buildAssignmentHandoverEmailAttachments(req, ids, {
+        assigneeName: assignee ? `${assignee.firstName || ''} ${assignee.lastName || ''}`.trim() || '—' : '—',
+        employeeCode: assignee?.employeeId || '—',
+        department: (assignee?.department && String(assignee.department).trim()) || '—',
+        hodName: hodDisplayFromEmployee(assignee),
+        assigner,
+        assignerName: assignerDisplay,
+        handoverDate: new Date(),
+        filenameBase: `asset-action-request-${ids.length}-handover`,
+    });
 };
 
 const assigneeHasCompanyEmailOnRecord = (emp) =>
@@ -1693,9 +1785,18 @@ export const handleOnServiceAction = async (req, res) => {
                 action: 'Extend',
                 assignedTo: prevAssignedTo,
                 performedBy: req.user.employeeObjectId,
-                comments: `Service duration extended by ${ext} day(s). New total: ${updatedTotalDays} day(s). Reason: ${reason}`,
+                comments: `Service extended by ${ext} day(s). Total duration: ${updatedTotalDays} day(s). Expiry: ${newExpiry.toLocaleDateString('en-GB')}. Reason: ${reason}`,
                 date: new Date(),
-                details: { ...statusSnapshot, extensionDays: ext, extensionReason: reason, updatedTotalDays, newExpiryDate: newExpiry }
+                details: buildServiceExtendHistoryDetails({
+                    currentService,
+                    extensionDays: ext,
+                    extensionReason: reason,
+                    previousExpiryDate: baseExpiry,
+                    newExpiryDate: newExpiry,
+                    previousDurationDays,
+                    updatedTotalDays,
+                    prevAssetStatus: item.status,
+                }),
             });
 
             const assignedEmployee = item.assignedTo
@@ -1740,16 +1841,22 @@ export const handleOnServiceAction = async (req, res) => {
                 await completeAssetServiceOverdueTasks(item._id, req.user?.employeeObjectId);
             }
 
+            const receiveDetails = buildServiceReceiveHistoryDetails({
+                action: action === 'Live' ? 'live' : 'return',
+                currentService,
+                prevStatus: statusSnapshot?.status || item.status,
+                nextStatus: item.status,
+            });
             await AssetHistory.create({
                 assetId: item._id,
                 action: 'Service Receive',
                 assignedTo: prevAssignedTo,
                 performedBy: req.user.employeeObjectId,
                 comments: action === 'Live'
-                    ? 'Asset marked Live — service window closed.'
-                    : 'Asset returned from service and moved back to active status.',
+                    ? `Marked Live on ${new Date().toLocaleDateString('en-GB')}. Service started ${currentService.date ? new Date(currentService.date).toLocaleDateString('en-GB') : '—'}; planned return ${currentService.expiryDate ? new Date(currentService.expiryDate).toLocaleDateString('en-GB') : '—'}.`
+                    : 'Returned from service and restored to active assignment status.',
                 date: new Date(),
-                details: { ...statusSnapshot, returnedFromService: true, nextStatus: item.status }
+                details: receiveDetails,
             });
         }
 
@@ -1835,13 +1942,25 @@ export const bulkHandleOnServiceAction = async (req, res) => {
                     currentService.expiryDayEmailSentAt = null;
                     currentService.serviceOverdueTaskAt = null;
                     await completeAssetServiceOverdueTasks(item._id, req.user?.employeeObjectId);
+                    const updatedTotalDays = Math.max(1, prevDays) + ext;
                     await AssetHistory.create({
                         assetId: item._id,
                         action: 'Extend',
                         assignedTo: item.assignedTo?._id || item.assignedTo,
                         performedBy: req.user.employeeObjectId,
-                        comments: `Service duration extended by ${ext} day(s) in bulk action. Reason: ${reason}`,
-                        date: new Date()
+                        comments: `Bulk extend: +${ext} day(s). Total ${updatedTotalDays} day(s). New expiry ${newExpiry.toLocaleDateString('en-GB')}. Reason: ${reason}`,
+                        date: new Date(),
+                        details: buildServiceExtendHistoryDetails({
+                            currentService,
+                            extensionDays: ext,
+                            extensionReason: reason,
+                            previousExpiryDate: baseExpiry,
+                            newExpiryDate: newExpiry,
+                            previousDurationDays: prevDays,
+                            updatedTotalDays,
+                            prevAssetStatus: item.status,
+                            isBulk: true,
+                        }),
                     });
 
                     const assignedEmployee = item.assignedTo
@@ -1889,9 +2008,16 @@ export const bulkHandleOnServiceAction = async (req, res) => {
                         assignedTo: item.assignedTo?._id || item.assignedTo,
                         performedBy: req.user.employeeObjectId,
                         comments: action === 'Live'
-                            ? 'Asset marked Live in bulk action.'
-                            : 'Asset returned from service in bulk action.',
-                        date: new Date()
+                            ? `Bulk Mark Live (${new Date().toLocaleDateString('en-GB')}). Service window closed.`
+                            : 'Bulk return from service.',
+                        date: new Date(),
+                        details: buildServiceReceiveHistoryDetails({
+                            action: action === 'Live' ? 'live' : 'return',
+                            currentService,
+                            prevStatus: item.status,
+                            nextStatus: item.assignedTo ? 'Assigned' : 'Unassigned',
+                            isBulk: true,
+                        }),
                     });
                 }
 
@@ -3897,6 +4023,28 @@ export const assignAssetItem = async (req, res) => {
                 recipient: actionRecipient,
                 attachments: assignAttachments,
             });
+
+            if (isReassignment && newAssignee) {
+                const skipIds = [actionRecipient?._id, employeeToAssign?._id].filter(Boolean).map(String);
+                const coordinatorForTransfer =
+                    assignedToType === 'Company' ? await getCompanyAssetCoordinator().catch(() => null) : null;
+                await sendAssetTransferHandoverEmails({
+                    req,
+                    asset: itemForEmail || item,
+                    assetIds: [item._id.toString()],
+                    targetEmployee: assignedToType === 'Company' ? null : employeeToAssign,
+                    targetCompany: assignedToType === 'Company' ? newAssignee : null,
+                    assignedToType,
+                    senderEmployeeId: req.user.employeeObjectId,
+                    companyCoordinator: coordinatorForTransfer,
+                    skipRecipientIds: skipIds,
+                }).catch((transferMailErr) => {
+                    console.error(
+                        '[assignAssetItem] Transfer notify AC/sender failed (non-fatal):',
+                        transferMailErr?.message || transferMailErr,
+                    );
+                });
+            }
         } catch (err) {
             console.error(`[Email Error] Failed to send assignment email: `, err);
         }
@@ -5425,9 +5573,9 @@ export const respondBulkAssignmentGroup = async (req, res) => {
             acceptanceStatus: 'Pending'
         }).populate({
             path: 'assignedTo',
-            select: 'employeeId companyEmail primaryReportee enablePortalAccess',
-            populate: { path: 'primaryReportee', select: '_id companyEmail' },
-        });
+            select: 'employeeId companyEmail primaryReportee enablePortalAccess firstName lastName department',
+            populate: { path: 'primaryReportee', select: '_id companyEmail firstName lastName' },
+        }).populate({ path: 'assignedBy', select: 'firstName lastName employeeId companyEmail workEmail' });
 
         if (!allInGroup.length) {
             return res.status(404).json({ message: 'No pending batch found.' });
@@ -5643,6 +5791,32 @@ export const respondBulkAssignmentGroup = async (req, res) => {
             currentUser,
             `Bulk assignment: ${results.accepted.length} accepted, ${results.rejected.length} declined.${comments ? ` ${comments}` : ''}`.trim()
         );
+
+        const acceptedSummary = accepted.map((idStr) => {
+            const item = byId.get(idStr);
+            return { assetId: item?.assetId, name: item?.name };
+        });
+        const rejectedSummary = rejected.map((idStr) => {
+            const item = byId.get(idStr);
+            const bulkMeta = item?.pendingActionDetails?.bulkAssignment;
+            const note = bulkMeta?.revertToEmployeeId
+                ? `Returned to ${bulkMeta.revertToDisplayName || 'previous assignee'}`
+                : 'Returned to unassigned';
+            return { assetId: item?.assetId, name: item?.name, note };
+        });
+
+        void notifyBulkAssignmentResponseEmails(req, {
+            acceptedMongoIds: accepted,
+            rejectedMongoIds: rejected,
+            acceptedSummary,
+            rejectedSummary,
+            assigneeEmployee: first.assignedTo,
+            assignerId: first.assignedBy?._id || first.assignedBy,
+            responderEmployeeId: currentUser,
+            responderName: ackNameBulkResp,
+            comments: String(comments || '').trim(),
+            isDelegate: isPrimaryReporteeDelegate,
+        });
 
         return res.status(200).json({
             message: `Batch processed: ${results.accepted.length} accepted, ${results.rejected.length} declined.`,
@@ -5983,19 +6157,24 @@ export const returnAssetItem = async (req, res) => {
                     });
 
                     const itemForHrEmail = await AssetItem.findById(item._id).populate('categoryId', 'name');
-                    let companyTransferAttachments = [];
-                    try {
-                        companyTransferAttachments = await buildBulkAssetInventoryPdfAttachment(req, [item._id.toString()], 'assignment-inventory');
-                    } catch (pdfErr) {
-                        console.error('Company transfer PDF attachment failed (non-fatal):', pdfErr?.message || pdfErr);
-                    }
-                    await sendAssetAssignmentEmail({
+                    const targetFullForTransfer =
+                        assignedToType === 'Employee' && targetEmployee
+                            ? await EmployeeBasic.findById(reassignTo)
+                                .select('firstName lastName employeeId department primaryReportee companyEmail workEmail email')
+                                .populate('primaryReportee', 'firstName lastName employeeId companyEmail workEmail')
+                                .lean()
+                                .catch(() => targetEmployee)
+                            : null;
+
+                    await sendAssetTransferHandoverEmails({
+                        req,
                         asset: itemForHrEmail || item,
-                        employee: assignedToType === 'Company'
-                            ? { firstName: targetCompany?.name || 'Company', lastName: "", isCompany: true }
-                            : targetEmployee,
-                        recipient: companyCoordinator,
-                        attachments: companyTransferAttachments
+                        assetIds: [item._id.toString()],
+                        targetEmployee: targetFullForTransfer,
+                        targetCompany: assignedToType === 'Company' ? targetCompany : null,
+                        assignedToType,
+                        senderEmployeeId: req.user.employeeObjectId,
+                        companyCoordinator,
                     });
 
                     console.log(
@@ -6021,6 +6200,25 @@ export const returnAssetItem = async (req, res) => {
                 item.negotiationHistory = [];
                 item.assignedCompany = null;
                 item.assignedToType = 'Employee';
+
+                try {
+                    const itemForEmail = await AssetItem.findById(item._id).populate('categoryId', 'name');
+                    const targetFull = await EmployeeBasic.findById(reassignTo)
+                        .select('firstName lastName employeeId companyEmail workEmail email primaryReportee department')
+                        .populate('primaryReportee', 'firstName lastName employeeId companyEmail workEmail')
+                        .lean();
+
+                    await sendAssetTransferHandoverEmails({
+                        req,
+                        asset: itemForEmail || item,
+                        assetIds: [item._id.toString()],
+                        targetEmployee: targetFull,
+                        senderEmployeeId: req.user.employeeObjectId,
+                        assignedToType: 'Employee',
+                    });
+                } catch (empTransferMailErr) {
+                    console.error('[returnAssetItem] Employee transfer email failed (non-fatal):', empTransferMailErr?.message || empTransferMailErr);
+                }
             }
         } else if (originalAssigner) {
             // Assign back to the original assigner as 'Returned'
@@ -6297,22 +6495,56 @@ export const updateAssetStatus = async (req, res) => {
             console.error('[Service Email Error] Failed to send service notifications:', emailErr);
         }
 
-        // Log history with clearer action names
+        const resolveOpenServiceRecord = (services = []) => {
+            for (let i = services.length - 1; i >= 0; i--) {
+                const s = services[i];
+                if (s?.expiryDate || s?.serviceDuration) return s;
+            }
+            return services.length ? services[services.length - 1] : null;
+        };
+        const activeServiceOnItem =
+            status === 'Live' ? resolveOpenServiceRecord(item.services) : serviceRecord;
+
+        let historyDetails = null;
+        let historyComments = description || note || serviceReport || null;
+
+        if (status === 'Service' && serviceRecord) {
+            historyDetails = buildServiceSendHistoryDetails({
+                serviceRecord,
+                prevStatus,
+                description: description || note,
+                serviceDuration,
+            });
+            const expiryLabel = serviceRecord.expiryDate
+                ? new Date(serviceRecord.expiryDate).toLocaleDateString('en-GB')
+                : '—';
+            historyComments =
+                historyComments ||
+                `Sent to service on ${new Date(serviceRecord.date).toLocaleDateString('en-GB')}. Duration: ${serviceDuration || serviceRecord.serviceDuration || '—'}. Expected return: ${expiryLabel}.`;
+        } else if (status === 'Live') {
+            historyDetails = buildServiceReceiveHistoryDetails({
+                action: 'live',
+                currentService: activeServiceOnItem,
+                completionRecord,
+                prevStatus,
+                nextStatus: item.status,
+                serviceReport,
+                amount,
+            });
+            historyComments =
+                historyComments ||
+                `Marked Live on ${new Date().toLocaleDateString('en-GB')}. Service completed.`;
+        } else if (status === 'Unassigned') {
+            historyDetails = { serviceEventType: 'unassigned', prevAssetStatus: prevStatus };
+        }
+
         await AssetHistory.create({
             assetId: item._id,
             action: status === 'Unassigned' ? 'Unassigned' : status === 'Service' ? 'Service Send' : 'Service Receive',
             performedBy: req.user.employeeObjectId,
-            comments: description || note || serviceReport || null,
+            comments: historyComments,
             file: (status === 'Service' ? (serviceRecord?.invoice || serviceRecord?.attachment) : completionRecord?.attachment) || null,
-            details: {
-                ...statusSnapshot,
-                serviceDuration: serviceDuration || null,
-                amount: amount || 0,
-                serviceReport: serviceReport || null,
-                invoice: status === 'Service' ? serviceRecord?.invoice : null,
-                attachment: status === 'Service' ? serviceRecord?.attachment : completionRecord?.attachment,
-                prevStatus: prevStatus
-            }
+            details: historyDetails || { prevAssetStatus: prevStatus },
         });
 
         await updateAssetTypeCounts(item.typeId);
@@ -6391,6 +6623,10 @@ export const getAssetHistory = async (req, res) => {
                 const d = recordObj.details;
                 if (d.invoice) d.invoice = await getSignedFileUrl(d.invoice);
                 if (d.invoiceFile) d.invoiceFile = await getSignedFileUrl(d.invoiceFile);
+                if (d.attachment) d.attachment = await getSignedFileUrl(d.attachment);
+                if (d.serviceRecord?.invoice) d.serviceRecord.invoice = await getSignedFileUrl(d.serviceRecord.invoice);
+                if (d.serviceRecord?.attachment) d.serviceRecord.attachment = await getSignedFileUrl(d.serviceRecord.attachment);
+                if (d.completionRecord?.attachment) d.completionRecord.attachment = await getSignedFileUrl(d.completionRecord.attachment);
 
                 // Sign assignedBy signature inside snapshot
                 if (d.assignedBy?.signature?.url) {
@@ -7412,7 +7648,7 @@ export const requestAssetAction = async (req, res) => {
                         actionLabel: 'Leave',
                         detailsText: 'Asset placed on leave by Asset Controller (direct transfer).',
                         customIntro:
-                            '<p>The Asset Controller placed your asset(s) on leave (parking). Details are in the attached inventory PDF.</p>'
+                            '<p>The Asset Controller placed your asset(s) on leave (parking). The attached PDF is the same <strong>Asset Handover Form</strong> used for bulk assignments, listing each asset with values and accessories.</p>'
                     });
                 } else {
                     await notifyAssignedEmployeeIfController(req, asset, 'Leave', 'Asset placed on leave by Asset Controller (direct transfer).');
@@ -7450,7 +7686,7 @@ export const requestAssetAction = async (req, res) => {
                         actionLabel: 'Return Asset',
                         detailsText: 'Asset returned to store by Asset Controller (End of Services direct transfer).',
                         customIntro:
-                            '<p>The Asset Controller returned your asset(s) to store (End of Services). Details are in the attached inventory PDF.</p>'
+                            '<p>The Asset Controller returned your asset(s) to store (End of Services). The attached PDF is the <strong>Asset Handover Form</strong> (same layout as bulk assignment).</p>'
                     });
                 } else {
                     await notifyAssignedEmployeeIfController(req, asset, 'Return Asset', 'Asset returned to store by Asset Controller (End of Services direct transfer).');
@@ -7540,8 +7776,21 @@ export const requestAssetAction = async (req, res) => {
 
         const requesterName = req.user.name || (req.user.firstName && req.user.lastName ? `${req.user.firstName} ${req.user.lastName}` : 'User');
 
-        // Assignee-initiated single request: no PDF — asset details are in the email body (not a separate inventory attachment).
-        await sendAssetActionApprovalEmail(asset, pendingActionType, nextApprover, { name: requesterName }, reason, []);
+        let requestAttachments = [];
+        try {
+            requestAttachments = await buildAssetActionApprovalHandoverAttachments(req, asset);
+        } catch (pdfErr) {
+            console.error('[requestAssetAction] Handover PDF for approval email (non-fatal):', pdfErr?.message || pdfErr);
+        }
+
+        await sendAssetActionApprovalEmail(
+            asset,
+            pendingActionType,
+            nextApprover,
+            { name: requesterName },
+            reason,
+            requestAttachments,
+        );
 
         res.status(200).json({ message: `${pendingActionType} request sent to Asset Controller for approval`, asset });
     } catch (error) {
@@ -7702,7 +7951,7 @@ export const bulkRequestAssetAction = async (req, res) => {
                     actionLabel: 'Leave',
                     detailsText: 'Assets placed on leave by Asset Controller (direct bulk transfer).',
                     customIntro:
-                        '<p>The Asset Controller placed your asset(s) on leave. The PDF lists every item in this bulk action.</p>'
+                        '<p>The Asset Controller placed your asset(s) on leave. The attached PDF is the <strong>Asset Handover Form</strong> (same layout as bulk assignment), listing every item in this bulk action.</p>'
                 });
             } else if (originalActionType === 'End of Services' && employeeSnapsForEmail.length > 0) {
                 await notifyEmployeesGroupedControllerBulkDirect(req, employeeSnapsForEmail, {
@@ -7711,7 +7960,7 @@ export const bulkRequestAssetAction = async (req, res) => {
                     actionLabel: 'Return Asset',
                     detailsText: 'Assets returned to store by Asset Controller (End of Services bulk transfer).',
                     customIntro:
-                        '<p>The Asset Controller returned your asset(s) to store (End of Services). The PDF lists every item in this bulk action.</p>'
+                        '<p>The Asset Controller returned your asset(s) to store (End of Services). The attached PDF is the <strong>Asset Handover Form</strong> (same layout as bulk assignment), listing every item in this bulk action.</p>'
                 });
             }
 
@@ -7742,22 +7991,16 @@ export const bulkRequestAssetAction = async (req, res) => {
 
         const pdfIds = assetIds.map((id) => id.toString());
         let bulkActionAttachments = [];
-        // Assignee bulk: attach full inventory PDF for the Asset Controller when multiple assets,
-        // or always for Loss and Damage. Single Leave/EOL-style requests use inline email details only.
-        const requireInventoryPdf = pdfIds.length > 1 || actionType === 'Loss and Damage';
-        if (requireInventoryPdf) {
-            try {
-                bulkActionAttachments = await requireBulkAssetInventoryPdfAttachment(
-                    req,
-                    pdfIds,
-                    `bulk-${String(actionType).replace(/\s+/g, '-')}-inventory`
-                );
-            } catch (pdfErr) {
-                console.error('[bulkRequestAssetAction] PDF required for email:', pdfErr?.message || pdfErr);
+        const requireHandoverPdf = pdfIds.length > 1 || actionType === 'Loss and Damage';
+        try {
+            bulkActionAttachments = await buildAssetActionApprovalHandoverAttachments(req, assets);
+        } catch (pdfErr) {
+            console.error('[bulkRequestAssetAction] Handover PDF for approval email:', pdfErr?.message || pdfErr);
+            if (requireHandoverPdf) {
                 return res.status(503).json({
                     message:
                         pdfErr?.message ||
-                        'Could not generate the asset list PDF. Request was not submitted.'
+                        'Could not generate the Asset Handover Form PDF. Request was not submitted.',
                 });
             }
         }
@@ -9186,7 +9429,30 @@ export const requestAccessoryAction = async (req, res) => {
         try {
             let accAttachments = [];
             try {
-                accAttachments = await buildBulkAssetInventoryPdfAttachment(req, [asset._id.toString()], 'asset-accessory-request-inventory');
+                if (actionType === 'Transfer' && targetAssetId) {
+                    const targetAssetRow = await AssetItem.findById(targetAssetId)
+                        .populate({ path: 'assignedTo', populate: { path: 'primaryReportee', select: 'firstName lastName employeeId' } })
+                        .select('assetId name assignedTo')
+                        .lean();
+                    const targetAssignee = targetAssetRow?.assignedTo;
+                    const assignerForTransfer = await EmployeeBasic.findById(req.user.employeeObjectId)
+                        .select('firstName lastName employeeId signature department')
+                        .lean()
+                        .catch(() => null);
+                    const pdfAssetIds = [asset._id.toString(), String(targetAssetId)].filter(Boolean);
+                    accAttachments = await buildAssignmentHandoverEmailAttachments(req, pdfAssetIds, {
+                        assigneeName: targetAssignee
+                            ? `${targetAssignee.firstName || ''} ${targetAssignee.lastName || ''}`.trim()
+                            : 'Employee',
+                        employeeCode: targetAssignee?.employeeId || '—',
+                        department: (targetAssignee?.department && String(targetAssignee.department).trim()) || '—',
+                        hodName: hodDisplayFromEmployee(targetAssignee),
+                        assigner: assignerForTransfer,
+                        filenameBase: 'accessory-transfer-request-handover',
+                    });
+                } else {
+                    accAttachments = await buildBulkAssetInventoryPdfAttachment(req, [asset._id.toString()], 'asset-accessory-request-inventory');
+                }
             } catch (pdfErr) {
                 console.error('[requestAccessoryAction] PDF attachment failed (non-fatal):', pdfErr?.message || pdfErr);
             }
@@ -9374,6 +9640,26 @@ export const respondAccessoryAction = async (req, res) => {
                     await syncAllAccessoryInstancesForAsset(targetAsset);
                 } catch (syncErr) {
                     console.error('[respondAccessoryAction Transfer catalog sync]', syncErr?.message || syncErr);
+                }
+
+                try {
+                    if (targetAsset.assignedTo) {
+                        const targetAssignee = await EmployeeBasic.findById(targetAsset.assignedTo)
+                            .select('firstName lastName employeeId companyEmail workEmail email primaryReportee department')
+                            .populate('primaryReportee', 'firstName lastName employeeId companyEmail workEmail')
+                            .lean();
+                        const targetForEmail = await AssetItem.findById(targetAsset._id).populate('categoryId', 'name');
+                        await sendAssetTransferHandoverEmails({
+                            req,
+                            asset: targetForEmail || targetAsset,
+                            assetIds: [targetAsset._id.toString()],
+                            targetEmployee: targetAssignee,
+                            senderEmployeeId: req.user.employeeObjectId,
+                            assignedToType: 'Employee',
+                        });
+                    }
+                } catch (accTransferMailErr) {
+                    console.error('[respondAccessoryAction Transfer] Transfer emails failed (non-fatal):', accTransferMailErr?.message || accTransferMailErr);
                 }
 
                 return res.status(200).json({ message: `Transfer approved and finalized by Asset Controller. Accessory assigned to ${targetAsset.assetId}.`, asset });

@@ -13,7 +13,11 @@ export const sendAssetAssignmentEmail = async ({
     isBulk = false,
     assetCount = 1,
     attachments = [],
-    bulkAssignmentGroupId = null
+    bulkAssignmentGroupId = null,
+    /** 'assignment' | 'transfer' — same handover PDF; transfer wording for reassign flows */
+    notificationContext = 'assignment',
+    /** transfer only: 'target' | 'target_reportee' | 'asset_controller' | 'sender' */
+    transferRecipientRole = null,
 }) => {
     try {
         const { email: recipientEmail, isFallbackToReportee, employee: resolvedRecipient } =
@@ -63,9 +67,27 @@ export const sendAssetAssignmentEmail = async ({
                 !!employee?._id &&
                 recipientRecord._id?.toString() !== employee._id?.toString());
 
-        const subject = employee?.isCompany
-            ? (isBulk ? `Asset Allocation for ${employeeName}: ${assetCount} Items` : `Asset Allocated to ${employeeName}: ${asset.name} (${asset.assetId})`)
-            : (isSelfAssignment
+        const isTransfer = notificationContext === 'transfer';
+        const transferRoleNote = isTransfer
+            ? transferRecipientRole === 'asset_controller'
+                ? '<p style="font-size: 13px; color: #64748b;">You are receiving this as the <strong>Asset Controller</strong> for this transfer.</p>'
+                : transferRecipientRole === 'sender'
+                  ? '<p style="font-size: 13px; color: #64748b;">You are receiving this as the person who initiated this asset transfer.</p>'
+                  : transferRecipientRole === 'target_reportee'
+                    ? '<p style="font-size: 13px; color: #64748b;">You are receiving this as the <strong>primary reportee</strong> for the assignee below.</p>'
+                    : ''
+            : '';
+        const subject = isTransfer
+            ? (isSelfAssignment
+                ? (isBulk
+                    ? `Asset transfer: ${assetCount} items assigned to you`
+                    : `Asset transferred to you: ${asset.name} (${asset.assetId})`)
+                : (isBulk
+                    ? `Asset transfer: ${assetCount} items for ${employeeName}`
+                    : `Asset transferred to ${employeeName}: ${asset.name} (${asset.assetId})`))
+            : employee?.isCompany
+              ? (isBulk ? `Asset Allocation for ${employeeName}: ${assetCount} Items` : `Asset Allocated to ${employeeName}: ${asset.name} (${asset.assetId})`)
+              : (isSelfAssignment
                 ? (isBulk ? `New Batch Asset Assignment: ${assetCount} Items Assigned to You` : `New Asset Assigned to You: ${asset.name} (${asset.assetId})`)
                 : (isBulk ? `New Batch Asset Assignment for ${employeeName}: ${assetCount} Items` : `Asset Assignment Notification for ${employeeName}: ${asset.name} (${asset.assetId})`));
 
@@ -92,16 +114,18 @@ export const sendAssetAssignmentEmail = async ({
         const html = `
             <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; color: #1e293b; line-height: 1.6; max-width: 600px; margin: 0 auto; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden; background-color: #ffffff;">
                 <div style="background-color: #2563eb; color: white; padding: 30px; text-align: center;">
-                    <h1 style="margin: 0; font-size: 24px;">Asset ${employee?.isCompany ? 'Allocation' : 'Assignment'}</h1>
+                    <h1 style="margin: 0; font-size: 24px;">Asset ${isTransfer ? 'Transfer' : employee?.isCompany ? 'Allocation' : 'Assignment'}</h1>
                 </div>
                 <div style="padding: 40px;">
                     ${fallbackNote}
+                    ${transferRoleNote}
                     <p style="font-size: 16px;">Hello ${recipientName},</p>
                     
                     <p>
-                        A new ${isBulk ? 'batch of assets has' : 'asset has'} been ${employee?.isCompany ? 'allocated' : 'assigned'}
-                        to <strong>${isSelfAssignment ? 'you' : employeeName}</strong>.
-                        ${isPrimaryReporteeRecipient ? 'Please review and respond on behalf of your reportee.' : ''}
+                        ${isTransfer
+                            ? `An ${isBulk ? 'asset batch has' : 'asset has'} been <strong>transferred</strong> to <strong>${isSelfAssignment ? 'you' : employeeName}</strong>.`
+                            : `A new ${isBulk ? 'batch of assets has' : 'asset has'} been ${employee?.isCompany ? 'allocated' : 'assigned'} to <strong>${isSelfAssignment ? 'you' : employeeName}</strong>.`}
+                        ${isPrimaryReporteeRecipient ? ' Please review and respond on behalf of your reportee.' : ''}
                     </p>
                     
                     <div style="background-color: #f8fafc; padding: 25px; border-radius: 8px; margin: 25px 0; border: 1px solid #e2e8f0;">

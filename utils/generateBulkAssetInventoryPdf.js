@@ -346,7 +346,21 @@ export async function buildAssetControllerHandoverOutcomePdfAttachment(keptIds, 
     return [{ filename: safe, content: buf, contentType: 'application/pdf', contentDisposition: 'attachment' }];
 }
 
-function buildAssigneeBulkDispositionHtmlDoc(processedRows, notProcessedRows) {
+function buildAssigneeBulkDispositionHtmlDoc(processedRows, notProcessedRows, labels = {}) {
+    const docTitle = labels.docTitle || 'Bulk request — Asset Controller decision';
+    const docSubtitle =
+        labels.docSubtitle ||
+        `VeRP · <strong>${processedRows?.length || 0}</strong> processed · <strong>${notProcessedRows?.length || 0}</strong> not processed (remain as assigned)`;
+    const processedTitle = labels.processedTitle || '1. Processed';
+    const processedDesc =
+        labels.processedDesc || 'These assets were updated by the Asset Controller.';
+    const notProcessedTitle = labels.notProcessedTitle || '2. Not processed';
+    const notProcessedDesc =
+        labels.notProcessedDesc ||
+        'These assets were not approved for change. They remain assigned to you with no pending request.';
+    const footerSummary =
+        labels.footerSummary ||
+        '<strong>Summary:</strong> Section 1 lists assets that were actioned. Section 2 lists assets that stayed on your assignment list.';
     const thead = `
         <tr style="border-bottom:2px solid #cbd5e1;background:#f8fafc;">
           <th style="text-align:left;padding:8px;font-weight:600;">Asset ID</th>
@@ -370,19 +384,19 @@ function buildAssigneeBulkDispositionHtmlDoc(processedRows, notProcessedRows) {
 </head>
 <body style="margin:0;background:#fff;">
 <div id="bulk-assignee-disposition-pdf" data-inventory-ready="true" style="min-height:120px;padding:24px;font-family:Segoe UI,Tahoma,sans-serif;color:#1e293b;box-sizing:border-box;max-width:1000px;margin:0 auto;">
-  <h1 style="font-size:20px;margin:0 0 6px 0;">Bulk request — Asset Controller decision</h1>
-  <p style="font-size:12px;color:#64748b;margin:0 0 20px 0;">VeRP · <strong>${np}</strong> processed · <strong>${nr}</strong> not processed (remain as assigned)</p>
+  <h1 style="font-size:20px;margin:0 0 6px 0;">${docTitle}</h1>
+  <p style="font-size:12px;color:#64748b;margin:0 0 20px 0;">${docSubtitle}</p>
 
-  <h2 style="font-size:15px;margin:24px 0 8px 0;color:#0f172a;border-bottom:2px solid #86efac;padding-bottom:6px;">1. Processed</h2>
-  <p style="font-size:12px;color:#475569;margin:0 0 10px 0;">These assets were updated by the Asset Controller.</p>
+  <h2 style="font-size:15px;margin:24px 0 8px 0;color:#0f172a;border-bottom:2px solid #86efac;padding-bottom:6px;">${processedTitle}</h2>
+  <p style="font-size:12px;color:#475569;margin:0 0 10px 0;">${processedDesc}</p>
   ${tableBlock(processedRows)}
 
-  <h2 style="font-size:15px;margin:24px 0 8px 0;color:#0f172a;border-bottom:2px solid #fecaca;padding-bottom:6px;">2. Not processed</h2>
-  <p style="font-size:12px;color:#475569;margin:0 0 10px 0;">These assets were not approved for change. They remain assigned to you with no pending request.</p>
+  <h2 style="font-size:15px;margin:24px 0 8px 0;color:#0f172a;border-bottom:2px solid #fecaca;padding-bottom:6px;">${notProcessedTitle}</h2>
+  <p style="font-size:12px;color:#475569;margin:0 0 10px 0;">${notProcessedDesc}</p>
   ${tableBlock(notProcessedRows)}
 
   <div style="margin-top:28px;padding:14px;background:#f1f5f9;border-radius:10px;border:1px solid #e2e8f0;">
-    <p style="margin:0;font-size:12px;color:#334155;line-height:1.55;"><strong>Summary:</strong> Section 1 lists assets that were actioned. Section 2 lists assets that stayed on your assignment list.</p>
+    <p style="margin:0;font-size:12px;color:#334155;line-height:1.55;">${footerSummary}</p>
   </div>
 </div>
 </body>
@@ -392,13 +406,18 @@ function buildAssigneeBulkDispositionHtmlDoc(processedRows, notProcessedRows) {
 /**
  * PDF for assignee email after bulk transfer/return decisions: processed vs not processed.
  */
-export async function buildBulkAssigneeDispositionPdfAttachment(processedIds, notProcessedIds, filenameBase = 'bulk-assignee-outcome') {
+export async function buildBulkAssigneeDispositionPdfAttachment(
+    processedIds,
+    notProcessedIds,
+    filenameBase = 'bulk-assignee-outcome',
+    labels = {},
+) {
     const p = [...new Set((processedIds || []).map(String).filter(Boolean))].filter((id) => mongoose.Types.ObjectId.isValid(id));
     const r = [...new Set((notProcessedIds || []).map(String).filter(Boolean))].filter((id) => mongoose.Types.ObjectId.isValid(id));
     try {
         const pRows = p.length ? await loadInventoryRows(p) : [];
         const rRows = r.length ? await loadInventoryRows(r) : [];
-        const html = buildAssigneeBulkDispositionHtmlDoc(pRows, rRows);
+        const html = buildAssigneeBulkDispositionHtmlDoc(pRows, rRows, labels);
         const raw = await generatePdfFromHtml(html, BULK_ASSIGNEE_DISPOSITION_PDF_SELECTOR);
         const buf = pdfOutputToBuffer(raw);
         if (!buf?.length) return [];

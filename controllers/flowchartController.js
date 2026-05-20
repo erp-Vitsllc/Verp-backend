@@ -7,7 +7,8 @@ import { sendResponsibilityApprovalEmail } from "../utils/sendResponsibilityAppr
 import { buildResponsibilityEmailData } from "../utils/flowchartResponsibilityEmailData.js";
 import AssetItem from "../models/AssetItem.js";
 import { sendAssetAssignmentEmail } from "../utils/sendAssetAssignmentEmail.js";
-import { buildBulkAssetInventoryPdfAttachment } from "../utils/generateBulkAssetInventoryPdf.js";
+import { hodDisplayFromEmployee } from "../utils/buildAssignmentHandoverEmailAttachments.js";
+import { notifyAssetHandoverTransferEmails } from "../utils/notifyAssetHandoverTransferEmails.js";
 import { sendFlowchartReassignmentResultEmail } from "../utils/sendFlowchartReassignmentResultEmail.js";
 import { isUserAdministrator } from "../services/permissionService.js";
 import { resolveFlowchartHrEmployee } from "../utils/resolveFlowchartHrEmployee.js";
@@ -608,25 +609,35 @@ export const respondToResponsibility = async (req, res) => {
                                 }));
                                 await DashboardAction.insertMany(dashboardActions);
                                 
-                                // Send single email notification to new HR
                                 try {
-                                    let handoverPdf = [];
-                                    try {
-                                        const hid = assetsToTransfer.map((a) => a._id.toString()).filter(Boolean);
-                                        if (hid.length) {
-                                            handoverPdf = await buildBulkAssetInventoryPdfAttachment(req, hid, 'hr-global-handover-inventory');
-                                        }
-                                    } catch (pdfErr) {
-                                        console.error('[Flowchart Handover] PDF attachment failed (non-fatal):', pdfErr?.message || pdfErr);
-                                    }
-                                    await sendAssetAssignmentEmail({
+                                    const assignerForHandover = req.user?.employeeObjectId
+                                        ? await EmployeeBasic.findById(req.user.employeeObjectId)
+                                            .select('firstName lastName employeeId signature department')
+                                            .lean()
+                                        : null;
+                                    const newHrFull = await EmployeeBasic.findById(newHR._id)
+                                        .select('firstName lastName employeeId department primaryReportee')
+                                        .populate('primaryReportee', 'firstName lastName employeeId')
+                                        .lean();
+                                    const hid = assetsToTransfer.map((a) => a._id.toString()).filter(Boolean);
+                                    await notifyAssetHandoverTransferEmails({
+                                        req,
+                                        assetIds: hid,
                                         asset: assetsToTransfer[0],
                                         assets: assetsToTransfer,
-                                        employee: newHR,
-                                        recipient: newHR,
+                                        assigneeEmployee: newHrFull || newHR,
+                                        assignerEmployee: assignerForHandover,
                                         isBulk: assetsToTransfer.length > 1,
                                         assetCount: assetsToTransfer.length,
-                                        attachments: handoverPdf
+                                        filenameBase: 'hr-global-handover',
+                                        handoverCtx: {
+                                            assigneeName: `${newHrFull?.firstName || ''} ${newHrFull?.lastName || ''}`.trim() || newHR.employeeId,
+                                            employeeCode: newHrFull?.employeeId || newHR.employeeId || '—',
+                                            department: (newHrFull?.department && String(newHrFull.department).trim()) || '—',
+                                            hodName: hodDisplayFromEmployee(newHrFull),
+                                            assigner: assignerForHandover,
+                                            assignerName: req.user?.name || 'System',
+                                        },
                                     });
                                 } catch (emailErr) {
                                     console.error(`[Email Error] Global handover notification failed:`, emailErr);

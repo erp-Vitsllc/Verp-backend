@@ -71,7 +71,7 @@ export const sendAssignedEmployeeActionEmail = async ({
                         <p><b>Asset:</b> ${asset.assetId || '-'} - ${asset.name || '-'}</p>
                         ${details ? `<p><b>Details:</b> ${details}</p>` : ''}
                         <p><b>Performed by:</b> ${performedBy || 'Asset Controller'}</p>
-                        ${att.length ? '<p style="font-size:12px;color:#64748b;">A PDF attachment lists the asset(s) for this update.</p>' : ''}
+                        ${att.length ? '<p style="font-size:12px;color:#64748b;">The attached PDF is the <strong>Asset Handover Form</strong> (same layout as bulk assignment), listing each asset with values and accessories.</p>' : ''}
                         <p style="margin-top:18px"><a href="${link}" style="background:#0ea5e9;color:white;padding:10px 14px;border-radius:8px;text-decoration:none">View Asset</a></p>
                     </div>
                 </div>

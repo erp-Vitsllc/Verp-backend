@@ -70,7 +70,7 @@ export const sendAssetActionApprovalEmail = async (asset, actionType, manager, r
 
                     <p>Action Item Details for review:</p>
 
-                    ${att.length ? `<p style="font-size: 13px; color: #64748b;">A PDF attachment lists the assets included in this request.</p>` : ''}
+                    ${att.length ? `<p style="font-size: 13px; color: #64748b;">The attached PDF is the <strong>Asset Handover Form</strong> (same layout as bulk assignment), listing the asset(s) in this request.</p>` : ''}
 
                     <div style="text-align: center; margin-top: 30px;">
                         <a href="${link}" style="background-color: #2563eb; color: #fff; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold;">Review & Details</a>
