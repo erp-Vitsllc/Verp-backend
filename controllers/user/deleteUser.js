@@ -1,9 +1,7 @@
 import User from "../../models/User.js";
 import Group from "../../models/Group.js";
-import {
-    isReqUserAdmin,
-    scheduleManagementAdminDeletionEmail,
-} from "../../utils/sendAdminDeletionNotificationEmails.js";
+import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
+import { awaitAdminDeletionArchive } from "../../utils/adminDeletionArchiveRun.js";
 
 // Delete user
 export const deleteUser = async (req, res) => {
@@ -118,7 +116,7 @@ export const deleteUser = async (req, res) => {
 
         const userSnapshot = user.toObject ? user.toObject() : user;
         if (await isReqUserAdmin(req.user)) {
-            scheduleManagementAdminDeletionEmail(req, {
+            await awaitAdminDeletionArchive(req, {
                 moduleName: 'User',
                 recordId: user.username || String(user._id),
                 details: user.name || user.email || 'User account',

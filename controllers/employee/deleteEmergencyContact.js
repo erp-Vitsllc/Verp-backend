@@ -3,10 +3,8 @@ import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { getCompleteEmployee } from "../../services/employeeService.js";
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
 import { skipLiveProfileWritesPendingHr, queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
-import {
-    isReqUserAdmin,
-    scheduleManagementAdminDeletionEmail,
-} from "../../utils/sendAdminDeletionNotificationEmails.js";
+import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
+import { awaitAdminDeletionArchive } from "../../utils/adminDeletionArchiveRun.js";
 
 export const deleteEmergencyContact = async (req, res) => {
     const { id, contactId } = req.params;
@@ -64,7 +62,7 @@ export const deleteEmergencyContact = async (req, res) => {
             });
         } else {
             const contactSnapshot = contact.toObject ? contact.toObject() : { ...contact };
-            scheduleManagementAdminDeletionEmail(req, {
+            await awaitAdminDeletionArchive(req, {
                 moduleName: "Employee Emergency Contact",
                 recordId: employeeId,
                 details: contactSnapshot?.name || "Emergency contact",

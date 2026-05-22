@@ -1,8 +1,6 @@
 import Reward from "../../models/Reward.js";
-import {
-    isReqUserAdmin,
-    scheduleManagementAdminDeletionEmail,
-} from "../../utils/sendAdminDeletionNotificationEmails.js";
+import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
+import { awaitAdminDeletionArchive } from "../../utils/adminDeletionArchiveRun.js";
 
 export const deleteReward = async (req, res) => {
     try {
@@ -19,7 +17,7 @@ export const deleteReward = async (req, res) => {
         }
 
         const rewardSnapshot = reward.toObject ? reward.toObject() : reward;
-        scheduleManagementAdminDeletionEmail(req, {
+        await awaitAdminDeletionArchive(req, {
             moduleName: 'Reward',
             recordId: reward.rewardId || reward._id?.toString?.(),
             details: reward.title || reward.description || 'Reward record',

@@ -1,9 +1,7 @@
 import EmployeeDrivingLicense from "../../models/EmployeeDrivingLicense.js";
 import { resolveEmployeeId } from "../../services/employeeService.js";
-import {
-    isReqUserAdmin,
-    scheduleManagementAdminDeletionEmail,
-} from "../../utils/sendAdminDeletionNotificationEmails.js";
+import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
+import { awaitAdminDeletionArchive } from "../../utils/adminDeletionArchiveRun.js";
 import { cleanupEmployeeExpiryNotificationsByLabels } from "../../utils/cleanupEmployeeExpiryNotifications.js";
 import { PURGE_TYPES, purgeEmployeeOldDocuments } from "../../utils/purgeEmployeeOldDocuments.js";
 
@@ -17,7 +15,7 @@ export const deleteDrivingLicenseDetails = async (req, res) => {
         if (!employee) return res.status(404).json({ message: "Employee not found." });
 
         const card = await EmployeeDrivingLicense.findOne({ employeeId: employee.employeeId }).lean();
-        scheduleManagementAdminDeletionEmail(req, {
+        await awaitAdminDeletionArchive(req, {
             moduleName: "Employee Driving License",
             recordId: employee.employeeId,
             details: `Driving license for ${employee.employeeId}`,

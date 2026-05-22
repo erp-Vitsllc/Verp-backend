@@ -1,7 +1,193 @@
-import { PutObjectCommand, DeleteObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
+import { PutObjectCommand, DeleteObjectCommand, GetObjectCommand, HeadObjectCommand, CopyObjectCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import s3Client, { bucketName } from '../config/s3Client.js';
 import { randomUUID } from 'crypto';
+
+const S3_STORAGE_FOLDER_PREFIXES = [
+    'admin-deletion-archive',
+    'asset-documents',
+    'asset-invoices',
+    'asset-photos',
+    'asset-service-invoices',
+    'asset-service-attachments',
+    'employee-documents',
+    'employee-signatures',
+    'profile-pictures',
+    'signatures',
+    'rewards',
+    'fines',
+    'company-documents',
+];
+
+/**
+ * Resolve a DB value or signed URL to the underlying S3 object key.
+ * @param {string} keyOrUrl
+ * @returns {string|null}
+ */
+export function normalizeS3Key(keyOrUrl) {
+    if (!keyOrUrl || typeof keyOrUrl !== 'string') return null;
+    let key = keyOrUrl.trim();
+    if (!key || key.startsWith('data:')) return null;
+
+    if (key.startsWith('http')) {
+        for (const folder of S3_STORAGE_FOLDER_PREFIXES) {
+            const index = key.indexOf(folder);
+            if (index !== -1) {
+                key = decodeURIComponent(key.substring(index).split('?')[0]);
+                return key;
+            }
+        }
+        try {
+            const parsed = new URL(key);
+            const pathKey = decodeURIComponent(String(parsed.pathname || '').replace(/^\/+/, ''));
+            if (pathKey && !pathKey.includes(' ')) return pathKey;
+        } catch {
+            return null;
+        }
+        return null;
+    }
+
+    return key.replace(/^\/+/, '');
+}
+
+export async function s3ObjectExists(key) {
+    const normalized = normalizeS3Key(key);
+    if (!normalized) return false;
+    try {
+        await s3Client.send(
+            new HeadObjectCommand({
+                Bucket: bucketName,
+                Key: normalized,
+            })
+        );
+        return true;
+    } catch (error) {
+        if (error?.name === 'NotFound' || error?.$metadata?.httpStatusCode === 404) return false;
+        console.warn('[s3ObjectExists]', normalized, error?.message || error);
+        return false;
+    }
+}
+
+function sanitizeS3FileName(name, fallbackExt = 'pdf') {
+    const raw = String(name || '').trim();
+    let base = raw.replace(/[/\\?%*:|"<>]/g, '-').replace(/\s+/g, '-');
+    if (!base || base === 'Existing-file-—-click-to-replace') {
+        base = `file-${randomUUID()}.${fallbackExt}`;
+    }
+    if (!base.includes('.')) {
+        base = `${base}.${fallbackExt}`;
+    }
+    return base.slice(0, 180);
+}
+
+function inferMimeAndExtension(base64Data, fileName, resourceType) {
+    let contentType = 'application/octet-stream';
+    let extension = 'bin';
+
+    const typeMatch = String(base64Data || '').match(/^data:([\w/+.+-]+);base64,/i);
+    if (typeMatch) {
+        contentType = typeMatch[1];
+        if (contentType === 'application/pdf') extension = 'pdf';
+        else if (contentType === 'image/jpeg') extension = 'jpg';
+        else if (contentType === 'image/png') extension = 'png';
+        else {
+            const tail = contentType.split('/').pop() || '';
+            extension = tail.includes('.') ? tail.split('.').pop() : tail || 'bin';
+        }
+    } else if (fileName) {
+        const lowerName = String(fileName).toLowerCase();
+        if (lowerName.endsWith('.pdf')) {
+            contentType = 'application/pdf';
+            extension = 'pdf';
+        } else if (lowerName.endsWith('.jpg') || lowerName.endsWith('.jpeg')) {
+            contentType = 'image/jpeg';
+            extension = 'jpg';
+        } else if (lowerName.endsWith('.png')) {
+            contentType = 'image/png';
+            extension = 'png';
+        }
+    } else if (resourceType === 'image') {
+        contentType = 'image/jpeg';
+        extension = 'jpg';
+    } else if (resourceType === 'raw') {
+        contentType = 'application/pdf';
+        extension = 'pdf';
+    }
+
+    return { contentType, extension };
+}
+
+async function putObjectCompat(uploadParams) {
+    try {
+        await s3Client.send(new PutObjectCommand(uploadParams));
+    } catch (error) {
+        const msg = String(error?.message || '');
+        if (uploadParams.ACL && /ACL|AccessControlList|not supported/i.test(msg)) {
+            const { ACL, ...withoutAcl } = uploadParams;
+            await s3Client.send(new PutObjectCommand(withoutAcl));
+            return;
+        }
+        throw error;
+    }
+}
+
+export async function copyS3Object(sourceKey, destKey) {
+    const source = normalizeS3Key(sourceKey);
+    const dest = normalizeS3Key(destKey);
+    if (!source || !dest) throw new Error('Invalid S3 keys for copy.');
+    await s3Client.send(
+        new CopyObjectCommand({
+            Bucket: bucketName,
+            CopySource: `${bucketName}/${source}`,
+            Key: dest,
+        })
+    );
+    return dest;
+}
+
+async function streamToBuffer(body) {
+    if (!body) return Buffer.alloc(0);
+    if (Buffer.isBuffer(body)) return body;
+    if (typeof body.transformToByteArray === 'function') {
+        const bytes = await body.transformToByteArray();
+        return Buffer.from(bytes);
+    }
+    const chunks = [];
+    for await (const chunk of body) {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    }
+    return Buffer.concat(chunks);
+}
+
+/** Copy object into archive folder; falls back to download+upload if server-side copy fails. */
+export async function replicateS3ObjectToKey(sourceKey, destKey) {
+    const source = normalizeS3Key(sourceKey);
+    const dest = normalizeS3Key(destKey);
+    if (!source || !dest) throw new Error('Invalid S3 keys for replicate.');
+
+    if (await s3ObjectExists(source)) {
+        try {
+            await copyS3Object(source, dest);
+            return dest;
+        } catch (copyErr) {
+            console.warn('[replicateS3ObjectToKey] copy failed, trying get/put:', source, copyErr?.message || copyErr);
+        }
+        const response = await s3Client.send(
+            new GetObjectCommand({ Bucket: bucketName, Key: source })
+        );
+        const buffer = await streamToBuffer(response.Body);
+        if (!buffer.length) throw new Error('Source object is empty.');
+        await putObjectCompat({
+            Bucket: bucketName,
+            Key: dest,
+            Body: buffer,
+            ContentType: response.ContentType || 'application/octet-stream',
+        });
+        return dest;
+    }
+
+    throw new Error(`Source not found in storage: ${source}`);
+}
 
 /**
  * Upload document to IDrive e2 (S3 compatible)
@@ -13,61 +199,40 @@ import { randomUUID } from 'crypto';
  */
 export const uploadDocumentToS3 = async (base64Data, folder = 'employee-documents', fileName = null, resourceType = 'auto') => {
     try {
-        // Clean base64 string
-        const cleanBase64 = base64Data.replace(/^data:[\w/]+;base64,/, "");
-        const buffer = Buffer.from(cleanBase64, 'base64');
-
-        // Determine Content-Type and Extension
-        let contentType = 'application/octet-stream';
-        let extension = 'bin';
-
-        const typeMatch = base64Data.match(/^data:([\w/]+);base64,/);
-        if (typeMatch) {
-            contentType = typeMatch[1];
-            extension = contentType.split('/')[1];
-        } else if (fileName) {
-            // Fallback: Infer from filename extension
-            const lowerName = fileName.toLowerCase();
-            if (lowerName.endsWith('.pdf')) {
-                contentType = 'application/pdf';
-                extension = 'pdf';
-            } else if (lowerName.endsWith('.jpg') || lowerName.endsWith('.jpeg')) {
-                contentType = 'image/jpeg';
-                extension = 'jpg';
-            } else if (lowerName.endsWith('.png')) {
-                contentType = 'image/png';
-                extension = 'png';
-            }
-        } else {
-            // Further fallback based on resourceType
-            if (resourceType === 'image') {
-                contentType = 'image/jpeg';
-                extension = 'jpg';
-            }
+        if (!base64Data || typeof base64Data !== 'string') {
+            throw new Error('No file data provided.');
         }
 
-        // Handle specific extension clarity
-        if (contentType === 'application/pdf') extension = 'pdf';
-        if (contentType === 'image/jpeg') extension = 'jpg';
-        if (contentType === 'image/png') extension = 'png';
+        const { contentType, extension } = inferMimeAndExtension(base64Data, fileName, resourceType);
 
-        // Generate final filename
-        const finalFileName = fileName ? fileName : `${randomUUID()}.${extension}`;
+        // Clean base64 string (supports raw base64 or full data: URL)
+        const cleanBase64 = String(base64Data)
+            .replace(/^data:[\w/+.+-]+;base64,/i, '')
+            .replace(/\s/g, '');
+        if (!cleanBase64) {
+            throw new Error('File data is empty.');
+        }
 
-        // Ensure folder doesn't have leading/trailing slashes if it's not empty
-        const cleanFolder = folder.replace(/^\/+|\/+$/g, '');
+        const buffer = Buffer.from(cleanBase64, 'base64');
+        if (!buffer.length) {
+            throw new Error('File data is invalid or empty.');
+        }
+
+        const safeName = sanitizeS3FileName(fileName, extension);
+        const finalFileName = `${randomUUID()}-${safeName}`;
+
+        const cleanFolder = String(folder || '').replace(/^\/+|\/+$/g, '');
         const key = cleanFolder ? `${cleanFolder}/${finalFileName}` : finalFileName;
 
-        // Upload to S3
         const uploadParams = {
             Bucket: bucketName,
             Key: key,
             Body: buffer,
             ContentType: contentType,
-            ACL: 'private' // Secure: Private access only
+            ACL: 'private',
         };
 
-        await s3Client.send(new PutObjectCommand(uploadParams));
+        await putObjectCompat(uploadParams);
 
         // Generate a temporary signed URL for immediate display
         const signedUrl = await getSignedFileUrl(key);
@@ -96,49 +261,11 @@ export const getSignedFileUrl = async (key, expiresIn = 86400) => {
         if (!key) return null;
 
         // If key is already a full URL, try to extract the object key
-        if (typeof key === 'string' && key.startsWith('http')) {
-            // Check if it's our storage URL and extract the key part
-            // Match against common folders to find where the key starts
-            const folders = [
-                'asset-invoices',
-                'asset-photos',
-                'asset-service-invoices',
-                'asset-service-attachments',
-                'employee-documents',
-                'employee-signatures',
-                'profile-pictures',
-                'signatures',
-                'rewards',
-                'fines',
-                'company-documents'
-            ];
-            for (const folder of folders) {
-                const index = key.indexOf(folder);
-                if (index !== -1) {
-                    // Extract the key part (folder/filename) and strip query params
-                    const extractedKey = key.substring(index).split('?')[0];
-                    key = decodeURIComponent(extractedKey);
-                    console.log(`[S3Upload] Extracted and decoded key "${key}" from URL`);
-                    break;
-                }
-            }
-
-            // Fallback: parse any S3-compatible URL pathname as key.
-            if (typeof key === 'string' && key.startsWith('http')) {
-                try {
-                    const parsed = new URL(key);
-                    const pathKey = decodeURIComponent(String(parsed.pathname || '').replace(/^\/+/, ''));
-                    if (pathKey) {
-                        key = pathKey;
-                        console.log(`[S3Upload] Parsed key "${key}" from URL pathname`);
-                    }
-                } catch {
-                    // If URL parsing fails, keep old behavior.
-                }
-            }
-
-            // If we still have a URL (non-storage URL), return as-is.
-            if (typeof key === 'string' && key.startsWith('http')) return key;
+        const normalizedFromUrl = normalizeS3Key(key);
+        if (normalizedFromUrl) {
+            key = normalizedFromUrl;
+        } else if (typeof key === 'string' && key.startsWith('http')) {
+            return key;
         }
 
         // Handle base64 fallbacks (if any old data exists)
@@ -166,15 +293,16 @@ export const getSignedFileUrl = async (key, expiresIn = 86400) => {
  */
 export const deleteDocumentFromS3 = async (key) => {
     try {
-        if (!key) return;
+        const normalized = normalizeS3Key(key);
+        if (!normalized) return;
 
         const deleteParams = {
             Bucket: bucketName,
-            Key: key,
+            Key: normalized,
         };
 
         await s3Client.send(new DeleteObjectCommand(deleteParams));
-        console.log(`Successfully deleted ${key} from S3`);
+        console.log(`Successfully deleted ${normalized} from S3`);
     } catch (error) {
         console.error('Error deleting from S3:', error);
         // Don't throw for delete errors to avoid breaking main flows

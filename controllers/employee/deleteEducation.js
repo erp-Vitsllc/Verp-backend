@@ -1,10 +1,8 @@
 import EmployeeEducation from "../../models/EmployeeEducation.js";
 import { getCompleteEmployee } from "../../services/employeeService.js";
 
-import {
-    isReqUserAdmin,
-    scheduleManagementAdminDeletionEmail,
-} from "../../utils/sendAdminDeletionNotificationEmails.js";
+import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
+import { awaitAdminDeletionArchive } from "../../utils/adminDeletionArchiveRun.js";
 
 export const deleteEducation = async (req, res) => {
     const { id, educationId } = req.params;
@@ -40,7 +38,7 @@ export const deleteEducation = async (req, res) => {
         }
 
         const educationSnapshot = education.toObject ? education.toObject() : { ...education };
-        scheduleManagementAdminDeletionEmail(req, {
+        await awaitAdminDeletionArchive(req, {
             moduleName: "Employee Education",
             recordId: employeeId,
             details: educationSnapshot?.qualification || educationSnapshot?.institution || "Education record",

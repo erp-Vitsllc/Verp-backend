@@ -1,9 +1,7 @@
 import EmployeeMedicalInsurance from "../../models/EmployeeMedicalInsurance.js";
 import { resolveEmployeeId } from "../../services/employeeService.js";
-import {
-    isReqUserAdmin,
-    scheduleManagementAdminDeletionEmail,
-} from "../../utils/sendAdminDeletionNotificationEmails.js";
+import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
+import { awaitAdminDeletionArchive } from "../../utils/adminDeletionArchiveRun.js";
 import { cleanupEmployeeExpiryNotificationsByLabels } from "../../utils/cleanupEmployeeExpiryNotifications.js";
 import { PURGE_TYPES, purgeEmployeeOldDocuments } from "../../utils/purgeEmployeeOldDocuments.js";
 
@@ -17,7 +15,7 @@ export const deleteMedicalInsuranceDetails = async (req, res) => {
         if (!employee) return res.status(404).json({ message: "Employee not found." });
 
         const card = await EmployeeMedicalInsurance.findOne({ employeeId: employee.employeeId }).lean();
-        scheduleManagementAdminDeletionEmail(req, {
+        await awaitAdminDeletionArchive(req, {
             moduleName: "Employee Medical Insurance",
             recordId: employee.employeeId,
             details: `Medical insurance for ${employee.employeeId}`,

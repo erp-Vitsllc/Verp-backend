@@ -28,14 +28,15 @@ const parseMoneyInt = (v) => {
     return Number.isFinite(n) ? n : 0;
 };
 
-/** Sold: balance in hand = (loan + registration expense + other expense) − sold value. */
-const computeSoldBalanceInHand = ({ soldValue, currentLoanAmount, registrationExpense, otherExpense }) =>
-    Math.round(
+/** Sold: balance in hand = |(loan + registration expense + other expense) − sold value|. */
+const computeSoldBalanceInHand = ({ soldValue, currentLoanAmount, registrationExpense, otherExpense }) => {
+    const raw =
         parseMoneyInt(currentLoanAmount) +
-            parseMoneyInt(registrationExpense) +
-            parseMoneyInt(otherExpense) -
-            parseMoneyInt(soldValue),
-    );
+        parseMoneyInt(registrationExpense) +
+        parseMoneyInt(otherExpense) -
+        parseMoneyInt(soldValue);
+    return Math.abs(Math.round(raw));
+};
 
 const isFleetVehicleAsset = (asset) => {
     if (!asset) return false;

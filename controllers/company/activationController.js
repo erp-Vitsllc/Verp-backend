@@ -2,6 +2,7 @@ import Company from "../../models/Company.js";
 import DashboardAction from "../../models/DashboardAction.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { isRequestUserDesignatedFlowchartHr } from "../../utils/isDesignatedFlowchartHr.js";
+import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
 import { calculateCompanyActivationProgress, submitCompanyActivation } from "../../utils/companyActivation.js";
 import { syncDashboardAction } from "../../utils/syncDashboard.js";
 import { clearAllCompanyActivationDashboardRows } from "../../utils/clearCompanyActivationHoldDashboardRows.js";
@@ -76,10 +77,14 @@ const resolveCompanyActivationSubmitterEmployee = async (company, pendingDashboa
     return null;
 };
 
+const ACTIVATION_PROCESSOR_DENIED =
+    "Only designated Flowchart HR, system super user, or portal administrator can process company activation.";
+
 const canProcessCompanyActivation = async (req) => {
     if (await isRequestUserDesignatedFlowchartHr(req)) return true;
-    if (req.user?.isAdmin === true) return true;
-    if (/^admin$/i.test(String(req.user?.role || "").trim())) return true;
+    if (await isReqUserAdmin(req.user)) return true;
+    const groupOrRole = String(req.user?.groupName || req.user?.role || "").trim();
+    if (/^admin(istrator)?$/i.test(groupOrRole)) return true;
     return false;
 };
 
@@ -178,7 +183,7 @@ export const approveCompanyActivationRequest = async (req, res) => {
 
         if (!(await canProcessCompanyActivation(req))) {
             return res.status(403).json({
-                message: "Only the designated Flowchart HR or an administrator can approve company activation.",
+                message: ACTIVATION_PROCESSOR_DENIED,
             });
         }
 
@@ -296,7 +301,7 @@ export const holdCompanyActivationRequest = async (req, res) => {
 
         if (!(await canProcessCompanyActivation(req))) {
             return res.status(403).json({
-                message: "Only the designated Flowchart HR or an administrator can hold company activation.",
+                message: ACTIVATION_PROCESSOR_DENIED,
             });
         }
 
@@ -457,7 +462,7 @@ export const rejectCompanyActivationRequest = async (req, res) => {
 
         if (!(await canProcessCompanyActivation(req))) {
             return res.status(403).json({
-                message: "Only the designated Flowchart HR or an administrator can reject company activation.",
+                message: ACTIVATION_PROCESSOR_DENIED,
             });
         }
 

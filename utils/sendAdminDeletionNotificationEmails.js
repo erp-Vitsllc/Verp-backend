@@ -6,7 +6,12 @@ import Company from '../models/Company.js';
 import { sendAssignedEmployeeActionEmail } from './sendAssignedEmployeeActionEmail.js';
 import { isUserAdministrator } from '../services/permissionService.js';
 import { buildAdminDeletionEmailAttachments } from './buildAdminDeletionEmailAttachments.js';
+import {
+    buildAdminDeletionFieldsHtmlTable,
+    shouldShowDeletionFieldsInManagementEmail,
+} from './formatAdminDeletionPayloadForEmail.js';
 import { createAdminDeletionArchiveFromDeletion } from '../services/adminDeletionArchiveService.js';
+import { awaitAdminDeletionArchive } from './adminDeletionArchiveRun.js';
 
 function getFrontendRestoreBaseUrl() {
     const base =
@@ -195,14 +200,14 @@ export async function notifyAdminDeletedWholeAsset(req, asset) {
                 <p><strong>Performed by:</strong> ${performedBy}</p>
             </div>
         </div>`;
-    await emailAssetControllerHtml(subject, html, performedBy);
-
-    scheduleManagementAdminDeletionEmail(req, {
+    await awaitAdminDeletionArchive(req, {
         moduleName: 'Asset',
         recordId: assetId,
         details: `Asset ${assetName} permanently deleted`,
         deletedPayload: asset,
     });
+
+    await emailAssetControllerHtml(subject, html, performedBy);
 
     await notifyAssignedPartyForAdminDeletion(req, asset, {
         actionLabel: 'Asset deleted',
@@ -218,7 +223,7 @@ export async function notifyAdminRemovedAccessoriesFromAssignedAsset(req, asset,
     const assetName = asset.name || '—';
 
     if (req && removedAccessories?.length) {
-        scheduleManagementAdminDeletionEmail(req, {
+        await awaitAdminDeletionArchive(req, {
             moduleName: 'Asset Accessories',
             recordId: assetId,
             details: `Removed from ${assetName}: ${names}`,
@@ -257,7 +262,7 @@ export async function notifyAdminRemovedAccessoriesFromAssignedAsset(req, asset,
 
 export async function notifyAdminDeletedBusinessRecordToManagement(
     req,
-    { moduleName, recordId, details, deletedPayload, archiveId } = {}
+    { moduleName, recordId, details, deletedPayload, archiveId, preservedAttachments } = {}
 ) {
     try {
         const to = await getManagementNotificationEmail();
@@ -286,17 +291,32 @@ export async function notifyAdminDeletedBusinessRecordToManagement(
                     <p><strong>Record ID:</strong> ${recordId || '—'}</p>
                     <p><strong>Details:</strong> ${details || '—'}</p>
                     <p><strong>Performed by:</strong> ${performedBy}</p>
+                    <div id="mgmt-del-fields"></div>
                     <p id="mgmt-del-attach-note" style="font-size:12px;color:#64748b;"></p>
                     ${restoreBlock}
                 </div>
             </div>`;
         const attachments =
-            deletedPayload != null ? await buildAdminDeletionEmailAttachments(deletedPayload) : [];
+            deletedPayload != null || preservedAttachments?.length
+                ? await buildAdminDeletionEmailAttachments(deletedPayload, preservedAttachments)
+                : [];
+        const showFieldDetails = shouldShowDeletionFieldsInManagementEmail({
+            moduleName,
+            deletedPayload,
+        });
+        const fieldsBlock =
+            showFieldDetails && deletedPayload != null
+                ? buildAdminDeletionFieldsHtmlTable(deletedPayload)
+                : '';
+        const listDeleteNote = !showFieldDetails
+            ? `<p style="font-size:13px;color:#64748b;margin-top:12px;">Full record data and attachments are available under <strong>Deleted Records</strong> in Settings.</p>`
+            : '';
         const attachLine =
             attachments.length > 0
-                ? `<p style="font-size:12px;color:#64748b;">Uploaded file(s) from this record are attached (${attachments.length}).</p>`
+                ? `<p style="font-size:12px;color:#64748b;">Uploaded file(s) are attached to this email (${attachments.length}).</p>`
                 : '';
-        const htmlFinal = html.replace(
+        let htmlFinal = html.replace('<div id="mgmt-del-fields"></div>', fieldsBlock + listDeleteNote);
+        htmlFinal = htmlFinal.replace(
             '<p id="mgmt-del-attach-note" style="font-size:12px;color:#64748b;"></p>',
             attachLine
         );
@@ -308,15 +328,27 @@ export async function notifyAdminDeletedBusinessRecordToManagement(
     }
 }
 
-export function scheduleManagementAdminDeletionEmail(req, opts) {
-    void (async () => {
-        let archiveId = null;
-        try {
-            const archive = await createAdminDeletionArchiveFromDeletion(req, opts);
-            archiveId = archive?._id?.toString?.() || String(archive?._id || '');
-        } catch (e) {
-            console.error('[scheduleManagementAdminDeletionEmail] archive:', e?.message || e);
-        }
+/** Create recovery archive, preserve files, and email management (awaitable). */
+export async function runManagementAdminDeletionArchive(req, opts) {
+    let archiveId = null;
+    try {
+        const archive = await createAdminDeletionArchiveFromDeletion(req, opts);
+        archiveId = archive?._id?.toString?.() || String(archive?._id || '');
+        await notifyAdminDeletedBusinessRecordToManagement(req, {
+            ...opts,
+            archiveId,
+            preservedAttachments: archive?.preservedAttachments,
+        });
+        return archive;
+    } catch (e) {
+        console.error('[runManagementAdminDeletionArchive] archive:', e?.message || e);
         await notifyAdminDeletedBusinessRecordToManagement(req, { ...opts, archiveId });
-    })().catch((e) => console.error('[scheduleManagementAdminDeletionEmail]', e?.message || e));
+        return null;
+    }
+}
+
+export function scheduleManagementAdminDeletionEmail(req, opts) {
+    void runManagementAdminDeletionArchive(req, opts).catch((e) =>
+        console.error('[scheduleManagementAdminDeletionEmail]', e?.message || e)
+    );
 }

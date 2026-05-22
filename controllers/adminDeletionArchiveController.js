@@ -5,6 +5,7 @@ import {
     getArchiveById,
     restoreArchiveById,
     purgeArchiveById,
+    getArchiveAttachmentsForView,
     ADMIN_DELETION_ARCHIVE_RETENTION_DAYS,
 } from '../services/adminDeletionArchiveService.js';
 import { canAccessAdminRestore } from '../utils/adminRestoreAccess.js';
@@ -62,6 +63,17 @@ export const getAdminDeletionArchiveItems = async (req, res) => {
     } catch (error) {
         console.error('[getAdminDeletionArchiveItems]', error);
         return res.status(500).json({ message: 'Failed to load items.' });
+    }
+};
+
+export const getAdminDeletionArchiveAttachments = async (req, res) => {
+    try {
+        if (!(await ensureRestoreAccess(req, res))) return;
+        const attachments = await getArchiveAttachmentsForView(req.params.id);
+        return res.json({ attachments });
+    } catch (error) {
+        console.error('[getAdminDeletionArchiveAttachments]', error);
+        return res.status(400).json({ message: error.message || 'Failed to load attachments.' });
     }
 };
 

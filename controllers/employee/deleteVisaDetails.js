@@ -2,10 +2,8 @@ import EmployeeVisa from "../../models/EmployeeVisa.js";
 import { resolveEmployeeId } from "../../services/employeeService.js";
 import { deleteDocumentFromS3 } from "../../utils/s3Upload.js";
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
-import {
-    isReqUserAdmin,
-    scheduleManagementAdminDeletionEmail,
-} from "../../utils/sendAdminDeletionNotificationEmails.js";
+import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
+import { awaitAdminDeletionArchive } from "../../utils/adminDeletionArchiveRun.js";
 import { cleanupEmployeeExpiryNotificationsByLabels } from "../../utils/cleanupEmployeeExpiryNotifications.js";
 import { PURGE_TYPES, purgeEmployeeOldDocuments } from "../../utils/purgeEmployeeOldDocuments.js";
 
@@ -33,7 +31,7 @@ export const deleteVisaDetails = async (req, res) => {
         // Find existing record to delete document from S3 if exists
         const existingVisa = await EmployeeVisa.findOne({ employeeId }).lean();
         if (existingVisa?.[type]) {
-            scheduleManagementAdminDeletionEmail(req, {
+            await awaitAdminDeletionArchive(req, {
                 moduleName: `Employee Visa (${type})`,
                 recordId: employeeId,
                 details: `Visa type ${type} for ${employeeId}`,

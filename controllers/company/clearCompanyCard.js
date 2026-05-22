@@ -1,9 +1,8 @@
 import mongoose from "mongoose";
 import Company from "../../models/Company.js";
-import {
-    isReqUserAdmin,
-    scheduleManagementAdminDeletionEmail,
-} from "../../utils/sendAdminDeletionNotificationEmails.js";
+import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
+import { buildAttachmentKeysMap } from "../../utils/listDeletionAttachmentRefs.js";
+import { awaitAdminDeletionArchive } from "../../utils/adminDeletionArchiveRun.js";
 
 const CARD_FIELD_MAP = {
     tradeLicense: [
@@ -51,7 +50,7 @@ export const clearCompanyCard = async (req, res) => {
             return acc;
         }, {});
 
-        scheduleManagementAdminDeletionEmail(req, {
+        await awaitAdminDeletionArchive(req, {
             moduleName: `Company ${card}`,
             recordId: companyBefore.companyId || String(companyBefore._id),
             details: `${card} card cleared for ${companyBefore.name || companyBefore.companyId}`,
@@ -60,6 +59,7 @@ export const clearCompanyCard = async (req, res) => {
                 companyName: companyBefore.name,
                 card,
                 fields: snapshot,
+                attachmentKeys: buildAttachmentKeysMap(snapshot),
             },
         });
 

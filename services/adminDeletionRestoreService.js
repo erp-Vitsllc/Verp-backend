@@ -25,6 +25,7 @@ import EmployeeSalary from '../models/EmployeeSalary.js';
 import EmployeeContact from '../models/EmployeeContact.js';
 import EmployeePersonal from '../models/EmployeePersonal.js';
 import EmployeeBank from '../models/EmployeeBank.js';
+import { normalizeS3Key } from '../utils/s3Upload.js';
 
 function stripMongoDoc(doc) {
     if (!doc || typeof doc !== 'object') return doc;
@@ -46,6 +47,156 @@ async function restoreMongoByUnique(Model, snapshot, uniqueField) {
     return Model.create(data);
 }
 
+function ownerIdentityKey(owner) {
+    const name = String(owner?.name || '').trim().toLowerCase();
+    const passportNo = String(owner?.passport?.number || '').trim().toLowerCase();
+    const email = String(owner?.email || '').trim().toLowerCase();
+    return `${name}|${passportNo}|${email}`;
+}
+
+function resolveOwnerDocumentForRestore(document, preservedAttachments = []) {
+    const doc = stripMongoDoc(document);
+    if (!doc || typeof doc !== 'object') return doc;
+
+    if (doc.attachmentStorageKey) {
+        doc.attachment = doc.attachmentStorageKey;
+        delete doc.attachmentStorageKey;
+        return doc;
+    }
+
+    const preserved = (preservedAttachments || []).find((p) => !p.unavailable && p.storageKey);
+    if (preserved?.storageKey) {
+        doc.attachment = preserved.storageKey;
+        return doc;
+    }
+
+    if (typeof doc.attachment === 'string' && doc.attachment.trim()) {
+        const key = normalizeS3Key(doc.attachment);
+        if (key) doc.attachment = key;
+    }
+    return doc;
+}
+
+function findOwnerIndex(owners, { ownerId, ownerName, owner }) {
+    const list = Array.isArray(owners) ? owners : [];
+    const idCandidates = [
+        ownerId,
+        owner?._id,
+        owner?.id,
+    ].filter((v) => v != null && String(v).trim());
+    for (const id of idCandidates) {
+        const idx = list.findIndex((o) => String(o?._id || o?.id) === String(id));
+        if (idx >= 0) return idx;
+    }
+    const nameKey = ownerName || owner?.name;
+    if (nameKey) {
+        const nk = String(nameKey).trim().toLowerCase();
+        const nameMatches = list
+            .map((o, i) => ({ i, n: String(o?.name || '').trim().toLowerCase() }))
+            .filter((x) => x.n && x.n === nk);
+        if (nameMatches.length === 1) return nameMatches[0].i;
+    }
+    const identity = ownerIdentityKey(owner || { name: nameKey });
+    if (identity && identity !== '||') {
+        const keyMatches = list
+            .map((o, i) => ({ i, k: ownerIdentityKey(o) }))
+            .filter((x) => x.k === identity);
+        if (keyMatches.length === 1) return keyMatches[0].i;
+    }
+    return -1;
+}
+
+function mergeOwnerSubdocument(existingRow, docKey, doc) {
+    const row = existingRow.toObject ? existingRow.toObject() : { ...existingRow };
+    if (docKey === 'attachment') {
+        row.attachment = doc?.attachment ?? doc;
+        return row;
+    }
+    const prev = row[docKey] && typeof row[docKey] === 'object' ? row[docKey] : {};
+    row[docKey] = { ...prev, ...doc };
+    return row;
+}
+
+function mergeFullOwners(existing, incoming) {
+    const row = existing?.toObject ? existing.toObject() : { ...existing };
+    const add = incoming?.toObject ? incoming.toObject() : { ...incoming };
+    for (const k of ['email', 'phone', 'nationality', 'sharePercentage', 'attachment']) {
+        if ((row[k] == null || row[k] === '') && add[k] != null && add[k] !== '') {
+            row[k] = add[k];
+        }
+    }
+    for (const docKey of [
+        'passport',
+        'visa',
+        'emiratesId',
+        'medical',
+        'drivingLicense',
+        'labourCard',
+    ]) {
+        if (!add[docKey]) continue;
+        row[docKey] = row[docKey]
+            ? mergeOwnerSubdocument({ [docKey]: row[docKey] }, docKey, add[docKey])[docKey]
+            : add[docKey];
+    }
+    return row;
+}
+
+/** Collapse duplicate owner tabs (same name) after a mistaken double-restore. */
+function dedupeCompanyOwnersList(owners) {
+    if (!Array.isArray(owners)) return owners;
+    const result = [];
+    for (const o of owners) {
+        const name = String(o?.name || '').trim().toLowerCase();
+        if (!name) {
+            result.push(o);
+            continue;
+        }
+        const existingIdx = result.findIndex(
+            (r) => String(r?.name || '').trim().toLowerCase() === name
+        );
+        if (existingIdx < 0) {
+            result.push(o);
+            continue;
+        }
+        result[existingIdx] = mergeFullOwners(result[existingIdx], o);
+    }
+    return result;
+}
+
+function resolveCompanyNestedDocumentItem(item, preservedAttachments = []) {
+    const row = stripMongoDoc(item);
+    if (!row || typeof row !== 'object') return row;
+    if (!row.document || typeof row.document !== 'object') return row;
+
+    const doc = { ...row.document };
+    const preserved = (preservedAttachments || []).find((p) => !p.unavailable && p.storageKey);
+    if (preserved?.storageKey) {
+        doc.url = preserved.storageKey;
+    } else if (typeof doc.url === 'string' && doc.url.trim()) {
+        const key = normalizeS3Key(doc.url);
+        if (key) doc.url = key;
+    }
+    return { ...row, document: doc };
+}
+
+async function restoreCompanyOwnerDocumentCard(company, snapshot, preservedAttachments = []) {
+    const { ownerTarget, ownerId, ownerName, docKey, document } = snapshot || {};
+    if (!docKey || !document) throw new Error('Missing owner document snapshot.');
+    const field = ownerTarget === 'oldOwners' ? 'oldOwners' : 'owners';
+    const owners = [...(company[field] || [])];
+    const idx = findOwnerIndex(owners, { ownerId, ownerName });
+    if (idx < 0) {
+        throw new Error('Owner not found on this company. Restore or add the owner before restoring this document.');
+    }
+
+    const doc = resolveOwnerDocumentForRestore(document, preservedAttachments);
+    owners[idx] = mergeOwnerSubdocument(owners[idx], docKey, doc);
+    company[field] = dedupeCompanyOwnersList(owners);
+    company.markModified(field);
+    await company.save();
+    return company;
+}
+
 const COMPANY_CARD_FIELDS = {
     tradeLicense: [
         'tradeLicenseNumber',
@@ -65,6 +216,7 @@ const COMPANY_CARD_FIELDS = {
 export async function restoreArchivedRecord(archive) {
     const type = archive.restoreDescriptor?.type || archive.entityType;
     const snapshot = archive.snapshot;
+    const preservedAttachments = archive.preservedAttachments || [];
 
     switch (type) {
         case 'fine':
@@ -91,7 +243,27 @@ export async function restoreArchivedRecord(archive) {
             const company = await Company.findOne({ companyId });
             if (!company) throw new Error('Company not found. Restore the company first if needed.');
             company.documents = company.documents || [];
-            company.documents.push(document);
+            company.documents.push(
+                resolveCompanyNestedDocumentItem(document, preservedAttachments)
+            );
+            await company.save();
+            return company;
+        }
+
+        case 'company_array_field': {
+            const { companyId, field, item } = snapshot || {};
+            if (!companyId || !field || !item) {
+                throw new Error('Missing company ejari/insurance snapshot.');
+            }
+            const allowed = new Set(['ejari', 'insurance']);
+            if (!allowed.has(String(field))) {
+                throw new Error('Unknown company array field.');
+            }
+            const company = await Company.findOne({ companyId });
+            if (!company) throw new Error('Company not found.');
+            company[field] = company[field] || [];
+            company[field].push(resolveCompanyNestedDocumentItem(item, preservedAttachments));
+            company.markModified(field);
             await company.save();
             return company;
         }
@@ -107,14 +279,61 @@ export async function restoreArchivedRecord(archive) {
             return company;
         }
 
-        case 'company_owner': {
-            const { companyId, owner, ownerTarget } = snapshot || {};
-            if (!companyId || !owner) throw new Error('Missing owner snapshot.');
+        case 'company_owner_document': {
+            const { companyId } = snapshot || {};
+            if (!companyId) throw new Error('Missing company ID.');
             const company = await Company.findOne({ companyId });
             if (!company) throw new Error('Company not found.');
-            const field = ownerTarget === 'owners' ? 'owners' : 'oldOwners';
-            company[field] = company[field] || [];
-            company[field].push(owner);
+            return restoreCompanyOwnerDocumentCard(company, snapshot, preservedAttachments);
+        }
+
+        case 'company_owner': {
+            const { companyId, owner, ownerTarget, docKey, document, ownerId, ownerName } = snapshot || {};
+            if (!companyId) throw new Error('Missing company ID.');
+            const company = await Company.findOne({ companyId });
+            if (!company) throw new Error('Company not found.');
+
+            if (docKey && document) {
+                return restoreCompanyOwnerDocumentCard(company, snapshot, preservedAttachments);
+            }
+
+            if (!owner) throw new Error('Missing owner snapshot.');
+            const field = ownerTarget === 'oldOwners' ? 'oldOwners' : 'owners';
+            const owners = [...(company[field] || [])];
+            const ownerPlain = stripMongoDoc(owner);
+            const idx = findOwnerIndex(owners, {
+                ownerId: snapshot.ownerId,
+                ownerName: snapshot.ownerName || ownerPlain.name,
+                owner,
+            });
+            if (idx >= 0) {
+                const existing = owners[idx].toObject ? owners[idx].toObject() : { ...owners[idx] };
+                const merged = { ...existing, ...ownerPlain, _id: existing._id };
+                for (const docField of [
+                    'passport',
+                    'visa',
+                    'emiratesId',
+                    'medical',
+                    'drivingLicense',
+                    'labourCard',
+                ]) {
+                    if (ownerPlain[docField] && typeof ownerPlain[docField] === 'object') {
+                        merged[docField] = mergeOwnerSubdocument(
+                            { [docField]: merged[docField] },
+                            docField,
+                            ownerPlain[docField]
+                        )[docField];
+                    }
+                }
+                if (ownerPlain.attachment !== undefined) {
+                    merged.attachment = ownerPlain.attachment;
+                }
+                owners[idx] = merged;
+            } else {
+                owners.push(ownerPlain);
+            }
+            company[field] = dedupeCompanyOwnersList(owners);
+            company.markModified(field);
             await company.save();
             return company;
         }

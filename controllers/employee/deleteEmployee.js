@@ -15,10 +15,8 @@ import EmployeeEducation from "../../models/EmployeeEducation.js";
 import EmployeeExperience from "../../models/EmployeeExperience.js";
 import EmployeeEmergencyContact from "../../models/EmployeeEmergencyContact.js";
 import EmployeeTraining from "../../models/EmployeeTraining.js";
-import {
-    isReqUserAdmin,
-    scheduleManagementAdminDeletionEmail,
-} from "../../utils/sendAdminDeletionNotificationEmails.js";
+import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
+import { awaitAdminDeletionArchive } from "../../utils/adminDeletionArchiveRun.js";
 
 // Delete employee
 export const deleteEmployee = async (req, res) => {
@@ -119,7 +117,8 @@ export const deleteEmployee = async (req, res) => {
             EmployeeEmergencyContact.findOne({ employeeId }).lean(),
             EmployeeTraining.findOne({ employeeId }).lean(),
         ]);
-        scheduleManagementAdminDeletionEmail(req, {
+        // Archive + copy attachments before Mongo rows are removed (async email ran too late before).
+        await awaitAdminDeletionArchive(req, {
             moduleName: "Employee",
             recordId: employeeId,
             details: `${employee.firstName || ""} ${employee.lastName || ""}`.trim() || employeeId,
@@ -145,7 +144,6 @@ export const deleteEmployee = async (req, res) => {
             },
         });
 
-        // Delete from all collections
         await deleteEmployeeData(employeeId);
 
         return res.status(200).json({

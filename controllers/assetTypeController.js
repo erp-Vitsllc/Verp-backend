@@ -28,8 +28,8 @@ import {
     notifyAdminDeletedWholeAsset,
     notifyAdminRemovedAccessoriesFromAssignedAsset,
     getAssetControllerNotificationEmail,
-    scheduleManagementAdminDeletionEmail,
 } from '../utils/sendAdminDeletionNotificationEmails.js';
+import { awaitAdminDeletionArchive } from '../utils/adminDeletionArchiveRun.js';
 import {
     syncAllAccessoryInstancesForAsset,
     markCatalogInstancesDetachedFromAsset
@@ -767,7 +767,7 @@ export const deleteAssetType = async (req, res) => {
             const categoryName = category.name;
             const performedBy = req.user?.name || req.user?.employeeId || 'Administrator';
             const categorySnapshot = category.toObject ? category.toObject() : category;
-            scheduleManagementAdminDeletionEmail(req, {
+            await awaitAdminDeletionArchive(req, {
                 moduleName: 'Asset Category',
                 recordId: categoryName,
                 details: `Asset category deleted`,
@@ -796,7 +796,7 @@ export const deleteAssetType = async (req, res) => {
             const typeName = assetType.name;
             const performedBy = req.user?.name || req.user?.employeeId || 'Administrator';
             const typeSnapshot = assetType.toObject ? assetType.toObject() : assetType;
-            scheduleManagementAdminDeletionEmail(req, {
+            await awaitAdminDeletionArchive(req, {
                 moduleName: 'Asset Type',
                 recordId: typeName,
                 details: `Asset type deleted`,
@@ -820,10 +820,14 @@ export const deleteAssetType = async (req, res) => {
             const isCreator = item.createdBy?.toString() === currentUserId;
             const isEditableDraft = item.status === 'Draft' && !item.actionRequiredBy;
 
-            if (Array.isArray(item.accessories) && item.accessories.length > 0) {
+            const {
+                shouldBlockAssetDeleteBecauseOfAccessories,
+                accessoryDeleteBlockMessage,
+            } = await import('../utils/assetDeleteAccessoriesRule.js');
+            if (shouldBlockAssetDeleteBecauseOfAccessories(item, { isAdmin })) {
                 return res.status(400).json({
-                    message: 'Administrator cannot delete the asset while accessories are attached. Delete accessories first.',
-                    accessoriesCount: item.accessories.length
+                    message: accessoryDeleteBlockMessage(item),
+                    accessoriesCount: item.accessories.length,
                 });
             }
 
@@ -855,9 +859,7 @@ export const deleteAssetType = async (req, res) => {
                     .populate('assignedCompany', 'name nickName companyId')
                     .lean();
                 if (itemForEmail) {
-                    void notifyAdminDeletedWholeAsset(req, itemForEmail).catch((e) =>
-                        console.error('[notify asset delete]', e?.message || e)
-                    );
+                    await notifyAdminDeletedWholeAsset(req, itemForEmail);
                 }
             }
 

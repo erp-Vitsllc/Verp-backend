@@ -1,9 +1,7 @@
 import Company from "../../models/Company.js";
 import mongoose from "mongoose";
-import {
-    isReqUserAdmin,
-    scheduleManagementAdminDeletionEmail,
-} from "../../utils/sendAdminDeletionNotificationEmails.js";
+import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
+import { awaitAdminDeletionArchive } from "../../utils/adminDeletionArchiveRun.js";
 
 // @desc    Delete a document from company's oldDocuments list (Archive)
 // @route   DELETE /api/Company/:id/old-document/:target
@@ -37,7 +35,7 @@ export const deleteOldDocument = async (req, res) => {
             }
         }
         if (deletedDoc) {
-            scheduleManagementAdminDeletionEmail(req, {
+            await awaitAdminDeletionArchive(req, {
                 moduleName: "Company Old Document",
                 recordId: company.companyId || String(company._id),
                 details: (deletedDoc?.type || "Archived company document").toString(),

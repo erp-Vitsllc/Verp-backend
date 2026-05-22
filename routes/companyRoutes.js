@@ -14,6 +14,7 @@ import { uploadCompanyDocument } from "../controllers/company/uploadCompanyDocum
 import { deleteCompany } from "../controllers/company/deleteCompany.js";
 import { deleteDocument } from "../controllers/company/deleteDocument.js";
 import { clearCompanyCard } from "../controllers/company/clearCompanyCard.js";
+import { deleteCompanyArrayItem } from "../controllers/company/deleteCompanyArrayItem.js";
 import { deleteOldDocument } from "../controllers/company/deleteOldDocument.js";
 import { deleteOldOwner } from "../controllers/company/deleteOldOwner.js";
 import { respondToResponsibility } from "../controllers/company/respondToResponsibility.js";
@@ -44,6 +45,7 @@ router.post("/:id/reject-activation", rejectCompanyActivationRequest);
 router.put("/:id/respond-responsibility", respondToResponsibility);
 router.post("/:id/upload", uploadCompanyDocument);
 router.delete("/:id/document/:target", deleteDocument);
+router.delete("/:id/array-field/:field/:target", deleteCompanyArrayItem);
 router.delete("/:id/card/:card", clearCompanyCard);
 router.delete("/:id/old-document/:target", deleteOldDocument);
 router.delete("/:id/old-owner/:target", deleteOldOwner);

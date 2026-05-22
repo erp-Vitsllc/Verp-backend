@@ -1,10 +1,8 @@
 import EmployeeExperience from "../../models/EmployeeExperience.js";
 import { getCompleteEmployee } from "../../services/employeeService.js";
 
-import {
-    isReqUserAdmin,
-    scheduleManagementAdminDeletionEmail,
-} from "../../utils/sendAdminDeletionNotificationEmails.js";
+import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
+import { awaitAdminDeletionArchive } from "../../utils/adminDeletionArchiveRun.js";
 
 export const deleteExperience = async (req, res) => {
     const { id, experienceId } = req.params;
@@ -40,7 +38,7 @@ export const deleteExperience = async (req, res) => {
         }
 
         const experienceSnapshot = experience.toObject ? experience.toObject() : { ...experience };
-        scheduleManagementAdminDeletionEmail(req, {
+        await awaitAdminDeletionArchive(req, {
             moduleName: "Employee Experience",
             recordId: employeeId,
             details: experienceSnapshot?.companyName || experienceSnapshot?.designation || "Experience record",

@@ -16,51 +16,63 @@ import {
     stripProposedDataKeysFromPendingReactivationEntries,
 } from "../../utils/companyActivation.js";
 import { markCompanyActivationHoldResolvedForUpdate } from "../../utils/markCompanyActivationHoldResolved.js";
+import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
+import { awaitAdminDeletionArchive } from "../../utils/adminDeletionArchiveRun.js";
 import {
-    isReqUserAdmin,
-    scheduleManagementAdminDeletionEmail,
-} from "../../utils/sendAdminDeletionNotificationEmails.js";
+    archiveAdminOwnerDocCardDeletion,
+    stripOwnerDocFromPendingReactivation,
+    ownerDocUnsetPath,
+} from "../../utils/companyOwnerDocDeletion.js";
 
-function scheduleAdminCompanyPullArchives(
+async function awaitAdminCompanyPullArchives(
     req,
     company,
     { pullDocumentsByIds = [], pullOldDocumentsByIds = [], pullOwnersByIds = [] } = {}
 ) {
     const companyId = company.companyId;
     const companyName = company.name || companyId;
+    const tasks = [];
 
     for (const oid of pullDocumentsByIds) {
         const document = (company.documents || []).find((d) => String(d._id) === String(oid));
         if (!document) continue;
-        scheduleManagementAdminDeletionEmail(req, {
-            moduleName: 'Company Document',
-            recordId: companyId,
-            details: `${document.type || 'Document'} removed from ${companyName}`,
-            deletedPayload: { companyId, companyName, document },
-        });
+        tasks.push(
+            awaitAdminDeletionArchive(req, {
+                moduleName: 'Company Document',
+                recordId: companyId,
+                details: `${document.type || 'Document'} removed from ${companyName}`,
+                deletedPayload: { companyId, companyName, document },
+            })
+        );
     }
 
     for (const oid of pullOldDocumentsByIds) {
         const document = (company.oldDocuments || []).find((d) => String(d._id) === String(oid));
         if (!document) continue;
-        scheduleManagementAdminDeletionEmail(req, {
-            moduleName: 'Company Old Document',
-            recordId: companyId,
-            details: `${document.type || 'Archived document'} removed from ${companyName}`,
-            deletedPayload: { companyId, companyName, document },
-        });
+        tasks.push(
+            awaitAdminDeletionArchive(req, {
+                moduleName: 'Company Old Document',
+                recordId: companyId,
+                details: `${document.type || 'Archived document'} removed from ${companyName}`,
+                deletedPayload: { companyId, companyName, document },
+            })
+        );
     }
 
     for (const oid of pullOwnersByIds) {
         const owner = (company.owners || []).find((o) => String(o._id) === String(oid));
         if (!owner) continue;
-        scheduleManagementAdminDeletionEmail(req, {
-            moduleName: 'Company Owner',
-            recordId: companyId,
-            details: `Owner removed from ${companyName}`,
-            deletedPayload: { companyId, companyName, owner, ownerTarget: 'owners' },
-        });
+        tasks.push(
+            awaitAdminDeletionArchive(req, {
+                moduleName: 'Company Owner',
+                recordId: companyId,
+                details: `Owner removed from ${companyName}`,
+                deletedPayload: { companyId, companyName, owner, ownerTarget: 'owners' },
+            })
+        );
     }
+
+    await Promise.all(tasks);
 }
 
 const shouldQueueCompanyChange = (company = {}) => {
@@ -544,7 +556,7 @@ export const updateCompany = async (req, res) => {
             }
             if (pullDocumentsByIds.length || pullOldDocumentsByIds.length || pullOwnersByIds.length) {
                 if (requesterIsAdmin) {
-                    scheduleAdminCompanyPullArchives(req, beforeCompany, {
+                    await awaitAdminCompanyPullArchives(req, beforeCompany, {
                         pullDocumentsByIds,
                         pullOldDocumentsByIds,
                         pullOwnersByIds,
@@ -573,18 +585,40 @@ export const updateCompany = async (req, res) => {
                     mongoArrayFilters.push({ "d._id": retireLiveDocumentOid });
                 }
             }
+            if (requesterIsAdmin && (clearOldOwnerDocCard || clearLiveOwnerDocCard)) {
+                const clearSpec = clearLiveOwnerDocCard || clearOldOwnerDocCard;
+                const ownerTarget = clearLiveOwnerDocCard ? 'owners' : 'oldOwners';
+                const ownerList = clearLiveOwnerDocCard ? beforeCompany.owners : beforeCompany.oldOwners;
+                const ownerRow = (ownerList || []).find(
+                    (o) => String(o?._id || o?.id) === String(clearSpec.ownerId)
+                );
+                if (ownerRow) {
+                    await archiveAdminOwnerDocCardDeletion(
+                        req,
+                        beforeCompany,
+                        ownerRow,
+                        clearSpec.docKey,
+                        ownerTarget
+                    );
+                }
+                const stripped = stripOwnerDocFromPendingReactivation(
+                    beforeCompany.pendingReactivationChanges || [],
+                    clearSpec.ownerId,
+                    clearSpec.docKey
+                );
+                if (stripped !== beforeCompany.pendingReactivationChanges) {
+                    if (!updateOps.$set) updateOps.$set = {};
+                    updateOps.$set.pendingReactivationChanges = stripped;
+                }
+            }
             if (clearOldOwnerDocCard) {
-                if (!updateOps.$set) updateOps.$set = {};
-                const k = clearOldOwnerDocCard.docKey;
-                const path = k === "attachment" ? "oldOwners.$[o].attachment" : `oldOwners.$[o].${k}`;
-                updateOps.$set[path] = null;
+                if (!updateOps.$unset) updateOps.$unset = {};
+                updateOps.$unset[ownerDocUnsetPath('oldOwners', clearOldOwnerDocCard.docKey)] = 1;
                 mongoArrayFilters.push({ "o._id": clearOldOwnerDocCard.ownerId });
             }
             if (clearLiveOwnerDocCard) {
-                if (!updateOps.$set) updateOps.$set = {};
-                const k = clearLiveOwnerDocCard.docKey;
-                const path = k === "attachment" ? "owners.$[live].attachment" : `owners.$[live].${k}`;
-                updateOps.$set[path] = null;
+                if (!updateOps.$unset) updateOps.$unset = {};
+                updateOps.$unset[ownerDocUnsetPath('owners', clearLiveOwnerDocCard.docKey)] = 1;
                 mongoArrayFilters.push({ "live._id": clearLiveOwnerDocCard.ownerId });
             }
             if (ownerArchives.length) {

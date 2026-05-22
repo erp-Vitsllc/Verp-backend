@@ -1,8 +1,6 @@
 import Fine from "../../models/Fine.js";
-import {
-    isReqUserAdmin,
-    scheduleManagementAdminDeletionEmail,
-} from "../../utils/sendAdminDeletionNotificationEmails.js";
+import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
+import { awaitAdminDeletionArchive } from "../../utils/adminDeletionArchiveRun.js";
 
 export const deleteFine = async (req, res) => {
     try {
@@ -19,7 +17,7 @@ export const deleteFine = async (req, res) => {
         }
 
         const fineSnapshot = fine.toObject ? fine.toObject() : fine;
-        scheduleManagementAdminDeletionEmail(req, {
+        await awaitAdminDeletionArchive(req, {
             moduleName: 'Fine',
             recordId: fine.fineId || fine._id?.toString?.(),
             details: fine.description || fine.fineType || 'Fine transaction',

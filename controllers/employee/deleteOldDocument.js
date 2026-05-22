@@ -1,9 +1,7 @@
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeService.js";
-import {
-    isReqUserAdmin,
-    scheduleManagementAdminDeletionEmail,
-} from "../../utils/sendAdminDeletionNotificationEmails.js";
+import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
+import { awaitAdminDeletionArchive } from "../../utils/adminDeletionArchiveRun.js";
 
 // @desc    Delete a document from employee's oldDocuments list (Archive)
 // @route   DELETE /api/Employee/:id/old-document/:target
@@ -50,7 +48,7 @@ export const deleteOldDocument = async (req, res) => {
         }
 
         const archivedDoc = employee.oldDocuments[docIndex];
-        scheduleManagementAdminDeletionEmail(req, {
+        await awaitAdminDeletionArchive(req, {
             moduleName: "Employee Old Document",
             recordId: employee.employeeId,
             details: (archivedDoc?.type || "Archived document").toString(),

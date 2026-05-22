@@ -1,9 +1,7 @@
 import mongoose from "mongoose";
 import Company from "../../models/Company.js";
-import {
-    isReqUserAdmin,
-    scheduleManagementAdminDeletionEmail,
-} from "../../utils/sendAdminDeletionNotificationEmails.js";
+import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
+import { awaitAdminDeletionArchive } from "../../utils/adminDeletionArchiveRun.js";
 
 const buildCompanyFilter = (id) => ({
     $or: [
@@ -42,7 +40,7 @@ export const deleteDocument = async (req, res) => {
             return res.status(400).json({ message: "Invalid document target." });
         }
 
-        scheduleManagementAdminDeletionEmail(req, {
+        await awaitAdminDeletionArchive(req, {
             moduleName: "Company Document",
             recordId: company.companyId || String(company._id),
             details: (deletedDoc?.type || "Company document").toString(),

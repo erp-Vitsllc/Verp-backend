@@ -40,6 +40,22 @@ const adminDeletionArchiveSchema = new mongoose.Schema(
             name: { type: String, default: '' },
         },
         purgedAt: { type: Date },
+        /** Cached count of uploaded files in snapshot (for recovery list UI). */
+        attachmentCount: { type: Number, default: 0 },
+        /** Copies of files kept under admin-deletion-archive/{id}/ for recovery viewing. */
+        preservedAttachments: {
+            type: [
+                {
+                    name: { type: String, default: '' },
+                    label: { type: String, default: '' },
+                    originalKey: { type: String, default: '' },
+                    storageKey: { type: String, default: '' },
+                    unavailable: { type: Boolean, default: false },
+                    unavailableReason: { type: String, default: '' },
+                },
+            ],
+            default: [],
+        },
     },
     { timestamps: true }
 );

@@ -1,9 +1,7 @@
 import Group from "../../models/Group.js";
 import User from "../../models/User.js";
-import {
-    isReqUserAdmin,
-    scheduleManagementAdminDeletionEmail,
-} from "../../utils/sendAdminDeletionNotificationEmails.js";
+import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
+import { awaitAdminDeletionArchive } from "../../utils/adminDeletionArchiveRun.js";
 
 // Delete group
 export const deleteGroup = async (req, res) => {
@@ -30,7 +28,7 @@ export const deleteGroup = async (req, res) => {
 
         const groupSnapshot = group.toObject ? group.toObject() : group;
         if (await isReqUserAdmin(req.user)) {
-            scheduleManagementAdminDeletionEmail(req, {
+            await awaitAdminDeletionArchive(req, {
                 moduleName: 'Group',
                 recordId: group.name || String(group._id),
                 details: `Permission group (${(group.users || []).length} users)`,

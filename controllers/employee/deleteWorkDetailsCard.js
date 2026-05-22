@@ -1,9 +1,7 @@
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { resolveEmployeeId } from "../../services/employeeService.js";
-import {
-    isReqUserAdmin,
-    scheduleManagementAdminDeletionEmail,
-} from "../../utils/sendAdminDeletionNotificationEmails.js";
+import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
+import { awaitAdminDeletionArchive } from "../../utils/adminDeletionArchiveRun.js";
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
 
 export const deleteWorkDetailsCard = async (req, res) => {
@@ -24,7 +22,7 @@ export const deleteWorkDetailsCard = async (req, res) => {
                 "employeeId reportingAuthority primaryReportee secondaryReportee overtime department designation role company companyEmail contractJoiningDate dateOfJoining probationPeriod"
             )
             .lean();
-        scheduleManagementAdminDeletionEmail(req, {
+        await awaitAdminDeletionArchive(req, {
             moduleName: "Employee Work Details",
             recordId: employee.employeeId,
             details: `Work details for ${employee.employeeId}`,

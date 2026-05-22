@@ -29,7 +29,8 @@ import { sendAssetCreationApprovalEmail } from '../utils/sendAssetCreationApprov
 import { sendAssetCreationDecisionEmail } from '../utils/sendAssetCreationDecisionEmail.js';
 import { notifyAssetCreationRejectedToCreator } from '../utils/notifyAssetCreationRejectedToCreator.js';
 import { resolveAssetCreatorEmployee } from '../utils/assetApprovalHelpers.js';
-import { isUserAdministrator } from '../services/permissionService.js';
+import { hasPermission, isUserAdministrator } from '../services/permissionService.js';
+import { collectAssetDocumentIdsForDeletion } from '../utils/assetDocumentDeletion.js';
 import { sendAssetServiceEmail } from '../utils/sendAssetServiceEmail.js';
 import { completeAssetServiceOverdueTasks, processAssetServiceOverdue } from '../utils/processAssetServiceOverdue.js';
 import {
@@ -93,8 +94,8 @@ import {
     notifyAdminDeletedWholeAsset,
     isReqUserAdmin,
     getAssetControllerNotificationEmail,
-    scheduleManagementAdminDeletionEmail,
 } from '../utils/sendAdminDeletionNotificationEmails.js';
+import { awaitAdminDeletionArchive } from '../utils/adminDeletionArchiveRun.js';
 import {
     cleanupDashboardActionsForDeletedAsset,
     ASSET_DASHBOARD_INBOX_TYPES,
@@ -6699,11 +6700,17 @@ export const addAssetDocument = async (req, res) => {
         if (document && document.data) {
             try {
                 // Upload to S3 under asset-documents folder
-                const uploadResult = await uploadDocumentToS3(document.data, 'asset-documents', document.name);
+                const uploadResult = await uploadDocumentToS3(
+                    document.data,
+                    'asset-documents',
+                    document.name || document.fileName,
+                );
                 documentUrl = uploadResult.publicId;
             } catch (error) {
                 console.error('Error uploading document to S3:', error);
-                return res.status(500).json({ message: 'Failed to upload document' });
+                return res.status(500).json({
+                    message: error?.message || 'Failed to upload document',
+                });
             }
         }
 
@@ -6785,11 +6792,17 @@ export const updateAssetDocument = async (req, res) => {
         // Upload new file only if provided
         if (document && document.data) {
             try {
-                const uploadResult = await uploadDocumentToS3(document.data, 'asset-documents', document.name);
+                const uploadResult = await uploadDocumentToS3(
+                    document.data,
+                    'asset-documents',
+                    document.name || document.fileName,
+                );
                 doc.attachment = uploadResult.publicId;
             } catch (error) {
                 console.error('Error uploading document to S3:', error);
-                return res.status(500).json({ message: 'Failed to upload document' });
+                return res.status(500).json({
+                    message: error?.message || 'Failed to upload document',
+                });
             }
         }
 
@@ -6826,7 +6839,11 @@ export const updateAssetDocument = async (req, res) => {
 // @access  Private
 export const deleteAssetDocument = async (req, res) => {
     try {
-        if (!(await isReqUserAdmin(req.user))) {
+        const uid = req.user?.id || req.user?._id?.toString?.();
+        const isAdminUser = await isReqUserAdmin(req.user);
+        const hasAssetDeletePerm =
+            uid && (await hasPermission(uid, 'hrm_asset', 'delete'));
+        if (!isAdminUser && !hasAssetDeletePerm) {
             return res.status(403).json({ message: 'Only administrator can delete asset documents.' });
         }
 
@@ -6842,9 +6859,18 @@ export const deleteAssetDocument = async (req, res) => {
             return res.status(404).json({ message: 'Document not found' });
         }
 
+        const idsToDelete = collectAssetDocumentIdsForDeletion(asset.documents, docId);
+        const removedSnapshots = [];
+        for (const removeId of idsToDelete) {
+            const sub = asset.documents.id(removeId);
+            if (sub) {
+                removedSnapshots.push(sub.toObject ? sub.toObject() : { ...sub });
+            }
+        }
+
         const docName = doc.name;
         const docSnapshot = doc.toObject ? doc.toObject() : { ...doc };
-        scheduleManagementAdminDeletionEmail(req, {
+        await awaitAdminDeletionArchive(req, {
             moduleName: 'Asset Document',
             recordId: asset.assetId || String(asset._id),
             details: `${docName || docSnapshot?.type || 'Document'} on ${asset.name || asset.assetId}`,
@@ -6853,9 +6879,12 @@ export const deleteAssetDocument = async (req, res) => {
                 mongoAssetId: asset._id,
                 assetName: asset.name,
                 document: docSnapshot,
+                relatedDocuments: removedSnapshots.length > 1 ? removedSnapshots.slice(1) : [],
             },
         });
-        asset.documents.pull({ _id: docId });
+        for (const removeId of idsToDelete) {
+            asset.documents.pull({ _id: removeId });
+        }
         await asset.save();
 
         // Log to history
@@ -6872,12 +6901,17 @@ export const deleteAssetDocument = async (req, res) => {
             console.error('History log failed during deleteAssetDocument:', historyErr);
         }
 
-        res.status(200).json({ message: 'Document deleted successfully' });
+        res.status(200).json({
+            message: 'Document deleted successfully',
+            deletedCount: idsToDelete.length,
+            deletedIds: idsToDelete,
+        });
     } catch (error) {
         console.error('Error deleting asset document:', error);
         res.status(500).json({ message: 'Internal server error' });
     }
 };
+
 
 // @desc    Add a service record to an asset item
 // @route   POST /api/AssetItem/:id/service
@@ -7199,7 +7233,7 @@ export const deleteAssetService = async (req, res) => {
 
         const removedServiceType = serviceSubdoc.serviceType || 'Service';
         const serviceSnapshot = serviceSubdoc.toObject ? serviceSubdoc.toObject() : { ...serviceSubdoc };
-        scheduleManagementAdminDeletionEmail(req, {
+        await awaitAdminDeletionArchive(req, {
             moduleName: 'Vehicle Service Record',
             recordId: asset.assetId || String(asset._id),
             details: `${removedServiceType} service (${serviceId})`,
@@ -10417,15 +10451,20 @@ export const deleteAssetItem = async (req, res) => {
         // 1. Admin/Controller: Always authorized
         // 2. Creator: Only if Status is Draft/Pending
 
-        if (Array.isArray(asset.accessories) && asset.accessories.length > 0) {
+        const isAdminUser = await isReqUserAdmin(req.user);
+        const {
+            shouldBlockAssetDeleteBecauseOfAccessories,
+            accessoryDeleteBlockMessage,
+        } = await import('../utils/assetDeleteAccessoriesRule.js');
+        if (shouldBlockAssetDeleteBecauseOfAccessories(asset, { isAdmin: isAdminUser })) {
             return res.status(400).json({
-                message: 'Administrator cannot delete the asset while accessories are attached. Delete accessories first.',
-                accessoriesCount: asset.accessories.length
+                message: accessoryDeleteBlockMessage(asset),
+                accessoriesCount: asset.accessories.length,
             });
         }
 
         let adminNotificationEmail = null;
-        if (await isReqUserAdmin(req.user)) {
+        if (isAdminUser) {
             adminNotificationEmail = await getAssetControllerNotificationEmail();
             const itemForEmail = await AssetItem.findById(id)
                 .populate({
@@ -10439,9 +10478,7 @@ export const deleteAssetItem = async (req, res) => {
                 .populate('assignedCompany', 'name companyId')
                 .lean();
             if (itemForEmail) {
-                void notifyAdminDeletedWholeAsset(req, itemForEmail).catch((e) =>
-                    console.error('[notify asset delete]', e?.message || e)
-                );
+                await notifyAdminDeletedWholeAsset(req, itemForEmail);
             }
         }
 

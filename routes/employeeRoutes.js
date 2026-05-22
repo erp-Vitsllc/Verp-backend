@@ -51,6 +51,7 @@ import { updateDocument } from "../controllers/employee/updateDocument.js";
 import { protect } from "../middleware/authMiddleware.js";
 import {
     checkPermission,
+    checkPermissionAny,
     checkBasicDetailsPatchPermission,
     checkEmployeeProfileActivationAction,
     checkEmployeeManualDocumentEdit,
@@ -136,7 +137,7 @@ router.get("/", checkPermission('hrm_employees_list', 'view'), getEmployees);
 router.get("/reportee-options", checkPermission('hrm_employees_view_work', 'view'), getReporteeOptions);
 
 // Get next employee ID - requires create permission (or just authenticated)
-router.get("/next-id", checkPermission('hrm_employees_add', 'create'), getNextEmployeeId);
+router.get("/next-id", checkPermissionAny('hrm_employees_add', ['view', 'create']), getNextEmployeeId);
 
 // Dashboard Hierarchy - basic access for anyone logged in
 router.get("/dashboard/hierarchy", getHierarchy);

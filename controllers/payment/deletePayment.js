@@ -2,8 +2,8 @@ import Payment from "../../models/Payment.js";
 import {
     isReqUserAdmin,
     getManagementNotificationEmail,
-    scheduleManagementAdminDeletionEmail,
 } from "../../utils/sendAdminDeletionNotificationEmails.js";
+import { awaitAdminDeletionArchive } from "../../utils/adminDeletionArchiveRun.js";
 
 export const deletePayment = async (req, res) => {
     try {
@@ -35,7 +35,7 @@ export const deletePayment = async (req, res) => {
         }
 
         const paymentSnapshot = payment.toObject ? payment.toObject() : payment;
-        scheduleManagementAdminDeletionEmail(req, {
+        await awaitAdminDeletionArchive(req, {
             moduleName: 'Payment',
             recordId: payment.paymentId || payment._id?.toString?.(),
             details: payment.description || payment.referenceId || 'Payment record',

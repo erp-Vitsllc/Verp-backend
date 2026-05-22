@@ -3,10 +3,8 @@ import Fine from "../../models/Fine.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import User from "../../models/User.js";
 import { deleteEmployeeData } from "../../services/employeeService.js";
-import {
-    isReqUserAdmin,
-    scheduleManagementAdminDeletionEmail,
-} from "../../utils/sendAdminDeletionNotificationEmails.js";
+import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
+import { awaitAdminDeletionArchive } from "../../utils/adminDeletionArchiveRun.js";
 
 export const deleteCompany = async (req, res) => {
     try {
@@ -58,7 +56,7 @@ export const deleteCompany = async (req, res) => {
             await User.deleteMany({ employeeId: { $in: employeeIds } });
         }
 
-        scheduleManagementAdminDeletionEmail(req, {
+        await awaitAdminDeletionArchive(req, {
             moduleName: "Company",
             recordId: company.companyId || String(company._id),
             details: `${company.name || "Company"} (${employeeIds.length} linked employees removed)`,

@@ -1,5 +1,10 @@
 import AdminDeletionArchive from '../models/AdminDeletionArchive.js';
 import { ADMIN_DELETION_ARCHIVE_RETENTION_DAYS } from '../constants/adminDeletionArchiveConstants.js';
+import { countDeletionAttachments } from './listDeletionAttachmentRefs.js';
+import {
+    deletePreservedDeletionAttachments,
+    deleteDeletionSnapshotSourceAttachments,
+} from './preserveDeletionAttachments.js';
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
@@ -70,9 +75,16 @@ export async function purgeExpiredAdminDeletionArchives() {
     const expired = await AdminDeletionArchive.find({
         status: 'pending',
         $or: [{ expiresAt: { $lte: now } }, { expiresAt: null, deletedAt: { $lte: legacyCutoff } }],
-    });
+    }).select('preservedAttachments snapshot');
 
     if (!expired.length) return 0;
+
+    for (const row of expired) {
+        await deletePreservedDeletionAttachments(row.preservedAttachments);
+        if (row.snapshot && row.snapshot.purged !== true) {
+            await deleteDeletionSnapshotSourceAttachments(row.snapshot);
+        }
+    }
 
     const purgeTime = new Date();
     await AdminDeletionArchive.updateMany(
@@ -93,12 +105,26 @@ export async function purgeExpiredAdminDeletionArchives() {
     return expired.length;
 }
 
+export function resolveArchiveAttachmentCount(archive) {
+    if (!archive) return 0;
+    if (typeof archive.attachmentCount === 'number' && archive.attachmentCount >= 0) {
+        return archive.attachmentCount;
+    }
+    if (archive.snapshot && archive.snapshot.purged !== true) {
+        return countDeletionAttachments(archive.snapshot);
+    }
+    return 0;
+}
+
 export function enrichArchiveRetentionFields(archive) {
     if (!archive) return archive;
     const expiresAt = resolveArchiveExpiresAt(archive);
     const daysRemaining = getArchiveDaysRemaining(expiresAt);
+    const attachmentCount = resolveArchiveAttachmentCount(archive);
+    const { snapshot, ...rest } = archive;
     return {
-        ...archive,
+        ...rest,
+        attachmentCount,
         expiresAt,
         retentionDays: ADMIN_DELETION_ARCHIVE_RETENTION_DAYS,
         daysRemaining,

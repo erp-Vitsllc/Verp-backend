@@ -1,8 +1,6 @@
 import Loan from "../../models/Loan.js";
-import {
-    isReqUserAdmin,
-    scheduleManagementAdminDeletionEmail,
-} from "../../utils/sendAdminDeletionNotificationEmails.js";
+import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
+import { awaitAdminDeletionArchive } from "../../utils/adminDeletionArchiveRun.js";
 
 export const deleteLoan = async (req, res) => {
     try {
@@ -19,7 +17,7 @@ export const deleteLoan = async (req, res) => {
         }
 
         const loanSnapshot = loan.toObject ? loan.toObject() : loan;
-        scheduleManagementAdminDeletionEmail(req, {
+        await awaitAdminDeletionArchive(req, {
             moduleName: loan.type || 'Loan/Advance',
             recordId: loan.loanId || loan._id?.toString?.(),
             details: loan.reason || loan.notes || `${loan.type || 'Loan/Advance'} record`,

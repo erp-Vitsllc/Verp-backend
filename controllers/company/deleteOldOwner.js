@@ -1,9 +1,7 @@
 import mongoose from "mongoose";
 import Company from "../../models/Company.js";
-import {
-    isReqUserAdmin,
-    scheduleManagementAdminDeletionEmail,
-} from "../../utils/sendAdminDeletionNotificationEmails.js";
+import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
+import { awaitAdminDeletionArchive } from "../../utils/adminDeletionArchiveRun.js";
 
 const companyMatch = (id) => ({
     $or: [{ _id: id.match(/^[0-9a-fA-F]{24}$/) ? id : null }, { companyId: id }],
@@ -32,7 +30,7 @@ export const deleteOldOwner = async (req, res) => {
                 (o) => String(o._id) === String(decodedTarget)
             );
             if (ownerSnap) {
-                scheduleManagementAdminDeletionEmail(req, {
+                await awaitAdminDeletionArchive(req, {
                     moduleName: "Company Archived Owner",
                     recordId: companySnap.companyId || String(companySnap._id),
                     details: ownerSnap?.name || "Archived owner",
@@ -77,7 +75,7 @@ export const deleteOldOwner = async (req, res) => {
         }
 
         const ownerSnap = company.oldOwners[ownerIndex];
-        scheduleManagementAdminDeletionEmail(req, {
+        await awaitAdminDeletionArchive(req, {
             moduleName: "Company Archived Owner",
             recordId: company.companyId || String(company._id),
             details: ownerSnap?.name || "Archived owner",

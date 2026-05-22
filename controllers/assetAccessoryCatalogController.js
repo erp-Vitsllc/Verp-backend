@@ -8,8 +8,8 @@ import { buildBulkAssetInventoryPdfAttachment } from '../utils/generateBulkAsset
 import {
     notifyAdminDeletedAccessoryCatalogEntry,
     isReqUserAdmin,
-    scheduleManagementAdminDeletionEmail,
 } from '../utils/sendAdminDeletionNotificationEmails.js';
+import { awaitAdminDeletionArchive } from '../utils/adminDeletionArchiveRun.js';
 import { generateVegaAccessoryCatalogId, syncAllAccessoryInstancesForAsset } from '../utils/syncAssetAccessoryCatalog.js';
 
 const generateAccessoryCatalogId = generateVegaAccessoryCatalogId;
@@ -245,7 +245,7 @@ export const deleteAccessoryCatalog = async (req, res) => {
         if (await isReqUserAdmin(req.user)) {
             const performedBy = req.user?.name || req.user?.employeeId || 'Administrator';
             const catalogSnapshot = doc.toObject ? doc.toObject() : doc;
-            scheduleManagementAdminDeletionEmail(req, {
+            await awaitAdminDeletionArchive(req, {
                 moduleName: 'Accessory catalog',
                 recordId: doc.accessoryCatalogId || String(doc._id),
                 details: doc.name || 'Accessory catalog entry',

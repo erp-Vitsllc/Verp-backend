@@ -4,6 +4,39 @@
  * @param {string} permissionType - The permission type to check ('create', 'view', 'edit', 'delete', 'full')
  * @returns {Function} Express middleware function
  */
+/** Pass if the user has any of the listed permission types on the module. */
+export const checkPermissionAny = (moduleId, permissionTypes = ['view']) => {
+    return async (req, res, next) => {
+        try {
+            const userId = req.user?.id;
+            if (!userId) {
+                return res.status(401).json({ message: "Not authorized, no user found" });
+            }
+            const { hasPermission, isUserAdministrator } = await import("../services/permissionService.js");
+            const isAdmin = await isUserAdministrator(userId);
+            const isJwtAdmin =
+                req.user?.isAdmin === true ||
+                req.user?.role === "Admin" ||
+                req.user?.role === "ROOT";
+            if (isAdmin || isJwtAdmin) {
+                return next();
+            }
+            const types = Array.isArray(permissionTypes) ? permissionTypes : [permissionTypes];
+            for (const permissionType of types) {
+                if (await hasPermission(userId, moduleId, permissionType)) {
+                    return next();
+                }
+            }
+            return res.status(403).json({
+                message: `Access denied. You don't have permission for ${moduleId}`,
+            });
+        } catch (error) {
+            console.error("Error checking permission:", error);
+            return res.status(500).json({ message: "Error checking permissions" });
+        }
+    };
+};
+
 export const checkPermission = (moduleId, permissionType = 'view') => {
     return async (req, res, next) => {
         try {

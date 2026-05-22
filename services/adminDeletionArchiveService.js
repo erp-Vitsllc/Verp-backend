@@ -6,6 +6,15 @@ import {
     topModuleLabel,
 } from '../constants/adminDeletionArchiveConstants.js';
 import { inferAdminDeletionArchiveMeta } from '../utils/inferAdminDeletionArchive.js';
+import { countDeletionAttachments } from '../utils/listDeletionAttachmentRefs.js';
+import { enrichDeletionPayloadAttachmentKeys } from '../utils/adminDeletionArchiveRun.js';
+import { signDeletionAttachmentUrls } from '../utils/signDeletionAttachmentUrls.js';
+import {
+    preserveDeletionAttachments,
+    deletePreservedDeletionAttachments,
+    deleteDeletionSnapshotSourceAttachments,
+} from '../utils/preserveDeletionAttachments.js';
+import mongoose from 'mongoose';
 import { restoreArchivedRecord } from './adminDeletionRestoreService.js';
 import {
     ADMIN_DELETION_ARCHIVE_RETENTION_DAYS,
@@ -29,10 +38,19 @@ function deletedByFromReq(req) {
 
 export async function createAdminDeletionArchiveFromDeletion(req, opts = {}) {
     const meta = opts.archive || inferAdminDeletionArchiveMeta(opts);
-    const snapshot = opts.deletedPayload != null ? opts.deletedPayload : {};
+    const snapshot = enrichDeletionPayloadAttachmentKeys(
+        opts.deletedPayload != null ? opts.deletedPayload : {}
+    );
+    const archiveId = new mongoose.Types.ObjectId();
+    const preservedAttachments = await preserveDeletionAttachments(String(archiveId), snapshot);
+    const preservedAvailable = preservedAttachments.filter(
+        (p) => !p.unavailable && (p.storageKey || p.originalKey)
+    ).length;
+    const attachmentCount = preservedAvailable || countDeletionAttachments(snapshot);
 
     const deletedAt = new Date();
     const doc = await AdminDeletionArchive.create({
+        _id: archiveId,
         topModule: meta.topModule || 'other',
         category: meta.category || 'list',
         entityType: meta.entityType || 'unknown',
@@ -48,9 +66,25 @@ export async function createAdminDeletionArchiveFromDeletion(req, opts = {}) {
         status: 'pending',
         deletedAt,
         expiresAt: computeArchiveExpiresAt(deletedAt),
+        attachmentCount,
+        preservedAttachments,
     });
 
     return doc;
+}
+
+export async function getArchiveAttachmentsForView(id) {
+    const row = await AdminDeletionArchive.findById(id)
+        .select('snapshot status preservedAttachments')
+        .lean();
+    if (!row) throw new Error('Archive record not found.');
+    if (row.status !== 'pending') throw new Error('Attachments are only available for pending recovery items.');
+    if (isArchiveExpired(row)) {
+        await purgeExpiredAdminDeletionArchives();
+        throw new Error('This record is no longer in recovery.');
+    }
+    const attachments = await signDeletionAttachmentUrls(row.snapshot, row.preservedAttachments);
+    return attachments;
 }
 
 export async function getArchiveTree() {
@@ -61,7 +95,9 @@ export async function getArchiveTree() {
         status: 'pending',
         expiresAt: { $gt: now },
     })
-        .select('topModule category title subtitle recordId moduleName deletedAt entityType expiresAt')
+        .select(
+            'topModule category title subtitle recordId moduleName deletedAt entityType expiresAt attachmentCount snapshot'
+        )
         .sort({ deletedAt: -1 })
         .lean();
 
@@ -170,6 +206,16 @@ export async function purgeArchiveById(id, req) {
     const archive = await AdminDeletionArchive.findById(id);
     if (!archive) throw new Error('Archive record not found.');
     if (archive.status === 'purged') throw new Error('Record already permanently deleted.');
+
+    const snapshotBeforePurge = archive.snapshot;
+    await deletePreservedDeletionAttachments(archive.preservedAttachments);
+    if (
+        archive.status === 'pending' &&
+        snapshotBeforePurge &&
+        snapshotBeforePurge.purged !== true
+    ) {
+        await deleteDeletionSnapshotSourceAttachments(snapshotBeforePurge);
+    }
 
     archive.status = 'purged';
     archive.purgedAt = new Date();

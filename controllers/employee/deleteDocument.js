@@ -1,10 +1,8 @@
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import mongoose from "mongoose";
 import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeService.js";
-import {
-    isReqUserAdmin,
-    scheduleManagementAdminDeletionEmail,
-} from "../../utils/sendAdminDeletionNotificationEmails.js";
+import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
+import { awaitAdminDeletionArchive } from "../../utils/adminDeletionArchiveRun.js";
 import { cleanupEmployeeExpiryNotificationsByLabels } from "../../utils/cleanupEmployeeExpiryNotifications.js";
 import {
     documentStorageFingerprint,
@@ -43,7 +41,7 @@ export const deleteDocument = async (req, res) => {
         const documentToDelete = employee.documents[docIndex];
         const deletedDocLabel = (documentToDelete?.type || "Employee Document").toString().trim();
 
-        scheduleManagementAdminDeletionEmail(req, {
+        await awaitAdminDeletionArchive(req, {
             moduleName: "Employee Document",
             recordId: employee.employeeId,
             details: `${deletedDocLabel} (live document index ${docIndex})`,

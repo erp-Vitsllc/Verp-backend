@@ -74,7 +74,20 @@ const assetItemSchema = new mongoose.Schema({
         type: Number,
         default: 0
     },
+    /** Principal financed (vehicle value − down payment). */
+    loanAmount: {
+        type: Number,
+        default: 0
+    },
     downPayment: {
+        type: Number,
+        default: 0
+    },
+    totalInterest: {
+        type: Number,
+        default: 0
+    },
+    totalPayable: {
         type: Number,
         default: 0
     },
