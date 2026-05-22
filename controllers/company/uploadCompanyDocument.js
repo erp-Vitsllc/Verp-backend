@@ -20,7 +20,8 @@ export const uploadCompanyDocument = async (req, res) => {
         res.status(200).json({
             message: "Upload successful",
             url: uploadResult.url,
-            key: uploadResult.key
+            key: uploadResult.publicId,
+            publicId: uploadResult.publicId,
         });
 
     } catch (error) {

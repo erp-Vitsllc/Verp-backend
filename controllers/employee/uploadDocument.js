@@ -54,10 +54,13 @@ export const uploadDocument = async (req, res) => {
         });
     } catch (error) {
         console.error('Error uploading document to S3:', error);
+        const message = error.message || 'Failed to upload document to storage';
+        const isClientError =
+            /only pdf|jpg|png|not allowed|no file data|must be a base64|invalid or empty/i.test(message);
 
-        return res.status(500).json({
-            message: error.message || 'Failed to upload document to storage',
-            error: process.env.NODE_ENV === 'development' ? error.message : undefined
+        return res.status(isClientError ? 400 : 500).json({
+            message,
+            error: process.env.NODE_ENV === 'development' ? message : undefined,
         });
     }
 };

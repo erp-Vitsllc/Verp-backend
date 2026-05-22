@@ -169,7 +169,7 @@ export const sendAssetAssignmentEmail = async ({
                         </table>
                     </div>
 
-                    ${att.length ? `<p style="font-size: 13px; color: #64748b; margin-bottom: 12px;">The attached PDF matches the portal asset handover layout (summary table with accessories, received dates, values, and totals).</p>` : ''}
+                    ${att.length ? `<p style="font-size: 13px; color: #64748b; margin-bottom: 12px;">The attached handover form includes the requester&rsquo;s name and signature. After acceptance, a completed copy with the assignee&rsquo;s name and signature is emailed and shown on the asset page.</p>` : ''}
 
                     <p style="font-size: 14px; color: #64748b; margin-bottom: 30px;">
                         ${isBulk && bulkAssignmentGroupId ? 'Use the button below to open the batch review: tick the assets you accept. Unticked assets are declined (returned to Unassigned, or to the prior assignee when applicable).' : 'Please log in to the portal to view the details and confirm receipt.'}

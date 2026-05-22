@@ -2,6 +2,7 @@ import { PutObjectCommand, DeleteObjectCommand, GetObjectCommand, HeadObjectComm
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import s3Client, { bucketName } from '../config/s3Client.js';
 import { randomUUID } from 'crypto';
+import { assertAllowedUploadMime } from './allowedUploadMime.js';
 
 const S3_STORAGE_FOLDER_PREFIXES = [
     'admin-deletion-archive',
@@ -63,9 +64,62 @@ export async function s3ObjectExists(key) {
         return true;
     } catch (error) {
         if (error?.name === 'NotFound' || error?.$metadata?.httpStatusCode === 404) return false;
+        // HeadObject can fail on permissions while GetObject/sign still works — allow signing to proceed.
         console.warn('[s3ObjectExists]', normalized, error?.message || error);
-        return false;
+        return true;
     }
+}
+
+/**
+ * Normalize a DB attachment value to an S3 key (upload inline base64 objects when needed).
+ * @param {string|object|null} value
+ * @param {string} folder
+ * @param {string} fileName
+ * @returns {Promise<string|object|null>}
+ */
+export async function persistStoredAttachmentValue(value, folder = 'asset-documents', fileName = 'attachment') {
+    if (value == null || value === '') return null;
+
+    if (typeof value === 'string') {
+        const trimmed = value.trim();
+        if (!trimmed) return null;
+        if (trimmed.startsWith('data:')) {
+            const uploadResult = await uploadDocumentToS3(trimmed, folder, fileName);
+            return uploadResult.publicId;
+        }
+        const fromUrl = normalizeS3Key(trimmed);
+        if (fromUrl) return fromUrl;
+        if (
+            trimmed.startsWith('http') ||
+            S3_STORAGE_FOLDER_PREFIXES.some((prefix) => trimmed === prefix || trimmed.startsWith(`${prefix}/`))
+        ) {
+            return trimmed;
+        }
+        if (trimmed.length > 80 && !trimmed.includes('/') && !trimmed.includes(' ')) {
+            const uploadResult = await uploadDocumentToS3(trimmed, folder, fileName);
+            return uploadResult.publicId;
+        }
+        return trimmed;
+    }
+
+    if (typeof value === 'object' && !Array.isArray(value)) {
+        if (value.publicId) return String(value.publicId).trim();
+        if (value.data) {
+            const uploadResult = await uploadDocumentToS3(
+                value.data,
+                folder,
+                value.name || value.fileName || fileName,
+            );
+            return uploadResult.publicId;
+        }
+        const url = value.url || value.href;
+        if (url) {
+            const fromUrl = normalizeS3Key(String(url));
+            if (fromUrl) return fromUrl;
+        }
+    }
+
+    return value;
 }
 
 function sanitizeS3FileName(name, fallbackExt = 'pdf') {
@@ -203,7 +257,11 @@ export const uploadDocumentToS3 = async (base64Data, folder = 'employee-document
             throw new Error('No file data provided.');
         }
 
-        const { contentType, extension } = inferMimeAndExtension(base64Data, fileName, resourceType);
+        let { contentType, extension } = inferMimeAndExtension(base64Data, fileName, resourceType);
+        contentType = assertAllowedUploadMime(contentType, fileName, folder);
+        if (contentType === 'application/pdf') extension = 'pdf';
+        else if (contentType === 'image/jpeg') extension = 'jpg';
+        else if (contentType === 'image/png') extension = 'png';
 
         // Clean base64 string (supports raw base64 or full data: URL)
         const cleanBase64 = String(base64Data)
@@ -265,7 +323,7 @@ export const getSignedFileUrl = async (key, expiresIn = 86400) => {
         if (normalizedFromUrl) {
             key = normalizedFromUrl;
         } else if (typeof key === 'string' && key.startsWith('http')) {
-            return key;
+            return null;
         }
 
         // Handle base64 fallbacks (if any old data exists)
@@ -282,9 +340,19 @@ export const getSignedFileUrl = async (key, expiresIn = 86400) => {
         return url;
     } catch (error) {
         console.error('Error generating signed URL:', error);
-        return typeof key === 'string' && key.startsWith('http') ? key : null;
+        return null;
     }
 };
+
+/** Store S3 object key in DB — never persist expiring signed URLs when the key can be extracted. */
+export function attachmentValueForDatabase(value) {
+    if (value == null || value === '') return value;
+    if (typeof value !== 'string') return value;
+    const trimmed = value.trim();
+    if (!trimmed || trimmed.startsWith('data:')) return value;
+    const key = normalizeS3Key(trimmed);
+    return key || trimmed;
+}
 
 /**
  * Delete document from IDrive e2

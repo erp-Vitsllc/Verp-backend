@@ -2,6 +2,7 @@ import Company from "../../models/Company.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { calculateCompanyActivationProgress } from "../../utils/companyActivation.js";
 import { isRequestUserDesignatedFlowchartHr } from "../../utils/isDesignatedFlowchartHr.js";
+import { signCompanyDocumentArray } from "../../utils/signCompanyDocumentFields.js";
 
 /**
  * Get a single company by its companyId (e.g., EST-001)
@@ -91,48 +92,18 @@ export const getCompany = async (req, res) => {
             }));
         }
 
-        // Custom Documents
-        if (companyObj.documents && Array.isArray(companyObj.documents)) {
-            companyObj.documents = await Promise.all(companyObj.documents.map(async (doc) => {
-                if (!doc || typeof doc !== "object") return doc;
-                if (doc?.document?.url) {
-                    doc.document.url = await getSignedFileUrl(doc.document.url);
-                }
-                return doc;
-            }));
+        // Custom / archived / insurance / ejari rows (document.url + legacy attachment)
+        if (companyObj.documents) {
+            companyObj.documents = await signCompanyDocumentArray(companyObj.documents);
         }
-
-        // Insurance Records
-        if (companyObj.insurance && Array.isArray(companyObj.insurance)) {
-            companyObj.insurance = await Promise.all(companyObj.insurance.map(async (item) => {
-                if (!item || typeof item !== "object") return item;
-                if (item?.document?.url) {
-                    item.document.url = await getSignedFileUrl(item.document.url);
-                }
-                return item;
-            }));
+        if (companyObj.insurance) {
+            companyObj.insurance = await signCompanyDocumentArray(companyObj.insurance);
         }
-
-        // Ejari Records
-        if (companyObj.ejari && Array.isArray(companyObj.ejari)) {
-            companyObj.ejari = await Promise.all(companyObj.ejari.map(async (item) => {
-                if (!item || typeof item !== "object") return item;
-                if (item?.document?.url) {
-                    item.document.url = await getSignedFileUrl(item.document.url);
-                }
-                return item;
-            }));
+        if (companyObj.ejari) {
+            companyObj.ejari = await signCompanyDocumentArray(companyObj.ejari);
         }
-
-        // Archived Documents (superseded/deleted)
-        if (companyObj.oldDocuments && Array.isArray(companyObj.oldDocuments)) {
-            companyObj.oldDocuments = await Promise.all(companyObj.oldDocuments.map(async (doc) => {
-                if (!doc || typeof doc !== "object") return doc;
-                if (doc?.document?.url) {
-                    doc.document.url = await getSignedFileUrl(doc.document.url);
-                }
-                return doc;
-            }));
+        if (companyObj.oldDocuments) {
+            companyObj.oldDocuments = await signCompanyDocumentArray(companyObj.oldDocuments);
         }
 
         const viewerIsDesignatedFlowchartHr = await isRequestUserDesignatedFlowchartHr(req);

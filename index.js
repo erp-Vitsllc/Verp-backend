@@ -17,6 +17,7 @@ import assetItemRoute from "./routes/assetItemRoutes.js"; // <-- Add asset item 
 import assetAccessoryCatalogRoute from "./routes/assetAccessoryCatalogRoutes.js";
 import flowchartRoute from "./routes/flowchartRoutes.js";
 import adminDeletionArchiveRoute from "./routes/adminDeletionArchiveRoutes.js"; // <-- Add flowchart routes
+import storageRoute from "./routes/storageRoutes.js";
 import { commonLimiter } from "./middleware/rateLimitMiddleware.js";
 import dotenv from "dotenv";
 import { connectDB } from "./config/db.js";
@@ -180,6 +181,7 @@ app.use("/api/AssetItem", assetItemRoute);
 app.use("/api/AssetAccessoryCatalog", assetAccessoryCatalogRoute);
 app.use("/api/Flowchart", flowchartRoute);
 app.use("/api/AdminDeletionArchive", adminDeletionArchiveRoute);
+app.use("/api/storage", storageRoute);
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`Server running at http://localhost:${PORT}`));

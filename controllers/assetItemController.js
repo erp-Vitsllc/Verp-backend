@@ -68,8 +68,11 @@ import {
 } from '../utils/buildAssetServiceHistoryDetails.js';
 import {
     buildAssignmentHandoverEmailAttachments,
+    buildPendingRequestHandoverCtx,
+    buildFullySignedHandoverCtx,
     hodDisplayFromEmployee,
 } from '../utils/buildAssignmentHandoverEmailAttachments.js';
+import { sendAssetControllerDirectAssignmentRecordEmail } from '../utils/sendAssetControllerDirectAssignmentRecordEmail.js';
 import { sendAssetTransferHandoverEmails } from '../utils/sendAssetTransferHandoverEmails.js';
 import { notifyBulkAssignmentResponseEmails } from '../utils/sendAssetBulkAssignmentOutcomeEmails.js';
 
@@ -337,13 +340,14 @@ const notifyEmployeesGroupedControllerBulkDirect = async (req, employeeSnapshots
                 || `${String(actionSummary.pdfBase || 'bulk-action').replace(/-inventory$/i, '')}-handover`;
             try {
                 pdf = await buildAssignmentHandoverEmailAttachments(req, ids, {
-                    assigneeName: `${employee.firstName || ''} ${employee.lastName || ''}`.trim() || 'Employee',
-                    employeeCode: employee.employeeId || '—',
-                    department: (employee.department && String(employee.department).trim()) || '—',
-                    hodName: hodDisplayFromEmployee(employee),
-                    assigner,
-                    assignerName: assignerDisplay,
-                    handoverDate: new Date(),
+                    ...buildPendingRequestHandoverCtx({
+                        assigner,
+                        assignerName: assignerDisplay,
+                        assigneeName: `${employee.firstName || ''} ${employee.lastName || ''}`.trim() || 'Employee',
+                        employeeCode: employee.employeeId || '—',
+                        department: (employee.department && String(employee.department).trim()) || '—',
+                        hodName: hodDisplayFromEmployee(employee),
+                    }),
                     filenameBase: handoverFilenameBase,
                 });
             } catch (e) {
@@ -388,16 +392,15 @@ const buildAssetActionApprovalHandoverAttachments = async (req, assets) => {
 
     if (primary.assignedToType === 'Company' && primary.assignedCompany) {
         const comp = await Company.findById(primary.assignedCompany).select('name companyId').lean();
-        return buildAssignmentHandoverEmailAttachments(req, ids, {
-            assigneeName: comp?.name || 'Company',
-            employeeCode: comp?.companyId || '—',
-            department: '—',
-            hodName: '—',
+    return buildAssignmentHandoverEmailAttachments(req, ids, {
+        ...buildPendingRequestHandoverCtx({
             assigner,
             assignerName: assignerDisplay,
-            handoverDate: new Date(),
-            filenameBase: `asset-action-request-${ids.length}-handover`,
-        });
+            assigneeName: comp?.name || 'Company',
+            employeeCode: comp?.companyId || '—',
+        }),
+        filenameBase: `asset-action-request-${ids.length}-handover`,
+    });
     }
 
     let assignee = primary.assignedTo;
@@ -416,13 +419,14 @@ const buildAssetActionApprovalHandoverAttachments = async (req, assets) => {
     }
 
     return buildAssignmentHandoverEmailAttachments(req, ids, {
-        assigneeName: assignee ? `${assignee.firstName || ''} ${assignee.lastName || ''}`.trim() || '—' : '—',
-        employeeCode: assignee?.employeeId || '—',
-        department: (assignee?.department && String(assignee.department).trim()) || '—',
-        hodName: hodDisplayFromEmployee(assignee),
-        assigner,
-        assignerName: assignerDisplay,
-        handoverDate: new Date(),
+        ...buildPendingRequestHandoverCtx({
+            assigner,
+            assignerName: assignerDisplay,
+            assigneeName: assignee ? `${assignee.firstName || ''} ${assignee.lastName || ''}`.trim() || '—' : '—',
+            employeeCode: assignee?.employeeId || '—',
+            department: (assignee?.department && String(assignee.department).trim()) || '—',
+            hodName: hodDisplayFromEmployee(assignee),
+        }),
         filenameBase: `asset-action-request-${ids.length}-handover`,
     });
 };
@@ -3486,6 +3490,30 @@ export const getAssetItemDetail = async (req, res) => {
 
         const signKey = (key) => (key ? getSignedFileUrl(key) : Promise.resolve(key));
 
+        const signMortgageAttachment = async (val) => {
+            if (val == null || val === '') return val;
+            if (typeof val === 'string') {
+                const trimmed = val.trim();
+                if (!trimmed || trimmed.startsWith('data:')) return val;
+                if (trimmed.length > 80 && !trimmed.includes('/') && !trimmed.startsWith('http')) {
+                    return val;
+                }
+                return signKey(trimmed);
+            }
+            if (typeof val === 'object' && !Array.isArray(val)) {
+                if (val.data && !val.publicId && !val.url) return val;
+                if (val.file != null) {
+                    return { ...val, file: await signMortgageAttachment(val.file) };
+                }
+                const ref = val.publicId || val.url;
+                if (ref) {
+                    const signed = await signKey(String(ref));
+                    return { ...val, url: signed };
+                }
+            }
+            return val;
+        };
+
         const signRemarkImages = async (arr) => {
             if (!Array.isArray(arr)) return arr;
             return Promise.all(
@@ -3558,43 +3586,69 @@ export const getAssetItemDetail = async (req, res) => {
             itemObj.photo ? signKey(itemObj.photo).then((u) => { itemObj.photo = u; }) : null,
         ];
 
+        const nonServiceAttachmentSignTasks = [
+            itemObj.invoiceFile ? signKey(itemObj.invoiceFile).then((u) => { itemObj.invoiceFile = u; }) : null,
+            itemObj.warrantyAttachment
+                ? signKey(itemObj.warrantyAttachment).then((u) => { itemObj.warrantyAttachment = u; })
+                : null,
+            itemObj.accidentReportAttachment
+                ? signKey(itemObj.accidentReportAttachment).then((u) => { itemObj.accidentReportAttachment = u; })
+                : null,
+            ...headerSignTasks,
+            itemObj.assignedBy?.signature?.url
+                ? signKey(itemObj.assignedBy.signature.url).then((u) => { itemObj.assignedBy.signature.url = u; })
+                : null,
+            itemObj.assignedTo?.signature?.url
+                ? signKey(itemObj.assignedTo.signature.url).then((u) => { itemObj.assignedTo.signature.url = u; })
+                : null,
+            itemObj.acceptedBy?.signature?.url
+                ? signKey(itemObj.acceptedBy.signature.url).then((u) => { itemObj.acceptedBy.signature.url = u; })
+                : null,
+            ...(itemObj.accessories || []).map((acc) =>
+                acc.attachment ? signKey(acc.attachment).then((u) => { acc.attachment = u; }) : null,
+            ),
+            ...(itemObj.documents || []).map((doc) =>
+                doc.attachment ? signKey(doc.attachment).then((u) => { doc.attachment = u; }) : null,
+            ),
+            itemObj.mortgageSecurityCheckAttachment
+                ? signMortgageAttachment(itemObj.mortgageSecurityCheckAttachment).then((u) => {
+                    itemObj.mortgageSecurityCheckAttachment = u;
+                })
+                : null,
+            itemObj.mortgageScheduleListAttachment
+                ? signMortgageAttachment(itemObj.mortgageScheduleListAttachment).then((u) => {
+                    itemObj.mortgageScheduleListAttachment = u;
+                })
+                : null,
+            itemObj.mortgageBankDocument
+                ? signMortgageAttachment(itemObj.mortgageBankDocument).then((u) => {
+                    itemObj.mortgageBankDocument = u;
+                })
+                : null,
+            ...(Array.isArray(itemObj.mortgageExtraAttachments)
+                ? itemObj.mortgageExtraAttachments.map((row) =>
+                    row?.file
+                        ? signMortgageAttachment(row.file).then((u) => {
+                            row.file = u;
+                        })
+                        : null,
+                )
+                : []),
+            ...(Array.isArray(itemObj?.activeServiceWorkflow?.history)
+                ? itemObj.activeServiceWorkflow.history.map((h) =>
+                    h?.bySignatureUrl
+                        ? signKey(h.bySignatureUrl).then((u) => { h.bySignatureUrl = u; })
+                        : null,
+                )
+                : []),
+        ];
+
         let signTasks;
         if (deferHeavyServiceSigning) {
             itemObj.deferredAttachmentSigning = true;
-            signTasks = headerSignTasks;
+            signTasks = nonServiceAttachmentSignTasks;
         } else {
-            signTasks = [
-                itemObj.invoiceFile ? signKey(itemObj.invoiceFile).then((u) => { itemObj.invoiceFile = u; }) : null,
-                itemObj.warrantyAttachment
-                    ? signKey(itemObj.warrantyAttachment).then((u) => { itemObj.warrantyAttachment = u; })
-                    : null,
-                itemObj.accidentReportAttachment
-                    ? signKey(itemObj.accidentReportAttachment).then((u) => { itemObj.accidentReportAttachment = u; })
-                    : null,
-                ...headerSignTasks,
-                itemObj.assignedBy?.signature?.url
-                    ? signKey(itemObj.assignedBy.signature.url).then((u) => { itemObj.assignedBy.signature.url = u; })
-                    : null,
-                itemObj.assignedTo?.signature?.url
-                    ? signKey(itemObj.assignedTo.signature.url).then((u) => { itemObj.assignedTo.signature.url = u; })
-                    : null,
-                itemObj.acceptedBy?.signature?.url
-                    ? signKey(itemObj.acceptedBy.signature.url).then((u) => { itemObj.acceptedBy.signature.url = u; })
-                    : null,
-                ...(itemObj.accessories || []).map((acc) =>
-                    acc.attachment ? signKey(acc.attachment).then((u) => { acc.attachment = u; }) : null,
-                ),
-                ...(itemObj.documents || []).map((doc) =>
-                    doc.attachment ? signKey(doc.attachment).then((u) => { doc.attachment = u; }) : null,
-                ),
-                ...(Array.isArray(itemObj?.activeServiceWorkflow?.history)
-                    ? itemObj.activeServiceWorkflow.history.map((h) =>
-                        h?.bySignatureUrl
-                            ? signKey(h.bySignatureUrl).then((u) => { h.bySignatureUrl = u; })
-                            : null,
-                    )
-                    : []),
-            ];
+            signTasks = [...nonServiceAttachmentSignTasks];
             if (itemObj.services?.length) {
                 signTasks.push(...itemObj.services.map((s) => signOneService(s)));
             }
@@ -3870,7 +3924,7 @@ export const assignAssetItem = async (req, res) => {
         } else {
             // Assigning to an Employee (Default)
             employeeToAssign = await EmployeeBasic.findById(assignedTo).select(
-                'employeeId firstName lastName companyEmail workEmail personalEmail email primaryReportee department'
+                'employeeId firstName lastName companyEmail workEmail personalEmail email primaryReportee department signature'
             ).populate({
                 path: 'primaryReportee',
                 select: '_id firstName lastName employeeId companyEmail workEmail',
@@ -3902,7 +3956,13 @@ export const assignAssetItem = async (req, res) => {
             }
 
             if (resolvedActors.autoAcceptOnAssign) {
-                applyAcceptedAssignmentState(item, actingEmpObjectId);
+                if (!employeeToAssign.signature?.url) {
+                    return res.status(403).json({
+                        message:
+                            'Cannot assign: The employee must have a digital signature on their profile before direct assignment.',
+                    });
+                }
+                applyAcceptedAssignmentState(item, employeeToAssign._id);
                 actionRequiredBy = null;
             } else {
                 item.status = 'Pending';
@@ -3969,8 +4029,6 @@ export const assignAssetItem = async (req, res) => {
         try {
             const itemForEmail = await AssetItem.findById(item._id).populate('categoryId', 'name');
             let assignAttachments = [];
-            const fe = frontendBaseUrl();
-            const assignerSigAbs = resolveSignatureUrlForPdf(assigner.signature, fe) || undefined;
 
             try {
                 const hodFromReportee =
@@ -3988,16 +4046,24 @@ export const assignAssetItem = async (req, res) => {
                 const codeDisplay =
                     assignedToType === 'Company' ? subjectEmpId : actionRecipient?.employeeId || '—';
 
-                const pdfBuf = await generateBulkAssignmentHandoverPdf(req, [item._id.toString()], {
-                    assigneeName: subjectName,
-                    employeeCode: codeDisplay,
-                    department: deptDisplay,
-                    hodName: hodDisplay,
-                    assignerName: `${assigner?.firstName || ''} ${assigner?.lastName || ''}`.trim() || '—',
-                    handoverDate: new Date(),
-                    assignerSignatureUrl: assignerSigAbs,
-                    showAssigneeSignature: false,
-                });
+                const handoverPdfCtx =
+                    item.acceptanceStatus === 'Accepted'
+                        ? buildFullySignedHandoverCtx({
+                              assigner,
+                              assignee: employeeToAssign,
+                              assigneeName: subjectName,
+                              employeeCode: codeDisplay,
+                              department: deptDisplay,
+                              hodName: hodDisplay,
+                          })
+                        : buildPendingRequestHandoverCtx({
+                              assigner,
+                              assigneeName: subjectName,
+                              employeeCode: codeDisplay,
+                              department: deptDisplay,
+                              hodName: hodDisplay,
+                          });
+                const pdfBuf = await generateBulkAssignmentHandoverPdf(req, [item._id.toString()], handoverPdfCtx);
                 if (pdfBuf?.length) {
                     assignmentHistoryPdfKey = await persistHandoverPdfBufferToHistory(
                         pdfBuf,
@@ -4015,15 +4081,42 @@ export const assignAssetItem = async (req, res) => {
             } catch (pdfErr) {
                 console.error('Assignment handover PDF attachment failed (non-fatal):', pdfErr?.message || pdfErr);
             }
-            await sendAssetAssignmentEmail({
-                asset: itemForEmail || item,
-                employee:
-                    assignedToType === 'Company'
-                        ? { firstName: subjectName, lastName: '', isCompany: true }
-                        : employeeToAssign,
-                recipient: actionRecipient,
-                attachments: assignAttachments,
-            });
+            const isDirectEmployeeAssign =
+                assignedToType === 'Employee' && item.acceptanceStatus === 'Accepted';
+
+            if (isDirectEmployeeAssign) {
+                await sendAssetAssignmentEmail({
+                    asset: itemForEmail || item,
+                    employee: employeeToAssign,
+                    recipient: employeeToAssign,
+                    attachments: assignAttachments,
+                }).catch((e) => console.error('[assignAssetItem] Assignee direct-assign email:', e?.message || e));
+
+                const assetController = await getDepartmentHOD('assetcontroller').catch(() => null);
+                if (assetController) {
+                    await sendAssetControllerDirectAssignmentRecordEmail({
+                        assetControllerEmployee: assetController,
+                        assigneeEmployee: employeeToAssign,
+                        assignerEmployee: assigner,
+                        attachments: assignAttachments,
+                        assetSummaryLines: [
+                            `${itemForEmail?.assetId || item.assetId} — ${itemForEmail?.name || item.name}`,
+                        ],
+                    }).catch((e) =>
+                        console.error('[assignAssetItem] AC direct-assign record email:', e?.message || e),
+                    );
+                }
+            } else {
+                await sendAssetAssignmentEmail({
+                    asset: itemForEmail || item,
+                    employee:
+                        assignedToType === 'Company'
+                            ? { firstName: subjectName, lastName: '', isCompany: true }
+                            : employeeToAssign,
+                    recipient: actionRecipient,
+                    attachments: assignAttachments,
+                });
+            }
 
             if (isReassignment && newAssignee) {
                 const skipIds = [actionRecipient?._id, employeeToAssign?._id].filter(Boolean).map(String);
@@ -4080,7 +4173,8 @@ export const assignAssetItem = async (req, res) => {
             .populate('categoryId typeId acceptedBy accessories assignedCompany')
             .populate({
                 path: 'assignedTo',
-                populate: [{ path: 'primaryReportee', select: 'firstName lastName employeeId' }]
+                select: 'firstName lastName employeeId department signature primaryReportee',
+                populate: [{ path: 'primaryReportee', select: 'firstName lastName employeeId' }],
             })
             .populate({ path: 'assignedBy', select: 'firstName lastName employeeId signature' });
 
@@ -4159,7 +4253,7 @@ export const bulkAssignAssetItems = async (req, res) => {
         }
 
         const employeeToAssign = await EmployeeBasic.findById(assignedTo).select(
-            'employeeId companyEmail workEmail personalEmail email primaryReportee firstName lastName department'
+            'employeeId companyEmail workEmail personalEmail email primaryReportee firstName lastName department signature'
         ).populate({ path: 'primaryReportee', select: '_id firstName lastName employeeId companyEmail workEmail' });
         if (!employeeToAssign) {
             return res.status(404).json({ message: 'Target employee not found' });
@@ -4168,6 +4262,13 @@ export const bulkAssignAssetItems = async (req, res) => {
         const resolvedActors = resolveEmployeeAssignmentActors(employeeToAssign, req.user.employeeObjectId);
         const pendingActionActorId = resolvedActors.pendingActionActorId;
         const autoAcceptOnAssign = resolvedActors.autoAcceptOnAssign;
+
+        if (autoAcceptOnAssign && !employeeToAssign.signature?.url) {
+            return res.status(403).json({
+                message:
+                    'Cannot assign: The employee must have a digital signature on their profile before direct assignment.',
+            });
+        }
 
         const empName = `${employeeToAssign?.firstName || ''} ${employeeToAssign?.lastName || ''}`.trim() || 'Unknown Employee';
 
@@ -4199,7 +4300,7 @@ export const bulkAssignAssetItems = async (req, res) => {
                 status: 'Assigned',
                 acceptanceStatus: 'Accepted',
                 actionRequiredBy: null,
-                acceptedBy: req.user.employeeObjectId,
+                acceptedBy: assignedTo,
             });
             if (assignmentType === 'Temporary' && updateData.assignedDays) {
                 const start = new Date();
@@ -4239,8 +4340,6 @@ export const bulkAssignAssetItems = async (req, res) => {
 
         let bulkAssignmentAttachments = [];
         let bulkAssignmentHandoverS3Key = null;
-        const feBulk = frontendBaseUrl();
-        const assignerSigBulk = resolveSignatureUrlForPdf(assigner.signature, feBulk) || undefined;
 
         try {
             const hodFromReportee = employeeToAssign.primaryReportee;
@@ -4250,19 +4349,26 @@ export const bulkAssignAssetItems = async (req, res) => {
                     hodFromReportee.employeeId ||
                     '—'
                     : '—';
+            const bulkHandoverPdfCtx = autoAcceptOnAssign
+                ? buildFullySignedHandoverCtx({
+                      assigner,
+                      assignee: employeeToAssign,
+                      assigneeName: empName,
+                      employeeCode: employeeToAssign.employeeId || '—',
+                      department: (employeeToAssign.department && String(employeeToAssign.department).trim()) || '—',
+                      hodName: hodDisplay,
+                  })
+                : buildPendingRequestHandoverCtx({
+                      assigner,
+                      assigneeName: empName,
+                      employeeCode: employeeToAssign.employeeId || '—',
+                      department: (employeeToAssign.department && String(employeeToAssign.department).trim()) || '—',
+                      hodName: hodDisplay,
+                  });
             bulkAssignmentAttachments = await requireBulkAssignmentHandoverPdfAttachment(
                 req,
                 assetIdStrings,
-                {
-                    assigneeName: empName,
-                    employeeCode: employeeToAssign.employeeId || '—',
-                    department: (employeeToAssign.department && String(employeeToAssign.department).trim()) || '—',
-                    hodName: hodDisplay,
-                    assignerName: `${assigner?.firstName || ''} ${assigner?.lastName || ''}`.trim() || '—',
-                    handoverDate: new Date(),
-                    assignerSignatureUrl: assignerSigBulk,
-                    showAssigneeSignature: false,
-                },
+                bulkHandoverPdfCtx,
                 'bulk-assignment-handover',
             );
             if (bulkAssignmentAttachments[0]?.content) {
@@ -4405,7 +4511,7 @@ export const bulkAssignAssetItems = async (req, res) => {
             await updateAssetTypeCounts(typeId);
         }
 
-        // Assignee pending flow email
+        // Assignment email (pending request vs AC direct-assign with both signatures)
         try {
             const assetsForEmail = await AssetItem.find({ _id: { $in: assetIds } })
                 .populate('categoryId', 'name')
@@ -4413,21 +4519,50 @@ export const bulkAssignAssetItems = async (req, res) => {
             const orderMap = new Map(assetIds.map((id, i) => [String(id), i]));
             assetsForEmail.sort((a, b) => (orderMap.get(String(a._id)) ?? 0) - (orderMap.get(String(b._id)) ?? 0));
 
-            const emailRecipient = await EmployeeBasic.findById(pendingActionActorId).select(
-                'employeeId firstName lastName companyEmail workEmail personalEmail email primaryReportee',
-            ).populate('primaryReportee', 'firstName lastName employeeId companyEmail workEmail');
             const firstAsset = await AssetItem.findById(assetIds[0]).populate('categoryId');
+            const assetSummaryLines = assetsForEmail.map(
+                (a) => `${a.assetId} — ${a.name}`,
+            );
+
             if (employeeToAssign && firstAsset) {
-                await sendAssetAssignmentEmail({
-                    asset: firstAsset,
-                    assets: assetsForEmail,
-                    employee: employeeToAssign,
-                    recipient: emailRecipient || employeeToAssign,
-                    isBulk: true,
-                    assetCount: assetIds.length,
-                    attachments: bulkAssignmentAttachments,
-                    bulkAssignmentGroupId: bulkAssignmentGroupId.toString(),
-                });
+                if (autoAcceptOnAssign) {
+                    await sendAssetAssignmentEmail({
+                        asset: firstAsset,
+                        assets: assetsForEmail,
+                        employee: employeeToAssign,
+                        recipient: employeeToAssign,
+                        isBulk: true,
+                        assetCount: assetIds.length,
+                        attachments: bulkAssignmentAttachments,
+                        bulkAssignmentGroupId: bulkAssignmentGroupId.toString(),
+                    });
+
+                    if (assetController) {
+                        await sendAssetControllerDirectAssignmentRecordEmail({
+                            assetControllerEmployee: assetController,
+                            assigneeEmployee: employeeToAssign,
+                            assignerEmployee: assigner,
+                            attachments: bulkAssignmentAttachments,
+                            isBulk: true,
+                            assetCount: assetIds.length,
+                            assetSummaryLines,
+                        });
+                    }
+                } else {
+                    const emailRecipient = await EmployeeBasic.findById(pendingActionActorId).select(
+                        'employeeId firstName lastName companyEmail workEmail personalEmail email primaryReportee',
+                    ).populate('primaryReportee', 'firstName lastName employeeId companyEmail workEmail');
+                    await sendAssetAssignmentEmail({
+                        asset: firstAsset,
+                        assets: assetsForEmail,
+                        employee: employeeToAssign,
+                        recipient: emailRecipient || employeeToAssign,
+                        isBulk: true,
+                        assetCount: assetIds.length,
+                        attachments: bulkAssignmentAttachments,
+                        bulkAssignmentGroupId: bulkAssignmentGroupId.toString(),
+                    });
+                }
             }
         } catch (emailErr) {
             console.error('Error in bulk asset assignment email trigger:', emailErr);
@@ -4643,6 +4778,18 @@ export const respondToAssignment = async (req, res) => {
                 if (!isActingOnAssignedTurn) {
                     return res.status(403).json({ message: 'It is not your turn to respond.' });
                 }
+            }
+        }
+
+        if (action === 'Accept' && item.assignedToType === 'Employee' && item.assignedTo) {
+            const assigneeSigCheck = await EmployeeBasic.findById(item.assignedTo._id || item.assignedTo)
+                .select('signature')
+                .lean();
+            if (!assigneeSigCheck?.signature?.url) {
+                return res.status(403).json({
+                    message:
+                        'The assigned employee must have a digital signature on their profile before this assignment can be accepted.',
+                });
             }
         }
 
@@ -5019,7 +5166,8 @@ export const respondToAssignment = async (req, res) => {
                 .populate('categoryId typeId acceptedBy accessories assignedCompany')
                 .populate({
                     path: 'assignedTo',
-                    populate: [{ path: 'primaryReportee', select: 'firstName lastName employeeId' }]
+                    select: 'firstName lastName employeeId department signature primaryReportee',
+                    populate: [{ path: 'primaryReportee', select: 'firstName lastName employeeId' }],
                 })
                 .populate({ path: 'assignedBy', select: 'firstName lastName employeeId signature' });
 
@@ -5051,24 +5199,18 @@ export const respondToAssignment = async (req, res) => {
 
             try {
                 const signerEmp = await EmployeeBasic.findById(currentUser).select('firstName lastName signature');
-                const fe = frontendBaseUrl();
-                const assignSig =
-                    snapshotItem.assignedBy?.signature &&
-                    resolveSignatureUrlForPdf(snapshotItem.assignedBy.signature, fe);
-                const acceptorSig =
-                    signerEmp?.signature && resolveSignatureUrlForPdf(signerEmp.signature, fe);
-                const ackNameStr =
-                    `${signerEmp?.firstName || ''} ${signerEmp?.lastName || ''}`.trim() || '—';
 
                 let subjectEmployeeName = '';
                 let subjectCode = '';
                 let subjectDept = '';
                 let hodDisplay = '—';
+                let assigneeForAck = null;
                 if (item.assignedToType === 'Company') {
                     const comp = await Company.findById(item.assignedCompany).select('name companyId').lean();
                     subjectEmployeeName = comp?.name || '—';
                     subjectCode = comp?.companyId || '—';
                     subjectDept = '—';
+                    assigneeForAck = signerEmp;
                 } else {
                     const ato = snapshotItem.assignedTo;
                     subjectEmployeeName = ato ? `${ato.firstName || ''} ${ato.lastName || ''}`.trim() : '—';
@@ -5081,23 +5223,28 @@ export const respondToAssignment = async (req, res) => {
                             hodFromReportee.employeeId ||
                             '—';
                     }
+                    const assigneeId = ato?._id || ato;
+                    if (assigneeId) {
+                        assigneeForAck = await EmployeeBasic.findById(assigneeId)
+                            .select('firstName lastName employeeId signature')
+                            .lean();
+                    }
                 }
                 const assignerNameStr = snapshotItem.assignedBy
                     ? `${snapshotItem.assignedBy.firstName || ''} ${snapshotItem.assignedBy.lastName || ''}`.trim()
                     : '—';
 
-                const pdfBuf = await generateBulkAssignmentHandoverPdf(req, [item._id.toString()], {
+                const handoverAcceptCtx = buildFullySignedHandoverCtx({
+                    assigner: snapshotItem.assignedBy,
+                    assignerName: assignerNameStr,
+                    assignee: assigneeForAck,
                     assigneeName: subjectEmployeeName,
                     employeeCode: subjectCode,
                     department: subjectDept,
                     hodName: hodDisplay,
-                    assignerName: assignerNameStr,
-                    handoverDate: new Date(),
-                    assignerSignatureUrl: assignSig || undefined,
-                    showAssigneeSignature: !!(acceptorSig && ackNameStr),
-                    assigneeSignatureUrl: acceptorSig || undefined,
-                    assigneeAcknowledgeName: ackNameStr,
                 });
+
+                const pdfBuf = await generateBulkAssignmentHandoverPdf(req, [item._id.toString()], handoverAcceptCtx);
 
                 let acceptPdfAttachments = [];
                 if (pdfBuf?.length) {
@@ -5601,16 +5748,6 @@ export const respondBulkAssignmentGroup = async (req, res) => {
         const byId = new Map(allInGroup.map((a) => [a._id.toString(), a]));
         const results = { accepted: [], rejected: [] };
 
-        const signerBulkAccept = await EmployeeBasic.findById(currentUser)
-            .select('firstName lastName signature')
-            .lean();
-        const feBulkAcceptResp = frontendBaseUrl();
-        const acceptorSigUrlBulkResp = signerBulkAccept?.signature
-            ? resolveSignatureUrlForPdf(signerBulkAccept.signature, feBulkAcceptResp)
-            : '';
-        const ackNameBulkResp =
-            `${signerBulkAccept?.firstName || ''} ${signerBulkAccept?.lastName || ''}`.trim() || '—';
-
         const applyTempDatesOnAccept = (item) => {
             if (item.assignmentType === 'Temporary' && item.assignedDays) {
                 const parsedDays = Number(item.assignedDays);
@@ -5674,9 +5811,17 @@ export const respondBulkAssignmentGroup = async (req, res) => {
             const assignerNameStr = snap.assignedBy
                 ? `${snap.assignedBy.firstName || ''} ${snap.assignedBy.lastName || ''}`.trim()
                 : '—';
-            const assignSigB =
-                snap.assignedBy?.signature &&
-                resolveSignatureUrlForPdf(snap.assignedBy.signature, feBulkAcceptResp);
+
+            let assigneeForBulkAck = null;
+            if (item.assignedToType !== 'Company' && item.assignedTo) {
+                assigneeForBulkAck = await EmployeeBasic.findById(item.assignedTo._id || item.assignedTo)
+                    .select('firstName lastName employeeId signature')
+                    .lean();
+            } else if (item.assignedToType === 'Company') {
+                assigneeForBulkAck = await EmployeeBasic.findById(currentUser)
+                    .select('firstName lastName signature')
+                    .lean();
+            }
 
             const acceptHistDoc = await AssetHistory.create({
                 assetId: item._id,
@@ -5692,18 +5837,19 @@ export const respondBulkAssignmentGroup = async (req, res) => {
             });
 
             try {
-                const pdfBuf = await generateBulkAssignmentHandoverPdf(req, [item._id.toString()], {
-                    assigneeName: subjectEmployeeName,
-                    employeeCode: subjectCode,
-                    department: subjectDept,
-                    hodName: hodDisplay,
-                    assignerName: assignerNameStr,
-                    handoverDate: new Date(),
-                    assignerSignatureUrl: assignSigB || undefined,
-                    showAssigneeSignature: !!(acceptorSigUrlBulkResp && ackNameBulkResp),
-                    assigneeSignatureUrl: acceptorSigUrlBulkResp || undefined,
-                    assigneeAcknowledgeName: ackNameBulkResp,
-                });
+                const pdfBuf = await generateBulkAssignmentHandoverPdf(
+                    req,
+                    [item._id.toString()],
+                    buildFullySignedHandoverCtx({
+                        assigner: snap.assignedBy,
+                        assignerName: assignerNameStr,
+                        assignee: assigneeForBulkAck,
+                        assigneeName: subjectEmployeeName,
+                        employeeCode: subjectCode,
+                        department: subjectDept,
+                        hodName: hodDisplay,
+                    }),
+                );
                 if (pdfBuf?.length) {
                     const fk = await persistHandoverPdfBufferToHistory(
                         pdfBuf,

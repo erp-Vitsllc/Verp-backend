@@ -3,12 +3,10 @@ import EmployeeBasic from '../models/EmployeeBasic.js';
 import { getDepartmentHOD } from './getDepartmentHOD.js';
 import { resolveEmployeeEmail } from './resolveEmployeeEmail.js';
 import { normalizePdfAttachments } from './normalizeEmailAttachments.js';
-import {
-    buildBulkAssigneeDispositionPdfAttachment,
-    resolveSignatureUrlForPdf,
-} from './generateBulkAssetInventoryPdf.js';
+import { buildBulkAssigneeDispositionPdfAttachment } from './generateBulkAssetInventoryPdf.js';
 import {
     buildAssignmentHandoverEmailAttachments,
+    buildFullySignedHandoverCtx,
     hodDisplayFromEmployee,
 } from './buildAssignmentHandoverEmailAttachments.js';
 
@@ -74,9 +72,9 @@ export async function notifyBulkAssignmentResponseEmails(req, {
             : 'Assignee';
 
         let assigneeFull = assigneeEmployee;
-        if (assigneeEmployee?._id && !assigneeEmployee.department) {
+        if (assigneeEmployee?._id && (!assigneeEmployee.department || !assigneeEmployee.signature)) {
             assigneeFull = await EmployeeBasic.findById(assigneeEmployee._id)
-                .select('firstName lastName employeeId department primaryReportee companyEmail workEmail')
+                .select('firstName lastName employeeId department signature primaryReportee companyEmail workEmail')
                 .populate('primaryReportee', 'firstName lastName employeeId companyEmail workEmail')
                 .lean()
                 .catch(() => assigneeEmployee);
@@ -109,33 +107,19 @@ export async function notifyBulkAssignmentResponseEmails(req, {
             return;
         }
 
-        const fe = String(process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/+$/, '');
-        const assignerSig =
-            assigner?.signature && resolveSignatureUrlForPdf(assigner.signature, fe)
-                ? resolveSignatureUrlForPdf(assigner.signature, fe)
-                : undefined;
-        const assigneeSig =
-            signer?.signature && resolveSignatureUrlForPdf(signer.signature, fe)
-                ? resolveSignatureUrlForPdf(signer.signature, fe)
-                : undefined;
-
         const attachments = [];
 
         if (acceptedIds.length) {
             const handoverAtt = await buildAssignmentHandoverEmailAttachments(req, acceptedIds, {
-                assigneeName,
-                employeeCode: assigneeFull?.employeeId || '—',
-                department:
-                    (assigneeFull?.department && String(assigneeFull.department).trim()) || '—',
-                hodName: hodDisplayFromEmployee(assigneeFull),
-                assigner,
-                assignerName: assigner
-                    ? `${assigner.firstName || ''} ${assigner.lastName || ''}`.trim()
-                    : '—',
-                handoverDate: new Date(),
-                showAssigneeSignature: !!(assigneeSig && responderName),
-                assigneeSignatureUrl: assigneeSig || undefined,
-                assigneeAcknowledgeName: responderName,
+                ...buildFullySignedHandoverCtx({
+                    assigner,
+                    assignee: assigneeFull,
+                    assigneeName,
+                    employeeCode: assigneeFull?.employeeId || '—',
+                    department:
+                        (assigneeFull?.department && String(assigneeFull.department).trim()) || '—',
+                    hodName: hodDisplayFromEmployee(assigneeFull),
+                }),
                 filenameBase: 'bulk-assignment-accepted-handover',
             });
             if (handoverAtt?.length) attachments.push(...handoverAtt);

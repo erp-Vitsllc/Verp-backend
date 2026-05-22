@@ -205,8 +205,12 @@ const tryFinalizeDispositionAtomic = async (req, assetId, actorName) => {
     } else {
         finalizeSet.totalLossValue = wf.totalLossValue != null ? Number(wf.totalLossValue) : null;
         finalizeSet.soldValue = null;
-        finalizeSet.registrationExpense = null;
-        finalizeSet.otherExpense = null;
+        finalizeSet.registrationExpense =
+            wf.registrationExpense != null && !Number.isNaN(Number(wf.registrationExpense))
+                ? Number(wf.registrationExpense)
+                : null;
+        finalizeSet.otherExpense =
+            wf.otherExpense != null && !Number.isNaN(Number(wf.otherExpense)) ? Number(wf.otherExpense) : null;
         if (wf.accidentReportAttachment) {
             finalizeSet.accidentReportAttachment = wf.accidentReportAttachment;
         }
@@ -240,11 +244,11 @@ const tryFinalizeDispositionAtomic = async (req, assetId, actorName) => {
             ? [{ label: 'Total loss value (AED)', value: String(wfFinal.totalLossValue) }]
             : []),
         { label: 'Current loan (AED)', value: String(wfFinal.currentLoanAmount ?? 0) },
-        ...(target === 'sold'
-            ? [
-                  { label: 'Registration expense (AED)', value: String(wfFinal.registrationExpense ?? 0) },
-                  { label: 'Other expenses (AED)', value: String(wfFinal.otherExpense ?? 0) },
-              ]
+        ...(wfFinal.registrationExpense != null
+            ? [{ label: 'Registration expense (AED)', value: String(wfFinal.registrationExpense ?? 0) }]
+            : []),
+        ...(wfFinal.otherExpense != null
+            ? [{ label: 'Other expenses (AED)', value: String(wfFinal.otherExpense ?? 0) }]
             : []),
         { label: 'Balance in hand (AED)', value: String(wfFinal.balanceInHand ?? 0) },
     ];
@@ -348,33 +352,16 @@ export const submitVehicleDispositionRequest = async (req, res) => {
             req.user?.employeeId ||
             '';
 
-        const regDate =
-            targetStatus === 'total loss' && body.registrationExpiryDate
-                ? new Date(body.registrationExpiryDate)
-                : targetStatus === 'total loss' && asset.registrationExpiryDate
-                  ? new Date(asset.registrationExpiryDate)
-                  : null;
-
         const loanAmt = parseMoneyInt(body.currentLoanAmount);
-        let balanceInHand;
-        let registrationExpense = null;
-        let otherExpense = null;
-        let registrationExpiryDateForWf = null;
-
-        if (targetStatus === 'sold') {
-            registrationExpense = parseMoneyInt(body.registrationExpense);
-            otherExpense = parseMoneyInt(body.otherExpense);
-            balanceInHand = computeSoldBalanceInHand({
-                soldValue,
-                currentLoanAmount: loanAmt,
-                registrationExpense,
-                otherExpense,
-            });
-        } else {
-            balanceInHand = parseMoneyInt(body.balanceInHand);
-            registrationExpiryDateForWf =
-                regDate instanceof Date && !Number.isNaN(regDate.getTime()) ? regDate : null;
-        }
+        const registrationExpense = parseMoneyInt(body.registrationExpense);
+        const otherExpense = parseMoneyInt(body.otherExpense);
+        const payoutValue = targetStatus === 'sold' ? soldValue : totalLossValue;
+        const balanceInHand = computeSoldBalanceInHand({
+            soldValue: payoutValue,
+            currentLoanAmount: loanAmt,
+            registrationExpense,
+            otherExpense,
+        });
 
         asset.vehicleDispositionWorkflow = {
             targetStatus,
@@ -387,9 +374,9 @@ export const submitVehicleDispositionRequest = async (req, res) => {
             totalLossValue,
             currentLoanAmount: loanAmt,
             balanceInHand,
-            registrationExpiryDate: targetStatus === 'sold' ? null : registrationExpiryDateForWf,
-            registrationExpense: targetStatus === 'sold' ? registrationExpense : null,
-            otherExpense: targetStatus === 'sold' ? otherExpense : null,
+            registrationExpiryDate: null,
+            registrationExpense,
+            otherExpense,
             accidentReportAttachment: accidentKey,
             accountsCompletedAt: null,
             accountsCompletedBy: null,

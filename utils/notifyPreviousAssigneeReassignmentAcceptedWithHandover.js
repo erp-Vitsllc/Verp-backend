@@ -1,7 +1,7 @@
 import nodemailer from 'nodemailer';
 import AssetHistory from '../models/AssetHistory.js';
 import AssetItem from '../models/AssetItem.js';
-import { generateAssetHandoverEmailPdf } from './generateAssetHandoverEmailPdf.js';
+import { buildAcceptedAssetHandoverAttachments } from './buildAssignmentHandoverEmailAttachments.js';
 import { normalizePdfAttachments } from './normalizeEmailAttachments.js';
 import { resolveEmployeeEmail } from './resolveEmployeeEmail.js';
 
@@ -84,19 +84,18 @@ export async function notifyPreviousAssigneeReassignmentAcceptedWithHandover(req
 
         const frontendUrl = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/'/g, '');
 
-        let pdfBuffer = null;
+        let attachments = [];
         try {
-            pdfBuffer = await generateAssetHandoverEmailPdf(assetMongoId);
+            attachments = normalizePdfAttachments(
+                await buildAcceptedAssetHandoverAttachments(
+                    req,
+                    assetMongoId,
+                    'reassignment-accepted-handover',
+                ),
+            );
         } catch (pdfErr) {
             console.error('[Prev assignee handover] PDF generation failed:', pdfErr?.message || pdfErr);
         }
-
-        const safeStem = String(current.assetId || assetMongoId).replace(/[^\w.-]+/g, '_');
-        const attachments = normalizePdfAttachments(
-            pdfBuffer?.length
-                ? [{ filename: `Asset-Handover-${safeStem}.pdf`, content: pdfBuffer }]
-                : []
-        );
         const hasPdf = attachments.length > 0;
 
         const buttonUrl = `${frontendUrl}/HRM/Asset/details/${assetMongoId.toString()}`;

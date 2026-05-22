@@ -6,7 +6,7 @@ import DashboardAction from '../models/DashboardAction.js';
 import { getDepartmentHOD, isUserInFlowchart } from '../utils/getDepartmentHOD.js';
 import { isUserAdministrator } from '../services/permissionService.js';
 import mongoose from 'mongoose';
-import { uploadDocumentToS3, getSignedFileUrl } from '../utils/s3Upload.js';
+import { uploadDocumentToS3, getSignedFileUrl, persistStoredAttachmentValue } from '../utils/s3Upload.js';
 import { sendAssetCreationApprovalEmail } from '../utils/sendAssetCreationApprovalEmail.js';
 import { buildBulkAssetInventoryPdfAttachment, requireBulkAssetInventoryPdfAttachment } from '../utils/generateBulkAssetInventoryPdf.js';
 import { sendAssetCreatedByAdminInfoEmail } from '../utils/sendAssetCreationDecisionEmail.js';
@@ -1148,6 +1148,39 @@ export const updateAssetItem = async (req, res) => {
         }
         delete updates.accidentReportDocument;
 
+        const mortgageFileKeys = [
+            'mortgageSecurityCheckAttachment',
+            'mortgageScheduleListAttachment',
+            'mortgageBankDocument',
+        ];
+        for (const mk of mortgageFileKeys) {
+            if (Object.prototype.hasOwnProperty.call(updates, mk)) {
+                asset[mk] = await persistStoredAttachmentValue(
+                    updates[mk],
+                    'asset-documents',
+                    mk,
+                );
+                delete updates[mk];
+            }
+        }
+        if (Object.prototype.hasOwnProperty.call(updates, 'mortgageExtraAttachments')) {
+            const rows = Array.isArray(updates.mortgageExtraAttachments)
+                ? updates.mortgageExtraAttachments
+                : [];
+            asset.mortgageExtraAttachments = await Promise.all(
+                rows.map(async (row) => {
+                    const docName = String(row?.docName || '').trim();
+                    const file = await persistStoredAttachmentValue(
+                        row?.file,
+                        'asset-documents',
+                        row?.file?.name || docName || 'mortgage-doc',
+                    );
+                    return { docName, file };
+                }),
+            );
+            delete updates.mortgageExtraAttachments;
+        }
+
         if (updates.vehicleDispositionStatus != null) {
             const nextDisp = String(updates.vehicleDispositionStatus || '').toLowerCase().trim();
             const curDisp = String(asset.vehicleDispositionStatus || 'active').toLowerCase().trim();
@@ -1528,6 +1561,52 @@ export const updateAssetItem = async (req, res) => {
         }
         if (assetObj.accidentReportAttachment) {
             assetObj.accidentReportAttachment = await getSignedFileUrl(assetObj.accidentReportAttachment);
+        }
+
+        const signMortgageAttachment = async (val) => {
+            if (val == null || val === '') return val;
+            if (typeof val === 'string') {
+                const trimmed = val.trim();
+                if (!trimmed || trimmed.startsWith('data:')) return val;
+                if (trimmed.length > 80 && !trimmed.includes('/') && !trimmed.startsWith('http')) {
+                    return val;
+                }
+                return getSignedFileUrl(trimmed);
+            }
+            if (typeof val === 'object' && !Array.isArray(val)) {
+                if (val.data && !val.publicId && !val.url) return val;
+                if (val.file != null) {
+                    return { ...val, file: await signMortgageAttachment(val.file) };
+                }
+                const ref = val.publicId || val.url;
+                if (ref) {
+                    const signed = await getSignedFileUrl(String(ref));
+                    return { ...val, url: signed };
+                }
+            }
+            return val;
+        };
+
+        if (assetObj.mortgageSecurityCheckAttachment) {
+            assetObj.mortgageSecurityCheckAttachment = await signMortgageAttachment(
+                assetObj.mortgageSecurityCheckAttachment,
+            );
+        }
+        if (assetObj.mortgageScheduleListAttachment) {
+            assetObj.mortgageScheduleListAttachment = await signMortgageAttachment(
+                assetObj.mortgageScheduleListAttachment,
+            );
+        }
+        if (assetObj.mortgageBankDocument) {
+            assetObj.mortgageBankDocument = await signMortgageAttachment(assetObj.mortgageBankDocument);
+        }
+        if (Array.isArray(assetObj.mortgageExtraAttachments)) {
+            assetObj.mortgageExtraAttachments = await Promise.all(
+                assetObj.mortgageExtraAttachments.map(async (row) => ({
+                    ...row,
+                    file: row?.file ? await signMortgageAttachment(row.file) : row?.file,
+                })),
+            );
         }
 
         if (assetObj.accessories && Array.isArray(assetObj.accessories)) {

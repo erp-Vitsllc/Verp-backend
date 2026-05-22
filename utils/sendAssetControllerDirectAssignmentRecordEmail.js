@@ -71,7 +71,9 @@ export async function sendAssetControllerDirectAssignmentRecordEmail({
                     <p style="font-size: 14px; color: #64748b;">Recorded by: <strong>${assignerName}</strong></p>
                     ${listHtml}
                     <p style="font-size: 13px; color: #64748b; margin-top: 20px;">
-                        The attached PDF is the asset handover summary (same layout as the portal handover form) for your records.
+                        The attached handover form includes your signature as <strong>Handover By</strong> and
+                        <strong>${assigneeName}</strong>&rsquo;s name and signature under <strong>Received and Acknowledge</strong>
+                        (assignee, not Asset Controller).
                     </p>
                 </div>
                 <div style="background-color: #f8fafc; padding: 16px; text-align: center; font-size: 12px; color: #64748b; border-top: 1px solid #e2e8f0;">

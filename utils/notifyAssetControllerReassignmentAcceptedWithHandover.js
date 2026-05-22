@@ -2,7 +2,7 @@ import nodemailer from 'nodemailer';
 import AssetItem from '../models/AssetItem.js';
 import { getDepartmentHOD } from './getDepartmentHOD.js';
 import { resolveEmployeeEmailTargets } from './resolveEmployeeEmail.js';
-import { generateAssetHandoverEmailPdf } from './generateAssetHandoverEmailPdf.js';
+import { buildAcceptedAssetHandoverAttachments } from './buildAssignmentHandoverEmailAttachments.js';
 import { normalizePdfAttachments } from './normalizeEmailAttachments.js';
 
 /**
@@ -33,9 +33,15 @@ export async function notifyAssetControllerReassignmentAcceptedWithHandover(req,
         const displayId = asset?.assetId || String(assetMongoId);
         const displayName = asset?.name || 'Asset';
 
-        let pdfBuffer = null;
+        let attachments = [];
         try {
-            pdfBuffer = await generateAssetHandoverEmailPdf(assetMongoId);
+            attachments = normalizePdfAttachments(
+                await buildAcceptedAssetHandoverAttachments(
+                    req,
+                    assetMongoId,
+                    'reassignment-accepted-handover',
+                ),
+            );
         } catch (pdfErr) {
             console.error('[AC Reassignment Handover] PDF generation failed:', pdfErr?.message || pdfErr);
         }
@@ -51,11 +57,6 @@ export async function notifyAssetControllerReassignmentAcceptedWithHandover(req,
         });
 
         const acFirst = ac.firstName || 'Asset Controller';
-        const attachments = normalizePdfAttachments(
-            pdfBuffer?.length
-                ? [{ filename: `Handover-${displayId.replace(/[^\w.-]+/g, '_')}.pdf`, content: pdfBuffer }]
-                : []
-        );
 
         const html = `
             <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; color: #1e293b; line-height: 1.6; max-width: 600px; margin: 0 auto; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden; background-color: #ffffff;">
@@ -78,16 +79,15 @@ export async function notifyAssetControllerReassignmentAcceptedWithHandover(req,
         `;
 
         await transporter.sendMail({
-            fromName: req.user ? `${req.user.firstName || ""} ${req.user.lastName || ""}`.trim() : "Asset Management",
+            from: `"Asset Management" <${emailUser}>`,
             to: acEmail,
-            ...(acCc.length ? { cc: acCc } : {}),
             subject: `Reassignment accepted: ${displayName} (${displayId})`,
             html,
-            ...(attachments.length ? { attachments } : {})
+            ...(attachments.length ? { attachments } : {}),
         });
 
         console.log(
-            `[AC Reassignment Handover] Notification sent to ${acEmail}${acCc.length ? ` (cc: ${acCc.join(', ')})` : ''} (${attachments.length ? 'with PDF' : 'no PDF'})`
+            `[AC Reassignment Handover] Notification sent to ${acEmail} (${attachments.length ? 'with PDF' : 'no PDF'})`,
         );
     } catch (err) {
         console.error('[AC Reassignment Handover] Failed to notify Asset Controller:', err);
