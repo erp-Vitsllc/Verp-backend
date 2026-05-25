@@ -57,7 +57,7 @@ export async function sendAssetBulkDispositionResultEmail({
                     <div style="padding:24px;background:#fff;">
                         <p style="margin:0 0 14px;font-size:15px;">Hello <strong>${employee.firstName || ''} ${employee.lastName || ''}</strong>,</p>
                         ${introHtml || ''}
-                        ${att.length ? '<p style="font-size:12px;color:#64748b;margin:16px 0 0">A PDF is attached with two lists: processed assets and assets that stayed assigned to you.</p>' : ''}
+                        ${att.length ? '<p style="font-size:12px;color:#64748b;margin:16px 0 0">The attached <strong>Asset Handover Form</strong> lists the processed asset(s) with assigner and assignee signatures.</p>' : ''}
                     </div>
                     <div style="padding:16px;background:#f8fafc;font-size:11px;color:#94a3b8;text-align:center;border-top:1px solid #e2e8f0;">VeRP Asset Management</div>
                 </div>

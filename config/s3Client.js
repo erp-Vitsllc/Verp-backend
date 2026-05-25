@@ -10,13 +10,14 @@ const endpoint = process.env.IDRIVE_ENDPOINT && !process.env.IDRIVE_ENDPOINT.sta
 console.log('Initializing S3 Client with endpoint:', endpoint);
 
 const s3Client = new S3Client({
-    region: "ap-southeast-1", // Region must match the endpoint (s3.ap-southeast-1...)
-    endpoint: endpoint,
+    region: process.env.IDRIVE_REGION || 'ap-southeast-1',
+    endpoint,
     credentials: {
         accessKeyId: process.env.IDRIVE_ACCESS_KEY,
         secretAccessKey: process.env.IDRIVE_SECRET_KEY,
     },
-    forcePathStyle: false, // Use Virtual Hosted style to avoid 302 redirects
+    // iDrive e2 and most S3-compatible stores require path-style signing for presigned URLs.
+    forcePathStyle: true,
 });
 
 export const bucketName = process.env.IDRIVE_BUCKET_NAME;

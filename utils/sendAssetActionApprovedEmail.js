@@ -95,7 +95,7 @@ export const sendAssetActionApprovedEmail = async (asset, actionType, employee, 
                         </table>
                     </div>
 
-                    ${att.length ? `<p style="font-size:13px;color:#64748b;margin:0 0 16px;">A PDF attachment lists the asset(s) included in this approval.</p>` : ''}
+                    ${att.length ? `<p style="font-size:13px;color:#64748b;margin:0 0 16px;">The attached <strong>Asset Handover Form</strong> shows the handover party&rsquo;s signature and your name and signature under <strong>Received and Acknowledge</strong>.</p>` : ''}
 
                     <div style="text-align: center; margin-top: 40px;">
                         <a href="${link}" style="display: inline-block; background-color: #10b981; color: #ffffff; padding: 16px 32px; text-decoration: none; border-radius: 12px; font-weight: 800; font-size: 14px; text-transform: uppercase; letter-spacing: 0.05em; box-shadow: 0 10px 15px -3px rgba(16, 185, 129, 0.3);">View Asset Details</a>
@@ -208,7 +208,7 @@ export const sendAssetBulkActionApprovedEmail = async (assets, actionType, emplo
                         <p style="margin: 16px 0 0; color: #64748b; font-size: 12px;">Approved by: <strong>${approver ? `${approver.firstName} ${approver.lastName}` : 'Asset Controller'}</strong></p>
                     </div>
 
-                    ${att.length ? `<p style="font-size:13px;color:#64748b;margin:16px 0 0;">A PDF attachment lists all assets included in this bulk approval.</p>` : ''}
+                    ${att.length ? `<p style="font-size:13px;color:#64748b;margin:16px 0 0;">The attached <strong>Asset Handover Form</strong> lists all assets included in this bulk approval, with assigner and assignee signatures.</p>` : ''}
 
                     <div style="text-align: center; margin-top: 40px;">
                         <a href="${frontendUrl}/HRM/Asset" style="display: inline-block; background-color: #10b981; color: #ffffff; padding: 16px 32px; text-decoration: none; border-radius: 12px; font-weight: 800; font-size: 14px; text-transform: uppercase; letter-spacing: 0.05em; box-shadow: 0 10px 15px -3px rgba(16, 185, 129, 0.3);">View Assets</a>

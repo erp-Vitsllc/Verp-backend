@@ -1,14 +1,22 @@
 import nodemailer from "nodemailer";
-import { resolveEmployeeEmail } from "./resolveEmployeeEmail.js";
+import {
+    resolveEmployeeEmailWithReporteeLoaded,
+    employeeDisplayName,
+} from "./resolveEmployeeEmail.js";
 import { normalizePdfAttachments } from "./normalizeEmailAttachments.js";
 
 export const sendAssetResponseEmail = async ({ asset, actor, recipient, action, comment, assignedToType, assignedCompany, attachments = [] }) => {
     try {
-        const { email: recipientEmail } = resolveEmployeeEmail(recipient);
+        const { email: recipientEmail, isFallbackToReportee, employee: resolvedRecipient } =
+            await resolveEmployeeEmailWithReporteeLoaded(recipient);
         if (!recipientEmail) {
             console.warn(`[Email Warning] No email found for recipient ${recipient?.employeeId || recipient?._id}`);
             return;
         }
+        const helloName =
+            isFallbackToReportee && resolvedRecipient?.primaryReportee
+                ? employeeDisplayName(resolvedRecipient.primaryReportee)
+                : employeeDisplayName(resolvedRecipient || recipient);
 
         const emailUser = process.env.EMAIL_USER?.trim();
         const emailPass = process.env.EMAIL_PASS?.trim();
@@ -69,7 +77,7 @@ export const sendAssetResponseEmail = async ({ asset, actor, recipient, action, 
                     <h1 style="margin: 0; font-size: 24px;">Asset Assignment Update</h1>
                 </div>
                 <div style="padding: 40px;">
-                    <p style="font-size: 16px;">Hello ${recipient.firstName || "User"},</p>
+                    <p style="font-size: 16px;">Hello ${helloName || 'User'},</p>
                     
                     <p><strong>${actorName}</strong> ${actionDescription}</p>
                     

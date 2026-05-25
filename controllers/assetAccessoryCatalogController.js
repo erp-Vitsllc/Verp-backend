@@ -4,7 +4,7 @@ import EmployeeBasic from '../models/EmployeeBasic.js';
 import DashboardAction from '../models/DashboardAction.js';
 import { getDepartmentHOD, isUserInFlowchart } from '../utils/getDepartmentHOD.js';
 import { sendAssetActionApprovalEmail } from '../utils/sendAssetActionApprovalEmail.js';
-import { buildBulkAssetInventoryPdfAttachment } from '../utils/generateBulkAssetInventoryPdf.js';
+import { buildCreationRequestHandoverAttachments } from '../utils/buildAssignmentHandoverEmailAttachments.js';
 import {
     notifyAdminDeletedAccessoryCatalogEntry,
     isReqUserAdmin,
@@ -361,7 +361,15 @@ export const requestAttachAccessoryCatalog = async (req, res) => {
         try {
             let catAttachPdf = [];
             try {
-                catAttachPdf = await buildBulkAssetInventoryPdfAttachment(req, [targetDoc._id.toString()], 'catalog-attach-request-inventory');
+                const requester = req.user.employeeObjectId
+                    ? await EmployeeBasic.findById(req.user.employeeObjectId)
+                          .select('firstName lastName signature employeeId department')
+                          .lean()
+                    : null;
+                catAttachPdf = await buildCreationRequestHandoverAttachments(req, [targetDoc._id.toString()], {
+                    assigner: requester,
+                    assignerName: req.user.employeeId || 'System',
+                });
             } catch (e) {
                 /* non-fatal */
             }

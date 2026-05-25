@@ -56,7 +56,7 @@ export const sendAssetTransferSuccessEmail = async (asset, actionType, assetCont
             `Action: ${actionType}`,
             `Assigned to: ${assignedUserName}`,
             '',
-            att.length ? 'A PDF is attached listing the asset(s) processed in this approval.' : '',
+            att.length ? 'The attached Asset Handover Form lists the asset(s) processed in this approval.' : '',
             '',
             `Asset link: ${link}`,
             '',
@@ -76,7 +76,7 @@ export const sendAssetTransferSuccessEmail = async (asset, actionType, assetCont
                     <tr><td style="padding: 2px 16px 2px 0; color: #64748b;">Action</td><td style="padding: 2px 0;">${actionType}</td></tr>
                     <tr><td style="padding: 2px 16px 2px 0; color: #64748b;">Assigned to</td><td style="padding: 2px 0;">${assignedUserName}</td></tr>
                 </table>
-                ${att.length ? `<p style="margin: 0 0 10px 0; font-size: 13px; color: #64748b;">A PDF attachment lists the asset(s) processed in this approval.</p>` : ''}
+                ${att.length ? `<p style="margin: 0 0 10px 0; font-size: 13px; color: #64748b;">The attached <strong>Asset Handover Form</strong> lists the asset(s) processed in this approval.</p>` : ''}
                 <p style="margin: 0 0 4px 0; font-size: 13px;"><a href="${link}" style="color: #0369a1;">View asset in VeRP</a></p>
                 <p style="margin: 16px 0 0 0; font-size: 12px; color: #94a3b8;">Automated message — VeRP Asset Management</p>
             </div>

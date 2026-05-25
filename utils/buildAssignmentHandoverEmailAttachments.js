@@ -2,6 +2,7 @@ import {
     buildBulkAssignmentHandoverPdfAttachment,
     resolveSignatureUrlForPdf,
 } from './generateBulkAssetInventoryPdf.js';
+import { getSignedFileUrl } from './s3Upload.js';
 
 function frontendBaseUrl() {
     return (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/'/g, '');
@@ -11,6 +12,39 @@ function employeeDisplayName(emp) {
     if (!emp) return '—';
     const t = `${emp.firstName || ''} ${emp.lastName || ''}`.trim();
     return t || emp.employeeId || '—';
+}
+
+/** Puppeteer must load a signed URL (or data URL); raw S3 keys fail silently in PDFs. */
+export async function resolveHandoverSignatureUrl(sig, frontendBase) {
+    const raw = resolveSignatureUrlForPdf(sig, frontendBase);
+    if (!raw || typeof raw !== 'string') return undefined;
+    if (raw.startsWith('data:')) return raw;
+    if (/X-Amz-|Signature=|AWSAccessKeyId=|x-amz-/i.test(raw)) return raw;
+    try {
+        const signed = await getSignedFileUrl(raw);
+        return signed || raw;
+    } catch (e) {
+        console.warn('[resolveHandoverSignatureUrl]', e?.message || e);
+        return raw;
+    }
+}
+
+export async function finalizeHandoverPdfCtx(ctx, { assigner = null, assignee = null } = {}) {
+    return applySignedUrlsToHandoverCtx(ctx, { assigner, assignee });
+}
+
+async function applySignedUrlsToHandoverCtx(ctx, { assigner = null, assignee = null } = {}) {
+    const fe = frontendBaseUrl();
+    const next = { ...ctx };
+    if (assigner?.signature) {
+        const url = await resolveHandoverSignatureUrl(assigner.signature, fe);
+        if (url) next.assignerSignatureUrl = url;
+    }
+    if (next.showAssigneeSignature && assignee?.signature) {
+        const url = await resolveHandoverSignatureUrl(assignee.signature, fe);
+        if (url) next.assigneeSignatureUrl = url;
+    }
+    return next;
 }
 
 /** Pending request / transfer: assigner name + signature only (no assignee acknowledgment block). */
@@ -71,6 +105,22 @@ export function buildFullySignedHandoverCtx({
     };
 }
 
+/** Pending creation / approval request: handover form with requester signature only. */
+export async function buildCreationRequestHandoverAttachments(
+    req,
+    assetMongoIds,
+    { assigner = null, assignerName = '—', filenameBase = 'asset-creation-handover' } = {},
+) {
+    const ids = [...new Set((assetMongoIds || []).map(String).filter(Boolean))];
+    if (!ids.length) return [];
+    const ctx = buildPendingRequestHandoverCtx({ assigner, assignerName });
+    return buildAssignmentHandoverEmailAttachments(req, ids, {
+        ...ctx,
+        assigner,
+        filenameBase,
+    });
+}
+
 /**
  * Same PDF as bulk asset assignment emails (handover form listing assets).
  */
@@ -83,6 +133,7 @@ export async function buildAssignmentHandoverEmailAttachments(
         department = '—',
         hodName = '—',
         assigner = null,
+        assignee = null,
         assignerName = '—',
         handoverDate = new Date(),
         showAssigneeSignature = false,
@@ -95,13 +146,7 @@ export async function buildAssignmentHandoverEmailAttachments(
     const ids = [...new Set((assetIds || []).map(String).filter(Boolean))];
     if (!ids.length) return [];
 
-    const fe = frontendBaseUrl();
-    const assignerSig =
-        assigner?.signature && resolveSignatureUrlForPdf(assigner.signature, fe)
-            ? resolveSignatureUrlForPdf(assigner.signature, fe)
-            : undefined;
-
-    const ctx = {
+    let ctx = {
         assigneeName,
         employeeCode,
         department,
@@ -112,11 +157,12 @@ export async function buildAssignmentHandoverEmailAttachments(
                 ? `${assigner.firstName || ''} ${assigner.lastName || ''}`.trim()
                 : '—'),
         handoverDate,
-        assignerSignatureUrl: assignerSig,
         showAssigneeSignature,
         ...(assigneeSignatureUrl ? { assigneeSignatureUrl } : {}),
         ...(assigneeAcknowledgeName ? { assigneeAcknowledgeName } : {}),
     };
+
+    ctx = await applySignedUrlsToHandoverCtx(ctx, { assigner, assignee });
 
     try {
         const att = await buildBulkAssignmentHandoverPdfAttachment(req, ids, ctx, filenameBase);
@@ -194,6 +240,103 @@ export async function buildAcceptedAssetHandoverAttachments(
 
     return buildAssignmentHandoverEmailAttachments(req, [String(assetMongoId)], {
         ...ctx,
+        assigner: asset.assignedBy,
+        assignee,
+        filenameBase,
+    });
+}
+
+/**
+ * Signed Asset Handover Form PDF for one or more assets (email attachment).
+ * Use instead of inventory tables or processed/not-processed decision PDFs.
+ */
+export async function buildBulkActionHandoverEmailAttachments(
+    req,
+    assetMongoIds,
+    { assigner = null, assignee = null, filenameBase = 'asset-handover' } = {},
+) {
+    const ids = [...new Set((assetMongoIds || []).map(String).filter(Boolean))];
+    if (!ids.length) return [];
+
+    const EmployeeBasic = (await import('../models/EmployeeBasic.js')).default;
+
+    let assignerDoc = assigner;
+    if (assigner && (assigner._id || assigner) && !assigner.signature) {
+        assignerDoc = await EmployeeBasic.findById(assigner._id || assigner)
+            .select('firstName lastName employeeId signature department')
+            .lean()
+            .catch(() => assigner);
+    }
+
+    let assigneeDoc = assignee;
+    if (assignee && (assignee._id || assignee) && !assignee.signature) {
+        assigneeDoc = await EmployeeBasic.findById(assignee._id || assignee)
+            .select('firstName lastName employeeId department signature primaryReportee')
+            .populate('primaryReportee', 'firstName lastName employeeId')
+            .lean()
+            .catch(() => assignee);
+    }
+
+    const assigneeName = employeeDisplayName(assigneeDoc);
+    const ctx = buildFullySignedHandoverCtx({
+        assigner: assignerDoc,
+        assignee: assigneeDoc,
+        assigneeName,
+        employeeCode: assigneeDoc?.employeeId || '—',
+        department: (assigneeDoc?.department && String(assigneeDoc.department).trim()) || '—',
+        hodName: hodDisplayFromEmployee(assigneeDoc),
+    });
+
+    return buildAssignmentHandoverEmailAttachments(req, ids, {
+        ...ctx,
+        assigner: assignerDoc,
+        assignee: assigneeDoc,
+        filenameBase,
+    });
+}
+
+/** After AC approves Leave / similar: handover form with assigner + assignee signatures for assignee email. */
+export async function buildApprovedActionHandoverAttachments(req, assetDoc, filenameBase = 'asset-action-approved-handover') {
+    if (!assetDoc?._id) return [];
+    const AssetItem = (await import('../models/AssetItem.js')).default;
+    const EmployeeBasic = (await import('../models/EmployeeBasic.js')).default;
+
+    let asset = assetDoc;
+    if (!asset.assignedBy?.signature && asset.assignedBy) {
+        asset = await AssetItem.findById(asset._id)
+            .populate('assignedBy', 'firstName lastName employeeId signature department')
+            .populate({
+                path: 'assignedTo',
+                select: 'firstName lastName employeeId department signature primaryReportee',
+                populate: [{ path: 'primaryReportee', select: 'firstName lastName employeeId' }],
+            })
+            .lean();
+    }
+    if (!asset) return [];
+
+    let assignee = asset.assignedTo;
+    if (assignee && !assignee.signature) {
+        assignee = await EmployeeBasic.findById(assignee._id || assignee)
+            .select('firstName lastName employeeId department signature primaryReportee')
+            .populate('primaryReportee', 'firstName lastName employeeId')
+            .lean()
+            .catch(() => assignee);
+    }
+
+    const assigneeName = employeeDisplayName(assignee);
+    const ctx = buildFullySignedHandoverCtx({
+        assigner: asset.assignedBy,
+        assignee,
+        assigneeName,
+        employeeCode: assignee?.employeeId || '—',
+        department: (assignee?.department && String(assignee.department).trim()) || '—',
+        hodName: hodDisplayFromEmployee(assignee),
+    });
+
+    return buildAssignmentHandoverEmailAttachments(req, [String(asset._id)], {
+        ...ctx,
+        assigner: asset.assignedBy,
+        assignee,
         filenameBase,
     });
 }

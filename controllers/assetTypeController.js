@@ -8,7 +8,11 @@ import { isUserAdministrator } from '../services/permissionService.js';
 import mongoose from 'mongoose';
 import { uploadDocumentToS3, getSignedFileUrl, persistStoredAttachmentValue } from '../utils/s3Upload.js';
 import { sendAssetCreationApprovalEmail } from '../utils/sendAssetCreationApprovalEmail.js';
-import { buildBulkAssetInventoryPdfAttachment, requireBulkAssetInventoryPdfAttachment } from '../utils/generateBulkAssetInventoryPdf.js';
+import {
+    buildCreationRequestHandoverAttachments,
+    buildPendingRequestHandoverCtx,
+    buildAssignmentHandoverEmailAttachments,
+} from '../utils/buildAssignmentHandoverEmailAttachments.js';
 import { sendAssetCreatedByAdminInfoEmail } from '../utils/sendAssetCreationDecisionEmail.js';
 import { sendAssetActionApprovalEmail } from '../utils/sendAssetActionApprovalEmail.js';
 import { sendAssignedEmployeeActionEmail } from '../utils/sendAssignedEmployeeActionEmail.js';
@@ -439,33 +443,36 @@ export const createAssetType = async (req, res) => {
                     { upsert: true, new: true, setDefaultsOnInsert: true }
                 );
 
+                const requester = req.user.employeeObjectId
+                    ? await EmployeeBasic.findById(req.user.employeeObjectId)
+                          .select('firstName lastName signature employeeId department')
+                          .lean()
+                    : null;
                 let creationBulkAttachments = [];
-                if (isBulkCreation) {
-                    try {
-                        creationBulkAttachments = await requireBulkAssetInventoryPdfAttachment(
-                            req,
-                            createdObjectIds,
-                            'asset-creation-draft-inventory'
-                        );
-                    } catch (pdfErr) {
-                        console.error('[createAssetType] Bulk creation PDF required:', pdfErr?.message || pdfErr);
+                try {
+                    creationBulkAttachments = await buildCreationRequestHandoverAttachments(
+                        req,
+                        isBulkCreation ? createdObjectIds : [first._id.toString()],
+                        { assigner: requester, assignerName: requesterDisplayName },
+                    );
+                    if (isBulkCreation && !creationBulkAttachments?.length) {
+                        return res.status(503).json({
+                            message:
+                                'Assets were created but the Asset Handover Form PDF could not be generated. Notify Asset Controller manually from the asset list.',
+                            createdAssetIds: createdObjectIds,
+                            createdCount: createdAssets.length,
+                        });
+                    }
+                } catch (pdfErr) {
+                    console.error('[createAssetType] Handover PDF failed:', pdfErr?.message || pdfErr);
+                    if (isBulkCreation) {
                         return res.status(503).json({
                             message:
                                 pdfErr?.message ||
-                                'Assets were created but the asset list PDF could not be generated. Notify Asset Controller manually from the asset list.',
+                                'Assets were created but the Asset Handover Form PDF could not be generated. Notify Asset Controller manually from the asset list.',
                             createdAssetIds: createdObjectIds,
-                            createdCount: createdAssets.length
+                            createdCount: createdAssets.length,
                         });
-                    }
-                } else {
-                    try {
-                        creationBulkAttachments = await buildBulkAssetInventoryPdfAttachment(
-                            req,
-                            [first._id.toString()],
-                            'asset-creation-draft-inventory'
-                        );
-                    } catch (pdfErr) {
-                        console.error('[createAssetType] PDF attachment failed (non-fatal):', pdfErr?.message || pdfErr);
                     }
                 }
                 await sendAssetCreationApprovalEmail({
@@ -1377,7 +1384,16 @@ export const updateAssetItem = async (req, res) => {
 
                                 let addAccPdf = [];
                                 try {
-                                    addAccPdf = await buildBulkAssetInventoryPdfAttachment(req, [asset._id.toString()], 'accessory-add-request-inventory');
+                                    const requester = req.user.employeeObjectId
+                                        ? await EmployeeBasic.findById(req.user.employeeObjectId)
+                                              .select('firstName lastName signature employeeId department')
+                                              .lean()
+                                        : null;
+                                    addAccPdf = await buildCreationRequestHandoverAttachments(
+                                        req,
+                                        [asset._id.toString()],
+                                        { assigner: requester, assignerName: requesterName },
+                                    );
                                 } catch (e) {
                                     /* non-fatal */
                                 }
@@ -1416,10 +1432,28 @@ export const updateAssetItem = async (req, res) => {
 
                                 let assigneeApprovalPdf = [];
                                 try {
-                                    assigneeApprovalPdf = await buildBulkAssetInventoryPdfAttachment(
+                                    const actor = req.user.employeeObjectId
+                                        ? await EmployeeBasic.findById(req.user.employeeObjectId)
+                                              .select('firstName lastName signature employeeId department')
+                                              .lean()
+                                        : null;
+                                    assigneeApprovalPdf = await buildAssignmentHandoverEmailAttachments(
                                         req,
                                         [asset._id.toString()],
-                                        'accessory-add-by-authority-assignee-approval'
+                                        {
+                                            ...buildPendingRequestHandoverCtx({
+                                                assigner: actor,
+                                                assignerName: actorName,
+                                                assigneeName: `${assigneeEmp.firstName || ''} ${assigneeEmp.lastName || ''}`.trim(),
+                                                employeeCode: assigneeEmp.employeeId || '—',
+                                                department:
+                                                    (assigneeEmp.department &&
+                                                        String(assigneeEmp.department).trim()) ||
+                                                    '—',
+                                            }),
+                                            assigner: actor,
+                                            filenameBase: 'accessory-add-assignee-approval-handover',
+                                        },
                                     );
                                 } catch (e) {
                                     /* non-fatal */
@@ -1691,7 +1725,16 @@ export const submitAssetForApproval = async (req, res) => {
 
                 let submitAttachments = [];
                 try {
-                    submitAttachments = await buildBulkAssetInventoryPdfAttachment(req, [asset._id.toString()], 'asset-creation-draft-inventory');
+                    const requester = req.user.employeeObjectId
+                        ? await EmployeeBasic.findById(req.user.employeeObjectId)
+                              .select('firstName lastName signature employeeId department')
+                              .lean()
+                        : null;
+                    submitAttachments = await buildCreationRequestHandoverAttachments(
+                        req,
+                        [asset._id.toString()],
+                        { assigner: requester, assignerName: requesterDisplayName },
+                    );
                 } catch (pdfErr) {
                     console.error('[submitAssetForApproval] PDF attachment failed (non-fatal):', pdfErr?.message || pdfErr);
                 }

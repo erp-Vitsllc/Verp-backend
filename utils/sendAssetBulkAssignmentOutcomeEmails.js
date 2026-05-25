@@ -3,7 +3,6 @@ import EmployeeBasic from '../models/EmployeeBasic.js';
 import { getDepartmentHOD } from './getDepartmentHOD.js';
 import { resolveEmployeeEmail } from './resolveEmployeeEmail.js';
 import { normalizePdfAttachments } from './normalizeEmailAttachments.js';
-import { buildBulkAssigneeDispositionPdfAttachment } from './generateBulkAssetInventoryPdf.js';
 import {
     buildAssignmentHandoverEmailAttachments,
     buildFullySignedHandoverCtx,
@@ -47,8 +46,8 @@ function buildSummaryTableHtml(items, accent) {
 }
 
 /**
- * After assignee accepts/declines a bulk assignment batch, notify assigner, asset controller,
- * and assignee with explicit accepted vs declined lists and handover + summary PDFs.
+ * After assignee accepts/declines a bulk assignment batch, notify assigner and asset controller
+ * (not the assignee) with accepted/declined lists and a signed handover PDF for accepted assets.
  */
 export async function notifyBulkAssignmentResponseEmails(req, {
     acceptedMongoIds = [],
@@ -96,11 +95,23 @@ export async function notifyBulkAssignmentResponseEmails(req, {
 
         const assetController = await getDepartmentHOD('assetcontroller').catch(() => null);
 
-        const recipientEmployees = [assigner, assetController, assigneeFull].filter(Boolean);
+        const assigneeIdStr =
+            assigneeFull?._id?.toString?.() || (assigneeEmployee?._id && String(assigneeEmployee._id)) || null;
+        const responderIdStr = responderEmployeeId?.toString?.() || String(responderEmployeeId || '');
+
+        const recipientEmployees = [assigner, assetController].filter(Boolean);
         const toEmails = [];
         for (const emp of recipientEmployees) {
+            const empId = emp._id?.toString?.();
+            if (assigneeIdStr && empId === assigneeIdStr) continue;
+            if (responderIdStr && empId === responderIdStr) continue;
             const { email } = resolveEmployeeEmail(emp);
-            if (email && !toEmails.includes(email)) toEmails.push(email);
+            if (!email || toEmails.includes(email)) continue;
+            if (assigneeIdStr && assigneeFull) {
+                const assigneeMail = resolveEmployeeEmail(assigneeFull).email;
+                if (assigneeMail && email === assigneeMail) continue;
+            }
+            toEmails.push(email);
         }
         if (!toEmails.length) {
             console.warn('[notifyBulkAssignmentResponseEmails] No recipient emails');
@@ -120,28 +131,12 @@ export async function notifyBulkAssignmentResponseEmails(req, {
                         (assigneeFull?.department && String(assigneeFull.department).trim()) || '—',
                     hodName: hodDisplayFromEmployee(assigneeFull),
                 }),
+                assigner,
+                assignee: assigneeFull,
                 filenameBase: 'bulk-assignment-accepted-handover',
             });
             if (handoverAtt?.length) attachments.push(...handoverAtt);
         }
-
-        const summaryPdf = await buildBulkAssigneeDispositionPdfAttachment(
-            acceptedIds,
-            rejectedIds,
-            'bulk-assignment-response',
-            {
-                docTitle: 'Bulk assignment — assignee response',
-                docSubtitle: `VeRP · <strong>${acceptedIds.length}</strong> accepted · <strong>${rejectedIds.length}</strong> declined`,
-                processedTitle: '1. Accepted assets',
-                processedDesc: 'These assets were accepted by the assignee (or their manager delegate).',
-                notProcessedTitle: '2. Declined assets',
-                notProcessedDesc:
-                    'These assets were declined. They were returned to the previous assignee or marked unassigned.',
-                footerSummary:
-                    '<strong>Summary:</strong> Section 1 lists accepted assets. Section 2 lists declined assets.',
-            },
-        );
-        if (summaryPdf?.length) attachments.push(...summaryPdf);
 
         const att = normalizePdfAttachments(attachments);
         const delegateNote = isDelegate
@@ -171,7 +166,7 @@ export async function notifyBulkAssignmentResponseEmails(req, {
             ${commentsBlock}
             ${
                 att.length
-                    ? '<p style="font-size:12px;color:#64748b;margin:16px 0 0;">Attachments: Asset Handover Form (accepted assets) and a PDF summary with both lists.</p>'
+                    ? '<p style="font-size:12px;color:#64748b;margin:16px 0 0;">Attachment: signed <strong>Asset Handover Form</strong> for accepted asset(s).</p>'
                     : ''
             }`;
 
