@@ -24,6 +24,10 @@ import {
     stripOwnerDocFromPendingReactivation,
     ownerDocUnsetPath,
 } from "../../utils/companyOwnerDocDeletion.js";
+import {
+    loadCompanyFullProfile,
+    upsertCompanyPartitions,
+} from "../../services/companyPartitionService.js";
 
 async function awaitAdminCompanyPullArchives(
     req,
@@ -713,8 +717,19 @@ export const updateCompany = async (req, res) => {
             }
         }
 
-        // Generate signed URLs for updated documents
-        const companyObj = updatedCompany.toObject();
+        try {
+            const fullRow = await Company.findById(updatedCompany._id).lean().maxTimeMS(8000);
+            if (fullRow) {
+                await upsertCompanyPartitions(updatedCompany._id, fullRow);
+            }
+        } catch (partitionErr) {
+            console.warn("[updateCompany] upsertCompanyPartitions:", partitionErr?.message || partitionErr);
+        }
+
+        const reloaded = await Company.findById(updatedCompany._id).maxTimeMS(8000);
+        let companyObj = reloaded
+            ? await loadCompanyFullProfile(reloaded)
+            : updatedCompany.toObject?.() ?? updatedCompany;
 
         // Core Documents
         if (companyObj.tradeLicenseAttachment) {

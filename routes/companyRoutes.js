@@ -4,6 +4,7 @@ import { getCompany } from "../controllers/company/getCompany.js";
 import { addCompany } from "../controllers/company/addCompany.js";
 import { getNextCompanyId } from "../controllers/company/getNextCompanyId.js";
 import { protect } from "../middleware/authMiddleware.js";
+import { sensitiveActionLimiter } from "../middleware/rateLimitMiddleware.js";
 
 import { updateCompany } from "../controllers/company/updateCompany.js";
 import {
@@ -34,7 +35,7 @@ router.get("/", getCompanies);
 router.get("/next-id", getNextCompanyId);
 router.get("/all-owners", getAllOwners);
 router.get("/:id", getCompany);
-router.post("/", addCompany);
+router.post("/", sensitiveActionLimiter, addCompany);
 router.patch("/:id", updateCompany);
 router.post("/:id/not-renew-requests", submitCompanyNotRenewRequest);
 router.post("/:id/not-renew-requests/:requestId/respond", respondCompanyNotRenewRequest);

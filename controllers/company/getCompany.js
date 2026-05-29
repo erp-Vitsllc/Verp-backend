@@ -3,6 +3,7 @@ import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { calculateCompanyActivationProgress } from "../../utils/companyActivation.js";
 import { isRequestUserDesignatedFlowchartHr } from "../../utils/isDesignatedFlowchartHr.js";
 import { signCompanyDocumentArray } from "../../utils/signCompanyDocumentFields.js";
+import { loadCompanyFullProfile } from "../../services/companyPartitionService.js";
 
 /**
  * Get a single company by its companyId (e.g., EST-001)
@@ -28,8 +29,10 @@ export const getCompany = async (req, res) => {
             employeeId: { $ne: "VEGA-HR-0000" }
         });
 
-        // Generate signed URLs for all documents
-        const companyObj = company.toObject();
+        const companyObj = await loadCompanyFullProfile(company);
+        if (!companyObj) {
+            return res.status(404).json({ message: "Company not found" });
+        }
 
         const { getSignedFileUrl } = await import("../../utils/s3Upload.js");
         const AssetItem = await import("../../models/AssetItem.js").then(m => m.default);

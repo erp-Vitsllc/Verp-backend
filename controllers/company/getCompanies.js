@@ -1,13 +1,6 @@
 import Company from "../../models/Company.js";
 import { calculateCompanyActivationProgress } from "../../utils/companyActivation.js";
-
-// Exclude the heavy archive/snapshot fields so list reads stay fast.
-// Everything else is returned as-is.
-const COMPANY_LIST_EXCLUSIONS = {
-    oldDocuments: 0,
-    oldOwners: 0,
-    "pendingReactivationChanges.previousData": 0,
-};
+import { COMPANY_LIST_SELECT, enrichCompaniesForList } from "../../services/companyPartitionService.js";
 
 const COMPANY_RESPONSIBILITIES_PROJECTION = {
     name: 1,
@@ -36,11 +29,17 @@ export const getCompanies = async (req, res) => {
         // Step 1: list companies without document/archive fields. Some company
         // documents contain large embedded file data, and full reads time out.
         const tList = Date.now();
-        const companies = await Company.find(filters)
-            .select(responsibilitiesOnly ? COMPANY_RESPONSIBILITIES_PROJECTION : COMPANY_LIST_EXCLUSIONS)
+        const listSelect = responsibilitiesOnly ? COMPANY_RESPONSIBILITIES_PROJECTION : COMPANY_LIST_SELECT;
+
+        let companies = await Company.find(filters)
+            .select(listSelect)
             .sort({ createdAt: -1 })
             .lean()
             .maxTimeMS(8000);
+
+        if (!responsibilitiesOnly) {
+            companies = await enrichCompaniesForList(companies);
+        }
         console.log(`[getCompanies] companies=${companies.length} took=${ms(tList)}`);
 
         if (responsibilitiesOnly) {
