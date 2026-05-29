@@ -124,8 +124,21 @@ const staticAllowedOrigins = [
     process.env.FRONTEND_URL,
 ].filter(Boolean);
 
-const isLocalDevOrigin = (origin) =>
-    /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin);
+const isLocalDevOrigin = (origin) => {
+    if (!origin || typeof origin !== "string") return false;
+    try {
+        const { hostname, protocol } = new URL(origin);
+        if (protocol !== "http:" && protocol !== "https:") return false;
+        if (hostname === "localhost" || hostname === "127.0.0.1") return true;
+        // LAN / private network (frontend on 0.0.0.0 — open via machine IP, e.g. 192.168.x.x:3000)
+        if (/^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(hostname)) return true;
+        if (/^192\.168\.\d{1,3}\.\d{1,3}$/.test(hostname)) return true;
+        if (/^172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}$/.test(hostname)) return true;
+        return false;
+    } catch {
+        return false;
+    }
+};
 
 app.use(
     cors({
