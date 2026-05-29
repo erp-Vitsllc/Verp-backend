@@ -136,6 +136,96 @@ export const updateCompany = async (req, res) => {
 
         // Update fields provided in req.body
         const updateData = req.body;
+
+        // Basic Details validations for editing
+        if (updateData.name !== undefined) {
+            updateData.name = typeof updateData.name === 'string' ? updateData.name.trim() : '';
+            if (!updateData.name) {
+                return res.status(400).json({ message: "Company Name is required" });
+            }
+            if (updateData.name.length < 3 || updateData.name.length > 100) {
+                return res.status(400).json({ message: "Company Name must be between 3 and 100 characters" });
+            }
+            const nameRegex = /^[A-Za-z0-9&.,()\' -]{3,100}$/;
+            if (!nameRegex.test(updateData.name)) {
+                return res.status(400).json({ message: "Company Name contains restricted special characters" });
+            }
+            // Prevent duplicate company names
+            const duplicate = await Company.findOne({ name: updateData.name, _id: { $ne: company._id } });
+            if (duplicate) {
+                return res.status(400).json({ message: "Company Name already exists" });
+            }
+        }
+
+        if (updateData.nickName !== undefined) {
+            updateData.nickName = typeof updateData.nickName === 'string' ? updateData.nickName.trim() : '';
+            if (updateData.nickName.length > 50) {
+                return res.status(400).json({ message: "Short Name cannot exceed 50 characters" });
+            }
+            const nickRegex = /^[A-Za-z0-9&.\' -]{0,50}$/;
+            if (!nickRegex.test(updateData.nickName)) {
+                return res.status(400).json({ message: "Short Name contains restricted characters" });
+            }
+        }
+
+        if (updateData.email !== undefined) {
+            updateData.email = typeof updateData.email === 'string' ? updateData.email.trim().toLowerCase() : '';
+            if (!updateData.email) {
+                return res.status(400).json({ message: "Company Email ID is required" });
+            }
+            if (updateData.email.includes(" ")) {
+                return res.status(400).json({ message: "Company Email ID cannot contain spaces" });
+            }
+            const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+            if (!emailRegex.test(updateData.email)) {
+                return res.status(400).json({ message: "Invalid Email format" });
+            }
+            // Prevent duplicate company emails
+            const duplicate = await Company.findOne({ email: updateData.email, _id: { $ne: company._id } });
+            if (duplicate) {
+                return res.status(400).json({ message: "Company Email ID already exists" });
+            }
+        }
+
+        if (updateData.phone !== undefined) {
+            updateData.phone = typeof updateData.phone === 'string' ? updateData.phone.trim() : '';
+            if (!updateData.phone) {
+                return res.status(400).json({ message: "Phone Number is required" });
+            }
+        }
+
+        if (updateData.establishedDate !== undefined) {
+            if (!updateData.establishedDate) {
+                return res.status(400).json({ message: "Established Date is required" });
+            }
+            const parsedDate = new Date(updateData.establishedDate);
+            if (isNaN(parsedDate.getTime())) {
+                return res.status(400).json({ message: "Established Date must be a valid date" });
+            }
+            if (parsedDate > new Date()) {
+                return res.status(400).json({ message: "Established Date cannot be in the future" });
+            }
+            if (parsedDate.getFullYear() < 1900) {
+                return res.status(400).json({ message: "Established Date minimum year is 1900" });
+            }
+        }
+
+        if (updateData.tradeLicenseExpiry !== undefined && updateData.tradeLicenseExpiry !== null && updateData.tradeLicenseExpiry !== '') {
+            const parsedExpiry = new Date(updateData.tradeLicenseExpiry);
+            if (isNaN(parsedExpiry.getTime())) {
+                return res.status(400).json({ message: "Expiry Date must be a valid date" });
+            }
+            if (parsedExpiry.getFullYear() < 1900) {
+                return res.status(400).json({ message: "Expiry Date minimum year is 1900" });
+            }
+            const refEstDate = updateData.establishedDate ? new Date(updateData.establishedDate) : (company.establishedDate ? new Date(company.establishedDate) : null);
+            if (refEstDate && !isNaN(refEstDate.getTime()) && parsedExpiry <= refEstDate) {
+                return res.status(400).json({ message: "Expiry Date must be greater than the Establishment Date" });
+            }
+        } else if (updateData.tradeLicenseExpiry === '') {
+            updateData.tradeLicenseExpiry = null;
+        }
+
         const beforeCompany = company.toObject();
         const requesterIsAdmin = await isReqUserAdmin(req.user);
 

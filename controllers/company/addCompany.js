@@ -119,9 +119,9 @@ export const addCompany = async (req, res) => {
                       (country && (country.toLowerCase() === "ae" || country.toLowerCase() === "united arab emirates" || country.toLowerCase() === "uae"));
 
         if (isUAE) {
-            const phoneRegex = /^5[0-9]{8}$/;
+            const phoneRegex = /^[45][0-9]{8}$/;
             if (!phoneRegex.test(cleanPhone)) {
-                return res.status(400).json({ message: "Phone Number must match UAE format starting with 5 (9 digits total)" });
+                return res.status(400).json({ message: "Phone Number must match UAE format starting with 4 or 5 (9 digits total)" });
             }
         } else {
             if (cleanPhone.length < 7 || cleanPhone.length > 15) {
@@ -173,21 +173,7 @@ export const addCompany = async (req, res) => {
         if (!state) {
             return res.status(400).json({ message: "State / Emirates is required" });
         }
-        if (country.toLowerCase() === "united arab emirates" || country.toLowerCase() === "uae") {
-            const uaeEmirates = [
-                "Abu Dhabi",
-                "Dubai",
-                "Sharjah",
-                "Ajman",
-                "Umm Al Quwain",
-                "Ras Al Khaimah",
-                "Fujairah"
-            ];
-            const isValidEmirate = uaeEmirates.some(e => e.toLowerCase() === state.toLowerCase());
-            if (!isValidEmirate) {
-                return res.status(400).json({ message: "State must match a valid UAE Emirate" });
-            }
-        }
+
 
         // 10. City validations
         // Required, Min 2 characters, Max 50 characters, Letters only, Format: /^[A-Za-z\s-]{2,50}$/
