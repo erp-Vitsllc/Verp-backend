@@ -129,6 +129,12 @@ export const HRM_MODULE = {
                                     hasDownload: true,
                                 },
                                 { id: 'hrm_company_view_basic_ejari', label: 'Ejari', parent: 'hrm_company_view_basic', hasDownload: true },
+                                {
+                                    id: 'hrm_company_view_basic_address',
+                                    label: 'Company Address',
+                                    parent: 'hrm_company_view_basic',
+                                    hasDownload: false,
+                                },
                             ],
                         },
                         {
@@ -240,6 +246,7 @@ export const COMPANY_MAIN_TAB_MODULES = {
         'hrm_company_view_basic_trade_license',
         'hrm_company_view_basic_establishment_card',
         'hrm_company_view_basic_ejari',
+        'hrm_company_view_basic_address',
     ],
     owner: [
         'hrm_company_view_owner',

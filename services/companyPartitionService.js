@@ -200,6 +200,27 @@ export function pickWorkflowPayload(company = {}) {
     return out;
 }
 
+/** Fields stored in side collections — stripped from strict Company $set. */
+export const PARTITION_UPDATE_KEYS = new Set([
+    ...COMPLIANCE_KEYS,
+    ...OWNER_KEYS,
+    ...DOCUMENT_BUNDLE_KEYS,
+    ...WORKFLOW_KEYS,
+]);
+
+export function splitCompanyUpdatePayload(payload = {}) {
+    const coreUpdate = {};
+    const partitionUpdate = {};
+    for (const [key, value] of Object.entries(payload)) {
+        if (PARTITION_UPDATE_KEYS.has(key)) {
+            partitionUpdate[key] = value;
+        } else {
+            coreUpdate[key] = value;
+        }
+    }
+    return { coreUpdate, partitionUpdate };
+}
+
 /** Upsert side collections after a company save (dual-write during migration). */
 export async function upsertCompanyPartitions(companyMongoId, companyPayload = {}) {
     const id = companyMongoId;

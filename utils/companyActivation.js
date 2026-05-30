@@ -74,8 +74,18 @@ const overlayProposedFieldsForActivation = (base, proposed) => {
     return out;
 };
 
+/** Only fully activated companies queue edits in pendingReactivationChanges. */
+export const shouldOverlayPendingReactivationChanges = (company = {}) => {
+    const status = String(company?.status || "").toLowerCase();
+    const activationStatus = String(company?.activationStatus || "").toLowerCase();
+    return status === "active" && activationStatus === "active";
+};
+
 export const mergePendingReactivationForActivationSnapshot = (company = {}) => {
     const co = typeof company.toObject === "function" ? company.toObject() : { ...company };
+    if (!shouldOverlayPendingReactivationChanges(co)) {
+        return { ...co };
+    }
     const pending = Array.isArray(co.pendingReactivationChanges) ? co.pendingReactivationChanges : [];
     let merged = { ...co };
     for (const entry of pending) {
@@ -84,8 +94,14 @@ export const mergePendingReactivationForActivationSnapshot = (company = {}) => {
     return merged;
 };
 
-export const calculateCompanyActivationProgress = (company = {}) => {
-    const co = mergePendingReactivationForActivationSnapshot(company);
+export const calculateCompanyActivationProgress = (company = {}, opts = {}) => {
+    const usePendingOverlay =
+        opts.usePendingOverlay !== false && shouldOverlayPendingReactivationChanges(company);
+    const co = usePendingOverlay
+        ? mergePendingReactivationForActivationSnapshot(company)
+        : typeof company.toObject === "function"
+          ? company.toObject()
+          : { ...company };
     const checks = [
         {
             key: "basicDetails",
@@ -419,6 +435,9 @@ export const collectCompanyReactivationChangeLabels = (updateData = {}) => {
     if (hasAny(["name", "nickName", "email", "phone", "establishedDate", "companyId"])) {
         changes.push("Basic Details");
     }
+    if (hasAny(["address", "country", "state", "city", "postalCode"])) {
+        changes.push("Company Address");
+    }
     if (
         hasAny([
             "tradeLicenseNumber",
@@ -526,17 +545,14 @@ const serializeMoaDocumentsSlice = (documents) => {
 };
 
 export const shouldTriggerCompanyReactivation = (beforeCompany = {}, updateData = {}) => {
-    const status = String(beforeCompany?.status || "").toLowerCase();
-    const activationStatus = String(beforeCompany?.activationStatus || "").toLowerCase();
-    const workflow = Array.isArray(beforeCompany?.activationWorkflow) ? beforeCompany.activationWorkflow : [];
-    const hasEverBeenActive = workflow.some((w) => String(w?.status || "").toLowerCase() === "active");
+    if (!shouldOverlayPendingReactivationChanges(beforeCompany)) {
+        return false;
+    }
 
-    // Keep queuing reactivation changes not only when currently active, but also while
-    // an already-active company is in submitted/draft reactivation flow.
-    const canQueueReactivation =
-        status === "active" ||
-        (hasEverBeenActive && (activationStatus === "submitted" || activationStatus === "draft"));
-    if (!canQueueReactivation) return false;
+    const progress = calculateCompanyActivationProgress(beforeCompany, { usePendingOverlay: false });
+    if (progress.percentage < 100) {
+        return false;
+    }
 
     let ownersStructuralChange = false;
     if (Object.prototype.hasOwnProperty.call(updateData, "owners")) {
@@ -565,7 +581,16 @@ export const shouldTriggerCompanyReactivation = (beforeCompany = {}, updateData 
     ].some((k) => Object.prototype.hasOwnProperty.call(updateData, k));
 
     const hasBasicDetailsChange = [
-        "name", "nickName", "email", "phone", "establishedDate"
+        "name",
+        "nickName",
+        "email",
+        "phone",
+        "establishedDate",
+        "address",
+        "country",
+        "state",
+        "city",
+        "postalCode",
     ].some((k) => Object.prototype.hasOwnProperty.call(updateData, k));
 
     const hasMoaChange =

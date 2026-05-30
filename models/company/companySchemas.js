@@ -18,6 +18,7 @@ export const companyComplianceSchema = new mongoose.Schema(
 );
 
 const ownerSubdoc = {
+    ownerProfileId: { type: String },
     name: { type: String },
     nationality: { type: String },
     sharePercentage: { type: String },

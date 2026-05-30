@@ -1,5 +1,9 @@
 import Company from "../../models/Company.js";
 import { calculateCompanyActivationProgress } from "../../utils/companyActivation.js";
+import {
+    sanitizeCompanyAddressField,
+    validateCompanyAddressPayload,
+} from "../../utils/companyAddressValidation.js";
 
 export const addCompany = async (req, res) => {
     try {
@@ -146,60 +150,17 @@ export const addCompany = async (req, res) => {
             return res.status(400).json({ message: "Established Date minimum year is 1900" });
         }
 
-        // 7. Company Address validations
-        // Required, Min 10 characters, Max 300 characters, No only spaces, Dangerous scripts blocked, Format: /^[A-Za-z0-9\s,./#()-]{10,300}$/
-        if (!address) {
-            return res.status(400).json({ message: "Company Address is required" });
-        }
-        if (address.length < 10) {
-            return res.status(400).json({ message: "Company Address must be at least 10 characters" });
-        }
-        if (address.length > 300) {
-            return res.status(400).json({ message: "Company Address must be no more than 300 characters" });
-        }
-        const addressRegex = /^[A-Za-z0-9\s,./#()-]{10,300}$/;
-        if (!addressRegex.test(address)) {
-            return res.status(400).json({ message: "Company Address contains restricted special characters" });
-        }
-
-        // 8. Country validations
-        // Required, Dropdown selection only, Must match allowed country list
-        if (!country) {
-            return res.status(400).json({ message: "Country is required" });
-        }
-
-        // 9. State / Emirates validations
-        // Required, Dropdown selection only, Must match UAE emirates list
-        if (!state) {
-            return res.status(400).json({ message: "State / Emirates is required" });
-        }
-
-
-        // 10. City validations
-        // Required, Min 2 characters, Max 50 characters, Letters only, Format: /^[A-Za-z\s-]{2,50}$/
-        if (!city) {
-            return res.status(400).json({ message: "City is required" });
-        }
-        if (city.length < 2) {
-            return res.status(400).json({ message: "City must be at least 2 characters" });
-        }
-        if (city.length > 50) {
-            return res.status(400).json({ message: "City must be no more than 50 characters" });
-        }
-        const cityRegex = /^[A-Za-z\s-]{2,50}$/;
-        if (!cityRegex.test(city)) {
-            return res.status(400).json({ message: "City must contain only letters, spaces or hyphens" });
-        }
-
-        // 11. Postal Code validations
-        // Optional, Max 20 characters, Letters and numbers allowed, Format: /^[A-Za-z0-9\s-]{0,20}$/
-        if (postalCode) {
-            if (postalCode.length > 20) {
-                return res.status(400).json({ message: "Postal Code must be no more than 20 characters" });
-            }
-            const postalRegex = /^[A-Za-z0-9\s-]{0,20}$/;
-            if (!postalRegex.test(postalCode)) {
-                return res.status(400).json({ message: "Postal Code contains invalid characters" });
+        const hasAddressPayload = Boolean(address || country || state || city || postalCode);
+        if (hasAddressPayload) {
+            const addressValidation = validateCompanyAddressPayload({
+                address,
+                country,
+                state,
+                city,
+                postalCode,
+            });
+            if (!addressValidation.ok) {
+                return res.status(400).json({ message: addressValidation.message });
             }
         }
 

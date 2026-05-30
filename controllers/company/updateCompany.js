@@ -27,7 +27,26 @@ import {
 import {
     loadCompanyFullProfile,
     upsertCompanyPartitions,
+    splitCompanyUpdatePayload,
 } from "../../services/companyPartitionService.js";
+import {
+    sanitizeCompanyAddressField,
+    validateCompanyAddressPayload,
+} from "../../utils/companyAddressValidation.js";
+import CompanyCompliance from "../../models/CompanyCompliance.js";
+import {
+    normalizeTradeLicenseNumber,
+    normalizeTradeLicenseOwners,
+    validateTradeLicensePayload,
+    validateTradeLicenseOwnersPayload,
+} from "../../utils/tradeLicenseValidation.js";
+import {
+    normalizeEstablishmentCardNumber,
+    validateEstablishmentCardPayload,
+    validateEstablishmentCardExpiryDate,
+} from "../../utils/establishmentCardValidation.js";
+import { normalizeEjariRow, validateEjariArrayPayload } from "../../utils/ejariValidation.js";
+import { collectGlobalOwnerProfileIds } from "../../utils/ownerProfileId.js";
 
 async function awaitAdminCompanyPullArchives(
     req,
@@ -210,7 +229,26 @@ export const updateCompany = async (req, res) => {
             }
         }
 
-        if (updateData.tradeLicenseExpiry !== undefined && updateData.tradeLicenseExpiry !== null && updateData.tradeLicenseExpiry !== '') {
+        if (Object.prototype.hasOwnProperty.call(updateData, "tradeLicenseNumber")) {
+            try {
+                updateData.tradeLicenseNumber = normalizeTradeLicenseNumber(updateData.tradeLicenseNumber);
+            } catch (e) {
+                return res.status(400).json({ message: e.message || "Invalid License Number" });
+            }
+
+            const tlValidation = validateTradeLicensePayload(updateData, { requireAttachment: true });
+            if (!tlValidation.ok) {
+                return res.status(400).json({ message: tlValidation.message });
+            }
+
+            const duplicateLicense = await CompanyCompliance.findOne({
+                company: { $ne: company._id },
+                tradeLicenseNumber: updateData.tradeLicenseNumber,
+            }).lean();
+            if (duplicateLicense) {
+                return res.status(400).json({ message: "License Number already exists" });
+            }
+        } else if (updateData.tradeLicenseExpiry !== undefined && updateData.tradeLicenseExpiry !== null && updateData.tradeLicenseExpiry !== '') {
             const parsedExpiry = new Date(updateData.tradeLicenseExpiry);
             if (isNaN(parsedExpiry.getTime())) {
                 return res.status(400).json({ message: "Expiry Date must be a valid date" });
@@ -226,7 +264,114 @@ export const updateCompany = async (req, res) => {
             updateData.tradeLicenseExpiry = null;
         }
 
-        const beforeCompany = company.toObject();
+        if (Object.prototype.hasOwnProperty.call(updateData, "establishmentCardNumber")) {
+            try {
+                updateData.establishmentCardNumber = normalizeEstablishmentCardNumber(
+                    updateData.establishmentCardNumber,
+                );
+            } catch (e) {
+                return res.status(400).json({ message: e.message || "Invalid Card Number" });
+            }
+
+            const ecValidation = validateEstablishmentCardPayload(updateData, { requireAttachment: true });
+            if (!ecValidation.ok) {
+                return res.status(400).json({ message: ecValidation.message });
+            }
+
+            const duplicateCard = await CompanyCompliance.findOne({
+                company: { $ne: company._id },
+                establishmentCardNumber: updateData.establishmentCardNumber,
+            }).lean();
+            if (duplicateCard) {
+                return res.status(400).json({ message: "Card Number already exists" });
+            }
+        } else if (
+            updateData.establishmentCardExpiry !== undefined &&
+            updateData.establishmentCardExpiry !== null &&
+            updateData.establishmentCardExpiry !== ""
+        ) {
+            const expiryErr = validateEstablishmentCardExpiryDate(updateData.establishmentCardExpiry);
+            if (expiryErr) {
+                return res.status(400).json({ message: expiryErr });
+            }
+        } else if (updateData.establishmentCardExpiry === "") {
+            updateData.establishmentCardExpiry = null;
+        }
+
+        if (Object.prototype.hasOwnProperty.call(updateData, "ejari")) {
+            try {
+                if (Array.isArray(updateData.ejari)) {
+                    updateData.ejari = updateData.ejari.map((row) => normalizeEjariRow(row));
+                }
+                const ejariCheck = validateEjariArrayPayload(updateData.ejari);
+                if (!ejariCheck.ok) {
+                    return res.status(400).json({ message: ejariCheck.message });
+                }
+            } catch (e) {
+                return res.status(400).json({ message: e.message || "Invalid Ejari data" });
+            }
+        }
+
+        if (Object.prototype.hasOwnProperty.call(updateData, "owners")) {
+            try {
+                const globalUsed = await collectGlobalOwnerProfileIds();
+                updateData.owners = normalizeTradeLicenseOwners(updateData.owners, globalUsed);
+                const ownersCheck = validateTradeLicenseOwnersPayload(updateData.owners);
+                if (!ownersCheck.ok) {
+                    return res.status(400).json({ message: ownersCheck.message });
+                }
+            } catch (e) {
+                return res.status(400).json({ message: e.message || "Invalid owner data" });
+            }
+        }
+
+        const addressFieldsTouched = ["address", "country", "state", "city", "postalCode"].some((k) =>
+            Object.prototype.hasOwnProperty.call(updateData, k),
+        );
+        if (addressFieldsTouched) {
+            try {
+                if (Object.prototype.hasOwnProperty.call(updateData, "address")) {
+                    updateData.address = sanitizeCompanyAddressField(updateData.address, "Company Address");
+                }
+                if (Object.prototype.hasOwnProperty.call(updateData, "country")) {
+                    updateData.country = sanitizeCompanyAddressField(updateData.country, "Country");
+                }
+                if (Object.prototype.hasOwnProperty.call(updateData, "state")) {
+                    updateData.state = sanitizeCompanyAddressField(updateData.state, "State / Emirates");
+                }
+                if (Object.prototype.hasOwnProperty.call(updateData, "city")) {
+                    updateData.city = sanitizeCompanyAddressField(updateData.city, "City");
+                }
+                if (Object.prototype.hasOwnProperty.call(updateData, "postalCode")) {
+                    updateData.postalCode = sanitizeCompanyAddressField(updateData.postalCode, "PO Box");
+                }
+            } catch (e) {
+                return res.status(400).json({ message: e.message || "Invalid address field" });
+            }
+
+            const addressValidation = validateCompanyAddressPayload({
+                address: Object.prototype.hasOwnProperty.call(updateData, "address")
+                    ? updateData.address
+                    : company.address,
+                country: Object.prototype.hasOwnProperty.call(updateData, "country")
+                    ? updateData.country
+                    : company.country,
+                state: Object.prototype.hasOwnProperty.call(updateData, "state")
+                    ? updateData.state
+                    : company.state,
+                city: Object.prototype.hasOwnProperty.call(updateData, "city")
+                    ? updateData.city
+                    : company.city,
+                postalCode: Object.prototype.hasOwnProperty.call(updateData, "postalCode")
+                    ? updateData.postalCode
+                    : company.postalCode,
+            });
+            if (!addressValidation.ok) {
+                return res.status(400).json({ message: addressValidation.message });
+            }
+        }
+
+        const beforeCompany = (await loadCompanyFullProfile(company)) || company.toObject();
         const requesterIsAdmin = await isReqUserAdmin(req.user);
 
         const isCompanyDocumentNotRenewArchive =
@@ -613,6 +758,7 @@ export const updateCompany = async (req, res) => {
 
         // Queue reactivation only for critical profile changes (license/card/owner/MOA).
         // Operational docs like memo/other company documents should save immediately.
+        let partitionUpdatePayload = {};
         const queueForApproval =
             !skipReactivationQueueForThisRequest && shouldTriggerCompanyReactivation(beforeCompany, updateData);
         let updatedCompany = null;
@@ -626,8 +772,7 @@ export const updateCompany = async (req, res) => {
                 company.activationStatus = "draft";
                 company.activationSubmittedTo = null;
             }
-            if (!Array.isArray(company.pendingReactivationChanges)) company.pendingReactivationChanges = [];
-            company.pendingReactivationChanges.push({
+            const pendingEntry = {
                 card: cardLabel,
                 reason: cardLabel,
                 section: "companyProfile",
@@ -636,7 +781,9 @@ export const updateCompany = async (req, res) => {
                 previousData: toSerializable(beforeCompany),
                 proposedData: toSerializable(updateData),
                 changedAt: new Date(),
-            });
+            };
+            const nextPending = [...(beforeCompany.pendingReactivationChanges || []), pendingEntry];
+            partitionUpdatePayload = { pendingReactivationChanges: nextPending };
             updatedCompany = await company.save();
         } else {
             if (!skipReactivationQueueForThisRequest) {
@@ -648,7 +795,11 @@ export const updateCompany = async (req, res) => {
             const updateOps = {};
             if (Object.keys(updateData).length > 0) {
                 normalizeCompanyUpdateAttachments(updateData);
-                updateOps.$set = updateData;
+                const { coreUpdate, partitionUpdate } = splitCompanyUpdatePayload(updateData);
+                partitionUpdatePayload = partitionUpdate;
+                if (Object.keys(coreUpdate).length > 0) {
+                    updateOps.$set = { ...(updateOps.$set || {}), ...coreUpdate };
+                }
             }
             if (pullDocumentsByIds.length || pullOldDocumentsByIds.length || pullOwnersByIds.length) {
                 if (requesterIsAdmin) {
@@ -703,8 +854,10 @@ export const updateCompany = async (req, res) => {
                     clearSpec.docKey
                 );
                 if (stripped !== beforeCompany.pendingReactivationChanges) {
-                    if (!updateOps.$set) updateOps.$set = {};
-                    updateOps.$set.pendingReactivationChanges = stripped;
+                    partitionUpdatePayload = {
+                        ...partitionUpdatePayload,
+                        pendingReactivationChanges: stripped,
+                    };
                 }
             }
             if (clearOldOwnerDocCard) {
@@ -808,9 +961,13 @@ export const updateCompany = async (req, res) => {
         }
 
         try {
-            const fullRow = await Company.findById(updatedCompany._id).lean().maxTimeMS(8000);
-            if (fullRow) {
-                await upsertCompanyPartitions(updatedCompany._id, fullRow);
+            if (Object.keys(partitionUpdatePayload).length > 0) {
+                await upsertCompanyPartitions(updatedCompany._id, partitionUpdatePayload);
+            } else {
+                const fullRow = await Company.findById(updatedCompany._id).lean().maxTimeMS(8000);
+                if (fullRow) {
+                    await upsertCompanyPartitions(updatedCompany._id, fullRow);
+                }
             }
         } catch (partitionErr) {
             console.warn("[updateCompany] upsertCompanyPartitions:", partitionErr?.message || partitionErr);
