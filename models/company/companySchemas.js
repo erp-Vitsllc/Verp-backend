@@ -20,6 +20,8 @@ export const companyComplianceSchema = new mongoose.Schema(
 const ownerSubdoc = {
     ownerProfileId: { type: String },
     name: { type: String },
+    email: { type: String },
+    phone: { type: String },
     nationality: { type: String },
     sharePercentage: { type: String },
     attachment: { type: String },
@@ -33,6 +35,29 @@ const ownerSubdoc = {
         attachment: { type: String },
     },
     visa: {
+        number: { type: String },
+        type: { type: String },
+        issueDate: { type: Date },
+        sponsor: { type: String },
+        expiryDate: { type: Date },
+        attachment: { type: String },
+    },
+    visitVisa: {
+        number: { type: String },
+        type: { type: String },
+        issueDate: { type: Date },
+        expiryDate: { type: Date },
+        attachment: { type: String },
+    },
+    employmentVisa: {
+        number: { type: String },
+        type: { type: String },
+        issueDate: { type: Date },
+        sponsor: { type: String },
+        expiryDate: { type: Date },
+        attachment: { type: String },
+    },
+    spouseVisa: {
         number: { type: String },
         type: { type: String },
         issueDate: { type: Date },

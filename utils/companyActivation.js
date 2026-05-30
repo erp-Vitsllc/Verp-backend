@@ -61,6 +61,7 @@ const ACTIVATION_PROGRESS_OVERLAY_KEYS = [
     "establishmentCardExpiry",
     "establishmentCardAttachment",
     "documents",
+    "owners",
 ];
 
 const overlayProposedFieldsForActivation = (base, proposed) => {
@@ -445,10 +446,12 @@ export const collectCompanyReactivationChangeLabels = (updateData = {}) => {
             "tradeLicenseExpiry",
             "tradeLicenseAttachment",
             "tradeLicenseOwnerName",
-            "owners",
         ])
     ) {
         changes.push("Trade License");
+    }
+    if (Object.prototype.hasOwnProperty.call(updateData, "owners")) {
+        changes.push("Owner Details");
     }
     if (hasAny(["establishmentCardNumber", "establishmentCardIssueDate", "establishmentCardExpiry", "establishmentCardAttachment"])) {
         changes.push("Establishment Card");
@@ -544,6 +547,34 @@ const serializeMoaDocumentsSlice = (documents) => {
     }
 };
 
+const VISA_ONLY_OWNER_DOC_KEYS = new Set(["visitVisa", "employmentVisa", "spouseVisa", "visa"]);
+
+function ownerWithoutVisaDocs(owner) {
+    if (!owner || typeof owner !== "object") return owner;
+    const copy = JSON.parse(JSON.stringify(owner));
+    for (const key of VISA_ONLY_OWNER_DOC_KEYS) {
+        delete copy[key];
+    }
+    return copy;
+}
+
+export function ownersChangeIsVisaDocsOnly(beforeOwners = [], nextOwners = []) {
+    const prev = Array.isArray(beforeOwners) ? beforeOwners : [];
+    const next = Array.isArray(nextOwners) ? nextOwners : [];
+    if (prev.length !== next.length) return false;
+    try {
+        if (JSON.stringify(prev) === JSON.stringify(next)) return false;
+        for (let i = 0; i < prev.length; i++) {
+            if (JSON.stringify(ownerWithoutVisaDocs(prev[i])) !== JSON.stringify(ownerWithoutVisaDocs(next[i]))) {
+                return false;
+            }
+        }
+        return true;
+    } catch {
+        return false;
+    }
+}
+
 export const shouldTriggerCompanyReactivation = (beforeCompany = {}, updateData = {}) => {
     if (!shouldOverlayPendingReactivationChanges(beforeCompany)) {
         return false;
@@ -560,6 +591,9 @@ export const shouldTriggerCompanyReactivation = (beforeCompany = {}, updateData 
             const prev = JSON.parse(JSON.stringify(beforeCompany?.owners ?? []));
             const next = JSON.parse(JSON.stringify(updateData?.owners ?? []));
             ownersStructuralChange = JSON.stringify(prev) !== JSON.stringify(next);
+            if (ownersStructuralChange && ownersChangeIsVisaDocsOnly(prev, next)) {
+                ownersStructuralChange = false;
+            }
         } catch {
             ownersStructuralChange = true;
         }

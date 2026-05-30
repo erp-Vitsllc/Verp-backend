@@ -4,6 +4,9 @@ import { normalizeS3Key } from './s3Upload.js';
 const OWNER_DOC_LABELS = {
     passport: 'Passport',
     visa: 'Visa',
+    visitVisa: 'Visit Visa',
+    employmentVisa: 'Employment Visa',
+    spouseVisa: 'Spouse Visa',
     emiratesId: 'Emirates ID',
     medical: 'Medical Insurance',
     drivingLicense: 'Driving License',

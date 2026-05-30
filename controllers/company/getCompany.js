@@ -87,6 +87,11 @@ export const getCompany = async (req, res) => {
                 if (owner.attachment) owner.attachment = await getSignedFileUrl(owner.attachment);
                 if (owner.passport?.attachment) owner.passport.attachment = await getSignedFileUrl(owner.passport.attachment);
                 if (owner.visa?.attachment) owner.visa.attachment = await getSignedFileUrl(owner.visa.attachment);
+                for (const visaKey of ["visitVisa", "employmentVisa", "spouseVisa"]) {
+                    if (owner[visaKey]?.attachment) {
+                        owner[visaKey].attachment = await getSignedFileUrl(owner[visaKey].attachment);
+                    }
+                }
                 if (owner.emiratesId?.attachment) owner.emiratesId.attachment = await getSignedFileUrl(owner.emiratesId.attachment);
                 if (owner.medical?.attachment) owner.medical.attachment = await getSignedFileUrl(owner.medical.attachment);
                 if (owner.drivingLicense?.attachment) owner.drivingLicense.attachment = await getSignedFileUrl(owner.drivingLicense.attachment);

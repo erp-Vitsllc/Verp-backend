@@ -50,6 +50,9 @@ const normalizeOwnerForCompare = (owner) => {
     normalizeAttachmentAt(out, 'attachment');
     if (out.passport && typeof out.passport === 'object') normalizeAttachmentAt(out.passport, 'attachment');
     if (out.visa && typeof out.visa === 'object') normalizeAttachmentAt(out.visa, 'attachment');
+    if (out.visitVisa && typeof out.visitVisa === 'object') normalizeAttachmentAt(out.visitVisa, 'attachment');
+    if (out.employmentVisa && typeof out.employmentVisa === 'object') normalizeAttachmentAt(out.employmentVisa, 'attachment');
+    if (out.spouseVisa && typeof out.spouseVisa === 'object') normalizeAttachmentAt(out.spouseVisa, 'attachment');
     if (out.emiratesId && typeof out.emiratesId === 'object') normalizeAttachmentAt(out.emiratesId, 'attachment');
     if (out.medical && typeof out.medical === 'object') normalizeAttachmentAt(out.medical, 'attachment');
     if (out.drivingLicense && typeof out.drivingLicense === 'object') normalizeAttachmentAt(out.drivingLicense, 'attachment');

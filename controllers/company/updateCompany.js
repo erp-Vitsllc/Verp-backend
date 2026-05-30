@@ -46,6 +46,22 @@ import {
     validateEstablishmentCardExpiryDate,
 } from "../../utils/establishmentCardValidation.js";
 import { normalizeEjariRow, validateEjariArrayPayload } from "../../utils/ejariValidation.js";
+import {
+    normalizeOwnerDetailsRow,
+    validateOwnerDetailsOwnersPayload,
+} from "../../utils/ownerDetailsValidation.js";
+import {
+    normalizeOwnerPassportRow,
+    validateOwnersPassportPayload,
+} from "../../utils/ownerPassportValidation.js";
+import {
+    normalizeOwnerEmiratesIdRow,
+    validateOwnersEmiratesIdPayload,
+} from "../../utils/ownerEmiratesIdValidation.js";
+import {
+    normalizeOwnerVisaRow,
+    validateOwnersVisaPayload,
+} from "../../utils/ownerVisaValidation.js";
 import { collectGlobalOwnerProfileIds } from "../../utils/ownerProfileId.js";
 
 async function awaitAdminCompanyPullArchives(
@@ -316,9 +332,49 @@ export const updateCompany = async (req, res) => {
             try {
                 const globalUsed = await collectGlobalOwnerProfileIds();
                 updateData.owners = normalizeTradeLicenseOwners(updateData.owners, globalUsed);
+                updateData.owners = updateData.owners.map((row) => {
+                    const normalized = normalizeOwnerDetailsRow(row);
+                    if (row?.passport && typeof row.passport === "object") {
+                        normalized.passport = normalizeOwnerPassportRow(row.passport);
+                    }
+                    if (row?.emiratesId && typeof row.emiratesId === "object") {
+                        normalized.emiratesId = normalizeOwnerEmiratesIdRow(row.emiratesId);
+                    }
+                    for (const visaKey of ["visitVisa", "employmentVisa", "spouseVisa"]) {
+                        if (row?.[visaKey] && typeof row[visaKey] === "object") {
+                            normalized[visaKey] = normalizeOwnerVisaRow(row[visaKey]);
+                        }
+                    }
+                    if (row?.visa && typeof row.visa === "object") {
+                        normalized.visa = normalizeOwnerVisaRow(row.visa);
+                    }
+                    return normalized;
+                });
                 const ownersCheck = validateTradeLicenseOwnersPayload(updateData.owners);
                 if (!ownersCheck.ok) {
                     return res.status(400).json({ message: ownersCheck.message });
+                }
+                const profileActive =
+                    String(company?.status || "").toLowerCase() === "active" &&
+                    String(company?.activationStatus || "").toLowerCase() === "active";
+                const detailsCheck = validateOwnerDetailsOwnersPayload(updateData.owners, {
+                    requireEmail: profileActive,
+                    profileActive,
+                });
+                if (!detailsCheck.ok) {
+                    return res.status(400).json({ message: detailsCheck.message });
+                }
+                const passportCheck = validateOwnersPassportPayload(updateData.owners);
+                if (!passportCheck.ok) {
+                    return res.status(400).json({ message: passportCheck.message });
+                }
+                const emiratesIdCheck = validateOwnersEmiratesIdPayload(updateData.owners);
+                if (!emiratesIdCheck.ok) {
+                    return res.status(400).json({ message: emiratesIdCheck.message });
+                }
+                const visaCheck = validateOwnersVisaPayload(updateData.owners);
+                if (!visaCheck.ok) {
+                    return res.status(400).json({ message: visaCheck.message });
                 }
             } catch (e) {
                 return res.status(400).json({ message: e.message || "Invalid owner data" });
@@ -398,6 +454,18 @@ export const updateCompany = async (req, res) => {
         delete updateData.pullOldDocumentsByIds;
         delete updateData.pullOwnersByIds;
 
+        if (pullOwnersByIds.length > 0) {
+            const liveOwners = beforeCompany.owners || [];
+            const remainingCount = liveOwners.filter(
+                (o) => !pullOwnersByIds.some((id) => String(o?._id || o?.id) === String(id)),
+            ).length;
+            if (remainingCount < 1) {
+                return res.status(400).json({
+                    message: "At least one owner is required. You cannot remove the only owner.",
+                });
+            }
+        }
+
         let retireLiveDocumentOid = null;
         if (Object.prototype.hasOwnProperty.call(updateData, "retireLiveDocumentById")) {
             const rs = updateData.retireLiveDocumentById != null ? String(updateData.retireLiveDocumentById).trim() : "";
@@ -414,6 +482,9 @@ export const updateCompany = async (req, res) => {
                 "attachment",
                 "passport",
                 "visa",
+                "visitVisa",
+                "employmentVisa",
+                "spouseVisa",
                 "emiratesId",
                 "medical",
                 "drivingLicense",
@@ -437,6 +508,9 @@ export const updateCompany = async (req, res) => {
                 "attachment",
                 "passport",
                 "visa",
+                "visitVisa",
+                "employmentVisa",
+                "spouseVisa",
                 "emiratesId",
                 "medical",
                 "drivingLicense",
@@ -590,7 +664,18 @@ export const updateCompany = async (req, res) => {
 
             // Owner document attachments
             if (Object.prototype.hasOwnProperty.call(updateData, "owners")) {
-                const ownerDocFields = ["attachment", "passport.attachment", "visa.attachment", "emiratesId.attachment", "medical.attachment", "drivingLicense.attachment", "labourCard.attachment"];
+                const ownerDocFields = [
+                    "attachment",
+                    "passport.attachment",
+                    "visa.attachment",
+                    "visitVisa.attachment",
+                    "employmentVisa.attachment",
+                    "spouseVisa.attachment",
+                    "emiratesId.attachment",
+                    "medical.attachment",
+                    "drivingLicense.attachment",
+                    "labourCard.attachment",
+                ];
                 const prevOwners = beforeCompany.owners || [];
                 const nextOwners = updateData.owners || [];
                 for (const field of ownerDocFields) {
@@ -919,10 +1004,15 @@ export const updateCompany = async (req, res) => {
             for (const owner of updateData.owners) {
                 if (owner.name) {
                     const syncData = {};
+                    if (owner.email !== undefined) syncData["owners.$.email"] = owner.email;
+                    if (owner.phone !== undefined) syncData["owners.$.phone"] = owner.phone;
                     if (owner.nationality !== undefined) syncData["owners.$.nationality"] = owner.nationality;
                     if (owner.attachment !== undefined) syncData["owners.$.attachment"] = owner.attachment;
                     if (owner.passport !== undefined) syncData["owners.$.passport"] = owner.passport;
                     if (owner.visa !== undefined) syncData["owners.$.visa"] = owner.visa;
+                    if (owner.visitVisa !== undefined) syncData["owners.$.visitVisa"] = owner.visitVisa;
+                    if (owner.employmentVisa !== undefined) syncData["owners.$.employmentVisa"] = owner.employmentVisa;
+                    if (owner.spouseVisa !== undefined) syncData["owners.$.spouseVisa"] = owner.spouseVisa;
                     if (owner.emiratesId !== undefined) syncData["owners.$.emiratesId"] = owner.emiratesId;
                     if (owner.medical !== undefined) syncData["owners.$.medical"] = owner.medical;
                     if (owner.drivingLicense !== undefined) syncData["owners.$.drivingLicense"] = owner.drivingLicense;
@@ -996,6 +1086,11 @@ export const updateCompany = async (req, res) => {
                 if (owner.attachment) owner.attachment = await getSignedFileUrl(owner.attachment);
                 if (owner.passport?.attachment) owner.passport.attachment = await getSignedFileUrl(owner.passport.attachment);
                 if (owner.visa?.attachment) owner.visa.attachment = await getSignedFileUrl(owner.visa.attachment);
+                for (const visaKey of ["visitVisa", "employmentVisa", "spouseVisa"]) {
+                    if (owner[visaKey]?.attachment) {
+                        owner[visaKey].attachment = await getSignedFileUrl(owner[visaKey].attachment);
+                    }
+                }
                 if (owner.emiratesId?.attachment) owner.emiratesId.attachment = await getSignedFileUrl(owner.emiratesId.attachment);
                 if (owner.medical?.attachment) owner.medical.attachment = await getSignedFileUrl(owner.medical.attachment);
                 if (owner.drivingLicense?.attachment) owner.drivingLicense.attachment = await getSignedFileUrl(owner.drivingLicense.attachment);
@@ -1011,6 +1106,11 @@ export const updateCompany = async (req, res) => {
                 if (owner.attachment) owner.attachment = await getSignedFileUrl(owner.attachment);
                 if (owner.passport?.attachment) owner.passport.attachment = await getSignedFileUrl(owner.passport.attachment);
                 if (owner.visa?.attachment) owner.visa.attachment = await getSignedFileUrl(owner.visa.attachment);
+                for (const visaKey of ["visitVisa", "employmentVisa", "spouseVisa"]) {
+                    if (owner[visaKey]?.attachment) {
+                        owner[visaKey].attachment = await getSignedFileUrl(owner[visaKey].attachment);
+                    }
+                }
                 if (owner.emiratesId?.attachment) owner.emiratesId.attachment = await getSignedFileUrl(owner.emiratesId.attachment);
                 if (owner.medical?.attachment) owner.medical.attachment = await getSignedFileUrl(owner.medical.attachment);
                 if (owner.drivingLicense?.attachment) owner.drivingLicense.attachment = await getSignedFileUrl(owner.drivingLicense.attachment);

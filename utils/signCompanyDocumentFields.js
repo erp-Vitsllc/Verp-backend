@@ -1,6 +1,16 @@
 import { getSignedFileUrl, attachmentValueForDatabase } from './s3Upload.js';
 
-const OWNER_DOC_KEYS = ['passport', 'visa', 'emiratesId', 'medical', 'drivingLicense', 'labourCard'];
+const OWNER_DOC_KEYS = [
+    'passport',
+    'visa',
+    'visitVisa',
+    'employmentVisa',
+    'spouseVisa',
+    'emiratesId',
+    'medical',
+    'drivingLicense',
+    'labourCard',
+];
 
 /** Persist S3 keys in DB — strip expiring signed URLs from company PATCH payloads. */
 export function normalizeCompanyUpdateAttachments(updateData) {
