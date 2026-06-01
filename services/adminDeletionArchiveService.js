@@ -96,7 +96,7 @@ export async function getArchiveTree() {
         expiresAt: { $gt: now },
     })
         .select(
-            'topModule category title subtitle recordId moduleName deletedAt entityType expiresAt attachmentCount snapshot'
+            'topModule category title subtitle recordId moduleName deletedAt entityType expiresAt attachmentCount status snapshot'
         )
         .sort({ deletedAt: -1 })
         .lean();

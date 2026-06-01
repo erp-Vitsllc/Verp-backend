@@ -116,12 +116,28 @@ export function resolveArchiveAttachmentCount(archive) {
     return 0;
 }
 
+const ARCHIVE_STATUS_LABELS = {
+    pending: 'Pending recovery',
+    restored: 'Restored',
+    purged: 'Purged',
+};
+
+function formatCompanyProfileStatusAtDeletion(snapshot) {
+    if (!snapshot || typeof snapshot !== 'object') return '';
+    const status = snapshot.companyStatus != null ? String(snapshot.companyStatus).trim() : '';
+    const activation =
+        snapshot.activationStatus != null ? String(snapshot.activationStatus).trim() : '';
+    if (status && activation) return `${status} / ${activation}`;
+    return status || activation || '';
+}
+
 export function enrichArchiveRetentionFields(archive) {
     if (!archive) return archive;
     const expiresAt = resolveArchiveExpiresAt(archive);
     const daysRemaining = getArchiveDaysRemaining(expiresAt);
     const attachmentCount = resolveArchiveAttachmentCount(archive);
     const { snapshot, ...rest } = archive;
+    const status = String(archive.status || 'pending').toLowerCase();
     return {
         ...rest,
         attachmentCount,
@@ -129,5 +145,8 @@ export function enrichArchiveRetentionFields(archive) {
         retentionDays: ADMIN_DELETION_ARCHIVE_RETENTION_DAYS,
         daysRemaining,
         isExpired: daysRemaining <= 0,
+        status,
+        statusLabel: ARCHIVE_STATUS_LABELS[status] || status,
+        companyProfileStatus: formatCompanyProfileStatusAtDeletion(snapshot),
     };
 }

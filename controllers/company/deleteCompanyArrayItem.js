@@ -69,20 +69,22 @@ export const deleteCompanyArrayItem = async (req, res) => {
         const activated = isCompanyProfileActivated(company);
         const permModule = FIELD_PERMISSION_MAP[fieldName];
 
-        if (activated) {
-            if (!canBypassActivatedDelete) {
-                return res.status(403).json({
-                    message: `Only administrator can delete ${fieldName} records on an activated company profile.`,
-                });
-            }
-        } else {
-            const userId = req.user?.id || req.user?._id;
-            const hasDeletePerm =
-                userId && permModule && (await hasPermission(userId, permModule, "delete"));
-            if (!canBypassActivatedDelete && !hasDeletePerm) {
-                return res.status(403).json({
-                    message: `You do not have permission to delete this ${fieldName} record.`,
-                });
+        if (!isAdmin) {
+            if (activated) {
+                if (!canBypassActivatedDelete) {
+                    return res.status(403).json({
+                        message: `Only administrator can delete ${fieldName} records on an activated company profile.`,
+                    });
+                }
+            } else {
+                const userId = req.user?.id || req.user?._id;
+                const hasDeletePerm =
+                    userId && permModule && (await hasPermission(userId, permModule, "delete"));
+                if (!canBypassActivatedDelete && !hasDeletePerm) {
+                    return res.status(403).json({
+                        message: `You do not have permission to delete this ${fieldName} record.`,
+                    });
+                }
             }
         }
 

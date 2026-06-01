@@ -24,7 +24,14 @@ function getFrontendRestoreBaseUrl() {
 
 export async function isReqUserAdmin(reqUser) {
     if (!reqUser) return false;
-    if (reqUser.isAdmin === true || reqUser.role === 'Admin' || reqUser.role === 'ROOT') return true;
+    if (reqUser.isAdmin === true || reqUser.isAdministrator === true) return true;
+    const role = String(reqUser.role || "").trim();
+    const userType = String(reqUser.userType || "").trim();
+    const groupName = String(reqUser.groupName || "").trim();
+    if (/^(admin|administrator|root)$/i.test(role)) return true;
+    if (/^(admin|administrator)$/i.test(userType)) return true;
+    if (/^(admin|administrator)$/i.test(groupName)) return true;
+    if (role === "Admin" || role === "ROOT") return true;
     const uid = reqUser.id || reqUser._id?.toString?.();
     return uid ? !!(await isUserAdministrator(uid)) : false;
 }

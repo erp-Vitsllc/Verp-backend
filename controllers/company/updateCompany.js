@@ -276,7 +276,7 @@ export const updateCompany = async (req, res) => {
         }
 
         if (clearLiveOwnerDocCard || clearOldOwnerDocCard) {
-            if (!requesterBypassesHrQueue) {
+            if (!requesterIsAdmin && !requesterIsDesignatedHr) {
                 return res.status(403).json({
                     message: "Only administrator can delete owner document cards.",
                 });
@@ -379,6 +379,7 @@ export const updateCompany = async (req, res) => {
 
         if (compactCompanyDocMutation) {
             const mayCompactDelete =
+                requesterIsAdmin ||
                 requesterBypassesHrQueue ||
                 (await userMayCompactDeleteCompanyContent(req.user, company, {
                     pullDocumentsByIds,
@@ -438,7 +439,7 @@ export const updateCompany = async (req, res) => {
             !shouldTriggerCompanyReactivation(beforeCompany, updateData) &&
             (!profileActivated || unmistakableDelete);
 
-        if (!requesterBypassesHrQueue && !hasGroupDeletePerm && blockAsDelete) {
+        if (!requesterIsAdmin && !requesterBypassesHrQueue && !hasGroupDeletePerm && blockAsDelete) {
             return res.status(403).json({
                 message: profileActivated
                     ? "Only administrator can delete company profile documents or card attachments on an activated profile."
