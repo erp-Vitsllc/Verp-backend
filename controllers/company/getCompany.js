@@ -10,10 +10,20 @@ import { loadCompanyFullProfile } from "../../services/companyPartitionService.j
  */
 export const getCompany = async (req, res) => {
     try {
-        const { id } = req.params;
+        const id = String(req.params.id || "").trim();
+        if (!id) {
+            return res.status(400).json({ message: "Company id is required" });
+        }
 
-        // Try finding by companyId first, then by _id
+        // Try exact companyId, then case-insensitive code (e.g. EST-006), then Mongo _id
         let company = await Company.findOne({ companyId: id }).maxTimeMS(8000);
+
+        if (!company) {
+            const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+            company = await Company.findOne({
+                companyId: { $regex: new RegExp(`^${escaped}$`, "i") },
+            }).maxTimeMS(8000);
+        }
 
         if (!company && id.match(/^[0-9a-fA-F]{24}$/)) {
             company = await Company.findById(id).maxTimeMS(8000);

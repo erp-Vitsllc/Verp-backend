@@ -20,6 +20,7 @@ import {
     calculateCompanyActivationProgress,
     shouldTriggerCompanyReactivation,
     collectCompanyReactivationChangeLabels,
+    pickCompanyPendingPreviousSnapshot,
     stripProposedDataKeysFromPendingReactivationEntries,
     isCompanyFullyActivated,
 } from "../../utils/companyActivation.js";
@@ -180,6 +181,19 @@ const dualWriteBundleKeysToCoreSet = (coreSet, partitionUpdate = {}) => {
         }
     }
 };
+
+const TRADE_LICENSE_UPDATE_KEYS = [
+    "tradeLicenseNumber",
+    "tradeLicenseIssueDate",
+    "tradeLicenseExpiry",
+    "tradeLicenseAttachment",
+    "tradeLicenseOwnerName",
+];
+
+/** Trade License modal only edits license fields + owner name/share — not owner email/phone. */
+const isTradeLicenseOwnersBundleUpdate = (updateData = {}) =>
+    Object.prototype.hasOwnProperty.call(updateData, "owners") &&
+    TRADE_LICENSE_UPDATE_KEYS.some((k) => Object.prototype.hasOwnProperty.call(updateData, k));
 
 const signCompanyProfileForResponse = async (companyObj = {}) => {
     const out = { ...companyObj };
@@ -568,36 +582,39 @@ export const updateCompany = async (req, res) => {
                 const profileActive =
                     String(company?.status || "").toLowerCase() === "active" &&
                     String(company?.activationStatus || "").toLowerCase() === "active";
-                const detailsCheck = validateOwnerDetailsOwnersPayload(updateData.owners, {
-                    requireEmail: profileActive,
-                    profileActive,
-                });
-                if (!detailsCheck.ok) {
-                    return res.status(400).json({ message: detailsCheck.message });
-                }
-                const passportCheck = validateOwnersPassportPayload(updateData.owners);
-                if (!passportCheck.ok) {
-                    return res.status(400).json({ message: passportCheck.message });
-                }
-                const emiratesIdCheck = validateOwnersEmiratesIdPayload(updateData.owners);
-                if (!emiratesIdCheck.ok) {
-                    return res.status(400).json({ message: emiratesIdCheck.message });
-                }
-                const visaCheck = validateOwnersVisaPayload(updateData.owners);
-                if (!visaCheck.ok) {
-                    return res.status(400).json({ message: visaCheck.message });
-                }
-                const labourCardCheck = validateOwnersLabourCardPayload(updateData.owners);
-                if (!labourCardCheck.ok) {
-                    return res.status(400).json({ message: labourCardCheck.message });
-                }
-                const medicalCheck = validateOwnersMedicalInsurancePayload(updateData.owners);
-                if (!medicalCheck.ok) {
-                    return res.status(400).json({ message: medicalCheck.message });
-                }
-                const drivingLicenseCheck = validateOwnersDrivingLicensePayload(updateData.owners);
-                if (!drivingLicenseCheck.ok) {
-                    return res.status(400).json({ message: drivingLicenseCheck.message });
+                const tradeLicenseOwnersOnly = isTradeLicenseOwnersBundleUpdate(updateData);
+                if (!tradeLicenseOwnersOnly) {
+                    const detailsCheck = validateOwnerDetailsOwnersPayload(updateData.owners, {
+                        requireEmail: profileActive,
+                        profileActive,
+                    });
+                    if (!detailsCheck.ok) {
+                        return res.status(400).json({ message: detailsCheck.message });
+                    }
+                    const passportCheck = validateOwnersPassportPayload(updateData.owners);
+                    if (!passportCheck.ok) {
+                        return res.status(400).json({ message: passportCheck.message });
+                    }
+                    const emiratesIdCheck = validateOwnersEmiratesIdPayload(updateData.owners);
+                    if (!emiratesIdCheck.ok) {
+                        return res.status(400).json({ message: emiratesIdCheck.message });
+                    }
+                    const visaCheck = validateOwnersVisaPayload(updateData.owners);
+                    if (!visaCheck.ok) {
+                        return res.status(400).json({ message: visaCheck.message });
+                    }
+                    const labourCardCheck = validateOwnersLabourCardPayload(updateData.owners);
+                    if (!labourCardCheck.ok) {
+                        return res.status(400).json({ message: labourCardCheck.message });
+                    }
+                    const medicalCheck = validateOwnersMedicalInsurancePayload(updateData.owners);
+                    if (!medicalCheck.ok) {
+                        return res.status(400).json({ message: medicalCheck.message });
+                    }
+                    const drivingLicenseCheck = validateOwnersDrivingLicensePayload(updateData.owners);
+                    if (!drivingLicenseCheck.ok) {
+                        return res.status(400).json({ message: drivingLicenseCheck.message });
+                    }
                 }
             } catch (e) {
                 return res.status(400).json({ message: e.message || "Invalid owner data" });
@@ -661,13 +678,12 @@ export const updateCompany = async (req, res) => {
             }
         }
 
-        const skipReactivationQueueForThisRequest = skipArchiveOnRequest;
+        const hrQueueRequired =
+            !requesterBypassesHrQueue && shouldTriggerCompanyReactivation(beforeCompany, updateData);
+        const skipReactivationQueueForThisRequest = skipArchiveOnRequest && !hrQueueRequired;
 
         let partitionUpdatePayload = {};
-        const queueForApproval =
-            !skipReactivationQueueForThisRequest &&
-            !requesterBypassesHrQueue &&
-            shouldTriggerCompanyReactivation(beforeCompany, updateData);
+        const queueForApproval = !skipReactivationQueueForThisRequest && hrQueueRequired;
 
         const findOpts = {
             new: true,
@@ -688,7 +704,7 @@ export const updateCompany = async (req, res) => {
                 section: "companyProfile",
                 changeType: "update",
                 targetIndex: null,
-                previousData: toSerializable(beforeCompany),
+                previousData: toSerializable(pickCompanyPendingPreviousSnapshot(beforeCompany, updateData)),
                 proposedData: toSerializable(updateData),
                 changedAt: new Date(),
             };
@@ -839,6 +855,7 @@ export const updateCompany = async (req, res) => {
             message: responseMessage,
             company: signedCompany,
             activationProgress: calculateCompanyActivationProgress(mergedForResponse),
+            queuedForHrApproval: queueForApproval,
         });
     } catch (error) {
         console.error("Error in updateCompany:", error);

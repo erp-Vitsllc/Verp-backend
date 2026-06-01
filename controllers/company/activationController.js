@@ -10,12 +10,18 @@ import {
 } from "../../utils/companyActivation.js";
 import { syncDashboardAction } from "../../utils/syncDashboard.js";
 import { clearAllCompanyActivationDashboardRows } from "../../utils/clearCompanyActivationHoldDashboardRows.js";
-import { archiveSupersededCompanyDocuments } from "../../utils/archiveCompanyDocument.js";
-import { archiveSupersededCompanyOwners } from "../../utils/archiveCompanyOwners.js";
 import { formatActivationAttachmentLine, shortenUrlsInString } from "../../utils/shortenUrlsInString.js";
 import { sendCompanyActivationHoldEmail } from "../../utils/sendCompanyActivationHoldEmail.js";
 import { sanitizeActivationHoldRowNotes } from "../../utils/sanitizeActivationHoldRowNotes.js";
 import { sendCompanyActivationOutcomeEmail } from "../../utils/sendCompanyActivationOutcomeEmail.js";
+import {
+    applyCompanyProposedActivationPatch,
+    companyPendingEntryId,
+    loadCompanyFullProfile,
+    upsertCompanyPartitions,
+    clearCompanyWorkflowActivationHold,
+} from "../../services/companyPartitionService.js";
+import CompanyOwners from "../../models/CompanyOwners.js";
 
 const resolveCompanyById = async (id) => {
     return Company.findOne({
@@ -103,7 +109,10 @@ export const submitCompanyActivationRequest = async (req, res) => {
         const company = await resolveCompanyForActivation(id);
         if (!company) return res.status(404).json({ message: "Company not found" });
 
-        const progressQuick = calculateCompanyActivationProgress(company.toObject());
+        const mergedForProgress =
+            (await loadCompanyFullProfile(company)) ||
+            (typeof company.toObject === "function" ? company.toObject() : company);
+        const progressQuick = calculateCompanyActivationProgress(mergedForProgress);
         const isDesignatedHr = await isRequestUserDesignatedFlowchartHr(req);
         if (isDesignatedHr) {
             if (progressQuick.percentage < 100) {
@@ -156,17 +165,22 @@ export const submitCompanyActivationRequest = async (req, res) => {
             const status = result.blocked ? 400 : 500;
             return res.status(status).json({
                 message: result.message,
-                activationProgress: result.progress || calculateCompanyActivationProgress(company.toObject()),
+                activationProgress:
+                    result.progress ||
+                    calculateCompanyActivationProgress(mergedForProgress),
             });
         }
 
-        const refreshed = await Company.findById(company._id)
+        const refreshedCore = await Company.findById(company._id)
             .select(ACTIVATION_HEAVY_EXCLUSIONS)
             .maxTimeMS(15000);
+        const refreshed =
+            (await loadCompanyFullProfile(refreshedCore)) ||
+            (typeof refreshedCore?.toObject === "function" ? refreshedCore.toObject() : refreshedCore);
         return res.status(200).json({
             message: "Company sent for HR activation review successfully.",
             company: refreshed,
-            activationProgress: calculateCompanyActivationProgress(refreshed.toObject()),
+            activationProgress: calculateCompanyActivationProgress(refreshed),
         });
     } catch (error) {
         console.error("submitCompanyActivationRequest error:", error);
@@ -191,11 +205,14 @@ export const approveCompanyActivationRequest = async (req, res) => {
             });
         }
 
-        const pendingChanges = Array.isArray(company.pendingReactivationChanges)
-            ? company.pendingReactivationChanges.map((entry) => entry?.toObject ? entry.toObject() : entry)
+        const merged =
+            (await loadCompanyFullProfile(company)) ||
+            (typeof company.toObject === "function" ? company.toObject() : company);
+        const pendingChanges = Array.isArray(merged.pendingReactivationChanges)
+            ? merged.pendingReactivationChanges.map((entry) => (entry?.toObject ? entry.toObject() : entry))
             : [];
         if (selectionProvided && pendingChanges.length > 0) {
-            const expSorted = [...pendingChanges.map((entry, idx) => String(entry?._id || idx))].sort();
+            const expSorted = [...pendingChanges.map((entry, idx) => companyPendingEntryId(entry, idx))].sort();
             const aprSorted = [...approvedChangeIds.map(String)].sort();
             if (expSorted.length !== aprSorted.length || expSorted.join(",") !== aprSorted.join(",")) {
                 return res.status(400).json({
@@ -205,33 +222,28 @@ export const approveCompanyActivationRequest = async (req, res) => {
             }
         }
         const selectedChanges = pendingChanges.filter((entry, idx) => {
-            const entryId = String(entry?._id || idx);
+            const entryId = companyPendingEntryId(entry, idx);
             if (!selectionProvided) return true;
             return approvedChangeIds.includes(entryId);
         });
 
-        // Collect owner archives to push atomically via $push (the in-memory mutation
-        // path would clobber existing oldOwners since the field stayed loaded but
-        // we now prefer the same pattern used for oldDocuments archives — direct atomic writes).
         const ownerArchivesToPush = [];
         for (const change of selectedChanges) {
             const proposedData = change?.proposedData;
             if (!proposedData || typeof proposedData !== "object") continue;
-
-            const beforeChange = company.toObject();
-            await archiveSupersededCompanyDocuments(beforeChange, proposedData);
-            const ownerArchives = archiveSupersededCompanyOwners(beforeChange, proposedData);
-            if (ownerArchives.length > 0) ownerArchivesToPush.push(...ownerArchives);
-
-            Object.assign(company, proposedData);
+            const { ownerArchivesToPush: archives } = await applyCompanyProposedActivationPatch(
+                company._id,
+                proposedData,
+            );
+            if (archives?.length) ownerArchivesToPush.push(...archives);
         }
 
         company.status = "Active";
         company.activationStatus = "active";
-        company.pendingReactivationChanges = [];
-        company.activationHold = undefined;
-        if (!Array.isArray(company.activationWorkflow)) company.activationWorkflow = [];
-        company.activationWorkflow.push({
+        await company.save();
+
+        const activationWorkflow = Array.isArray(merged.activationWorkflow) ? [...merged.activationWorkflow] : [];
+        activationWorkflow.push({
             role: "HR",
             assignedTo: req.user?._id || null,
             status: "active",
@@ -239,14 +251,25 @@ export const approveCompanyActivationRequest = async (req, res) => {
             actionedAt: new Date(),
             comment: "Company activation approved",
         });
-        await company.save();
+        await upsertCompanyPartitions(company._id, {
+            pendingReactivationChanges: [],
+            activationWorkflow,
+        });
+        await clearCompanyWorkflowActivationHold(company._id);
 
         if (ownerArchivesToPush.length > 0) {
             try {
-                await Company.updateOne(
-                    { _id: company._id },
-                    { $push: { oldOwners: { $each: ownerArchivesToPush } } },
-                );
+                const ownersDoc = await CompanyOwners.findOne({ company: company._id });
+                if (ownersDoc) {
+                    ownersDoc.oldOwners = [...(ownersDoc.oldOwners || []), ...ownerArchivesToPush];
+                    await ownersDoc.save();
+                } else {
+                    await CompanyOwners.create({
+                        company: company._id,
+                        owners: [],
+                        oldOwners: ownerArchivesToPush,
+                    });
+                }
             } catch (archiveErr) {
                 console.error("[approveCompanyActivationRequest] Owner archive push error:", archiveErr);
             }
@@ -283,10 +306,13 @@ export const approveCompanyActivationRequest = async (req, res) => {
             console.error("[approveCompanyActivationRequest] Outcome email error:", mailErr);
         }
 
+        const refreshed =
+            (await loadCompanyFullProfile(company)) ||
+            (typeof company.toObject === "function" ? company.toObject() : company);
         return res.status(200).json({
             message: "Company activation approved successfully.",
-            company,
-            activationProgress: calculateCompanyActivationProgress(company.toObject()),
+            company: refreshed,
+            activationProgress: calculateCompanyActivationProgress(refreshed),
         });
     } catch (error) {
         console.error("approveCompanyActivationRequest error:", error);
@@ -313,10 +339,13 @@ export const holdCompanyActivationRequest = async (req, res) => {
             return res.status(400).json({ message: "Company activation is not awaiting HR review." });
         }
 
-        const pendingChanges = Array.isArray(company.pendingReactivationChanges)
-            ? company.pendingReactivationChanges.map((entry, idx) => {
+        const merged =
+            (await loadCompanyFullProfile(company)) ||
+            (typeof company.toObject === "function" ? company.toObject() : company);
+        const pendingChanges = Array.isArray(merged.pendingReactivationChanges)
+            ? merged.pendingReactivationChanges.map((entry, idx) => {
                 const o = entry?.toObject ? entry.toObject() : entry;
-                return { ...o, __idStr: String(o?._id || idx) };
+                return { ...o, __idStr: companyPendingEntryId(o, idx) };
             })
             : [];
 
@@ -350,7 +379,7 @@ export const holdCompanyActivationRequest = async (req, res) => {
         const unapprovedCards = [...new Set(unapproved.map((e) => String(e.card || "").trim()).filter(Boolean))];
         const rowNotesByEntryId = sanitizeActivationHoldRowNotes(req.body?.rowNotesByEntryId, unapproved.map((e) => e.__idStr));
 
-        company.activationHold = {
+        const activationHold = {
             heldAt: new Date(),
             unapprovedEntryIds: unapproved.map((e) => e.__idStr),
             unapprovedCards: unapprovedCards.length ? unapprovedCards : unapproved.map((_, i) => `Change ${i + 1}`),
@@ -360,9 +389,9 @@ export const holdCompanyActivationRequest = async (req, res) => {
             ...(rowNotesByEntryId ? { rowNotesByEntryId } : {}),
         };
 
-        await company.save();
+        await upsertCompanyPartitions(company._id, { activationHold });
 
-        const holdNotice = `[Company profile] On hold — update: ${company.activationHold.unapprovedCards.join(", ")}`;
+        const holdNotice = `[Company profile] On hold — update: ${activationHold.unapprovedCards.join(", ")}`;
 
         const pendingDashboardRows = await DashboardAction.find({
             requestId: company._id,
@@ -439,13 +468,16 @@ export const holdCompanyActivationRequest = async (req, res) => {
             console.error("[holdCompanyActivationRequest] Hold email error:", mailErr);
         }
 
-        const refreshed = await Company.findById(company._id)
+        const refreshedCore = await Company.findById(company._id)
             .select(ACTIVATION_HEAVY_EXCLUSIONS)
             .maxTimeMS(15000);
+        const refreshed =
+            (await loadCompanyFullProfile(refreshedCore)) ||
+            (typeof refreshedCore?.toObject === "function" ? refreshedCore.toObject() : refreshedCore);
         return res.status(200).json({
             message: "Company activation placed on hold. The submitter was notified to update the listed items.",
             company: refreshed,
-            activationProgress: calculateCompanyActivationProgress(refreshed.toObject()),
+            activationProgress: calculateCompanyActivationProgress(refreshed),
         });
     } catch (error) {
         console.error("holdCompanyActivationRequest error:", error);
@@ -473,13 +505,15 @@ export const rejectCompanyActivationRequest = async (req, res) => {
         const keepActiveProfile = companyWasEverFullyActivated(company);
         company.status = keepActiveProfile ? "Active" : "Inactive";
         company.activationStatus = keepActiveProfile ? "active" : "rejected";
+        const merged =
+            (await loadCompanyFullProfile(company)) ||
+            (typeof company.toObject === "function" ? company.toObject() : company);
+
         if (keepActiveProfile) {
-            company.pendingReactivationChanges = [];
-            company.markModified("pendingReactivationChanges");
+            await upsertCompanyPartitions(company._id, { pendingReactivationChanges: [] });
         }
-        company.activationHold = undefined;
-        if (!Array.isArray(company.activationWorkflow)) company.activationWorkflow = [];
-        company.activationWorkflow.push({
+        const activationWorkflow = Array.isArray(merged.activationWorkflow) ? [...merged.activationWorkflow] : [];
+        activationWorkflow.push({
             role: "HR",
             assignedTo: req.user?._id || null,
             status: "rejected",
@@ -487,7 +521,11 @@ export const rejectCompanyActivationRequest = async (req, res) => {
             actionedAt: new Date(),
             comment: reasonText,
         });
+        company.status = keepActiveProfile ? "Active" : "Inactive";
+        company.activationStatus = keepActiveProfile ? "active" : "rejected";
         await company.save();
+        await upsertCompanyPartitions(company._id, { activationWorkflow });
+        await clearCompanyWorkflowActivationHold(company._id);
 
         const pendingRowsForSubmitter = await DashboardAction.find({
             requestId: company._id,
@@ -565,10 +603,13 @@ export const rejectCompanyActivationRequest = async (req, res) => {
             console.error("[rejectCompanyActivationRequest] Outcome email error:", mailErr);
         }
 
+        const refreshed =
+            (await loadCompanyFullProfile(company)) ||
+            (typeof company.toObject === "function" ? company.toObject() : company);
         return res.status(200).json({
             message: "Company activation rejected.",
-            company,
-            activationProgress: calculateCompanyActivationProgress(company.toObject()),
+            company: refreshed,
+            activationProgress: calculateCompanyActivationProgress(refreshed),
         });
     } catch (error) {
         console.error("rejectCompanyActivationRequest error:", error);

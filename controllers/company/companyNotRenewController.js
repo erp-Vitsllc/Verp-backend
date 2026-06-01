@@ -6,7 +6,7 @@ import DashboardAction from "../../models/DashboardAction.js";
 import { getDepartmentHOD } from "../../utils/getDepartmentHOD.js";
 import { resolveEmployeeEmail } from "../../utils/resolveEmployeeEmail.js";
 import { isRequestUserDesignatedFlowchartHr } from "../../utils/isDesignatedFlowchartHr.js";
-import { calculateCompanyActivationProgress } from "../../utils/companyActivation.js";
+import { calculateCompanyActivationProgress, isCompanyFullyActivated } from "../../utils/companyActivation.js";
 import {
     loadCompanyFullProfile,
     upsertCompanyPartitions,
@@ -382,6 +382,10 @@ export const submitCompanyNotRenewRequest = async (req, res) => {
         }
 
         const autoApprove = await isHrLoggedInUser(req);
+        const profileFullyActive = isCompanyFullyActivated({
+            status: core.status,
+            activationStatus: companyData.activationStatus,
+        });
         const requestId = crypto.randomUUID();
         const row = {
             requestId,
@@ -403,7 +407,7 @@ export const submitCompanyNotRenewRequest = async (req, res) => {
             submittedAt: new Date(),
         };
 
-        if (autoApprove) {
+        if (autoApprove || !profileFullyActive) {
             try {
                 applyApprovedArchive(companyData, row);
             } catch (e) {

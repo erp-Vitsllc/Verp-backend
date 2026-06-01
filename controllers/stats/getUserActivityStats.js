@@ -214,7 +214,10 @@ const filterStaleExpiryDashboardRows = async (items = []) => {
     });
 };
 
-/** Hide company activation notifications once the company is fully activated. */
+/**
+ * Drop stale Company Activation rows once HR review is finished.
+ * Keep tasks while `activationStatus` is `submitted` (including reactivation on Active companies).
+ */
 const filterCompletedCompanyActivationItems = async (activityList = []) => {
     if (!Array.isArray(activityList) || activityList.length === 0) return activityList;
 
@@ -228,18 +231,20 @@ const filterCompletedCompanyActivationItems = async (activityList = []) => {
     });
     if (!companyMongoIds.size) return activityList;
 
-    const activatedCompanies = await Company.find({
-        _id: { $in: [...companyMongoIds] },
-        $or: [{ activationStatus: "active" }, { status: "Active" }],
-    })
-        .select("_id")
+    const companies = await Company.find({ _id: { $in: [...companyMongoIds] } })
+        .select("_id activationStatus")
         .lean()
         .maxTimeMS(6000);
 
-    const activatedIdSet = new Set(activatedCompanies.map((c) => String(c._id)));
+    const awaitingHrById = new Set(
+        companies
+            .filter((c) => String(c.activationStatus || "").toLowerCase() === "submitted")
+            .map((c) => String(c._id)),
+    );
+
     return activityList.filter((item) => {
         if (item?.type !== "Company Activation") return true;
-        return !activatedIdSet.has(String(item.id));
+        return awaitingHrById.has(String(item.id));
     });
 };
 
@@ -446,6 +451,14 @@ export const getUserActivityStats = async (req, res) => {
         }
         const isCurrentAccountsHolder = await isUserActiveInFlowchart(currentUser, 'accounts').catch(() => false);
         const isCurrentManagementHolder = await isUserInFlowchart(currentUser, 'management').catch(() => false);
+
+        // Flowchart HR sees all in-flight company activations even if `assignedTo` still points at a prior HR holder.
+        if (isCurrentHrHolder) {
+            dashboardOrConditions.push({
+                requestType: "Company Activation",
+                status: "Pending",
+            });
+        }
 
         const dispositionRowVisibleToViewer = (item) => {
             if (item?.requestType !== 'Vehicle Disposition Request') return true;
@@ -789,6 +802,47 @@ export const getUserActivityStats = async (req, res) => {
                 scope: (isCreatorSideAssetApproval || isCompanyActivationRequesterCopy || isVehicleActivationRequesterCopy || isAssetCreationCreatorCopy) ? 'outgoing' : 'inbox'
             });
             if (reqIdStr) seenRequests.set(reqIdStr, 'Pending');
+        });
+
+        // Fallback when activation was submitted but DashboardAction sync is missing or assignee drifted.
+        const submittedCompanies = await Company.find({ activationStatus: "submitted" })
+            .select("_id name companyId nickName activationSubmittedTo activationSubmittedBy updatedAt")
+            .lean()
+            .maxTimeMS(6000);
+
+        submittedCompanies.forEach((co) => {
+            const reqIdStr = String(co._id);
+            if (seenRequests.has(reqIdStr)) return;
+
+            const submittedToHr = co.activationSubmittedTo?.toString();
+            const submittedBy = co.activationSubmittedBy?.toString();
+            const isHrInbox =
+                isCurrentHrHolder ||
+                (submittedToHr &&
+                    dashboardAssigneeMongoIds.some((id) => id && id.toString() === submittedToHr));
+            const isSubmitterOutgoing =
+                submittedBy &&
+                dashboardAssigneeMongoIds.some((id) => id && id.toString() === submittedBy);
+
+            if (!isHrInbox && !isSubmitterOutgoing) return;
+
+            activityList.push({
+                id: reqIdStr,
+                type: "Company Activation",
+                requestedBy: co.name || "Company",
+                requestedDate: co.updatedAt || new Date(),
+                actionedDate: null,
+                status: "Pending",
+                extra1: `[Company profile] Company submitted for activation review`,
+                extra2: co.companyId || "",
+                extra3: JSON.stringify({
+                    companyActivationViewerRole: isSubmitterOutgoing && !isHrInbox ? "requester" : "approver",
+                    activationSubject: "company",
+                }),
+                targetEmployeeId: co.companyId,
+                scope: isSubmitterOutgoing && !isHrInbox ? "outgoing" : "inbox",
+            });
+            seenRequests.set(reqIdStr, "Pending");
         });
 
         // 5.1 Add Direct Inbox Items (De-duplicate with DashboardAction)

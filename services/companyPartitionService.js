@@ -5,6 +5,8 @@ import CompanyOwners from "../models/CompanyOwners.js";
 import CompanyDocumentBundle from "../models/CompanyDocumentBundle.js";
 import CompanyWorkflow from "../models/CompanyWorkflow.js";
 import { ownerDocUnsetPath } from "../utils/companyOwnerDocDeletion.js";
+import { archiveSupersededCompanyDocuments } from "../utils/archiveCompanyDocument.js";
+import { archiveSupersededCompanyOwners } from "../utils/archiveCompanyOwners.js";
 
 /** Heavy fields excluded from company list reads (MongoDB projection — exclusion only). */
 export const COMPANY_LIST_SELECT = {
@@ -282,6 +284,41 @@ export async function upsertCompanyPartitions(companyMongoId, companyPayload = {
               )
             : Promise.resolve(),
     ]);
+}
+
+export const companyPendingEntryId = (entry, idx) => String(entry?._id ?? idx);
+
+/** Pending queue + workflow fields live on CompanyWorkflow after partition migration. */
+export async function persistCompanyPendingReactivationChanges(companyMongoId, pendingArray = []) {
+    await upsertCompanyPartitions(companyMongoId, {
+        pendingReactivationChanges: Array.isArray(pendingArray) ? pendingArray : [],
+    });
+}
+
+export async function clearCompanyWorkflowActivationHold(companyMongoId) {
+    await CompanyWorkflow.updateOne({ company: companyMongoId }, { $unset: { activationHold: 1 } });
+}
+
+/** Apply one HR-approved proposedData patch (compliance, owners, documents, core fields). */
+export async function applyCompanyProposedActivationPatch(companyMongoId, proposedData) {
+    if (!proposedData || typeof proposedData !== "object") {
+        return { ownerArchivesToPush: [] };
+    }
+    const core = await Company.findById(companyMongoId).lean().maxTimeMS(8000);
+    if (!core) return { ownerArchivesToPush: [] };
+    const before = (await loadCompanyFullProfile(core)) || core;
+
+    await archiveSupersededCompanyDocuments(before, proposedData);
+    const ownerArchives = archiveSupersededCompanyOwners(before, proposedData) || [];
+
+    const { coreUpdate, partitionUpdate } = splitCompanyUpdatePayload(proposedData);
+    if (Object.keys(coreUpdate).length) {
+        await Company.findByIdAndUpdate(companyMongoId, { $set: coreUpdate }).maxTimeMS(8000);
+    }
+    if (Object.keys(partitionUpdate).length) {
+        await upsertCompanyPartitions(companyMongoId, partitionUpdate);
+    }
+    return { ownerArchivesToPush: ownerArchives };
 }
 
 /** Parse Mongo subdoc _id or array index from route `:target`. */

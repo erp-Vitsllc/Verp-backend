@@ -1,6 +1,12 @@
 import nodemailer from "nodemailer";
 import Company from "../models/Company.js";
 import EmployeeBasic from "../models/EmployeeBasic.js";
+import {
+    companyPendingEntryId,
+    loadCompanyFullProfile,
+    clearCompanyWorkflowActivationHold,
+    upsertCompanyPartitions,
+} from "../services/companyPartitionService.js";
 import { isActorDesignatedFlowchartHr } from "./isDesignatedFlowchartHr.js";
 import { resolveFlowchartHrEmployee } from "./resolveFlowchartHrEmployee.js";
 import { syncDashboardAction } from "./syncDashboard.js";
@@ -253,8 +259,6 @@ const resolveActorDashboardEmployeeBasicId = async (actor) => {
     return emp?._id || null;
 };
 
-const companyPendingEntryId = (entry, idx) => String(entry?._id ?? idx);
-
 export const submitCompanyActivation = async ({
     companyId,
     actor = null,
@@ -272,7 +276,12 @@ export const submitCompanyActivation = async ({
     const company = await Company.findById(companyId);
     if (!company) return { ok: false, message: "Company not found" };
 
-    const progress = calculateCompanyActivationProgress(company.toObject());
+    const merged = (await loadCompanyFullProfile(company)) || company.toObject();
+    const progress = calculateCompanyActivationProgress(merged);
+
+    let pendingAfterSelection = Array.isArray(merged.pendingReactivationChanges)
+        ? [...merged.pendingReactivationChanges]
+        : [];
 
     if (selectionProvided) {
         if (!Array.isArray(includedChangeEntryIds)) {
@@ -283,8 +292,7 @@ export const submitCompanyActivation = async ({
                 progress,
             };
         }
-        const pending = Array.isArray(company.pendingReactivationChanges) ? [...company.pendingReactivationChanges] : [];
-        const allSet = new Set(pending.map((entry, idx) => companyPendingEntryId(entry, idx)));
+        const allSet = new Set(pendingAfterSelection.map((entry, idx) => companyPendingEntryId(entry, idx)));
         for (const wid of includedChangeEntryIds.map(String)) {
             if (!allSet.has(wid)) {
                 return {
@@ -296,8 +304,9 @@ export const submitCompanyActivation = async ({
             }
         }
         const keep = new Set(includedChangeEntryIds.map(String));
-        company.pendingReactivationChanges = pending.filter((entry, idx) => keep.has(companyPendingEntryId(entry, idx)));
-        company.markModified("pendingReactivationChanges");
+        pendingAfterSelection = pendingAfterSelection.filter((entry, idx) =>
+            keep.has(companyPendingEntryId(entry, idx)),
+        );
     }
     if (!force && progress.percentage < 100) {
         return {
@@ -325,19 +334,17 @@ export const submitCompanyActivation = async ({
         };
     }
     const requestedByName = getActorName(actor);
-    const wasPreviouslyActive = Array.isArray(company.activationWorkflow)
-        ? company.activationWorkflow.some((w) => String(w?.status || "").toLowerCase() === "active")
+    const wasPreviouslyActive = Array.isArray(merged.activationWorkflow)
+        ? merged.activationWorkflow.some((w) => String(w?.status || "").toLowerCase() === "active")
         : false;
     const activationTypeLabel = wasPreviouslyActive ? "Reactivation" : "New Activation";
-    const requestedChanges = Array.isArray(company.pendingReactivationChanges)
-        ? [...new Set(company.pendingReactivationChanges.map((x) => String(x?.card || "").trim()).filter(Boolean))]
-        : [];
+    const requestedChanges = [...new Set(pendingAfterSelection.map((x) => String(x?.card || "").trim()).filter(Boolean))];
     const extra1ForDashboard = dashboardSummary != null
         ? `${activationTypeLabel} | ${dashboardSummary}${requestedChanges.length ? ` | Requested Changes: ${requestedChanges.join(", ")}` : ""}`
         : `${activationTypeLabel} | ${reason}${requestedChanges.length ? ` | Requested Changes: ${requestedChanges.join(", ")}` : ""}`;
 
-    const resubmitAfterHold = Boolean(company.activationHold);
-    const profileWasFullyActive = isCompanyFullyActivated(company.toObject());
+    const resubmitAfterHold = Boolean(merged.activationHold);
+    const profileWasFullyActive = isCompanyFullyActivated(merged);
 
     // First-time activation: Inactive until HR approves. Reactivation: status stays Active.
     if (!profileWasFullyActive) {
@@ -346,9 +353,8 @@ export const submitCompanyActivation = async ({
     company.activationStatus = "submitted";
     company.activationSubmittedTo = hr._id;
     company.activationSubmittedBy = actor?.employeeObjectId || null;
-    company.activationHold = undefined;
-    if (!Array.isArray(company.activationWorkflow)) company.activationWorkflow = [];
-    company.activationWorkflow.push({
+    const activationWorkflow = Array.isArray(merged.activationWorkflow) ? [...merged.activationWorkflow] : [];
+    activationWorkflow.push({
         role: "HR",
         assignedTo: hr._id,
         status: "submitted",
@@ -360,6 +366,13 @@ export const submitCompanyActivation = async ({
         attachmentName: attachmentName || "",
     });
     await company.save();
+    await upsertCompanyPartitions(company._id, {
+        pendingReactivationChanges: pendingAfterSelection,
+        activationWorkflow,
+    });
+    if (merged.activationHold) {
+        await clearCompanyWorkflowActivationHold(company._id);
+    }
 
     await clearCompanyActivationHoldDashboardRows(company._id);
     await clearStaleCompanyActivationOutcomeRows(company._id);
@@ -454,6 +467,22 @@ export const ACTIVE_COMPANY_HR_QUEUE_CARD_LABELS = [
 /**
  * Human-readable labels for HR-queued changes on an active company (pending queue + hold UI).
  */
+/** Prior values for a queued edit — only keys present in the PATCH, not the full company profile. */
+export const pickCompanyPendingPreviousSnapshot = (beforeCompany = {}, updateData = {}) => {
+    const before =
+        beforeCompany && typeof beforeCompany === "object"
+            ? beforeCompany
+            : {};
+    const patch = updateData && typeof updateData === "object" ? updateData : {};
+    const out = {};
+    for (const key of Object.keys(patch)) {
+        if (Object.prototype.hasOwnProperty.call(before, key)) {
+            out[key] = before[key];
+        }
+    }
+    return out;
+};
+
 export const collectCompanyReactivationChangeLabels = (updateData = {}) => {
     const changes = [];
     const hasAny = (keys) => keys.some((k) => Object.prototype.hasOwnProperty.call(updateData, k));
@@ -614,43 +643,54 @@ export function ownersChangeIsVisaDocsOnly(beforeOwners = [], nextOwners = []) {
     }
 }
 
-export const shouldTriggerCompanyReactivation = (beforeCompany = {}, updateData = {}) => {
-    if (!shouldOverlayPendingReactivationChanges(beforeCompany)) {
-        return false;
-    }
+const BASIC_DETAILS_HR_KEYS = ["name", "nickName", "email", "phone", "establishedDate", "companyId"];
+const TRADE_LICENSE_HR_KEYS = [
+    "tradeLicenseNumber",
+    "tradeLicenseIssueDate",
+    "tradeLicenseExpiry",
+    "tradeLicenseAttachment",
+    "tradeLicenseOwnerName",
+];
+const ESTABLISHMENT_HR_KEYS = [
+    "establishmentCardNumber",
+    "establishmentCardIssueDate",
+    "establishmentCardExpiry",
+    "establishmentCardAttachment",
+];
 
-    const progress = calculateCompanyActivationProgress(beforeCompany, { usePendingOverlay: false });
-    if (progress.percentage < 100) {
-        return false;
-    }
+const hasPayloadKey = (updateData, keys) =>
+    keys.some((k) => Object.prototype.hasOwnProperty.call(updateData, k));
 
-    const hasTradeLicenseChange = [
-        "tradeLicenseNumber",
-        "tradeLicenseIssueDate",
-        "tradeLicenseExpiry",
-        "tradeLicenseAttachment",
-        "tradeLicenseOwnerName",
-    ].some((k) => Object.prototype.hasOwnProperty.call(updateData, k));
-
-    const hasEstablishmentCardChange = [
-        "establishmentCardNumber",
-        "establishmentCardIssueDate",
-        "establishmentCardExpiry",
-        "establishmentCardAttachment",
-    ].some((k) => Object.prototype.hasOwnProperty.call(updateData, k));
-
-    const hasBasicDetailsChange = ["name", "nickName", "email", "phone", "establishedDate", "companyId"].some((k) =>
-        Object.prototype.hasOwnProperty.call(updateData, k),
-    );
-
-    const hasMoaChange =
-        Object.prototype.hasOwnProperty.call(updateData, "documents") &&
-        serializeMoaDocumentsSlice(beforeCompany.documents) !== serializeMoaDocumentsSlice(updateData.documents);
-
-    // Trade License save includes owners in the same payload — queue as one card.
-    if (hasTradeLicenseChange) {
+/**
+ * True when a PATCH body changes Basic Details, Trade License, Establishment Card, or MOA
+ * (add / edit / renew / not-renew via documents payload). Used for HR queue on active profiles.
+ */
+export const updateDataTouchesHrApprovalCards = (beforeCompany = {}, updateData = {}) => {
+    if (hasPayloadKey(updateData, BASIC_DETAILS_HR_KEYS)) {
         return true;
     }
+    if (hasPayloadKey(updateData, TRADE_LICENSE_HR_KEYS)) {
+        return true;
+    }
+    if (hasPayloadKey(updateData, ESTABLISHMENT_HR_KEYS)) {
+        return true;
+    }
+    if (
+        Object.prototype.hasOwnProperty.call(updateData, "documents") &&
+        serializeMoaDocumentsSlice(beforeCompany.documents) !== serializeMoaDocumentsSlice(updateData.documents)
+    ) {
+        return true;
+    }
+    return false;
+};
 
-    return hasBasicDetailsChange || hasEstablishmentCardChange || hasMoaChange;
+/**
+ * Active profile (status + activation both active): HR-queue card edits wait in pendingReactivationChanges.
+ * Inactive / draft profile: returns false so updates apply immediately without HR approval.
+ */
+export const shouldTriggerCompanyReactivation = (beforeCompany = {}, updateData = {}) => {
+    if (!isCompanyFullyActivated(beforeCompany)) {
+        return false;
+    }
+    return updateDataTouchesHrApprovalCards(beforeCompany, updateData);
 };
