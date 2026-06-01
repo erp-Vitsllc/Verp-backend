@@ -63,10 +63,33 @@ function stripMeta(row = {}) {
     return rest;
 }
 
+/** Partitioned compliance is authoritative — do not keep legacy fields from `companies` core. */
+function applyCompliancePartition(merged, compliance) {
+    const usePartition =
+        Number(merged.dataPartitionVersion) >= 1 || compliance != null;
+    if (!usePartition) return;
+    const slice = compliance ? stripMeta(compliance) : {};
+    for (const k of COMPLIANCE_KEYS) {
+        delete merged[k];
+    }
+    Object.assign(merged, slice);
+}
+
+/** Partitioned owners are authoritative — do not keep legacy owner arrays on `companies` core. */
+function applyOwnersPartition(merged, owners) {
+    const usePartition = Number(merged.dataPartitionVersion) >= 1 || owners != null;
+    if (!usePartition) return;
+    const slice = owners ? stripMeta(owners) : {};
+    for (const k of OWNER_KEYS) {
+        delete merged[k];
+    }
+    Object.assign(merged, slice);
+}
+
 export function mergePartitionedCompany(core, compliance, owners, bundle, workflow) {
     const merged = { ...core };
-    if (compliance) Object.assign(merged, stripMeta(compliance));
-    if (owners) Object.assign(merged, stripMeta(owners));
+    applyCompliancePartition(merged, compliance);
+    applyOwnersPartition(merged, owners);
     if (bundle) {
         const b = stripMeta(bundle);
         const coreDocuments = Array.isArray(merged.documents) ? merged.documents : [];
@@ -175,7 +198,7 @@ export async function enrichCompaniesForList(companies = []) {
         const bundle = bundleByCompany.get(id);
         const workflow = workflowByCompany.get(id);
         const merged = { ...c };
-        if (compliance) Object.assign(merged, stripMeta(compliance));
+        applyCompliancePartition(merged, compliance);
         if (workflow?.pendingReactivationChanges) {
             merged.pendingReactivationChanges = workflow.pendingReactivationChanges.map((entry) => {
                 if (!entry || typeof entry !== "object") return entry;

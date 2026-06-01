@@ -6,7 +6,10 @@ import { isRequestUserDesignatedFlowchartHr } from "../../utils/isDesignatedFlow
 import { hasPermission } from "../../services/permissionService.js";
 import { buildAttachmentKeysMap } from "../../utils/listDeletionAttachmentRefs.js";
 import { awaitAdminDeletionArchive } from "../../utils/adminDeletionArchiveRun.js";
-import { stripProposedDataKeysFromPendingReactivationEntries } from "../../utils/companyActivation.js";
+import {
+    stripProposedDataKeysFromPendingReactivationEntries,
+    calculateCompanyActivationProgress,
+} from "../../utils/companyActivation.js";
 import {
     loadCompanyFullProfile,
     upsertCompanyPartitions,
@@ -111,12 +114,19 @@ export const clearCompanyCard = async (req, res) => {
         }, {});
 
         const filter = buildCompanyFilter(id);
-        const result = await Company.updateOne(filter, { $unset: unsetOps });
-        if (!result.matchedCount) {
+        const coreDoc = await Company.findOne(filter).select("_id").lean();
+        if (!coreDoc?._id) {
             return res.status(404).json({ message: "Company not found." });
         }
 
-        await CompanyCompliance.updateOne({ company: companyBefore._id }, { $unset: unsetOps });
+        // Raw collection update clears legacy monolith fields not in strict Company schema.
+        await Company.collection.updateOne({ _id: coreDoc._id }, { $unset: unsetOps });
+
+        await CompanyCompliance.updateOne(
+            { company: companyBefore._id },
+            { $unset: unsetOps },
+            { upsert: true },
+        );
 
         const existingPending = Array.isArray(companyBefore.pendingReactivationChanges)
             ? companyBefore.pendingReactivationChanges
@@ -135,6 +145,7 @@ export const clearCompanyCard = async (req, res) => {
         return res.status(200).json({
             message: "Company card cleared successfully.",
             company: signedCompany,
+            activationProgress: calculateCompanyActivationProgress(fullProfile || {}),
         });
     } catch (error) {
         console.error("Error clearing company card:", error);
