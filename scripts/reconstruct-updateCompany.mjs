@@ -199,11 +199,13 @@ const scalarAttachmentCleared = (beforeVal, afterVal) => {
 
 const isDocumentRemovalAttempt = (beforeCompany = {}, updateData = {}) => {
     if (
+        Object.prototype.hasOwnProperty.call(updateData, "tradeLicenseAttachment") &&
         scalarAttachmentCleared(beforeCompany.tradeLicenseAttachment, updateData.tradeLicenseAttachment)
     ) {
         return true;
     }
     if (
+        Object.prototype.hasOwnProperty.call(updateData, "establishmentCardAttachment") &&
         scalarAttachmentCleared(
             beforeCompany.establishmentCardAttachment,
             updateData.establishmentCardAttachment,
@@ -713,7 +715,7 @@ export const updateCompany = async (req, res) => {
         let responseMessage = "Company updated successfully";
 
         if (queueForApproval) {
-            const changedCards = collectCompanyReactivationChangeLabels(updateData);
+            const changedCards = collectCompanyReactivationChangeLabels(updateData, beforeCompany);
             const cardLabel = changedCards.length ? changedCards.join(", ") : "Company Profile";
             const currentStatus = String(company?.status || "").toLowerCase();
             const currentActivation = String(company?.activationStatus || "").toLowerCase();

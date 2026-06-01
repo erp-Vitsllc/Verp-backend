@@ -1,5 +1,6 @@
 import mongoose from "mongoose";
 import { hasPermission } from "../services/permissionService.js";
+import { subdocRowId } from "../services/companyPartitionService.js";
 import {
     ownersChangeIsVisaDocsOnly,
     shouldOverlayPendingReactivationChanges,
@@ -122,18 +123,176 @@ const moduleForDocumentContext = (context) => {
     return COMPANY_DELETE_PERM.docLive;
 };
 
-const collectRemovedDocumentModules = (beforeRows = [], afterRows = []) => {
-    const modules = new Set();
-    const afterByUrl = new Set(collectAttachmentUrls(afterRows));
-    for (const row of beforeRows || []) {
-        const urls = collectAttachmentUrls([row]);
-        const removed = urls.some((u) => !afterByUrl.has(u));
-        if (removed || !afterRows.includes(row)) {
-            modules.add(moduleForDocumentContext(row?.context || row?.type));
+const getOwnerDocAttachmentUrl = (owner, docKey) => {
+    if (!owner || typeof owner !== "object") return "";
+    if (docKey === "attachment") {
+        if (typeof owner.attachment === "string") return owner.attachment.trim();
+        return owner.attachment?.url?.trim() || "";
+    }
+    const doc = owner[docKey];
+    if (!doc || typeof doc !== "object") return "";
+    if (typeof doc.attachment === "string") return doc.attachment.trim();
+    return doc.attachment?.url?.trim() || doc.url?.trim() || "";
+};
+
+/** Match owner rows by Mongo _id, then ownerProfileId — not array index. */
+const ownerRowMatchKey = (row) => {
+    const id = subdocRowId(row);
+    if (id) return `id:${id}`;
+    const profileId =
+        row?.ownerProfileId != null ? String(row.ownerProfileId).trim() : "";
+    if (profileId) return `pid:${profileId}`;
+    return "";
+};
+
+const indexOwnersByMatchKey = (owners = []) => {
+    const map = new Map();
+    (Array.isArray(owners) ? owners : []).forEach((row, index) => {
+        const key = ownerRowMatchKey(row);
+        map.set(key || `@idx:${index}`, row);
+    });
+    return map;
+};
+
+const nestedDocAttachmentExplicitlyEmpty = (doc) => {
+    if (!doc || typeof doc !== "object") return false;
+    if (!Object.prototype.hasOwnProperty.call(doc, "attachment")) return false;
+    const att = doc.attachment;
+    if (att === null || att === undefined) return false;
+    if (typeof att === "string") return att.trim() === "";
+    if (typeof att === "object" && att !== null) {
+        const url = att.url != null ? String(att.url).trim() : "";
+        return url === "";
+    }
+    return false;
+};
+
+/** Row removed by id, owner count drop, or attachment cleared — not array length drift from partial saves. */
+const bundleRowsExplicitlyRemoved = (beforeRows = [], afterRows = []) => {
+    const before = Array.isArray(beforeRows) ? beforeRows : [];
+    const after = Array.isArray(afterRows) ? afterRows : [];
+    const afterById = new Map();
+    for (const row of after) {
+        const id = subdocRowId(row);
+        if (id) afterById.set(id, row);
+    }
+
+    for (const row of before) {
+        const id = subdocRowId(row);
+        if (!id) continue;
+        if (!afterById.has(id) && collectAttachmentUrls([row]).length) return true;
+        const afterRow = afterById.get(id);
+        const prevAtt = collectAttachmentUrls([row]);
+        const nextAtt = collectAttachmentUrls([afterRow]);
+        if (prevAtt.length && !nextAtt.length) return true;
+    }
+
+    if (after.length < before.length) {
+        const idsRemoved = before.filter((row) => {
+            const id = subdocRowId(row);
+            return id && !afterById.has(id);
+        });
+        if (idsRemoved.some((row) => collectAttachmentUrls([row]).length)) return true;
+    }
+
+    return false;
+};
+
+const ownerDocExplicitlyCleared = (prevOwner, nextOwner, docKey) => {
+    const pUrl = getOwnerDocAttachmentUrl(prevOwner, docKey);
+    if (!pUrl) return false;
+
+    if (docKey === "attachment") {
+        if (!Object.prototype.hasOwnProperty.call(nextOwner, "attachment")) return false;
+        const nextVal = nextOwner.attachment;
+        // UI often sends `attachment: null` when saving another card; that is not a delete.
+        if (nextVal === null || nextVal === undefined) return false;
+        if (typeof nextVal === "string" && nextVal.trim() === "") return true;
+        if (typeof nextVal === "object" && nextVal !== null) {
+            const url = nextVal.url != null ? String(nextVal.url).trim() : "";
+            return url === "";
+        }
+        return false;
+    }
+
+    if (!Object.prototype.hasOwnProperty.call(nextOwner, docKey)) return false;
+    if (nextOwner[docKey] === null || nextOwner[docKey] === undefined) return false;
+
+    const nextDoc = nextOwner[docKey];
+    if (nestedDocAttachmentExplicitlyEmpty(nextDoc)) return true;
+    if (!nextDoc || typeof nextDoc !== "object") return false;
+    if (!Object.prototype.hasOwnProperty.call(nextDoc, "attachment")) return false;
+
+    return !getOwnerDocAttachmentUrl(nextOwner, docKey);
+};
+
+/**
+ * Unmistakable delete on an active company (fewer owners, row removed by id, attachment cleared).
+ * Normal edits (new file URL, field updates) return false.
+ */
+export const isExplicitDestructiveCompanyPatch = (beforeCompany = {}, updateData = {}) => {
+    if (
+        Object.prototype.hasOwnProperty.call(updateData, "tradeLicenseAttachment") &&
+        scalarAttachmentCleared(beforeCompany.tradeLicenseAttachment, updateData.tradeLicenseAttachment)
+    ) {
+        return true;
+    }
+    if (
+        Object.prototype.hasOwnProperty.call(updateData, "establishmentCardAttachment") &&
+        scalarAttachmentCleared(
+            beforeCompany.establishmentCardAttachment,
+            updateData.establishmentCardAttachment,
+        )
+    ) {
+        return true;
+    }
+
+    if (Object.prototype.hasOwnProperty.call(updateData, "documents")) {
+        if (bundleRowsExplicitlyRemoved(beforeCompany.documents, updateData.documents)) return true;
+    }
+    if (Object.prototype.hasOwnProperty.call(updateData, "ejari")) {
+        if (bundleRowsExplicitlyRemoved(beforeCompany.ejari, updateData.ejari)) return true;
+    }
+    if (Object.prototype.hasOwnProperty.call(updateData, "insurance")) {
+        if (bundleRowsExplicitlyRemoved(beforeCompany.insurance, updateData.insurance)) return true;
+    }
+
+    if (Object.prototype.hasOwnProperty.call(updateData, "owners")) {
+        const prevByKey = indexOwnersByMatchKey(beforeCompany.owners || []);
+        const nextByKey = indexOwnersByMatchKey(updateData.owners || []);
+
+        for (const [key, prevRow] of prevByKey) {
+            if (!nextByKey.has(key)) return true;
+            const nextRow = nextByKey.get(key);
+            for (const docKey of Object.keys(OWNER_DOC_KEY_PERM)) {
+                if (ownerDocExplicitlyCleared(prevRow, nextRow, docKey)) return true;
+            }
         }
     }
-    if ((beforeRows || []).length > (afterRows || []).length) {
-        for (const row of beforeRows || []) {
+
+    return false;
+};
+
+const collectRemovedDocumentModules = (beforeRows = [], afterRows = []) => {
+    const modules = new Set();
+    const afterUrlsNormalized = new Set(
+        collectAttachmentUrls(afterRows || []).map((u) => normalizeAttachmentKeyForCompare(u)).filter(Boolean)
+    );
+    const afterIds = new Set();
+    for (const r of afterRows || []) {
+        const id = subdocRowId(r);
+        if (id) afterIds.add(String(id));
+    }
+
+    for (const row of beforeRows || []) {
+        const rowId = subdocRowId(row);
+        const exists = rowId && afterIds.has(String(rowId));
+
+        const urls = collectAttachmentUrls([row]);
+        const normalizedUrls = urls.map((u) => normalizeAttachmentKeyForCompare(u)).filter(Boolean);
+        const removed = normalizedUrls.some((u) => !afterUrlsNormalized.has(u));
+
+        if (removed || !exists) {
             modules.add(moduleForDocumentContext(row?.context || row?.type));
         }
     }
@@ -146,11 +305,13 @@ export const isCompanyProfileActivated = (company = {}) =>
 
 export const isDocumentRemovalAttempt = (beforeCompany = {}, updateData = {}) => {
     if (
+        Object.prototype.hasOwnProperty.call(updateData, "tradeLicenseAttachment") &&
         scalarAttachmentCleared(beforeCompany.tradeLicenseAttachment, updateData.tradeLicenseAttachment)
     ) {
         return true;
     }
     if (
+        Object.prototype.hasOwnProperty.call(updateData, "establishmentCardAttachment") &&
         scalarAttachmentCleared(
             beforeCompany.establishmentCardAttachment,
             updateData.establishmentCardAttachment,
@@ -160,72 +321,19 @@ export const isDocumentRemovalAttempt = (beforeCompany = {}, updateData = {}) =>
     }
 
     if (Object.prototype.hasOwnProperty.call(updateData, "documents")) {
-        const prevUrls = new Set(collectAttachmentUrls(beforeCompany.documents));
-        const nextUrls = new Set(collectAttachmentUrls(updateData.documents));
-        for (const u of prevUrls) {
-            if (!nextUrls.has(u)) return true;
-        }
-        if ((beforeCompany.documents || []).length > (updateData.documents || []).length) {
-            return true;
-        }
+        if (bundleRowsExplicitlyRemoved(beforeCompany.documents, updateData.documents)) return true;
     }
 
     if (Object.prototype.hasOwnProperty.call(updateData, "ejari")) {
-        const prevUrls = new Set(collectAttachmentUrls(beforeCompany.ejari));
-        const nextUrls = new Set(collectAttachmentUrls(updateData.ejari));
-        for (const u of prevUrls) {
-            if (!nextUrls.has(u)) return true;
-        }
-        if ((beforeCompany.ejari || []).length > (updateData.ejari || []).length) {
-            return true;
-        }
+        if (bundleRowsExplicitlyRemoved(beforeCompany.ejari, updateData.ejari)) return true;
     }
 
     if (Object.prototype.hasOwnProperty.call(updateData, "insurance")) {
-        const prevUrls = new Set(collectAttachmentUrls(beforeCompany.insurance));
-        const nextUrls = new Set(collectAttachmentUrls(updateData.insurance));
-        for (const u of prevUrls) {
-            if (!nextUrls.has(u)) return true;
-        }
-        if ((beforeCompany.insurance || []).length > (updateData.insurance || []).length) {
-            return true;
-        }
+        if (bundleRowsExplicitlyRemoved(beforeCompany.insurance, updateData.insurance)) return true;
     }
 
     if (Object.prototype.hasOwnProperty.call(updateData, "owners")) {
-        const prev = beforeCompany.owners || [];
-        const next = updateData.owners || [];
-        if (next.length < prev.length) return true;
-        if (ownersChangeIsVisaDocsOnly(prev, next)) return false;
-        try {
-            const prevJson = JSON.stringify(toSerializable(prev));
-            const nextJson = JSON.stringify(toSerializable(next));
-            if (prevJson !== nextJson) {
-                const ownerDocKeys = Object.keys(OWNER_DOC_KEY_PERM);
-                for (let i = 0; i < Math.max(prev.length, next.length); i += 1) {
-                    const p = prev[i] || {};
-                    const n = next[i] || {};
-                    for (const key of ownerDocKeys) {
-                        const pUrl =
-                            key === "attachment"
-                                ? typeof p.attachment === "string"
-                                    ? p.attachment
-                                    : p.attachment?.url
-                                : p[key]?.attachment?.url || p[key]?.attachment;
-                        const nUrl =
-                            key === "attachment"
-                                ? typeof n.attachment === "string"
-                                    ? n.attachment
-                                    : n.attachment?.url
-                                : n[key]?.attachment?.url || n[key]?.attachment;
-                        if (pUrl && !nUrl) return true;
-                        if (pUrl && nUrl && attachmentUrlsDiffer(pUrl, nUrl)) return true;
-                    }
-                }
-            }
-        } catch {
-            return true;
-        }
+        if (isExplicitDestructiveCompanyPatch(beforeCompany, { owners: updateData.owners })) return true;
     }
 
     return false;
@@ -235,11 +343,13 @@ export const collectDeletePermissionModules = (beforeCompany = {}, updateData = 
     const modules = new Set();
 
     if (
+        Object.prototype.hasOwnProperty.call(updateData, "tradeLicenseAttachment") &&
         scalarAttachmentCleared(beforeCompany.tradeLicenseAttachment, updateData.tradeLicenseAttachment)
     ) {
         modules.add(COMPANY_DELETE_PERM.tradeLicense);
     }
     if (
+        Object.prototype.hasOwnProperty.call(updateData, "establishmentCardAttachment") &&
         scalarAttachmentCleared(
             beforeCompany.establishmentCardAttachment,
             updateData.establishmentCardAttachment,
@@ -260,7 +370,10 @@ export const collectDeletePermissionModules = (beforeCompany = {}, updateData = 
     if (Object.prototype.hasOwnProperty.call(updateData, "ejari")) {
         const prev = beforeCompany.ejari || [];
         const next = updateData.ejari || [];
-        if (prev.length > next.length || collectAttachmentUrls(prev).some((u) => !collectAttachmentUrls(next).includes(u))) {
+        const prevUrls = collectAttachmentUrls(prev).map(u => normalizeAttachmentKeyForCompare(u)).filter(Boolean);
+        const nextUrls = new Set(collectAttachmentUrls(next).map(u => normalizeAttachmentKeyForCompare(u)).filter(Boolean));
+        const urlsRemoved = prevUrls.some(u => !nextUrls.has(u));
+        if (prev.length > next.length || urlsRemoved) {
             modules.add(COMPANY_DELETE_PERM.ejari);
         }
     }
@@ -297,7 +410,7 @@ export const collectDeletePermissionModules = (beforeCompany = {}, updateData = 
                                 ? n.attachment
                                 : n.attachment?.url
                             : n[key]?.attachment?.url || n[key]?.attachment;
-                    if ((pUrl && !nUrl) || (pUrl && nUrl && attachmentUrlsDiffer(pUrl, nUrl))) {
+                    if (pUrl && !nUrl) {
                         modules.add(OWNER_DOC_KEY_PERM[key] || COMPANY_DELETE_PERM.ownerDetails);
                     }
                 }

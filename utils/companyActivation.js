@@ -462,6 +462,8 @@ export const ACTIVE_COMPANY_HR_QUEUE_CARD_LABELS = [
     "Trade License",
     "Establishment Card",
     "MOA",
+    "Owner Passport",
+    "Owner Emirates ID",
 ];
 
 /**
@@ -483,7 +485,7 @@ export const pickCompanyPendingPreviousSnapshot = (beforeCompany = {}, updateDat
     return out;
 };
 
-export const collectCompanyReactivationChangeLabels = (updateData = {}) => {
+export const collectCompanyReactivationChangeLabels = (updateData = {}, beforeCompany = {}) => {
     const changes = [];
     const hasAny = (keys) => keys.some((k) => Object.prototype.hasOwnProperty.call(updateData, k));
 
@@ -508,6 +510,15 @@ export const collectCompanyReactivationChangeLabels = (updateData = {}) => {
         const docs = Array.isArray(updateData.documents) ? updateData.documents : [];
         if (docs.some((d) => documentIsMoaForActivation(d))) {
             changes.push("MOA");
+        }
+    }
+    if (Object.prototype.hasOwnProperty.call(updateData, "owners")) {
+        const beforeOwners = beforeCompany?.owners || [];
+        if (isOwnersPassportModified(beforeOwners, updateData.owners)) {
+            changes.push("Owner Passport");
+        }
+        if (isOwnersEmiratesIdModified(beforeOwners, updateData.owners)) {
+            changes.push("Owner Emirates ID");
         }
     }
 
@@ -552,7 +563,7 @@ export const stripProposedDataKeysFromPendingReactivationEntries = (entries = []
         if (Object.keys(pd).length === 0) {
             continue;
         }
-        const newLabels = collectCompanyReactivationChangeLabels(pd);
+        const newLabels = collectCompanyReactivationChangeLabels(pd, entry?.previousData);
         const cardLabel = newLabels.length ? newLabels.join(", ") : "Company Profile";
         out.push({
             ...entry,
@@ -665,6 +676,86 @@ const hasPayloadKey = (updateData, keys) =>
  * True when a PATCH body changes Basic Details, Trade License, Establishment Card, or MOA
  * (add / edit / renew / not-renew via documents payload). Used for HR queue on active profiles.
  */
+const serializeOwnerPassport = (owner) => {
+    if (!owner || typeof owner !== "object") return "";
+    const p = owner.passport || {};
+    const passportData = {
+        number: p.number || "",
+        nationality: p.nationality || "",
+        countryOfIssue: p.countryOfIssue || "",
+        issueDate: p.issueDate ? new Date(p.issueDate).getTime() : "",
+        expiryDate: p.expiryDate ? new Date(p.expiryDate).getTime() : "",
+        attachment: typeof p.attachment === "object" ? p.attachment?.url || "" : p.attachment || "",
+    };
+    return JSON.stringify(passportData);
+};
+
+const serializeOwnerEmiratesId = (owner) => {
+    if (!owner || typeof owner !== "object") return "";
+    const e = owner.emiratesId || {};
+    const emiratesIdData = {
+        number: e.number || "",
+        issueDate: e.issueDate ? new Date(e.issueDate).getTime() : "",
+        expiryDate: e.expiryDate ? new Date(e.expiryDate).getTime() : "",
+        attachment: typeof e.attachment === "object" ? e.attachment?.url || "" : e.attachment || "",
+    };
+    return JSON.stringify(emiratesIdData);
+};
+
+export const isOwnersPassportModified = (beforeOwners = [], nextOwners = []) => {
+    const prev = Array.isArray(beforeOwners) ? beforeOwners : [];
+    const next = Array.isArray(nextOwners) ? nextOwners : [];
+    
+    for (let i = 0; i < next.length; i++) {
+        const nextOwner = next[i];
+        const nextId = nextOwner?._id || nextOwner?.id;
+        
+        let prevOwner = null;
+        if (nextId) {
+            prevOwner = prev.find(o => String(o?._id || o?.id || "") === String(nextId));
+        }
+        if (!prevOwner) {
+            const p = nextOwner?.passport;
+            if (p && (p.number || p.attachment)) {
+                return true;
+            }
+            continue;
+        }
+        
+        if (serializeOwnerPassport(prevOwner) !== serializeOwnerPassport(nextOwner)) {
+            return true;
+        }
+    }
+    return false;
+};
+
+export const isOwnersEmiratesIdModified = (beforeOwners = [], nextOwners = []) => {
+    const prev = Array.isArray(beforeOwners) ? beforeOwners : [];
+    const next = Array.isArray(nextOwners) ? nextOwners : [];
+    
+    for (let i = 0; i < next.length; i++) {
+        const nextOwner = next[i];
+        const nextId = nextOwner?._id || nextOwner?.id;
+        
+        let prevOwner = null;
+        if (nextId) {
+            prevOwner = prev.find(o => String(o?._id || o?.id || "") === String(nextId));
+        }
+        if (!prevOwner) {
+            const e = nextOwner?.emiratesId;
+            if (e && (e.number || e.attachment)) {
+                return true;
+            }
+            continue;
+        }
+        
+        if (serializeOwnerEmiratesId(prevOwner) !== serializeOwnerEmiratesId(nextOwner)) {
+            return true;
+        }
+    }
+    return false;
+};
+
 export const updateDataTouchesHrApprovalCards = (beforeCompany = {}, updateData = {}) => {
     if (hasPayloadKey(updateData, BASIC_DETAILS_HR_KEYS)) {
         return true;
@@ -680,6 +771,15 @@ export const updateDataTouchesHrApprovalCards = (beforeCompany = {}, updateData 
         serializeMoaDocumentsSlice(beforeCompany.documents) !== serializeMoaDocumentsSlice(updateData.documents)
     ) {
         return true;
+    }
+    if (Object.prototype.hasOwnProperty.call(updateData, "owners")) {
+        const beforeOwners = beforeCompany?.owners || [];
+        if (
+            isOwnersPassportModified(beforeOwners, updateData.owners) ||
+            isOwnersEmiratesIdModified(beforeOwners, updateData.owners)
+        ) {
+            return true;
+        }
     }
     return false;
 };

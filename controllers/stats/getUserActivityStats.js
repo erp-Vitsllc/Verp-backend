@@ -6,6 +6,7 @@ import AssetItem from "../../models/AssetItem.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import User from "../../models/User.js";
 import Company from "../../models/Company.js";
+import CompanyWorkflow from "../../models/CompanyWorkflow.js";
 import { getDaysUntil, isExpiryTaskWindow } from "../../utils/documentExpiryReminderStages.js";
 
 /** Matches owner-style company rows — allow ASCII/en/em dashes between name and document type (same intent as frontend). */
@@ -810,9 +811,23 @@ export const getUserActivityStats = async (req, res) => {
             .lean()
             .maxTimeMS(6000);
 
+        const companyIdsForWorkflows = submittedCompanies.map((c) => c._id);
+        const companyWorkflows = companyIdsForWorkflows.length
+            ? await CompanyWorkflow.find({ company: { $in: companyIdsForWorkflows } })
+                  .select("company activationHold")
+                  .lean()
+                  .maxTimeMS(5000)
+            : [];
+        const holdMap = new Map(
+            companyWorkflows.map((w) => [String(w.company), w.activationHold]),
+        );
+
         submittedCompanies.forEach((co) => {
             const reqIdStr = String(co._id);
             if (seenRequests.has(reqIdStr)) return;
+
+            const hold = holdMap.get(reqIdStr);
+            const isOnHold = hold && hold.heldAt;
 
             const submittedToHr = co.activationSubmittedTo?.toString();
             const submittedBy = co.activationSubmittedBy?.toString();
@@ -823,6 +838,29 @@ export const getUserActivityStats = async (req, res) => {
             const isSubmitterOutgoing =
                 submittedBy &&
                 dashboardAssigneeMongoIds.some((id) => id && id.toString() === submittedBy);
+
+            if (isOnHold) {
+                if (isSubmitterOutgoing) {
+                    activityList.push({
+                        id: reqIdStr,
+                        type: "Company Activation",
+                        requestedBy: co.name || "Company",
+                        requestedDate: co.updatedAt || new Date(),
+                        actionedDate: null,
+                        status: "On Hold",
+                        extra1: `[Company profile] Activation request placed on hold by HR`,
+                        extra2: co.companyId || "",
+                        extra3: JSON.stringify({
+                            companyActivationViewerRole: "submitter",
+                            activationSubject: "company",
+                        }),
+                        targetEmployeeId: co.companyId,
+                        scope: "inbox",
+                    });
+                    seenRequests.set(reqIdStr, "On Hold");
+                }
+                return;
+            }
 
             if (!isHrInbox && !isSubmitterOutgoing) return;
 
@@ -1157,7 +1195,7 @@ export const getUserActivityStats = async (req, res) => {
                 extra3: item.extra3,
                 targetEmployeeId: item.subjectEmployeeId?.toString(),
                 employeeId: targetEmployeeId,
-                scope: isProfileActAssignee ? 'outgoing' : 'inbox',
+                scope: (item.status === 'On Hold' && isProfileActAssignee) ? 'inbox' : (isProfileActAssignee ? 'outgoing' : 'inbox'),
             };
 
             const idx = activityList.findIndex((i) => {
@@ -1169,7 +1207,9 @@ export const getUserActivityStats = async (req, res) => {
                 ) {
                     return true;
                 }
-                if (isProfileActAssignee && i.scope === 'outgoing') return true;
+                if (isProfileActAssignee) {
+                    return i.scope === 'outgoing' || i.scope === 'inbox';
+                }
                 if (!isProfileActAssignee && i.scope !== 'outgoing') return true;
                 return false;
             });
@@ -1233,7 +1273,7 @@ export const getUserActivityStats = async (req, res) => {
                 extra3: item.extra3,
                 targetEmployeeId: item.extra2 || item.subjectEmployeeId?.toString(),
                 employeeId: targetEmployeeId,
-                scope: isCompanyActSelf ? 'outgoing' : 'inbox',
+                scope: (item.status === 'On Hold' && isCompanyActSelf) ? 'inbox' : (isCompanyActSelf ? 'outgoing' : 'inbox'),
             };
 
             const idx = activityList.findIndex((i) => {
@@ -1245,7 +1285,9 @@ export const getUserActivityStats = async (req, res) => {
                 ) {
                     return true;
                 }
-                if (isCompanyActSelf && i.scope === 'outgoing') return true;
+                if (isCompanyActSelf) {
+                    return i.scope === 'outgoing' || i.scope === 'inbox';
+                }
                 if (!isCompanyActSelf && i.scope !== 'outgoing') return true;
                 return false;
             });
@@ -1308,7 +1350,7 @@ export const getUserActivityStats = async (req, res) => {
                 extra3: item.extra3,
                 targetEmployeeId: item.subjectEmployeeId?.toString(),
                 employeeId: targetEmployeeId,
-                scope: isVehicleActSelf ? 'outgoing' : 'inbox',
+                scope: (item.status === 'On Hold' && isVehicleActSelf) ? 'inbox' : (isVehicleActSelf ? 'outgoing' : 'inbox'),
             };
 
             const idx = activityList.findIndex((i) => {
@@ -1320,7 +1362,9 @@ export const getUserActivityStats = async (req, res) => {
                 ) {
                     return true;
                 }
-                if (isVehicleActSelf && i.scope === 'outgoing') return true;
+                if (isVehicleActSelf) {
+                    return i.scope === 'outgoing' || i.scope === 'inbox';
+                }
                 if (!isVehicleActSelf && i.scope !== 'outgoing') return true;
                 return false;
             });

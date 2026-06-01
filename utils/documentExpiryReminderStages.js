@@ -25,4 +25,5 @@ export const getEmailReminderStageMarker = (daysUntilExpiry) => {
 };
 
 /** Pending HR/Admin (and related) dashboard tasks while expiry is within 10 days or overdue. */
-export const isExpiryTaskWindow = (daysUntilExpiry) => daysUntilExpiry != null && daysUntilExpiry <= 10;
+export const isExpiryTaskWindow = (daysUntilExpiry) =>
+    daysUntilExpiry != null && (daysUntilExpiry === 30 || daysUntilExpiry === 20 || daysUntilExpiry <= 10);

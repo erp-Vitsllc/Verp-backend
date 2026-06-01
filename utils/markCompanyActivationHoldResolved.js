@@ -27,7 +27,7 @@ function plainProposedData(entry) {
 
 function labelsRequiredForEntry(entry) {
     const pd = plainProposedData(entry);
-    const fromPd = collectCompanyReactivationChangeLabels(pd);
+    const fromPd = collectCompanyReactivationChangeLabels(pd, entry?.previousData);
     if (fromPd.length) return fromPd;
     return labelsFromEntryCard(entry?.card);
 }
@@ -46,13 +46,13 @@ function resolveHoldRowId(entry, idx, unapproved) {
 export async function markCompanyActivationHoldResolvedForUpdate(companyMongoId, updateData = {}) {
     if (!companyMongoId || !updateData || typeof updateData !== "object") return;
 
-    const changed = collectCompanyReactivationChangeLabels(updateData);
-    if (!changed.length) return;
-
     const company = await Company.findById(companyMongoId).select(
-        "activationHold pendingReactivationChanges activationStatus",
+        "activationHold pendingReactivationChanges activationStatus owners",
     );
     if (!company) return;
+
+    const changed = collectCompanyReactivationChangeLabels(updateData, company);
+    if (!changed.length) return;
 
     const hold = company.activationHold;
     if (!hold?.unapprovedEntryIds?.length) return;

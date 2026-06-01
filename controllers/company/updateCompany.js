@@ -100,6 +100,7 @@ import {
 } from "../../utils/companyOwnerDocDeletion.js";
 import {
     isDocumentRemovalAttempt,
+    isExplicitDestructiveCompanyPatch,
     userMayDeleteCompanyProfileContent,
     userMayCompactDeleteCompanyContent,
     isCompanyProfileActivated,
@@ -253,6 +254,7 @@ export const updateCompany = async (req, res) => {
         }
 
         const updateData = { ...req.body };
+        normalizeCompanyUpdateAttachments(updateData);
         const skipArchiveOnRequest =
             updateData.skipArchive === true ||
             String(req.query?.skipArchive || "").toLowerCase() === "true";
@@ -427,16 +429,18 @@ export const updateCompany = async (req, res) => {
             beforeCompany,
             updateData,
         );
-        if (
-            !requesterBypassesHrQueue &&
-            !hasGroupDeletePerm &&
-            isDocumentRemovalAttempt(beforeCompany, updateData) &&
+        const profileActivated = isCompanyProfileActivated(beforeCompany);
+        const looksLikeRemoval = isDocumentRemovalAttempt(beforeCompany, updateData);
+        const unmistakableDelete = isExplicitDestructiveCompanyPatch(beforeCompany, updateData);
+        const blockAsDelete =
+            looksLikeRemoval &&
             !isCompanyDocumentNotRenewArchive &&
-            !shouldTriggerCompanyReactivation(beforeCompany, updateData)
-        ) {
-            const activated = isCompanyProfileActivated(beforeCompany);
+            !shouldTriggerCompanyReactivation(beforeCompany, updateData) &&
+            (!profileActivated || unmistakableDelete);
+
+        if (!requesterBypassesHrQueue && !hasGroupDeletePerm && blockAsDelete) {
             return res.status(403).json({
-                message: activated
+                message: profileActivated
                     ? "Only administrator can delete company profile documents or card attachments on an activated profile."
                     : "You do not have permission to delete this company profile content.",
             });
@@ -695,7 +699,7 @@ export const updateCompany = async (req, res) => {
         let responseMessage = "Company updated successfully";
 
         if (queueForApproval) {
-            const changedCards = collectCompanyReactivationChangeLabels(updateData);
+            const changedCards = collectCompanyReactivationChangeLabels(updateData, beforeCompany);
             const cardLabel = changedCards.length ? changedCards.join(", ") : "Company Profile";
             // Active companies stay Active; changes wait in pendingReactivationChanges until HR approves via Submit.
             const pendingEntry = {
