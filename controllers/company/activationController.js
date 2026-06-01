@@ -3,7 +3,11 @@ import DashboardAction from "../../models/DashboardAction.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { isRequestUserDesignatedFlowchartHr } from "../../utils/isDesignatedFlowchartHr.js";
 import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
-import { calculateCompanyActivationProgress, submitCompanyActivation } from "../../utils/companyActivation.js";
+import {
+    calculateCompanyActivationProgress,
+    submitCompanyActivation,
+    companyWasEverFullyActivated,
+} from "../../utils/companyActivation.js";
 import { syncDashboardAction } from "../../utils/syncDashboard.js";
 import { clearAllCompanyActivationDashboardRows } from "../../utils/clearCompanyActivationHoldDashboardRows.js";
 import { archiveSupersededCompanyDocuments } from "../../utils/archiveCompanyDocument.js";
@@ -466,8 +470,13 @@ export const rejectCompanyActivationRequest = async (req, res) => {
             });
         }
 
-        company.status = "Inactive";
-        company.activationStatus = "rejected";
+        const keepActiveProfile = companyWasEverFullyActivated(company);
+        company.status = keepActiveProfile ? "Active" : "Inactive";
+        company.activationStatus = keepActiveProfile ? "active" : "rejected";
+        if (keepActiveProfile) {
+            company.pendingReactivationChanges = [];
+            company.markModified("pendingReactivationChanges");
+        }
         company.activationHold = undefined;
         if (!Array.isArray(company.activationWorkflow)) company.activationWorkflow = [];
         company.activationWorkflow.push({

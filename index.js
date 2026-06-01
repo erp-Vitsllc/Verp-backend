@@ -1,6 +1,7 @@
 import express from "express";
 import cors from "cors";
 import compression from "compression";
+import mongoose from "mongoose";
 // import { connectDB } from "./config/db.js"; // <-- Import DB connection
 import loginRoute from "./routes/loginRoutes.js"; // <-- Add routes
 import employeeRoute from "./routes/employeeRoutes.js"; // <-- Add employee routes
@@ -36,14 +37,8 @@ import { rerouteAllPendingAssetCreationApprovals } from "./utils/assetApprovalHe
 dotenv.config();
 setupEmailSubjectTag();
 
-// Set DNS before DB connection
-dns.setServers(["8.8.8.8"]);
-
-// connectDB(); // Now Atlas hostname will resolve correctly
-
-dotenv.config();
-connectDB(); // <-- Call DB connection
-console.log("MONGO_URI:", process.env.MONGO_URI);
+// Atlas SRV resolution on Windows can fail with system DNS; Google DNS is more reliable.
+dns.setServers(["8.8.8.8", "8.8.4.4"]);
 
 const app = express();
 app.disable("x-powered-by");
@@ -163,6 +158,16 @@ app.use(commonLimiter);
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 
+// Reject API traffic until MongoDB is connected (avoids hung requests during startup/reconnect).
+app.use((req, res, next) => {
+    if (mongoose.connection.readyState === 1) {
+        return next();
+    }
+    return res.status(503).json({
+        message: "Database not ready. Wait a moment and retry.",
+    });
+});
+
 // Request timeout middleware - catch hanging requests
 app.use((req, res, next) => {
     req.setTimeout(60000, () => {
@@ -176,6 +181,14 @@ app.use((req, res, next) => {
 // Test API Endpoint
 app.get("/", (req, res) => {
     res.send("Backend running successfully!");
+});
+
+app.get("/api/health", (req, res) => {
+    const dbReady = mongoose.connection.readyState === 1;
+    res.status(dbReady ? 200 : 503).json({
+        ok: dbReady,
+        database: dbReady ? "connected" : "disconnected",
+    });
 });
 
 // Routes
@@ -197,4 +210,23 @@ app.use("/api/AdminDeletionArchive", adminDeletionArchiveRoute);
 app.use("/api/storage", storageRoute);
 
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, "0.0.0.0", () => console.log(`Server running at http://localhost:${PORT}`));
+
+async function startServer() {
+    if (!process.env.MONGO_URI) {
+        console.error("❌ MONGO_URI is missing. Add it to VERP_backend/.env");
+        process.exit(1);
+    }
+
+    console.log("Connecting to MongoDB…");
+    await connectDB();
+
+    app.listen(PORT, "0.0.0.0", () => {
+        console.log(`Server running at http://localhost:${PORT}`);
+        console.log(`Health check: http://localhost:${PORT}/api/health`);
+    });
+}
+
+startServer().catch((err) => {
+    console.error("❌ Failed to start server:", err?.message || err);
+    process.exit(1);
+});

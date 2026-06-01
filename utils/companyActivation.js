@@ -82,6 +82,16 @@ export const shouldOverlayPendingReactivationChanges = (company = {}) => {
     return status === "active" && activationStatus === "active";
 };
 
+/** Alias — company profile is live (status + activation both active). */
+export const isCompanyFullyActivated = (company = {}) => shouldOverlayPendingReactivationChanges(company);
+
+export const companyWasEverFullyActivated = (company = {}) => {
+    const co = typeof company.toObject === "function" ? company.toObject() : company;
+    if (isCompanyFullyActivated(co)) return true;
+    const workflow = Array.isArray(co?.activationWorkflow) ? co.activationWorkflow : [];
+    return workflow.some((w) => String(w?.status || "").toLowerCase() === "active");
+};
+
 export const mergePendingReactivationForActivationSnapshot = (company = {}) => {
     const co = typeof company.toObject === "function" ? company.toObject() : { ...company };
     if (!shouldOverlayPendingReactivationChanges(co)) {
@@ -327,8 +337,12 @@ export const submitCompanyActivation = async ({
         : `${activationTypeLabel} | ${reason}${requestedChanges.length ? ` | Requested Changes: ${requestedChanges.join(", ")}` : ""}`;
 
     const resubmitAfterHold = Boolean(company.activationHold);
+    const profileWasFullyActive = isCompanyFullyActivated(company.toObject());
 
-    company.status = "Inactive";
+    // First-time activation: Inactive until HR approves. Reactivation: status stays Active.
+    if (!profileWasFullyActive) {
+        company.status = "Inactive";
+    }
     company.activationStatus = "submitted";
     company.activationSubmittedTo = hr._id;
     company.activationSubmittedBy = actor?.employeeObjectId || null;
@@ -427,7 +441,18 @@ export const submitCompanyActivation = async ({
 };
 
 /**
- * Human-readable labels for which company "cards" an update touches (activation hold progress + queue card text).
+ * When company is Active, only these cards use the HR approval queue.
+ * All other cards (address, ejari, memo, certificate, owner docs, etc.) apply immediately.
+ */
+export const ACTIVE_COMPANY_HR_QUEUE_CARD_LABELS = [
+    "Basic Details",
+    "Trade License",
+    "Establishment Card",
+    "MOA",
+];
+
+/**
+ * Human-readable labels for HR-queued changes on an active company (pending queue + hold UI).
  */
 export const collectCompanyReactivationChangeLabels = (updateData = {}) => {
     const changes = [];
@@ -435,9 +460,6 @@ export const collectCompanyReactivationChangeLabels = (updateData = {}) => {
 
     if (hasAny(["name", "nickName", "email", "phone", "establishedDate", "companyId"])) {
         changes.push("Basic Details");
-    }
-    if (hasAny(["address", "country", "state", "city", "postalCode"])) {
-        changes.push("Company Address");
     }
     if (
         hasAny([
@@ -450,9 +472,6 @@ export const collectCompanyReactivationChangeLabels = (updateData = {}) => {
     ) {
         changes.push("Trade License");
     }
-    if (Object.prototype.hasOwnProperty.call(updateData, "owners")) {
-        changes.push("Owner Details");
-    }
     if (hasAny(["establishmentCardNumber", "establishmentCardIssueDate", "establishmentCardExpiry", "establishmentCardAttachment"])) {
         changes.push("Establishment Card");
     }
@@ -462,14 +481,8 @@ export const collectCompanyReactivationChangeLabels = (updateData = {}) => {
             changes.push("MOA");
         }
     }
-    if (Object.prototype.hasOwnProperty.call(updateData, "ejari")) {
-        changes.push("Ejari");
-    }
-    if (Object.prototype.hasOwnProperty.call(updateData, "insurance")) {
-        changes.push("Insurance");
-    }
 
-    return [...new Set(changes)];
+    return [...new Set(changes)].filter((label) => ACTIVE_COMPANY_HR_QUEUE_CARD_LABELS.includes(label));
 };
 
 /**
@@ -522,7 +535,33 @@ export const stripProposedDataKeysFromPendingReactivationEntries = (entries = []
     return out;
 };
 
-/** Compare only MOA rows so deleting e.g. "Document with expiry" does not queue reactivation just because MOA still exists in the payload. */
+/** Live document rows (MOA, memo, certificate, with/without expiry) for reactivation diff — excludes archived rows. */
+const serializeActivationDocumentsSlice = (documents) => {
+    const list = Array.isArray(documents) ? documents : [];
+    const liveRows = list.filter((d) => !isArchivedCompanyDocumentRow(d));
+    const iso = (v) => {
+        if (v == null || v === "") return "";
+        const d = v instanceof Date ? v : new Date(v);
+        return Number.isNaN(d.getTime()) ? "" : d.toISOString();
+    };
+    const norm = (d) => ({
+        id: d?._id != null ? String(d._id) : "",
+        context: String(d?.context || ""),
+        type: String(d?.type || ""),
+        description: String(d?.description || ""),
+        issueDate: iso(d?.issueDate),
+        startDate: iso(d?.startDate),
+        expiryDate: iso(d?.expiryDate),
+        url: String(d?.document?.url || d?.attachment || "").split("?")[0],
+    });
+    try {
+        return JSON.stringify(liveRows.map(norm).sort((a, b) => a.id.localeCompare(b.id)));
+    } catch {
+        return String(liveRows.length);
+    }
+};
+
+/** @deprecated Use serializeActivationDocumentsSlice — kept for callers that only diff MOA. */
 const serializeMoaDocumentsSlice = (documents) => {
     const list = Array.isArray(documents) ? documents : [];
     const moaRows = list.filter((d) => documentIsMoaForActivation(d));
@@ -547,12 +586,12 @@ const serializeMoaDocumentsSlice = (documents) => {
     }
 };
 
-const VISA_ONLY_OWNER_DOC_KEYS = new Set(["visitVisa", "employmentVisa", "spouseVisa", "visa"]);
+const ACTIVATION_INDEPENDENT_OWNER_DOC_KEYS = new Set(["visitVisa", "employmentVisa", "spouseVisa", "visa", "labourCard", "medical", "drivingLicense"]);
 
-function ownerWithoutVisaDocs(owner) {
+function ownerWithoutActivationIndependentDocs(owner) {
     if (!owner || typeof owner !== "object") return owner;
     const copy = JSON.parse(JSON.stringify(owner));
-    for (const key of VISA_ONLY_OWNER_DOC_KEYS) {
+    for (const key of ACTIVATION_INDEPENDENT_OWNER_DOC_KEYS) {
         delete copy[key];
     }
     return copy;
@@ -565,7 +604,7 @@ export function ownersChangeIsVisaDocsOnly(beforeOwners = [], nextOwners = []) {
     try {
         if (JSON.stringify(prev) === JSON.stringify(next)) return false;
         for (let i = 0; i < prev.length; i++) {
-            if (JSON.stringify(ownerWithoutVisaDocs(prev[i])) !== JSON.stringify(ownerWithoutVisaDocs(next[i]))) {
+            if (JSON.stringify(ownerWithoutActivationIndependentDocs(prev[i])) !== JSON.stringify(ownerWithoutActivationIndependentDocs(next[i]))) {
                 return false;
             }
         }
@@ -585,26 +624,12 @@ export const shouldTriggerCompanyReactivation = (beforeCompany = {}, updateData 
         return false;
     }
 
-    let ownersStructuralChange = false;
-    if (Object.prototype.hasOwnProperty.call(updateData, "owners")) {
-        try {
-            const prev = JSON.parse(JSON.stringify(beforeCompany?.owners ?? []));
-            const next = JSON.parse(JSON.stringify(updateData?.owners ?? []));
-            ownersStructuralChange = JSON.stringify(prev) !== JSON.stringify(next);
-            if (ownersStructuralChange && ownersChangeIsVisaDocsOnly(prev, next)) {
-                ownersStructuralChange = false;
-            }
-        } catch {
-            ownersStructuralChange = true;
-        }
-    }
-
-    // Critical sections that require reactivation when changed after activation
     const hasTradeLicenseChange = [
         "tradeLicenseNumber",
         "tradeLicenseIssueDate",
         "tradeLicenseExpiry",
         "tradeLicenseAttachment",
+        "tradeLicenseOwnerName",
     ].some((k) => Object.prototype.hasOwnProperty.call(updateData, k));
 
     const hasEstablishmentCardChange = [
@@ -614,33 +639,18 @@ export const shouldTriggerCompanyReactivation = (beforeCompany = {}, updateData 
         "establishmentCardAttachment",
     ].some((k) => Object.prototype.hasOwnProperty.call(updateData, k));
 
-    const hasBasicDetailsChange = [
-        "name",
-        "nickName",
-        "email",
-        "phone",
-        "establishedDate",
-        "address",
-        "country",
-        "state",
-        "city",
-        "postalCode",
-    ].some((k) => Object.prototype.hasOwnProperty.call(updateData, k));
+    const hasBasicDetailsChange = ["name", "nickName", "email", "phone", "establishedDate", "companyId"].some((k) =>
+        Object.prototype.hasOwnProperty.call(updateData, k),
+    );
 
     const hasMoaChange =
         Object.prototype.hasOwnProperty.call(updateData, "documents") &&
         serializeMoaDocumentsSlice(beforeCompany.documents) !== serializeMoaDocumentsSlice(updateData.documents);
 
-    const hasEjariChange = Object.prototype.hasOwnProperty.call(updateData, "ejari");
-    const hasInsuranceChange = Object.prototype.hasOwnProperty.call(updateData, "insurance");
+    // Trade License save includes owners in the same payload — queue as one card.
+    if (hasTradeLicenseChange) {
+        return true;
+    }
 
-    return (
-        ownersStructuralChange ||
-        hasBasicDetailsChange ||
-        hasTradeLicenseChange ||
-        hasEstablishmentCardChange ||
-        hasMoaChange ||
-        hasEjariChange ||
-        hasInsuranceChange
-    );
+    return hasBasicDetailsChange || hasEstablishmentCardChange || hasMoaChange;
 };

@@ -1321,10 +1321,10 @@ export const getAllAssignedAssets = async (req, res) => {
             query.status = { $ne: 'Draft' };
         }
 
-        // Handle company filtering
+        // Handle company filtering — company profile shows assets transferred to this company only
         if (companyId) {
             query.assignedCompany = companyId;
-            // Show everything (already handled by status above)
+            query.assignedToType = 'Company';
         } else if (!status) {
             // ONLY apply restricted fallback if NO status is provided at all (initial load/default)
             // to keep it focused on items with some assignment or unassigned status
@@ -1345,11 +1345,12 @@ export const getAllAssignedAssets = async (req, res) => {
         const pendingAccessoryCtx = await buildPendingAccessoryVisibilityCtx(req);
 
         const items = await AssetItem.find(query)
-            .select('assetId name ownership assignedTo assignedCompany accessories assetValue status updatedAt typeId categoryId invoiceFile documents actionRequiredBy')
+            .select('assetId name ownership assignedTo assignedToType assignedCompany accessories assetValue status updatedAt typeId categoryId invoiceFile documents actionRequiredBy pendingAction')
             .populate({
                 path: 'assignedTo',
                 select: 'firstName lastName employeeId company'
             })
+            .populate('assignedCompany', 'name companyId nickName')
             .populate('actionRequiredBy', 'employeeId')
             .populate('typeId', 'name')
             .populate('categoryId', 'name')

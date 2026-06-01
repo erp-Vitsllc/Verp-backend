@@ -1,10 +1,19 @@
 import mongoose from "mongoose";
 import Company from "../../models/Company.js";
+import {
+    loadCompanyFullProfile,
+    pullOwnerFromPartition,
+    findOwnerRow,
+    findBundleArrayRow,
+} from "../../services/companyPartitionService.js";
 import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
 import { awaitAdminDeletionArchive } from "../../utils/adminDeletionArchiveRun.js";
 
 const companyMatch = (id) => ({
-    $or: [{ _id: id.match(/^[0-9a-fA-F]{24}$/) ? id : null }, { companyId: id }],
+    $or: [
+        ...(mongoose.Types.ObjectId.isValid(id) ? [{ _id: new mongoose.Types.ObjectId(id) }] : []),
+        { companyId: id },
+    ],
 });
 
 // @desc    Delete an owner record from company's oldOwners list (Archive)
@@ -20,61 +29,17 @@ export const deleteOldOwner = async (req, res) => {
         const { id, target } = req.params;
         const decodedTarget = typeof target === "string" ? decodeURIComponent(target) : target;
 
-        /** Prefer $pull by subdoc _id so we never load/save a multi‑MB Company document in memory. */
-        if (typeof decodedTarget === "string" && /^[0-9a-fA-F]{24}$/.test(decodedTarget)) {
-            const oid = new mongoose.Types.ObjectId(decodedTarget);
-            const companySnap = await Company.findOne(companyMatch(id))
-                .select("companyId name oldOwners")
-                .lean();
-            const ownerSnap = (companySnap?.oldOwners || []).find(
-                (o) => String(o._id) === String(decodedTarget)
-            );
-            if (ownerSnap) {
-                await awaitAdminDeletionArchive(req, {
-                    moduleName: "Company Archived Owner",
-                    recordId: companySnap.companyId || String(companySnap._id),
-                    details: ownerSnap?.name || "Archived owner",
-                    deletedPayload: {
-                        companyId: companySnap.companyId,
-                        companyName: companySnap.name,
-                        owner: ownerSnap,
-                        ownerTarget: 'oldOwners',
-                    },
-                });
-            }
-            const result = await Company.updateOne(companyMatch(id), { $pull: { oldOwners: { _id: oid } } });
-            if (!result.matchedCount) {
-                return res.status(404).json({ message: "Company not found" });
-            }
-            if (!result.modifiedCount) {
-                return res.status(404).json({ message: "Owner record not found in archive" });
-            }
-            return res.status(200).json({
-                message: "Archived company owner record deleted successfully",
-            });
-        }
-
-        let company = await Company.findOne(companyMatch(id));
-
+        const company = await Company.findOne(companyMatch(id)).lean();
         if (!company) {
             return res.status(404).json({ message: "Company not found" });
         }
 
-        if (!company.oldOwners || company.oldOwners.length === 0) {
-            return res.status(404).json({ message: "No archived owners found" });
+        const fullProfile = (await loadCompanyFullProfile(company)) || company;
+        const ownerSnap = findBundleArrayRow(fullProfile.oldOwners, decodedTarget);
+        if (!ownerSnap) {
+            return res.status(404).json({ message: "Owner record not found in archive" });
         }
 
-        let ownerIndex = -1;
-        const indexValue = parseInt(decodedTarget, 10);
-        if (!Number.isNaN(indexValue) && indexValue >= 0 && indexValue < company.oldOwners.length) {
-            ownerIndex = indexValue;
-        }
-
-        if (ownerIndex === -1) {
-            return res.status(400).json({ message: "Owner record not found in archive" });
-        }
-
-        const ownerSnap = company.oldOwners[ownerIndex];
         await awaitAdminDeletionArchive(req, {
             moduleName: "Company Archived Owner",
             recordId: company.companyId || String(company._id),
@@ -82,19 +47,21 @@ export const deleteOldOwner = async (req, res) => {
             deletedPayload: {
                 companyId: company.companyId,
                 companyName: company.name,
-                owner: ownerSnap?.toObject ? ownerSnap.toObject() : ownerSnap,
-                ownerTarget: 'oldOwners',
+                owner: ownerSnap,
+                ownerTarget: "oldOwners",
             },
         });
 
-        company.oldOwners.splice(ownerIndex, 1);
-        await company.save();
+        const { modified, found } = await pullOwnerFromPartition(company._id, "oldOwners", decodedTarget);
+        if (!found || !modified) {
+            return res.status(404).json({ message: "Owner record not found in archive" });
+        }
 
-        res.status(200).json({
+        return res.status(200).json({
             message: "Archived company owner record deleted successfully",
         });
     } catch (error) {
         console.error("Error deleting archived company owner:", error);
-        res.status(500).json({ message: "Server error", error: error.message });
+        return res.status(500).json({ message: "Server error", error: error.message });
     }
 };

@@ -280,9 +280,15 @@ const buildCompanyDocuments = (company) => {
     (company?.documents || []).forEach((d, idx) => {
         if (!d?.expiryDate) return;
         if (isOldLikeRow(d)) return;
+        const ctx = String(d?.context || "").toLowerCase();
+        const typeLabel = d?.type || "Company Document";
+        const label =
+            ctx === "certificate"
+                ? `Certificate — ${typeLabel}`
+                : typeLabel;
         docs.push({
             key: `company:${company._id}:document:${d?._id || idx}`,
-            label: d?.type || "Company Document",
+            label,
             expiryDate: d.expiryDate,
         });
     });

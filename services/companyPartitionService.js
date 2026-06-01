@@ -1,8 +1,10 @@
+import mongoose from "mongoose";
 import Company from "../models/Company.js";
 import CompanyCompliance from "../models/CompanyCompliance.js";
 import CompanyOwners from "../models/CompanyOwners.js";
 import CompanyDocumentBundle from "../models/CompanyDocumentBundle.js";
 import CompanyWorkflow from "../models/CompanyWorkflow.js";
+import { ownerDocUnsetPath } from "../utils/companyOwnerDocDeletion.js";
 
 /** Heavy fields excluded from company list reads (MongoDB projection — exclusion only). */
 export const COMPANY_LIST_SELECT = {
@@ -31,7 +33,7 @@ const COMPLIANCE_KEYS = [
 ];
 
 const OWNER_KEYS = ["owners", "oldOwners"];
-const DOCUMENT_BUNDLE_KEYS = ["documents", "insurance", "ejari", "trainingDetails", "oldDocuments", "customTabs"];
+export const DOCUMENT_BUNDLE_KEYS = ["documents", "insurance", "ejari", "trainingDetails", "oldDocuments", "customTabs"];
 const WORKFLOW_KEYS = [
     "activationWorkflow",
     "pendingReactivationChanges",
@@ -65,7 +67,28 @@ export function mergePartitionedCompany(core, compliance, owners, bundle, workfl
     if (owners) Object.assign(merged, stripMeta(owners));
     if (bundle) {
         const b = stripMeta(bundle);
+        const coreDocuments = Array.isArray(merged.documents) ? merged.documents : [];
+        const coreOldDocuments = Array.isArray(merged.oldDocuments) ? merged.oldDocuments : [];
+        const coreInsurance = Array.isArray(merged.insurance) ? merged.insurance : [];
+        const coreEjari = Array.isArray(merged.ejari) ? merged.ejari : [];
+        const coreCustomTabs = Array.isArray(merged.customTabs) ? merged.customTabs : [];
         Object.assign(merged, b);
+        // Partition bundle can exist with empty arrays while legacy data still lives on Company core.
+        if (Array.isArray(b.documents) && b.documents.length === 0 && coreDocuments.length > 0) {
+            merged.documents = coreDocuments;
+        }
+        if (Array.isArray(b.oldDocuments) && b.oldDocuments.length === 0 && coreOldDocuments.length > 0) {
+            merged.oldDocuments = coreOldDocuments;
+        }
+        if (Array.isArray(b.insurance) && b.insurance.length === 0 && coreInsurance.length > 0) {
+            merged.insurance = coreInsurance;
+        }
+        if (Array.isArray(b.ejari) && b.ejari.length === 0 && coreEjari.length > 0) {
+            merged.ejari = coreEjari;
+        }
+        if (Array.isArray(b.customTabs) && b.customTabs.length === 0 && coreCustomTabs.length > 0) {
+            merged.customTabs = coreCustomTabs;
+        }
         if (bundle.hasLiveMoa === true && !Array.isArray(merged.documents)) {
             merged.documents = [{ context: "moa", document: { url: "partitioned-moa-flag" } }];
         }
@@ -259,4 +282,215 @@ export async function upsertCompanyPartitions(companyMongoId, companyPayload = {
               )
             : Promise.resolve(),
     ]);
+}
+
+/** Parse Mongo subdoc _id or array index from route `:target`. */
+export function resolveSubdocPullTarget(target) {
+    const targetStr = String(target ?? "").trim();
+    if (/^[a-fA-F0-9]{24}$/.test(targetStr)) {
+        return { pullById: true, oid: new mongoose.Types.ObjectId(targetStr), idStr: targetStr };
+    }
+    const index = Number.parseInt(targetStr, 10);
+    if (Number.isInteger(index) && index >= 0) {
+        return { pullById: false, index };
+    }
+    return null;
+}
+
+export function subdocRowId(row) {
+    if (!row || typeof row !== "object") return "";
+    const raw = row._id ?? row.id;
+    return raw != null ? String(raw).trim() : "";
+}
+
+/** Find a row in one bundle array by Mongo subdoc _id/id or numeric index. */
+export function findBundleArrayRow(list, target) {
+    const items = Array.isArray(list) ? list : [];
+    const resolved = resolveSubdocPullTarget(target);
+    if (!resolved) return null;
+    if (resolved.pullById) {
+        return (
+            items.find((row) => {
+                const rowId = subdocRowId(row);
+                return rowId && rowId === resolved.idStr;
+            }) || null
+        );
+    }
+    return items[resolved.index] || null;
+}
+
+/** Locate a document row in live and/or archived bundle arrays. */
+export function findCompanyDocumentRow(profile = {}, target, fields = ["documents", "oldDocuments"]) {
+    for (const field of fields) {
+        const row = findBundleArrayRow(profile[field], target);
+        if (row) return { field, row };
+    }
+    return null;
+}
+
+/**
+ * Remove one row from a document-bundle array (`documents`, `oldDocuments`, `ejari`, etc.).
+ * Reads/writes `companydocumentbundles` first; falls back to legacy embedded arrays on `companies`.
+ */
+export async function pullFromCompanyDocumentBundle(companyMongoId, field, target) {
+    const resolved = resolveSubdocPullTarget(target);
+    if (!resolved) {
+        return { modified: false, matched: false, found: false };
+    }
+
+    const companyId =
+        companyMongoId instanceof mongoose.Types.ObjectId
+            ? companyMongoId
+            : new mongoose.Types.ObjectId(String(companyMongoId));
+
+    const bundle = await CompanyDocumentBundle.findOne({ company: companyId });
+    if (bundle && Array.isArray(bundle[field])) {
+        const arr = bundle[field];
+        let removed = false;
+
+        if (resolved.pullById) {
+            const before = arr.length;
+            bundle[field] = arr.filter((row) => subdocRowId(row) !== resolved.idStr);
+            removed = bundle[field].length < before;
+        } else if (resolved.index < arr.length) {
+            arr.splice(resolved.index, 1);
+            removed = true;
+        }
+
+        if (!removed) {
+            return { modified: false, matched: true, found: false };
+        }
+
+        if (field === "documents") {
+            bundle.hasLiveMoa = documentBundleHasLiveMoa(bundle.documents);
+        }
+        await bundle.save();
+        return { modified: true, matched: true, found: true };
+    }
+
+    // Legacy monolith row — bypass Mongoose strict schema on Company
+    if (resolved.pullById) {
+        const result = await Company.collection.updateOne(
+            { _id: companyId },
+            { $pull: { [field]: { _id: resolved.oid } } },
+        );
+        return {
+            modified: result.modifiedCount > 0,
+            matched: result.matchedCount > 0,
+            found: result.modifiedCount > 0,
+        };
+    }
+
+    const unsetResult = await Company.collection.updateOne(
+        { _id: companyId },
+        { $unset: { [`${field}.${resolved.index}`]: 1 } },
+    );
+    if (unsetResult.modifiedCount) {
+        await Company.collection.updateOne({ _id: companyId }, { $pull: { [field]: null } });
+    }
+    return {
+        modified: unsetResult.modifiedCount > 0,
+        matched: unsetResult.matchedCount > 0,
+        found: unsetResult.modifiedCount > 0,
+    };
+}
+
+export function findOwnerRow(list, ownerId) {
+    const idStr = String(ownerId ?? "").trim();
+    if (!idStr) return null;
+    return (Array.isArray(list) ? list : []).find((row) => subdocRowId(row) === idStr) || null;
+}
+
+/** Remove one nested owner document card (passport, visa, etc.) from companyowners partition. */
+export async function clearOwnerDocInPartition(companyMongoId, ownerTarget, ownerId, docKey) {
+    if (!["owners", "oldOwners"].includes(ownerTarget)) {
+        return { modified: false, matched: false, found: false };
+    }
+
+    const ownerOid = new mongoose.Types.ObjectId(String(ownerId));
+    const filterKey = ownerTarget === "oldOwners" ? "o" : "live";
+    const unsetPath = ownerDocUnsetPath(ownerTarget, docKey);
+    const companyId =
+        companyMongoId instanceof mongoose.Types.ObjectId
+            ? companyMongoId
+            : new mongoose.Types.ObjectId(String(companyMongoId));
+
+    const ownersPartition = await CompanyOwners.findOne({ company: companyId }).select("_id").lean();
+    const updateFilter = ownersPartition ? { company: companyId } : { _id: companyId };
+    const model = ownersPartition ? CompanyOwners : Company.collection;
+    const result = await model.updateOne(
+        updateFilter,
+        { $unset: { [unsetPath]: 1 } },
+        { arrayFilters: [{ [`${filterKey}._id`]: ownerOid }] },
+    );
+
+    return {
+        modified: result.modifiedCount > 0,
+        matched: result.matchedCount > 0,
+        found: result.modifiedCount > 0,
+    };
+}
+
+/** Pull an entire owner subdocument from owners or oldOwners. */
+export async function pullOwnerFromPartition(companyMongoId, ownerTarget, target) {
+    if (!["owners", "oldOwners"].includes(ownerTarget)) {
+        return { modified: false, matched: false, found: false };
+    }
+
+    const resolved = resolveSubdocPullTarget(target);
+    if (!resolved) {
+        return { modified: false, matched: false, found: false };
+    }
+
+    const companyId =
+        companyMongoId instanceof mongoose.Types.ObjectId
+            ? companyMongoId
+            : new mongoose.Types.ObjectId(String(companyMongoId));
+
+    const ownersDoc = await CompanyOwners.findOne({ company: companyId });
+    if (ownersDoc && Array.isArray(ownersDoc[ownerTarget])) {
+        const arr = ownersDoc[ownerTarget];
+        let removed = false;
+
+        if (resolved.pullById) {
+            const before = arr.length;
+            ownersDoc[ownerTarget] = arr.filter((row) => subdocRowId(row) !== resolved.idStr);
+            removed = ownersDoc[ownerTarget].length < before;
+        } else if (resolved.index < arr.length) {
+            arr.splice(resolved.index, 1);
+            removed = true;
+        }
+
+        if (!removed) {
+            return { modified: false, matched: true, found: false };
+        }
+
+        await ownersDoc.save();
+        return { modified: true, matched: true, found: true };
+    }
+
+    if (resolved.pullById) {
+        const result = await Company.collection.updateOne(
+            { _id: companyId },
+            { $pull: { [ownerTarget]: { _id: resolved.oid } } },
+        );
+        return {
+            modified: result.modifiedCount > 0,
+            matched: result.matchedCount > 0,
+            found: result.modifiedCount > 0,
+        };
+    }
+
+    const unsetResult = await Company.collection.updateOne(
+        { _id: companyId },
+        { $unset: { [`${ownerTarget}.${resolved.index}`]: 1 } },
+    );
+    if (unsetResult.modifiedCount) {
+        await Company.collection.updateOne({ _id: companyId }, { $pull: { [ownerTarget]: null } });
+    }
+    return {
+        modified: unsetResult.modifiedCount > 0,
+        matched: unsetResult.matchedCount > 0,
+        found: unsetResult.modifiedCount > 0,
+    };
 }

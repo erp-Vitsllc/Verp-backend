@@ -1,6 +1,12 @@
 import mongoose from "mongoose";
 import Company from "../../models/Company.js";
+import {
+    loadCompanyFullProfile,
+    pullFromCompanyDocumentBundle,
+    findBundleArrayRow,
+} from "../../services/companyPartitionService.js";
 import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
+import { isRequestUserDesignatedFlowchartHr } from "../../utils/isDesignatedFlowchartHr.js";
 import { hasPermission } from "../../services/permissionService.js";
 import { awaitAdminDeletionArchive } from "../../utils/adminDeletionArchiveRun.js";
 
@@ -25,17 +31,17 @@ function isCompanyProfileActivated(company) {
 }
 
 function resolveArrayItem(list, target) {
-    const items = Array.isArray(list) ? list : [];
-    const targetStr = String(target ?? "").trim();
-    if (/^[a-fA-F0-9]{24}$/.test(targetStr)) {
-        const byId = items.find((row) => String(row?._id) === targetStr);
-        if (byId) return { row: byId, pullById: true, oid: new mongoose.Types.ObjectId(targetStr) };
+    const row = findBundleArrayRow(list, target);
+    if (!row) return null;
+    const rowId = row._id ?? row.id;
+    if (rowId && /^[a-fA-F0-9]{24}$/.test(String(rowId))) {
+        return { row, pullById: true, oid: new mongoose.Types.ObjectId(String(rowId)) };
     }
-    const index = Number.parseInt(targetStr, 10);
-    if (Number.isInteger(index) && index >= 0 && index < items.length) {
-        return { row: items[index], pullById: false, index };
+    const index = Number.parseInt(String(target ?? "").trim(), 10);
+    if (Number.isInteger(index) && index >= 0) {
+        return { row, pullById: false, index };
     }
-    return null;
+    return { row, pullById: true, oid: row._id };
 }
 
 /**
@@ -55,12 +61,16 @@ export const deleteCompanyArrayItem = async (req, res) => {
             return res.status(404).json({ message: "Company not found." });
         }
 
+        const fullProfile = (await loadCompanyFullProfile(company)) || company;
+
         const isAdmin = await isReqUserAdmin(req.user);
+        const isDesignatedHr = await isRequestUserDesignatedFlowchartHr(req);
+        const canBypassActivatedDelete = isAdmin || isDesignatedHr;
         const activated = isCompanyProfileActivated(company);
         const permModule = FIELD_PERMISSION_MAP[fieldName];
 
         if (activated) {
-            if (!isAdmin) {
+            if (!canBypassActivatedDelete) {
                 return res.status(403).json({
                     message: `Only administrator can delete ${fieldName} records on an activated company profile.`,
                 });
@@ -69,14 +79,14 @@ export const deleteCompanyArrayItem = async (req, res) => {
             const userId = req.user?.id || req.user?._id;
             const hasDeletePerm =
                 userId && permModule && (await hasPermission(userId, permModule, "delete"));
-            if (!isAdmin && !hasDeletePerm) {
+            if (!canBypassActivatedDelete && !hasDeletePerm) {
                 return res.status(403).json({
                     message: `You do not have permission to delete this ${fieldName} record.`,
                 });
             }
         }
 
-        const resolved = resolveArrayItem(company[fieldName], target);
+        const resolved = resolveArrayItem(fullProfile[fieldName], target);
         if (!resolved?.row) {
             return res.status(404).json({ message: `${fieldName} entry not found.` });
         }
@@ -96,16 +106,9 @@ export const deleteCompanyArrayItem = async (req, res) => {
             },
         });
 
-        const filter = buildCompanyFilter(id);
-        if (resolved.pullById) {
-            await Company.updateOne(filter, {
-                $pull: { [fieldName]: { _id: resolved.oid } },
-            });
-        } else {
-            await Company.updateOne(filter, {
-                $unset: { [`${fieldName}.${resolved.index}`]: 1 },
-            });
-            await Company.updateOne(filter, { $pull: { [fieldName]: null } });
+        const { modified, found } = await pullFromCompanyDocumentBundle(company._id, fieldName, target);
+        if (!found || !modified) {
+            return res.status(404).json({ message: `${fieldName} entry not found.` });
         }
 
         return res.status(200).json({

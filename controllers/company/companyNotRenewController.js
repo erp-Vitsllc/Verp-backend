@@ -7,6 +7,10 @@ import { getDepartmentHOD } from "../../utils/getDepartmentHOD.js";
 import { resolveEmployeeEmail } from "../../utils/resolveEmployeeEmail.js";
 import { isRequestUserDesignatedFlowchartHr } from "../../utils/isDesignatedFlowchartHr.js";
 import { calculateCompanyActivationProgress } from "../../utils/companyActivation.js";
+import {
+    loadCompanyFullProfile,
+    upsertCompanyPartitions,
+} from "../../services/companyPartitionService.js";
 
 const KINDS = new Set(["tradeLicense", "establishmentCard", "document", "ownerDoc", "ejari", "insurance"]);
 
@@ -40,6 +44,22 @@ const findCompanyByRouteId = async (id) =>
     Company.findOne({
         $or: [{ _id: id.match(/^[0-9a-fA-F]{24}$/) ? id : null }, { companyId: id }],
     });
+
+/** Merged profile (core + compliance / owners / bundle / workflow partitions). */
+const loadCompanyForNotRenew = async (routeId) => {
+    const core = await findCompanyByRouteId(routeId);
+    if (!core) return null;
+    const full = await loadCompanyFullProfile(core);
+    const companyData =
+        full && typeof full === "object"
+            ? { ...full }
+            : core.toObject?.({ strict: false, virtuals: false }) || { ...core };
+    return { core, companyData };
+};
+
+const saveCompanyNotRenewState = async (companyMongoId, companyData) => {
+    await upsertCompanyPartitions(companyMongoId, companyData);
+};
 
 const isHrLoggedInUser = async (req) => {
     if (await isRequestUserDesignatedFlowchartHr(req)) return true;
@@ -157,7 +177,7 @@ const applyApprovedArchive = (company, entry) => {
                 : null,
         };
         const nextDocs = prependRows(company.documents || [], [historyDoc, ...supportingRows]);
-        company.set("documents", nextDocs);
+        company.documents = nextDocs;
         company.tradeLicenseNumber = null;
         company.tradeLicenseIssueDate = null;
         company.tradeLicenseExpiry = null;
@@ -177,7 +197,7 @@ const applyApprovedArchive = (company, entry) => {
                 : null,
         };
         const nextDocs = prependRows(company.documents || [], [historyDoc, ...supportingRows]);
-        company.set("documents", nextDocs);
+        company.documents = nextDocs;
         company.establishmentCardNumber = null;
         company.establishmentCardExpiry = null;
         company.establishmentCardAttachment = null;
@@ -211,8 +231,8 @@ const applyApprovedArchive = (company, entry) => {
         next.splice(idx, 1);
         const oldList = [...(company.oldDocuments || [])];
         oldList.push(historyDoc);
-        company.set("oldDocuments", oldList);
-        company.set("documents", supportingRows.length ? prependRows(next, supportingRows) : next);
+        company.oldDocuments = oldList;
+        company.documents = supportingRows.length ? prependRows(next, supportingRows) : next;
         return;
     }
 
@@ -236,9 +256,9 @@ const applyApprovedArchive = (company, entry) => {
             document: od.attachment ? { url: od.attachment, mimeType: "application/pdf" } : od.document || null,
         };
         const nextDocs = prependRows(company.documents || [], [historyDoc, ...supportingRows]);
-        company.set("documents", nextDocs);
+        company.documents = nextDocs;
         owners[oi] = { ...owners[oi], [docKey]: null };
-        company.set("owners", owners);
+        company.owners = owners;
         return;
     }
 
@@ -267,8 +287,8 @@ const applyApprovedArchive = (company, entry) => {
         const updatedFieldList = [...(company[field] || [])];
         updatedFieldList.splice(index, 1);
         const nextDocs = prependRows(company.documents || [], [historyDoc, ...supportingRows]);
-        company.set(field, updatedFieldList);
-        company.set("documents", nextDocs);
+        company[field] = updatedFieldList;
+        company.documents = nextDocs;
     }
 };
 
@@ -317,10 +337,11 @@ export const submitCompanyNotRenewRequest = async (req, res) => {
             return res.status(400).json({ message: "Please provide a reason (at least 3 characters)." });
         }
 
-        const company = await findCompanyByRouteId(id);
-        if (!company) return res.status(404).json({ message: "Company not found" });
+        const loaded = await loadCompanyForNotRenew(id);
+        if (!loaded) return res.status(404).json({ message: "Company not found" });
+        const { core, companyData } = loaded;
 
-        const pending = (company.pendingNotRenewRequests || []).filter((p) => p.status === "pending");
+        const pending = (companyData.pendingNotRenewRequests || []).filter((p) => p.status === "pending");
         const incoming = {
             kind,
             documentIndex: typeof body.documentIndex === "number" ? body.documentIndex : undefined,
@@ -334,28 +355,28 @@ export const submitCompanyNotRenewRequest = async (req, res) => {
             return res.status(400).json({ message: "A pending not-renew request already exists for this document." });
         }
 
-        if (kind === "tradeLicense" && !company.tradeLicenseNumber) {
+        if (kind === "tradeLicense" && !companyData.tradeLicenseNumber) {
             return res.status(400).json({ message: "No trade license on file to mark as not renewed." });
         }
-        if (kind === "establishmentCard" && !company.establishmentCardNumber) {
+        if (kind === "establishmentCard" && !companyData.establishmentCardNumber) {
             return res.status(400).json({ message: "No establishment card on file to mark as not renewed." });
         }
         if (kind === "document") {
-            const idx = resolveDocumentIndex(company, incoming);
-            if (idx < 0 || !company.documents?.[idx]) {
+            const idx = resolveDocumentIndex(companyData, incoming);
+            if (idx < 0 || !companyData.documents?.[idx]) {
                 return res.status(400).json({ message: "Document not found." });
             }
         }
         if (kind === "ownerDoc") {
             const oi = body.ownerIndex;
             const dk = body.docKey;
-            if (typeof oi !== "number" || !dk || !company.owners?.[oi]?.[dk]) {
+            if (typeof oi !== "number" || !dk || !companyData.owners?.[oi]?.[dk]) {
                 return res.status(400).json({ message: "Owner document not found." });
             }
         }
         if (kind === "ejari" || kind === "insurance") {
-            const idx = resolveArrayIndex(company, kind, incoming);
-            if (idx < 0 || !company[kind]?.[idx]) {
+            const idx = resolveArrayIndex(companyData, kind, incoming);
+            if (idx < 0 || !companyData[kind]?.[idx]) {
                 return res.status(400).json({ message: "Record not found." });
             }
         }
@@ -384,39 +405,38 @@ export const submitCompanyNotRenewRequest = async (req, res) => {
 
         if (autoApprove) {
             try {
-                applyApprovedArchive(company, row);
+                applyApprovedArchive(companyData, row);
             } catch (e) {
                 return res.status(400).json({
                     message: e.message === "DOCUMENT_NOT_FOUND" ? "Document no longer exists." : "Could not apply not-renew.",
                 });
             }
-            await company.save();
+            await saveCompanyNotRenewState(core._id, companyData);
             await cleanupCompanyExpiryNotificationsByLabels({
-                companyObjectId: company._id,
+                companyObjectId: core._id,
                 labels: [row.label || row.kind],
             });
-            const companyObj = company.toObject ? company.toObject() : company;
             return res.status(201).json({
                 message: "Not renew applied and moved to Old Documents.",
-                activationProgress: calculateCompanyActivationProgress(companyObj),
+                activationProgress: calculateCompanyActivationProgress(companyData),
             });
         }
 
-        company.pendingNotRenewRequests = [...(company.pendingNotRenewRequests || []), row];
-        await company.save();
+        companyData.pendingNotRenewRequests = [...(companyData.pendingNotRenewRequests || []), row];
+        await saveCompanyNotRenewState(core._id, companyData);
 
         const hr = await getDepartmentHOD("hr");
         const hrEmail = pickEmail(hr);
         const baseUrl = (process.env.FRONTEND_URL || "http://localhost:3000").replace(/\/$/, "");
-        const companyLink = `${baseUrl}/Company/${encodeURIComponent(company.companyId || company._id)}?tab=others`;
+        const companyLink = `${baseUrl}/Company/${encodeURIComponent(core.companyId || core._id)}?tab=others`;
 
         if (hrEmail) {
             await sendMail({
                 to: [hrEmail],
-                subject: `Company not-renew approval: ${company.name} (${company.companyId})`,
+                subject: `Company not-renew approval: ${core.name} (${core.companyId})`,
                 html: `<div style="font-family:Arial,sans-serif;line-height:1.6;">
                     <p><strong>Flowchart HR</strong> — a user submitted <strong>Not renew</strong> for company documents.</p>
-                    <p><strong>Company:</strong> ${company.name} (${company.companyId})</p>
+                    <p><strong>Company:</strong> ${core.name} (${core.companyId})</p>
                     <p><strong>Document:</strong> ${row.label || kind}</p>
                     <p><strong>Reason:</strong> ${reason.replace(/</g, "&lt;")}</p>
                     <p><a href="${companyLink}">Open company profile (Documents)</a> to approve or reject.</p>
@@ -428,11 +448,11 @@ export const submitCompanyNotRenewRequest = async (req, res) => {
             await DashboardAction.create({
                 assignedTo: hr._id,
                 assignedToEmpId: hr.employeeId,
-                requestId: company._id,
+                requestId: core._id,
                 requestType: "Company Document Not Renew",
                 status: "Pending",
-                subjectEmployeeId: company.companyId,
-                subjectName: company.name,
+                subjectEmployeeId: core.companyId,
+                subjectName: core.name,
                 requestedByName: row.submittedByName || "User",
                 extra1: `Not renew pending: ${row.label || kind}`,
                 extra2: reason.length > 220 ? `${reason.slice(0, 217)}...` : reason,
@@ -467,10 +487,11 @@ export const respondCompanyNotRenewRequest = async (req, res) => {
             return res.status(403).json({ message: "Only designated Flowchart HR can approve or reject this request." });
         }
 
-        const company = await findCompanyByRouteId(id);
-        if (!company) return res.status(404).json({ message: "Company not found" });
+        const loaded = await loadCompanyForNotRenew(id);
+        if (!loaded) return res.status(404).json({ message: "Company not found" });
+        const { core, companyData } = loaded;
 
-        const list = company.pendingNotRenewRequests || [];
+        const list = companyData.pendingNotRenewRequests || [];
         const entry = list.find((r) => r.requestId === requestId && r.status === "pending");
         if (!entry) {
             return res.status(404).json({ message: "Pending request not found." });
@@ -481,10 +502,10 @@ export const respondCompanyNotRenewRequest = async (req, res) => {
             if (hrComment.length < 3) {
                 return res.status(400).json({ message: "Please provide a rejection reason (at least 3 characters)." });
             }
-            company.pendingNotRenewRequests = list.filter((r) => r.requestId !== requestId);
-            await company.save();
+            companyData.pendingNotRenewRequests = list.filter((r) => r.requestId !== requestId);
+            await saveCompanyNotRenewState(core._id, companyData);
 
-            await closeDashboardAction(company._id, requestId, "Rejected", hrComment, req.user.employeeObjectId);
+            await closeDashboardAction(core._id, requestId, "Rejected", hrComment, req.user.employeeObjectId);
 
             const submitter = entry.submittedByUserId
                 ? await User.findById(entry.submittedByUserId).select("email companyEmail name").lean()
@@ -493,10 +514,10 @@ export const respondCompanyNotRenewRequest = async (req, res) => {
             if (to) {
                 await sendMail({
                     to: [to],
-                    subject: `Not renew request rejected — ${company.companyId}`,
+                    subject: `Not renew request rejected — ${core.companyId}`,
                     html: `<div style="font-family:Arial,sans-serif;line-height:1.6;">
                         <p>Your request to mark <strong>${entry.label || entry.kind}</strong> as not renewed for
-                        <strong>${company.name}</strong> (${company.companyId}) was <strong>rejected</strong>.</p>
+                        <strong>${core.name}</strong> (${core.companyId}) was <strong>rejected</strong>.</p>
                         <p><strong>HR comment:</strong> ${hrComment.replace(/</g, "&lt;")}</p>
                     </div>`,
                 });
@@ -506,20 +527,20 @@ export const respondCompanyNotRenewRequest = async (req, res) => {
 
         // approve
         try {
-            applyApprovedArchive(company, entry);
+            applyApprovedArchive(companyData, entry);
         } catch (e) {
             console.error(e);
             return res.status(400).json({ message: e.message === "DOCUMENT_NOT_FOUND" ? "Document no longer exists." : "Could not apply not-renew." });
         }
 
-        company.pendingNotRenewRequests = list.filter((r) => r.requestId !== requestId);
-        await company.save();
+        companyData.pendingNotRenewRequests = list.filter((r) => r.requestId !== requestId);
+        await saveCompanyNotRenewState(core._id, companyData);
         await cleanupCompanyExpiryNotificationsByLabels({
-            companyObjectId: company._id,
+            companyObjectId: core._id,
             labels: [entry.label || entry.kind],
         });
 
-        await closeDashboardAction(company._id, requestId, "Approved", "", req.user.employeeObjectId);
+        await closeDashboardAction(core._id, requestId, "Approved", "", req.user.employeeObjectId);
 
         const submitter = entry.submittedByUserId
             ? await User.findById(entry.submittedByUserId).select("email companyEmail name").lean()
@@ -528,19 +549,18 @@ export const respondCompanyNotRenewRequest = async (req, res) => {
         if (to) {
             await sendMail({
                 to: [to],
-                subject: `Not renew request approved — ${company.companyId}`,
+                subject: `Not renew request approved — ${core.companyId}`,
                 html: `<div style="font-family:Arial,sans-serif;line-height:1.6;">
                     <p>Your request to mark <strong>${entry.label || entry.kind}</strong> as not renewed for
-                    <strong>${company.name}</strong> (${company.companyId}) was <strong>approved</strong>.</p>
+                    <strong>${core.name}</strong> (${core.companyId}) was <strong>approved</strong>.</p>
                     <p>The document has been archived.</p>
                 </div>`,
             });
         }
 
-        const companyObj = company.toObject ? company.toObject() : company;
         return res.json({
             message: "Not renew approved and archived.",
-            activationProgress: calculateCompanyActivationProgress(companyObj),
+            activationProgress: calculateCompanyActivationProgress(companyData),
         });
     } catch (error) {
         console.error("respondCompanyNotRenewRequest", error);

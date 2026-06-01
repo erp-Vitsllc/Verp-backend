@@ -72,13 +72,17 @@ const ownerSubdoc = {
         attachment: { type: String },
     },
     medical: {
+        provider: { type: String },
         number: { type: String },
+        issueDate: { type: Date },
         expiryDate: { type: Date },
         attachment: { type: String },
     },
     drivingLicense: {
         number: { type: String },
+        issueDate: { type: Date },
         expiryDate: { type: Date },
+        issuingCountry: { type: String },
         attachment: { type: String },
     },
     labourCard: {

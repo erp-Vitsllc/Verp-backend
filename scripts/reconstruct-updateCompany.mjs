@@ -1,4 +1,15 @@
-import mongoose from "mongoose";
+/**
+ * One-off: rebuild updateCompany.js from patch history + transcript hints.
+ * Run: node VERP_backend/scripts/reconstruct-updateCompany.mjs
+ */
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const outPath = path.join(__dirname, "../controllers/company/updateCompany.js");
+
+const content = `import mongoose from "mongoose";
 import Company from "../../models/Company.js";
 import CompanyCompliance from "../../models/CompanyCompliance.js";
 import DashboardAction from "../../models/DashboardAction.js";
@@ -7,8 +18,6 @@ import {
     upsertCompanyPartitions,
     splitCompanyUpdatePayload,
     DOCUMENT_BUNDLE_KEYS,
-    clearOwnerDocInPartition,
-    findOwnerRow,
 } from "../../services/companyPartitionService.js";
 import { archiveSupersededCompanyDocuments } from "../../utils/archiveCompanyDocument.js";
 import { archiveSupersededCompanyOwners } from "../../utils/archiveCompanyOwners.js";
@@ -21,11 +30,10 @@ import {
     shouldTriggerCompanyReactivation,
     collectCompanyReactivationChangeLabels,
     stripProposedDataKeysFromPendingReactivationEntries,
-    isCompanyFullyActivated,
+    ownersChangeIsVisaDocsOnly,
 } from "../../utils/companyActivation.js";
 import { markCompanyActivationHoldResolvedForUpdate } from "../../utils/markCompanyActivationHoldResolved.js";
 import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
-import { isRequestUserDesignatedFlowchartHr } from "../../utils/isDesignatedFlowchartHr.js";
 import {
     normalizeCompanyUpdateAttachments,
     signCompanyDocumentArray,
@@ -95,27 +103,37 @@ import {
 import {
     archiveAdminOwnerDocCardDeletion,
     stripOwnerDocFromPendingReactivation,
-    ownerDocSnapshot,
+    ownerDocUnsetPath,
 } from "../../utils/companyOwnerDocDeletion.js";
-import {
-    isDocumentRemovalAttempt,
-    userMayDeleteCompanyProfileContent,
-    userMayCompactDeleteCompanyContent,
-    isCompanyProfileActivated,
-} from "../../utils/companyProfileDeleteAccess.js";
 
-const ALLOWED_OWNER_DOC_KEYS = new Set([
-    "passport",
-    "visa",
-    "visitVisa",
-    "employmentVisa",
-    "spouseVisa",
-    "emiratesId",
-    "medical",
-    "drivingLicense",
-    "labourCard",
-    "attachment",
-]);
+const FOLDER_MARKERS = [
+    "company-documents",
+    "employee-documents",
+    "asset-invoices",
+    "asset-photos",
+    "profile-pictures",
+    "signatures",
+    "rewards",
+    "fines",
+];
+
+const normalizeAttachmentKeyForCompare = (value) => {
+    if (typeof value !== "string" || !value.trim()) return "";
+    const noQuery = value.split("?")[0].trim();
+    const lower = noQuery.toLowerCase();
+    for (const folder of FOLDER_MARKERS) {
+        const idx = lower.indexOf(folder);
+        if (idx !== -1) return noQuery.slice(idx).toLowerCase();
+    }
+    return noQuery.toLowerCase();
+};
+
+const attachmentUrlsDiffer = (prevUrl, nextUrl) => {
+    const a = normalizeAttachmentKeyForCompare(prevUrl || "");
+    const b = normalizeAttachmentKeyForCompare(nextUrl || "");
+    if (!a || !b) return false;
+    return a !== b;
+};
 
 const toSerializable = (value) => {
     if (value === undefined) return undefined;
@@ -153,6 +171,122 @@ const COMPANY_UPDATE_READ_EXCLUSIONS = {
     "ejari.document.data": 0,
     "pendingReactivationChanges.previousData": 0,
     "pendingReactivationChanges.proposedData": 0,
+};
+
+const collectAttachmentUrls = (items = [], pathKey = "document.url") => {
+    const parts = pathKey.split(".");
+    const urls = [];
+    for (const item of items || []) {
+        if (!item || typeof item !== "object") continue;
+        let value = item;
+        for (const p of parts) value = value?.[p];
+        if (typeof value === "string" && value.trim()) urls.push(value.trim());
+    }
+    return urls;
+};
+
+const scalarAttachmentCleared = (beforeVal, afterVal) => {
+    const prev =
+        typeof beforeVal === "string"
+            ? beforeVal.trim()
+            : beforeVal?.url?.trim?.() || beforeVal?.url || "";
+    const next =
+        typeof afterVal === "string"
+            ? afterVal.trim()
+            : afterVal?.url?.trim?.() || afterVal?.url || "";
+    return Boolean(prev) && !next;
+};
+
+const isDocumentRemovalAttempt = (beforeCompany = {}, updateData = {}) => {
+    if (
+        scalarAttachmentCleared(beforeCompany.tradeLicenseAttachment, updateData.tradeLicenseAttachment)
+    ) {
+        return true;
+    }
+    if (
+        scalarAttachmentCleared(
+            beforeCompany.establishmentCardAttachment,
+            updateData.establishmentCardAttachment,
+        )
+    ) {
+        return true;
+    }
+
+    if (Object.prototype.hasOwnProperty.call(updateData, "documents")) {
+        const prevUrls = new Set(collectAttachmentUrls(beforeCompany.documents));
+        const nextUrls = new Set(collectAttachmentUrls(updateData.documents));
+        for (const u of prevUrls) {
+            if (!nextUrls.has(u)) return true;
+        }
+        if ((beforeCompany.documents || []).length > (updateData.documents || []).length) {
+            return true;
+        }
+    }
+
+    if (Object.prototype.hasOwnProperty.call(updateData, "ejari")) {
+        const prevUrls = new Set(collectAttachmentUrls(beforeCompany.ejari));
+        const nextUrls = new Set(collectAttachmentUrls(updateData.ejari));
+        for (const u of prevUrls) {
+            if (!nextUrls.has(u)) return true;
+        }
+    }
+
+    if (Object.prototype.hasOwnProperty.call(updateData, "insurance")) {
+        const prevUrls = new Set(collectAttachmentUrls(beforeCompany.insurance));
+        const nextUrls = new Set(collectAttachmentUrls(updateData.insurance));
+        for (const u of prevUrls) {
+            if (!nextUrls.has(u)) return true;
+        }
+    }
+
+    if (Object.prototype.hasOwnProperty.call(updateData, "owners")) {
+        const prev = beforeCompany.owners || [];
+        const next = updateData.owners || [];
+        if (next.length < prev.length) return true;
+        if (ownersChangeIsVisaDocsOnly(prev, next)) return false;
+        try {
+            const prevJson = JSON.stringify(toSerializable(prev));
+            const nextJson = JSON.stringify(toSerializable(next));
+            if (prevJson !== nextJson) {
+                const ownerDocKeys = [
+                    "attachment",
+                    "passport",
+                    "visa",
+                    "visitVisa",
+                    "employmentVisa",
+                    "spouseVisa",
+                    "emiratesId",
+                    "medical",
+                    "drivingLicense",
+                    "labourCard",
+                ];
+                for (let i = 0; i < Math.max(prev.length, next.length); i += 1) {
+                    const p = prev[i] || {};
+                    const n = next[i] || {};
+                    for (const key of ownerDocKeys) {
+                        const pUrl =
+                            key === "attachment"
+                                ? typeof p.attachment === "string"
+                                    ? p.attachment
+                                    : p.attachment?.url
+                                : p[key]?.attachment?.url || p[key]?.attachment;
+                        const nUrl =
+                            key === "attachment"
+                                ? typeof n.attachment === "string"
+                                    ? n.attachment
+                                    : n.attachment?.url
+                                : n[key]?.attachment?.url || n[key]?.attachment;
+                        if (pUrl && !nUrl) return true;
+                        if (pUrl && nUrl && attachmentUrlsDiffer(pUrl, nUrl)) return true;
+                    }
+                }
+            }
+        } catch {
+            return true;
+        }
+    }
+
+    return false;
 };
 
 const normalizeDocumentRowsForUpdate = (documents = []) => {
@@ -245,86 +379,6 @@ export const updateCompany = async (req, res) => {
         delete updateData.skipArchive;
 
         const requesterIsAdmin = await isReqUserAdmin(req.user);
-        const requesterIsDesignatedHr = await isRequestUserDesignatedFlowchartHr(req);
-        const requesterBypassesHrQueue = requesterIsAdmin || requesterIsDesignatedHr;
-
-        let clearLiveOwnerDocCard = null;
-        let clearOldOwnerDocCard = null;
-        if (Object.prototype.hasOwnProperty.call(updateData, "clearLiveOwnerDocCard")) {
-            clearLiveOwnerDocCard = updateData.clearLiveOwnerDocCard;
-            delete updateData.clearLiveOwnerDocCard;
-        }
-        if (Object.prototype.hasOwnProperty.call(updateData, "clearOldOwnerDocCard")) {
-            clearOldOwnerDocCard = updateData.clearOldOwnerDocCard;
-            delete updateData.clearOldOwnerDocCard;
-        }
-
-        if (clearLiveOwnerDocCard || clearOldOwnerDocCard) {
-            if (!requesterBypassesHrQueue) {
-                return res.status(403).json({
-                    message: "Only administrator can delete owner document cards.",
-                });
-            }
-
-            const clearSpec = clearLiveOwnerDocCard || clearOldOwnerDocCard;
-            const ownerTarget = clearLiveOwnerDocCard ? "owners" : "oldOwners";
-            const ownerId = String(clearSpec?.ownerId ?? "").trim();
-            const docKey = String(clearSpec?.docKey ?? "").trim();
-
-            if (!/^[a-fA-F0-9]{24}$/.test(ownerId)) {
-                return res.status(400).json({ message: "Invalid owner id for document delete." });
-            }
-            if (!ALLOWED_OWNER_DOC_KEYS.has(docKey)) {
-                return res.status(400).json({ message: "Invalid owner document type." });
-            }
-
-            const beforeCompany =
-                (await loadCompanyFullProfile(company)) ||
-                (typeof company.toObject === "function"
-                    ? company.toObject({ strict: false, virtuals: false })
-                    : { ...company });
-
-            const ownerRow = findOwnerRow(beforeCompany[ownerTarget], ownerId);
-            if (!ownerRow) {
-                return res.status(404).json({ message: "Owner record not found." });
-            }
-            if (!ownerDocSnapshot(ownerRow, docKey)) {
-                return res.status(404).json({ message: "Owner document card not found." });
-            }
-
-            if (!skipArchiveOnRequest) {
-                await archiveAdminOwnerDocCardDeletion(req, beforeCompany, ownerRow, docKey, ownerTarget);
-            }
-
-            const strippedPending = stripOwnerDocFromPendingReactivation(
-                beforeCompany.pendingReactivationChanges || [],
-                ownerId,
-                docKey,
-            );
-
-            const clearResult = await clearOwnerDocInPartition(company._id, ownerTarget, ownerId, docKey);
-            if (!clearResult.modified) {
-                return res.status(404).json({ message: "Owner document card not found." });
-            }
-
-            if (strippedPending !== beforeCompany.pendingReactivationChanges) {
-                await upsertCompanyPartitions(company._id, {
-                    pendingReactivationChanges: strippedPending,
-                });
-            }
-
-            const refreshed = await Company.findById(company._id)
-                .select(COMPANY_UPDATE_READ_EXCLUSIONS)
-                .maxTimeMS(8000);
-            const fullProfile = await loadCompanyFullProfile(refreshed);
-            const signed = await signCompanyProfileForResponse(fullProfile || {});
-
-            return res.status(200).json({
-                message: "Owner document card removed successfully.",
-                company: signed,
-                activationProgress: calculateCompanyActivationProgress(fullProfile || {}),
-            });
-        }
 
         const isCompanyDocumentNotRenewArchive =
             updateData.companyDocumentNotRenew === true &&
@@ -362,19 +416,9 @@ export const updateCompany = async (req, res) => {
         delete updateData.pullOwnersByIds;
 
         if (compactCompanyDocMutation) {
-            const mayCompactDelete =
-                requesterBypassesHrQueue ||
-                (await userMayCompactDeleteCompanyContent(req.user, company, {
-                    pullDocumentsByIds,
-                    pullOldDocumentsByIds,
-                    pullOwnersByIds,
-                }));
-            if (!mayCompactDelete) {
-                const activated = isCompanyProfileActivated(company);
+            if (!requesterIsAdmin) {
                 return res.status(403).json({
-                    message: activated
-                        ? "Only administrator can remove company documents or owners on an activated profile."
-                        : "You do not have permission to delete this company profile content.",
+                    message: "Only administrator can remove company documents or owners via compact delete.",
                 });
             }
             const filter = { _id: company._id };
@@ -408,23 +452,14 @@ export const updateCompany = async (req, res) => {
                 ? company.toObject({ strict: false, virtuals: false })
                 : { ...company });
 
-        const hasGroupDeletePerm = await userMayDeleteCompanyProfileContent(
-            req.user,
-            beforeCompany,
-            updateData,
-        );
         if (
-            !requesterBypassesHrQueue &&
-            !hasGroupDeletePerm &&
+            !requesterIsAdmin &&
             isDocumentRemovalAttempt(beforeCompany, updateData) &&
             !isCompanyDocumentNotRenewArchive &&
             !shouldTriggerCompanyReactivation(beforeCompany, updateData)
         ) {
-            const activated = isCompanyProfileActivated(beforeCompany);
             return res.status(403).json({
-                message: activated
-                    ? "Only administrator can delete company profile documents or card attachments on an activated profile."
-                    : "You do not have permission to delete this company profile content.",
+                message: "Only administrator can delete company profile documents or card attachments.",
             });
         }
 
@@ -666,7 +701,6 @@ export const updateCompany = async (req, res) => {
         let partitionUpdatePayload = {};
         const queueForApproval =
             !skipReactivationQueueForThisRequest &&
-            !requesterBypassesHrQueue &&
             shouldTriggerCompanyReactivation(beforeCompany, updateData);
 
         const findOpts = {
@@ -681,7 +715,13 @@ export const updateCompany = async (req, res) => {
         if (queueForApproval) {
             const changedCards = collectCompanyReactivationChangeLabels(updateData);
             const cardLabel = changedCards.length ? changedCards.join(", ") : "Company Profile";
-            // Active companies stay Active; changes wait in pendingReactivationChanges until HR approves via Submit.
+            const currentStatus = String(company?.status || "").toLowerCase();
+            const currentActivation = String(company?.activationStatus || "").toLowerCase();
+            if (currentStatus === "active" || currentActivation === "submitted") {
+                company.status = "Inactive";
+                company.activationStatus = "draft";
+                company.activationSubmittedTo = null;
+            }
             const pendingEntry = {
                 card: cardLabel,
                 reason: cardLabel,
@@ -695,9 +735,7 @@ export const updateCompany = async (req, res) => {
             const nextPending = [...(beforeCompany.pendingReactivationChanges || []), pendingEntry];
             partitionUpdatePayload = { pendingReactivationChanges: nextPending };
             updatedCompany = await company.save();
-            responseMessage = isCompanyFullyActivated(beforeCompany)
-                ? "Change queued for HR review. Submit for HR approval when you are finished editing."
-                : "Company change queued for HR activation approval.";
+            responseMessage = "Company change queued for HR activation approval.";
         } else {
             if (!skipReactivationQueueForThisRequest) {
                 await archiveSupersededCompanyDocuments(beforeCompany, updateData);
@@ -813,7 +851,7 @@ export const updateCompany = async (req, res) => {
                                     firstName: beforeCompany.name,
                                     lastName: "",
                                 },
-                                extra1: `Responsibility: ${resp.category || "Category"}`,
+                                extra1: \`Responsibility: \${resp.category || "Category"}\`,
                                 extra2: beforeCompany.companyId || "",
                             });
                         } catch (emailErr) {
@@ -845,3 +883,8 @@ export const updateCompany = async (req, res) => {
         return res.status(500).json({ message: error.message || "Failed to update company" });
     }
 };
+`;
+
+fs.writeFileSync(outPath, content, "utf8");
+const lines = content.split(/\r?\n/).length;
+console.log(`Wrote ${outPath} (${lines} lines)`);

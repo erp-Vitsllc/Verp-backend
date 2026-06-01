@@ -2,6 +2,7 @@ import mongoose from "mongoose";
 import Company from "../../models/Company.js";
 import CompanyCompliance from "../../models/CompanyCompliance.js";
 import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
+import { isRequestUserDesignatedFlowchartHr } from "../../utils/isDesignatedFlowchartHr.js";
 import { hasPermission } from "../../services/permissionService.js";
 import { buildAttachmentKeysMap } from "../../utils/listDeletionAttachmentRefs.js";
 import { awaitAdminDeletionArchive } from "../../utils/adminDeletionArchiveRun.js";
@@ -54,11 +55,13 @@ export const clearCompanyCard = async (req, res) => {
         }
 
         const isAdmin = await isReqUserAdmin(req.user);
+        const isDesignatedHr = await isRequestUserDesignatedFlowchartHr(req);
+        const canBypassActivatedDelete = isAdmin || isDesignatedHr;
         const activated = isCompanyProfileActivated(companyBefore);
         const permModule = CARD_PERMISSION_MAP[card];
 
         if (activated) {
-            if (!isAdmin) {
+            if (!canBypassActivatedDelete) {
                 return res.status(403).json({
                     message: "Only administrator can delete card details on an activated company profile.",
                 });
@@ -67,7 +70,7 @@ export const clearCompanyCard = async (req, res) => {
             const userId = req.user?.id || req.user?._id;
             const hasDeletePerm =
                 userId && permModule && (await hasPermission(userId, permModule, "delete"));
-            if (!isAdmin && !hasDeletePerm) {
+            if (!canBypassActivatedDelete && !hasDeletePerm) {
                 return res.status(403).json({ message: "You do not have permission to delete this card." });
             }
         }

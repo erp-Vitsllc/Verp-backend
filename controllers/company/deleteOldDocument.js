@@ -1,7 +1,19 @@
 import Company from "../../models/Company.js";
 import mongoose from "mongoose";
+import {
+    loadCompanyFullProfile,
+    pullFromCompanyDocumentBundle,
+    findCompanyDocumentRow,
+} from "../../services/companyPartitionService.js";
 import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
 import { awaitAdminDeletionArchive } from "../../utils/adminDeletionArchiveRun.js";
+
+const buildCompanyFilter = (id) => ({
+    $or: [
+        ...(mongoose.Types.ObjectId.isValid(id) ? [{ _id: new mongoose.Types.ObjectId(id) }] : []),
+        { companyId: id },
+    ],
+});
 
 // @desc    Delete a document from company's oldDocuments list (Archive)
 // @route   DELETE /api/Company/:id/old-document/:target
@@ -13,69 +25,42 @@ export const deleteOldDocument = async (req, res) => {
             return res.status(403).json({ message: "Only administrator can delete archived company documents." });
         }
 
-        const { id, target } = req.params; // target can be an index or an _id
-        const filter = {
-            $or: [
-                ...(mongoose.Types.ObjectId.isValid(id) ? [{ _id: new mongoose.Types.ObjectId(id) }] : []),
-                { companyId: id },
-            ],
-        };
-        const company = await Company.findOne(filter).lean();
+        const { id, target } = req.params;
+        const company = await Company.findOne(buildCompanyFilter(id)).lean();
         if (!company) {
             return res.status(404).json({ message: "Company not found" });
         }
 
-        let deletedDoc = null;
-        if (mongoose.Types.ObjectId.isValid(target)) {
-            deletedDoc = (company.oldDocuments || []).find((d) => String(d._id) === String(target));
-        } else {
-            const docIndex = Number.parseInt(target, 10);
-            if (Number.isInteger(docIndex) && docIndex >= 0 && company.oldDocuments?.[docIndex]) {
-                deletedDoc = company.oldDocuments[docIndex];
-            }
-        }
-        if (deletedDoc) {
-            await awaitAdminDeletionArchive(req, {
-                moduleName: "Company Old Document",
-                recordId: company.companyId || String(company._id),
-                details: (deletedDoc?.type || "Archived company document").toString(),
-                deletedPayload: {
-                    companyId: company.companyId,
-                    companyName: company.name,
-                    document: deletedDoc,
-                },
-            });
+        const fullProfile = (await loadCompanyFullProfile(company)) || company;
+        const located = findCompanyDocumentRow(fullProfile, target, ["oldDocuments", "documents"]);
+        if (!located?.row) {
+            return res.status(404).json({ message: "Archived document not found." });
         }
 
-        let result;
+        const { field, row: deletedDoc } = located;
 
-        if (mongoose.Types.ObjectId.isValid(target)) {
-            result = await Company.updateOne(filter, {
-                $pull: { oldDocuments: { _id: new mongoose.Types.ObjectId(target) } },
-            });
-        } else {
-            const docIndex = Number.parseInt(target, 10);
-            if (!Number.isInteger(docIndex) || docIndex < 0) {
-                return res.status(400).json({ message: "Invalid archived document target" });
-            }
-            result = await Company.updateOne(filter, {
-                $unset: { [`oldDocuments.${docIndex}`]: 1 },
-            });
-            if (result.matchedCount) {
-                await Company.updateOne(filter, { $pull: { oldDocuments: null } });
-            }
-        }
-
-        if (!result.matchedCount) {
-            return res.status(404).json({ message: "Company not found" });
-        }
-
-        res.status(200).json({
-            message: "Archived company document deleted successfully",
+        await awaitAdminDeletionArchive(req, {
+            moduleName: "Company Old Document",
+            recordId: company.companyId || String(company._id),
+            details: (deletedDoc?.type || "Archived company document").toString(),
+            deletedPayload: {
+                companyId: company.companyId,
+                companyName: company.name,
+                document: deletedDoc,
+                storageField: field,
+            },
         });
 
+        const { modified, found } = await pullFromCompanyDocumentBundle(company._id, field, target);
+        if (!found || !modified) {
+            return res.status(404).json({ message: "Archived document not found." });
+        }
+
+        return res.status(200).json({
+            message: "Archived company document deleted successfully",
+        });
     } catch (error) {
         console.error("Error deleting archived company document:", error);
-        res.status(500).json({ message: "Server error", error: error.message });
+        return res.status(500).json({ message: "Server error", error: error.message });
     }
 };
