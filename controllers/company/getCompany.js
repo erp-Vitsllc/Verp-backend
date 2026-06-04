@@ -3,6 +3,7 @@ import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { calculateCompanyActivationProgress } from "../../utils/companyActivation.js";
 import { isRequestUserDesignatedFlowchartHr } from "../../utils/isDesignatedFlowchartHr.js";
 import { signCompanyDocumentArray } from "../../utils/signCompanyDocumentFields.js";
+import { signCompanyProfileForResponse } from "../../utils/signCompanyProfileForResponse.js";
 import { loadCompanyFullProfile } from "../../services/companyPartitionService.js";
 
 /**
@@ -90,26 +91,6 @@ export const getCompany = async (req, res) => {
             }
         }
 
-        // Owners Documents (arrays may contain null placeholders)
-        if (companyObj.owners && Array.isArray(companyObj.owners)) {
-            companyObj.owners = await Promise.all(companyObj.owners.map(async (owner) => {
-                if (!owner || typeof owner !== "object") return owner;
-                if (owner.attachment) owner.attachment = await getSignedFileUrl(owner.attachment);
-                if (owner.passport?.attachment) owner.passport.attachment = await getSignedFileUrl(owner.passport.attachment);
-                if (owner.visa?.attachment) owner.visa.attachment = await getSignedFileUrl(owner.visa.attachment);
-                for (const visaKey of ["visitVisa", "employmentVisa", "spouseVisa"]) {
-                    if (owner[visaKey]?.attachment) {
-                        owner[visaKey].attachment = await getSignedFileUrl(owner[visaKey].attachment);
-                    }
-                }
-                if (owner.emiratesId?.attachment) owner.emiratesId.attachment = await getSignedFileUrl(owner.emiratesId.attachment);
-                if (owner.medical?.attachment) owner.medical.attachment = await getSignedFileUrl(owner.medical.attachment);
-                if (owner.drivingLicense?.attachment) owner.drivingLicense.attachment = await getSignedFileUrl(owner.drivingLicense.attachment);
-                if (owner.labourCard?.attachment) owner.labourCard.attachment = await getSignedFileUrl(owner.labourCard.attachment);
-                return owner;
-            }));
-        }
-
         // Custom / archived / insurance / ejari rows (document.url + legacy attachment)
         if (companyObj.documents) {
             companyObj.documents = await signCompanyDocumentArray(companyObj.documents);
@@ -160,11 +141,13 @@ export const getCompany = async (req, res) => {
         }));
 
 
+        const signedCompany = await signCompanyProfileForResponse(companyObj);
+
         return res.status(200).json({
             message: "Company fetched successfully",
-            company: companyObj,
+            company: signedCompany,
             employeeCount: employeeCount,
-            activationProgress: calculateCompanyActivationProgress(companyObj),
+            activationProgress: calculateCompanyActivationProgress(signedCompany),
             viewerIsDesignatedFlowchartHr,
         });
     } catch (error) {

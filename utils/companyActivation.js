@@ -16,9 +16,69 @@ import {
     clearStaleCompanyActivationOutcomeRows,
 } from "./clearCompanyActivationHoldDashboardRows.js";
 import { shortenUrlsInString } from "./shortenUrlsInString.js";
+import { validateOwnerDetailsOwnersPayload } from "./ownerDetailsValidation.js";
+import { validateOwnerPassportRow } from "./ownerPassportValidation.js";
+import { validateOwnerEmiratesIdRow } from "./ownerEmiratesIdValidation.js";
+import { mergeCompanyOwnersSnapshot } from "./mergeCompanyOwnersSnapshot.js";
 
 const hasValue = (v) => !(v === undefined || v === null || (typeof v === "string" && v.trim() === ""));
 const hasAttachment = (v) => hasValue(v);
+
+const hasOwnerDocAttachment = (att) => {
+    if (!hasValue(att)) return false;
+    if (typeof att === "object" && att !== null) {
+        return hasValue(att.url) || hasValue(att.publicId) || hasValue(att.data);
+    }
+    return true;
+};
+
+const companyOwnersList = (company = {}) =>
+    Array.isArray(company.owners) ? company.owners : [];
+
+const isOwnerPassportActivationComplete = (passport, owners, ownerIndex) => {
+    if (!passport || typeof passport !== "object") return false;
+    const check = validateOwnerPassportRow(passport, { owners, ownerIndex });
+    if (!check.ok) return false;
+    const hasContent =
+        passport.number ||
+        passport.nationality ||
+        passport.countryOfIssue ||
+        passport.issueDate ||
+        passport.expiryDate ||
+        passport.attachment;
+    if (!hasContent) return false;
+    return hasOwnerDocAttachment(passport.attachment);
+};
+
+const isOwnerEmiratesIdActivationComplete = (emiratesId, owners, ownerIndex) => {
+    if (!emiratesId || typeof emiratesId !== "object") return false;
+    const check = validateOwnerEmiratesIdRow(emiratesId, { owners, ownerIndex });
+    if (!check.ok) return false;
+    const hasContent =
+        emiratesId.number ||
+        emiratesId.issueDate ||
+        emiratesId.expiryDate ||
+        emiratesId.attachment;
+    if (!hasContent) return false;
+    return hasOwnerDocAttachment(emiratesId.attachment);
+};
+
+const areOwnersPassportsActivationComplete = (owners = []) => {
+    if (!owners.length) return false;
+    return owners.every((owner, i) =>
+        isOwnerPassportActivationComplete(owner?.passport, owners, i),
+    );
+};
+
+const areOwnersEmiratesIdsActivationComplete = (owners = []) => {
+    if (!owners.length) return false;
+    return owners.every((owner, i) =>
+        isOwnerEmiratesIdActivationComplete(owner?.emiratesId, owners, i),
+    );
+};
+
+const areOwnerDetailsActivationComplete = (owners = []) =>
+    validateOwnerDetailsOwnersPayload(owners, { profileActive: true }).ok;
 
 const isArchivedCompanyDocumentRow = (d) => {
     if (!d || typeof d !== "object") return false;
@@ -75,7 +135,10 @@ const overlayProposedFieldsForActivation = (base, proposed) => {
     if (!proposed || typeof proposed !== "object") return base;
     const out = { ...base };
     for (const k of ACTIVATION_PROGRESS_OVERLAY_KEYS) {
-        if (Object.prototype.hasOwnProperty.call(proposed, k)) {
+        if (!Object.prototype.hasOwnProperty.call(proposed, k)) continue;
+        if (k === "owners" && Array.isArray(proposed.owners)) {
+            out.owners = mergeCompanyOwnersSnapshot(out.owners || [], proposed.owners);
+        } else {
             out[k] = proposed[k];
         }
     }
@@ -160,6 +223,21 @@ export const calculateCompanyActivationProgress = (company = {}, opts = {}) => {
             key: "moa",
             label: "MOA",
             completed: hasMoaDocument(co),
+        },
+        {
+            key: "ownerDetails",
+            label: "Owner Details Card",
+            completed: areOwnerDetailsActivationComplete(companyOwnersList(co)),
+        },
+        {
+            key: "ownerPassport",
+            label: "Passport of Owner",
+            completed: areOwnersPassportsActivationComplete(companyOwnersList(co)),
+        },
+        {
+            key: "ownerEmiratesId",
+            label: "EID of Owner",
+            completed: areOwnersEmiratesIdsActivationComplete(companyOwnersList(co)),
         },
     ];
 
@@ -635,6 +713,9 @@ export const upsertPendingReactivationEntry = (existingPending = [], newEntry, c
                     ? JSON.parse(JSON.stringify(newEntry.proposedData))
                     : {};
             mergedProposed = { ...prior, ...patch };
+            if (Array.isArray(prior.owners) && Array.isArray(patch.owners)) {
+                mergedProposed.owners = mergeCompanyOwnersSnapshot(prior.owners, patch.owners);
+            }
         } catch {
             mergedProposed = newEntry.proposedData;
         }

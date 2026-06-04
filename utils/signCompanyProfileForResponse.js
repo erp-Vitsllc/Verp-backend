@@ -15,33 +15,49 @@ export async function signCompanyProfileForResponse(companyObj = {}) {
     if (Array.isArray(out.oldDocuments)) out.oldDocuments = await signCompanyDocumentArray(out.oldDocuments);
     if (Array.isArray(out.insurance)) out.insurance = await signCompanyDocumentArray(out.insurance);
     if (Array.isArray(out.ejari)) out.ejari = await signCompanyDocumentArray(out.ejari);
+    const signOwnerRow = async (owner) => {
+        if (!owner || typeof owner !== "object") return owner;
+        const o = { ...owner };
+        if (typeof o.attachment === "string" && o.attachment) {
+            o.attachment = await getSignedFileUrl(o.attachment);
+        }
+        for (const key of [
+            "passport",
+            "visa",
+            "visitVisa",
+            "employmentVisa",
+            "spouseVisa",
+            "emiratesId",
+            "medical",
+            "drivingLicense",
+            "labourCard",
+        ]) {
+            const doc = o[key];
+            if (doc?.attachment && typeof doc.attachment === "string") {
+                o[key] = { ...doc, attachment: await getSignedFileUrl(doc.attachment) };
+            }
+        }
+        return o;
+    };
+
     if (Array.isArray(out.owners)) {
-        out.owners = await Promise.all(
-            out.owners.map(async (owner) => {
-                if (!owner || typeof owner !== "object") return owner;
-                const o = { ...owner };
-                if (typeof o.attachment === "string" && o.attachment) {
-                    o.attachment = await getSignedFileUrl(o.attachment);
+        out.owners = await Promise.all(out.owners.map(signOwnerRow));
+    }
+
+    if (Array.isArray(out.pendingReactivationChanges)) {
+        out.pendingReactivationChanges = await Promise.all(
+            out.pendingReactivationChanges.map(async (entry) => {
+                if (!entry?.proposedData?.owners || !Array.isArray(entry.proposedData.owners)) {
+                    return entry;
                 }
-                for (const key of [
-                    "passport",
-                    "visa",
-                    "visitVisa",
-                    "employmentVisa",
-                    "spouseVisa",
-                    "emiratesId",
-                    "medical",
-                    "drivingLicense",
-                    "labourCard",
-                ]) {
-                    const doc = o[key];
-                    if (doc?.attachment && typeof doc.attachment === "string") {
-                        o[key] = { ...doc, attachment: await getSignedFileUrl(doc.attachment) };
-                    }
-                }
-                return o;
+                const proposedData = { ...entry.proposedData };
+                proposedData.owners = await Promise.all(
+                    entry.proposedData.owners.map(signOwnerRow),
+                );
+                return { ...entry, proposedData };
             }),
         );
     }
+
     return out;
 }

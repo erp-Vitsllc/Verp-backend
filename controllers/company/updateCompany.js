@@ -26,6 +26,7 @@ import {
     stripProposedDataKeysFromPendingReactivationEntries,
     isCompanyFullyActivated,
 } from "../../utils/companyActivation.js";
+import { mergeCompanyOwnersSnapshot } from "../../utils/mergeCompanyOwnersSnapshot.js";
 import {
     markCompanyActivationHoldResolvedForUpdate,
     labelsRequiredForActivationHoldEntry,
@@ -583,6 +584,11 @@ export const updateCompany = async (req, res) => {
 
         if (Object.prototype.hasOwnProperty.call(updateData, "owners")) {
             try {
+                // Keep existing owner doc cards (passport, EID, etc.) when PATCH sends only one updated card.
+                updateData.owners = mergeCompanyOwnersSnapshot(
+                    beforeCompany.owners || [],
+                    updateData.owners,
+                );
                 const globalUsed = await collectGlobalOwnerProfileIds();
                 updateData.owners = normalizeTradeLicenseOwners(updateData.owners, globalUsed);
                 updateData.owners = updateData.owners.map((row) => {
