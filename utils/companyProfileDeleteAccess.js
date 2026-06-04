@@ -174,14 +174,27 @@ const bundleRowsExplicitlyRemoved = (beforeRows = [], afterRows = []) => {
         if (id) afterById.set(id, row);
     }
 
-    for (const row of before) {
+    for (let i = 0; i < before.length; i++) {
+        const row = before[i];
         const id = subdocRowId(row);
         if (!id) continue;
-        if (!afterById.has(id) && collectAttachmentUrls([row]).length) return true;
-        const afterRow = afterById.get(id);
+        let afterRow = afterById.get(id);
+        if (!afterRow && after[i] && subdocRowId(after[i]) === id) {
+            afterRow = after[i];
+        }
+        if (!afterRow && after[i]) {
+            afterRow = after[i];
+        }
+        if (!afterRow && collectAttachmentUrls([row]).length) return true;
         const prevAtt = collectAttachmentUrls([row]);
         const nextAtt = collectAttachmentUrls([afterRow]);
         if (prevAtt.length && !nextAtt.length) return true;
+        const prevNorm = prevAtt.map((u) => normalizeAttachmentKeyForCompare(u)).filter(Boolean);
+        const nextNorm = nextAtt.map((u) => normalizeAttachmentKeyForCompare(u)).filter(Boolean);
+        if (prevNorm.length && nextNorm.length && prevNorm.some((u) => !nextNorm.includes(u))) {
+            const hasReplacement = nextNorm.some((u) => !prevNorm.includes(u));
+            if (!hasReplacement) return true;
+        }
     }
 
     if (after.length < before.length) {

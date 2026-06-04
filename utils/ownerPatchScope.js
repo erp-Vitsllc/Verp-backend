@@ -13,6 +13,15 @@ const OWNER_BASIC_SCALAR_KEYS = [
     "sharePercentage",
 ];
 
+/** Contact/detail fields only — excludes share % (auto-redistribute must not validate other owners). */
+const OWNER_CONTACT_DETAIL_KEYS = [
+    "name",
+    "email",
+    "phone",
+    "phoneCountryCode",
+    "nationality",
+];
+
 const scalarFieldEqual = (key, baseVal, patchVal) => {
     if (key === "email") {
         return normalizeOwnerEmail(baseVal) === normalizeOwnerEmail(patchVal);
@@ -30,6 +39,27 @@ export const ownerPatchTouchesBasicScalarFields = (patch = {}, base = {}) => {
         if (!Object.prototype.hasOwnProperty.call(patch, key)) return false;
         return !scalarFieldEqual(key, base[key], patch[key]);
     });
+};
+
+const ownerPatchTouchesContactDetailFields = (patch = {}, base = {}) => {
+    if (!patch || typeof patch !== "object") return false;
+    return OWNER_CONTACT_DETAIL_KEYS.some((key) => {
+        if (!Object.prototype.hasOwnProperty.call(patch, key)) return false;
+        return !scalarFieldEqual(key, base[key], patch[key]);
+    });
+};
+
+/** Owner row indexes whose contact/basic fields changed (not share-only redistribute). */
+export const getOwnerIndicesWithContactDetailChanges = (patchOwners = [], baseOwners = []) => {
+    if (!Array.isArray(patchOwners) || patchOwners.length === 0) return [];
+    const indices = [];
+    patchOwners.forEach((patch, index) => {
+        const base = findBaseOwner(patch, baseOwners, index);
+        if (ownerPatchTouchesContactDetailFields(patch, base)) {
+            indices.push(index);
+        }
+    });
+    return indices;
 };
 
 const findBaseOwner = (patch, baseOwners, index) => {

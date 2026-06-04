@@ -123,11 +123,21 @@ export function normalizeOwnerDetailsRow(owner) {
 
 export function validateOwnerDetailsOwnersPayload(
     owners = [],
-    { requireEmail = false, profileActive = false } = {},
+    {
+        requireEmail = false,
+        profileActive = false,
+        /** When set, email/phone/nationality are validated only on these owner indexes (modal save). */
+        onlyValidateDetailIndices = null,
+    } = {},
 ) {
     if (!Array.isArray(owners) || owners.length === 0) {
         return { ok: false, message: "At least one owner is required" };
     }
+
+    const limitDetailIndices =
+        Array.isArray(onlyValidateDetailIndices)
+            ? new Set(onlyValidateDetailIndices)
+            : null;
 
     const emails = new Set();
 
@@ -139,7 +149,11 @@ export function validateOwnerDetailsOwnersPayload(
         const shareErr = validateOwnerSharePercentage(owner?.sharePercentage);
         if (shareErr) return { ok: false, message: shareErr };
 
-        if (!ownerRowNeedsDetailValidation(owner, profileActive)) continue;
+        const validateContactDetails = limitDetailIndices
+            ? limitDetailIndices.has(i)
+            : ownerRowNeedsDetailValidation(owner, profileActive);
+
+        if (!validateContactDetails) continue;
 
         const emailErr = validateOwnerEmail(getOwnerRowEmail(owner), {
             requireEmail: profileActive || requireEmail,
@@ -149,19 +163,26 @@ export function validateOwnerDetailsOwnersPayload(
             return { ok: false, message: `${label}: ${emailErr}` };
         }
 
-        const emailKey = getOwnerRowEmail(owner);
-        if (emailKey) {
-            if (emails.has(emailKey)) {
-                return { ok: false, message: "Email Address must be unique among owners" };
-            }
-            emails.add(emailKey);
+        const phoneErr = validateOwnerPhone(owner?.phone);
+        if (phoneErr) {
+            const label = String(owner?.name || "").trim() || `Owner ${i + 1}`;
+            return { ok: false, message: `${label}: ${phoneErr}` };
         }
 
-        const phoneErr = validateOwnerPhone(owner?.phone);
-        if (phoneErr) return { ok: false, message: phoneErr };
-
         const natErr = validateOwnerNationality(owner?.nationality);
-        if (natErr) return { ok: false, message: natErr };
+        if (natErr) {
+            const label = String(owner?.name || "").trim() || `Owner ${i + 1}`;
+            return { ok: false, message: `${label}: ${natErr}` };
+        }
+    }
+
+    for (let i = 0; i < owners.length; i++) {
+        const emailKey = getOwnerRowEmail(owners[i]);
+        if (!emailKey) continue;
+        if (emails.has(emailKey)) {
+            return { ok: false, message: "Email Address must be unique among owners" };
+        }
+        emails.add(emailKey);
     }
 
     let total = 0;

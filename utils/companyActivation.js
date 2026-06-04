@@ -403,7 +403,7 @@ export const submitCompanyActivation = async ({
         );
         // Keep the full queue in pendingReactivationChanges — unchecked rows stay until HR approves.
     }
-    if (!force && progress.percentage < 100) {
+    if (!force && !isActiveCompanyProfile(merged) && progress.percentage < 100) {
         return {
             ok: false,
             blocked: true,
@@ -759,6 +759,20 @@ const serializeActivationDocumentsSlice = (documents) => {
     }
 };
 
+/** Same path logic as company profile UI — signed URLs must not look like MOA edits. */
+const documentAttachmentFingerprint = (d) => {
+    const raw = String(
+        d?.document?.url || d?.document?.publicId || d?.attachment || "",
+    ).trim();
+    if (!raw) return "";
+    const noQuery = raw.split("?")[0].trim().toLowerCase();
+    for (const marker of ["company-documents", "employee-documents"]) {
+        const idx = noQuery.indexOf(marker);
+        if (idx !== -1) return noQuery.slice(idx);
+    }
+    return noQuery;
+};
+
 /** @deprecated Use serializeActivationDocumentsSlice — kept for callers that only diff MOA. */
 const serializeMoaDocumentsSlice = (documents) => {
     const list = Array.isArray(documents) ? documents : [];
@@ -775,7 +789,7 @@ const serializeMoaDocumentsSlice = (documents) => {
         issueDate: iso(d?.issueDate),
         startDate: iso(d?.startDate),
         expiryDate: iso(d?.expiryDate),
-        url: String(d?.document?.url || d?.attachment || "").split("?")[0],
+        url: documentAttachmentFingerprint(d),
     });
     try {
         return JSON.stringify(moaRows.map(norm).sort((a, b) => a.id.localeCompare(b.id)));

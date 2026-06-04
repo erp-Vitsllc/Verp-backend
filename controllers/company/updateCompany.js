@@ -27,7 +27,10 @@ import {
     isCompanyFullyActivated,
 } from "../../utils/companyActivation.js";
 import { mergeCompanyOwnersSnapshot } from "../../utils/mergeCompanyOwnersSnapshot.js";
-import { isOwnerNestedDocOnlyOwnersUpdate } from "../../utils/ownerPatchScope.js";
+import {
+    getOwnerIndicesWithContactDetailChanges,
+    isOwnerNestedDocOnlyOwnersUpdate,
+} from "../../utils/ownerPatchScope.js";
 import {
     markCompanyActivationHoldResolvedForUpdate,
     labelsRequiredForActivationHoldEntry,
@@ -643,9 +646,14 @@ export const updateCompany = async (req, res) => {
                     beforeCompany.owners || [],
                 );
                 if (!tradeLicenseOwnersOnly && !ownerDocCardsOnly) {
+                    const contactDetailChangeIndices = getOwnerIndicesWithContactDetailChanges(
+                        updateData.owners,
+                        beforeCompany.owners || [],
+                    );
                     const detailsCheck = validateOwnerDetailsOwnersPayload(updateData.owners, {
                         requireEmail: profileActive,
                         profileActive,
+                        onlyValidateDetailIndices: contactDetailChangeIndices,
                     });
                     if (!detailsCheck.ok) {
                         return res.status(400).json({ message: detailsCheck.message });
