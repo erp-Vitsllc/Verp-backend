@@ -719,9 +719,9 @@ export const discardCompanyPendingActivationEntry = async (req, res) => {
 
         const pending = Array.isArray(merged.pendingReactivationChanges)
             ? merged.pendingReactivationChanges.map((entry, idx) => ({
-                  ...(entry?.toObject ? entry.toObject() : entry),
-                  __idStr: companyPendingEntryId(entry, idx),
-              }))
+                ...(entry?.toObject ? entry.toObject() : entry),
+                __idStr: companyPendingEntryId(entry, idx),
+            }))
             : [];
 
         const target = pending.find((e) => e.__idStr === entryIdStr);

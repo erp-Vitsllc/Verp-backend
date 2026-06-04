@@ -45,7 +45,7 @@ export const getNextEmployeeId = async (req, res) => {
         });
 
         const nextIdNumber = maxIdNumber + 1;
-        const nextId = `${prefix}${String(nextIdNumber).padStart(5, '0')}`;
+        const nextId = `${prefix}${String(nextIdNumber).padStart(5, '0')}`.toUpperCase();
 
         return res.status(200).json({
             nextEmployeeId: nextId

@@ -21,6 +21,7 @@ import {
     calculateCompanyActivationProgress,
     shouldTriggerCompanyReactivation,
     collectCompanyReactivationChangeLabels,
+    upsertPendingReactivationEntry,
     pickCompanyPendingPreviousSnapshot,
     stripProposedDataKeysFromPendingReactivationEntries,
     isCompanyFullyActivated,
@@ -773,7 +774,7 @@ export const updateCompany = async (req, res) => {
                 });
             }
             if (!mergedIntoHeldRow) {
-                nextPending = [...nextPending, pendingEntry];
+                nextPending = upsertPendingReactivationEntry(nextPending, pendingEntry, changedCards);
             }
             partitionUpdatePayload = { pendingReactivationChanges: nextPending };
             updatedCompany = await company.save();

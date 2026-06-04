@@ -6,6 +6,10 @@ import EmployeeSalary from "../../models/EmployeeSalary.js";
 import User from "../../models/User.js";
 import bcrypt from "bcryptjs";
 import { getCompleteEmployee } from "../../services/employeeService.js";
+import {
+    validateEmployeeAddBody,
+    assertActiveCompany,
+} from "../../utils/employeeAddValidation.js";
 
 // Calculate age from date of birth
 const calculateAge = (dateOfBirth) => {
@@ -81,33 +85,34 @@ export const addEmployee = async (req, res) => {
         // Check for empty strings, null, undefined, or whitespace-only strings
         const isEmpty = (val) => !val || (typeof val === 'string' && val.trim() === '');
 
-        // Sanitize Employee ID: Remove all spaces to standardized format (e.g. VEGA - HR - 01 -> VEGA-HR-01)
+        const validation = validateEmployeeAddBody(req.body);
+        if (validation.errors.length > 0) {
+            return res.status(400).json({
+                message: validation.errors[0],
+                errors: validation.errors,
+            });
+        }
+
+        const companyError = await assertActiveCompany(company);
+        if (companyError) {
+            return res.status(400).json({ message: companyError });
+        }
+
+        // Sanitize Employee ID: uppercase, no spaces
         if (employeeId && typeof employeeId === 'string') {
-            req.body.employeeId = employeeId.replace(/\s+/g, '');
+            req.body.employeeId = employeeId.replace(/\s+/g, '').toUpperCase();
         }
         const cleanedEmployeeId = req.body.employeeId;
+        const cleanedEmail = validation.normalized.email;
 
-        // Only keep the minimal must-have fields to align with the simplified form
-        // Validate required fields and types
-        if (typeof firstName !== 'string' || !firstName.trim() ||
-            typeof lastName !== 'string' || !lastName.trim() ||
-            typeof cleanedEmployeeId !== 'string' || !cleanedEmployeeId.trim() ||
-            !company ||
-            (email !== undefined && typeof email !== 'string')) {
-            return res.status(400).json({
-                message: "First Name, Last Name, Company, and Employee ID are required and must be valid strings. Email if provided must be a string."
-            });
+        if (enablePortalAccess && cleanedEmail) {
+            const existingUser = await User.findOne({ email: cleanedEmail }).lean();
+            if (existingUser) {
+                return res.status(400).json({
+                    message: "A user account with this email already exists. Disable portal access or use another email.",
+                });
+            }
         }
-
-        // Additional check for email if it's required for user creation
-        if (email && typeof email !== 'string') {
-            return res.status(400).json({
-                message: "Invalid email format"
-            });
-        }
-
-        // Sanitize email if provided
-        const cleanedEmail = email && typeof email === 'string' ? email.trim().toLowerCase() : '';
 
         // Check if employee ID already exists
         const existingEmployeeId = await EmployeeBasic.findOne({ employeeId: cleanedEmployeeId });

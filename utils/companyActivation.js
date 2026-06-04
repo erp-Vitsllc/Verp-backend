@@ -82,15 +82,21 @@ const overlayProposedFieldsForActivation = (base, proposed) => {
     return out;
 };
 
-/** Only fully activated companies queue edits in pendingReactivationChanges. */
-export const shouldOverlayPendingReactivationChanges = (company = {}) => {
-    const status = String(company?.status || "").toLowerCase();
-    const activationStatus = String(company?.activationStatus || "").toLowerCase();
-    return status === "active" && activationStatus === "active";
-};
+/** Company status is Active (may still be in submitted/hold reactivation review). */
+export const isActiveCompanyProfile = (company = {}) =>
+    String(company?.status || "").toLowerCase() === "active";
 
-/** Alias — company profile is live (status + activation both active). */
-export const isCompanyFullyActivated = (company = {}) => shouldOverlayPendingReactivationChanges(company);
+/**
+ * Merge queued patches for progress / eligibility only — not for live card display.
+ * Active profiles keep pending edits in the queue until HR approves, even when activationStatus is submitted.
+ */
+export const shouldOverlayPendingReactivationChanges = (company = {}) => isActiveCompanyProfile(company);
+
+/** Status Active + activationStatus active (strict “fully activated” UI state). */
+export const isCompanyFullyActivated = (company = {}) => {
+    const activationStatus = String(company?.activationStatus || "").toLowerCase();
+    return isActiveCompanyProfile(company) && activationStatus === "active";
+};
 
 export const companyWasEverFullyActivated = (company = {}) => {
     const co = typeof company.toObject === "function" ? company.toObject() : company;
@@ -284,6 +290,7 @@ export const submitCompanyActivation = async ({
         ? [...merged.pendingReactivationChanges]
         : [];
 
+    let submittingThisRequest = pendingAfterSelection;
     if (selectionProvided) {
         if (!Array.isArray(includedChangeEntryIds)) {
             return {
@@ -304,10 +311,19 @@ export const submitCompanyActivation = async ({
                 };
             }
         }
+        if (pendingAfterSelection.length > 0 && includedChangeEntryIds.length === 0) {
+            return {
+                ok: false,
+                blocked: true,
+                message: "Select at least one requested change to submit.",
+                progress,
+            };
+        }
         const keep = new Set(includedChangeEntryIds.map(String));
-        pendingAfterSelection = pendingAfterSelection.filter((entry, idx) =>
+        submittingThisRequest = pendingAfterSelection.filter((entry, idx) =>
             keep.has(companyPendingEntryId(entry, idx)),
         );
+        // Keep the full queue in pendingReactivationChanges — unchecked rows stay until HR approves.
     }
     if (!force && progress.percentage < 100) {
         return {
@@ -339,7 +355,7 @@ export const submitCompanyActivation = async ({
         ? merged.activationWorkflow.some((w) => String(w?.status || "").toLowerCase() === "active")
         : false;
     const activationTypeLabel = wasPreviouslyActive ? "Reactivation" : "New Activation";
-    const requestedChanges = [...new Set(pendingAfterSelection.map((x) => String(x?.card || "").trim()).filter(Boolean))];
+    const requestedChanges = [...new Set(submittingThisRequest.map((x) => String(x?.card || "").trim()).filter(Boolean))];
     const extra1ForDashboard = dashboardSummary != null
         ? `${activationTypeLabel} | ${dashboardSummary}${requestedChanges.length ? ` | Requested Changes: ${requestedChanges.join(", ")}` : ""}`
         : `${activationTypeLabel} | ${reason}${requestedChanges.length ? ` | Requested Changes: ${requestedChanges.join(", ")}` : ""}`;
@@ -456,6 +472,7 @@ export const ACTIVE_COMPANY_HR_QUEUE_CARD_LABELS = [
     "Trade License",
     "Establishment Card",
     "MOA",
+    "Owner Details",
     "Owner Passport",
     "Owner Emirates ID",
 ];
@@ -508,6 +525,9 @@ export const collectCompanyReactivationChangeLabels = (updateData = {}, beforeCo
     }
     if (Object.prototype.hasOwnProperty.call(updateData, "owners")) {
         const beforeOwners = beforeCompany?.owners || [];
+        if (isOwnersBasicDetailsModified(beforeOwners, updateData.owners)) {
+            changes.push("Owner Details");
+        }
         if (isOwnersPassportModified(beforeOwners, updateData.owners)) {
             changes.push("Owner Passport");
         }
@@ -567,6 +587,69 @@ export const stripProposedDataKeysFromPendingReactivationEntries = (entries = []
         });
     }
     return out;
+};
+
+const normCardLabel = (s) => String(s || "").toLowerCase().trim();
+
+function labelsFromPendingEntryCard(card) {
+    return String(card || "")
+        .split(",")
+        .map((s) => s.replace(/\([^)]*\)/g, "").trim())
+        .filter(Boolean);
+}
+
+function pendingEntryMatchesChangedCards(entry, changedCards = []) {
+    const changedNorm = new Set(changedCards.map(normCardLabel).filter(Boolean));
+    if (!changedNorm.size) return false;
+    const pd =
+        entry?.proposedData && typeof entry.proposedData === "object" ? entry.proposedData : {};
+    const fromPd = collectCompanyReactivationChangeLabels(pd, entry?.previousData);
+    const entryLabels = fromPd.length ? fromPd : labelsFromPendingEntryCard(entry?.card);
+    return entryLabels.some((l) => changedNorm.has(normCardLabel(l)));
+}
+
+/**
+ * Merge a new save into an existing queued row for the same card (e.g. Trade License edited twice).
+ * Keeps the original previousData snapshot from the first queue.
+ */
+export const upsertPendingReactivationEntry = (existingPending = [], newEntry, changedCards = []) => {
+    const list = Array.isArray(existingPending) ? [...existingPending] : [];
+    const cards = [...new Set(changedCards)].filter(Boolean);
+    if (!cards.length) {
+        list.push(newEntry);
+        return list;
+    }
+    let merged = false;
+    const next = list.map((entry) => {
+        if (!pendingEntryMatchesChangedCards(entry, cards)) return entry;
+        merged = true;
+        const prevSnapshot = entry?.previousData ?? newEntry.previousData;
+        let mergedProposed = {};
+        try {
+            const prior =
+                entry?.proposedData && typeof entry.proposedData === "object"
+                    ? JSON.parse(JSON.stringify(entry.proposedData))
+                    : {};
+            const patch =
+                newEntry?.proposedData && typeof newEntry.proposedData === "object"
+                    ? JSON.parse(JSON.stringify(newEntry.proposedData))
+                    : {};
+            mergedProposed = { ...prior, ...patch };
+        } catch {
+            mergedProposed = newEntry.proposedData;
+        }
+        return {
+            ...entry,
+            ...newEntry,
+            card: newEntry.card || entry.card,
+            reason: newEntry.reason || entry.reason,
+            previousData: prevSnapshot,
+            proposedData: mergedProposed,
+            changedAt: newEntry.changedAt || entry.changedAt,
+        };
+    });
+    if (!merged) next.push(newEntry);
+    return next;
 };
 
 /** Live document rows (MOA, memo, certificate, with/without expiry) for reactivation diff — excludes archived rows. */
@@ -696,6 +779,49 @@ const serializeOwnerEmiratesId = (owner) => {
     return JSON.stringify(emiratesIdData);
 };
 
+const serializeOwnerBasicDetails = (owner = {}) =>
+    JSON.stringify({
+        name: String(owner?.name || "").trim(),
+        email: String(owner?.email || "").trim().toLowerCase(),
+        phone: String(owner?.phone || "").trim(),
+        phoneCountryCode: String(owner?.phoneCountryCode || "").trim(),
+        nationality: String(owner?.nationality || "").trim(),
+        sharePercentage:
+            owner?.sharePercentage != null && owner?.sharePercentage !== ""
+                ? String(owner.sharePercentage)
+                : "",
+    });
+
+/** Name, email, phone, nationality, share % — not passport / Emirates ID sub-documents. */
+export const isOwnersBasicDetailsModified = (beforeOwners = [], nextOwners = []) => {
+    const prev = Array.isArray(beforeOwners) ? beforeOwners : [];
+    const next = Array.isArray(nextOwners) ? nextOwners : [];
+
+    const findPrev = (nextOwner, idx) => {
+        const nextId = nextOwner?._id || nextOwner?.id;
+        if (nextId) {
+            const found = prev.find((o) => String(o?._id || o?.id || "") === String(nextId));
+            if (found) return found;
+        }
+        return prev[idx] || null;
+    };
+
+    if (prev.length !== next.length) return true;
+
+    for (let i = 0; i < next.length; i++) {
+        const nextOwner = next[i];
+        const prevOwner = findPrev(nextOwner, i);
+        if (!prevOwner) {
+            if (serializeOwnerBasicDetails(nextOwner) !== serializeOwnerBasicDetails({})) return true;
+            continue;
+        }
+        if (serializeOwnerBasicDetails(prevOwner) !== serializeOwnerBasicDetails(nextOwner)) {
+            return true;
+        }
+    }
+    return false;
+};
+
 export const isOwnersPassportModified = (beforeOwners = [], nextOwners = []) => {
     const prev = Array.isArray(beforeOwners) ? beforeOwners : [];
     const next = Array.isArray(nextOwners) ? nextOwners : [];
@@ -769,6 +895,7 @@ export const updateDataTouchesHrApprovalCards = (beforeCompany = {}, updateData 
     if (Object.prototype.hasOwnProperty.call(updateData, "owners")) {
         const beforeOwners = beforeCompany?.owners || [];
         if (
+            isOwnersBasicDetailsModified(beforeOwners, updateData.owners) ||
             isOwnersPassportModified(beforeOwners, updateData.owners) ||
             isOwnersEmiratesIdModified(beforeOwners, updateData.owners)
         ) {
@@ -779,11 +906,11 @@ export const updateDataTouchesHrApprovalCards = (beforeCompany = {}, updateData 
 };
 
 /**
- * Active profile (status + activation both active): HR-queue card edits wait in pendingReactivationChanges.
+ * Active profile (status Active): HR-queue card edits wait in pendingReactivationChanges.
  * Inactive / draft profile: returns false so updates apply immediately without HR approval.
  */
 export const shouldTriggerCompanyReactivation = (beforeCompany = {}, updateData = {}) => {
-    if (!isCompanyFullyActivated(beforeCompany)) {
+    if (!isActiveCompanyProfile(beforeCompany)) {
         return false;
     }
     return updateDataTouchesHrApprovalCards(beforeCompany, updateData);
