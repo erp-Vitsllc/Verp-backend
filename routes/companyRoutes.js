@@ -25,6 +25,7 @@ import {
     approveCompanyActivationRequest,
     holdCompanyActivationRequest,
     rejectCompanyActivationRequest,
+    discardCompanyPendingActivationEntry,
 } from "../controllers/company/activationController.js";
 
 const router = express.Router();
@@ -43,6 +44,7 @@ router.post("/:id/submit-activation", submitCompanyActivationRequest);
 router.post("/:id/approve-activation", approveCompanyActivationRequest);
 router.post("/:id/hold-activation", holdCompanyActivationRequest);
 router.post("/:id/reject-activation", rejectCompanyActivationRequest);
+router.delete("/:id/pending-activation-entry/:entryId", discardCompanyPendingActivationEntry);
 router.put("/:id/respond-responsibility", respondToResponsibility);
 router.post("/:id/upload", uploadCompanyDocument);
 router.delete("/:id/document/:target", deleteDocument);

@@ -15,6 +15,7 @@ import {
     upsertCompanyPartitions,
 } from "../../services/companyPartitionService.js";
 import { signCompanyProfileForResponse } from "../../utils/signCompanyProfileForResponse.js";
+import { closeCreatorNotRenewFollowUpTasks } from "../../utils/companyNotRenewFollowUp.js";
 
 const CARD_FIELD_MAP = {
     tradeLicense: [
@@ -141,6 +142,12 @@ export const clearCompanyCard = async (req, res) => {
         const refreshedCore = await Company.findOne(buildCompanyFilter(id)).lean();
         const fullProfile = (await loadCompanyFullProfile(refreshedCore)) || refreshedCore;
         const signedCompany = await signCompanyProfileForResponse(fullProfile);
+
+        const notRenewKind = card === "tradeLicense" ? "tradeLicense" : "establishmentCard";
+        await closeCreatorNotRenewFollowUpTasks(companyBefore._id, {
+            kind: notRenewKind,
+            closeAllOfKind: true,
+        });
 
         return res.status(200).json({
             message: "Company card cleared successfully.",

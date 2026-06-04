@@ -11,6 +11,13 @@ import {
     loadCompanyFullProfile,
     upsertCompanyPartitions,
 } from "../../services/companyPartitionService.js";
+import {
+    samePendingNotRenewTarget,
+    buildNotRenewTargetFromEntry,
+    closeHrNotRenewDashboardAction,
+    closeCreatorNotRenewFollowUpTasks,
+    createCreatorNotRenewFollowUpAfterReject,
+} from "../../utils/companyNotRenewFollowUp.js";
 
 const KINDS = new Set(["tradeLicense", "establishmentCard", "document", "ownerDoc", "ejari", "insurance"]);
 
@@ -115,34 +122,6 @@ const resolveArrayIndex = (company, field, entry) => {
         return entry.arrayIndex;
     }
     return -1;
-};
-
-const samePendingTarget = (a, b) => {
-    if (a.kind !== b.kind) return false;
-    if (a.kind === "tradeLicense" || a.kind === "establishmentCard") return true;
-    if (a.kind === "document") {
-        if (a.documentItemId && b.documentItemId) return String(a.documentItemId) === String(b.documentItemId);
-        return (
-            typeof a.documentIndex === "number" &&
-            typeof b.documentIndex === "number" &&
-            a.documentIndex === b.documentIndex
-        );
-    }
-    if (a.kind === "ownerDoc") {
-        return (
-            a.ownerIndex === b.ownerIndex &&
-            String(a.docKey || "") === String(b.docKey || "")
-        );
-    }
-    if (a.kind === "ejari" || a.kind === "insurance") {
-        if (a.arrayItemId && b.arrayItemId) return String(a.arrayItemId) === String(b.arrayItemId);
-        return (
-            typeof a.arrayIndex === "number" &&
-            typeof b.arrayIndex === "number" &&
-            a.arrayIndex === b.arrayIndex
-        );
-    }
-    return false;
 };
 
 const applyApprovedArchive = (company, entry) => {
@@ -292,38 +271,6 @@ const applyApprovedArchive = (company, entry) => {
     }
 };
 
-const closeDashboardAction = async (companyMongoId, notRenewRequestId, status, comment, actionedByEmpObjectId) => {
-    const rows = await DashboardAction.find({
-        requestId: companyMongoId,
-        requestType: "Company Document Not Renew",
-        status: "Pending",
-    }).select("_id extra3");
-    const matchedIds = [];
-    for (const row of rows) {
-        let meta = {};
-        try {
-            meta = JSON.parse(row.extra3 || "{}");
-        } catch {
-            meta = {};
-        }
-        if (meta.notRenewRequestId !== notRenewRequestId) continue;
-        matchedIds.push(row._id);
-    }
-    if (matchedIds.length === 0) return;
-    await DashboardAction.updateMany(
-        { _id: { $in: matchedIds } },
-        {
-            status,
-            comment: comment || "",
-            actionedDate: new Date(),
-            ...(actionedByEmpObjectId ? { actionedBy: actionedByEmpObjectId } : {}),
-        }
-    );
-    if (status !== "Pending") {
-        await DashboardAction.deleteMany({ _id: { $in: matchedIds } });
-    }
-};
-
 export const submitCompanyNotRenewRequest = async (req, res) => {
     try {
         const { id } = req.params;
@@ -351,7 +298,7 @@ export const submitCompanyNotRenewRequest = async (req, res) => {
             ownerIndex: typeof body.ownerIndex === "number" ? body.ownerIndex : undefined,
             docKey: body.docKey,
         };
-        if (pending.some((p) => samePendingTarget(p, incoming))) {
+        if (pending.some((p) => samePendingNotRenewTarget(p, incoming))) {
             return res.status(400).json({ message: "A pending not-renew request already exists for this document." });
         }
 
@@ -416,6 +363,7 @@ export const submitCompanyNotRenewRequest = async (req, res) => {
                 });
             }
             await saveCompanyNotRenewState(core._id, companyData);
+            await closeCreatorNotRenewFollowUpTasks(core._id, buildNotRenewTargetFromEntry(row));
             await cleanupCompanyExpiryNotificationsByLabels({
                 companyObjectId: core._id,
                 labels: [row.label || row.kind],
@@ -428,6 +376,8 @@ export const submitCompanyNotRenewRequest = async (req, res) => {
 
         companyData.pendingNotRenewRequests = [...(companyData.pendingNotRenewRequests || []), row];
         await saveCompanyNotRenewState(core._id, companyData);
+
+        await closeCreatorNotRenewFollowUpTasks(core._id, buildNotRenewTargetFromEntry(row));
 
         const hr = await getDepartmentHOD("hr");
         const hrEmail = pickEmail(hr);
@@ -461,6 +411,7 @@ export const submitCompanyNotRenewRequest = async (req, res) => {
                 extra1: `Not renew pending: ${row.label || kind}`,
                 extra2: reason.length > 220 ? `${reason.slice(0, 217)}...` : reason,
                 extra3: JSON.stringify({
+                    role: "hr_review",
                     notRenewRequestId: requestId,
                     kind: row.kind,
                     label: row.label || row.kind,
@@ -509,12 +460,22 @@ export const respondCompanyNotRenewRequest = async (req, res) => {
             companyData.pendingNotRenewRequests = list.filter((r) => r.requestId !== requestId);
             await saveCompanyNotRenewState(core._id, companyData);
 
-            await closeDashboardAction(core._id, requestId, "Rejected", hrComment, req.user.employeeObjectId);
+            await closeHrNotRenewDashboardAction(
+                core._id,
+                requestId,
+                "Rejected",
+                hrComment,
+                req.user.employeeObjectId,
+            );
+
+            await createCreatorNotRenewFollowUpAfterReject({ core, entry, hrComment });
 
             const submitter = entry.submittedByUserId
                 ? await User.findById(entry.submittedByUserId).select("email companyEmail name").lean()
                 : null;
             const to = resolveEmployeeEmail(submitter || {}).email || "";
+            const baseUrl = (process.env.FRONTEND_URL || "http://localhost:3000").replace(/\/$/, "");
+            const companyLink = `${baseUrl}/Company/${encodeURIComponent(core.companyId || core._id)}`;
             if (to) {
                 await sendMail({
                     to: [to],
@@ -523,6 +484,7 @@ export const respondCompanyNotRenewRequest = async (req, res) => {
                         <p>Your request to mark <strong>${entry.label || entry.kind}</strong> as not renewed for
                         <strong>${core.name}</strong> (${core.companyId}) was <strong>rejected</strong>.</p>
                         <p><strong>HR comment:</strong> ${hrComment.replace(/</g, "&lt;")}</p>
+                        <p>Open your dashboard task or <a href="${companyLink}">company profile</a> to renew, edit, delete, or resubmit.</p>
                     </div>`,
                 });
             }
@@ -544,7 +506,8 @@ export const respondCompanyNotRenewRequest = async (req, res) => {
             labels: [entry.label || entry.kind],
         });
 
-        await closeDashboardAction(core._id, requestId, "Approved", "", req.user.employeeObjectId);
+        await closeHrNotRenewDashboardAction(core._id, requestId, "Approved", "", req.user.employeeObjectId);
+        await closeCreatorNotRenewFollowUpTasks(core._id, buildNotRenewTargetFromEntry(entry));
 
         const submitter = entry.submittedByUserId
             ? await User.findById(entry.submittedByUserId).select("email companyEmail name").lean()

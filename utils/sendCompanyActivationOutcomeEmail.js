@@ -49,7 +49,7 @@ export async function sendCompanyActivationOutcomeEmail({
         });
 
         const subject = isApproved
-            ? `Company activation approved: ${companyName}`
+            ? `Company activation approved — all cards applied (${companyName})`
             : `Company activation rejected: ${companyName}`;
 
         const html = `
@@ -59,7 +59,8 @@ export async function sendCompanyActivationOutcomeEmail({
                 </div>
                 <div style="padding:24px;">
                     <p>Hello <strong>${recipientName}</strong>,</p>
-                    <p>The company activation you submitted for <strong>${companyName}</strong>${companyCode ? ` (ID: ${companyCode})` : ""} has been <strong>${isApproved ? "approved" : "rejected"}</strong> by ${managerName}.</p>
+                    <p>The company activation you submitted for <strong>${companyName}</strong>${companyCode ? ` (ID: ${companyCode})` : ""} has been <strong>${isApproved ? "fully approved" : "rejected"}</strong> by ${managerName}.</p>
+                    ${isApproved ? "<p>All requested cards were accepted and applied to the company profile.</p>" : ""}
                     ${!isApproved && reason ? `<p><strong>Reason:</strong> ${String(reason).replace(/</g, " ")}</p>` : ""}
                     <p style="text-align:center;margin:28px 0;">
                         <a href="${companyUrl}" style="background:#2563eb;color:#fff;padding:12px 24px;text-decoration:none;border-radius:6px;font-weight:bold;">Open company in VeRP</a>

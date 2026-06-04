@@ -21,6 +21,18 @@ export async function clearCompanyActivationHoldDashboardRows(companyMongoId) {
     });
 }
 
+/** Removes all Company Activation dashboard rows for the submitter (hold, pending, outcomes). */
+export async function clearCreatorCompanyActivationDashboardTasks(companyMongoId, submitterMongoId) {
+    const requestId = resolveCompanyActivationRequestId(companyMongoId);
+    if (!requestId || !submitterMongoId) return;
+    const DashboardAction = (await import("../models/DashboardAction.js")).default;
+    await DashboardAction.deleteMany({
+        requestId,
+        requestType: "Company Activation",
+        assignedTo: submitterMongoId,
+    });
+}
+
 /** Removes finished activation notifications (e.g. before resubmit after rejection). */
 export async function clearStaleCompanyActivationOutcomeRows(companyMongoId) {
     const requestId = resolveCompanyActivationRequestId(companyMongoId);

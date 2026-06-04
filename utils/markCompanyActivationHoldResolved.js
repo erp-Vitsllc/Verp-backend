@@ -1,7 +1,23 @@
 import Company from "../models/Company.js";
 import { collectCompanyReactivationChangeLabels } from "./companyActivation.js";
+import { loadCompanyFullProfile, upsertCompanyPartitions } from "../services/companyPartitionService.js";
 
 const norm = (s) => String(s || "").toLowerCase().trim();
+
+const TRADE_LICENSE_UPDATE_KEYS = [
+    "tradeLicenseNumber",
+    "tradeLicenseIssueDate",
+    "tradeLicenseExpiry",
+    "tradeLicenseAttachment",
+    "tradeLicenseOwnerName",
+];
+
+function isTradeLicenseOwnersBundleUpdate(updateData = {}) {
+    return (
+        Object.prototype.hasOwnProperty.call(updateData, "owners") &&
+        TRADE_LICENSE_UPDATE_KEYS.some((k) => Object.prototype.hasOwnProperty.call(updateData, k))
+    );
+}
 
 function labelsFromEntryCard(card) {
     return String(card || "")
@@ -10,13 +26,6 @@ function labelsFromEntryCard(card) {
         .filter(Boolean);
 }
 
-/**
- * Labels HR expected fixed for this queue row.
- * Prefer labels inferred from the actual `proposedData` patch (what was submitted for that row).
- * Only parse the human `card` string when proposedData has no recognizable activation fields — otherwise
- * a combined title like "Basic Details, Trade License" would wrongly require a Basic Details save even when
- * the queued change only touched trade license fields.
- */
 function plainProposedData(entry) {
     const raw = entry?.proposedData;
     if (raw == null) return {};
@@ -25,7 +34,7 @@ function plainProposedData(entry) {
     return {};
 }
 
-function labelsRequiredForEntry(entry) {
+export function labelsRequiredForActivationHoldEntry(entry) {
     const pd = plainProposedData(entry);
     const fromPd = collectCompanyReactivationChangeLabels(pd, entry?.previousData);
     if (fromPd.length) return fromPd;
@@ -40,25 +49,35 @@ function resolveHoldRowId(entry, idx, unapproved) {
     return candidates.find((c) => unapproved.has(c)) || null;
 }
 
+function labelsTouchedByUpdate(updateData, beforeCompany) {
+    let changed = collectCompanyReactivationChangeLabels(updateData, beforeCompany);
+    if (!changed.length && isTradeLicenseOwnersBundleUpdate(updateData)) {
+        changed = ["Trade License"];
+    }
+    return changed;
+}
+
 /**
- * After a successful company PATCH (non-queue path), advance activation hold progress when activation is still submitted.
+ * After a successful company PATCH, advance activation hold progress.
+ * Persists `activationHold` on CompanyWorkflow (partition), not the lean Company core document.
  */
 export async function markCompanyActivationHoldResolvedForUpdate(companyMongoId, updateData = {}) {
     if (!companyMongoId || !updateData || typeof updateData !== "object") return;
 
-    const company = await Company.findById(companyMongoId).select(
-        "activationHold pendingReactivationChanges activationStatus owners",
-    );
-    if (!company) return;
+    const core = await Company.findById(companyMongoId).lean().maxTimeMS(8000);
+    if (!core) return;
 
-    const changed = collectCompanyReactivationChangeLabels(updateData, company);
+    const full = await loadCompanyFullProfile(core);
+    if (!full) return;
+
+    const changed = labelsTouchedByUpdate(updateData, full);
     if (!changed.length) return;
 
-    const hold = company.activationHold;
+    const hold = full.activationHold;
     if (!hold?.unapprovedEntryIds?.length) return;
 
     const unapproved = new Set(hold.unapprovedEntryIds.map((x) => String(x)));
-    const pending = Array.isArray(company.pendingReactivationChanges) ? company.pendingReactivationChanges : [];
+    const pending = Array.isArray(full.pendingReactivationChanges) ? full.pendingReactivationChanges : [];
     const resolved = new Set((hold.resolvedEntryIds || []).map(String));
 
     const prog =
@@ -72,19 +91,20 @@ export async function markCompanyActivationHoldResolvedForUpdate(companyMongoId,
         const rowId = resolveHoldRowId(entry, idx, unapproved);
         if (!rowId) return;
 
-        const needed = labelsRequiredForEntry(entry);
+        const needed = labelsRequiredForActivationHoldEntry(entry);
         const acc = new Set((prog[rowId] || []).map((x) => String(x)));
 
         if (!needed.length) {
             const cardLow = norm(entry?.card || "");
+            const sectionLow = norm(entry?.section || "");
             const labelHit = changed.some((c) => {
                 const cl = norm(c);
-                return cl && cardLow.includes(cl);
+                return cl && (cardLow.includes(cl) || sectionLow.includes(cl) || cl.includes(cardLow));
             });
             if (labelHit) {
                 for (const c of changed) {
                     const cl = norm(c);
-                    if (cl && cardLow.includes(cl)) acc.add(c);
+                    if (cl && (cardLow.includes(cl) || sectionLow.includes(cl))) acc.add(c);
                 }
                 prog[rowId] = [...acc];
                 resolved.add(rowId);
@@ -103,8 +123,11 @@ export async function markCompanyActivationHoldResolvedForUpdate(companyMongoId,
         if (done) resolved.add(rowId);
     });
 
-    hold.addressedLabelsByEntryId = prog;
-    hold.resolvedEntryIds = [...resolved];
-    company.markModified("activationHold");
-    await company.save();
+    await upsertCompanyPartitions(companyMongoId, {
+        activationHold: {
+            ...hold,
+            addressedLabelsByEntryId: prog,
+            resolvedEntryIds: [...resolved],
+        },
+    });
 }

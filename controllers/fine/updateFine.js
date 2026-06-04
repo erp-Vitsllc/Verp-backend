@@ -7,6 +7,7 @@ import User from "../../models/User.js";
 import { sendFineApprovalEmail } from "../../utils/sendFineApprovalEmail.js";
 import { getDepartmentHOD } from "../../utils/getDepartmentHOD.js";
 import { getManagementHOD } from "../../utils/getManagementHOD.js";
+import { isVehicleFinePayload, validateVehicleFinePayload } from "../../utils/validateVehicleFinePayload.js";
 
 export const updateFine = async (req, res) => {
     try {
@@ -65,8 +66,49 @@ export const updateFine = async (req, res) => {
             'attachment', 'category', 'subCategory', 'vehicleId', 'assetId', 'assetName',
             'projectId', 'projectName', 'engineerName', 'responsibleFor',
             'fineAmount', 'employeeAmount', 'companyAmount', 'serviceCharge', 'payableDuration', 'monthStart',
-            'employees', 'totalEmployeeFineAmount', 'company', 'companyName'
+            'employees', 'totalEmployeeFineAmount', 'company', 'companyName', 'companyDescription',
         ];
+
+        const mergedVehicleFine = {
+            fineType: updates.fineType ?? fine.fineType,
+            subCategory: updates.subCategory ?? fine.subCategory,
+            vehicleId: updates.vehicleId ?? fine.vehicleId,
+            employeeId: updates.employeeId,
+            employees: updates.employees ?? fine.assignedEmployees,
+            fineAmount: updates.fineAmount ?? fine.fineAmount,
+            serviceCharge: updates.serviceCharge ?? fine.serviceCharge,
+            responsibleFor: updates.responsibleFor ?? fine.responsibleFor,
+            employeeAmount: updates.employeeAmount ?? fine.employeeAmount,
+            companyAmount: updates.companyAmount ?? fine.companyAmount,
+            description: updates.description ?? fine.description,
+            companyDescription: updates.companyDescription ?? fine.companyDescription,
+            company: updates.company ?? fine.company,
+            payableDuration: updates.payableDuration ?? fine.payableDuration,
+            monthStart: updates.monthStart ?? fine.monthStart,
+            attachment: updates.attachment ?? fine.attachment,
+        };
+        if (isVehicleFinePayload(mergedVehicleFine)) {
+            const strictSubmit =
+                updates.resubmit === true ||
+                updates.fineStatus === 'Pending' ||
+                (oldStatus === 'Draft' && updates.fineStatus === 'Pending');
+            if (strictSubmit || oldStatus === 'Draft') {
+                const vehicleCheck = validateVehicleFinePayload(mergedVehicleFine, {
+                    mode: strictSubmit ? 'strict' : 'draft',
+                    hasExistingAttachment: Boolean(
+                        mergedVehicleFine.attachment?.url ||
+                        mergedVehicleFine.attachment?.data ||
+                        fine.attachment?.url
+                    ),
+                });
+                if (!vehicleCheck.valid) {
+                    return res.status(400).json({
+                        message: vehicleCheck.message || 'Invalid vehicle fine data',
+                        errors: vehicleCheck.errors,
+                    });
+                }
+            }
+        }
 
         // 2. Perform submission logic from Draft -> Pending
         if (oldStatus === 'Draft' && updates.fineStatus === 'Pending') {

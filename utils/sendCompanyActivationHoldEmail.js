@@ -18,6 +18,9 @@ export const sendCompanyActivationHoldEmail = async ({
     /** @type {{ cardLabel?: string; note?: string }[]} */
     holdLineItems,
     comment = "",
+    approvedCount = 0,
+    rejectedCount = 0,
+    totalCount = 0,
 }) => {
     const to = String(recipientEmail || "").trim();
     if (!to) return;
@@ -60,17 +63,28 @@ export const sendCompanyActivationHoldEmail = async ({
             ? `<div style="background:#fef3c7;padding:14px;border-radius:8px;margin:18px 0;"><strong>HR note:</strong><br/>${String(comment).trim().replace(/\n/g, "<br/>")}</div>`
             : "";
 
+    const total = Number(totalCount) || approvedCount + rejectedCount;
+    const summaryBlock =
+        total > 0
+            ? `<div style="background:#f1f5f9;padding:14px;border-radius:8px;margin:16px 0;">
+                <p style="margin:0;"><strong>HR review summary:</strong></p>
+                <p style="margin:8px 0 0;"><strong>${approvedCount}</strong> approved · <strong>${rejectedCount}</strong> need correction (of ${total} requested)</p>
+               </div>`
+            : "";
+
     await transporter.sendMail({
         fromName: hrName,
         to,
-        subject: `Company activation on hold — ${companyName}`,
+        subject: `Company activation — ${approvedCount} approved, ${rejectedCount} need updates (${companyName})`,
         html: `
             <div style="font-family:Segoe UI,Arial,sans-serif;line-height:1.6;color:#1e293b;max-width:600px;margin:0 auto;">
                 <p>Hello <strong>${recipientName || "there"}</strong>,</p>
-                <p>${hrName} placed the activation request for <strong>${companyName}</strong> (${companyCode || "N/A"}) <strong>on hold</strong>. The company remains <strong>inactive</strong> until the items below are resolved and activation is submitted again.</p>
-                <p><strong>Sections needing updates:</strong></p>
+                <p>${hrName} reviewed the activation request for <strong>${companyName}</strong> (${companyCode || "N/A"}).</p>
+                ${summaryBlock}
+                <p><strong>Sections needing your updates:</strong></p>
                 ${listHtml}
                 ${commentBlock}
+                <p>Open your VeRP dashboard task or company profile to edit held items, remove a pending update, or submit for activation again when ready.</p>
                 <p style="margin-top:24px;"><a href="${baseUrl}/Company/${encodeURIComponent(String(companyPageId || companyCode || ""))}" style="display:inline-block;background:#1d4ed8;color:#fff;padding:11px 20px;text-decoration:none;border-radius:8px;font-weight:600;">Open company profile</a></p>
             </div>
         `,

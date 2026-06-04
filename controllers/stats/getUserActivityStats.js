@@ -245,6 +245,8 @@ const filterCompletedCompanyActivationItems = async (activityList = []) => {
 
     return activityList.filter((item) => {
         if (item?.type !== "Company Activation") return true;
+        const st = String(item.status || "").toLowerCase();
+        if (st === "on hold" || st === "rejected") return true;
         return awaitingHrById.has(String(item.id));
     });
 };
@@ -481,6 +483,8 @@ export const getUserActivityStats = async (req, res) => {
             'Document Expiry Reminder',
             'Employee Document Expiry Reminder',
             'Company Activation',
+            'Company Document Not Renew',
+            'Employee Document Not Renew',
             'Vehicle Profile Activation',
             'Vehicle Disposition Request',
         ]);
@@ -788,6 +792,17 @@ export const getUserActivityStats = async (req, res) => {
                 item.requestType === 'Asset Approval' &&
                 assetCreationViewerRole === 'creator';
 
+            const assignedToViewer = dashboardRowAssignedToViewer(item);
+            const scope =
+                assignedToViewer ||
+                isCompanyActivationRequesterCopy ||
+                item.requestType === 'Company Document Not Renew' ||
+                item.requestType === 'Employee Document Not Renew'
+                    ? 'inbox'
+                    : isCreatorSideAssetApproval || isVehicleActivationRequesterCopy || isAssetCreationCreatorCopy
+                      ? 'outgoing'
+                      : 'inbox';
+
             activityList.push({
                 id: displayId,
                 actionId: item._id.toString(),
@@ -800,7 +815,7 @@ export const getUserActivityStats = async (req, res) => {
                 extra2: item.extra2,
                 extra3: item.extra3,
                 targetEmployeeId: item.subjectEmployeeId?.toString(),
-                scope: (isCreatorSideAssetApproval || isCompanyActivationRequesterCopy || isVehicleActivationRequesterCopy || isAssetCreationCreatorCopy) ? 'outgoing' : 'inbox'
+                scope,
             });
             if (reqIdStr) seenRequests.set(reqIdStr, 'Pending');
         });
@@ -878,7 +893,7 @@ export const getUserActivityStats = async (req, res) => {
                     activationSubject: "company",
                 }),
                 targetEmployeeId: co.companyId,
-                scope: isSubmitterOutgoing && !isHrInbox ? "outgoing" : "inbox",
+                scope: "inbox",
             });
             seenRequests.set(reqIdStr, "Pending");
         });
@@ -1195,7 +1210,7 @@ export const getUserActivityStats = async (req, res) => {
                 extra3: item.extra3,
                 targetEmployeeId: item.subjectEmployeeId?.toString(),
                 employeeId: targetEmployeeId,
-                scope: (item.status === 'On Hold' && isProfileActAssignee) ? 'inbox' : (isProfileActAssignee ? 'outgoing' : 'inbox'),
+                scope: isProfileActAssignee ? 'inbox' : 'inbox',
             };
 
             const idx = activityList.findIndex((i) => {
@@ -1273,7 +1288,7 @@ export const getUserActivityStats = async (req, res) => {
                 extra3: item.extra3,
                 targetEmployeeId: item.extra2 || item.subjectEmployeeId?.toString(),
                 employeeId: targetEmployeeId,
-                scope: (item.status === 'On Hold' && isCompanyActSelf) ? 'inbox' : (isCompanyActSelf ? 'outgoing' : 'inbox'),
+                scope: isCompanyActSelf ? 'inbox' : 'inbox',
             };
 
             const idx = activityList.findIndex((i) => {
@@ -1350,7 +1365,7 @@ export const getUserActivityStats = async (req, res) => {
                 extra3: item.extra3,
                 targetEmployeeId: item.subjectEmployeeId?.toString(),
                 employeeId: targetEmployeeId,
-                scope: (item.status === 'On Hold' && isVehicleActSelf) ? 'inbox' : (isVehicleActSelf ? 'outgoing' : 'inbox'),
+                scope: isVehicleActSelf ? 'inbox' : 'inbox',
             };
 
             const idx = activityList.findIndex((i) => {

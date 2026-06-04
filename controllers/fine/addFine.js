@@ -4,6 +4,7 @@ import User from "../../models/User.js";
 import Company from "../../models/Company.js";
 import { uploadDocumentToS3 } from "../../utils/s3Upload.js";
 import { sendFineApprovalEmail } from "../../utils/sendFineApprovalEmail.js";
+import { isVehicleFinePayload, validateVehicleFinePayload } from "../../utils/validateVehicleFinePayload.js";
 
 /**
  * Generate unique random fine ID (4 digits)
@@ -140,6 +141,24 @@ export const addFine = async (req, res) => {
         }
 
         const { isBulk, employees, ...commonData } = req.body;
+
+        if (isVehicleFinePayload(req.body)) {
+            const fineStatusToCheck = commonData.fineStatus || req.body.fineStatus;
+            const validationMode = fineStatusToCheck === 'Draft' ? 'draft' : 'strict';
+            const hasExistingAttachment = Boolean(
+                commonData.attachment?.url || commonData.attachment?.data
+            );
+            const vehicleCheck = validateVehicleFinePayload(req.body, {
+                mode: validationMode,
+                hasExistingAttachment,
+            });
+            if (!vehicleCheck.valid) {
+                return res.status(400).json({
+                    message: vehicleCheck.message || 'Invalid vehicle fine data',
+                    errors: vehicleCheck.errors,
+                });
+            }
+        }
 
         // VALIDATION: Check if HR HOD is assigned in Flowchart (required for all fines)
         // This check applies before processing to prevent creating incomplete requests

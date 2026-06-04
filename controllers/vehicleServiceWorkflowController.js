@@ -1071,6 +1071,7 @@ export const respondVehicleServiceScheduledPeriod = async (req, res) => {
             returnMode,
             returnDate,
             returnStatus,
+            handOverDate,
         } = req.body || {};
         if (!['extend', 'go_live', 'cancel', 'reject', 'update_status', 'change_service_start'].includes(String(action || ''))) {
             return res
@@ -1293,6 +1294,9 @@ export const respondVehicleServiceScheduledPeriod = async (req, res) => {
                 const r = parseRemarkMeta(subAfterMerge.remark);
                 r.vehicleServiceCompleted = 'live';
                 r.vehicleServiceCompletedAt = new Date().toISOString();
+                if (handOverDate !== undefined) {
+                    r.handOverDate = handOverDate ? String(handOverDate).slice(0, 10) : null;
+                }
                 if (completionBlob?.name) {
                     r.serviceReportName = String(completionBlob.name);
                     if (completionBlob.mime != null && String(completionBlob.mime).trim() !== '') {
@@ -1425,6 +1429,9 @@ export const respondVehicleServiceScheduledPeriod = async (req, res) => {
                 r.serviceReturnDate = returnDate ? String(returnDate).slice(0, 10) : null;
             }
             r.accidentReturnStatus = String(returnStatus || '').trim();
+            if (handOverDate !== undefined) {
+                r.handOverDate = handOverDate ? String(handOverDate).slice(0, 10) : null;
+            }
             if (serviceReport?.name) r.serviceReportName = String(serviceReport.name);
             if (serviceReport?.mime) r.serviceReportMime = String(serviceReport.mime);
             if (serviceReport?.data) r.serviceReportUpdatedAt = new Date().toISOString();

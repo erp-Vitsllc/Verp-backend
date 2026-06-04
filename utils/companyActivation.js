@@ -12,6 +12,7 @@ import { resolveFlowchartHrEmployee } from "./resolveFlowchartHrEmployee.js";
 import { syncDashboardAction } from "./syncDashboard.js";
 import {
     clearCompanyActivationHoldDashboardRows,
+    clearCreatorCompanyActivationDashboardTasks,
     clearStaleCompanyActivationOutcomeRows,
 } from "./clearCompanyActivationHoldDashboardRows.js";
 import { shortenUrlsInString } from "./shortenUrlsInString.js";
@@ -347,7 +348,8 @@ export const submitCompanyActivation = async ({
     const profileWasFullyActive = isCompanyFullyActivated(merged);
 
     // First-time activation: Inactive until HR approves. Reactivation: status stays Active.
-    if (!profileWasFullyActive) {
+    const companyStatusLower = String(company?.status || "").toLowerCase();
+    if (!profileWasFullyActive && companyStatusLower !== "active") {
         company.status = "Inactive";
     }
     company.activationStatus = "submitted";
@@ -377,6 +379,11 @@ export const submitCompanyActivation = async ({
     await clearCompanyActivationHoldDashboardRows(company._id);
     await clearStaleCompanyActivationOutcomeRows(company._id);
 
+    const actorEmpId = actor ? await resolveActorDashboardEmployeeBasicId(actor) : null;
+    if (actorEmpId) {
+        await clearCreatorCompanyActivationDashboardTasks(company._id, actorEmpId);
+    }
+
     await syncDashboardAction({
         requestId: company._id,
         requestType: "Company Activation",
@@ -397,39 +404,26 @@ export const submitCompanyActivation = async ({
         }),
     });
 
-    if (actor?.employeeObjectId || actor?._id) {
-        if (resubmitAfterHold) {
-            const actorEmpId = await resolveActorDashboardEmployeeBasicId(actor);
-            if (actorEmpId) {
-                const DashboardAction = (await import("../models/DashboardAction.js")).default;
-                await DashboardAction.deleteMany({
-                    requestId: company._id,
-                    requestType: "Company Activation",
-                    assignedTo: actorEmpId,
-                    status: "Pending",
-                });
-            }
-        } else {
-            await syncDashboardAction({
-                requestId: company._id,
-                requestType: "Company Activation",
-                assignedTo: String(actor.employeeObjectId || actor._id),
-                status: "Pending",
-                subjectEmployee: {
-                    employeeId: company.companyId,
-                    firstName: company.name,
-                    lastName: "",
-                    designation: company.nickName || "",
-                },
-                requestedByName,
-                extra1: `[Company profile] ${extra1ForDashboard}`,
-                extra2: company.companyId || "",
-                extra3: JSON.stringify({
-                    companyActivationViewerRole: "requester",
-                    activationSubject: "company",
-                }),
-            });
-        }
+    if ((actor?.employeeObjectId || actor?._id) && !resubmitAfterHold) {
+        await syncDashboardAction({
+            requestId: company._id,
+            requestType: "Company Activation",
+            assignedTo: String(actor.employeeObjectId || actor._id),
+            status: "Pending",
+            subjectEmployee: {
+                employeeId: company.companyId,
+                firstName: company.name,
+                lastName: "",
+                designation: company.nickName || "",
+            },
+            requestedByName,
+            extra1: `[Company profile] ${extra1ForDashboard}`,
+            extra2: company.companyId || "",
+            extra3: JSON.stringify({
+                companyActivationViewerRole: "requester",
+                activationSubject: "company",
+            }),
+        });
     }
 
     try {

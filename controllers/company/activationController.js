@@ -7,9 +7,14 @@ import {
     calculateCompanyActivationProgress,
     submitCompanyActivation,
     companyWasEverFullyActivated,
+    isCompanyFullyActivated,
 } from "../../utils/companyActivation.js";
 import { syncDashboardAction } from "../../utils/syncDashboard.js";
-import { clearAllCompanyActivationDashboardRows } from "../../utils/clearCompanyActivationHoldDashboardRows.js";
+import {
+    clearAllCompanyActivationDashboardRows,
+    clearCompanyActivationHoldDashboardRows,
+    clearCreatorCompanyActivationDashboardTasks,
+} from "../../utils/clearCompanyActivationHoldDashboardRows.js";
 import { formatActivationAttachmentLine, shortenUrlsInString } from "../../utils/shortenUrlsInString.js";
 import { sendCompanyActivationHoldEmail } from "../../utils/sendCompanyActivationHoldEmail.js";
 import { sanitizeActivationHoldRowNotes } from "../../utils/sanitizeActivationHoldRowNotes.js";
@@ -96,6 +101,41 @@ const canProcessCompanyActivation = async (req) => {
     const groupOrRole = String(req.user?.groupName || req.user?.role || "").trim();
     if (/^admin(istrator)?$/i.test(groupOrRole)) return true;
     return false;
+};
+
+/** Creator removed every held/pending row — clear their tasks and exit the submitted cycle. */
+const finalizeCreatorActivationQueueCleared = async (companyCore, nextPending, submitterEmp) => {
+    if (submitterEmp?._id) {
+        await clearCreatorCompanyActivationDashboardTasks(companyCore._id, submitterEmp._id);
+    }
+    await clearCompanyActivationHoldDashboardRows(companyCore._id);
+    // Creator cleared the queue: remove HR inbox task too (otherwise HR can still open Review modal).
+    await clearAllCompanyActivationDashboardRows(companyCore._id);
+
+    if (Array.isArray(nextPending) && nextPending.length > 0) return;
+
+    const full =
+        (await loadCompanyFullProfile(companyCore)) ||
+        (typeof companyCore.toObject === "function" ? companyCore.toObject() : companyCore);
+    const wasFullyActive = isCompanyFullyActivated(full);
+    const companyStatusLower = String(companyCore?.status || "").toLowerCase();
+    // Rule: once a company is active, do not demote it to Inactive just because activationStatus
+    // is temporarily 'submitted'/'hold' during the cycle.
+    const shouldKeepActive = companyStatusLower === "active" || wasFullyActive;
+
+    if (shouldKeepActive) {
+        companyCore.status = "Active";
+        companyCore.activationStatus = "active";
+    } else {
+        companyCore.status = "Inactive";
+        companyCore.activationStatus = "inactive";
+    }
+    await companyCore.save();
+    await Company.updateOne(
+        { _id: companyCore._id },
+        { $unset: { activationSubmittedTo: 1, activationSubmittedBy: 1 } },
+    );
+    await upsertCompanyPartitions(companyCore._id, { pendingReactivationChanges: [] });
 };
 
 export const submitCompanyActivationRequest = async (req, res) => {
@@ -371,13 +411,43 @@ export const holdCompanyActivationRequest = async (req, res) => {
         const numRowsAccepted = allIds.filter((rowId) => approvedChoice.has(rowId)).length;
         if (numRowsAccepted >= allIds.length) {
             return res.status(400).json({
-                message: "Nothing left to hold. Use Accept when every change is acceptable.",
+                message: "All rows are checked. Use OK to fully approve, or uncheck items that need correction.",
             });
         }
 
+        const approvedChanges = pendingChanges.filter((e) => approvedChoice.has(e.__idStr));
         const unapproved = pendingChanges.filter((e) => !approvedChoice.has(e.__idStr));
         const unapprovedCards = [...new Set(unapproved.map((e) => String(e.card || "").trim()).filter(Boolean))];
         const rowNotesByEntryId = sanitizeActivationHoldRowNotes(req.body?.rowNotesByEntryId, unapproved.map((e) => e.__idStr));
+
+        const ownerArchivesToPush = [];
+        for (const change of approvedChanges) {
+            const proposedData = change?.proposedData;
+            if (!proposedData || typeof proposedData !== "object") continue;
+            const { ownerArchivesToPush: archives } = await applyCompanyProposedActivationPatch(
+                company._id,
+                proposedData,
+            );
+            if (archives?.length) ownerArchivesToPush.push(...archives);
+        }
+
+        if (ownerArchivesToPush.length > 0) {
+            try {
+                const ownersDoc = await CompanyOwners.findOne({ company: company._id });
+                if (ownersDoc) {
+                    ownersDoc.oldOwners = [...(ownersDoc.oldOwners || []), ...ownerArchivesToPush];
+                    await ownersDoc.save();
+                } else {
+                    await CompanyOwners.create({
+                        company: company._id,
+                        owners: [],
+                        oldOwners: ownerArchivesToPush,
+                    });
+                }
+            } catch (archiveErr) {
+                console.error("[holdCompanyActivationRequest] Owner archive push error:", archiveErr);
+            }
+        }
 
         const activationHold = {
             heldAt: new Date(),
@@ -389,7 +459,11 @@ export const holdCompanyActivationRequest = async (req, res) => {
             ...(rowNotesByEntryId ? { rowNotesByEntryId } : {}),
         };
 
-        await upsertCompanyPartitions(company._id, { activationHold });
+        const remainingPending = unapproved.map(({ __idStr, ...rest }) => rest);
+        await upsertCompanyPartitions(company._id, {
+            activationHold,
+            pendingReactivationChanges: remainingPending,
+        });
 
         const holdNotice = `[Company profile] On hold — update: ${activationHold.unapprovedCards.join(", ")}`;
 
@@ -434,17 +508,18 @@ export const holdCompanyActivationRequest = async (req, res) => {
             }
         }
 
-        if (company.activationSubmittedTo) {
-            try {
-                await DashboardAction.deleteMany({
-                    requestId: company._id,
-                    requestType: "Company Activation",
-                    status: "Pending",
-                    assignedTo: company.activationSubmittedTo,
-                });
-            } catch (_e) {
-                /* non-fatal */
+        try {
+            const hrCloseQuery = {
+                requestId: company._id,
+                requestType: "Company Activation",
+                status: "Pending",
+            };
+            if (submitterEmp?._id) {
+                hrCloseQuery.assignedTo = { $ne: submitterEmp._id };
             }
+            await DashboardAction.deleteMany(hrCloseQuery);
+        } catch (_e) {
+            /* non-fatal */
         }
 
         try {
@@ -460,9 +535,12 @@ export const holdCompanyActivationRequest = async (req, res) => {
                 companyCode: company.companyId,
                 companyPageId: company._id.toString(),
                 hrManager: req.user,
-                unapprovedCards: company.activationHold.unapprovedCards || [],
+                unapprovedCards: activationHold.unapprovedCards || [],
                 holdLineItems,
                 comment,
+                approvedCount: numRowsAccepted,
+                rejectedCount: unapproved.length,
+                totalCount: allIds.length,
             });
         } catch (mailErr) {
             console.error("[holdCompanyActivationRequest] Hold email error:", mailErr);
@@ -502,7 +580,9 @@ export const rejectCompanyActivationRequest = async (req, res) => {
             });
         }
 
-        const keepActiveProfile = companyWasEverFullyActivated(company);
+        const keepActiveProfile =
+            companyWasEverFullyActivated(company) ||
+            String(company?.status || "").toLowerCase() === "active";
         company.status = keepActiveProfile ? "Active" : "Inactive";
         company.activationStatus = keepActiveProfile ? "active" : "rejected";
         const merged =
@@ -614,5 +694,116 @@ export const rejectCompanyActivationRequest = async (req, res) => {
     } catch (error) {
         console.error("rejectCompanyActivationRequest error:", error);
         return res.status(500).json({ message: error.message || "Failed to reject company activation request" });
+    }
+};
+
+/** Creator removes one held pending change from the queue (does not delete live profile data). */
+export const discardCompanyPendingActivationEntry = async (req, res) => {
+    try {
+        const { id, entryId } = req.params;
+        const entryIdStr = String(entryId || "").trim();
+        if (!entryIdStr) {
+            return res.status(400).json({ message: "Entry id is required." });
+        }
+
+        const company = await resolveCompanyForActivation(id);
+        if (!company) return res.status(404).json({ message: "Company not found" });
+
+        const merged =
+            (await loadCompanyFullProfile(company)) ||
+            (typeof company.toObject === "function" ? company.toObject() : company);
+        const hold = merged.activationHold;
+        if (!hold?.unapprovedEntryIds?.length) {
+            return res.status(400).json({ message: "No activation hold is active for this company." });
+        }
+
+        const pending = Array.isArray(merged.pendingReactivationChanges)
+            ? merged.pendingReactivationChanges.map((entry, idx) => ({
+                  ...(entry?.toObject ? entry.toObject() : entry),
+                  __idStr: companyPendingEntryId(entry, idx),
+              }))
+            : [];
+
+        const target = pending.find((e) => e.__idStr === entryIdStr);
+        if (!target) {
+            return res.status(404).json({ message: "Pending change entry not found." });
+        }
+
+        const unapprovedSet = new Set((hold.unapprovedEntryIds || []).map(String));
+        if (!unapprovedSet.has(entryIdStr)) {
+            return res.status(400).json({ message: "This entry is not in the current hold list." });
+        }
+
+        const submitterEmp = await resolveCompanyActivationSubmitterEmployee(company, []);
+        const viewerEmpId = String(req.user?.employeeObjectId || "");
+        const submitterId = String(company.activationSubmittedBy || "");
+        const isSubmitter =
+            (submitterEmp?._id && String(submitterEmp._id) === viewerEmpId) ||
+            (submitterId && submitterId === viewerEmpId);
+        if (!isSubmitter && !(await canProcessCompanyActivation(req))) {
+            return res.status(403).json({ message: "Only the activation submitter can remove this pending update." });
+        }
+
+        const nextPending = pending
+            .filter((e) => e.__idStr !== entryIdStr)
+            .map(({ __idStr, ...rest }) => rest);
+        unapprovedSet.delete(entryIdStr);
+        const resolvedIds = (hold.resolvedEntryIds || []).map(String).filter((x) => x !== entryIdStr);
+        const rowNotes =
+            hold.rowNotesByEntryId && typeof hold.rowNotesByEntryId === "object"
+                ? { ...hold.rowNotesByEntryId }
+                : {};
+        delete rowNotes[entryIdStr];
+
+        if (unapprovedSet.size === 0) {
+            await upsertCompanyPartitions(company._id, {
+                pendingReactivationChanges: nextPending,
+            });
+            await clearCompanyWorkflowActivationHold(company._id);
+            try {
+                await finalizeCreatorActivationQueueCleared(company, nextPending, submitterEmp);
+            } catch (syncErr) {
+                console.error("[discardCompanyPendingActivationEntry] finalize queue:", syncErr);
+            }
+        } else {
+            const remainingUnapproved = pending.filter((e) => unapprovedSet.has(e.__idStr));
+            const unapprovedCards = [
+                ...new Set(remainingUnapproved.map((e) => String(e.card || "").trim()).filter(Boolean)),
+            ];
+            await upsertCompanyPartitions(company._id, {
+                pendingReactivationChanges: nextPending,
+                activationHold: {
+                    ...hold,
+                    unapprovedEntryIds: [...unapprovedSet],
+                    unapprovedCards: unapprovedCards.length
+                        ? unapprovedCards
+                        : [...unapprovedSet].map((_, i) => `Change ${i + 1}`),
+                    resolvedEntryIds: resolvedIds,
+                    rowNotesByEntryId: rowNotes,
+                },
+            });
+        }
+
+        const refreshedCore = await Company.findById(company._id)
+            .select(ACTIVATION_HEAVY_EXCLUSIONS)
+            .maxTimeMS(15000);
+        const refreshed =
+            (await loadCompanyFullProfile(refreshedCore)) ||
+            (typeof refreshedCore?.toObject === "function" ? refreshedCore.toObject() : refreshedCore);
+        const queueEmpty =
+            !Array.isArray(refreshed?.pendingReactivationChanges) ||
+            refreshed.pendingReactivationChanges.length === 0;
+
+        return res.status(200).json({
+            message: queueEmpty
+                ? "Pending update removed. Activation queue is empty — notifications cleared."
+                : "Pending update removed from the activation queue.",
+            company: refreshed,
+            activationProgress: calculateCompanyActivationProgress(refreshed),
+            activationQueueEmpty: queueEmpty,
+        });
+    } catch (error) {
+        console.error("discardCompanyPendingActivationEntry error:", error);
+        return res.status(500).json({ message: error.message || "Failed to remove pending update" });
     }
 };

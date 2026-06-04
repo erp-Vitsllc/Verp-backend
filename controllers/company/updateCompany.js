@@ -5,6 +5,7 @@ import DashboardAction from "../../models/DashboardAction.js";
 import {
     loadCompanyFullProfile,
     upsertCompanyPartitions,
+    companyPendingEntryId,
     splitCompanyUpdatePayload,
     DOCUMENT_BUNDLE_KEYS,
     clearOwnerDocInPartition,
@@ -24,7 +25,10 @@ import {
     stripProposedDataKeysFromPendingReactivationEntries,
     isCompanyFullyActivated,
 } from "../../utils/companyActivation.js";
-import { markCompanyActivationHoldResolvedForUpdate } from "../../utils/markCompanyActivationHoldResolved.js";
+import {
+    markCompanyActivationHoldResolvedForUpdate,
+    labelsRequiredForActivationHoldEntry,
+} from "../../utils/markCompanyActivationHoldResolved.js";
 import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
 import { isRequestUserDesignatedFlowchartHr } from "../../utils/isDesignatedFlowchartHr.js";
 import {
@@ -32,6 +36,10 @@ import {
     signCompanyDocumentArray,
 } from "../../utils/signCompanyDocumentFields.js";
 import { reconcileCompanyDocumentExpiryDashboard } from "../../utils/processDocumentExpiryReminders.js";
+import {
+    closeCreatorNotRenewFollowUpTasks,
+    closeCreatorNotRenewFollowUpsFromCompanyUpdate,
+} from "../../utils/companyNotRenewFollowUp.js";
 import {
     sanitizeCompanyAddressField,
     validateCompanyAddressPayload,
@@ -335,6 +343,17 @@ export const updateCompany = async (req, res) => {
             const fullProfile = await loadCompanyFullProfile(refreshed);
             const signed = await signCompanyProfileForResponse(fullProfile || {});
 
+            const ownerIndex = (beforeCompany.owners || []).findIndex(
+                (o) => o && String(o._id || o.id) === ownerId,
+            );
+            if (ownerIndex >= 0) {
+                await closeCreatorNotRenewFollowUpTasks(company._id, {
+                    kind: "ownerDoc",
+                    ownerIndex,
+                    docKey,
+                });
+            }
+
             return res.status(200).json({
                 message: "Owner document card removed successfully.",
                 company: signed,
@@ -412,6 +431,18 @@ export const updateCompany = async (req, res) => {
                 .maxTimeMS(8000);
             const fullProfile = await loadCompanyFullProfile(refreshed);
             const signed = await signCompanyProfileForResponse(fullProfile || {});
+            if (pullDocumentsByIds.length || retireLiveDocumentOid) {
+                await closeCreatorNotRenewFollowUpTasks(company._id, {
+                    kind: "document",
+                    closeAllOfKind: true,
+                });
+            }
+            if (pullOwnersByIds.length) {
+                await closeCreatorNotRenewFollowUpTasks(company._id, {
+                    kind: "ownerDoc",
+                    closeAllOfKind: true,
+                });
+            }
             return res.status(200).json({
                 message: "Company updated successfully",
                 company: signed,
@@ -713,7 +744,37 @@ export const updateCompany = async (req, res) => {
                 proposedData: toSerializable(updateData),
                 changedAt: new Date(),
             };
-            const nextPending = [...(beforeCompany.pendingReactivationChanges || []), pendingEntry];
+            const holdUnapproved = new Set(
+                (beforeCompany.activationHold?.unapprovedEntryIds || []).map((x) => String(x)),
+            );
+            let nextPending = [...(beforeCompany.pendingReactivationChanges || [])];
+            let mergedIntoHeldRow = false;
+            if (holdUnapproved.size > 0 && changedCards.length > 0) {
+                const changedNorm = new Set(changedCards.map((c) => String(c || "").toLowerCase().trim()));
+                nextPending = nextPending.map((entry, idx) => {
+                    const entryId = companyPendingEntryId(entry, idx);
+                    if (!holdUnapproved.has(entryId)) return entry;
+                    const needed = labelsRequiredForActivationHoldEntry(entry);
+                    const overlaps =
+                        needed.length === 0 ||
+                        needed.some((label) => changedNorm.has(String(label || "").toLowerCase().trim()));
+                    if (!overlaps) return entry;
+                    mergedIntoHeldRow = true;
+                    return {
+                        ...entry,
+                        card: cardLabel,
+                        reason: cardLabel,
+                        section: entry.section || "companyProfile",
+                        changeType: entry.changeType || "update",
+                        previousData: pendingEntry.previousData,
+                        proposedData: pendingEntry.proposedData,
+                        changedAt: pendingEntry.changedAt,
+                    };
+                });
+            }
+            if (!mergedIntoHeldRow) {
+                nextPending = [...nextPending, pendingEntry];
+            }
             partitionUpdatePayload = { pendingReactivationChanges: nextPending };
             updatedCompany = await company.save();
             responseMessage = isCompanyFullyActivated(beforeCompany)
@@ -786,15 +847,16 @@ export const updateCompany = async (req, res) => {
             console.warn("[updateCompany] upsertCompanyPartitions:", partitionErr?.message || partitionErr);
         }
 
+        try {
+            await markCompanyActivationHoldResolvedForUpdate(updatedCompany._id, updateData);
+        } catch (holdErr) {
+            console.warn(
+                "[updateCompany] markCompanyActivationHoldResolvedForUpdate:",
+                holdErr?.message || holdErr,
+            );
+        }
+
         if (!queueForApproval) {
-            try {
-                await markCompanyActivationHoldResolvedForUpdate(updatedCompany._id, updateData);
-            } catch (holdErr) {
-                console.warn(
-                    "[updateCompany] markCompanyActivationHoldResolvedForUpdate:",
-                    holdErr?.message || holdErr,
-                );
-            }
             try {
                 await reconcileCompanyDocumentExpiryDashboard(updatedCompany._id);
             } catch (expiryErr) {
@@ -855,6 +917,15 @@ export const updateCompany = async (req, res) => {
                 : { ...updatedCompany });
 
         const signedCompany = await signCompanyProfileForResponse(mergedForResponse);
+
+        try {
+            await closeCreatorNotRenewFollowUpsFromCompanyUpdate(updatedCompany._id, updateData);
+        } catch (followUpErr) {
+            console.warn(
+                "[updateCompany] closeCreatorNotRenewFollowUps:",
+                followUpErr?.message || followUpErr,
+            );
+        }
 
         return res.status(200).json({
             message: responseMessage,

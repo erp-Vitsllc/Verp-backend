@@ -4,11 +4,16 @@ import {
     loadCompanyFullProfile,
     pullFromCompanyDocumentBundle,
     findBundleArrayRow,
+    loadAuthoritativeBundleArray,
+    isCompanyUsingPartitions,
 } from "../../services/companyPartitionService.js";
+import { signCompanyProfileForResponse } from "../../utils/signCompanyProfileForResponse.js";
+import { calculateCompanyActivationProgress } from "../../utils/companyActivation.js";
 import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
 import { isRequestUserDesignatedFlowchartHr } from "../../utils/isDesignatedFlowchartHr.js";
 import { hasPermission } from "../../services/permissionService.js";
 import { awaitAdminDeletionArchive } from "../../utils/adminDeletionArchiveRun.js";
+import { closeCreatorNotRenewFollowUpTasks } from "../../utils/companyNotRenewFollowUp.js";
 
 const ALLOWED_FIELDS = new Set(["ejari", "insurance"]);
 
@@ -62,6 +67,9 @@ export const deleteCompanyArrayItem = async (req, res) => {
         }
 
         const fullProfile = (await loadCompanyFullProfile(company)) || company;
+        const bundleList = isCompanyUsingPartitions(company)
+            ? await loadAuthoritativeBundleArray(company._id, fieldName)
+            : fullProfile[fieldName];
 
         const isAdmin = await isReqUserAdmin(req.user);
         const isDesignatedHr = await isRequestUserDesignatedFlowchartHr(req);
@@ -88,7 +96,7 @@ export const deleteCompanyArrayItem = async (req, res) => {
             }
         }
 
-        const resolved = resolveArrayItem(fullProfile[fieldName], target);
+        const resolved = resolveArrayItem(bundleList, target);
         if (!resolved?.row) {
             return res.status(404).json({ message: `${fieldName} entry not found.` });
         }
@@ -113,8 +121,23 @@ export const deleteCompanyArrayItem = async (req, res) => {
             return res.status(404).json({ message: `${fieldName} entry not found.` });
         }
 
+        const refreshedCore = await Company.findOne(buildCompanyFilter(id)).lean();
+        const fullAfter = (await loadCompanyFullProfile(refreshedCore)) || refreshedCore;
+
+        const followUpTarget = { kind: fieldName };
+        if (resolved.pullById && resolved.oid) {
+            followUpTarget.arrayItemId = String(resolved.oid);
+        } else if (Number.isInteger(resolved.index)) {
+            followUpTarget.arrayIndex = resolved.index;
+        } else {
+            followUpTarget.closeAllOfKind = true;
+        }
+        await closeCreatorNotRenewFollowUpTasks(company._id, followUpTarget);
+
         return res.status(200).json({
             message: `${label} entry deleted successfully.`,
+            company: await signCompanyProfileForResponse(fullAfter),
+            activationProgress: calculateCompanyActivationProgress(fullAfter),
         });
     } catch (error) {
         console.error("deleteCompanyArrayItem error:", error);
