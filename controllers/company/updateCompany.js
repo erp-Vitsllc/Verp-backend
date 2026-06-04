@@ -27,6 +27,7 @@ import {
     isCompanyFullyActivated,
 } from "../../utils/companyActivation.js";
 import { mergeCompanyOwnersSnapshot } from "../../utils/mergeCompanyOwnersSnapshot.js";
+import { isOwnerNestedDocOnlyOwnersUpdate } from "../../utils/ownerPatchScope.js";
 import {
     markCompanyActivationHoldResolvedForUpdate,
     labelsRequiredForActivationHoldEntry,
@@ -635,10 +636,13 @@ export const updateCompany = async (req, res) => {
                     return res.status(400).json({ message: ownersCheck.message });
                 }
                 const profileActive =
-                    String(company?.status || "").toLowerCase() === "active" &&
-                    String(company?.activationStatus || "").toLowerCase() === "active";
+                    String(company?.status || "").toLowerCase() === "active";
                 const tradeLicenseOwnersOnly = isTradeLicenseOwnersBundleUpdate(updateData);
-                if (!tradeLicenseOwnersOnly) {
+                const ownerDocCardsOnly = isOwnerNestedDocOnlyOwnersUpdate(
+                    updateData.owners,
+                    beforeCompany.owners || [],
+                );
+                if (!tradeLicenseOwnersOnly && !ownerDocCardsOnly) {
                     const detailsCheck = validateOwnerDetailsOwnersPayload(updateData.owners, {
                         requireEmail: profileActive,
                         profileActive,

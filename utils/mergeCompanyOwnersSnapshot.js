@@ -1,5 +1,5 @@
 /** Nested owner document cards — merge per key instead of replacing the whole owner row. */
-const OWNER_NESTED_DOC_KEYS = [
+export const OWNER_NESTED_DOC_KEYS = [
     "passport",
     "emiratesId",
     "visa",

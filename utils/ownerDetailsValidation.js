@@ -58,8 +58,18 @@ export function validateOwnerFullName(value) {
     return null;
 }
 
+/** Read email from an owner row (handles string or legacy shapes). */
+export function getOwnerRowEmail(owner) {
+    if (!owner || typeof owner !== "object") return "";
+    const raw = owner.email ?? owner.contactEmail ?? "";
+    return normalizeOwnerEmail(raw);
+}
+
 export function validateOwnerEmail(value, { requireEmail = false } = {}) {
-    const email = normalizeOwnerEmail(value);
+    const email =
+        value && typeof value === "object"
+            ? getOwnerRowEmail(value)
+            : normalizeOwnerEmail(value);
     if (!email) {
         return requireEmail ? "Email Address is required" : null;
     }
@@ -92,7 +102,7 @@ export function validateOwnerEmailUniqueAmongOwners(email, owners = [], skipInde
     if (!normalized) return null;
     for (let i = 0; i < owners.length; i++) {
         if (i === skipIndex) continue;
-        const other = normalizeOwnerEmail(owners[i]?.email);
+        const other = getOwnerRowEmail(owners[i]);
         if (other && other === normalized) {
             return "Email Address must be unique among owners";
         }
@@ -131,12 +141,15 @@ export function validateOwnerDetailsOwnersPayload(
 
         if (!ownerRowNeedsDetailValidation(owner, profileActive)) continue;
 
-        const emailErr = validateOwnerEmail(owner?.email, {
+        const emailErr = validateOwnerEmail(getOwnerRowEmail(owner), {
             requireEmail: profileActive || requireEmail,
         });
-        if (emailErr) return { ok: false, message: emailErr };
+        if (emailErr) {
+            const label = String(owner?.name || "").trim() || `Owner ${i + 1}`;
+            return { ok: false, message: `${label}: ${emailErr}` };
+        }
 
-        const emailKey = normalizeOwnerEmail(owner?.email);
+        const emailKey = getOwnerRowEmail(owner);
         if (emailKey) {
             if (emails.has(emailKey)) {
                 return { ok: false, message: "Email Address must be unique among owners" };
