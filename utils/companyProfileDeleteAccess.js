@@ -1,10 +1,7 @@
 import mongoose from "mongoose";
 import { hasPermission } from "../services/permissionService.js";
 import { subdocRowId } from "../services/companyPartitionService.js";
-import {
-    ownersChangeIsVisaDocsOnly,
-    shouldOverlayPendingReactivationChanges,
-} from "./companyActivation.js";
+import { shouldOverlayPendingReactivationChanges } from "./companyActivation.js";
 
 export const COMPANY_DELETE_PERM = {
     tradeLicense: "hrm_company_view_basic_trade_license",
@@ -198,15 +195,31 @@ const bundleRowsExplicitlyRemoved = (beforeRows = [], afterRows = []) => {
     return false;
 };
 
+const ownerSubdocHadCard = (owner, docKey) => {
+    if (!owner || typeof owner !== "object") return false;
+    if (docKey === "attachment") {
+        const att = owner.attachment;
+        return att != null && att !== "" && (typeof att !== "string" || att.trim() !== "");
+    }
+    const doc = owner[docKey];
+    if (!doc || typeof doc !== "object") return false;
+    if (getOwnerDocAttachmentUrl(owner, docKey)) return true;
+    return Boolean(
+        String(doc.number || "").trim() ||
+            doc.issueDate ||
+            doc.expiryDate ||
+            String(doc.type || "").trim() ||
+            String(doc.provider || "").trim(),
+    );
+};
+
 const ownerDocExplicitlyCleared = (prevOwner, nextOwner, docKey) => {
-    const pUrl = getOwnerDocAttachmentUrl(prevOwner, docKey);
-    if (!pUrl) return false;
+    if (!ownerSubdocHadCard(prevOwner, docKey)) return false;
 
     if (docKey === "attachment") {
-        if (!Object.prototype.hasOwnProperty.call(nextOwner, "attachment")) return false;
+        if (!Object.prototype.hasOwnProperty.call(nextOwner, "attachment")) return true;
         const nextVal = nextOwner.attachment;
-        // UI often sends `attachment: null` when saving another card; that is not a delete.
-        if (nextVal === null || nextVal === undefined) return false;
+        if (nextVal === null || nextVal === undefined) return true;
         if (typeof nextVal === "string" && nextVal.trim() === "") return true;
         if (typeof nextVal === "object" && nextVal !== null) {
             const url = nextVal.url != null ? String(nextVal.url).trim() : "";
@@ -215,12 +228,13 @@ const ownerDocExplicitlyCleared = (prevOwner, nextOwner, docKey) => {
         return false;
     }
 
-    if (!Object.prototype.hasOwnProperty.call(nextOwner, docKey)) return false;
-    if (nextOwner[docKey] === null || nextOwner[docKey] === undefined) return false;
+    if (!Object.prototype.hasOwnProperty.call(nextOwner, docKey)) return true;
+    if (nextOwner[docKey] === null || nextOwner[docKey] === undefined) return true;
 
     const nextDoc = nextOwner[docKey];
+    if (!nextDoc || typeof nextDoc !== "object") return true;
+    if (!ownerSubdocHadCard(nextOwner, docKey)) return true;
     if (nestedDocAttachmentExplicitlyEmpty(nextDoc)) return true;
-    if (!nextDoc || typeof nextDoc !== "object") return false;
     if (!Object.prototype.hasOwnProperty.call(nextDoc, "attachment")) return false;
 
     return !getOwnerDocAttachmentUrl(nextOwner, docKey);
@@ -392,27 +406,15 @@ export const collectDeletePermissionModules = (beforeCompany = {}, updateData = 
         const next = updateData.owners || [];
         if (next.length < prev.length) {
             modules.add(COMPANY_DELETE_PERM.ownerDetails);
-        } else if (!ownersChangeIsVisaDocsOnly(prev, next)) {
-            const ownerDocKeys = Object.keys(OWNER_DOC_KEY_PERM);
-            for (let i = 0; i < Math.max(prev.length, next.length); i += 1) {
-                const p = prev[i] || {};
-                const n = next[i] || {};
-                for (const key of ownerDocKeys) {
-                    const pUrl =
-                        key === "attachment"
-                            ? typeof p.attachment === "string"
-                                ? p.attachment
-                                : p.attachment?.url
-                            : p[key]?.attachment?.url || p[key]?.attachment;
-                    const nUrl =
-                        key === "attachment"
-                            ? typeof n.attachment === "string"
-                                ? n.attachment
-                                : n.attachment?.url
-                            : n[key]?.attachment?.url || n[key]?.attachment;
-                    if (pUrl && !nUrl) {
-                        modules.add(OWNER_DOC_KEY_PERM[key] || COMPANY_DELETE_PERM.ownerDetails);
-                    }
+        }
+        const prevByKey = indexOwnersByMatchKey(prev);
+        const nextByKey = indexOwnersByMatchKey(next);
+        for (const [matchKey, prevRow] of prevByKey) {
+            const nextRow = nextByKey.get(matchKey);
+            if (!nextRow) continue;
+            for (const docKey of Object.keys(OWNER_DOC_KEY_PERM)) {
+                if (ownerDocExplicitlyCleared(prevRow, nextRow, docKey)) {
+                    modules.add(OWNER_DOC_KEY_PERM[docKey] || COMPANY_DELETE_PERM.ownerDetails);
                 }
             }
         }
@@ -442,6 +444,22 @@ export const userMayDeleteCompanyProfileContent = async (user, beforeCompany = {
         }
     }
     return true;
+};
+
+/** Inactive company: user may clear one owner doc card when their group has delete on that module. */
+export const userMayClearOwnerDocumentCard = async (
+    user,
+    beforeCompany = {},
+    docKey,
+) => {
+    if (isCompanyProfileActivated(beforeCompany)) {
+        return false;
+    }
+    const userId = user?.id || user?._id?.toString?.() || user?._id;
+    if (!userId) return false;
+    const moduleId = OWNER_DOC_KEY_PERM[String(docKey || "")];
+    if (!moduleId) return false;
+    return hasPermission(userId, moduleId, "delete");
 };
 
 export const userMayCompactDeleteCompanyContent = async (

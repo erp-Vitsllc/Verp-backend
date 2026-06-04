@@ -112,6 +112,7 @@ import {
     isDocumentRemovalAttempt,
     isExplicitDestructiveCompanyPatch,
     userMayDeleteCompanyProfileContent,
+    userMayClearOwnerDocumentCard,
     userMayCompactDeleteCompanyContent,
     isCompanyProfileActivated,
 } from "../../utils/companyProfileDeleteAccess.js";
@@ -286,12 +287,6 @@ export const updateCompany = async (req, res) => {
         }
 
         if (clearLiveOwnerDocCard || clearOldOwnerDocCard) {
-            if (!requesterIsAdmin && !requesterIsDesignatedHr) {
-                return res.status(403).json({
-                    message: "Only administrator can delete owner document cards.",
-                });
-            }
-
             const clearSpec = clearLiveOwnerDocCard || clearOldOwnerDocCard;
             const ownerTarget = clearLiveOwnerDocCard ? "owners" : "oldOwners";
             const ownerId = String(clearSpec?.ownerId ?? "").trim();
@@ -309,6 +304,23 @@ export const updateCompany = async (req, res) => {
                 (typeof company.toObject === "function"
                     ? company.toObject({ strict: false, virtuals: false })
                     : { ...company });
+
+            const profileActive = isCompanyProfileActivated(beforeCompany);
+            let mayClearOwnerDoc = requesterIsAdmin || requesterIsDesignatedHr;
+            if (!mayClearOwnerDoc && !profileActive) {
+                mayClearOwnerDoc = await userMayClearOwnerDocumentCard(
+                    req.user,
+                    beforeCompany,
+                    docKey,
+                );
+            }
+            if (!mayClearOwnerDoc) {
+                return res.status(403).json({
+                    message: profileActive
+                        ? "Only administrator can delete owner document cards on an active company profile."
+                        : "You do not have permission to delete this owner document card.",
+                });
+            }
 
             const ownerRow = findOwnerRow(beforeCompany[ownerTarget], ownerId);
             if (!ownerRow) {
