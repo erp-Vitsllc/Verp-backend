@@ -1018,23 +1018,20 @@ export const syncCompanyStatus = async (companyId) => {
     if (!company) return;
 
     const full = await loadCompanyFullProfile(company);
-    const progress = calculateCompanyActivationProgress(full);
 
-    const pendingNotRenews = Array.isArray(full.pendingNotRenewRequests)
-        ? full.pendingNotRenewRequests.filter((r) => r.status === "pending")
-        : [];
+    // Once HR has approved activation, keep status Active during reactivation / hold cycles.
+    if (isCompanyFullyActivated(full) || companyWasEverFullyActivated(full)) {
+        if (company.status !== "Active") {
+            company.status = "Active";
+            await company.save();
+        }
+        return;
+    }
 
-    const hasPendingKeyNotRenew = pendingNotRenews.some((r) =>
-        r.kind === "tradeLicense" ||
-        r.kind === "establishmentCard" ||
-        (r.kind === "ownerDoc" && (r.docKey === "passport" || r.docKey === "emiratesId"))
-    );
-
-    const shouldBeActive = progress.percentage === 100 && !hasPendingKeyNotRenew;
-    const nextStatus = shouldBeActive ? "Active" : "Inactive";
-
-    if (company.status !== nextStatus) {
-        company.status = nextStatus;
+    // Draft / submitted / not yet HR-approved: never promote to Active from card progress alone.
+    // First-time activation requires Submit + HR approval (approveCompanyActivationRequest).
+    if (company.status !== "Inactive") {
+        company.status = "Inactive";
         await company.save();
     }
 };
