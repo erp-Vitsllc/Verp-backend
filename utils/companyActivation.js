@@ -1019,8 +1019,14 @@ export const syncCompanyStatus = async (companyId) => {
 
     const full = await loadCompanyFullProfile(company);
 
-    // Once HR has approved activation, keep status Active during reactivation / hold cycles.
-    if (isCompanyFullyActivated(full) || companyWasEverFullyActivated(full)) {
+    // Active profile or previously HR-approved: never demote to Inactive when cards are edited.
+    // Status stays Active through reactivation / hold / pending-queue cycles.
+    const keepActiveProfile =
+        isActiveCompanyProfile(full) ||
+        isCompanyFullyActivated(full) ||
+        companyWasEverFullyActivated(full);
+
+    if (keepActiveProfile) {
         if (company.status !== "Active") {
             company.status = "Active";
             await company.save();
@@ -1028,7 +1034,7 @@ export const syncCompanyStatus = async (companyId) => {
         return;
     }
 
-    // Draft / submitted / not yet HR-approved: never promote to Active from card progress alone.
+    // Draft / not yet HR-approved: never promote to Active from card progress alone.
     // First-time activation requires Submit + HR approval (approveCompanyActivationRequest).
     if (company.status !== "Inactive") {
         company.status = "Inactive";

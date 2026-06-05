@@ -68,6 +68,7 @@ import {
     validateOwnerDetailsOwnersPayload,
 } from "../../utils/ownerDetailsValidation.js";
 import { collectGlobalOwnerProfileIds } from "../../utils/ownerProfileId.js";
+import { enrichOwnersFromGlobalCatalog } from "../../utils/globalOwnersCatalog.js";
 import {
     normalizeOwnerPassportRow,
     validateOwnersPassportPayload,
@@ -606,6 +607,7 @@ export const updateCompany = async (req, res) => {
                     beforeCompany.owners || [],
                     updateData.owners,
                 );
+                updateData.owners = await enrichOwnersFromGlobalCatalog(updateData.owners);
                 const globalUsed = await collectGlobalOwnerProfileIds();
                 updateData.owners = normalizeTradeLicenseOwners(updateData.owners, globalUsed);
                 updateData.owners = updateData.owners.map((row) => {
