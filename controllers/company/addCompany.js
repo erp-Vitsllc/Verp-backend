@@ -92,7 +92,7 @@ export const addCompany = async (req, res) => {
         }
 
         // 4. Company Email ID validations
-        // Required, Must be unique, Valid email format, lowercase, No spaces, Format: /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+        // Required, Valid email format, lowercase, No spaces, Format: /^[^\s@]+@[^\s@]+\.[^\s@]+$/
         if (!email) {
             return res.status(400).json({ message: "Company Email ID is required" });
         }
@@ -103,11 +103,6 @@ export const addCompany = async (req, res) => {
         if (!emailRegex.test(email)) {
             return res.status(400).json({ message: "Invalid Company Email ID format" });
         }
-        const duplicateEmail = await Company.findOne({ email });
-        if (duplicateEmail) {
-            return res.status(400).json({ message: "Company Email ID must be unique" });
-        }
-
         // 5. Phone Number validations
         // Required, Numbers only, UAE format supported, Min 7 digits, Country code stored separately, Format: /^5[0-9]{8}$/
         if (!phone) {

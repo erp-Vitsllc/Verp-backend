@@ -776,6 +776,14 @@ export const getUserActivityStats = async (req, res) => {
                 item.requestType === 'Company Activation' &&
                 companyActivationViewerRole === 'requester';
 
+            // Submitter is notified only after HR acts (hold / reject), not at submit time.
+            if (
+                isCompanyActivationRequesterCopy &&
+                String(item.status || '').toLowerCase() === 'pending'
+            ) {
+                return;
+            }
+
             const isVehicleActivationRequesterCopy =
                 item.requestType === 'Vehicle Profile Activation' &&
                 vehicleActivationViewerRole === 'requester';
@@ -877,7 +885,7 @@ export const getUserActivityStats = async (req, res) => {
                 return;
             }
 
-            if (!isHrInbox && !isSubmitterOutgoing) return;
+            if (!isHrInbox) return;
 
             activityList.push({
                 id: reqIdStr,
@@ -889,7 +897,7 @@ export const getUserActivityStats = async (req, res) => {
                 extra1: `[Company profile] Company submitted for activation review`,
                 extra2: co.companyId || "",
                 extra3: JSON.stringify({
-                    companyActivationViewerRole: isSubmitterOutgoing && !isHrInbox ? "requester" : "approver",
+                    companyActivationViewerRole: "approver",
                     activationSubject: "company",
                 }),
                 targetEmployeeId: co.companyId,

@@ -30,6 +30,7 @@ import {
 import { mergeCompanyOwnersSnapshot } from "../../utils/mergeCompanyOwnersSnapshot.js";
 import {
     getOwnerIndicesWithContactDetailChanges,
+    getChangedOwnerNestedDocKeys,
     isOwnerNestedDocOnlyOwnersUpdate,
 } from "../../utils/ownerPatchScope.js";
 import {
@@ -602,11 +603,12 @@ export const updateCompany = async (req, res) => {
 
         if (Object.prototype.hasOwnProperty.call(updateData, "owners")) {
             try {
+                const baseOwners = beforeCompany.owners || [];
+                const rawPatchOwners = updateData.owners;
+                const ownerDocCardsOnly = isOwnerNestedDocOnlyOwnersUpdate(rawPatchOwners, baseOwners);
+                const changedNestedDocKeys = getChangedOwnerNestedDocKeys(rawPatchOwners, baseOwners);
                 // Keep existing owner doc cards (passport, EID, etc.) when PATCH sends only one updated card.
-                updateData.owners = mergeCompanyOwnersSnapshot(
-                    beforeCompany.owners || [],
-                    updateData.owners,
-                );
+                updateData.owners = mergeCompanyOwnersSnapshot(baseOwners, rawPatchOwners);
                 updateData.owners = await enrichOwnersFromGlobalCatalog(updateData.owners);
                 const globalUsed = await collectGlobalOwnerProfileIds();
                 updateData.owners = normalizeTradeLicenseOwners(updateData.owners, globalUsed);
@@ -644,46 +646,61 @@ export const updateCompany = async (req, res) => {
                 const profileActive =
                     String(company?.status || "").toLowerCase() === "active";
                 const tradeLicenseOwnersOnly = isTradeLicenseOwnersBundleUpdate(updateData);
-                const ownerDocCardsOnly = isOwnerNestedDocOnlyOwnersUpdate(
-                    updateData.owners,
-                    beforeCompany.owners || [],
-                );
-                if (!tradeLicenseOwnersOnly && !ownerDocCardsOnly) {
-                    const contactDetailChangeIndices = getOwnerIndicesWithContactDetailChanges(
-                        updateData.owners,
-                        beforeCompany.owners || [],
-                    );
-                    const detailsCheck = validateOwnerDetailsOwnersPayload(updateData.owners, {
-                        requireEmail: profileActive,
-                        profileActive,
-                        onlyValidateDetailIndices: contactDetailChangeIndices,
-                    });
-                    if (!detailsCheck.ok) {
-                        return res.status(400).json({ message: detailsCheck.message });
+                if (!tradeLicenseOwnersOnly) {
+                    if (!ownerDocCardsOnly) {
+                        const contactDetailChangeIndices = getOwnerIndicesWithContactDetailChanges(
+                            updateData.owners,
+                            baseOwners,
+                        );
+                        const detailsCheck = validateOwnerDetailsOwnersPayload(updateData.owners, {
+                            requireEmail: profileActive,
+                            profileActive,
+                            onlyValidateDetailIndices: contactDetailChangeIndices,
+                        });
+                        if (!detailsCheck.ok) {
+                            return res.status(400).json({ message: detailsCheck.message });
+                        }
                     }
-                    const passportCheck = validateOwnersPassportPayload(updateData.owners);
-                    if (!passportCheck.ok) {
-                        return res.status(400).json({ message: passportCheck.message });
+                    if (changedNestedDocKeys.has("passport")) {
+                        const passportCheck = validateOwnersPassportPayload(updateData.owners);
+                        if (!passportCheck.ok) {
+                            return res.status(400).json({ message: passportCheck.message });
+                        }
                     }
-                    const emiratesIdCheck = validateOwnersEmiratesIdPayload(updateData.owners);
-                    if (!emiratesIdCheck.ok) {
-                        return res.status(400).json({ message: emiratesIdCheck.message });
+                    if (changedNestedDocKeys.has("emiratesId")) {
+                        const emiratesIdCheck = validateOwnersEmiratesIdPayload(updateData.owners);
+                        if (!emiratesIdCheck.ok) {
+                            return res.status(400).json({ message: emiratesIdCheck.message });
+                        }
                     }
-                    const visaCheck = validateOwnersVisaPayload(updateData.owners);
-                    if (!visaCheck.ok) {
-                        return res.status(400).json({ message: visaCheck.message });
+                    if (
+                        changedNestedDocKeys.has("visa") ||
+                        changedNestedDocKeys.has("visitVisa") ||
+                        changedNestedDocKeys.has("employmentVisa") ||
+                        changedNestedDocKeys.has("spouseVisa")
+                    ) {
+                        const visaCheck = validateOwnersVisaPayload(updateData.owners);
+                        if (!visaCheck.ok) {
+                            return res.status(400).json({ message: visaCheck.message });
+                        }
                     }
-                    const labourCardCheck = validateOwnersLabourCardPayload(updateData.owners);
-                    if (!labourCardCheck.ok) {
-                        return res.status(400).json({ message: labourCardCheck.message });
+                    if (changedNestedDocKeys.has("labourCard")) {
+                        const labourCardCheck = validateOwnersLabourCardPayload(updateData.owners);
+                        if (!labourCardCheck.ok) {
+                            return res.status(400).json({ message: labourCardCheck.message });
+                        }
                     }
-                    const medicalCheck = validateOwnersMedicalInsurancePayload(updateData.owners);
-                    if (!medicalCheck.ok) {
-                        return res.status(400).json({ message: medicalCheck.message });
+                    if (changedNestedDocKeys.has("medical")) {
+                        const medicalCheck = validateOwnersMedicalInsurancePayload(updateData.owners);
+                        if (!medicalCheck.ok) {
+                            return res.status(400).json({ message: medicalCheck.message });
+                        }
                     }
-                    const drivingLicenseCheck = validateOwnersDrivingLicensePayload(updateData.owners);
-                    if (!drivingLicenseCheck.ok) {
-                        return res.status(400).json({ message: drivingLicenseCheck.message });
+                    if (changedNestedDocKeys.has("drivingLicense")) {
+                        const drivingLicenseCheck = validateOwnersDrivingLicensePayload(updateData.owners);
+                        if (!drivingLicenseCheck.ok) {
+                            return res.status(400).json({ message: drivingLicenseCheck.message });
+                        }
                     }
                 }
             } catch (e) {

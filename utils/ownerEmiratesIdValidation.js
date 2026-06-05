@@ -30,6 +30,7 @@ export function validateEmiratesIdNumber(value, { existingNumbers = [], skipNumb
     const normalized = normalizeEmiratesIdNumber(value);
     if (!normalized) return "Emirates ID Number is required";
     if (normalized.length !== 15) return "Emirates ID Number must be exactly 15 digits";
+    if (!normalized.startsWith("784")) return "Emirates ID Number must start with 784";
     if (!EMIRATES_ID_REGEX.test(normalized)) {
         return "Emirates ID Number must contain digits only";
     }

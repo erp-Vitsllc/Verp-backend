@@ -438,7 +438,6 @@ export const submitCompanyActivation = async ({
         ? `${activationTypeLabel} | ${dashboardSummary}${requestedChanges.length ? ` | Requested Changes: ${requestedChanges.join(", ")}` : ""}`
         : `${activationTypeLabel} | ${reason}${requestedChanges.length ? ` | Requested Changes: ${requestedChanges.join(", ")}` : ""}`;
 
-    const resubmitAfterHold = Boolean(merged.activationHold);
     const profileWasFullyActive = isCompanyFullyActivated(merged);
 
     // First-time activation: Inactive until HR approves. Reactivation: status stays Active.
@@ -497,28 +496,6 @@ export const submitCompanyActivation = async ({
             activationSubject: "company",
         }),
     });
-
-    if ((actor?.employeeObjectId || actor?._id) && !resubmitAfterHold) {
-        await syncDashboardAction({
-            requestId: company._id,
-            requestType: "Company Activation",
-            assignedTo: String(actor.employeeObjectId || actor._id),
-            status: "Pending",
-            subjectEmployee: {
-                employeeId: company.companyId,
-                firstName: company.name,
-                lastName: "",
-                designation: company.nickName || "",
-            },
-            requestedByName,
-            extra1: `[Company profile] ${extra1ForDashboard}`,
-            extra2: company.companyId || "",
-            extra3: JSON.stringify({
-                companyActivationViewerRole: "requester",
-                activationSubject: "company",
-            }),
-        });
-    }
 
     try {
         const hrName = `${hr.firstName || ""} ${hr.lastName || ""}`.trim() || "HR";

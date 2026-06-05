@@ -1,4 +1,7 @@
-import { mergeCompanyOwnersSnapshot, OWNER_NESTED_DOC_KEYS } from "./mergeCompanyOwnersSnapshot.js";
+import {
+    mergeCompanyOwnersSnapshot,
+    OWNER_NESTED_DOC_KEYS,
+} from "./mergeCompanyOwnersSnapshot.js";
 import {
     normalizeOwnerEmail,
     normalizeOwnerPhone,
@@ -77,15 +80,60 @@ const findBaseOwner = (patch, baseOwners, index) => {
 export const isOwnerNestedDocOnlyOwnersUpdate = (patchOwners = [], baseOwners = []) => {
     if (!Array.isArray(patchOwners) || patchOwners.length === 0) return false;
 
-    return patchOwners.every((patch, index) => {
-        const base = findBaseOwner(patch, baseOwners, index);
-        const touchesBasic = ownerPatchTouchesBasicScalarFields(patch, base);
-        const touchesNested = OWNER_NESTED_DOC_KEYS.some(
-            (key) =>
-                Object.prototype.hasOwnProperty.call(patch, key) &&
-                patch[key] != null &&
-                typeof patch[key] === "object",
-        );
-        return touchesNested && !touchesBasic;
+    const merged = mergeCompanyOwnersSnapshot(baseOwners, patchOwners);
+    let anyNestedChanged = false;
+    for (let index = 0; index < merged.length; index++) {
+        const mergedRow = merged[index];
+        const base = findBaseOwner(mergedRow, baseOwners, index);
+        if (ownerPatchTouchesBasicScalarFields(mergedRow, base)) return false;
+        if (ownerRowNestedDocsChanged(mergedRow, base)) anyNestedChanged = true;
+    }
+    return anyNestedChanged;
+};
+
+const nestedDocHasContent = (doc) => {
+    if (!doc || typeof doc !== "object") return false;
+    const scalarKeys = ["number", "nationality", "type", "provider", "issueDate", "expiryDate", "sponsor"];
+    if (scalarKeys.some((k) => doc[k] != null && String(doc[k]).trim() !== "")) return true;
+    const att = doc.attachment;
+    if (!att) return false;
+    if (typeof att === "string") return String(att).trim() !== "";
+    return Boolean(att?.url || att?.publicId || att?.data);
+};
+
+const nestedDocFieldEqual = (left, right) => {
+    if (left == null && right == null) return true;
+    if (left == null || right == null) {
+        const doc = left || right;
+        if (typeof doc !== "object") return String(left ?? "") === String(right ?? "");
+        return !nestedDocHasContent(doc);
+    }
+    if (typeof left !== "object" || typeof right !== "object") {
+        return String(left) === String(right);
+    }
+    try {
+        return JSON.stringify(left) === JSON.stringify(right);
+    } catch {
+        return false;
+    }
+};
+
+/** True when passport / EID / visa etc. on a row differ from the live owner snapshot. */
+export const ownerRowNestedDocsChanged = (mergedRow = {}, baseRow = {}) =>
+    OWNER_NESTED_DOC_KEYS.some((key) => !nestedDocFieldEqual(mergedRow?.[key], baseRow?.[key]));
+
+/** Nested doc card keys that differ from the live owner snapshot (passport-only save → Set { passport }). */
+export const getChangedOwnerNestedDocKeys = (patchOwners = [], baseOwners = []) => {
+    if (!Array.isArray(patchOwners) || patchOwners.length === 0) return new Set();
+    const merged = mergeCompanyOwnersSnapshot(baseOwners, patchOwners);
+    const changedKeys = new Set();
+    merged.forEach((mergedRow, index) => {
+        const base = findBaseOwner(mergedRow, baseOwners, index);
+        for (const key of OWNER_NESTED_DOC_KEYS) {
+            if (!nestedDocFieldEqual(mergedRow?.[key], base?.[key])) {
+                changedKeys.add(key);
+            }
+        }
     });
+    return changedKeys;
 };

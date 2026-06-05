@@ -3,6 +3,7 @@ import Group from "../models/Group.js";
 import EmployeeBasic from "../models/EmployeeBasic.js";
 import { getAllPermissions } from "../services/permissionService.js";
 import { ensureAssetCategoryIndexes } from "../utils/ensureAssetCategoryIndexes.js";
+import { ensureCompanyEmailIndex } from "../models/Company.js";
 
 export const connectDB = async () => {
     try {
@@ -40,6 +41,7 @@ export const connectDB = async () => {
         });
 
         await ensureAssetCategoryIndexes();
+        await ensureCompanyEmailIndex();
 
         // Ensure the critical EmployeeBasic.company index exists before serving traffic.
         // getCompanies hangs without this index because $lookup runs COLLSCAN per company.

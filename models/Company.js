@@ -19,7 +19,7 @@ const companySchema = new mongoose.Schema(
         companyId: { type: String, required: true, unique: true },
         establishedDate: { type: Date },
         logo: { type: String },
-        email: { type: String, required: true, unique: true },
+        email: { type: String, required: true },
         phone: { type: String },
         phoneCountryCode: { type: String },
         website: { type: String },
@@ -64,5 +64,22 @@ const companySchema = new mongoose.Schema(
 
 companySchema.index({ createdAt: -1 });
 companySchema.index({ status: 1, createdAt: -1 });
+companySchema.index({ email: 1 });
 
-export default mongoose.model("Company", companySchema);
+const Company = mongoose.model("Company", companySchema);
+
+/** Drop legacy unique email index so the same email can be used on multiple companies. */
+export async function ensureCompanyEmailIndex() {
+    try {
+        await Company.collection.dropIndex("email_1");
+    } catch {
+        // Index may not exist or may already be non-unique.
+    }
+    try {
+        await Company.collection.createIndex({ email: 1 });
+    } catch {
+        // Non-fatal if index already exists.
+    }
+}
+
+export default Company;
