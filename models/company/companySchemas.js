@@ -191,6 +191,10 @@ export const companyWorkflowSchema = new mongoose.Schema(
                 previousData: { type: mongoose.Schema.Types.Mixed, default: null },
                 proposedData: { type: mongoose.Schema.Types.Mixed, default: null },
                 changedAt: { type: Date, default: Date.now },
+                queuedByUserId: { type: String, default: "" },
+                queuedByEmployeeId: { type: String, default: "" },
+                queuedByEmployeeObjectId: { type: String, default: "" },
+                queuedByName: { type: String, default: "" },
             },
         ],
         activationHold: {
@@ -222,6 +226,7 @@ export const companyWorkflowSchema = new mongoose.Schema(
                 arrayIndex: { type: Number },
                 arrayItemId: { type: String, default: "" },
                 ownerIndex: { type: Number },
+                ownerProfileId: { type: String, default: "" },
                 docKey: { type: String, default: "" },
                 reason: { type: String, required: true },
                 supportingAttachmentKey: { type: String, default: "" },

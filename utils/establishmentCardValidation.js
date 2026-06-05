@@ -1,11 +1,6 @@
 const CARD_NUMBER_REGEX = /^[A-Z0-9-]{4,30}$/;
 
-const ALLOWED_MIME_TYPES = new Set([
-    "application/pdf",
-    "image/jpeg",
-    "image/jpg",
-    "image/png",
-]);
+const NON_PDF_ATTACHMENT_EXT = /\.(jpe?g|png|gif|webp|bmp|tiff?)$/i;
 
 export function sanitizeEstablishmentField(val, fieldName) {
     if (val === undefined || val === null) return "";
@@ -44,6 +39,21 @@ export function validateEstablishmentCardNumber(value) {
     return null;
 }
 
+export function validateEstablishmentCardAttachmentUrl(value) {
+    if (!value) return "Attachment is required (PDF only, max 5MB)";
+    const str = String(value).trim();
+    if (!str) return "Attachment is required (PDF only, max 5MB)";
+    const path = str.split("?")[0];
+    if (NON_PDF_ATTACHMENT_EXT.test(path)) return "Only PDF files are allowed";
+    const lastDot = path.lastIndexOf(".");
+    const lastSlash = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+    if (lastDot > lastSlash) {
+        const ext = path.slice(lastDot).toLowerCase();
+        if (ext !== ".pdf") return "Only PDF files are allowed";
+    }
+    return null;
+}
+
 export function validateEstablishmentCardExpiryDate(value) {
     if (!value) return "Expiry Date is required";
     const expiry = parseDate(value);
@@ -75,8 +85,9 @@ export function validateEstablishmentCardPayload(payload = {}, { requireAttachme
     const expiryErr = validateEstablishmentCardExpiryDate(expiry);
     if (expiryErr) return { ok: false, message: expiryErr };
 
-    if (requireAttachment && !payload.establishmentCardAttachment) {
-        return { ok: false, message: "Attachment is required (PDF, JPG, JPEG, or PNG, max 5MB)" };
+    if (requireAttachment || Object.prototype.hasOwnProperty.call(payload, "establishmentCardAttachment")) {
+        const attachmentErr = validateEstablishmentCardAttachmentUrl(payload.establishmentCardAttachment);
+        if (attachmentErr) return { ok: false, message: attachmentErr };
     }
 
     return { ok: true };

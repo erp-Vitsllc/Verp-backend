@@ -11,7 +11,9 @@ export function stripDangerousText(value) {
 }
 
 export function normalizeEmiratesIdNumber(value) {
-    return stripDangerousText(value).replace(/\D/g, "");
+    return stripDangerousText(value)
+        .replace(/[\u200E\u200F\u202A-\u202E]/g, "")
+        .replace(/\D/g, "");
 }
 
 function parseDate(value) {
@@ -103,9 +105,13 @@ export function validateOwnerEmiratesIdRow(emiratesId, { owners = [], ownerIndex
     return { ok: true };
 }
 
-export function validateOwnersEmiratesIdPayload(owners = []) {
+export function validateOwnersEmiratesIdPayload(owners = [], { onlyValidateOwnerIndices = null } = {}) {
     if (!Array.isArray(owners)) return { ok: true };
+    const onlySet = Array.isArray(onlyValidateOwnerIndices)
+        ? new Set(onlyValidateOwnerIndices)
+        : null;
     for (let i = 0; i < owners.length; i++) {
+        if (onlySet && !onlySet.has(i)) continue;
         const check = validateOwnerEmiratesIdRow(owners[i]?.emiratesId, { owners, ownerIndex: i });
         if (!check.ok) return check;
     }

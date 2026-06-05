@@ -8,6 +8,9 @@ import {
     submitCompanyActivation,
     companyWasEverFullyActivated,
     isCompanyFullyActivated,
+    filterPendingEntriesInCurrentSubmission,
+    pendingEntryIncludedInSubmittedCards,
+    resolveLatestActivationSubmissionLabels,
 } from "../../utils/companyActivation.js";
 import { syncDashboardAction } from "../../utils/syncDashboard.js";
 import {
@@ -83,7 +86,7 @@ const resolveCompanyActivationSubmitterEmployee = async (company, pendingDashboa
         } catch {
             /* ignore */
         }
-        if (role === "requester" && row.assignedTo) {
+        if ((role === "requester" || role === "submitter") && row.assignedTo) {
             const fromRow = await findEmpByIdOrUserId(row.assignedTo);
             if (fromRow) return fromRow;
         }
@@ -251,8 +254,16 @@ export const approveCompanyActivationRequest = async (req, res) => {
         const pendingChanges = Array.isArray(merged.pendingReactivationChanges)
             ? merged.pendingReactivationChanges.map((entry) => (entry?.toObject ? entry.toObject() : entry))
             : [];
-        if (selectionProvided && pendingChanges.length > 0) {
-            const expSorted = [...pendingChanges.map((entry, idx) => companyPendingEntryId(entry, idx))].sort();
+        const submissionScope = filterPendingEntriesInCurrentSubmission(
+            pendingChanges,
+            merged.activationWorkflow,
+        );
+        const submissionScopeIds = submissionScope.map((entry) => {
+            const idx = pendingChanges.indexOf(entry);
+            return companyPendingEntryId(entry, idx >= 0 ? idx : 0);
+        });
+        if (selectionProvided && submissionScopeIds.length > 0) {
+            const expSorted = [...submissionScopeIds].sort();
             const aprSorted = [...approvedChangeIds.map(String)].sort();
             if (expSorted.length !== aprSorted.length || expSorted.join(",") !== aprSorted.join(",")) {
                 return res.status(400).json({
@@ -278,6 +289,17 @@ export const approveCompanyActivationRequest = async (req, res) => {
             if (archives?.length) ownerArchivesToPush.push(...archives);
         }
 
+        const appliedIds = new Set(
+            selectedChanges.map((entry) => {
+                const idx = pendingChanges.indexOf(entry);
+                return companyPendingEntryId(entry, idx >= 0 ? idx : 0);
+            }),
+        );
+        const remainingPending = pendingChanges.filter((entry, idx) => {
+            const entryId = companyPendingEntryId(entry, idx);
+            return !appliedIds.has(entryId);
+        });
+
         company.status = "Active";
         company.activationStatus = "active";
         await company.save();
@@ -292,7 +314,7 @@ export const approveCompanyActivationRequest = async (req, res) => {
             comment: "Company activation approved",
         });
         await upsertCompanyPartitions(company._id, {
-            pendingReactivationChanges: [],
+            pendingReactivationChanges: remainingPending,
             activationWorkflow,
         });
         await clearCompanyWorkflowActivationHold(company._id);
@@ -388,6 +410,13 @@ export const holdCompanyActivationRequest = async (req, res) => {
                 return { ...o, __idStr: companyPendingEntryId(o, idx) };
             })
             : [];
+        const submissionLabels = resolveLatestActivationSubmissionLabels(merged.activationWorkflow);
+        const reviewRows =
+            submissionLabels.length > 0
+                ? pendingChanges.filter((entry) =>
+                      pendingEntryIncludedInSubmittedCards(entry, submissionLabels),
+                  )
+                : pendingChanges;
 
         if (!selectionProvided) {
             return res.status(400).json({
@@ -395,7 +424,7 @@ export const holdCompanyActivationRequest = async (req, res) => {
             });
         }
 
-        const allIds = pendingChanges.map((e) => e.__idStr);
+        const allIds = reviewRows.map((e) => e.__idStr);
         if (!allIds.length) {
             return res.status(400).json({
                 message: "There are no structured change rows to hold. Accept or reject the request instead.",
@@ -415,8 +444,8 @@ export const holdCompanyActivationRequest = async (req, res) => {
             });
         }
 
-        const approvedChanges = pendingChanges.filter((e) => approvedChoice.has(e.__idStr));
-        const unapproved = pendingChanges.filter((e) => !approvedChoice.has(e.__idStr));
+        const approvedChanges = reviewRows.filter((e) => approvedChoice.has(e.__idStr));
+        const unapproved = reviewRows.filter((e) => !approvedChoice.has(e.__idStr));
         const unapprovedCards = [...new Set(unapproved.map((e) => String(e.card || "").trim()).filter(Boolean))];
         const rowNotesByEntryId = sanitizeActivationHoldRowNotes(req.body?.rowNotesByEntryId, unapproved.map((e) => e.__idStr));
 
@@ -459,7 +488,16 @@ export const holdCompanyActivationRequest = async (req, res) => {
             ...(rowNotesByEntryId ? { rowNotesByEntryId } : {}),
         };
 
-        const remainingPending = unapproved.map(({ __idStr, ...rest }) => rest);
+        const unapprovedIds = new Set(unapproved.map((e) => e.__idStr));
+        const remainingPending = pendingChanges
+            .filter((entry) => {
+                const inReview = reviewRows.some((r) => r.__idStr === entry.__idStr);
+                if (!inReview) return true;
+                return unapprovedIds.has(entry.__idStr);
+            })
+            .map(({ __idStr, ...rest }) => rest);
+        company.activationStatus = "hold";
+        await company.save();
         await upsertCompanyPartitions(company._id, {
             activationHold,
             pendingReactivationChanges: remainingPending,
@@ -495,7 +533,7 @@ export const holdCompanyActivationRequest = async (req, res) => {
                     companyActivationNotifyAssignee: submitterEmp,
                     requestedByName: req.user?.name || "",
                     actionedBy: req.user?.employeeObjectId || req.user?._id,
-                    comment: comment || company.activationHold.unapprovedCards.join(", "),
+                    comment: comment || activationHold.unapprovedCards.join(", "),
                     extra1: holdNotice.slice(0, 950),
                     extra2: company.companyId || "",
                     extra3: JSON.stringify({
@@ -509,15 +547,11 @@ export const holdCompanyActivationRequest = async (req, res) => {
         }
 
         try {
-            const hrCloseQuery = {
+            await DashboardAction.deleteMany({
                 requestId: company._id,
                 requestType: "Company Activation",
                 status: "Pending",
-            };
-            if (submitterEmp?._id) {
-                hrCloseQuery.assignedTo = { $ne: submitterEmp._id };
-            }
-            await DashboardAction.deleteMany(hrCloseQuery);
+            });
         } catch (_e) {
             /* non-fatal */
         }

@@ -82,11 +82,17 @@ export function validateCertificateIssuedToLabel(value) {
     return null;
 }
 
+/** HR certificate tab rows only — not live docs whose type name contains "Certificate". */
+export function isCompanyCertificateDocument(doc) {
+    if (!doc || typeof doc !== "object") return false;
+    const ctx = String(doc.context || "").toLowerCase();
+    if (ctx === "document_with_expiry" || ctx === "document_without_expiry") return false;
+    return ctx === "certificate";
+}
+
 export function validateCertificateDocumentRow(doc) {
     if (!doc || typeof doc !== "object") return { ok: true };
-    const ctx = String(doc.context || "").toLowerCase();
-    const typeLower = String(doc.type || "").toLowerCase();
-    if (ctx !== "certificate" && !typeLower.includes("certificate")) return { ok: true };
+    if (!isCompanyCertificateDocument(doc)) return { ok: true };
 
     const parsed = parseCertificateStoredDescription(doc.description);
     const checks = [
@@ -115,9 +121,7 @@ export function validateCertificateDocumentRow(doc) {
 
 export function normalizeCompanyCertificateRow(doc) {
     if (!doc || typeof doc !== "object") return doc;
-    const ctx = String(doc.context || "").toLowerCase();
-    const typeLower = String(doc.type || "").toLowerCase();
-    if (ctx !== "certificate" && !typeLower.includes("certificate")) return doc;
+    if (!isCompanyCertificateDocument(doc)) return doc;
     const row = { ...doc, context: "certificate" };
     if (row.issueDate && !(row.issueDate instanceof Date)) {
         const d = new Date(row.issueDate);

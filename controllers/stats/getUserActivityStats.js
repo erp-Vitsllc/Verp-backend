@@ -7,11 +7,13 @@ import EmployeeBasic from "../../models/EmployeeBasic.js";
 import User from "../../models/User.js";
 import Company from "../../models/Company.js";
 import CompanyWorkflow from "../../models/CompanyWorkflow.js";
+import { loadCompaniesForExpiryScanByIds } from "../../services/companyPartitionService.js";
+import { collectCompanyExpiryDocuments } from "../../utils/companyExpiryScanUtils.js";
 import { getDaysUntil, isExpiryTaskWindow } from "../../utils/documentExpiryReminderStages.js";
 
 /** Matches owner-style company rows — allow ASCII/en/em dashes between name and document type (same intent as frontend). */
 const COMPANY_OWNER_EXPIRY_BODY_RE =
-    /\s[-\u2013\u2014]\s(Passport|Visa|Emirates ID|Medical Insurance|Driving License|Labour Card)\s*\(/i;
+    /\s[-\u2013\u2014]\s(Passport|Visa|Visit Visa|Employment Visa|Spouse Visa|Emirates ID|Medical Insurance|Driving License|Labour Card)\s*\(/i;
 
 const normalizeExpiryExtra1ForDedupe = (s) => String(s || "").trim().replace(/\s+/g, " ").toLowerCase();
 
@@ -89,55 +91,9 @@ const formatExpiryDateLabel = (expiryDate) => {
     return d.toLocaleDateString("en-GB");
 };
 
-const isArchivedManualDoc = (doc = {}) => {
-    if (!doc || typeof doc !== "object") return false;
-    if (doc.archivedAt || doc.isArchived === true) return true;
-    const text = `${doc.type || ""} ${doc.description || ""}`.toLowerCase();
-    return text.includes("previous") || text.includes("not renew") || text.includes("not renewed");
-};
-
-const companyOwnerDocEntries = (company = {}) => {
-    const owners = Array.isArray(company?.owners) ? company.owners : [];
-    const fields = [
-        ["passport", "Passport"],
-        ["visa", "Visa"],
-        ["emiratesId", "Emirates ID"],
-        ["medical", "Medical Insurance"],
-        ["drivingLicense", "Driving License"],
-        ["labourCard", "Labour Card"],
-    ];
-    const rows = [];
-    owners.forEach((owner) => {
-        fields.forEach(([k, lbl]) => {
-            const exp = owner?.[k]?.expiryDate;
-            if (!exp) return;
-            rows.push({ label: `${owner?.name || "Owner"} - ${lbl}`, expiryDate: exp });
-        });
-    });
-    return rows;
-};
-
 const buildCompanyLiveExpiryExtra1Set = (company = {}) => {
-    const labels = [];
-    if (company?.tradeLicenseExpiry) labels.push({ label: "Trade License", expiryDate: company.tradeLicenseExpiry });
-    if (company?.establishmentCardExpiry)
-        labels.push({ label: "Establishment Card", expiryDate: company.establishmentCardExpiry });
-    (company?.documents || []).forEach((d) => {
-        if (!d?.expiryDate || isArchivedManualDoc(d)) return;
-        labels.push({ label: d?.type || "Company Document", expiryDate: d.expiryDate });
-    });
-    (company?.ejari || []).forEach((ej) => {
-        if (!ej?.expiryDate || isArchivedManualDoc(ej)) return;
-        labels.push({ label: ej?.type ? `Ejari — ${ej.type}` : "Ejari", expiryDate: ej.expiryDate });
-    });
-    (company?.insurance || []).forEach((ins) => {
-        if (!ins?.expiryDate || isArchivedManualDoc(ins)) return;
-        labels.push({ label: ins?.type ? `Insurance — ${ins.type}` : "Insurance", expiryDate: ins.expiryDate });
-    });
-    labels.push(...companyOwnerDocEntries(company));
-
     const set = new Set();
-    labels.forEach((x) => {
+    collectCompanyExpiryDocuments(company).forEach((x) => {
         const days = getDaysUntil(x.expiryDate);
         if (days == null || !isExpiryTaskWindow(days)) return;
         const exp = formatExpiryDateLabel(x.expiryDate);
@@ -168,51 +124,60 @@ const EMPLOYEE_SYSTEM_EXPIRY_LABEL_RE =
 
 const filterStaleExpiryDashboardRows = async (items = []) => {
     if (!Array.isArray(items) || items.length === 0) return items;
-    const candidateCompanyIds = new Set();
-    const candidateEmployeeIds = new Set();
-    items.forEach((it) => {
-        if (it?.requestType === "Document Expiry Reminder" && it?.requestId) {
-            candidateCompanyIds.add(String(it.requestId));
-        } else if (it?.requestType === "Employee Document Expiry Reminder" && it?.requestId) {
-            candidateEmployeeIds.add(String(it.requestId));
-        }
-    });
+    try {
+        const candidateCompanyIds = new Set();
+        const candidateEmployeeIds = new Set();
+        items.forEach((it) => {
+            if (it?.requestType === "Document Expiry Reminder" && it?.requestId) {
+                candidateCompanyIds.add(String(it.requestId));
+            } else if (it?.requestType === "Employee Document Expiry Reminder" && it?.requestId) {
+                candidateEmployeeIds.add(String(it.requestId));
+            }
+        });
 
-    const [companies, employees] = await Promise.all([
-        candidateCompanyIds.size
-            ? Company.find({ _id: { $in: [...candidateCompanyIds] } })
-                  .select("_id tradeLicenseExpiry establishmentCardExpiry documents ejari insurance owners")
-                  .lean()
-                  .maxTimeMS(6000)
-            : [],
-        candidateEmployeeIds.size
-            ? EmployeeBasic.find({ _id: { $in: [...candidateEmployeeIds] } })
-                  .select("_id documents contractExpiryDate")
-                  .lean()
-                  .maxTimeMS(6000)
-            : [],
-    ]);
+        const [companies, employees] = await Promise.all([
+            candidateCompanyIds.size
+                ? loadCompaniesForExpiryScanByIds([...candidateCompanyIds])
+                : [],
+            candidateEmployeeIds.size
+                ? EmployeeBasic.find({ _id: { $in: [...candidateEmployeeIds] } })
+                      .select("_id documents contractExpiryDate")
+                      .lean()
+                      .maxTimeMS(6000)
+                : [],
+        ]);
 
-    const companyLabelSetById = new Map(companies.map((c) => [String(c._id), buildCompanyLiveExpiryExtra1Set(c)]));
-    const employeeLabelSetById = new Map(employees.map((e) => [String(e._id), buildEmployeeLiveExpiryExtra1Set(e)]));
+        const companyLabelSetById = new Map(
+            companies.map((c) => [String(c._id), buildCompanyLiveExpiryExtra1Set(c)]),
+        );
+        const employeeLabelSetById = new Map(
+            employees.map((e) => [String(e._id), buildEmployeeLiveExpiryExtra1Set(e)]),
+        );
 
-    return items.filter((it) => {
-        const extra1 = String(it?.extra1 || "").trim();
-        if (!extra1.toLowerCase().startsWith("expiry follow-up required:")) return true;
-        if (it?.requestType === "Document Expiry Reminder") {
-            const set = companyLabelSetById.get(String(it.requestId || ""));
-            if (!set) return true;
-            return set.has(extra1);
-        }
-        if (it?.requestType === "Employee Document Expiry Reminder") {
-            // Keep system-card reminders; filter stale manual document reminders against active manual docs.
-            if (EMPLOYEE_SYSTEM_EXPIRY_LABEL_RE.test(extra1)) return true;
-            const set = employeeLabelSetById.get(String(it.requestId || ""));
-            if (!set) return true;
-            return set.has(extra1);
-        }
-        return true;
-    });
+        return items.filter((it) => {
+            const extra1 = String(it?.extra1 || "").trim();
+            if (!extra1.toLowerCase().startsWith("expiry follow-up required:")) return true;
+            if (it?.requestType === "Document Expiry Reminder") {
+                const set = companyLabelSetById.get(String(it.requestId || ""));
+                if (!set) return true;
+                return set.has(extra1);
+            }
+            if (it?.requestType === "Employee Document Expiry Reminder") {
+                // Keep system-card reminders; filter stale manual document reminders against active manual docs.
+                if (EMPLOYEE_SYSTEM_EXPIRY_LABEL_RE.test(extra1)) return true;
+                const set = employeeLabelSetById.get(String(it.requestId || ""));
+                if (!set) return true;
+                return set.has(extra1);
+            }
+            return true;
+        });
+    } catch (err) {
+        console.warn(
+            "[getUserActivityStats] filterStaleExpiryDashboardRows skipped:",
+            err?.message || err,
+        );
+        return items;
+    }
 };
 
 /**
@@ -829,8 +794,8 @@ export const getUserActivityStats = async (req, res) => {
         });
 
         // Fallback when activation was submitted but DashboardAction sync is missing or assignee drifted.
-        const submittedCompanies = await Company.find({ activationStatus: "submitted" })
-            .select("_id name companyId nickName activationSubmittedTo activationSubmittedBy updatedAt")
+        const submittedCompanies = await Company.find({ activationStatus: { $in: ["submitted", "hold"] } })
+            .select("_id name companyId nickName activationSubmittedTo activationSubmittedBy activationStatus updatedAt")
             .lean()
             .maxTimeMS(6000);
 
@@ -850,7 +815,8 @@ export const getUserActivityStats = async (req, res) => {
             if (seenRequests.has(reqIdStr)) return;
 
             const hold = holdMap.get(reqIdStr);
-            const isOnHold = hold && hold.heldAt;
+            const isOnHold =
+                String(co.activationStatus || "").toLowerCase() === "hold" || Boolean(hold?.heldAt);
 
             const submittedToHr = co.activationSubmittedTo?.toString();
             const submittedBy = co.activationSubmittedBy?.toString();

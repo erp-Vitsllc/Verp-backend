@@ -1,5 +1,9 @@
 import nodemailer from "nodemailer";
-import Company from "../models/Company.js";
+import { loadCompaniesForExpiryScan } from "../services/companyPartitionService.js";
+import {
+    collectCompanyExpiryDocuments,
+    COMPANY_OWNER_EXPIRY_FIELDS,
+} from "./companyExpiryScanUtils.js";
 import EmployeeBasic from "../models/EmployeeBasic.js";
 import EmployeePassport from "../models/EmployeePassport.js";
 import EmployeeVisa from "../models/EmployeeVisa.js";
@@ -256,93 +260,12 @@ const getEmployeeRecipientBundle = async (employee) => {
     return { admins, hr, hod, emails };
 };
 
-const buildCompanyDocuments = (company) => {
-    const docs = [];
-    const isOldLikeRow = (row) => {
-        const text = `${row?.type || ""} ${row?.description || ""}`.toLowerCase();
-        return text.includes("previous") || text.includes("not renew") || text.includes("not renewed");
-    };
-    if (company?.tradeLicenseExpiry) {
-        docs.push({
-            key: `company:${company._id}:trade-license`,
-            label: "Trade License",
-            expiryDate: company.tradeLicenseExpiry,
-        });
-    }
-    if (company?.establishmentCardExpiry) {
-        docs.push({
-            key: `company:${company._id}:establishment-card`,
-            label: "Establishment Card",
-            expiryDate: company.establishmentCardExpiry,
-        });
-    }
-
-    (company?.documents || []).forEach((d, idx) => {
-        if (!d?.expiryDate) return;
-        if (isOldLikeRow(d)) return;
-        const ctx = String(d?.context || "").toLowerCase();
-        const typeLabel = d?.type || "Company Document";
-        const label =
-            ctx === "certificate"
-                ? `Certificate — ${typeLabel}`
-                : typeLabel;
-        docs.push({
-            key: `company:${company._id}:document:${d?._id || idx}`,
-            label,
-            expiryDate: d.expiryDate,
-        });
-    });
-
-    (company?.ejari || []).forEach((ej, idx) => {
-        if (!ej?.expiryDate) return;
-        if (isOldLikeRow(ej)) return;
-        const subKey = ej?._id != null ? String(ej._id) : `idx-${idx}`;
-        docs.push({
-            key: `company:${company._id}:ejari:${subKey}`,
-            label: ej?.type ? `Ejari — ${ej.type}` : "Ejari",
-            expiryDate: ej.expiryDate,
-        });
-    });
-
-    (company?.insurance || []).forEach((ins, idx) => {
-        if (!ins?.expiryDate) return;
-        if (isOldLikeRow(ins)) return;
-        const subKey = ins?._id != null ? String(ins._id) : `idx-${idx}`;
-        docs.push({
-            key: `company:${company._id}:insurance:${subKey}`,
-            label: ins?.type ? `Insurance — ${ins.type}` : "Insurance",
-            expiryDate: ins.expiryDate,
-        });
-    });
-
-    const ownerFields = [
-        { key: "passport", label: "Passport" },
-        { key: "visa", label: "Visa" },
-        { key: "emiratesId", label: "Emirates ID" },
-        { key: "medical", label: "Medical Insurance" },
-        { key: "drivingLicense", label: "Driving License" },
-        { key: "labourCard", label: "Labour Card" },
-    ];
-
-    (company?.owners || []).forEach((owner, ownerIdx) => {
-        ownerFields.forEach((f) => {
-            const exp = owner?.[f.key]?.expiryDate;
-            if (!exp) return;
-            docs.push({
-                key: `company:${company._id}:owner:${ownerIdx}:${f.key}`,
-                label: `${owner?.name || "Owner"} - ${f.label}`,
-                expiryDate: exp,
-            });
-        });
-    });
-    return docs;
-};
+const buildCompanyDocuments = (company) => collectCompanyExpiryDocuments(company);
 
 /** Parse keys like `company:<mongoId>:owner:0:passport` */
 const parseCompanyOwnerDocKey = (docKey = "") => {
-    const m = String(docKey).match(
-        /^company:[^:]+:owner:(\d+):(passport|visa|emiratesId|medical|drivingLicense|labourCard)$/
-    );
+    const ownerKeys = COMPANY_OWNER_EXPIRY_FIELDS.map((f) => f.key).join("|");
+    const m = String(docKey).match(new RegExp(`^company:[^:]+:owner:(\\d+):(${ownerKeys})$`));
     if (!m) return null;
     return { ownerIdx: Number(m[1]), fieldKey: m[2] };
 };
@@ -357,6 +280,9 @@ const ownerDocIdentifierForFingerprint = (owner, fieldKey) => {
     if (!owner || typeof owner !== "object") return "";
     if (fieldKey === "passport") return String(owner?.passport?.number || "").trim().toLowerCase();
     if (fieldKey === "visa") return String(owner?.visa?.number || "").trim().toLowerCase();
+    if (fieldKey === "visitVisa") return String(owner?.visitVisa?.number || "").trim().toLowerCase();
+    if (fieldKey === "employmentVisa") return String(owner?.employmentVisa?.number || "").trim().toLowerCase();
+    if (fieldKey === "spouseVisa") return String(owner?.spouseVisa?.number || "").trim().toLowerCase();
     if (fieldKey === "emiratesId") return String(owner?.emiratesId?.number || "").trim().toLowerCase();
     if (fieldKey === "labourCard") return String(owner?.labourCard?.number || "").trim().toLowerCase();
     if (fieldKey === "medical") return String(owner?.medical?.number || owner?.medical?.policyNumber || "").trim().toLowerCase();
@@ -414,37 +340,35 @@ const buildCanonicalOwnerExpiryTargets = (companies) => {
     return canon;
 };
 
-/**
- * Drops stale/non-canonical company document-expiry DashboardAction rows immediately (not only on cron).
- * Non-canonical owner copies must not retain follow-up rows; canonical uses lowest human companyId globally.
- */
-export const reconcileCompanyDocumentExpiryDashboard = async (companyMongoId) => {
-    if (!companyMongoId) return;
-    const recipients = await getFlowchartRecipientBundle();
-    const companies = await Company.find({}).select(
-        "_id name companyId tradeLicenseExpiry establishmentCardExpiry documents ejari insurance owners"
-    ).lean();
-    const canonicalOwnerTargets = buildCanonicalOwnerExpiryTargets(companies);
-    const company = companies.find((c) => String(c._id) === String(companyMongoId));
-    if (!company) return;
+const resolveOwnerExpiryReminderMeta = (company, doc, canonicalOwnerTargets) => {
+    const parsedOwner = parseCompanyOwnerDocKey(doc.key);
+    if (!parsedOwner) {
+        return { skipDuplicateOwnerReminder: false, ownerTabMeta: null, countsForActiveSet: true };
+    }
+    const ownerRow = company?.owners?.[parsedOwner.ownerIdx];
+    const fp = ownerLinkedExpiryFingerprint(ownerRow, parsedOwner.fieldKey, doc.expiryDate);
+    const winner = canonicalOwnerTargets.get(fp);
+    if (!winner || String(winner.companyMongoId) !== String(company._id)) {
+        return { skipDuplicateOwnerReminder: true, ownerTabMeta: null, countsForActiveSet: false };
+    }
+    return {
+        skipDuplicateOwnerReminder: false,
+        ownerTabMeta: { idx: parsedOwner.ownerIdx, fieldKey: parsedOwner.fieldKey },
+        countsForActiveSet: true,
+    };
+};
 
+const syncCompanyDocumentExpiryDashboard = async (company, canonicalOwnerTargets, recipients) => {
     const docs = buildCompanyDocuments(company);
     const activeTaskWindowExtra1 = new Set();
+
     for (const doc of docs) {
         const daysUntil = getDaysUntil(doc.expiryDate);
         if (daysUntil == null || !isExpiryTaskWindow(daysUntil)) continue;
         const expLabel = formatExpiryDateLabel(doc.expiryDate);
         const extra1 = `Expiry follow-up required: ${doc.label}${expLabel ? ` (Exp: ${expLabel})` : ""}`;
-
-        const parsedOwner = parseCompanyOwnerDocKey(doc.key);
-        if (parsedOwner) {
-            const owner = company?.owners?.[parsedOwner.ownerIdx];
-            const fp = ownerLinkedExpiryFingerprint(owner, parsedOwner.fieldKey, doc.expiryDate);
-            const winner = canonicalOwnerTargets.get(fp);
-            if (!winner || String(winner.companyMongoId) !== String(company._id)) {
-                continue;
-            }
-        }
+        const { countsForActiveSet } = resolveOwnerExpiryReminderMeta(company, doc, canonicalOwnerTargets);
+        if (!countsForActiveSet) continue;
         activeTaskWindowExtra1.add(extra1);
     }
 
@@ -458,93 +382,73 @@ export const reconcileCompanyDocumentExpiryDashboard = async (companyMongoId) =>
         requestType: "Document Expiry Reminder",
         hrObjectId: recipients.hr?._id || null,
     });
+
+    for (const doc of docs) {
+        const days = getDaysUntil(doc.expiryDate);
+        if (days == null || !isExpiryTaskWindow(days) || !recipients.hr?._id) continue;
+
+        const expLabel = formatExpiryDateLabel(doc.expiryDate);
+        const extra1 = `Expiry follow-up required: ${doc.label}${expLabel ? ` (Exp: ${expLabel})` : ""}`;
+        const extra2 = `${company.name || ""} (${company.companyId || ""})`;
+        const { skipDuplicateOwnerReminder, ownerTabMeta } = resolveOwnerExpiryReminderMeta(
+            company,
+            doc,
+            canonicalOwnerTargets
+        );
+        if (skipDuplicateOwnerReminder) continue;
+
+        const extra3 =
+            ownerTabMeta != null
+                ? JSON.stringify({
+                      ownerExpiryDedupe: true,
+                      ownerTabIndex: ownerTabMeta.idx,
+                      ownerDocField: ownerTabMeta.fieldKey,
+                  })
+                : undefined;
+        await ensureDashboardAction({
+            assignedTo: recipients.hr._id,
+            assignedToEmpId: recipients.hr.employeeId,
+            requestId: company._id,
+            subjectEmployeeId: company.companyId,
+            subjectName: company.name,
+            extra1,
+            extra2,
+            extra3,
+        });
+    }
+};
+
+/**
+ * Sync HR task-bar rows for one company immediately after save (and drop stale/non-canonical copies).
+ */
+export const reconcileCompanyDocumentExpiryDashboard = async (companyMongoId) => {
+    if (!companyMongoId) return;
+    const recipients = await getFlowchartRecipientBundle();
+    const companies = await loadCompaniesForExpiryScan();
+    const canonicalOwnerTargets = buildCanonicalOwnerExpiryTargets(companies);
+    const company = companies.find((c) => String(c._id) === String(companyMongoId));
+    if (!company) return;
+    await syncCompanyDocumentExpiryDashboard(company, canonicalOwnerTargets, recipients);
 };
 
 const processCompanyReminders = async () => {
-    const companies = await Company.find({}).select(
-        "_id name companyId tradeLicenseExpiry establishmentCardExpiry documents ejari insurance owners"
-    ).lean();
+    const companies = await loadCompaniesForExpiryScan();
     const recipients = await getFlowchartRecipientBundle();
     const canonicalOwnerTargets = buildCanonicalOwnerExpiryTargets(companies);
 
     for (const company of companies) {
+        await syncCompanyDocumentExpiryDashboard(company, canonicalOwnerTargets, recipients);
+
         const docs = buildCompanyDocuments(company);
-
-        const activeTaskWindowExtra1 = new Set();
-        for (const doc of docs) {
-            const daysUntil = getDaysUntil(doc.expiryDate);
-            if (daysUntil == null || !isExpiryTaskWindow(daysUntil)) continue;
-            const expLabel = formatExpiryDateLabel(doc.expiryDate);
-            const extra1 = `Expiry follow-up required: ${doc.label}${expLabel ? ` (Exp: ${expLabel})` : ""}`;
-
-            const parsedOwner = parseCompanyOwnerDocKey(doc.key);
-            if (parsedOwner) {
-                const owner = company?.owners?.[parsedOwner.ownerIdx];
-                const fp = ownerLinkedExpiryFingerprint(owner, parsedOwner.fieldKey, doc.expiryDate);
-                const winner = canonicalOwnerTargets.get(fp);
-                if (!winner || String(winner.companyMongoId) !== String(company._id)) {
-                    continue;
-                }
-            }
-            activeTaskWindowExtra1.add(extra1);
-        }
-
-        await removeObsoleteExpiryActions({
-            requestId: company._id,
-            requestType: "Document Expiry Reminder",
-            allowedExtra1Set: activeTaskWindowExtra1,
-        });
-        await purgeNonHrExpiryTasks({
-            requestId: company._id,
-            requestType: "Document Expiry Reminder",
-            hrObjectId: recipients.hr?._id || null,
-        });
-
         for (const doc of docs) {
             const days = getDaysUntil(doc.expiryDate);
             if (days == null) continue;
 
-            const expLabel = formatExpiryDateLabel(doc.expiryDate);
-            const extra1 = `Expiry follow-up required: ${doc.label}${expLabel ? ` (Exp: ${expLabel})` : ""}`;
-            const extra2 = `${company.name || ""} (${company.companyId || ""})`;
-
-            const parsedOwner = parseCompanyOwnerDocKey(doc.key);
-            let skipDuplicateOwnerReminder = false;
-            let ownerTabMeta = null;
-            if (parsedOwner) {
-                const ownerRow = company?.owners?.[parsedOwner.ownerIdx];
-                const fp = ownerLinkedExpiryFingerprint(ownerRow, parsedOwner.fieldKey, doc.expiryDate);
-                const winner = canonicalOwnerTargets.get(fp);
-                if (!winner || String(winner.companyMongoId) !== String(company._id)) {
-                    skipDuplicateOwnerReminder = true;
-                } else {
-                    ownerTabMeta = {
-                        idx: parsedOwner.ownerIdx,
-                        fieldKey: parsedOwner.fieldKey,
-                    };
-                }
-            }
-
-            if (isExpiryTaskWindow(days) && recipients.hr?._id && !skipDuplicateOwnerReminder) {
-                const extra3 =
-                    ownerTabMeta != null
-                        ? JSON.stringify({
-                              ownerExpiryDedupe: true,
-                              ownerTabIndex: ownerTabMeta.idx,
-                              ownerDocField: ownerTabMeta.fieldKey,
-                          })
-                        : undefined;
-                await ensureDashboardAction({
-                    assignedTo: recipients.hr._id,
-                    assignedToEmpId: recipients.hr.employeeId,
-                    requestId: company._id,
-                    subjectEmployeeId: company.companyId,
-                    subjectName: company.name,
-                    extra1,
-                    extra2,
-                    extra3,
-                });
-            }
+            const { skipDuplicateOwnerReminder } = resolveOwnerExpiryReminderMeta(
+                company,
+                doc,
+                canonicalOwnerTargets
+            );
 
             const emailStage = getEmailReminderStageMarker(days);
             if (emailStage == null) continue;

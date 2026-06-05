@@ -1,4 +1,51 @@
 import Company from "../models/Company.js";
+import CompanyDocumentBundle from "../models/CompanyDocumentBundle.js";
+
+const isCompanyUsingPartitions = (core = {}) => Number(core.dataPartitionVersion) >= 1;
+
+const normalizeCompanyMongoId = (companyMongoId) =>
+    companyMongoId?._id != null ? companyMongoId._id : companyMongoId;
+
+/** Old Documents tab reads `CompanyDocumentBundle.oldDocuments` for partitioned companies. */
+const loadAuthoritativeOldDocuments = async (companyId) => {
+    const id = normalizeCompanyMongoId(companyId);
+    const core = await Company.findById(id).select("dataPartitionVersion").lean();
+    if (!isCompanyUsingPartitions(core || {})) {
+        const company = await Company.findById(id).select("oldDocuments").lean();
+        return Array.isArray(company?.oldDocuments) ? company.oldDocuments : [];
+    }
+    const bundle = await CompanyDocumentBundle.findOne({ company: id }).select("oldDocuments").lean();
+    return Array.isArray(bundle?.oldDocuments) ? bundle.oldDocuments : [];
+};
+
+const pushArchivedRowToOldDocuments = async (companyId, archivedRow) => {
+    const id = normalizeCompanyMongoId(companyId);
+    const core = await Company.findById(id).select("dataPartitionVersion").lean();
+    const bundleExists = await CompanyDocumentBundle.exists({ company: id });
+    const useBundle = isCompanyUsingPartitions(core || {}) || bundleExists;
+
+    if (useBundle) {
+        await CompanyDocumentBundle.findOneAndUpdate(
+            { company: id },
+            {
+                $push: { oldDocuments: archivedRow },
+                $setOnInsert: {
+                    company: id,
+                    documents: [],
+                    insurance: [],
+                    ejari: [],
+                    trainingDetails: [],
+                    customTabs: [],
+                    hasLiveMoa: false,
+                },
+            },
+            { upsert: true },
+        );
+        return;
+    }
+
+    await Company.updateOne({ _id: id }, { $push: { oldDocuments: archivedRow } });
+};
 
 /** Same logic as updateCompany.js — signed URLs vs stored keys must compare equal. */
 const FOLDER_MARKERS = [
@@ -37,14 +84,23 @@ const attachmentUrlsDiffer = (prevUrl, nextUrl) => {
     return a !== b;
 };
 
+const normalizeDocumentDateForCompare = (value) => {
+    if (value == null || value === "") return "";
+    const parsed = new Date(value);
+    return Number.isNaN(parsed.getTime()) ? String(value).trim() : parsed.toISOString().slice(0, 10);
+};
+
+const documentDatesChanged = (prev, next) =>
+    normalizeDocumentDateForCompare(prev?.issueDate) !== normalizeDocumentDateForCompare(next?.issueDate) ||
+    normalizeDocumentDateForCompare(prev?.expiryDate) !== normalizeDocumentDateForCompare(next?.expiryDate);
+
 /**
  * Skip pushing if the same file was already archived as "Replaced" (concurrent renews / double apply).
  */
 const isDuplicateReplacedArchive = async (companyId, type, document) => {
     const fp = documentStorageFingerprint(document);
     if (!fp) return false;
-    const company = await Company.findOne({ _id: companyId }).select("oldDocuments").lean();
-    const list = Array.isArray(company?.oldDocuments) ? company.oldDocuments : [];
+    const list = await loadAuthoritativeOldDocuments(companyId);
     return list.some(
         (d) =>
             String(d?.archiveReason || "") === "Replaced" &&
@@ -88,14 +144,7 @@ export const archiveCompanyDocument = async ({
     if (context) archivedRow.context = context;
     if (provider) archivedRow.provider = provider;
 
-    await Company.updateOne(
-        { _id: companyId },
-        {
-            $push: {
-                oldDocuments: archivedRow,
-            },
-        }
-    );
+    await pushArchivedRowToOldDocuments(companyId, archivedRow);
 };
 
 /**
@@ -182,7 +231,12 @@ export const archiveSupersededCompanyDocuments = async (beforeCompany, updateDat
             const idStr = String(nextDoc._id);
             if (archivedCustomDocIds.has(idStr)) continue;
             const prevDoc = beforeCompany.documents.find(d => String(d._id) === String(nextDoc._id));
-            if (prevDoc && prevDoc.document?.url && attachmentUrlsDiffer(prevDoc.document.url, nextDoc.document.url)) {
+            if (
+                prevDoc &&
+                prevDoc.document?.url &&
+                (attachmentUrlsDiffer(prevDoc.document.url, nextDoc.document.url) ||
+                    documentDatesChanged(prevDoc, nextDoc))
+            ) {
                 archivedCustomDocIds.add(idStr);
                 await archiveCompanyDocument({
                     companyId,

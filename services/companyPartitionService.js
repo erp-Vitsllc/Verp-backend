@@ -7,6 +7,7 @@ import CompanyWorkflow from "../models/CompanyWorkflow.js";
 import { ownerDocUnsetPath } from "../utils/companyOwnerDocDeletion.js";
 import { archiveSupersededCompanyDocuments } from "../utils/archiveCompanyDocument.js";
 import { archiveSupersededCompanyOwners } from "../utils/archiveCompanyOwners.js";
+import { mergeCompanyOwnersSnapshot } from "../utils/mergeCompanyOwnersSnapshot.js";
 
 /** Heavy fields excluded from company list reads (MongoDB projection — exclusion only). */
 export const COMPANY_LIST_SELECT = {
@@ -291,12 +292,180 @@ export async function loadCompanyFullProfile(coreDoc) {
 /**
  * List row: core only; for partitioned rows attach compliance + hasLiveMoa for activation progress.
  */
-export async function enrichCompaniesForList(companies = []) {
-    const partitioned = companies.filter((c) => Number(c.dataPartitionVersion) >= 1);
-    if (!partitioned.length) return companies;
+const OWNER_DOC_EXPIRY_KEYS = [
+    "passport",
+    "visa",
+    "visitVisa",
+    "employmentVisa",
+    "spouseVisa",
+    "emiratesId",
+    "medical",
+    "drivingLicense",
+    "labourCard",
+];
 
-    const ids = partitioned.map((c) => c._id);
-    const [complianceRows, bundles, workflowRows] = await Promise.all([
+const slimDocRowForExpiry = (row) => {
+    if (!row || typeof row !== "object") return row;
+    return {
+        _id: row._id,
+        type: row.type,
+        context: row.context,
+        description: row.description,
+        expiryDate: row.expiryDate,
+        archivedAt: row.archivedAt,
+        archiveReason: row.archiveReason,
+        isArchived: row.isArchived,
+    };
+};
+
+const slimOwnerForExpiry = (owner) => {
+    if (!owner || typeof owner !== "object") return owner;
+    const slim = { name: owner.name };
+    for (const k of OWNER_DOC_EXPIRY_KEYS) {
+        const d = owner[k];
+        if (!d?.expiryDate) continue;
+        slim[k] = {
+            expiryDate: d.expiryDate,
+            number: d.number,
+            policyNumber: d.policyNumber,
+        };
+    }
+    return slim;
+};
+
+const slimBundleForExpiry = (bundle) => {
+    if (!bundle || typeof bundle !== "object") return bundle;
+    const slim = { hasLiveMoa: bundle.hasLiveMoa };
+    for (const k of ["documents", "ejari", "insurance"]) {
+        if (Array.isArray(bundle[k])) slim[k] = bundle[k].map(slimDocRowForExpiry);
+    }
+    return slim;
+};
+
+const EXPIRY_SCAN_CORE_SELECT =
+    "_id name companyId dataPartitionVersion tradeLicenseExpiry establishmentCardExpiry documents ejari insurance owners";
+
+/**
+ * Full company rows for document-expiry cron / dashboard reconcile (includes partitioned slices).
+ */
+export async function loadCompaniesForExpiryScan() {
+    const cores = await Company.find({})
+        .select(EXPIRY_SCAN_CORE_SELECT)
+        .lean()
+        .maxTimeMS(15000);
+    return enrichCoresWithExpiryPartitions(cores);
+}
+
+/** Targeted expiry scan for one or more companies (dashboard stale-row filter, reconcile). */
+export async function loadCompaniesForExpiryScanByIds(companyMongoIds = []) {
+    const ids = [...new Set((companyMongoIds || []).map((x) => String(x)).filter(Boolean))];
+    if (!ids.length) return [];
+    const cores = await Company.find({ _id: { $in: ids } })
+        .select(EXPIRY_SCAN_CORE_SELECT)
+        .lean()
+        .maxTimeMS(6000);
+    return enrichCoresWithExpiryPartitions(cores);
+}
+
+const slimExpiryDocArrayAggMap = (fieldName) => ({
+    $map: {
+        input: { $ifNull: [`$${fieldName}`, []] },
+        as: "d",
+        in: {
+            _id: "$$d._id",
+            type: "$$d.type",
+            context: "$$d.context",
+            description: "$$d.description",
+            expiryDate: "$$d.expiryDate",
+            archivedAt: "$$d.archivedAt",
+            archiveReason: "$$d.archiveReason",
+            isArchived: "$$d.isArchived",
+        },
+    },
+});
+
+/** Avoid loading embedded attachment payloads — expiry scan needs metadata only. */
+async function loadSlimExpiryBundles(companyIds = []) {
+    if (!companyIds.length) return [];
+    return CompanyDocumentBundle.aggregate([
+        { $match: { company: { $in: companyIds } } },
+        {
+            $project: {
+                company: 1,
+                hasLiveMoa: 1,
+                documents: slimExpiryDocArrayAggMap("documents"),
+                ejari: slimExpiryDocArrayAggMap("ejari"),
+                insurance: slimExpiryDocArrayAggMap("insurance"),
+            },
+        },
+    ])
+        .option({ maxTimeMS: 6000 })
+        .exec();
+}
+
+const slimOwnersSliceForExpiry = (ownersRow) => {
+    if (!ownersRow) return null;
+    return {
+        company: ownersRow.company,
+        owners: (ownersRow.owners || []).map(slimOwnerForExpiry),
+    };
+};
+
+async function enrichCoresWithExpiryPartitions(cores = []) {
+    if (!cores.length) return [];
+
+    const allIds = cores.map((c) => c._id);
+    const [complianceSettled, ownerSettled, bundleSettled] = await Promise.allSettled([
+        CompanyCompliance.find({ company: { $in: allIds } })
+            .select({ company: 1, tradeLicenseExpiry: 1, establishmentCardExpiry: 1 })
+            .lean()
+            .maxTimeMS(6000),
+        CompanyOwners.find({ company: { $in: allIds } })
+            .select({ company: 1, owners: 1 })
+            .lean()
+            .maxTimeMS(6000),
+        loadSlimExpiryBundles(allIds),
+    ]);
+
+    const complianceRows = complianceSettled.status === "fulfilled" ? complianceSettled.value : [];
+    const ownerRows = ownerSettled.status === "fulfilled" ? ownerSettled.value : [];
+    const bundleRows = bundleSettled.status === "fulfilled" ? bundleSettled.value : [];
+
+    if (complianceSettled.status === "rejected") {
+        console.warn("[enrichCoresWithExpiryPartitions] compliance load failed:", complianceSettled.reason?.message);
+    }
+    if (ownerSettled.status === "rejected") {
+        console.warn("[enrichCoresWithExpiryPartitions] owners load failed:", ownerSettled.reason?.message);
+    }
+    if (bundleSettled.status === "rejected") {
+        console.warn("[enrichCoresWithExpiryPartitions] bundle load failed:", bundleSettled.reason?.message);
+    }
+
+    const complianceByCompany = new Map(complianceRows.map((r) => [String(r.company), r]));
+    const ownersByCompany = new Map(ownerRows.map((r) => [String(r.company), r]));
+    const bundleByCompany = new Map(bundleRows.map((r) => [String(r.company), r]));
+
+    return cores.map((core) => {
+        const id = String(core._id);
+        const compliance = complianceByCompany.get(id);
+        const owners = slimOwnersSliceForExpiry(ownersByCompany.get(id));
+        const bundle = bundleByCompany.get(id);
+        const slicesPresent = compliance != null || owners != null || bundle != null;
+
+        if (Number(core?.dataPartitionVersion) >= 1) {
+            if (!slicesPresent) return core;
+            return mergePartitionedCompany(core, compliance, owners, bundle, null);
+        }
+        if (!slicesPresent) return core;
+        return mergePartitionedCompany(core, compliance, owners, bundle, null);
+    });
+}
+
+export async function enrichCompaniesForList(companies = []) {
+    if (!Array.isArray(companies) || companies.length === 0) return companies;
+
+    const ids = companies.map((c) => c._id);
+    const [complianceRows, ownerRows, bundles, workflowRows] = await Promise.all([
         CompanyCompliance.find({ company: { $in: ids } })
             .select({
                 company: 1,
@@ -311,8 +480,12 @@ export async function enrichCompaniesForList(companies = []) {
             })
             .lean()
             .maxTimeMS(8000),
+        CompanyOwners.find({ company: { $in: ids } })
+            .select({ company: 1, owners: 1 })
+            .lean()
+            .maxTimeMS(8000),
         CompanyDocumentBundle.find({ company: { $in: ids } })
-            .select({ company: 1, hasLiveMoa: 1 })
+            .select({ company: 1, hasLiveMoa: 1, documents: 1, ejari: 1, insurance: 1 })
             .lean()
             .maxTimeMS(8000),
         CompanyWorkflow.find({ company: { $in: ids } })
@@ -322,26 +495,39 @@ export async function enrichCompaniesForList(companies = []) {
     ]);
 
     const complianceByCompany = new Map(complianceRows.map((r) => [String(r.company), r]));
+    const ownersByCompany = new Map(ownerRows.map((r) => [String(r.company), r]));
     const bundleByCompany = new Map(bundles.map((r) => [String(r.company), r]));
     const workflowByCompany = new Map(workflowRows.map((r) => [String(r.company), r]));
 
     return companies.map((c) => {
-        if (Number(c.dataPartitionVersion) < 1) return c;
         const id = String(c._id);
         const compliance = complianceByCompany.get(id);
+        const owners = ownersByCompany.get(id);
         const bundle = bundleByCompany.get(id);
         const workflow = workflowByCompany.get(id);
+        const hasPartitionSlices = compliance != null || owners != null || bundle != null || workflow != null;
+        if (!hasPartitionSlices && Number(c.dataPartitionVersion) < 1) return c;
+
         const merged = { ...c };
         applyCompliancePartition(merged, compliance);
+        if (owners?.owners) {
+            merged.owners = owners.owners.map(slimOwnerForExpiry);
+        }
+        if (bundle) {
+            const slimBundle = slimBundleForExpiry(bundle);
+            if (Array.isArray(slimBundle.documents)) merged.documents = slimBundle.documents;
+            if (Array.isArray(slimBundle.ejari)) merged.ejari = slimBundle.ejari;
+            if (Array.isArray(slimBundle.insurance)) merged.insurance = slimBundle.insurance;
+            if (slimBundle.hasLiveMoa && !documentBundleHasLiveMoa(merged.documents)) {
+                merged.documents = [{ context: "moa", document: { url: "partitioned-moa-flag" } }];
+            }
+        }
         if (workflow?.pendingReactivationChanges) {
             merged.pendingReactivationChanges = workflow.pendingReactivationChanges.map((entry) => {
                 if (!entry || typeof entry !== "object") return entry;
                 const { previousData, ...rest } = entry;
                 return rest;
             });
-        }
-        if (bundle?.hasLiveMoa) {
-            merged.documents = [{ context: "moa", document: { url: "partitioned-moa-flag" } }];
         }
         return merged;
     });
@@ -422,7 +608,13 @@ export async function upsertCompanyPartitions(companyMongoId, companyPayload = {
         Object.keys(owners).length
             ? CompanyOwners.findOneAndUpdate(
                   { company: id },
-                  { $set: { company: id, owners: owners.owners ?? [], oldOwners: owners.oldOwners ?? [] } },
+                  {
+                      $set: {
+                          company: id,
+                          ...(owners.owners !== undefined ? { owners: owners.owners ?? [] } : {}),
+                          ...(owners.oldOwners !== undefined ? { oldOwners: owners.oldOwners ?? [] } : {}),
+                      },
+                  },
                   { upsert: true, new: true },
               )
             : Promise.resolve(),
@@ -465,10 +657,16 @@ export async function applyCompanyProposedActivationPatch(companyMongoId, propos
     if (!core) return { ownerArchivesToPush: [] };
     const before = (await loadCompanyFullProfile(core)) || core;
 
-    await archiveSupersededCompanyDocuments(before, proposedData);
-    const ownerArchives = archiveSupersededCompanyOwners(before, proposedData) || [];
+    // Pending queue rows are sliced per card (e.g. passport-only) — merge into live owners before apply.
+    const patch = { ...proposedData };
+    if (Array.isArray(patch.owners)) {
+        patch.owners = mergeCompanyOwnersSnapshot(before.owners || [], patch.owners);
+    }
 
-    const { coreUpdate, partitionUpdate } = splitCompanyUpdatePayload(proposedData);
+    await archiveSupersededCompanyDocuments(before, patch);
+    const ownerArchives = archiveSupersededCompanyOwners(before, patch) || [];
+
+    const { coreUpdate, partitionUpdate } = splitCompanyUpdatePayload(patch);
     if (Object.keys(coreUpdate).length) {
         await Company.findByIdAndUpdate(companyMongoId, { $set: coreUpdate }).maxTimeMS(8000);
     }

@@ -18,6 +18,12 @@ import {
     closeCreatorNotRenewFollowUpTasks,
     createCreatorNotRenewFollowUpAfterReject,
 } from "../../utils/companyNotRenewFollowUp.js";
+import {
+    coerceOwnerIndex,
+    normalizeOwnerDocKey,
+    resolveOwnerDocumentForNotRenew,
+    stripOwnerDocFromPendingReactivationChanges,
+} from "../../utils/companyOwnerDocResolve.js";
 
 const KINDS = new Set(["tradeLicense", "establishmentCard", "document", "ownerDoc", "ejari", "insurance"]);
 
@@ -81,6 +87,19 @@ const historyDescription = (base, reason) => {
 };
 
 const prependRows = (docs, rows) => [...(rows || []), ...(docs || [])];
+
+/** Not-renew / superseded rows belong in `oldDocuments[]` (Old Documents tab reads this array). */
+const archiveRowToOldDocuments = (company, historyDoc, supportingRows = []) => {
+    const row = {
+        ...historyDoc,
+        archivedAt: historyDoc?.archivedAt || new Date(),
+        archiveReason: historyDoc?.archiveReason || "Not Renewed",
+    };
+    company.oldDocuments = [...(company.oldDocuments || []), row];
+    if (supportingRows.length) {
+        company.documents = prependRows(company.documents || [], supportingRows);
+    }
+};
 const escapeRegExp = (value = "") => String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const buildExtra1Regex = (label) => {
     const escaped = escapeRegExp(label || "");
@@ -148,6 +167,7 @@ const applyApprovedArchive = (company, entry) => {
         const historyDoc = {
             type: "Previous Trade License",
             description: historyDescription(`Not Renewed - ${company.tradeLicenseNumber || ""}`, reason),
+            context: "trade_license",
             issueDate: company.tradeLicenseIssueDate,
             startDate: company.tradeLicenseIssueDate,
             expiryDate: company.tradeLicenseExpiry,
@@ -155,8 +175,7 @@ const applyApprovedArchive = (company, entry) => {
                 ? { url: company.tradeLicenseAttachment, mimeType: "application/pdf" }
                 : null,
         };
-        const nextDocs = prependRows(company.documents || [], [historyDoc, ...supportingRows]);
-        company.documents = nextDocs;
+        archiveRowToOldDocuments(company, historyDoc, supportingRows);
         company.tradeLicenseNumber = null;
         company.tradeLicenseIssueDate = null;
         company.tradeLicenseExpiry = null;
@@ -168,6 +187,7 @@ const applyApprovedArchive = (company, entry) => {
         const historyDoc = {
             type: "Previous Establishment Card",
             description: historyDescription(`Not Renewed - ${company.establishmentCardNumber || ""}`, reason),
+            context: "establishment_card",
             issueDate: company.establishmentCardIssueDate,
             startDate: company.establishmentCardIssueDate,
             expiryDate: company.establishmentCardExpiry,
@@ -175,8 +195,7 @@ const applyApprovedArchive = (company, entry) => {
                 ? { url: company.establishmentCardAttachment, mimeType: "application/pdf" }
                 : null,
         };
-        const nextDocs = prependRows(company.documents || [], [historyDoc, ...supportingRows]);
-        company.documents = nextDocs;
+        archiveRowToOldDocuments(company, historyDoc, supportingRows);
         company.establishmentCardNumber = null;
         company.establishmentCardExpiry = null;
         company.establishmentCardAttachment = null;
@@ -208,36 +227,46 @@ const applyApprovedArchive = (company, entry) => {
         };
         const next = [...(company.documents || [])];
         next.splice(idx, 1);
-        const oldList = [...(company.oldDocuments || [])];
-        oldList.push(historyDoc);
-        company.oldDocuments = oldList;
         company.documents = supportingRows.length ? prependRows(next, supportingRows) : next;
+        archiveRowToOldDocuments(company, historyDoc);
         return;
     }
 
     if (entry.kind === "ownerDoc") {
-        const oi = entry.ownerIndex;
-        const docKey = entry.docKey;
-        const owners = [...(company.owners || [])];
-        const owner = owners[oi];
-        if (!owner) throw new Error("OWNER_NOT_FOUND");
-        const od = owner[docKey];
-        if (!od) throw new Error("OWNER_DOC_NOT_FOUND");
-        const ownerName = owner.name || `Owner ${oi + 1}`;
+        const resolved = resolveOwnerDocumentForNotRenew(company, {
+            ownerIndex: entry.ownerIndex,
+            docKey: entry.docKey,
+            ownerProfileId: entry.ownerProfileId,
+        });
+        if (!resolved) throw new Error("OWNER_DOC_NOT_FOUND");
+
+        const { ownerIndex: oi, docKey, ownerName, archiveDoc, liveDoc, pendingOnly } = resolved;
         const docLabel = entry.label || docKey;
+        const od = archiveDoc;
         const historyDoc = {
             type: `${ownerName} - ${docLabel}`,
             description: historyDescription(`Not Renewed - ${ownerName} ${docLabel}`, reason),
+            context: "owner_doc",
             issueDate: od.issueDate || od.startDate,
             startDate: od.startDate,
             expiryDate: od.expiryDate,
             value: od.value,
             document: od.attachment ? { url: od.attachment, mimeType: "application/pdf" } : od.document || null,
         };
-        const nextDocs = prependRows(company.documents || [], [historyDoc, ...supportingRows]);
-        company.documents = nextDocs;
-        owners[oi] = { ...owners[oi], [docKey]: null };
-        company.owners = owners;
+        archiveRowToOldDocuments(company, historyDoc, supportingRows);
+
+        const owners = [...(company.owners || [])];
+        if (liveDoc && owners[oi]) {
+            owners[oi] = { ...owners[oi], [docKey]: null };
+            company.owners = owners;
+        }
+        if (pendingOnly || liveDoc) {
+            company.pendingReactivationChanges = stripOwnerDocFromPendingReactivationChanges(
+                company.pendingReactivationChanges || [],
+                oi,
+                docKey,
+            );
+        }
         return;
     }
 
@@ -265,9 +294,8 @@ const applyApprovedArchive = (company, entry) => {
         };
         const updatedFieldList = [...(company[field] || [])];
         updatedFieldList.splice(index, 1);
-        const nextDocs = prependRows(company.documents || [], [historyDoc, ...supportingRows]);
         company[field] = updatedFieldList;
-        company.documents = nextDocs;
+        archiveRowToOldDocuments(company, historyDoc, supportingRows);
     }
 };
 
@@ -295,8 +323,9 @@ export const submitCompanyNotRenewRequest = async (req, res) => {
             documentItemId: body.documentItemId,
             arrayIndex: typeof body.arrayIndex === "number" ? body.arrayIndex : undefined,
             arrayItemId: body.arrayItemId,
-            ownerIndex: typeof body.ownerIndex === "number" ? body.ownerIndex : undefined,
-            docKey: body.docKey,
+            ownerIndex: coerceOwnerIndex(body.ownerIndex),
+            docKey: normalizeOwnerDocKey(body.docKey),
+            ownerProfileId: body.ownerProfileId ? String(body.ownerProfileId).trim() : "",
         };
         if (pending.some((p) => samePendingNotRenewTarget(p, incoming))) {
             return res.status(400).json({ message: "A pending not-renew request already exists for this document." });
@@ -315,9 +344,12 @@ export const submitCompanyNotRenewRequest = async (req, res) => {
             }
         }
         if (kind === "ownerDoc") {
-            const oi = body.ownerIndex;
-            const dk = body.docKey;
-            if (typeof oi !== "number" || !dk || !companyData.owners?.[oi]?.[dk]) {
+            const resolved = resolveOwnerDocumentForNotRenew(companyData, {
+                ownerIndex: body.ownerIndex,
+                docKey: body.docKey,
+                ownerProfileId: body.ownerProfileId,
+            });
+            if (!resolved) {
                 return res.status(400).json({ message: "Owner document not found." });
             }
         }
@@ -342,8 +374,9 @@ export const submitCompanyNotRenewRequest = async (req, res) => {
             documentItemId: body.documentItemId ? String(body.documentItemId) : "",
             arrayIndex: typeof body.arrayIndex === "number" ? body.arrayIndex : undefined,
             arrayItemId: body.arrayItemId ? String(body.arrayItemId) : "",
-            ownerIndex: typeof body.ownerIndex === "number" ? body.ownerIndex : undefined,
-            docKey: body.docKey ? String(body.docKey) : "",
+            ownerIndex: coerceOwnerIndex(body.ownerIndex) ?? undefined,
+            docKey: normalizeOwnerDocKey(body.docKey),
+            ownerProfileId: body.ownerProfileId ? String(body.ownerProfileId).trim() : "",
             reason,
             supportingAttachmentKey: String(body.supportingAttachmentKey || "").trim(),
             supportingAttachmentName: String(body.supportingAttachmentName || "").trim(),

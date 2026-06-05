@@ -520,7 +520,7 @@ export const submitCompanyActivation = async ({
 
 /**
  * When company is Active, only these cards use the HR approval queue.
- * All other cards (address, ejari, memo, certificate, owner docs, etc.) apply immediately.
+ * Other cards (address, ejari, memo, certificate, owner visas, etc.) apply immediately.
  */
 export const ACTIVE_COMPANY_HR_QUEUE_CARD_LABELS = [
     "Basic Details",
@@ -535,6 +535,53 @@ export const ACTIVE_COMPANY_HR_QUEUE_CARD_LABELS = [
 /**
  * Human-readable labels for HR-queued changes on an active company (pending queue + hold UI).
  */
+const normalizeSubmittedCardLabel = (label) =>
+    String(label || "")
+        .toLowerCase()
+        .replace(/\s*\([^)]*\)\s*$/g, "")
+        .trim();
+
+/** True when a pending row belongs to cards named in this HR submission (e.g. only Owner Passport). */
+export const pendingEntryIncludedInSubmittedCards = (entry, submittedCardLabels = []) => {
+    if (!entry || typeof entry !== "object") return false;
+    if (!Array.isArray(submittedCardLabels) || submittedCardLabels.length === 0) return true;
+    const submitted = new Set(submittedCardLabels.map(normalizeSubmittedCardLabel).filter(Boolean));
+    if (!submitted.size) return true;
+    const rawCard = String(entry?.card || entry?.reason || "").trim();
+    const parts = rawCard
+        .split(",")
+        .map((s) => normalizeSubmittedCardLabel(s))
+        .filter(Boolean);
+    if (!parts.length) return false;
+    return parts.some((part) => submitted.has(part));
+};
+
+/** Card labels from the latest workflow step still in `submitted` status. */
+export const resolveLatestActivationSubmissionLabels = (activationWorkflow = []) => {
+    const list = Array.isArray(activationWorkflow) ? activationWorkflow : [];
+    for (let i = list.length - 1; i >= 0; i--) {
+        const step = list[i];
+        if (String(step?.status || "").toLowerCase() !== "submitted") continue;
+        const text = `${step?.description || ""} ${step?.reason || ""} ${step?.comment || ""}`;
+        const match = text.match(/Requested Changes:\s*([^|]+)/i);
+        if (match?.[1]) {
+            return match[1]
+                .split(",")
+                .map((s) => s.trim())
+                .filter(Boolean);
+        }
+    }
+    return [];
+};
+
+/** Pending rows HR is reviewing in the current submission — excludes unsubmitted local drafts. */
+export const filterPendingEntriesInCurrentSubmission = (pendingChanges = [], activationWorkflow = []) => {
+    const list = Array.isArray(pendingChanges) ? pendingChanges : [];
+    const labels = resolveLatestActivationSubmissionLabels(activationWorkflow);
+    if (!labels.length) return list;
+    return list.filter((entry) => pendingEntryIncludedInSubmittedCards(entry, labels));
+};
+
 /** Prior values for a queued edit — only keys present in the PATCH, not the full company profile. */
 export const pickCompanyPendingPreviousSnapshot = (beforeCompany = {}, updateData = {}) => {
     const before =
@@ -580,14 +627,14 @@ export const collectCompanyReactivationChangeLabels = (updateData = {}, beforeCo
     }
     if (Object.prototype.hasOwnProperty.call(updateData, "owners")) {
         const beforeOwners = beforeCompany?.owners || [];
-        if (isOwnersBasicDetailsModified(beforeOwners, updateData.owners)) {
-            changes.push("Owner Details");
-        }
         if (isOwnersPassportModified(beforeOwners, updateData.owners)) {
             changes.push("Owner Passport");
         }
         if (isOwnersEmiratesIdModified(beforeOwners, updateData.owners)) {
             changes.push("Owner Emirates ID");
+        }
+        if (isOwnersBasicDetailsModified(beforeOwners, updateData.owners)) {
+            changes.push("Owner Details");
         }
     }
 
@@ -663,6 +710,140 @@ function pendingEntryMatchesChangedCards(entry, changedCards = []) {
     return entryLabels.some((l) => changedNorm.has(normCardLabel(l)));
 }
 
+const OWNER_NESTED_DOC_KEYS = [
+    "passport",
+    "emiratesId",
+    "visitVisa",
+    "employmentVisa",
+    "spouseVisa",
+    "labourCard",
+    "medical",
+    "drivingLicense",
+    "visa",
+];
+
+const sliceOwnersPassportOnly = (owners = []) =>
+    (Array.isArray(owners) ? owners : [])
+        .map((o) => {
+            if (!o || typeof o !== "object" || !o.passport) return null;
+            const row = {};
+            if (o._id != null) row._id = o._id;
+            if (o.id != null) row.id = o.id;
+            if (o.name) row.name = o.name;
+            row.passport = o.passport;
+            return row;
+        })
+        .filter(Boolean);
+
+const sliceOwnersEmiratesIdOnly = (owners = []) =>
+    (Array.isArray(owners) ? owners : [])
+        .map((o) => {
+            if (!o || typeof o !== "object" || !o.emiratesId) return null;
+            const row = {};
+            if (o._id != null) row._id = o._id;
+            if (o.id != null) row.id = o.id;
+            if (o.name) row.name = o.name;
+            row.emiratesId = o.emiratesId;
+            return row;
+        })
+        .filter(Boolean);
+
+const stripOwnerNestedDocs = (owner = {}) => {
+    const out = { ...owner };
+    for (const k of OWNER_NESTED_DOC_KEYS) delete out[k];
+    return out;
+};
+
+const sliceOwnersBasicOnly = (owners = []) =>
+    (Array.isArray(owners) ? owners : []).map((o) => stripOwnerNestedDocs(o));
+
+const pendingPayloadHasContent = (payload = {}) => {
+    if (!payload || typeof payload !== "object") return false;
+    if (Array.isArray(payload.owners)) return payload.owners.length > 0;
+    return Object.keys(payload).length > 0;
+};
+
+/** One pending row per HR card so Submit pending shows separate Passport / EID / Owner Details rows. */
+const slicePendingEntryForCard = (entry, cardLabel) => {
+    const proposed = entry?.proposedData && typeof entry.proposedData === "object" ? entry.proposedData : {};
+    const previous = entry?.previousData && typeof entry.previousData === "object" ? entry.previousData : {};
+    const label = normCardLabel(cardLabel);
+
+    if (label === "owner passport") {
+        return {
+            ...entry,
+            card: cardLabel,
+            reason: cardLabel,
+            proposedData: { owners: sliceOwnersPassportOnly(proposed.owners) },
+            previousData: { owners: sliceOwnersPassportOnly(previous.owners) },
+        };
+    }
+    if (label === "owner emirates id") {
+        return {
+            ...entry,
+            card: cardLabel,
+            reason: cardLabel,
+            proposedData: { owners: sliceOwnersEmiratesIdOnly(proposed.owners) },
+            previousData: { owners: sliceOwnersEmiratesIdOnly(previous.owners) },
+        };
+    }
+    if (label === "owner details") {
+        return {
+            ...entry,
+            card: cardLabel,
+            reason: cardLabel,
+            proposedData: { owners: sliceOwnersBasicOnly(proposed.owners) },
+            previousData: { owners: sliceOwnersBasicOnly(previous.owners) },
+        };
+    }
+    if (label === "trade license") {
+        const keys = [
+            "tradeLicenseNumber",
+            "tradeLicenseIssueDate",
+            "tradeLicenseExpiry",
+            "tradeLicenseAttachment",
+            "tradeLicenseOwnerName",
+        ];
+        const pick = (src) => {
+            const out = {};
+            for (const k of keys) {
+                if (Object.prototype.hasOwnProperty.call(src, k)) out[k] = src[k];
+            }
+            if (Array.isArray(src.owners)) out.owners = src.owners;
+            return out;
+        };
+        return { ...entry, card: cardLabel, reason: cardLabel, proposedData: pick(proposed), previousData: pick(previous) };
+    }
+    if (label === "establishment card") {
+        const keys = [
+            "establishmentCardNumber",
+            "establishmentCardIssueDate",
+            "establishmentCardExpiry",
+            "establishmentCardAttachment",
+        ];
+        const pick = (src) => {
+            const out = {};
+            for (const k of keys) {
+                if (Object.prototype.hasOwnProperty.call(src, k)) out[k] = src[k];
+            }
+            return out;
+        };
+        return { ...entry, card: cardLabel, reason: cardLabel, proposedData: pick(proposed), previousData: pick(previous) };
+    }
+    if (label === "basic details") {
+        const keys = ["name", "nickName", "email", "phone", "establishedDate", "companyId"];
+        const pick = (src) => {
+            const out = {};
+            for (const k of keys) {
+                if (Object.prototype.hasOwnProperty.call(src, k)) out[k] = src[k];
+            }
+            return out;
+        };
+        return { ...entry, card: cardLabel, reason: cardLabel, proposedData: pick(proposed), previousData: pick(previous) };
+    }
+    return { ...entry, card: cardLabel, reason: cardLabel };
+};
+
 /**
  * Merge a new save into an existing queued row for the same card (e.g. Trade License edited twice).
  * Keeps the original previousData snapshot from the first queue.
@@ -670,8 +851,21 @@ function pendingEntryMatchesChangedCards(entry, changedCards = []) {
 export const upsertPendingReactivationEntry = (existingPending = [], newEntry, changedCards = []) => {
     const list = Array.isArray(existingPending) ? [...existingPending] : [];
     const cards = [...new Set(changedCards)].filter(Boolean);
+    if (cards.length > 1) {
+        let result = list;
+        for (const cardLabel of cards) {
+            const sliced = slicePendingEntryForCard(newEntry, cardLabel);
+            if (!pendingPayloadHasContent(sliced.proposedData)) continue;
+            result = upsertPendingReactivationEntry(result, sliced, [cardLabel]);
+        }
+        return result;
+    }
     if (!cards.length) {
         list.push(newEntry);
+        return list;
+    }
+    newEntry = slicePendingEntryForCard(newEntry, cards[0]);
+    if (!pendingPayloadHasContent(newEntry.proposedData)) {
         return list;
     }
     let merged = false;
@@ -704,6 +898,11 @@ export const upsertPendingReactivationEntry = (existingPending = [], newEntry, c
             previousData: prevSnapshot,
             proposedData: mergedProposed,
             changedAt: newEntry.changedAt || entry.changedAt,
+            queuedByUserId: entry.queuedByUserId || newEntry.queuedByUserId || "",
+            queuedByEmployeeId: entry.queuedByEmployeeId || newEntry.queuedByEmployeeId || "",
+            queuedByEmployeeObjectId:
+                entry.queuedByEmployeeObjectId || newEntry.queuedByEmployeeObjectId || "",
+            queuedByName: entry.queuedByName || newEntry.queuedByName || "",
         };
     });
     if (!merged) next.push(newEntry);

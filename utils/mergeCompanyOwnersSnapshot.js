@@ -11,6 +11,23 @@ export const OWNER_NESTED_DOC_KEYS = [
     "drivingLicense",
 ];
 
+const findBaseOwnerForPatch = (patch, baseOwners, index) => {
+    if (patch?._id != null) {
+        const hit = baseOwners.find((b) => String(b?._id) === String(patch._id));
+        if (hit) return hit;
+    }
+    const profileId = patch?.ownerProfileId;
+    if (profileId != null && String(profileId).trim() !== "") {
+        const hit = baseOwners.find(
+            (b) =>
+                b?.ownerProfileId != null &&
+                String(b.ownerProfileId) === String(profileId),
+        );
+        if (hit) return hit;
+    }
+    return baseOwners[index] || {};
+};
+
 const mergeOwnerRow = (base = {}, patch = {}) => {
     if (!patch || typeof patch !== "object") return { ...base };
     const out = { ...base };
@@ -34,6 +51,20 @@ const mergeOwnerRow = (base = {}, patch = {}) => {
         }
     }
     return out;
+};
+
+/**
+ * Trade License modal sends the full intended owner list (add/remove/share).
+ * Replace the array — do not keep owners removed in the modal — while preserving
+ * nested doc cards (passport, EID, etc.) for owners that remain.
+ */
+export const replaceCompanyOwnersFromTradeLicensePatch = (baseOwners = [], patchOwners = []) => {
+    if (!Array.isArray(patchOwners)) return Array.isArray(baseOwners) ? [...baseOwners] : [];
+    if (patchOwners.length === 0) return [];
+    return patchOwners.map((patch, index) => {
+        const base = findBaseOwnerForPatch(patch, baseOwners, index);
+        return mergeOwnerRow(base, patch);
+    });
 };
 
 /**

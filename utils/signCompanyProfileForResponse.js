@@ -44,17 +44,33 @@ export async function signCompanyProfileForResponse(companyObj = {}) {
         out.owners = await Promise.all(out.owners.map(signOwnerRow));
     }
 
+    const signPendingSnapshot = async (data) => {
+        if (!data || typeof data !== "object") return data;
+        const snap = { ...data };
+        if (typeof snap.tradeLicenseAttachment === "string" && snap.tradeLicenseAttachment) {
+            snap.tradeLicenseAttachment = await getSignedFileUrl(snap.tradeLicenseAttachment);
+        }
+        if (typeof snap.establishmentCardAttachment === "string" && snap.establishmentCardAttachment) {
+            snap.establishmentCardAttachment = await getSignedFileUrl(snap.establishmentCardAttachment);
+        }
+        if (Array.isArray(snap.owners)) {
+            snap.owners = await Promise.all(snap.owners.map(signOwnerRow));
+        }
+        return snap;
+    };
+
     if (Array.isArray(out.pendingReactivationChanges)) {
         out.pendingReactivationChanges = await Promise.all(
             out.pendingReactivationChanges.map(async (entry) => {
-                if (!entry?.proposedData?.owners || !Array.isArray(entry.proposedData.owners)) {
-                    return entry;
+                if (!entry || typeof entry !== "object") return entry;
+                const next = { ...entry };
+                if (entry.previousData) {
+                    next.previousData = await signPendingSnapshot(entry.previousData);
                 }
-                const proposedData = { ...entry.proposedData };
-                proposedData.owners = await Promise.all(
-                    entry.proposedData.owners.map(signOwnerRow),
-                );
-                return { ...entry, proposedData };
+                if (entry.proposedData) {
+                    next.proposedData = await signPendingSnapshot(entry.proposedData);
+                }
+                return next;
             }),
         );
     }

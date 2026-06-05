@@ -27,10 +27,14 @@ import {
     isCompanyFullyActivated,
     syncCompanyStatus,
 } from "../../utils/companyActivation.js";
-import { mergeCompanyOwnersSnapshot } from "../../utils/mergeCompanyOwnersSnapshot.js";
+import {
+    mergeCompanyOwnersSnapshot,
+    replaceCompanyOwnersFromTradeLicensePatch,
+} from "../../utils/mergeCompanyOwnersSnapshot.js";
 import {
     getOwnerIndicesWithContactDetailChanges,
     getChangedOwnerNestedDocKeys,
+    getOwnerIndicesWithNestedDocChange,
     isOwnerNestedDocOnlyOwnersUpdate,
 } from "../../utils/ownerPatchScope.js";
 import {
@@ -181,14 +185,14 @@ const normalizeDocumentRowsForUpdate = (documents = []) => {
         if (!row || typeof row !== "object") return row;
         const ctx = String(row.context || "").toLowerCase();
         const typeLower = String(row.type || "").toLowerCase();
-        if (ctx === "certificate" || typeLower.includes("certificate")) {
+        if (ctx === "document_with_expiry" || ctx === "document_without_expiry") {
+            return normalizeCompanyLiveDocumentRow(row);
+        }
+        if (ctx === "certificate") {
             return normalizeCompanyCertificateRow(row);
         }
         if (ctx === "memo") return normalizeCompanyMemoRow(row);
         if (ctx === "moa" || typeLower.includes("moa")) return normalizeCompanyMoaRow(row);
-        if (ctx === "document_with_expiry" || ctx === "document_without_expiry") {
-            return normalizeCompanyLiveDocumentRow(row);
-        }
         return row;
     });
 };
@@ -607,8 +611,11 @@ export const updateCompany = async (req, res) => {
                 const rawPatchOwners = updateData.owners;
                 const ownerDocCardsOnly = isOwnerNestedDocOnlyOwnersUpdate(rawPatchOwners, baseOwners);
                 const changedNestedDocKeys = getChangedOwnerNestedDocKeys(rawPatchOwners, baseOwners);
-                // Keep existing owner doc cards (passport, EID, etc.) when PATCH sends only one updated card.
-                updateData.owners = mergeCompanyOwnersSnapshot(baseOwners, rawPatchOwners);
+                const tradeLicenseOwnersReplace = isTradeLicenseOwnersBundleUpdate(updateData);
+                // Trade License modal replaces the owner list; doc-card saves merge one card into existing rows.
+                updateData.owners = tradeLicenseOwnersReplace
+                    ? replaceCompanyOwnersFromTradeLicensePatch(baseOwners, rawPatchOwners)
+                    : mergeCompanyOwnersSnapshot(baseOwners, rawPatchOwners);
                 updateData.owners = await enrichOwnersFromGlobalCatalog(updateData.owners);
                 const globalUsed = await collectGlobalOwnerProfileIds();
                 updateData.owners = normalizeTradeLicenseOwners(updateData.owners, globalUsed);
@@ -639,15 +646,21 @@ export const updateCompany = async (req, res) => {
                     }
                     return normalized;
                 });
-                const ownersCheck = validateTradeLicenseOwnersPayload(updateData.owners);
-                if (!ownersCheck.ok) {
-                    return res.status(400).json({ message: ownersCheck.message });
+                // Nested owner doc cards (passport, EID, visa, labour, medical, DL) must not
+                // trigger trade-license share / roster validation.
+                const onlyNestedOwnerDocSave =
+                    changedNestedDocKeys.size > 0 && !tradeLicenseOwnersReplace;
+                if (!onlyNestedOwnerDocSave) {
+                    const ownersCheck = validateTradeLicenseOwnersPayload(updateData.owners);
+                    if (!ownersCheck.ok) {
+                        return res.status(400).json({ message: ownersCheck.message });
+                    }
                 }
                 const profileActive =
                     String(company?.status || "").toLowerCase() === "active";
                 const tradeLicenseOwnersOnly = isTradeLicenseOwnersBundleUpdate(updateData);
                 if (!tradeLicenseOwnersOnly) {
-                    if (!ownerDocCardsOnly) {
+                    if (!ownerDocCardsOnly && !onlyNestedOwnerDocSave) {
                         const contactDetailChangeIndices = getOwnerIndicesWithContactDetailChanges(
                             updateData.owners,
                             baseOwners,
@@ -668,7 +681,14 @@ export const updateCompany = async (req, res) => {
                         }
                     }
                     if (changedNestedDocKeys.has("emiratesId")) {
-                        const emiratesIdCheck = validateOwnersEmiratesIdPayload(updateData.owners);
+                        const emiratesIdChangeIndices = getOwnerIndicesWithNestedDocChange(
+                            rawPatchOwners,
+                            baseOwners,
+                            "emiratesId",
+                        );
+                        const emiratesIdCheck = validateOwnersEmiratesIdPayload(updateData.owners, {
+                            onlyValidateOwnerIndices: emiratesIdChangeIndices,
+                        });
                         if (!emiratesIdCheck.ok) {
                             return res.status(400).json({ message: emiratesIdCheck.message });
                         }
@@ -794,6 +814,12 @@ export const updateCompany = async (req, res) => {
                 previousData: toSerializable(pickCompanyPendingPreviousSnapshot(beforeCompany, updateData)),
                 proposedData: toSerializable(updateData),
                 changedAt: new Date(),
+                queuedByUserId: req.user?._id ? String(req.user._id) : String(req.user?.id || "").trim(),
+                queuedByEmployeeId: String(req.user?.employeeId || "").trim(),
+                queuedByEmployeeObjectId: req.user?.employeeObjectId
+                    ? String(req.user.employeeObjectId)
+                    : "",
+                queuedByName: String(req.user?.name || req.user?.email || "").trim(),
             };
             const holdUnapproved = new Set(
                 (beforeCompany.activationHold?.unapprovedEntryIds || []).map((x) => String(x)),
@@ -820,6 +846,11 @@ export const updateCompany = async (req, res) => {
                         previousData: pendingEntry.previousData,
                         proposedData: pendingEntry.proposedData,
                         changedAt: pendingEntry.changedAt,
+                        queuedByUserId: pendingEntry.queuedByUserId || entry.queuedByUserId || "",
+                        queuedByEmployeeId: pendingEntry.queuedByEmployeeId || entry.queuedByEmployeeId || "",
+                        queuedByEmployeeObjectId:
+                            pendingEntry.queuedByEmployeeObjectId || entry.queuedByEmployeeObjectId || "",
+                        queuedByName: pendingEntry.queuedByName || entry.queuedByName || "",
                     };
                 });
             }

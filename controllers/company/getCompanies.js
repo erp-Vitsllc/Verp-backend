@@ -50,35 +50,28 @@ export const getCompanies = async (req, res) => {
             });
         }
 
-        // Step 2: count employees per company with a strict per-company timeout.
-        // We never let this step hang the whole request — if a count is slow,
-        // we return 0 and continue. Keep the budget short so the page loads.
+        // Step 2: one aggregation for employee counts (partition-safe EmployeeBasic.company refs).
         const tCount = Date.now();
-        const COUNT_BUDGET_MS = 4000;
         const EmployeeBasic = (await import("../../models/EmployeeBasic.js")).default;
         const countByCompany = new Map();
-        const countResults = await Promise.allSettled(
-            companies.map((c) =>
-                EmployeeBasic.countDocuments({
-                    company: c._id,
-                    employeeId: { $ne: "VEGA-HR-0000" },
-                })
-                    .maxTimeMS(COUNT_BUDGET_MS)
-                    .then((n) => ({ id: String(c._id), n }))
-            )
-        );
-        let countFailures = 0;
-        for (const r of countResults) {
-            if (r.status === "fulfilled") {
-                countByCompany.set(r.value.id, r.value.n);
-            } else {
-                countFailures += 1;
+        const companyIds = companies.map((c) => c._id);
+        if (companyIds.length > 0) {
+            try {
+                const grouped = await EmployeeBasic.aggregate([
+                    {
+                        $match: {
+                            company: { $in: companyIds },
+                            employeeId: { $ne: "VEGA-HR-0000" },
+                        },
+                    },
+                    { $group: { _id: "$company", n: { $sum: 1 } } },
+                ]).option({ maxTimeMS: 8000 });
+                for (const row of grouped) {
+                    if (row?._id != null) countByCompany.set(String(row._id), row.n || 0);
+                }
+            } catch (countErr) {
+                console.warn("[getCompanies] employee count aggregation failed:", countErr?.message || countErr);
             }
-        }
-        if (countFailures > 0) {
-            console.warn(
-                `[getCompanies] employeeCounts: ${countFailures}/${companies.length} timed out — returning 0 for those`
-            );
         }
         console.log(`[getCompanies] employeeCounts took=${ms(tCount)}`);
 
@@ -94,7 +87,12 @@ export const getCompanies = async (req, res) => {
                     console.warn("getCompanies: failed to sign logo for", company._id, err.message);
                 }
             }
-            company.activationProgress = calculateCompanyActivationProgress(company);
+            try {
+                company.activationProgress = calculateCompanyActivationProgress(company);
+            } catch (progressErr) {
+                console.warn("getCompanies: activation progress failed for", company._id, progressErr?.message);
+                company.activationProgress = { percentage: 0, checks: [] };
+            }
             return company;
         }));
         console.log(`[getCompanies] sign+progress took=${ms(tSign)} total=${ms(t0)}`);

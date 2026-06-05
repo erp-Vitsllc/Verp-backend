@@ -27,7 +27,19 @@ export const samePendingNotRenewTarget = (a, b) => {
         );
     }
     if (a.kind === "ownerDoc") {
-        return a.ownerIndex === b.ownerIndex && String(a.docKey || "") === String(b.docKey || "");
+        const aOi =
+            typeof a.ownerIndex === "number"
+                ? a.ownerIndex
+                : Number.isFinite(Number(a.ownerIndex))
+                  ? Number(a.ownerIndex)
+                  : null;
+        const bOi =
+            typeof b.ownerIndex === "number"
+                ? b.ownerIndex
+                : Number.isFinite(Number(b.ownerIndex))
+                  ? Number(b.ownerIndex)
+                  : null;
+        return aOi === bOi && String(a.docKey || "") === String(b.docKey || "");
     }
     if (a.kind === "ejari" || a.kind === "insurance") {
         if (a.arrayItemId && b.arrayItemId) return String(a.arrayItemId) === String(b.arrayItemId);

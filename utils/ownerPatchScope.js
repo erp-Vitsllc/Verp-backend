@@ -70,6 +70,15 @@ const findBaseOwner = (patch, baseOwners, index) => {
         const hit = baseOwners.find((b) => String(b?._id) === String(patch._id));
         if (hit) return hit;
     }
+    const profileId = patch?.ownerProfileId;
+    if (profileId != null && String(profileId).trim() !== "") {
+        const hit = baseOwners.find(
+            (b) =>
+                b?.ownerProfileId != null &&
+                String(b.ownerProfileId) === String(profileId),
+        );
+        if (hit) return hit;
+    }
     return baseOwners[index] || {};
 };
 
@@ -121,6 +130,20 @@ const nestedDocFieldEqual = (left, right) => {
 /** True when passport / EID / visa etc. on a row differ from the live owner snapshot. */
 export const ownerRowNestedDocsChanged = (mergedRow = {}, baseRow = {}) =>
     OWNER_NESTED_DOC_KEYS.some((key) => !nestedDocFieldEqual(mergedRow?.[key], baseRow?.[key]));
+
+/** Owner row indexes whose nested doc card (e.g. emiratesId) changed vs the live snapshot. */
+export const getOwnerIndicesWithNestedDocChange = (patchOwners = [], baseOwners = [], docKey) => {
+    if (!docKey || !Array.isArray(patchOwners) || patchOwners.length === 0) return [];
+    const merged = mergeCompanyOwnersSnapshot(baseOwners, patchOwners);
+    const indices = [];
+    merged.forEach((mergedRow, index) => {
+        const base = findBaseOwner(mergedRow, baseOwners, index);
+        if (!nestedDocFieldEqual(mergedRow?.[docKey], base?.[docKey])) {
+            indices.push(index);
+        }
+    });
+    return indices;
+};
 
 /** Nested doc card keys that differ from the live owner snapshot (passport-only save → Set { passport }). */
 export const getChangedOwnerNestedDocKeys = (patchOwners = [], baseOwners = []) => {

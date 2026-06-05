@@ -9,6 +9,25 @@ import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileRe
 import { skipLiveProfileWritesPendingHr, queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
 import { markProfileActivationHoldResolvedForSection } from "../../utils/markProfileActivationHoldResolved.js";
 import { PURGE_TYPES, purgeEmployeeOldDocuments } from "../../utils/purgeEmployeeOldDocuments.js";
+import EmployeePersonal from "../../models/EmployeePersonal.js";
+import EmployeeContact from "../../models/EmployeeContact.js";
+import {
+    normalizeEmployeeProfileBasicDetailsPayload,
+    validateEmployeeProfileBasicDetailsPayload,
+} from "../../utils/employeeProfileBasicDetailsValidation.js";
+
+const PROFILE_BASIC_PATCH_KEYS = new Set([
+    "firstName",
+    "lastName",
+    "email",
+    "contactNumber",
+    "dateOfBirth",
+    "maritalStatus",
+    "numberOfDependents",
+    "fathersName",
+    "nationality",
+    "country",
+]);
 
 export const updateBasicDetails = async (req, res) => {
     try {
@@ -103,6 +122,74 @@ export const updateBasicDetails = async (req, res) => {
         });
         if (skipArchiveOnRequest) {
             delete updatePayload.skipArchive;
+        }
+
+        const touchesProfileBasic = [...PROFILE_BASIC_PATCH_KEYS].some((key) =>
+            Object.prototype.hasOwnProperty.call(updatePayload, key),
+        );
+
+        if (touchesProfileBasic) {
+            if (
+                updatePayload.employeeId !== undefined &&
+                String(updatePayload.employeeId || "").trim() &&
+                String(updatePayload.employeeId) !== String(employeeId)
+            ) {
+                return res.status(400).json({ message: "Employee ID cannot be edited" });
+            }
+            delete updatePayload.employeeId;
+
+            const [existingPersonal, existingContact] = await Promise.all([
+                EmployeePersonal.findOne({ employeeId })
+                    .select("dateOfBirth maritalStatus numberOfDependents fathersName nationality")
+                    .lean(),
+                EmployeeContact.findOne({ employeeId }).select("contactNumber").lean(),
+            ]);
+
+            const mergedForValidation = {
+                firstName: updatePayload.firstName ?? existingBasic?.firstName,
+                lastName: updatePayload.lastName ?? existingBasic?.lastName,
+                email: updatePayload.email ?? existingBasic?.email,
+                contactNumber:
+                    updatePayload.contactNumber ??
+                    existingContact?.contactNumber ??
+                    existingBasic?.contactNumber,
+                dateOfBirth: updatePayload.dateOfBirth ?? existingPersonal?.dateOfBirth,
+                maritalStatus: updatePayload.maritalStatus ?? existingPersonal?.maritalStatus,
+                numberOfDependents:
+                    updatePayload.numberOfDependents !== undefined
+                        ? updatePayload.numberOfDependents
+                        : existingPersonal?.numberOfDependents,
+                fathersName: updatePayload.fathersName ?? existingPersonal?.fathersName,
+                nationality:
+                    updatePayload.nationality ??
+                    updatePayload.country ??
+                    existingPersonal?.nationality ??
+                    existingBasic?.country,
+            };
+
+            const validation = validateEmployeeProfileBasicDetailsPayload(mergedForValidation);
+            if (!validation.ok) {
+                return res.status(400).json({ message: validation.message });
+            }
+
+            const normalizedBasic = normalizeEmployeeProfileBasicDetailsPayload(updatePayload);
+            for (const key of PROFILE_BASIC_PATCH_KEYS) {
+                if (Object.prototype.hasOwnProperty.call(updatePayload, key)) {
+                    updatePayload[key] = normalizedBasic[key];
+                }
+            }
+
+            if (normalizedBasic.email) {
+                const duplicateEmail = await EmployeeBasic.findOne({
+                    email: normalizedBasic.email,
+                    employeeId: { $ne: employeeId },
+                })
+                    .select("employeeId")
+                    .lean();
+                if (duplicateEmail) {
+                    return res.status(400).json({ message: "Email must be unique" });
+                }
+            }
         }
 
         // 3. Handle documents - if URL is provided, use it; if data is base64, upload to S3 (IDrive)
