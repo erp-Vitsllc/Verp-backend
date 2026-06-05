@@ -229,12 +229,54 @@ export async function restoreArchivedRecord(archive) {
             return restoreMongoByUnique(Payment, snapshot, 'paymentId');
 
         case 'company_whole': {
-            const data = stripMongoDoc(snapshot);
-            if (data.companyId) {
-                const exists = await Company.findOne({ companyId: data.companyId }).lean();
+            const companyId = snapshot.companyId;
+            if (companyId) {
+                const exists = await Company.findOne({ companyId }).lean();
                 if (exists) throw new Error('Company with this ID already exists.');
             }
-            return Company.create(data);
+
+            const companyData = { ...snapshot };
+            delete companyData.__v;
+            delete companyData.createdAt;
+            delete companyData.updatedAt;
+
+            const { employees, ...companyFields } = companyData;
+
+            const newCompany = await Company.create(companyFields);
+
+            if (Array.isArray(employees)) {
+                for (const emp of employees) {
+                    const collections = emp.collections;
+                    const flat = emp.complete || emp;
+                    const employeeId = flat?.employeeId || collections?.basic?.employeeId;
+                    if (!employeeId) continue;
+
+                    const exists = await EmployeeBasic.findOne({ employeeId }).lean();
+                    if (exists) continue;
+
+                    if (collections) {
+                        if (collections.basic) {
+                            collections.basic.company = newCompany._id;
+                            await EmployeeBasic.create(stripMongoDoc(collections.basic));
+                        }
+                        if (collections.contact) await EmployeeContact.create(stripMongoDoc(collections.contact));
+                        if (collections.personal) await EmployeePersonal.create(stripMongoDoc(collections.personal));
+                        if (collections.passport) await EmployeePassport.create(stripMongoDoc(collections.passport));
+                        if (collections.visa) await EmployeeVisa.create(stripMongoDoc(collections.visa));
+                        if (collections.emiratesId) await EmployeeEmiratesId.create(stripMongoDoc(collections.emiratesId));
+                        if (collections.labourCard) await EmployeeLabourCard.create(stripMongoDoc(collections.labourCard));
+                        if (collections.medicalInsurance) await EmployeeMedicalInsurance.create(stripMongoDoc(collections.medicalInsurance));
+                        if (collections.drivingLicense) await EmployeeDrivingLicense.create(stripMongoDoc(collections.drivingLicense));
+                        if (collections.salary) await EmployeeSalary.create(stripMongoDoc(collections.salary));
+                        if (collections.bank) await EmployeeBank.create(stripMongoDoc(collections.bank));
+                        if (collections.education) await EmployeeEducation.create(stripMongoDoc(collections.education));
+                        if (collections.experience) await EmployeeExperience.create(stripMongoDoc(collections.experience));
+                        if (collections.emergencyContact) await EmployeeEmergencyContact.create(stripMongoDoc(collections.emergencyContact));
+                        if (collections.training) await EmployeeTraining.create(stripMongoDoc(collections.training));
+                    }
+                }
+            }
+            return newCompany;
         }
 
         case 'company_document': {

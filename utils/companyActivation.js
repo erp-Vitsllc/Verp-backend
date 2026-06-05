@@ -1010,3 +1010,32 @@ export const shouldTriggerCompanyReactivation = (beforeCompany = {}, updateData 
     }
     return updateDataTouchesHrApprovalCards(beforeCompany, updateData);
 };
+
+export const syncCompanyStatus = async (companyId) => {
+    const Company = (await import("../models/Company.js")).default;
+    const { loadCompanyFullProfile } = await import("../services/companyPartitionService.js");
+    const company = await Company.findById(companyId);
+    if (!company) return;
+
+    const full = await loadCompanyFullProfile(company);
+    const progress = calculateCompanyActivationProgress(full);
+
+    const pendingNotRenews = Array.isArray(full.pendingNotRenewRequests)
+        ? full.pendingNotRenewRequests.filter((r) => r.status === "pending")
+        : [];
+
+    const hasPendingKeyNotRenew = pendingNotRenews.some((r) =>
+        r.kind === "tradeLicense" ||
+        r.kind === "establishmentCard" ||
+        (r.kind === "ownerDoc" && (r.docKey === "passport" || r.docKey === "emiratesId"))
+    );
+
+    const shouldBeActive = progress.percentage === 100 && !hasPendingKeyNotRenew;
+    const nextStatus = shouldBeActive ? "Active" : "Inactive";
+
+    if (company.status !== nextStatus) {
+        company.status = nextStatus;
+        await company.save();
+    }
+};
+

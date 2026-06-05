@@ -25,6 +25,7 @@ import {
     pickCompanyPendingPreviousSnapshot,
     stripProposedDataKeysFromPendingReactivationEntries,
     isCompanyFullyActivated,
+    syncCompanyStatus,
 } from "../../utils/companyActivation.js";
 import { mergeCompanyOwnersSnapshot } from "../../utils/mergeCompanyOwnersSnapshot.js";
 import {
@@ -941,11 +942,14 @@ export const updateCompany = async (req, res) => {
             }
         }
 
+        await syncCompanyStatus(updatedCompany._id);
+        const refreshedCore = await Company.findById(updatedCompany._id);
+
         const mergedForResponse =
-            (await loadCompanyFullProfile(updatedCompany)) ||
-            (typeof updatedCompany.toObject === "function"
-                ? updatedCompany.toObject({ strict: false, virtuals: false })
-                : { ...updatedCompany });
+            (await loadCompanyFullProfile(refreshedCore)) ||
+            (typeof refreshedCore.toObject === "function"
+                ? refreshedCore.toObject({ strict: false, virtuals: false })
+                : { ...refreshedCore });
 
         const signedCompany = await signCompanyProfileForResponse(mergedForResponse);
 

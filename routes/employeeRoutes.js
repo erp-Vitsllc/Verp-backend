@@ -2,7 +2,7 @@ import express from "express";
 import { getEmployees } from "../controllers/employee/getEmployees.js";
 import { getEmployeeById } from "../controllers/employee/getEmployeeById.js";
 import { addEmployee } from "../controllers/employee/addEmployee.js";
-// import { updateEmployee } from "../controllers/employee/updateEmployee.js";
+import { updateEmployee } from "../controllers/employee/updateEmployee.js";
 import { updateBasicDetails } from "../controllers/employee/updateBasicDetails.js";
 import { addEmergencyContact } from "../controllers/employee/addEmergencyContact.js";
 import { updateEmergencyContact } from "../controllers/employee/updateEmergencyContact.js";
@@ -289,6 +289,9 @@ router.get("/:id/document", checkPermission('hrm_employees_view', 'view'), getEm
 // Generic :id routes must come last
 // Get employee by ID - requires view permission
 router.get("/:id", checkPermission('hrm_employees_view', 'view'), getEmployeeById);
+
+// Update employee - requires edit permission
+router.put("/:id", checkPermission('hrm_employees_list', 'edit'), updateEmployee);
 
 // Delete employee - requires delete permission
 router.delete("/:id", checkPermission('hrm_employees', 'delete'), deleteEmployee);

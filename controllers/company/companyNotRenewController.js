@@ -6,7 +6,7 @@ import DashboardAction from "../../models/DashboardAction.js";
 import { getDepartmentHOD } from "../../utils/getDepartmentHOD.js";
 import { resolveEmployeeEmail } from "../../utils/resolveEmployeeEmail.js";
 import { isRequestUserDesignatedFlowchartHr } from "../../utils/isDesignatedFlowchartHr.js";
-import { calculateCompanyActivationProgress, isCompanyFullyActivated } from "../../utils/companyActivation.js";
+import { calculateCompanyActivationProgress, isCompanyFullyActivated, syncCompanyStatus } from "../../utils/companyActivation.js";
 import {
     loadCompanyFullProfile,
     upsertCompanyPartitions,
@@ -368,14 +368,17 @@ export const submitCompanyNotRenewRequest = async (req, res) => {
                 companyObjectId: core._id,
                 labels: [row.label || row.kind],
             });
+            await syncCompanyStatus(core._id);
+            const refreshedCompany = await loadCompanyFullProfile(core);
             return res.status(201).json({
                 message: "Not renew applied and moved to Old Documents.",
-                activationProgress: calculateCompanyActivationProgress(companyData),
+                activationProgress: calculateCompanyActivationProgress(refreshedCompany || {}),
             });
         }
 
         companyData.pendingNotRenewRequests = [...(companyData.pendingNotRenewRequests || []), row];
         await saveCompanyNotRenewState(core._id, companyData);
+        await syncCompanyStatus(core._id);
 
         await closeCreatorNotRenewFollowUpTasks(core._id, buildNotRenewTargetFromEntry(row));
 
@@ -459,6 +462,7 @@ export const respondCompanyNotRenewRequest = async (req, res) => {
             }
             companyData.pendingNotRenewRequests = list.filter((r) => r.requestId !== requestId);
             await saveCompanyNotRenewState(core._id, companyData);
+            await syncCompanyStatus(core._id);
 
             await closeHrNotRenewDashboardAction(
                 core._id,
@@ -505,6 +509,7 @@ export const respondCompanyNotRenewRequest = async (req, res) => {
             companyObjectId: core._id,
             labels: [entry.label || entry.kind],
         });
+        await syncCompanyStatus(core._id);
 
         await closeHrNotRenewDashboardAction(core._id, requestId, "Approved", "", req.user.employeeObjectId);
         await closeCreatorNotRenewFollowUpTasks(core._id, buildNotRenewTargetFromEntry(entry));
@@ -525,9 +530,10 @@ export const respondCompanyNotRenewRequest = async (req, res) => {
             });
         }
 
+        const refreshedCompany = await loadCompanyFullProfile(core);
         return res.json({
             message: "Not renew approved and archived.",
-            activationProgress: calculateCompanyActivationProgress(companyData),
+            activationProgress: calculateCompanyActivationProgress(refreshedCompany || {}),
         });
     } catch (error) {
         console.error("respondCompanyNotRenewRequest", error);
