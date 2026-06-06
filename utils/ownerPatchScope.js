@@ -6,6 +6,7 @@ import {
     normalizeOwnerEmail,
     normalizeOwnerPhone,
 } from "./ownerDetailsValidation.js";
+import { normalizeOwnerProfileId } from "./ownerProfileId.js";
 
 const OWNER_BASIC_SCALAR_KEYS = [
     "name",
@@ -143,6 +144,62 @@ export const getOwnerIndicesWithNestedDocChange = (patchOwners = [], baseOwners 
         }
     });
     return indices;
+};
+
+/**
+ * Owner profile ids whose shared data changed (contact fields, nested docs, attachment, or roster removal).
+ * Share-%-only / Trade License license-field saves do not count as profile mutations.
+ */
+export const collectOwnerProfileIdsWithSharedProfileMutations = (
+    patchOwners = [],
+    baseOwners = [],
+    options = {},
+) => {
+    const { rosterReplace = false } = options;
+    const mutated = new Set();
+    const patch = Array.isArray(patchOwners) ? patchOwners : [];
+    const base = Array.isArray(baseOwners) ? baseOwners : [];
+
+    const patchProfileIds = new Set();
+    for (const row of patch) {
+        const pid = normalizeOwnerProfileId(row?.ownerProfileId);
+        if (pid) patchProfileIds.add(pid);
+    }
+
+    for (const row of base) {
+        const pid = normalizeOwnerProfileId(row?.ownerProfileId);
+        if (pid && !patchProfileIds.has(pid)) {
+            mutated.add(pid);
+        }
+    }
+
+    const merged = rosterReplace ? null : mergeCompanyOwnersSnapshot(base, patch);
+    const rowsToCheck = rosterReplace ? patch : merged;
+
+    rowsToCheck.forEach((row, index) => {
+        const baseRow = findBaseOwner(row, base, index);
+        const pid = normalizeOwnerProfileId(row?.ownerProfileId || baseRow?.ownerProfileId);
+        if (!pid) return;
+
+        if (ownerPatchTouchesContactDetailFields(row, baseRow)) {
+            mutated.add(pid);
+            return;
+        }
+
+        const mergedForNested = rosterReplace ? { ...baseRow, ...row } : row;
+        if (ownerRowNestedDocsChanged(mergedForNested, baseRow)) {
+            mutated.add(pid);
+        }
+
+        if (
+            Object.prototype.hasOwnProperty.call(row, "attachment") &&
+            String(row.attachment ?? "").trim() !== String(baseRow?.attachment ?? "").trim()
+        ) {
+            mutated.add(pid);
+        }
+    });
+
+    return [...mutated];
 };
 
 /** Nested doc card keys that differ from the live owner snapshot (passport-only save → Set { passport }). */

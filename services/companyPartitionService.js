@@ -7,7 +7,11 @@ import CompanyWorkflow from "../models/CompanyWorkflow.js";
 import { ownerDocUnsetPath } from "../utils/companyOwnerDocDeletion.js";
 import { archiveSupersededCompanyDocuments } from "../utils/archiveCompanyDocument.js";
 import { archiveSupersededCompanyOwners } from "../utils/archiveCompanyOwners.js";
-import { mergeCompanyOwnersSnapshot } from "../utils/mergeCompanyOwnersSnapshot.js";
+import { resolveOwnersForActivationApply } from "../utils/mergeCompanyOwnersSnapshot.js";
+import {
+    dedupeCompanyOwnersList,
+    propagateOwnerProfilesAcrossCompanies,
+} from "../utils/globalOwnersCatalog.js";
 
 /** Heavy fields excluded from company list reads (MongoDB projection — exclusion only). */
 export const COMPANY_LIST_SELECT = {
@@ -657,11 +661,13 @@ export async function applyCompanyProposedActivationPatch(companyMongoId, propos
     if (!core) return { ownerArchivesToPush: [] };
     const before = (await loadCompanyFullProfile(core)) || core;
 
-    // Pending queue rows are sliced per card (e.g. passport-only) — merge into live owners before apply.
+    // Doc-card slices merge; Trade License / owner removal replaces the live roster.
     const patch = { ...proposedData };
-    if (Array.isArray(patch.owners)) {
-        patch.owners = mergeCompanyOwnersSnapshot(before.owners || [], patch.owners);
+    const resolvedOwners = resolveOwnersForActivationApply(before.owners || [], patch);
+    if (resolvedOwners != null) {
+        patch.owners = dedupeCompanyOwnersList(resolvedOwners);
     }
+    delete patch.__ownersReplaceRoster;
 
     await archiveSupersededCompanyDocuments(before, patch);
     const ownerArchives = archiveSupersededCompanyOwners(before, patch) || [];
@@ -672,6 +678,16 @@ export async function applyCompanyProposedActivationPatch(companyMongoId, propos
     }
     if (Object.keys(partitionUpdate).length) {
         await upsertCompanyPartitions(companyMongoId, partitionUpdate);
+    }
+    if (Array.isArray(patch.owners) && patch.owners.length > 0) {
+        try {
+            await propagateOwnerProfilesAcrossCompanies(patch.owners, companyMongoId);
+        } catch (propErr) {
+            console.warn(
+                "[applyCompanyProposedActivationPatch] propagateOwnerProfilesAcrossCompanies:",
+                propErr?.message || propErr,
+            );
+        }
     }
     return { ownerArchivesToPush: ownerArchives };
 }

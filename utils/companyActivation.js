@@ -19,7 +19,7 @@ import { shortenUrlsInString } from "./shortenUrlsInString.js";
 import { validateOwnerDetailsOwnersPayload } from "./ownerDetailsValidation.js";
 import { validateOwnerPassportRow } from "./ownerPassportValidation.js";
 import { validateOwnerEmiratesIdRow } from "./ownerEmiratesIdValidation.js";
-import { mergeCompanyOwnersSnapshot } from "./mergeCompanyOwnersSnapshot.js";
+import { mergeCompanyOwnersSnapshot, isTradeLicenseOwnersBundleUpdate } from "./mergeCompanyOwnersSnapshot.js";
 
 const hasValue = (v) => !(v === undefined || v === null || (typeof v === "string" && v.trim() === ""));
 const hasAttachment = (v) => hasValue(v);
@@ -627,14 +627,18 @@ export const collectCompanyReactivationChangeLabels = (updateData = {}, beforeCo
     }
     if (Object.prototype.hasOwnProperty.call(updateData, "owners")) {
         const beforeOwners = beforeCompany?.owners || [];
-        if (isOwnersPassportModified(beforeOwners, updateData.owners)) {
-            changes.push("Owner Passport");
-        }
-        if (isOwnersEmiratesIdModified(beforeOwners, updateData.owners)) {
-            changes.push("Owner Emirates ID");
-        }
-        if (isOwnersBasicDetailsModified(beforeOwners, updateData.owners)) {
-            changes.push("Owner Details");
+        const tradeLicenseBundle = isTradeLicenseOwnersBundleUpdate(updateData);
+        // Trade License modal owns roster/name/share edits — do not also queue Owner Details rows.
+        if (!tradeLicenseBundle) {
+            if (isOwnersPassportModified(beforeOwners, updateData.owners)) {
+                changes.push("Owner Passport");
+            }
+            if (isOwnersEmiratesIdModified(beforeOwners, updateData.owners)) {
+                changes.push("Owner Emirates ID");
+            }
+            if (isOwnersBasicDetailsModified(beforeOwners, updateData.owners)) {
+                changes.push("Owner Details");
+            }
         }
     }
 
@@ -792,7 +796,10 @@ const slicePendingEntryForCard = (entry, cardLabel) => {
             ...entry,
             card: cardLabel,
             reason: cardLabel,
-            proposedData: { owners: sliceOwnersBasicOnly(proposed.owners) },
+            proposedData: {
+                owners: sliceOwnersBasicOnly(proposed.owners),
+                ...(proposed.__ownersReplaceRoster ? { __ownersReplaceRoster: true } : {}),
+            },
             previousData: { owners: sliceOwnersBasicOnly(previous.owners) },
         };
     }
@@ -1062,6 +1069,91 @@ const serializeOwnerBasicDetails = (owner = {}) =>
                 ? String(owner.sharePercentage)
                 : "",
     });
+
+const serializeOwnerContactDetails = (owner = {}) =>
+    JSON.stringify({
+        name: String(owner?.name || "").trim(),
+        email: String(owner?.email || "").trim().toLowerCase(),
+        phone: String(owner?.phone || "").trim(),
+        phoneCountryCode: String(owner?.phoneCountryCode || "").trim(),
+        nationality: String(owner?.nationality || "").trim(),
+    });
+
+/** Email / phone / nationality / name changed — not share-only or roster add/remove. */
+export const isOwnersContactDetailsModified = (beforeOwners = [], nextOwners = []) => {
+    const prev = Array.isArray(beforeOwners) ? beforeOwners : [];
+    const next = Array.isArray(nextOwners) ? nextOwners : [];
+
+    const findPrev = (nextOwner, idx) => {
+        const nextId = nextOwner?._id || nextOwner?.id;
+        if (nextId) {
+            const found = prev.find((o) => String(o?._id || o?.id || "") === String(nextId));
+            if (found) return found;
+        }
+        const profileId = nextOwner?.ownerProfileId;
+        if (profileId) {
+            const found = prev.find((o) => String(o?.ownerProfileId || "") === String(profileId));
+            if (found) return found;
+        }
+        return prev[idx] || null;
+    };
+
+    if (prev.length !== next.length) {
+        for (let i = 0; i < next.length; i++) {
+            const nextOwner = next[i];
+            const prevOwner = findPrev(nextOwner, i);
+            if (!prevOwner) {
+                const contact = serializeOwnerContactDetails(nextOwner);
+                const nameOnly = serializeOwnerContactDetails({ name: nextOwner?.name });
+                if (contact !== nameOnly) return true;
+                continue;
+            }
+            if (serializeOwnerContactDetails(prevOwner) !== serializeOwnerContactDetails(nextOwner)) {
+                return true;
+            }
+        }
+        for (const prevOwner of prev) {
+            const prevId = prevOwner?._id || prevOwner?.id;
+            const prevPid = prevOwner?.ownerProfileId;
+            const stillPresent = next.some(
+                (o) =>
+                    (prevId && String(o?._id || o?.id || "") === String(prevId)) ||
+                    (prevPid && String(o?.ownerProfileId || "") === String(prevPid)),
+            );
+            if (!stillPresent) return false;
+        }
+        return false;
+    }
+
+    for (let i = 0; i < next.length; i++) {
+        const nextOwner = next[i];
+        const prevOwner = findPrev(nextOwner, i);
+        if (!prevOwner) continue;
+        if (serializeOwnerContactDetails(prevOwner) !== serializeOwnerContactDetails(nextOwner)) {
+            return true;
+        }
+    }
+    return false;
+};
+
+/** Share % or owner roster changed without contact-field edits (Trade License modal). */
+export const isOwnersShareOrRosterOnlyModified = (beforeOwners = [], nextOwners = []) => {
+    if (!isOwnersBasicDetailsModified(beforeOwners, nextOwners)) return false;
+    return !isOwnersContactDetailsModified(beforeOwners, nextOwners);
+};
+
+/** Drop Owner Details queue rows that only mirror Trade License roster edits. */
+export const stripOwnerDetailsPendingSupersededByTradeLicense = (pending = []) => {
+    return (Array.isArray(pending) ? pending : []).filter((entry) => {
+        const card = String(entry?.card || entry?.reason || "").toLowerCase();
+        if (!card.includes("owner details")) return true;
+        if (card.includes("trade license")) return false;
+        const before = entry?.previousData?.owners || [];
+        const after = entry?.proposedData?.owners || [];
+        if (!Array.isArray(after) || after.length === 0) return true;
+        return !isOwnersShareOrRosterOnlyModified(before, after);
+    });
+};
 
 /** Name, email, phone, nationality, share % — not passport / Emirates ID sub-documents. */
 export const isOwnersBasicDetailsModified = (beforeOwners = [], nextOwners = []) => {

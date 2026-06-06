@@ -24,16 +24,19 @@ import {
     upsertPendingReactivationEntry,
     pickCompanyPendingPreviousSnapshot,
     stripProposedDataKeysFromPendingReactivationEntries,
+    stripOwnerDetailsPendingSupersededByTradeLicense,
     isCompanyFullyActivated,
     syncCompanyStatus,
 } from "../../utils/companyActivation.js";
 import {
     mergeCompanyOwnersSnapshot,
     replaceCompanyOwnersFromTradeLicensePatch,
+    isOwnerRosterRemovalPatch,
 } from "../../utils/mergeCompanyOwnersSnapshot.js";
 import {
     getOwnerIndicesWithContactDetailChanges,
     getChangedOwnerNestedDocKeys,
+    collectOwnerProfileIdsWithSharedProfileMutations,
     getOwnerIndicesWithNestedDocChange,
     isOwnerNestedDocOnlyOwnersUpdate,
 } from "../../utils/ownerPatchScope.js";
@@ -72,8 +75,17 @@ import {
     normalizeOwnerDetailsRow,
     validateOwnerDetailsOwnersPayload,
 } from "../../utils/ownerDetailsValidation.js";
-import { collectGlobalOwnerProfileIds } from "../../utils/ownerProfileId.js";
-import { enrichOwnersFromGlobalCatalog } from "../../utils/globalOwnersCatalog.js";
+import {
+    collectGlobalOwnerProfileIds,
+    normalizeOwnerProfileId,
+    validateOwnerProfileIdsUnique,
+} from "../../utils/ownerProfileId.js";
+import {
+    enrichOwnersFromGlobalCatalog,
+    dedupeCompanyOwnersList,
+    propagateOwnerProfilesAcrossCompanies,
+    assertOwnersEditableFromCompany,
+} from "../../utils/globalOwnersCatalog.js";
 import {
     normalizeOwnerPassportRow,
     validateOwnersPassportPayload,
@@ -341,6 +353,16 @@ export const updateCompany = async (req, res) => {
                 return res.status(404).json({ message: "Owner document card not found." });
             }
 
+            if (!requesterIsAdmin && clearLiveOwnerDocCard) {
+                const ownerPid = normalizeOwnerProfileId(ownerRow?.ownerProfileId);
+                if (ownerPid) {
+                    const editCheck = await assertOwnersEditableFromCompany(beforeCompany, [ownerPid]);
+                    if (!editCheck.ok) {
+                        return res.status(403).json({ message: editCheck.message });
+                    }
+                }
+            }
+
             if (!skipArchiveOnRequest) {
                 await archiveAdminOwnerDocCardDeletion(req, beforeCompany, ownerRow, docKey, ownerTarget);
             }
@@ -480,6 +502,7 @@ export const updateCompany = async (req, res) => {
             (typeof company.toObject === "function"
                 ? company.toObject({ strict: false, virtuals: false })
                 : { ...company });
+        let ownersReplaceRosterFlag = false;
 
         const hasGroupDeletePerm = await userMayDeleteCompanyProfileContent(
             req.user,
@@ -609,11 +632,33 @@ export const updateCompany = async (req, res) => {
             try {
                 const baseOwners = beforeCompany.owners || [];
                 const rawPatchOwners = updateData.owners;
+
                 const ownerDocCardsOnly = isOwnerNestedDocOnlyOwnersUpdate(rawPatchOwners, baseOwners);
                 const changedNestedDocKeys = getChangedOwnerNestedDocKeys(rawPatchOwners, baseOwners);
                 const tradeLicenseOwnersReplace = isTradeLicenseOwnersBundleUpdate(updateData);
+                const rosterReplace =
+                    tradeLicenseOwnersReplace ||
+                    isOwnerRosterRemovalPatch(baseOwners, rawPatchOwners);
+
+                if (!(await isReqUserAdmin(req.user))) {
+                    const mutatedProfileIds = collectOwnerProfileIdsWithSharedProfileMutations(
+                        rawPatchOwners,
+                        baseOwners,
+                        { rosterReplace },
+                    );
+                    if (mutatedProfileIds.length > 0) {
+                        const editCheck = await assertOwnersEditableFromCompany(company, mutatedProfileIds);
+                        if (!editCheck.ok) {
+                            return res.status(403).json({ message: editCheck.message });
+                        }
+                    }
+                }
                 // Trade License modal replaces the owner list; doc-card saves merge one card into existing rows.
-                updateData.owners = tradeLicenseOwnersReplace
+                const replaceOwnersList =
+                    tradeLicenseOwnersReplace ||
+                    isOwnerRosterRemovalPatch(baseOwners, rawPatchOwners);
+                ownersReplaceRosterFlag = replaceOwnersList;
+                updateData.owners = replaceOwnersList
                     ? replaceCompanyOwnersFromTradeLicensePatch(baseOwners, rawPatchOwners)
                     : mergeCompanyOwnersSnapshot(baseOwners, rawPatchOwners);
                 updateData.owners = await enrichOwnersFromGlobalCatalog(updateData.owners);
@@ -646,6 +691,11 @@ export const updateCompany = async (req, res) => {
                     }
                     return normalized;
                 });
+                updateData.owners = dedupeCompanyOwnersList(updateData.owners);
+                const uniqueIdsCheck = validateOwnerProfileIdsUnique(updateData.owners);
+                if (!uniqueIdsCheck.ok) {
+                    return res.status(400).json({ message: uniqueIdsCheck.message });
+                }
                 // Nested owner doc cards (passport, EID, visa, labour, medical, DL) must not
                 // trigger trade-license share / roster validation.
                 const onlyNestedOwnerDocSave =
@@ -804,6 +854,10 @@ export const updateCompany = async (req, res) => {
         if (queueForApproval) {
             const changedCards = collectCompanyReactivationChangeLabels(updateData, beforeCompany);
             const cardLabel = changedCards.length ? changedCards.join(", ") : "Company Profile";
+            const proposedForQueue = toSerializable(updateData);
+            if (ownersReplaceRosterFlag) {
+                proposedForQueue.__ownersReplaceRoster = true;
+            }
             // Active companies stay Active; changes wait in pendingReactivationChanges until HR approves via Submit.
             const pendingEntry = {
                 card: cardLabel,
@@ -812,7 +866,7 @@ export const updateCompany = async (req, res) => {
                 changeType: "update",
                 targetIndex: null,
                 previousData: toSerializable(pickCompanyPendingPreviousSnapshot(beforeCompany, updateData)),
-                proposedData: toSerializable(updateData),
+                proposedData: proposedForQueue,
                 changedAt: new Date(),
                 queuedByUserId: req.user?._id ? String(req.user._id) : String(req.user?.id || "").trim(),
                 queuedByEmployeeId: String(req.user?.employeeId || "").trim(),
@@ -855,6 +909,9 @@ export const updateCompany = async (req, res) => {
                 });
             }
             if (!mergedIntoHeldRow) {
+                if (isTradeLicenseOwnersBundleUpdate(updateData)) {
+                    nextPending = stripOwnerDetailsPendingSupersededByTradeLicense(nextPending);
+                }
                 nextPending = upsertPendingReactivationEntry(nextPending, pendingEntry, changedCards);
             }
             partitionUpdatePayload = { pendingReactivationChanges: nextPending };
@@ -927,6 +984,18 @@ export const updateCompany = async (req, res) => {
             }
         } catch (partitionErr) {
             console.warn("[updateCompany] upsertCompanyPartitions:", partitionErr?.message || partitionErr);
+        }
+
+        if (
+            !queueForApproval &&
+            Object.prototype.hasOwnProperty.call(updateData, "owners") &&
+            Array.isArray(updateData.owners)
+        ) {
+            try {
+                await propagateOwnerProfilesAcrossCompanies(updateData.owners, updatedCompany._id);
+            } catch (propErr) {
+                console.warn("[updateCompany] propagateOwnerProfilesAcrossCompanies:", propErr?.message || propErr);
+            }
         }
 
         try {

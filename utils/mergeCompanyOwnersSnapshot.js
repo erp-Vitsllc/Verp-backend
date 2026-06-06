@@ -1,3 +1,41 @@
+export const TRADE_LICENSE_OWNER_BUNDLE_KEYS = [
+    "tradeLicenseNumber",
+    "tradeLicenseIssueDate",
+    "tradeLicenseExpiry",
+    "tradeLicenseAttachment",
+    "tradeLicenseOwnerName",
+];
+
+/** Trade License modal sends license fields + the full intended owner roster. */
+export const isTradeLicenseOwnersBundleUpdate = (updateData = {}) =>
+    Object.prototype.hasOwnProperty.call(updateData, "owners") &&
+    TRADE_LICENSE_OWNER_BUNDLE_KEYS.some((k) => Object.prototype.hasOwnProperty.call(updateData, k));
+
+/** Fewer owners in patch — each row matches an existing owner id (removal, not a doc-card slice). */
+export const isOwnerRosterRemovalPatch = (beforeOwners = [], patchOwners = []) => {
+    const before = Array.isArray(beforeOwners) ? beforeOwners : [];
+    const patch = Array.isArray(patchOwners) ? patchOwners : [];
+    if (patch.length === 0 || patch.length >= before.length) return false;
+    return patch.every((p) => {
+        const id = p?._id ?? p?.id;
+        if (id == null) return false;
+        return before.some((b) => String(b?._id ?? b?.id ?? "") === String(id));
+    });
+};
+
+/**
+ * HR-approved owner patches: merge doc-card slices; replace roster for Trade License edits
+ * or when the queue row was saved with `__ownersReplaceRoster` (owner removed from roster).
+ */
+export const resolveOwnersForActivationApply = (beforeOwners = [], proposedData = {}) => {
+    const patchOwners = proposedData?.owners;
+    if (!Array.isArray(patchOwners)) return null;
+    if (isTradeLicenseOwnersBundleUpdate(proposedData) || proposedData.__ownersReplaceRoster === true) {
+        return replaceCompanyOwnersFromTradeLicensePatch(beforeOwners, patchOwners);
+    }
+    return mergeCompanyOwnersSnapshot(beforeOwners, patchOwners);
+};
+
 /** Nested owner document cards — merge per key instead of replacing the whole owner row. */
 export const OWNER_NESTED_DOC_KEYS = [
     "passport",
