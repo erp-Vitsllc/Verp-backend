@@ -8,8 +8,8 @@ import User from "../../models/User.js";
 import Company from "../../models/Company.js";
 import CompanyWorkflow from "../../models/CompanyWorkflow.js";
 import { loadCompaniesForExpiryScanByIds } from "../../services/companyPartitionService.js";
-import { collectCompanyExpiryDocuments } from "../../utils/companyExpiryScanUtils.js";
-import { getDaysUntil, isExpiryTaskWindow } from "../../utils/documentExpiryReminderStages.js";
+import { collectCompanyExpiryDocuments, buildEmployeeManualDocumentExpiryLabel } from "../../utils/companyExpiryScanUtils.js";
+import { getDaysUntil, isExpiryHrTaskDueForDoc } from "../../utils/documentExpiryReminderStages.js";
 
 /** Matches owner-style company rows — allow ASCII/en/em dashes between name and document type (same intent as frontend). */
 const COMPANY_OWNER_EXPIRY_BODY_RE =
@@ -95,7 +95,7 @@ const buildCompanyLiveExpiryExtra1Set = (company = {}) => {
     const set = new Set();
     collectCompanyExpiryDocuments(company).forEach((x) => {
         const days = getDaysUntil(x.expiryDate);
-        if (days == null || !isExpiryTaskWindow(days)) return;
+        if (days == null || !isExpiryHrTaskDueForDoc(days, { isCertificate: x.isCertificate })) return;
         const exp = formatExpiryDateLabel(x.expiryDate);
         set.add(`Expiry follow-up required: ${x.label}${exp ? ` (Exp: ${exp})` : ""}`);
     });
@@ -106,13 +106,17 @@ const buildEmployeeLiveExpiryExtra1Set = (emp = {}) => {
     const labels = [];
     (emp?.documents || []).forEach((d) => {
         if (!d?.expiryDate || isArchivedManualDoc(d)) return;
-        labels.push({ label: d?.type || "Employee Document", expiryDate: d.expiryDate });
+        labels.push({
+            label: buildEmployeeManualDocumentExpiryLabel(d),
+            expiryDate: d.expiryDate,
+            isCertificate: String(d?.context || "").toLowerCase() === "certificate",
+        });
     });
     if (emp?.contractExpiryDate) labels.push({ label: "Contract Expiry", expiryDate: emp.contractExpiryDate });
     const set = new Set();
     labels.forEach((x) => {
         const days = getDaysUntil(x.expiryDate);
-        if (days == null || !isExpiryTaskWindow(days)) return;
+        if (days == null || !isExpiryHrTaskDueForDoc(days, { isCertificate: x.isCertificate })) return;
         const exp = formatExpiryDateLabel(x.expiryDate);
         set.add(`Expiry follow-up required: ${x.label}${exp ? ` (Exp: ${exp})` : ""}`);
     });
@@ -120,7 +124,7 @@ const buildEmployeeLiveExpiryExtra1Set = (emp = {}) => {
 };
 
 const EMPLOYEE_SYSTEM_EXPIRY_LABEL_RE =
-    /(passport|visa|emirates\s*id|labour\s*card|medical\s*insurance|driving\s*license|contract\s*expiry)/i;
+    /(passport|visa|emirates\s*id|labour\s*card|medical\s*insurance|driving\s*license|contract\s*expiry|certificate\s*[—–-])/i;
 
 const filterStaleExpiryDashboardRows = async (items = []) => {
     if (!Array.isArray(items) || items.length === 0) return items;

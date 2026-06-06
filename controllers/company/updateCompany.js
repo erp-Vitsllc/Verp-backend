@@ -644,7 +644,9 @@ export const updateCompany = async (req, res) => {
                     tradeLicenseOwnersReplace ||
                     isOwnerRosterRemovalPatch(baseOwners, rawPatchOwners);
 
-                if (!(await isReqUserAdmin(req.user))) {
+                // Trade License add/edit/renew may change roster (add/remove owners, share %) without
+                // blocking owners that also appear on another activated company profile.
+                if (!(await isReqUserAdmin(req.user)) && !tradeLicenseOwnersReplace) {
                     const mutatedProfileIds = collectOwnerProfileIdsWithSharedProfileMutations(
                         rawPatchOwners,
                         baseOwners,
@@ -654,7 +656,10 @@ export const updateCompany = async (req, res) => {
                         },
                     );
                     if (mutatedProfileIds.length > 0) {
-                        const editCheck = await assertOwnersEditableFromCompany(company, mutatedProfileIds);
+                        const editCheck = await assertOwnersEditableFromCompany(
+                            beforeCompany,
+                            mutatedProfileIds,
+                        );
                         if (!editCheck.ok) {
                             return res.status(403).json({ message: editCheck.message });
                         }

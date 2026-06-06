@@ -50,10 +50,18 @@ const isBasicSystemHistoryRowInDocuments = (row = {}) => {
     return t.includes("trade license") || t.includes("establishment card");
 };
 
+const isSyntheticMoaPlaceholderRow = (row = {}) => {
+    if (!row || typeof row !== "object") return false;
+    const ctx = String(row?.context || "").toLowerCase();
+    const url = String(row?.document?.url || row?.attachment || "").trim();
+    return ctx === "moa" && url === "partitioned-moa-flag";
+};
+
 const shouldSkipDocumentsArrayExpiryRow = (row = {}) => {
     const ctx = String(row?.context || "").toLowerCase();
     if (ctx === "ejari" || ctx === "insurance") return true;
     if (ctx === "document_without_expiry") return true;
+    if (isSyntheticMoaPlaceholderRow(row)) return true;
     if (isArchivedOrStaleCompanyExpiryRow(row)) return true;
     if (isOwnerHistoryRowInDocuments(row)) return true;
     if (isBasicSystemHistoryRowInDocuments(row)) return true;
@@ -64,6 +72,16 @@ const hasUsableExpiryDate = (expiryDate) => {
     if (!expiryDate) return false;
     const s = String(expiryDate).trim().toLowerCase();
     return s && !["---", "-", "n/a", "na", "null", "undefined"].includes(s);
+};
+
+export const isCertificateDocumentRow = (row = {}) =>
+    String(row?.context || "").toLowerCase() === "certificate";
+
+/** Employee `documents[]` rows — align certificate labels with company expiry scan. */
+export const buildEmployeeManualDocumentExpiryLabel = (row = {}) => {
+    if (isCertificateDocumentRow(row)) return buildDocumentsArrayExpiryLabel(row);
+    const typeLabel = String(row?.type || "").trim();
+    return typeLabel || "Employee Document";
 };
 
 export const buildDocumentsArrayExpiryLabel = (row = {}) => {
@@ -84,6 +102,9 @@ export const buildDocumentsArrayExpiryLabel = (row = {}) => {
 
 /**
  * All live company documents that can surface HR expiry follow-ups.
+ * Covers: Trade License, Establishment Card, Ejari, Insurance, owner docs
+ * (Passport, Visas, Labour Card, Emirates ID, Medical, Driving License),
+ * MOA / Memo / Certificate / Document with Expiry rows in `documents[]`.
  * Never includes `oldDocuments[]`, renewed archives, or not-renew history rows.
  */
 export const collectCompanyExpiryDocuments = (company = {}) => {
@@ -112,6 +133,7 @@ export const collectCompanyExpiryDocuments = (company = {}) => {
             key: `company:${companyId}:document:${d?._id || idx}`,
             label: buildDocumentsArrayExpiryLabel(d),
             expiryDate: d.expiryDate,
+            isCertificate: isCertificateDocumentRow(d),
         });
     });
 

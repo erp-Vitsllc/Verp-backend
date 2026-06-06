@@ -27,12 +27,15 @@ import {
     rejectCompanyActivationRequest,
     discardCompanyPendingActivationEntry,
 } from "../controllers/company/activationController.js";
+import { syncCompanyExpiryNotifications, syncOneCompanyExpiryNotifications } from "../controllers/company/syncCompanyExpiryNotifications.js";
 
 const router = express.Router();
 
 router.use(protect);
 
 router.get("/", getCompanies);
+router.post("/sync-expiry-notifications", syncCompanyExpiryNotifications);
+router.post("/:id/sync-expiry-notifications", syncOneCompanyExpiryNotifications);
 router.get("/next-id", getNextCompanyId);
 router.get("/all-owners", getAllOwners);
 router.get("/:id", getCompany);

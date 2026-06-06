@@ -662,8 +662,51 @@ const normalizeSubmittedCardLabel = (label) =>
         .replace(/\s*\([^)]*\)\s*$/g, "")
         .trim();
 
-/** True when a pending row belongs to cards named in this HR submission (e.g. only Owner Passport). */
-export const pendingEntryIncludedInSubmittedCards = (entry, submittedCardLabels = []) => {
+/** Card labels from the latest workflow step still in `submitted` status. */
+const parseRequestedChangesFromWorkflowStep = (step = {}) => {
+    if (!step || typeof step !== "object") return [];
+    const desc = String(step.description || "").trim();
+    if (desc) {
+        for (const segment of desc.split("|").map((s) => s.trim())) {
+            const inline = segment.match(/^Requested Changes:\s*(.+)$/i);
+            if (inline?.[1]) {
+                return inline[1]
+                    .split(",")
+                    .map((s) => s.trim())
+                    .filter(Boolean);
+            }
+        }
+        const tail = desc.match(/Requested Changes:\s*(.+)$/i);
+        if (tail?.[1]) {
+            return tail[1]
+                .split(",")
+                .map((s) => s.trim())
+                .filter(Boolean);
+        }
+    }
+    const text = `${step.description || ""} ${step.reason || ""} ${step.comment || ""}`;
+    const match = text.match(/Requested Changes:\s*([^|]+?)(?:\s*\||\s*Type:|$)/i);
+    if (match?.[1]) {
+        return match[1]
+            .split(",")
+            .map((s) => s.trim())
+            .filter(Boolean);
+    }
+    return [];
+};
+
+const submittedCardLabelMatchesPart = (part, submittedSet) => {
+    if (!part || !submittedSet?.size) return false;
+    if (submittedSet.has(part)) return true;
+    for (const s of submittedSet) {
+        if (s === part) return true;
+        if (s.startsWith(`${part} `) || part.startsWith(`${s} `)) return true;
+    }
+    return false;
+};
+
+/** True when a pending row belongs to cards named in this HR submission (e.g. only Trade License). */
+export function pendingEntryIncludedInSubmittedCards(entry, submittedCardLabels = []) {
     if (!entry || typeof entry !== "object") return false;
     if (!Array.isArray(submittedCardLabels) || submittedCardLabels.length === 0) return true;
     const submitted = new Set(submittedCardLabels.map(normalizeSubmittedCardLabel).filter(Boolean));
@@ -674,26 +717,19 @@ export const pendingEntryIncludedInSubmittedCards = (entry, submittedCardLabels 
         .map((s) => normalizeSubmittedCardLabel(s))
         .filter(Boolean);
     if (!parts.length) return false;
-    return parts.some((part) => submitted.has(part));
-};
+    return parts.some((part) => submittedCardLabelMatchesPart(part, submitted));
+}
 
-/** Card labels from the latest workflow step still in `submitted` status. */
-export const resolveLatestActivationSubmissionLabels = (activationWorkflow = []) => {
+export function resolveLatestActivationSubmissionLabels(activationWorkflow = []) {
     const list = Array.isArray(activationWorkflow) ? activationWorkflow : [];
     for (let i = list.length - 1; i >= 0; i--) {
         const step = list[i];
         if (String(step?.status || "").toLowerCase() !== "submitted") continue;
-        const text = `${step?.description || ""} ${step?.reason || ""} ${step?.comment || ""}`;
-        const match = text.match(/Requested Changes:\s*([^|]+)/i);
-        if (match?.[1]) {
-            return match[1]
-                .split(",")
-                .map((s) => s.trim())
-                .filter(Boolean);
-        }
+        const labels = parseRequestedChangesFromWorkflowStep(step);
+        if (labels.length) return labels;
     }
     return [];
-};
+}
 
 /** Pending rows HR is reviewing in the current submission — excludes unsubmitted local drafts. */
 export const filterPendingEntriesInCurrentSubmission = (pendingChanges = [], activationWorkflow = []) => {

@@ -1,7 +1,13 @@
 import nodemailer from "nodemailer";
-import { loadCompaniesForExpiryScan } from "../services/companyPartitionService.js";
+import Company from "../models/Company.js";
+import {
+    loadCompaniesForExpiryScan,
+    loadCompaniesForExpiryScanByIds,
+} from "../services/companyPartitionService.js";
 import {
     collectCompanyExpiryDocuments,
+    buildEmployeeManualDocumentExpiryLabel,
+    isArchivedOrStaleCompanyExpiryRow,
     COMPANY_OWNER_EXPIRY_FIELDS,
 } from "./companyExpiryScanUtils.js";
 import EmployeeBasic from "../models/EmployeeBasic.js";
@@ -20,15 +26,20 @@ import {
     getDaysUntil,
     getEmailReminderStageMarker,
     isExpiryTaskWindow,
+    isExpiryHrTaskDueForDoc,
 } from "./documentExpiryReminderStages.js";
 
 const STAGE_1_MARKER = 30;
 const STAGE_2_MARKER = 20;
+const STAGE_3_MARKER = 10;
+const STAGE_0_MARKER = 0;
 
 const getReminderStageLabel = (marker) => {
     if (marker === STAGE_1_MARKER) return "1st Reminder";
     if (marker === STAGE_2_MARKER) return "2nd Reminder";
-    return "3rd Reminder";
+    if (marker === STAGE_3_MARKER) return "3rd Reminder";
+    if (marker === STAGE_0_MARKER) return "Expiry Day Reminder";
+    return "Reminder";
 };
 
 export const formatExpiryDateLabel = (expiryDate) => {
@@ -364,7 +375,7 @@ const syncCompanyDocumentExpiryDashboard = async (company, canonicalOwnerTargets
 
     for (const doc of docs) {
         const daysUntil = getDaysUntil(doc.expiryDate);
-        if (daysUntil == null || !isExpiryTaskWindow(daysUntil)) continue;
+        if (daysUntil == null || !isExpiryHrTaskDueForDoc(daysUntil, { isCertificate: doc.isCertificate })) continue;
         const expLabel = formatExpiryDateLabel(doc.expiryDate);
         const extra1 = `Expiry follow-up required: ${doc.label}${expLabel ? ` (Exp: ${expLabel})` : ""}`;
         const { countsForActiveSet } = resolveOwnerExpiryReminderMeta(company, doc, canonicalOwnerTargets);
@@ -385,7 +396,7 @@ const syncCompanyDocumentExpiryDashboard = async (company, canonicalOwnerTargets
 
     for (const doc of docs) {
         const days = getDaysUntil(doc.expiryDate);
-        if (days == null || !isExpiryTaskWindow(days) || !recipients.hr?._id) continue;
+        if (days == null || !isExpiryHrTaskDueForDoc(days, { isCertificate: doc.isCertificate }) || !recipients.hr?._id) continue;
 
         const expLabel = formatExpiryDateLabel(doc.expiryDate);
         const extra1 = `Expiry follow-up required: ${doc.label}${expLabel ? ` (Exp: ${expLabel})` : ""}`;
@@ -424,11 +435,39 @@ const syncCompanyDocumentExpiryDashboard = async (company, canonicalOwnerTargets
 export const reconcileCompanyDocumentExpiryDashboard = async (companyMongoId) => {
     if (!companyMongoId) return;
     const recipients = await getFlowchartRecipientBundle();
-    const companies = await loadCompaniesForExpiryScan();
-    const canonicalOwnerTargets = buildCanonicalOwnerExpiryTargets(companies);
-    const company = companies.find((c) => String(c._id) === String(companyMongoId));
+    const [scanCompanies, companyRows] = await Promise.all([
+        loadCompaniesForExpiryScan(),
+        loadCompaniesForExpiryScanByIds([companyMongoId]),
+    ]);
+    const canonicalOwnerTargets = buildCanonicalOwnerExpiryTargets(scanCompanies);
+    const company = companyRows[0];
     if (!company) return;
     await syncCompanyDocumentExpiryDashboard(company, canonicalOwnerTargets, recipients);
+};
+
+/**
+ * Rebuild all company document-expiry dashboard tasks (no emails). Used when HR opens notifications.
+ */
+export const syncAllCompaniesDocumentExpiryDashboard = async () => {
+    const recipients = await getFlowchartRecipientBundle();
+    const scanCompanies = await loadCompaniesForExpiryScan();
+    const canonicalOwnerTargets = buildCanonicalOwnerExpiryTargets(scanCompanies);
+
+    const cores = await Company.find({}).select("_id").lean().maxTimeMS(15000);
+
+    for (const core of cores) {
+        try {
+            const [company] = await loadCompaniesForExpiryScanByIds([core._id]);
+            if (!company) continue;
+            await syncCompanyDocumentExpiryDashboard(company, canonicalOwnerTargets, recipients);
+        } catch (err) {
+            console.warn(
+                "[syncAllCompaniesDocumentExpiryDashboard]",
+                String(core._id),
+                err?.message || err,
+            );
+        }
+    }
 };
 
 const processCompanyReminders = async () => {
@@ -541,11 +580,12 @@ const processEmployeeReminders = async () => {
     for (const employee of employees) {
         const docs = [...(map.get(employee.employeeId) || [])];
         (employee.documents || []).forEach((d, idx) => {
-            if (!d?.expiryDate) return;
+            if (!d?.expiryDate || isArchivedOrStaleCompanyExpiryRow(d)) return;
             docs.push({
                 key: `manual:${d?._id || idx}`,
-                label: d?.type || "Employee Document",
+                label: buildEmployeeManualDocumentExpiryLabel(d),
                 expiryDate: d.expiryDate,
+                isCertificate: String(d?.context || "").toLowerCase() === "certificate",
             });
         });
         if (employee?.contractExpiryDate) {
@@ -558,7 +598,11 @@ const processEmployeeReminders = async () => {
 
         const activeTaskWindowExtra1 = new Set(
             docs
-                .filter((doc) => isExpiryTaskWindow(getDaysUntil(doc.expiryDate)))
+                .filter((doc) =>
+                    isExpiryHrTaskDueForDoc(getDaysUntil(doc.expiryDate), {
+                        isCertificate: doc.isCertificate,
+                    }),
+                )
                 .map((doc) => {
                     const expLabel = formatExpiryDateLabel(doc.expiryDate);
                     return `Expiry follow-up required: ${doc.label}${expLabel ? ` (Exp: ${expLabel})` : ""}`;
@@ -586,7 +630,7 @@ const processEmployeeReminders = async () => {
             const extra1 = `Expiry follow-up required: ${doc.label}${expLabel ? ` (Exp: ${expLabel})` : ""}`;
             const extra2 = `${subjectName} (${employee.employeeId})`;
 
-            if (isExpiryTaskWindow(days) && recipients.hr?._id) {
+            if (isExpiryHrTaskDueForDoc(days, { isCertificate: doc.isCertificate }) && recipients.hr?._id) {
                 await ensureDashboardAction({
                     assignedTo: recipients.hr._id,
                     assignedToEmpId: recipients.hr.employeeId,

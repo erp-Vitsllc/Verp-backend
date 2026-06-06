@@ -63,6 +63,29 @@ export function documentBundleHasLiveMoa(documents = []) {
     });
 }
 
+const SYNTHETIC_MOA_PLACEHOLDER_URL = "partitioned-moa-flag";
+
+/** Activation flag row only — must not be treated as the full live documents list. */
+const isSyntheticMoaPlaceholderRow = (row = {}) => {
+    if (!row || typeof row !== "object") return false;
+    const ctx = String(row?.context || "").toLowerCase();
+    const url = String(row?.document?.url || row?.attachment || "").trim();
+    return ctx === "moa" && url === SYNTHETIC_MOA_PLACEHOLDER_URL;
+};
+
+const isOnlySyntheticMoaPlaceholderDocuments = (documents = []) => {
+    const arr = Array.isArray(documents) ? documents : [];
+    if (arr.length === 0) return true;
+    return arr.every(isSyntheticMoaPlaceholderRow);
+};
+
+/** Keep VAT / Document With Expiry rows — append MOA flag instead of replacing `documents[]`. */
+const ensureMoaActivationFlagInDocuments = (documents = []) => {
+    const list = Array.isArray(documents) ? [...documents] : [];
+    if (documentBundleHasLiveMoa(list)) return list;
+    return [...list, { context: "moa", document: { url: SYNTHETIC_MOA_PLACEHOLDER_URL } }];
+};
+
 function stripMeta(row = {}) {
     const { company, _id, createdAt, updatedAt, __v, ...rest } = row;
     return rest;
@@ -97,6 +120,14 @@ function applyOwnersPartition(merged, owners) {
 function applyBundlePartition(merged, bundle) {
     const usePartition = Number(merged.dataPartitionVersion) >= 1 || bundle != null;
     if (!usePartition) return;
+
+    const coreLiveBundleFallback = {};
+    for (const k of DOCUMENT_BUNDLE_EXPIRY_KEYS) {
+        if (Array.isArray(merged[k]) && merged[k].length > 0) {
+            coreLiveBundleFallback[k] = merged[k];
+        }
+    }
+
     const slice = bundle ? stripMeta(bundle) : {};
     for (const k of DOCUMENT_BUNDLE_KEYS) {
         delete merged[k];
@@ -105,9 +136,10 @@ function applyBundlePartition(merged, bundle) {
         if (!Array.isArray(slice[k])) slice[k] = [];
     }
     if (bundle?.hasLiveMoa === true && !documentBundleHasLiveMoa(slice.documents)) {
-        slice.documents = [{ context: "moa", document: { url: "partitioned-moa-flag" } }];
+        slice.documents = ensureMoaActivationFlagInDocuments(slice.documents);
     }
     Object.assign(merged, slice);
+    applyLegacyDocumentBundleFallbackForExpiry(merged, coreLiveBundleFallback, { slim: false });
 }
 
 /** Workflow / pending queue lives only on `companyworkflows` for partitioned companies. */
@@ -124,6 +156,7 @@ function applyWorkflowPartition(merged, workflow) {
 export function mergePartitionedCompany(core, compliance, owners, bundle, workflow) {
     const merged = { ...core };
     applyCompliancePartition(merged, compliance);
+    applyLegacyComplianceFallbackForExpiry(merged, core);
     applyOwnersPartition(merged, owners);
     applyBundlePartition(merged, bundle);
     applyWorkflowPartition(merged, workflow);
@@ -378,8 +411,122 @@ const slimBundleForExpiry = (bundle) => {
     return slim;
 };
 
+const DOCUMENT_BUNDLE_EXPIRY_KEYS = ["documents", "ejari", "insurance"];
+
 const EXPIRY_SCAN_CORE_SELECT =
     "_id name companyId dataPartitionVersion tradeLicenseExpiry establishmentCardExpiry documents ejari insurance owners";
+
+/**
+ * Partitioned companies may still have live rows on the core document (dual-write) while the
+ * side-collection array is empty. Detail pages migrate on read; expiry scan/list must not drop them.
+ */
+const applyLegacyDocumentBundleFallbackForExpiry = (merged = {}, core = {}, { slim = false } = {}) => {
+    if (!merged || typeof merged !== "object") return merged;
+    for (const k of DOCUMENT_BUNDLE_EXPIRY_KEYS) {
+        const partArr = merged[k];
+        const coreArr = core[k];
+        const partEmpty = !Array.isArray(partArr) || partArr.length === 0;
+        const coreHas = Array.isArray(coreArr) && coreArr.length > 0;
+        if (partEmpty && coreHas) {
+            merged[k] = slim ? coreArr.map(slimDocRowForExpiry) : coreArr;
+        }
+    }
+    return merged;
+};
+
+const COMPLIANCE_EXPIRY_FALLBACK_KEYS = [
+    "tradeLicenseNumber",
+    "tradeLicenseIssueDate",
+    "tradeLicenseExpiry",
+    "establishmentCardNumber",
+    "establishmentCardIssueDate",
+    "establishmentCardExpiry",
+];
+
+/** Partition merge can clear core compliance before dual-write migration finishes — restore for expiry scan/list. */
+const applyLegacyComplianceFallbackForExpiry = (merged = {}, core = {}) => {
+    if (!merged || typeof merged !== "object") return merged;
+    for (const k of COMPLIANCE_EXPIRY_FALLBACK_KEYS) {
+        const partVal = merged[k];
+        const coreVal = core[k];
+        const partEmpty = partVal === undefined || partVal === null || partVal === "";
+        const coreHas = coreVal !== undefined && coreVal !== null && coreVal !== "";
+        if (partEmpty && coreHas) {
+            merged[k] = coreVal;
+        }
+    }
+    return merged;
+};
+
+const companyNeedsExpiryProfileHydration = (company = {}) => {
+    if (isOnlySyntheticMoaPlaceholderDocuments(company.documents)) return true;
+    if (Number(company?.dataPartitionVersion) >= 1) {
+        if (!Array.isArray(company.owners) || company.owners.length === 0) return true;
+    }
+    return false;
+};
+
+/** Strip attachment payloads — expiry scan / list notifications need metadata only. */
+export function slimCompanyProfileForExpiryScan(full = {}) {
+    if (!full || typeof full !== "object") return full;
+    return {
+        ...full,
+        documents: (full.documents || []).map(slimDocRowForExpiry),
+        ejari: (full.ejari || []).map(slimDocRowForExpiry),
+        insurance: (full.insurance || []).map(slimDocRowForExpiry),
+        owners: (full.owners || []).map(slimOwnerForExpiry),
+    };
+}
+
+/** When partition list reads are empty, hydrate from the same full profile path as the company detail page. */
+async function hydrateMissingExpiryDocumentSlices(companies = []) {
+    if (!Array.isArray(companies) || companies.length === 0) return companies;
+
+    const idsToHydrate = companies
+        .filter((c) => companyNeedsExpiryProfileHydration(c))
+        .map((c) => c._id)
+        .filter(Boolean);
+    if (!idsToHydrate.length) return companies;
+
+    const cores = await Company.find({ _id: { $in: idsToHydrate } })
+        .select(`${EXPIRY_SCAN_CORE_SELECT} name`)
+        .lean()
+        .maxTimeMS(12000);
+
+    const hydratedById = new Map();
+    await Promise.all(
+        cores.map(async (core) => {
+            try {
+                const full = await loadCompanyFullProfile(core);
+                if (!full) return;
+                hydratedById.set(String(core._id), slimCompanyProfileForExpiryScan(full));
+            } catch (err) {
+                console.warn(
+                    "[hydrateMissingExpiryDocumentSlices]",
+                    String(core._id),
+                    err?.message || err,
+                );
+            }
+        }),
+    );
+
+    if (hydratedById.size === 0) return companies;
+
+    return companies.map((c) => {
+        const slim = hydratedById.get(String(c._id));
+        if (!slim) return c;
+        const merged = { ...c };
+        for (const k of DOCUMENT_BUNDLE_EXPIRY_KEYS) {
+            if (Array.isArray(slim[k]) && slim[k].length > 0) {
+                merged[k] = slim[k];
+            }
+        }
+        if (Array.isArray(slim.owners) && slim.owners.length > 0) {
+            merged.owners = slim.owners;
+        }
+        return merged;
+    });
+}
 
 /**
  * Full company rows for document-expiry cron / dashboard reconcile (includes partitioned slices).
@@ -400,7 +547,23 @@ export async function loadCompaniesForExpiryScanByIds(companyMongoIds = []) {
         .select(EXPIRY_SCAN_CORE_SELECT)
         .lean()
         .maxTimeMS(6000);
-    return enrichCoresWithExpiryPartitions(cores);
+
+    const profiles = await Promise.all(
+        cores.map(async (core) => {
+            try {
+                const full = await loadCompanyFullProfile(core);
+                return full ? slimCompanyProfileForExpiryScan(full) : null;
+            } catch (err) {
+                console.warn(
+                    "[loadCompaniesForExpiryScanByIds]",
+                    String(core._id),
+                    err?.message || err,
+                );
+                return null;
+            }
+        }),
+    );
+    return profiles.filter(Boolean);
 }
 
 const slimExpiryDocArrayAggMap = (fieldName) => ({
@@ -490,10 +653,18 @@ async function enrichCoresWithExpiryPartitions(cores = []) {
 
         if (Number(core?.dataPartitionVersion) >= 1) {
             if (!slicesPresent) return core;
-            return mergePartitionedCompany(core, compliance, owners, bundle, null);
+            return applyLegacyDocumentBundleFallbackForExpiry(
+                mergePartitionedCompany(core, compliance, owners, bundle, null),
+                core,
+                { slim: true },
+            );
         }
         if (!slicesPresent) return core;
-        return mergePartitionedCompany(core, compliance, owners, bundle, null);
+        return applyLegacyDocumentBundleFallbackForExpiry(
+            mergePartitionedCompany(core, compliance, owners, bundle, null),
+            core,
+            { slim: true },
+        );
     });
 }
 
@@ -535,7 +706,7 @@ export async function enrichCompaniesForList(companies = []) {
     const bundleByCompany = new Map(bundles.map((r) => [String(r.company), r]));
     const workflowByCompany = new Map(workflowRows.map((r) => [String(r.company), r]));
 
-    return companies.map((c) => {
+    const enriched = companies.map((c) => {
         const id = String(c._id);
         const compliance = complianceByCompany.get(id);
         const owners = ownersByCompany.get(id);
@@ -546,17 +717,24 @@ export async function enrichCompaniesForList(companies = []) {
 
         const merged = { ...c };
         applyCompliancePartition(merged, compliance);
+        applyLegacyComplianceFallbackForExpiry(merged, c);
         if (owners?.owners) {
             merged.owners = owners.owners.map(slimOwnerForActivationProgress);
         }
         if (bundle) {
             const slimBundle = slimBundleForExpiry(bundle);
-            if (Array.isArray(slimBundle.documents)) merged.documents = slimBundle.documents;
-            if (Array.isArray(slimBundle.ejari)) merged.ejari = slimBundle.ejari;
-            if (Array.isArray(slimBundle.insurance)) merged.insurance = slimBundle.insurance;
-            if (slimBundle.hasLiveMoa && !documentBundleHasLiveMoa(merged.documents)) {
-                merged.documents = [{ context: "moa", document: { url: "partitioned-moa-flag" } }];
+            for (const k of DOCUMENT_BUNDLE_EXPIRY_KEYS) {
+                const arr = slimBundle[k];
+                if (Array.isArray(arr) && arr.length > 0) {
+                    merged[k] = arr;
+                }
             }
+            applyLegacyDocumentBundleFallbackForExpiry(merged, c, { slim: true });
+            if (slimBundle.hasLiveMoa && !documentBundleHasLiveMoa(merged.documents)) {
+                merged.documents = ensureMoaActivationFlagInDocuments(merged.documents || []);
+            }
+        } else {
+            applyLegacyDocumentBundleFallbackForExpiry(merged, c, { slim: true });
         }
         if (workflow?.pendingReactivationChanges) {
             merged.pendingReactivationChanges = workflow.pendingReactivationChanges.map((entry) => {
@@ -567,6 +745,8 @@ export async function enrichCompaniesForList(companies = []) {
         }
         return merged;
     });
+
+    return hydrateMissingExpiryDocumentSlices(enriched);
 }
 
 export function pickCompliancePayload(company = {}) {
