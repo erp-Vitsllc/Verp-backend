@@ -1,5 +1,6 @@
 import Company from "../models/Company.js";
 import CompanyDocumentBundle from "../models/CompanyDocumentBundle.js";
+import { mergeCompanyOwnersSnapshot, OWNER_NESTED_DOC_KEYS } from "./mergeCompanyOwnersSnapshot.js";
 
 const isCompanyUsingPartitions = (core = {}) => Number(core.dataPartitionVersion) >= 1;
 
@@ -94,6 +95,67 @@ const documentDatesChanged = (prev, next) =>
     normalizeDocumentDateForCompare(prev?.issueDate) !== normalizeDocumentDateForCompare(next?.issueDate) ||
     normalizeDocumentDateForCompare(prev?.expiryDate) !== normalizeDocumentDateForCompare(next?.expiryDate);
 
+const resolveAttachmentUrl = (att) => {
+    if (att == null || att === "") return "";
+    if (typeof att === "string") return att.trim();
+    if (typeof att === "object" && att.url) return String(att.url).trim();
+    return "";
+};
+
+const nestedOwnerDocHasLiveContent = (doc) => {
+    if (!doc || typeof doc !== "object") return false;
+    const scalarKeys = ["number", "nationality", "type", "provider", "issueDate", "expiryDate", "sponsor"];
+    if (scalarKeys.some((k) => doc[k] != null && String(doc[k]).trim() !== "")) return true;
+    return Boolean(resolveAttachmentUrl(doc.attachment));
+};
+
+const ownerNestedDocSuperseded = (prevDoc, nextDoc) => {
+    if (!nestedOwnerDocHasLiveContent(prevDoc)) return false;
+    const prevAtt = resolveAttachmentUrl(prevDoc?.attachment);
+    const nextAtt = resolveAttachmentUrl(nextDoc?.attachment);
+    if (prevAtt && nextAtt && attachmentUrlsDiffer(prevAtt, nextAtt)) return true;
+    if (documentDatesChanged(prevDoc, nextDoc || {})) return true;
+    const prevNum = String(prevDoc?.number || "").trim();
+    const nextNum = String(nextDoc?.number || "").trim();
+    if (prevNum && nextNum && prevNum !== nextNum) return true;
+    return false;
+};
+
+const OWNER_NESTED_DOC_LABELS = {
+    passport: "Passport",
+    emiratesId: "Emirates ID",
+    visa: "Visa",
+    visitVisa: "Visit Visa",
+    employmentVisa: "Employment Visa",
+    spouseVisa: "Spouse Visa",
+    labourCard: "Labour Card",
+    medical: "Medical Insurance",
+    drivingLicense: "Driving License",
+};
+
+const findPrevOwnerRow = (mergedRow, beforeOwners = []) => {
+    if (mergedRow?._id != null) {
+        const hit = beforeOwners.find((b) => String(b?._id) === String(mergedRow._id));
+        if (hit) return hit;
+    }
+    const profileId = mergedRow?.ownerProfileId;
+    if (profileId != null && String(profileId).trim() !== "") {
+        const hit = beforeOwners.find(
+            (b) => b?.ownerProfileId != null && String(b.ownerProfileId) === String(profileId),
+        );
+        if (hit) return hit;
+    }
+    return null;
+};
+
+const arrayDocumentSuperseded = (prevRow, nextRow) => {
+    if (!prevRow || !nextRow) return false;
+    const prevUrl = resolveAttachmentUrl(prevRow.document);
+    const nextUrl = resolveAttachmentUrl(nextRow.document);
+    if (prevUrl && nextUrl && attachmentUrlsDiffer(prevUrl, nextUrl)) return true;
+    return documentDatesChanged(prevRow, nextRow);
+};
+
 /**
  * Skip pushing if the same file was already archived as "Replaced" (concurrent renews / double apply).
  */
@@ -154,131 +216,170 @@ export const archiveSupersededCompanyDocuments = async (beforeCompany, updateDat
     if (!beforeCompany || !updateData) return;
     const companyId = beforeCompany._id;
 
-    const checkAndArchive = async (key, type, label) => {
-        const prev = beforeCompany[key];
-        const next = updateData[key];
-        // For Company, some attachments are strings (URL), some are objects.
-        const prevUrl = typeof prev === "string" ? prev.trim() : prev?.url?.trim();
-        const nextUrl = typeof next === "string" ? next.trim() : next?.url?.trim();
+    const checkAndArchiveCompliance = async (
+        attachmentKey,
+        type,
+        label,
+        { issueDateKey = null, expiryDateKey = null, numberKey = null } = {},
+    ) => {
+        const prevAtt = resolveAttachmentUrl(beforeCompany[attachmentKey]);
+        if (!prevAtt) return;
 
-        if (prevUrl && nextUrl && attachmentUrlsDiffer(prevUrl, nextUrl)) {
+        const nextAtt = Object.prototype.hasOwnProperty.call(updateData, attachmentKey)
+            ? resolveAttachmentUrl(updateData[attachmentKey])
+            : prevAtt;
+
+        let superseded = false;
+        if (nextAtt && attachmentUrlsDiffer(prevAtt, nextAtt)) {
+            superseded = true;
+        }
+        if (!superseded) {
+            if (
+                numberKey &&
+                Object.prototype.hasOwnProperty.call(updateData, numberKey) &&
+                String(beforeCompany[numberKey] || "").trim() !== String(updateData[numberKey] || "").trim()
+            ) {
+                superseded = true;
+            }
+            if (
+                issueDateKey &&
+                Object.prototype.hasOwnProperty.call(updateData, issueDateKey) &&
+                normalizeDocumentDateForCompare(beforeCompany[issueDateKey]) !==
+                    normalizeDocumentDateForCompare(updateData[issueDateKey])
+            ) {
+                superseded = true;
+            }
+            if (
+                expiryDateKey &&
+                Object.prototype.hasOwnProperty.call(updateData, expiryDateKey) &&
+                normalizeDocumentDateForCompare(beforeCompany[expiryDateKey]) !==
+                    normalizeDocumentDateForCompare(updateData[expiryDateKey])
+            ) {
+                superseded = true;
+            }
+        }
+
+        if (!superseded) return;
+
+        await archiveCompanyDocument({
+            companyId,
+            type,
+            description: `${label} (superseded)`,
+            issueDate: issueDateKey ? beforeCompany[issueDateKey] || null : null,
+            expiryDate: expiryDateKey
+                ? beforeCompany[expiryDateKey] || beforeCompany[`${attachmentKey}ExpiryDate`] || null
+                : null,
+            document: beforeCompany[attachmentKey],
+            context:
+                attachmentKey === "tradeLicenseAttachment"
+                    ? "trade_license"
+                    : attachmentKey === "establishmentCardAttachment"
+                      ? "establishment_card"
+                      : "",
+        });
+    };
+
+    await checkAndArchiveCompliance("tradeLicenseAttachment", "Trade License", "Trade License", {
+        issueDateKey: "tradeLicenseIssueDate",
+        expiryDateKey: "tradeLicenseExpiry",
+        numberKey: "tradeLicenseNumber",
+    });
+
+    await checkAndArchiveCompliance(
+        "establishmentCardAttachment",
+        "Establishment Card",
+        "Establishment Card",
+        {
+            issueDateKey: "establishmentCardIssueDate",
+            expiryDateKey: "establishmentCardExpiry",
+            numberKey: "establishmentCardNumber",
+        },
+    );
+
+    const archiveArrayReplacements = async (field, typePrefix, defaultDescription) => {
+        if (!Array.isArray(beforeCompany[field]) || !Array.isArray(updateData[field])) return;
+        const archivedIds = new Set();
+        for (const nextRow of updateData[field]) {
+            if (!nextRow?._id) continue;
+            const idStr = String(nextRow._id);
+            if (archivedIds.has(idStr)) continue;
+            const prevRow = beforeCompany[field].find((row) => String(row._id) === idStr);
+            if (!prevRow || !arrayDocumentSuperseded(prevRow, nextRow)) continue;
+            archivedIds.add(idStr);
+            const rowType = prevRow.type ? `${typePrefix} - ${prevRow.type}` : typePrefix;
             await archiveCompanyDocument({
                 companyId,
-                type,
-                description: `${label} (superseded)`,
-                issueDate: beforeCompany[`${key}IssueDate`] || null,
-                expiryDate: beforeCompany[`${key}Expiry`] || beforeCompany[`${key}ExpiryDate`] || null,
-                document: prev,
+                type: rowType,
+                description: prevRow.description || `${defaultDescription} (superseded)`,
+                issueDate: prevRow.issueDate || null,
+                expiryDate: prevRow.expiryDate || null,
+                document: prevRow.document,
+                context: field === "ejari" ? "ejari" : field === "insurance" ? "insurance" : prevRow.context || "",
+                provider: prevRow.provider || "",
             });
         }
     };
 
-    // 1. Trade License
-    await checkAndArchive("tradeLicenseAttachment", "Trade License", "Trade License");
+    await archiveArrayReplacements("ejari", "Ejari", "Ejari / Tenancy Contract");
+    await archiveArrayReplacements("insurance", "Insurance", "Company Insurance");
 
-    // 2. Establishment Card
-    await checkAndArchive("establishmentCardAttachment", "Establishment Card", "Establishment Card");
-
-    // 3. Ejari (Array)
-    if (Array.isArray(beforeCompany.ejari) && Array.isArray(updateData.ejari)) {
-        const archivedEjariIds = new Set();
-        for (const nextEjari of updateData.ejari) {
-            if (!nextEjari._id || !nextEjari.document?.url) continue;
-            const idStr = String(nextEjari._id);
-            if (archivedEjariIds.has(idStr)) continue;
-            const prevEjari = beforeCompany.ejari.find(ej => String(ej._id) === String(nextEjari._id));
-            if (prevEjari && prevEjari.document?.url && attachmentUrlsDiffer(prevEjari.document.url, nextEjari.document.url)) {
-                archivedEjariIds.add(idStr);
-                await archiveCompanyDocument({
-                    companyId,
-                    type: prevEjari.type ? `Ejari - ${prevEjari.type}` : "Ejari",
-                    description: prevEjari.description || "Ejari / Tenancy Contract (superseded)",
-                    issueDate: prevEjari.issueDate || null,
-                    expiryDate: prevEjari.expiryDate || null,
-                    document: prevEjari.document,
-                });
-            }
-        }
-    }
-
-    // 4. Insurance (Array)
-    if (Array.isArray(beforeCompany.insurance) && Array.isArray(updateData.insurance)) {
-        const archivedInsuranceIds = new Set();
-        for (const nextIns of updateData.insurance) {
-            if (!nextIns._id || !nextIns.document?.url) continue;
-            const idStr = String(nextIns._id);
-            if (archivedInsuranceIds.has(idStr)) continue;
-            const prevIns = beforeCompany.insurance.find(ins => String(ins._id) === String(nextIns._id));
-            if (prevIns && prevIns.document?.url && attachmentUrlsDiffer(prevIns.document.url, nextIns.document.url)) {
-                archivedInsuranceIds.add(idStr);
-                await archiveCompanyDocument({
-                    companyId,
-                    type: prevIns.type ? `Insurance - ${prevIns.type}` : "Insurance",
-                    description: prevIns.description || "Company Insurance (superseded)",
-                    issueDate: prevIns.issueDate || null,
-                    expiryDate: prevIns.expiryDate || null,
-                    document: prevIns.document,
-                });
-            }
-        }
-    }
-
-    // 5. Custom Documents array
     if (Array.isArray(beforeCompany.documents) && Array.isArray(updateData.documents)) {
         const archivedCustomDocIds = new Set();
         for (const nextDoc of updateData.documents) {
-            if (!nextDoc._id || !nextDoc.document?.url) continue;
+            if (!nextDoc._id) continue;
             const idStr = String(nextDoc._id);
             if (archivedCustomDocIds.has(idStr)) continue;
-            const prevDoc = beforeCompany.documents.find(d => String(d._id) === String(nextDoc._id));
-            if (
-                prevDoc &&
-                prevDoc.document?.url &&
-                (attachmentUrlsDiffer(prevDoc.document.url, nextDoc.document.url) ||
-                    documentDatesChanged(prevDoc, nextDoc))
-            ) {
-                archivedCustomDocIds.add(idStr);
-                await archiveCompanyDocument({
-                    companyId,
-                    type: prevDoc.type || "Document",
-                    description: prevDoc.description || "Company document (superseded)",
-                    issueDate: prevDoc.issueDate || null,
-                    expiryDate: prevDoc.expiryDate || null,
-                    document: prevDoc.document,
-                    context: prevDoc.context || "",
-                    provider: prevDoc.provider || "",
-                });
-            }
+            const prevDoc = beforeCompany.documents.find((d) => String(d._id) === idStr);
+            if (!prevDoc || !arrayDocumentSuperseded(prevDoc, nextDoc)) continue;
+            if (String(prevDoc.context || "").toLowerCase() === "certificate") continue;
+            archivedCustomDocIds.add(idStr);
+            await archiveCompanyDocument({
+                companyId,
+                type: prevDoc.type || "Document",
+                description: prevDoc.description || "Company document (superseded)",
+                issueDate: prevDoc.issueDate || null,
+                expiryDate: prevDoc.expiryDate || null,
+                document: prevDoc.document,
+                context: prevDoc.context || "",
+                provider: prevDoc.provider || "",
+            });
         }
     }
 
-    // 6. Owners
     if (Array.isArray(beforeCompany.owners) && Array.isArray(updateData.owners)) {
-        for (const nextOwner of updateData.owners) {
-            if (!nextOwner._id) continue;
-            const prevOwner = beforeCompany.owners.find(o => String(o._id) === String(nextOwner._id));
+        const mergedOwners = mergeCompanyOwnersSnapshot(beforeCompany.owners, updateData.owners);
+        const archivedOwnerDocKeys = new Set();
+
+        for (const mergedRow of mergedOwners) {
+            const prevOwner = findPrevOwnerRow(mergedRow, beforeCompany.owners);
             if (!prevOwner) continue;
+            const ownerName = String(prevOwner.name || mergedRow.name || "Owner").trim() || "Owner";
 
-            const checkOwnerDoc = async (key, typeLabel) => {
-                const prev = prevOwner[key]?.attachment;
-                const next = nextOwner[key]?.attachment;
-                const prevUrl = prev?.url?.trim();
-                const nextUrl = next?.url?.trim();
-                if (prevUrl && nextUrl && attachmentUrlsDiffer(prevUrl, nextUrl)) {
-                    await archiveCompanyDocument({
-                        companyId,
-                        type: `Owner ${typeLabel}`,
-                        description: `Owner: ${prevOwner.name} - ${typeLabel} (superseded)`,
-                        issueDate: prevOwner[key]?.issueDate || null,
-                        expiryDate: prevOwner[key]?.expiryDate || null,
-                        document: prev,
-                    });
-                }
-            };
+            for (const docKey of OWNER_NESTED_DOC_KEYS) {
+                const prevDoc = prevOwner[docKey];
+                const nextDoc = mergedRow[docKey];
+                if (!ownerNestedDocSuperseded(prevDoc, nextDoc)) continue;
 
-            await checkOwnerDoc("passport", "Passport");
-            await checkOwnerDoc("visa", "Visa");
-            await checkOwnerDoc("emiratesId", "Emirates ID");
+                const dedupeKey = `${String(prevOwner._id || prevOwner.ownerProfileId || ownerName)}::${docKey}::${resolveAttachmentUrl(prevDoc?.attachment)}`;
+                if (archivedOwnerDocKeys.has(dedupeKey)) continue;
+                archivedOwnerDocKeys.add(dedupeKey);
+
+                const typeLabel = OWNER_NESTED_DOC_LABELS[docKey] || docKey;
+                await archiveCompanyDocument({
+                    companyId,
+                    // Match not-renew archives: UI Old Documents parses `${ownerName} - ${docLabel}` from `type`.
+                    type: `${ownerName} - ${typeLabel}`,
+                    description: `${typeLabel} (superseded)`,
+                    issueDate: prevDoc?.issueDate || null,
+                    expiryDate: prevDoc?.expiryDate || null,
+                    document: prevDoc?.attachment
+                        ? typeof prevDoc.attachment === "string"
+                            ? { url: prevDoc.attachment, mimeType: "application/pdf" }
+                            : prevDoc.attachment
+                        : null,
+                    context: "owner_doc",
+                });
+            }
         }
     }
 };

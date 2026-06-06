@@ -23,6 +23,7 @@ import {
     normalizeOwnerDocKey,
     resolveOwnerDocumentForNotRenew,
     stripOwnerDocFromPendingReactivationChanges,
+    clearOwnerDocFromAllMatchingRows,
 } from "../../utils/companyOwnerDocResolve.js";
 
 const KINDS = new Set(["tradeLicense", "establishmentCard", "document", "ownerDoc", "ejari", "insurance"]);
@@ -255,11 +256,10 @@ const applyApprovedArchive = (company, entry) => {
         };
         archiveRowToOldDocuments(company, historyDoc, supportingRows);
 
-        const owners = [...(company.owners || [])];
-        if (liveDoc && owners[oi]) {
-            owners[oi] = { ...owners[oi], [docKey]: null };
-            company.owners = owners;
-        }
+        company.owners = clearOwnerDocFromAllMatchingRows(company.owners || [], {
+            ownerIndex: oi,
+            ownerProfileId: entry.ownerProfileId,
+        }, docKey);
         if (pendingOnly || liveDoc) {
             company.pendingReactivationChanges = stripOwnerDocFromPendingReactivationChanges(
                 company.pendingReactivationChanges || [],

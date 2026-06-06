@@ -1,4 +1,5 @@
 import { mergePendingReactivationForActivationSnapshot } from "./companyActivation.js";
+import { dedupeCompanyOwnersList } from "./globalOwnersCatalog.js";
 import { OWNER_NESTED_DOC_KEYS } from "./mergeCompanyOwnersSnapshot.js";
 
 export function coerceOwnerIndex(value) {
@@ -50,10 +51,10 @@ export function ownerDocHasContent(docObj) {
     return Boolean(url && String(url).trim());
 }
 
-function findOwnerIndex(owners = [], { ownerIndex, ownerProfileId }) {
-    const coerced = coerceOwnerIndex(ownerIndex);
-    if (ownerProfileId != null && String(ownerProfileId).trim() !== "") {
-        const pid = String(ownerProfileId).trim();
+function findOwnerIndex(owners = [], target = {}) {
+    const coerced = coerceOwnerIndex(target.ownerIndex);
+    if (target.ownerProfileId != null && String(target.ownerProfileId).trim() !== "") {
+        const pid = String(target.ownerProfileId).trim();
         const byProfile = owners.findIndex(
             (o) =>
                 (o?.ownerProfileId != null && String(o.ownerProfileId) === pid) ||
@@ -65,6 +66,62 @@ function findOwnerIndex(owners = [], { ownerIndex, ownerProfileId }) {
     return coerced;
 }
 
+/** Prefer the owner row that actually holds the nested doc (handles duplicate roster rows). */
+function findOwnerIndexWithDoc(owners = [], target = {}, docKey = "") {
+    const dk = normalizeOwnerDocKey(docKey);
+    if (!dk) return findOwnerIndex(owners, target);
+
+    const coerced = coerceOwnerIndex(target.ownerIndex);
+    if (coerced != null && ownerDocHasContent(owners[coerced]?.[dk])) {
+        return coerced;
+    }
+
+    const pid =
+        target.ownerProfileId != null && String(target.ownerProfileId).trim() !== ""
+            ? String(target.ownerProfileId).trim()
+            : "";
+    if (pid) {
+        for (let i = 0; i < owners.length; i++) {
+            const row = owners[i];
+            if (
+                ((row?.ownerProfileId != null && String(row.ownerProfileId) === pid) ||
+                    (row?._id != null && String(row._id) === pid)) &&
+                ownerDocHasContent(row?.[dk])
+            ) {
+                return i;
+            }
+        }
+    }
+
+    return findOwnerIndex(owners, target);
+}
+
+/** Clear a nested owner doc from every live row matching the not-renew target. */
+export function clearOwnerDocFromAllMatchingRows(owners = [], target = {}, docKey = "") {
+    const dk = normalizeOwnerDocKey(docKey);
+    if (!dk || !Array.isArray(owners)) return owners;
+
+    const coerced = coerceOwnerIndex(target.ownerIndex);
+    const pid =
+        target.ownerProfileId != null && String(target.ownerProfileId).trim() !== ""
+            ? String(target.ownerProfileId).trim()
+            : "";
+
+    const next = owners.map((row, idx) => {
+        if (!row || typeof row !== "object") return row;
+        const matchesProfile =
+            pid &&
+            ((row?.ownerProfileId != null && String(row.ownerProfileId) === pid) ||
+                (row?._id != null && String(row._id) === pid));
+        const matchesIndex = coerced != null && idx === coerced;
+        if (!matchesProfile && !matchesIndex) return row;
+        if (!ownerDocHasContent(row[dk]) && row[dk] == null) return row;
+        return { ...row, [dk]: null };
+    });
+
+    return dedupeCompanyOwnersList(next);
+}
+
 /**
  * Resolve an owner document from partitioned profile data (owners slice + pending queue overlay).
  * Returns null when neither live nor queued data contains the document.
@@ -74,18 +131,35 @@ export function resolveOwnerDocumentForNotRenew(companyData = {}, target = {}) {
     if (!docKey) return null;
 
     const liveOwners = Array.isArray(companyData?.owners) ? companyData.owners : [];
-    const ownerIndex = findOwnerIndex(liveOwners, target);
-    if (ownerIndex == null || ownerIndex < 0) return null;
-
-    const liveOwner = liveOwners[ownerIndex];
-    const liveDoc = liveOwner?.[docKey];
-    const hasLive = ownerDocHasContent(liveDoc);
-
     const effectiveCompany = mergePendingReactivationForActivationSnapshot(companyData);
     const effectiveOwners = Array.isArray(effectiveCompany?.owners) ? effectiveCompany.owners : [];
-    const effectiveOwner = effectiveOwners[ownerIndex];
-    const effectiveDoc = effectiveOwner?.[docKey];
-    const hasEffective = ownerDocHasContent(effectiveDoc);
+
+    let ownerIndex = findOwnerIndexWithDoc(liveOwners, target, docKey);
+    if (ownerIndex == null || ownerIndex < 0) {
+        ownerIndex = findOwnerIndex(liveOwners, target);
+    }
+    if (ownerIndex == null || ownerIndex < 0) return null;
+
+    let liveOwner = liveOwners[ownerIndex];
+    let liveDoc = liveOwner?.[docKey];
+    let hasLive = ownerDocHasContent(liveDoc);
+
+    let effectiveOwner = effectiveOwners[ownerIndex];
+    let effectiveDoc = effectiveOwner?.[docKey];
+    let hasEffective = ownerDocHasContent(effectiveDoc);
+
+    if (!hasLive && !hasEffective) {
+        const effectiveIndex = findOwnerIndexWithDoc(effectiveOwners, target, docKey);
+        if (effectiveIndex != null && effectiveIndex >= 0) {
+            ownerIndex = effectiveIndex;
+            liveOwner = liveOwners[ownerIndex];
+            liveDoc = liveOwner?.[docKey];
+            hasLive = ownerDocHasContent(liveDoc);
+            effectiveOwner = effectiveOwners[ownerIndex];
+            effectiveDoc = effectiveOwner?.[docKey];
+            hasEffective = ownerDocHasContent(effectiveDoc);
+        }
+    }
 
     if (!hasLive && !hasEffective) return null;
 

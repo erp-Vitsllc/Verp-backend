@@ -77,10 +77,14 @@ export function validateOwnerLabourCardRow(labourCard) {
     return { ok: true };
 }
 
-export function validateOwnersLabourCardPayload(owners = []) {
+export function validateOwnersLabourCardPayload(owners = [], { onlyValidateOwnerIndices = null } = {}) {
     if (!Array.isArray(owners)) return { ok: true };
-    for (const owner of owners) {
-        const check = validateOwnerLabourCardRow(owner?.labourCard);
+    const onlySet = Array.isArray(onlyValidateOwnerIndices)
+        ? new Set(onlyValidateOwnerIndices)
+        : null;
+    for (let i = 0; i < owners.length; i++) {
+        if (onlySet && !onlySet.has(i)) continue;
+        const check = validateOwnerLabourCardRow(owners[i]?.labourCard);
         if (!check.ok) return check;
     }
     return { ok: true };

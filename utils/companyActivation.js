@@ -16,7 +16,15 @@ import {
     clearStaleCompanyActivationOutcomeRows,
 } from "./clearCompanyActivationHoldDashboardRows.js";
 import { shortenUrlsInString } from "./shortenUrlsInString.js";
-import { validateOwnerDetailsOwnersPayload } from "./ownerDetailsValidation.js";
+import {
+    getOwnerRowEmail,
+    validateOwnerDetailsOwnersPayload,
+    validateOwnerEmail,
+    validateOwnerFullName,
+    validateOwnerNationality,
+    validateOwnerPhone,
+} from "./ownerDetailsValidation.js";
+import { validateOwnerSharePercentage } from "./tradeLicenseValidation.js";
 import { validateOwnerPassportRow } from "./ownerPassportValidation.js";
 import { validateOwnerEmiratesIdRow } from "./ownerEmiratesIdValidation.js";
 import { mergeCompanyOwnersSnapshot, isTradeLicenseOwnersBundleUpdate } from "./mergeCompanyOwnersSnapshot.js";
@@ -65,20 +73,124 @@ const isOwnerEmiratesIdActivationComplete = (emiratesId, owners, ownerIndex) => 
 
 const areOwnersPassportsActivationComplete = (owners = []) => {
     if (!owners.length) return false;
-    return owners.every((owner, i) =>
+    return owners.some((owner, i) =>
         isOwnerPassportActivationComplete(owner?.passport, owners, i),
     );
 };
 
 const areOwnersEmiratesIdsActivationComplete = (owners = []) => {
     if (!owners.length) return false;
-    return owners.every((owner, i) =>
+    return owners.some((owner, i) =>
         isOwnerEmiratesIdActivationComplete(owner?.emiratesId, owners, i),
     );
 };
 
-const areOwnerDetailsActivationComplete = (owners = []) =>
-    validateOwnerDetailsOwnersPayload(owners, { profileActive: true }).ok;
+const ownerActivationLabel = (owner, index, total) => {
+    const name = String(owner?.name || "").trim();
+    if (total <= 1) return name || "Owner";
+    return name || `Owner ${index + 1}`;
+};
+
+const getOwnerEmiratesIdActivationBlockers = (owners = []) => {
+    if (!owners.length) return ["Add an owner with a complete Emirates ID card"];
+    if (owners.some((owner, i) => isOwnerEmiratesIdActivationComplete(owner?.emiratesId, owners, i))) {
+        return [];
+    }
+    const blockers = [];
+    owners.forEach((owner, i) => {
+        const eid = owner?.emiratesId;
+        if (!eid || typeof eid !== "object") return;
+        const prefix = owners.length > 1 ? `${ownerActivationLabel(owner, i, owners.length)}: ` : "";
+        const check = validateOwnerEmiratesIdRow(eid, { owners, ownerIndex: i });
+        if (!check.ok && check.message) {
+            blockers.push(`${prefix}${check.message}`);
+            return;
+        }
+        if (!hasOwnerDocAttachment(eid.attachment)) {
+            blockers.push(`${prefix}Emirates ID PDF attachment is required`);
+        }
+    });
+    if (blockers.length) return blockers;
+    return ["At least one owner needs a complete Emirates ID card (784…, dates, PDF attachment)"];
+};
+
+const getOwnerPassportActivationBlockers = (owners = []) => {
+    if (!owners.length) return ["Add an owner with a complete passport card"];
+    if (owners.some((owner, i) => isOwnerPassportActivationComplete(owner?.passport, owners, i))) {
+        return [];
+    }
+    const blockers = [];
+    owners.forEach((owner, i) => {
+        const passport = owner?.passport;
+        if (!passport || typeof passport !== "object") return;
+        const prefix = owners.length > 1 ? `${ownerActivationLabel(owner, i, owners.length)}: ` : "";
+        const check = validateOwnerPassportRow(passport, { owners, ownerIndex: i });
+        if (!check.ok && check.message) {
+            blockers.push(`${prefix}${check.message}`);
+            return;
+        }
+        if (!hasOwnerDocAttachment(passport.attachment)) {
+            blockers.push(`${prefix}Passport PDF attachment is required`);
+        }
+    });
+    if (blockers.length) return blockers;
+    return ["At least one owner needs a complete passport card (number, dates, PDF attachment)"];
+};
+
+const isOwnerDetailsRowActivationComplete = (owner, owners, ownerIndex) => {
+    const nameErr = validateOwnerFullName(owner?.name);
+    if (nameErr) return false;
+    const emailErr = validateOwnerEmail(getOwnerRowEmail(owner), { requireEmail: true });
+    if (emailErr) return false;
+    const phoneErr = validateOwnerPhone(owner?.phone);
+    if (phoneErr) return false;
+    const natErr = validateOwnerNationality(owner?.nationality);
+    if (natErr) return false;
+    const shareErr = validateOwnerSharePercentage(owner?.sharePercentage);
+    if (shareErr) return false;
+    return true;
+};
+
+const getOwnerDetailsActivationBlockers = (owners = []) => {
+    if (!owners.length) return ["Add at least one owner"];
+    const rosterCheck = validateOwnerDetailsOwnersPayload(owners, { profileActive: false });
+    if (!rosterCheck.ok) return [rosterCheck.message];
+    if (owners.some((owner, i) => isOwnerDetailsRowActivationComplete(owner, owners, i))) {
+        return [];
+    }
+    const blockers = [];
+    owners.forEach((owner, i) => {
+        const prefix = owners.length > 1 ? `${ownerActivationLabel(owner, i, owners.length)}: ` : "";
+        const nameErr = validateOwnerFullName(owner?.name);
+        if (nameErr) {
+            blockers.push(`${prefix}${nameErr}`);
+            return;
+        }
+        const emailErr = validateOwnerEmail(getOwnerRowEmail(owner), { requireEmail: true });
+        if (emailErr) {
+            blockers.push(`${prefix}${emailErr}`);
+            return;
+        }
+        const phoneErr = validateOwnerPhone(owner?.phone);
+        if (phoneErr) {
+            blockers.push(`${prefix}${phoneErr}`);
+            return;
+        }
+        const natErr = validateOwnerNationality(owner?.nationality);
+        if (natErr) {
+            blockers.push(`${prefix}${natErr}`);
+        }
+    });
+    if (blockers.length) return blockers;
+    return ["At least one owner needs complete details (email, phone, nationality)"];
+};
+
+const areOwnerDetailsActivationComplete = (owners = []) => {
+    if (!owners.length) return false;
+    const rosterCheck = validateOwnerDetailsOwnersPayload(owners, { profileActive: false });
+    if (!rosterCheck.ok) return false;
+    return owners.some((owner, i) => isOwnerDetailsRowActivationComplete(owner, owners, i));
+};
 
 const isArchivedCompanyDocumentRow = (d) => {
     if (!d || typeof d !== "object") return false;
@@ -228,16 +340,25 @@ export const calculateCompanyActivationProgress = (company = {}, opts = {}) => {
             key: "ownerDetails",
             label: "Owner Details Card",
             completed: areOwnerDetailsActivationComplete(companyOwnersList(co)),
+            blockers: areOwnerDetailsActivationComplete(companyOwnersList(co))
+                ? []
+                : getOwnerDetailsActivationBlockers(companyOwnersList(co)),
         },
         {
             key: "ownerPassport",
             label: "Passport of Owner",
             completed: areOwnersPassportsActivationComplete(companyOwnersList(co)),
+            blockers: areOwnersPassportsActivationComplete(companyOwnersList(co))
+                ? []
+                : getOwnerPassportActivationBlockers(companyOwnersList(co)),
         },
         {
             key: "ownerEmiratesId",
             label: "EID of Owner",
             completed: areOwnersEmiratesIdsActivationComplete(companyOwnersList(co)),
+            blockers: areOwnersEmiratesIdsActivationComplete(companyOwnersList(co))
+                ? []
+                : getOwnerEmiratesIdActivationBlockers(companyOwnersList(co)),
         },
     ];
 
@@ -767,6 +888,70 @@ const pendingPayloadHasContent = (payload = {}) => {
     return Object.keys(payload).length > 0;
 };
 
+/** Same path logic as company profile UI — signed URLs must not look like MOA edits. */
+const documentAttachmentFingerprint = (d) => {
+    const raw = String(
+        d?.document?.url || d?.document?.publicId || d?.attachment || "",
+    ).trim();
+    if (!raw) return "";
+    const noQuery = raw.split("?")[0].trim().toLowerCase();
+    for (const marker of ["company-documents", "employee-documents"]) {
+        const idx = noQuery.indexOf(marker);
+        if (idx !== -1) return noQuery.slice(idx);
+    }
+    return noQuery;
+};
+
+const moaDocumentRowSignature = (d) => {
+    if (!d || typeof d !== "object") return "";
+    return JSON.stringify({
+        type: String(d?.type || "").trim(),
+        description: String(d?.description || "").trim(),
+        issueDate: String(d?.issueDate || "").trim(),
+        startDate: String(d?.startDate || "").trim(),
+        expiryDate: String(d?.expiryDate || "").trim(),
+        url: documentAttachmentFingerprint(d),
+    });
+};
+
+const moaDocRowId = (d) => (d?._id != null ? String(d._id) : d?.id != null ? String(d.id) : "");
+
+const filterMoaDocumentsForPending = (docs = []) =>
+    (Array.isArray(docs) ? docs : []).filter((d) => documentIsMoaForActivation(d));
+
+const collectPendingMoaDocumentChanges = (previousDocs = [], proposedDocs = []) => {
+    const prevMoa = filterMoaDocumentsForPending(previousDocs);
+    const propMoa = filterMoaDocumentsForPending(proposedDocs);
+    const prevById = new Map();
+    for (const doc of prevMoa) {
+        const id = moaDocRowId(doc);
+        if (id) prevById.set(id, doc);
+    }
+    const changedPropDocs = [];
+    const changedPrevDocs = [];
+    const seenPropIds = new Set();
+    for (const doc of propMoa) {
+        const id = moaDocRowId(doc);
+        if (!id) {
+            changedPropDocs.push(doc);
+            continue;
+        }
+        const prev = prevById.get(id);
+        if (!prev) {
+            changedPropDocs.push(doc);
+            continue;
+        }
+        if (moaDocumentRowSignature(prev) !== moaDocumentRowSignature(doc)) {
+            if (!seenPropIds.has(id)) {
+                seenPropIds.add(id);
+                changedPropDocs.push(doc);
+                changedPrevDocs.push(prev);
+            }
+        }
+    }
+    return { changedPropDocs, changedPrevDocs };
+};
+
 /** One pending row per HR card so Submit pending shows separate Passport / EID / Owner Details rows. */
 const slicePendingEntryForCard = (entry, cardLabel) => {
     const proposed = entry?.proposedData && typeof entry.proposedData === "object" ? entry.proposedData : {};
@@ -847,6 +1032,21 @@ const slicePendingEntryForCard = (entry, cardLabel) => {
             return out;
         };
         return { ...entry, card: cardLabel, reason: cardLabel, proposedData: pick(proposed), previousData: pick(previous) };
+    }
+    if (label === "moa") {
+        const { changedPropDocs, changedPrevDocs } = collectPendingMoaDocumentChanges(
+            previous.documents,
+            proposed.documents,
+        );
+        const proposedData = changedPropDocs.length ? { documents: changedPropDocs } : {};
+        const previousData = changedPrevDocs.length ? { documents: changedPrevDocs } : {};
+        return {
+            ...entry,
+            card: cardLabel,
+            reason: cardLabel,
+            proposedData,
+            previousData,
+        };
     }
     return { ...entry, card: cardLabel, reason: cardLabel };
 };
@@ -940,20 +1140,6 @@ const serializeActivationDocumentsSlice = (documents) => {
     } catch {
         return String(liveRows.length);
     }
-};
-
-/** Same path logic as company profile UI — signed URLs must not look like MOA edits. */
-const documentAttachmentFingerprint = (d) => {
-    const raw = String(
-        d?.document?.url || d?.document?.publicId || d?.attachment || "",
-    ).trim();
-    if (!raw) return "";
-    const noQuery = raw.split("?")[0].trim().toLowerCase();
-    for (const marker of ["company-documents", "employee-documents"]) {
-        const idx = noQuery.indexOf(marker);
-        if (idx !== -1) return noQuery.slice(idx);
-    }
-    return noQuery;
 };
 
 /** @deprecated Use serializeActivationDocumentsSlice — kept for callers that only diff MOA. */

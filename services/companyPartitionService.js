@@ -337,6 +337,38 @@ const slimOwnerForExpiry = (owner) => {
     return slim;
 };
 
+/** Enough owner fields for activation progress on company list (matches detail-page checklist). */
+const slimOwnerForActivationProgress = (owner) => {
+    if (!owner || typeof owner !== "object") return owner;
+    const slim = {
+        _id: owner._id,
+        ownerProfileId: owner.ownerProfileId,
+        name: owner.name,
+        email: owner.email,
+        phone: owner.phone,
+        nationality: owner.nationality,
+        sharePercentage: owner.sharePercentage,
+        contactEmail: owner.contactEmail,
+        personalEmail: owner.personalEmail,
+    };
+    for (const k of OWNER_DOC_EXPIRY_KEYS) {
+        const d = owner[k];
+        if (!d || typeof d !== "object") continue;
+        slim[k] = {
+            number: d.number,
+            idNumber: d.idNumber,
+            nationality: d.nationality,
+            countryOfIssue: d.countryOfIssue,
+            issueDate: d.issueDate,
+            expiryDate: d.expiryDate,
+            startDate: d.startDate,
+            attachment: d.attachment,
+            policyNumber: d.policyNumber,
+        };
+    }
+    return slim;
+};
+
 const slimBundleForExpiry = (bundle) => {
     if (!bundle || typeof bundle !== "object") return bundle;
     const slim = { hasLiveMoa: bundle.hasLiveMoa };
@@ -515,7 +547,7 @@ export async function enrichCompaniesForList(companies = []) {
         const merged = { ...c };
         applyCompliancePartition(merged, compliance);
         if (owners?.owners) {
-            merged.owners = owners.owners.map(slimOwnerForExpiry);
+            merged.owners = owners.owners.map(slimOwnerForActivationProgress);
         }
         if (bundle) {
             const slimBundle = slimBundleForExpiry(bundle);

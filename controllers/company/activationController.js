@@ -8,7 +8,6 @@ import {
     submitCompanyActivation,
     companyWasEverFullyActivated,
     isCompanyFullyActivated,
-    filterPendingEntriesInCurrentSubmission,
     pendingEntryIncludedInSubmittedCards,
     resolveLatestActivationSubmissionLabels,
 } from "../../utils/companyActivation.js";
@@ -252,31 +251,34 @@ export const approveCompanyActivationRequest = async (req, res) => {
             (await loadCompanyFullProfile(company)) ||
             (typeof company.toObject === "function" ? company.toObject() : company);
         const pendingChanges = Array.isArray(merged.pendingReactivationChanges)
-            ? merged.pendingReactivationChanges.map((entry) => (entry?.toObject ? entry.toObject() : entry))
+            ? merged.pendingReactivationChanges.map((entry, idx) => {
+                  const o = entry?.toObject ? entry.toObject() : entry;
+                  return { ...o, __idStr: companyPendingEntryId(o, idx) };
+              })
             : [];
-        const submissionScope = filterPendingEntriesInCurrentSubmission(
-            pendingChanges,
-            merged.activationWorkflow,
-        );
-        const submissionScopeIds = submissionScope.map((entry) => {
-            const idx = pendingChanges.indexOf(entry);
-            return companyPendingEntryId(entry, idx >= 0 ? idx : 0);
-        });
-        if (selectionProvided && submissionScopeIds.length > 0) {
-            const expSorted = [...submissionScopeIds].sort();
-            const aprSorted = [...approvedChangeIds.map(String)].sort();
-            if (expSorted.length !== aprSorted.length || expSorted.join(",") !== aprSorted.join(",")) {
+        const submissionLabels = resolveLatestActivationSubmissionLabels(merged.activationWorkflow);
+        const reviewRows =
+            submissionLabels.length > 0
+                ? pendingChanges.filter((entry) =>
+                      pendingEntryIncludedInSubmittedCards(entry, submissionLabels),
+                  )
+                : pendingChanges;
+        const reviewRowIds = reviewRows.map((entry) => entry.__idStr);
+
+        if (selectionProvided && reviewRowIds.length > 0) {
+            const approvedSet = new Set(approvedChangeIds.map(String));
+            const missingScopeIds = reviewRowIds.filter((rowId) => !approvedSet.has(String(rowId)));
+            if (missingScopeIds.length > 0) {
                 return res.status(400).json({
                     message:
                         "Accept requires all requested change rows checked, or use Hold when only some are acceptable.",
                 });
             }
         }
-        const selectedChanges = pendingChanges.filter((entry, idx) => {
-            const entryId = companyPendingEntryId(entry, idx);
-            if (!selectionProvided) return true;
-            return approvedChangeIds.includes(entryId);
-        });
+
+        const selectedChanges = selectionProvided
+            ? reviewRows.filter((entry) => approvedChangeIds.includes(entry.__idStr))
+            : pendingChanges;
 
         const ownerArchivesToPush = [];
         for (const change of selectedChanges) {
@@ -289,16 +291,10 @@ export const approveCompanyActivationRequest = async (req, res) => {
             if (archives?.length) ownerArchivesToPush.push(...archives);
         }
 
-        const appliedIds = new Set(
-            selectedChanges.map((entry) => {
-                const idx = pendingChanges.indexOf(entry);
-                return companyPendingEntryId(entry, idx >= 0 ? idx : 0);
-            }),
-        );
-        const remainingPending = pendingChanges.filter((entry, idx) => {
-            const entryId = companyPendingEntryId(entry, idx);
-            return !appliedIds.has(entryId);
-        });
+        const appliedIds = new Set(selectedChanges.map((entry) => entry.__idStr));
+        const remainingPending = pendingChanges
+            .filter((entry) => !appliedIds.has(entry.__idStr))
+            .map(({ __idStr, ...rest }) => rest);
 
         company.status = "Active";
         company.activationStatus = "active";

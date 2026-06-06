@@ -44,6 +44,10 @@ import {
     markCompanyActivationHoldResolvedForUpdate,
     labelsRequiredForActivationHoldEntry,
 } from "../../utils/markCompanyActivationHoldResolved.js";
+import {
+    collectCompanyInformativeHrNotifyLabels,
+    notifyHrOfCompanyInformativeCardUpdates,
+} from "../../utils/companyInformativeHrNotify.js";
 import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
 import { isRequestUserDesignatedFlowchartHr } from "../../utils/isDesignatedFlowchartHr.js";
 import {
@@ -644,7 +648,10 @@ export const updateCompany = async (req, res) => {
                     const mutatedProfileIds = collectOwnerProfileIdsWithSharedProfileMutations(
                         rawPatchOwners,
                         baseOwners,
-                        { rosterReplace },
+                        {
+                            rosterReplace,
+                            tradeLicenseBundle: tradeLicenseOwnersReplace,
+                        },
                     );
                     if (mutatedProfileIds.length > 0) {
                         const editCheck = await assertOwnersEditableFromCompany(company, mutatedProfileIds);
@@ -755,7 +762,14 @@ export const updateCompany = async (req, res) => {
                         }
                     }
                     if (changedNestedDocKeys.has("labourCard")) {
-                        const labourCardCheck = validateOwnersLabourCardPayload(updateData.owners);
+                        const labourCardChangeIndices = getOwnerIndicesWithNestedDocChange(
+                            rawPatchOwners,
+                            baseOwners,
+                            "labourCard",
+                        );
+                        const labourCardCheck = validateOwnersLabourCardPayload(updateData.owners, {
+                            onlyValidateOwnerIndices: labourCardChangeIndices,
+                        });
                         if (!labourCardCheck.ok) {
                             return res.status(400).json({ message: labourCardCheck.message });
                         }
@@ -1081,11 +1095,35 @@ export const updateCompany = async (req, res) => {
             );
         }
 
+        let informativeHrNotified = false;
+        if (!queueForApproval) {
+            try {
+                const informativeLabels = collectCompanyInformativeHrNotifyLabels(
+                    beforeCompany,
+                    updateData,
+                );
+                if (informativeLabels.length > 0) {
+                    const notifyResult = await notifyHrOfCompanyInformativeCardUpdates({
+                        company: mergedForResponse,
+                        changedCards: informativeLabels,
+                        actor: req.user,
+                    });
+                    informativeHrNotified = notifyResult?.sent === true;
+                }
+            } catch (informErr) {
+                console.warn(
+                    "[updateCompany] notifyHrOfCompanyInformativeCardUpdates:",
+                    informErr?.message || informErr,
+                );
+            }
+        }
+
         return res.status(200).json({
             message: responseMessage,
             company: signedCompany,
             activationProgress: calculateCompanyActivationProgress(mergedForResponse),
             queuedForHrApproval: queueForApproval,
+            informativeHrNotified,
         });
     } catch (error) {
         console.error("Error in updateCompany:", error);
