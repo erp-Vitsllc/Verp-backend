@@ -2,6 +2,7 @@ import { PutObjectCommand } from "@aws-sdk/client-s3";
 import User from '../../models/User.js';
 import EmployeeBasic from '../../models/EmployeeBasic.js';
 import s3Client, { bucketName } from '../../config/s3Client.js';
+import { getSignedFileUrl } from '../../utils/s3Upload.js';
 import { randomUUID } from 'crypto';
 
 export const uploadUserProfilePicture = async (req, res) => {
@@ -40,26 +41,22 @@ export const uploadUserProfilePicture = async (req, res) => {
 
         await s3Client.send(new PutObjectCommand(uploadParams));
 
-        const region = 'ap-southeast-1';
-        const baseDomain = 'idrivee2.com';
-        const cleanBucketName = bucketName.trim();
-        const publicUrl = `https://${cleanBucketName}.s3.${region}.${baseDomain}/${filename}`;
+        const storageKey = filename;
+        const signedUrl = await getSignedFileUrl(storageKey);
 
-        // Update User model
-        user.profilePicture = publicUrl;
+        user.profilePicture = storageKey;
         await user.save();
 
-        // If linked to employee, also update EmployeeBasic
         if (user.employeeId) {
             await EmployeeBasic.findOneAndUpdate(
                 { employeeId: user.employeeId },
-                { profilePicture: publicUrl }
+                { profilePicture: storageKey }
             );
         }
 
         return res.status(200).json({
             message: 'Profile picture uploaded successfully',
-            profilePicture: publicUrl
+            profilePicture: signedUrl || storageKey
         });
 
     } catch (error) {

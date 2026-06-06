@@ -2,13 +2,14 @@ import { PutObjectCommand } from "@aws-sdk/client-s3";
 import EmployeeBasic from '../../models/EmployeeBasic.js';
 import { getCompleteEmployee, resolveEmployeeId } from '../../services/employeeService.js';
 import s3Client, { bucketName } from '../../config/s3Client.js';
+import { getSignedFileUrl } from '../../utils/s3Upload.js';
 import { randomUUID } from 'crypto';
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
 import { skipLiveProfileWritesPendingHr, queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
 
 export const uploadProfilePicture = async (req, res) => {
     try {
-        console.log('Upload profile picture endpoint hit (IDrive S3)');
+        console.log('Upload profile picture endpoint hit (Wasabi S3)');
         const { id } = req.params;
         const { image } = req.body; // Base64 image string
 
@@ -42,31 +43,19 @@ export const uploadProfilePicture = async (req, res) => {
         // Bucket folder: employee-profiles/
         const filename = `employee-profiles/${employeeId}-${randomUUID()}.${extension}`;
 
-        // 5. Upload to IDrive e2 (S3)
+        // 5. Upload to Wasabi (S3-compatible)
         const uploadParams = {
             Bucket: bucketName,
             Key: filename,
             Body: buffer,
             ContentType: contentType,
-            ACL: 'private' // Private access, requires signed URL to view
-            // No ServerSideEncryption or KMS keys specified
+            ACL: 'private'
         };
 
         await s3Client.send(new PutObjectCommand(uploadParams));
 
-        // 6. Construct Public URL (Virtual-hosted style)
-        // Format: https://${bucketName}.s3.ap-southeast-1.idrivee2.com/${filename}
-        const region = 'ap-southeast-1'; // Hardcoded as per your requirement/environment
-        const baseDomain = 'idrivee2.com';
-
-        // Ensure bucketName is clean
-        const cleanBucketName = bucketName.trim();
-
-        // The endpoint in your env is likely "s3.ap-southeast-1.idrivee2.com"
-        // We will construct the Virtual Hosted URL manually as requested
-        const publicUrl = `https://${cleanBucketName}.s3.${region}.${baseDomain}/${filename}`;
-
-        console.log('Generated Public URL:', publicUrl);
+        const storageKey = filename;
+        const signedUrl = await getSignedFileUrl(storageKey);
 
         const employeeBasic = await EmployeeBasic.findOne({ employeeId })
             .select("profilePicture profileStatus profileWorkflow profileApprovalStatus company")
@@ -81,7 +70,7 @@ export const uploadProfilePicture = async (req, res) => {
         if (!skipLive) {
             await EmployeeBasic.findOneAndUpdate(
                 { employeeId },
-                { profilePicture: publicUrl },
+                { profilePicture: storageKey },
                 { new: true, runValidators: true }
             );
             await triggerProfileReactivationIfNeeded({
@@ -104,7 +93,7 @@ export const uploadProfilePicture = async (req, res) => {
                     changeType: "update",
                     targetIndex: null,
                     previousData: { profilePicture: previousPicture },
-                    proposedData: { profilePicture: publicUrl },
+                    proposedData: { profilePicture: storageKey },
                 },
             });
         }
@@ -115,7 +104,7 @@ export const uploadProfilePicture = async (req, res) => {
             message: skipLive
                 ? "Profile picture change queued for HR activation approval."
                 : "Profile picture uploaded successfully",
-            profilePicture: publicUrl,
+            profilePicture: signedUrl || storageKey,
             employee: completeEmployee
         });
 

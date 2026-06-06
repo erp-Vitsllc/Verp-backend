@@ -15,7 +15,8 @@ import EmployeeExperience from "../models/EmployeeExperience.js";
 import EmployeeEmergencyContact from "../models/EmployeeEmergencyContact.js";
 import EmployeeTraining from "../models/EmployeeTraining.js";
 import User from "../models/User.js";
-import { getSignedFileUrl } from "../utils/s3Upload.js";
+import { getSignedFileUrl, normalizeS3Key } from "../utils/s3Upload.js";
+import { getS3BucketName, looksLikeObjectStorageUrl } from "../config/storageConfig.js";
 import { checkAndUpdateProbationStatus } from "../utils/employeeStatusHelper.js";
 
 
@@ -663,16 +664,13 @@ export const getCompleteEmployee = async (id) => {
             if (!keyToSign && obj?.url && typeof obj.url === 'string') {
                 try {
                     // Check if it's an S3/iDrive URL
-                    if (obj.url.includes('idrivee2.com') || obj.url.includes('s3.')) {
+                    if (looksLikeObjectStorageUrl(obj.url) || obj.url.includes('.s3.')) {
                         const urlObj = new URL(obj.url);
-                        let path = urlObj.pathname; // e.g. "/key" or "/bucket/key"
+                        let path = urlObj.pathname;
                         
-                        // Remove leading slash
                         if (path.startsWith('/')) path = path.substring(1);
                         
-                        // Handle Virtual Hosted Style URLs (bucket.s3.region.amazonaws.com/key)
-                        // or Path Style URLs (s3.region.amazonaws.com/bucket/key)
-                        const bucketName = process.env.IDRIVE_BUCKET_NAME || 'verp-storage';
+                        const bucketName = getS3BucketName() || 'verp-storage';
                         
                         // Check if path starts with bucket name (Path Style: s3...com/bucket/key)
                         const bucketPrefix = `${bucketName}/`;
@@ -701,7 +699,7 @@ export const getCompleteEmployee = async (id) => {
                         console.log(`[getCompleteEmployee]   Original path: "${path}"`);
                         console.log(`[getCompleteEmployee]   From URL: ${obj.url.substring(0, 150)}...`);
                     } else {
-                        console.warn(`[getCompleteEmployee] ⚠ URL for ${context} is not an S3/iDrive URL: ${obj.url?.substring(0, 100)}...`);
+                        console.warn(`[getCompleteEmployee] ⚠ URL for ${context} is not an object-storage URL: ${obj.url?.substring(0, 100)}...`);
                     }
                 } catch (err) {
                     console.error(`[getCompleteEmployee] ❌ Error parsing URL for ${context}:`, err.message);
@@ -723,7 +721,7 @@ export const getCompleteEmployee = async (id) => {
                     if (keyToSign.startsWith('/')) keyToSign = keyToSign.substring(1);
 
                     // Remove bucket name prefix if present
-                    const bucketName = process.env.IDRIVE_BUCKET_NAME || 'verp-storage';
+                    const bucketName = getS3BucketName() || 'verp-storage';
                     if (keyToSign.startsWith(`${bucketName}/`)) {
                         keyToSign = keyToSign.substring(bucketName.length + 1);
                     }
@@ -770,25 +768,8 @@ export const getCompleteEmployee = async (id) => {
             if (typeof completeEmployee.profilePicture === 'string') {
                 const url = completeEmployee.profilePicture;
                 // Create a temporary object to pass to signUrl
-                const tempObj = { url, publicId: null };
+                const tempObj = { url, publicId: normalizeS3Key(url) };
 
-                // Helper to extract key from string URL if possible
-                if (url.includes('idrivee2.com')) {
-                    try {
-                        const urlObj = new URL(url);
-                        let path = urlObj.pathname;
-                        if (path.startsWith('/')) path = path.substring(1);
-                        const bucketPrefix = `${process.env.IDRIVE_BUCKET_NAME}/`;
-                        if (path.startsWith(bucketPrefix)) {
-                            path = path.substring(bucketPrefix.length);
-                        }
-                        tempObj.publicId = decodeURIComponent(path);
-                    } catch (e) {
-                        console.error('Error parsing profile URL for key:', e);
-                    }
-                }
-
-                // Add to signing promises
                 signingPromises.push(
                     signUrl(tempObj, 'profilePicture').then(() => {
                         // Update the profilePicture property with the new signed URL

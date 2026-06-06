@@ -12,8 +12,10 @@ const S3_STORAGE_FOLDER_PREFIXES = [
     'asset-service-invoices',
     'asset-service-attachments',
     'employee-documents',
+    'employee-profiles',
     'employee-signatures',
     'profile-pictures',
+    'user-profiles',
     'signatures',
     'rewards',
     'fines',
@@ -40,7 +42,11 @@ export function normalizeS3Key(keyOrUrl) {
         }
         try {
             const parsed = new URL(key);
-            const pathKey = decodeURIComponent(String(parsed.pathname || '').replace(/^\/+/, ''));
+            let pathKey = decodeURIComponent(String(parsed.pathname || '').replace(/^\/+/, ''));
+            const bucketPrefix = `${bucketName}/`;
+            if (pathKey.startsWith(bucketPrefix)) {
+                pathKey = pathKey.substring(bucketPrefix.length);
+            }
             if (pathKey && !pathKey.includes(' ')) return pathKey;
         } catch {
             return null;

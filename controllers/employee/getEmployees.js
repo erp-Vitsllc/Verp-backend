@@ -1,7 +1,7 @@
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import EmployeeVisa from "../../models/EmployeeVisa.js";
 import mongoose from "mongoose";
-import { getSignedFileUrl } from "../../utils/s3Upload.js";
+import { getSignedFileUrl, normalizeS3Key } from "../../utils/s3Upload.js";
 import { escapeRegex } from "../../utils/regexHelper.js";
 import { ensureProbationRequestForEmployee } from "../../utils/sendProbationWorkflowEmail.js";
 
@@ -369,22 +369,11 @@ export const getEmployees = async (req, res) => {
         // Check and sign profile pictures for all employees
         // This is necessary because profile pictures are now private and need signed URLs
         await Promise.all(employeesWithVisas.map(async (emp) => {
-            if (emp.profilePicture && typeof emp.profilePicture === 'string' && emp.profilePicture.includes('idrivee2.com')) {
+            if (emp.profilePicture && typeof emp.profilePicture === 'string' && !emp.profilePicture.startsWith('data:')) {
                 try {
-                    // Extract key from URL
-                    const url = emp.profilePicture;
-                    const urlObj = new URL(url);
-                    let path = urlObj.pathname;
-                    if (path.startsWith('/')) path = path.substring(1);
-
-                    const bucketPrefix = `${process.env.IDRIVE_BUCKET_NAME}/`;
-                    if (path.startsWith(bucketPrefix)) {
-                        path = path.substring(bucketPrefix.length);
-                    }
-
-                    const key = decodeURIComponent(path);
+                    const key = normalizeS3Key(emp.profilePicture);
+                    if (!key) return;
                     const signedUrl = await getSignedFileUrl(key);
-
                     if (signedUrl) {
                         emp.profilePicture = signedUrl;
                     }

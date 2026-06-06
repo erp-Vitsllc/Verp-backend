@@ -3,6 +3,7 @@ import EmployeeBasic from '../models/EmployeeBasic.js';
 import User from '../models/User.js';
 import axios from 'axios';
 import { resolveEmployeeEmail, addEmployeeEmailToSet } from './resolveEmployeeEmail.js';
+import { isValidStorageUrl } from './validationHelper.js';
 
 /**
  * Sends a rejection email to assigned employees when a fine is rejected by CEO/Admin.
@@ -80,7 +81,7 @@ export const sendFineRejectedEmail = async (fine, assignedEmployees) => {
                 const rawUrl = String(fine.attachment.url);
 
                 // INLINE VALIDATION FOR SNYK (Explicit check right before use)
-                const isSafe = /^https:\/\/[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.idrivee2\.com\/[^\s<>]+$/i.test(rawUrl);
+                const isSafe = isValidStorageUrl(rawUrl);
 
                 if (!isSafe || rawUrl.includes('localhost') || rawUrl.includes('127.0.0.1')) {
                     throw new Error(`SSRF Blocked: Invalid attachment URL signature: ${rawUrl}`);
