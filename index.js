@@ -202,6 +202,7 @@ app.use("/api/Payment", paymentRoute);
 app.use("/api/Department", departmentRoute);
 app.use("/api/Designation", designationRoute);
 app.use("/api/Company", companyRoute);
+app.use("/api/company", companyRoute);
 app.use("/api/AssetType", assetTypeRoute);
 app.use("/api/AssetItem", assetItemRoute);
 app.use("/api/AssetAccessoryCatalog", assetAccessoryCatalogRoute);

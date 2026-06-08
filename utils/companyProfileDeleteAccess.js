@@ -33,7 +33,7 @@ const FOLDER_MARKERS = [
     "fines",
 ];
 
-const OWNER_DOC_KEY_PERM = {
+export const OWNER_DOC_KEY_PERM = {
     attachment: COMPANY_DELETE_PERM.ownerDetails,
     passport: COMPANY_DELETE_PERM.ownerPassport,
     visa: COMPANY_DELETE_PERM.ownerVisa,
