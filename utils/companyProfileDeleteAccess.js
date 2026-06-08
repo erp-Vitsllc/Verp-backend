@@ -104,7 +104,7 @@ const scalarAttachmentCleared = (beforeVal, afterVal) => {
     return Boolean(prev) && !next;
 };
 
-const moduleForDocumentContext = (context) => {
+export const moduleForDocumentContext = (context) => {
     const c = String(context || "").toLowerCase();
     if (c === "moa" || c.includes("moa")) return COMPANY_DELETE_PERM.moa;
     if (c === "memo") return COMPANY_DELETE_PERM.memo;

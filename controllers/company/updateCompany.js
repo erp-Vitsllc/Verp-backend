@@ -144,6 +144,7 @@ import {
     userMayCompactDeleteCompanyContent,
     isCompanyProfileActivated,
 } from "../../utils/companyProfileDeleteAccess.js";
+import { userMayEditCompanyProfilePatch } from "../../utils/companyProfileEditAccess.js";
 
 const ALLOWED_OWNER_DOC_KEYS = new Set([
     "passport",
@@ -531,6 +532,26 @@ export const updateCompany = async (req, res) => {
                     ? "Only administrator can delete company profile documents or card attachments on an activated profile."
                     : "You do not have permission to delete this company profile content.",
             });
+        }
+
+        const skipEditPermCheck =
+            requesterIsAdmin ||
+            requesterBypassesHrQueue ||
+            (blockAsDelete && hasGroupDeletePerm);
+        if (!skipEditPermCheck) {
+            const mayEdit = await userMayEditCompanyProfilePatch(
+                req.user,
+                beforeCompany,
+                updateData,
+                { isRenewal: isRenewalRequest },
+            );
+            if (!mayEdit) {
+                return res.status(403).json({
+                    message: isRenewalRequest
+                        ? "You do not have permission to renew this company document."
+                        : "You do not have permission to edit this company profile content.",
+                });
+            }
         }
 
         if (Object.prototype.hasOwnProperty.call(updateData, "tradeLicenseNumber")) {

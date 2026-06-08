@@ -25,6 +25,10 @@ import {
     stripOwnerDocFromPendingReactivationChanges,
     clearOwnerDocFromAllMatchingRows,
 } from "../../utils/companyOwnerDocResolve.js";
+import { userMaySubmitCompanyNotRenew } from "../../utils/companyProfileEditAccess.js";
+import { moduleForDocumentContext } from "../../utils/companyProfileDeleteAccess.js";
+import { hasPermission } from "../../services/permissionService.js";
+import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
 
 const KINDS = new Set(["tradeLicense", "establishmentCard", "document", "ownerDoc", "ejari", "insurance"]);
 
@@ -315,6 +319,28 @@ export const submitCompanyNotRenewRequest = async (req, res) => {
         const loaded = await loadCompanyForNotRenew(id);
         if (!loaded) return res.status(404).json({ message: "Company not found" });
         const { core, companyData } = loaded;
+
+        const docKey = normalizeOwnerDocKey(body.docKey);
+        let mayNotRenew = await isReqUserAdmin(req.user);
+        if (!mayNotRenew) {
+            if (kind === "document") {
+                const idx = resolveDocumentIndex(companyData, {
+                    documentIndex: body.documentIndex,
+                    documentItemId: body.documentItemId,
+                });
+                const docRow = idx >= 0 ? companyData.documents?.[idx] : null;
+                const moduleId = moduleForDocumentContext(docRow?.context);
+                const userId = req.user?.id || req.user?._id;
+                mayNotRenew = userId && (await hasPermission(userId, moduleId, "edit"));
+            } else {
+                mayNotRenew = await userMaySubmitCompanyNotRenew(req.user, { kind, docKey });
+            }
+        }
+        if (!mayNotRenew) {
+            return res.status(403).json({
+                message: "You do not have permission to request not-renew for this document.",
+            });
+        }
 
         const pending = (companyData.pendingNotRenewRequests || []).filter((p) => p.status === "pending");
         const incoming = {
