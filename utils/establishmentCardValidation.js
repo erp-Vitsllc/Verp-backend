@@ -59,8 +59,6 @@ export function validateEstablishmentCardExpiryDate(value) {
     const expiry = parseDate(value);
     if (!expiry) return "Expiry Date must be a valid date";
     if (expiry.getFullYear() < 1900) return "Expiry Date minimum year is 1900";
-    const today = startOfDay(new Date());
-    if (expiry <= today) return "Expiry Date must be a future date";
     return null;
 }
 

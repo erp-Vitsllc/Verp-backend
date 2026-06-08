@@ -4,6 +4,8 @@ import { getCompleteEmployee } from "../../services/employeeService.js";
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
 import { skipLiveProfileWritesPendingHr, queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
 import { markProfileActivationHoldResolvedForSection } from "../../utils/markProfileActivationHoldResolved.js";
+import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
+import { validateEmployeeWorkDetailsPayload } from "../../utils/employeeWorkDetailsValidation.js";
 
 export const updateWorkDetails = async (req, res) => {
     try {
@@ -24,6 +26,7 @@ export const updateWorkDetails = async (req, res) => {
             "contractExpiryDate",
             "dateOfJoining",
             "companyEmail",
+            "enablePortalAccess",
             "profileStatus",
             "profileApprovalStatus"
         ];
@@ -54,6 +57,42 @@ export const updateWorkDetails = async (req, res) => {
         }
 
         const employeeId = employee.employeeId;
+        const isAdmin = await isReqUserAdmin(req.user);
+
+        if (
+            req.body.contractJoiningDate === null ||
+            req.body.contractJoiningDate === ""
+        ) {
+            if (!isAdmin) {
+                return res.status(403).json({
+                    message: "Only administrator can clear Contract Joining Date.",
+                });
+            }
+        } else if (
+            employee.contractJoiningDate &&
+            req.body.contractJoiningDate !== undefined &&
+            String(req.body.contractJoiningDate) !== String(employee.contractJoiningDate) &&
+            !isAdmin
+        ) {
+            return res.status(403).json({
+                message: "Contract Joining Date can only be changed by an administrator once set.",
+            });
+        }
+
+        const validation = await validateEmployeeWorkDetailsPayload(
+            { ...employee, ...updatePayload },
+            { employee, employeeId },
+        );
+        if (!validation.ok) {
+            return res.status(400).json({ message: validation.message });
+        }
+
+        if (updatePayload.companyEmail !== undefined) {
+            updatePayload.companyEmail = String(updatePayload.companyEmail || "")
+                .replace(/\s+/g, " ")
+                .trim()
+                .toLowerCase();
+        }
 
         // Auto-fill contractJoiningDate with dateOfJoining if not provided
         // This ensures contract joining date always has a value when DOJ is available

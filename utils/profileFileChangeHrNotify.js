@@ -17,7 +17,7 @@ export const COMPANY_ACTIVATION_PROGRESS_KEYS = new Set([
     "ownerEmiratesId",
 ]);
 
-/** Core employee activation cards — excluded from informative file-change emails. */
+/** Progress-bar mandatory employee cards — queue on active profile; no informative-only email. */
 export const EMPLOYEE_ACTIVATION_SECTION_KEYS = new Set([
     "basicDetails",
     "passport",
@@ -25,6 +25,8 @@ export const EMPLOYEE_ACTIVATION_SECTION_KEYS = new Set([
     "emiratesId",
     "labourCard",
     "workDetails",
+    "signature",
+    "emergencyContact",
 ]);
 
 const escapeHtml = (value = "") =>

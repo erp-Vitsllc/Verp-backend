@@ -3,29 +3,23 @@ import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeS
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { uploadDocumentToS3, deleteDocumentFromS3 } from "../../utils/s3Upload.js";
 import { archiveEmployeeDocument } from "../../utils/archiveEmployeeDocument.js";
-import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
-import { skipLiveProfileWritesPendingHr, queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
 import { markProfileActivationHoldResolvedForSection } from "../../utils/markProfileActivationHoldResolved.js";
+import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
+import { shouldSkipLiveEmployeeSection, queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
+import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
+import { isEmployeeProfileActivationDesignatedHr } from "../../utils/isEmployeeProfileActivationDesignatedHr.js";
+import {
+    normalizeEmployeeVisaPayload,
+    validateEmployeeVisaPayload,
+} from "../../utils/employeeVisaValidation.js";
+import { scheduleEmployeeProfileFileChangeHrEmailForRequest } from "../../utils/employeeInformativeHrNotify.js";
 
 const ALLOWED_VISA_TYPES = ["visit", "employment", "spouse"];
 
-const REQUIRED_FIELDS_BY_TYPE = {
-    visit: ["visaNumber", "issueDate", "expiryDate", "visaCopy"],
-    employment: ["visaNumber", "issueDate", "expiryDate", "visaCopy", "sponsor"],
-    spouse: ["visaNumber", "issueDate", "expiryDate", "visaCopy", "sponsor"],
-};
-
-const buildMissingFields = (body, visaType, existingDocument) => {
-    const required = REQUIRED_FIELDS_BY_TYPE[visaType] || [];
-    return required.filter((field) => {
-        if (field === "visaCopy") {
-            // Check if visaCopy is provided OR if existing document exists in DB
-            const hasVisaCopy = body.visaCopy && typeof body.visaCopy === 'string' && body.visaCopy.trim() !== '';
-            return !hasVisaCopy && !existingDocument;
-        }
-        const value = body[field];
-        return value === undefined || value === null || value === "";
-    });
+const VISA_LABELS = {
+    visit: "Visit Visa",
+    employment: "Employment Visa",
+    spouse: "Third Party",
 };
 
 const normalizeDate = (value) => {
@@ -47,11 +41,10 @@ export const updateVisaDetails = async (req, res) => {
         visaCopyMime,
     } = req.body || {};
 
-    // Type validation
-    if (visaNumber !== undefined && typeof visaNumber !== 'string') {
+    if (visaNumber !== undefined && typeof visaNumber !== "string") {
         return res.status(400).json({ message: "Visa number must be a string" });
     }
-    if (visaCopy !== undefined && typeof visaCopy !== 'string') {
+    if (visaCopy !== undefined && typeof visaCopy !== "string") {
         return res.status(400).json({ message: "Visa copy must be a string (base64 or URL)" });
     }
 
@@ -60,7 +53,6 @@ export const updateVisaDetails = async (req, res) => {
     }
 
     try {
-        // Get employeeId first to check for existing documents
         const employee = await resolveEmployeeId(id);
         if (!employee) {
             return res.status(404).json({ message: "Employee not found." });
@@ -69,22 +61,32 @@ export const updateVisaDetails = async (req, res) => {
         const employeeBasic = await EmployeeBasic.findOne({ employeeId })
             .select("company profileStatus status profileWorkflow profileApprovalStatus")
             .lean();
-        const skipLive = skipLiveProfileWritesPendingHr(employeeBasic);
+        const isAdminUser = await isReqUserAdmin(req.user);
+        const canActAsHr = await isEmployeeProfileActivationDesignatedHr(req, employeeBasic);
+        const skipLive =
+            !isAdminUser && !canActAsHr && shouldSkipLiveEmployeeSection(employeeBasic, "visa");
 
-        // Check if existing document exists in database (check for both url and data for backward compatibility)
         const existingVisa = await EmployeeVisa.findOne({ employeeId });
         const existingDocument = existingVisa?.[visaType]?.document?.url || existingVisa?.[visaType]?.document?.data;
 
-        const missingFields = buildMissingFields(
-            { visaNumber, issueDate, expiryDate, sponsor, visaCopy },
+        const validationInput = normalizeEmployeeVisaPayload(
+            {
+                number: visaNumber,
+                issueDate,
+                expiryDate,
+                sponsor,
+                document: visaCopy || existingVisa?.[visaType]?.document,
+                documentName: visaCopyName || existingVisa?.[visaType]?.document?.name,
+            },
             visaType,
-            existingDocument
         );
-        if (missingFields.length > 0) {
-            return res.status(400).json({
-                message: "Missing required visa fields.",
-                missingFields,
-            });
+        const validation = await validateEmployeeVisaPayload(validationInput, {
+            visaType,
+            employeeId,
+            existingVisaNumber: existingVisa?.[visaType]?.number || "",
+        });
+        if (!validation.ok) {
+            return res.status(400).json({ message: validation.message });
         }
 
         const parsedIssueDate = normalizeDate(issueDate);
@@ -110,27 +112,22 @@ export const updateVisaDetails = async (req, res) => {
             });
         }
 
-        // Handle document upload to IDrive (S3) if new document provided
         let documentData = undefined;
-        if (visaCopy && typeof visaCopy === 'string' && visaCopy.trim() !== '') {
-            // Check if it's already a URL (IDrive or otherwise)
-            if (visaCopy.startsWith('http://') || visaCopy.startsWith('https://')) {
-                // Already a URL
+        if (visaCopy && typeof visaCopy === "string" && visaCopy.trim() !== "") {
+            if (visaCopy.startsWith("http://") || visaCopy.startsWith("https://")) {
                 documentData = {
                     url: visaCopy,
                     name: visaCopyName || "",
                     mimeType: visaCopyMime || "",
                 };
             } else {
-                // Upload base64 to IDrive
                 const uploadResult = await uploadDocumentToS3(
                     visaCopy,
                     `employee-documents/${employeeId}/visa/${visaType}`,
                     visaCopyName || `${visaType}-visa.pdf`,
-                    'raw'
+                    "raw",
                 );
 
-                // Delete old file only when it is not archived in oldDocuments.
                 if (!shouldArchivePrevious && existingVisa?.[visaType]?.document?.publicId) {
                     await deleteDocumentFromS3(existingVisa[visaType].document.publicId);
                 }
@@ -143,16 +140,15 @@ export const updateVisaDetails = async (req, res) => {
                 };
             }
         } else {
-            // Preserve existing document if no new one provided
             documentData = existingVisa?.[visaType]?.document || undefined;
         }
 
-        // Build visa payload - preserve existing document if no new one provided
         const visaPayload = {
-            number: visaNumber,
+            visaType,
+            number: validationInput.number,
             issueDate: parsedIssueDate,
             expiryDate: parsedExpiryDate,
-            sponsor: sponsor || "",
+            sponsor: validationInput.sponsor || "",
             document: documentData,
             lastUpdated: new Date(),
         };
@@ -163,28 +159,49 @@ export const updateVisaDetails = async (req, res) => {
                 { employeeId },
                 {
                     $set: {
-                        [visaType]: visaPayload,
+                        [visaType]: {
+                            number: visaPayload.number,
+                            issueDate: visaPayload.issueDate,
+                            expiryDate: visaPayload.expiryDate,
+                            sponsor: visaPayload.sponsor,
+                            document: visaPayload.document,
+                            lastUpdated: visaPayload.lastUpdated,
+                        },
                     },
                 },
-                { upsert: true, new: true }
+                { upsert: true, new: true },
             );
+
+            const expiryCheck = new Date(parsedExpiryDate);
+            const todayCheck = new Date();
+            expiryCheck.setHours(0, 0, 0, 0);
+            todayCheck.setHours(0, 0, 0, 0);
+
+            if (expiryCheck <= todayCheck) {
+                await EmployeeBasic.updateOne(
+                    { employeeId, status: "Active" },
+                    { $set: { status: "Inactive" } },
+                );
+            }
         }
 
         const visaChangeEntry = {
-            card: `${visaType} Visa`,
-            reason: `${visaType} visa details updated`,
+            card: VISA_LABELS[visaType] || "Visa",
+            reason: "Visa details updated",
             section: "visa",
             changeType: "update",
             targetIndex: null,
-            previousData: existingVisa?.[visaType] || null,
-            proposedData: { visaType, ...visaPayload },
+            previousData: previousVisaEntry
+                ? { visaType, ...previousVisaEntry.toObject?.() || previousVisaEntry }
+                : null,
+            proposedData: visaPayload,
         };
 
         if (skipLive) {
             await queueOrTriggerProfileChange({
                 employeeId,
                 actor: req.user,
-                reason: `${visaType} visa details updated`,
+                reason: "Visa details updated",
                 employeeBasic,
                 changeEntry: visaChangeEntry,
             });
@@ -192,44 +209,43 @@ export const updateVisaDetails = async (req, res) => {
             await triggerProfileReactivationIfNeeded({
                 employeeId,
                 actor: req.user,
-                reason: `${visaType} visa details updated`,
+                reason: "Visa details updated",
                 changeEntry: null,
                 trackDefaultChange: true,
             });
         }
+
         try {
             await markProfileActivationHoldResolvedForSection(employeeId, "visa");
         } catch (_e) {
             /* non-fatal */
         }
 
-        // Check for Visa Expiry and Update Status
-        const expiryCheck = new Date(parsedExpiryDate);
-        const todayCheck = new Date();
-        expiryCheck.setHours(0, 0, 0, 0);
-        todayCheck.setHours(0, 0, 0, 0);
-
-        if (!skipLive && expiryCheck <= todayCheck) {
-            // If the visa being updated is expired, set employee status to Inactive
-            // Only update if currently 'Active' to avoid overwriting other statuses like 'Terminated' or 'Resigned'
-            await EmployeeBasic.updateOne(
-                { employeeId: employeeId, status: 'Active' },
-                { $set: { status: 'Inactive' } }
-            );
-        }
-
         const completeEmployee = await getCompleteEmployee(employeeId);
+
+        scheduleEmployeeProfileFileChangeHrEmailForRequest({
+            employeeId,
+            employeeBasic,
+            sectionKey: "visa",
+            sectionLabel: VISA_LABELS[visaType] || "Visa",
+            action: hasNewDocumentUpload && hasExistingDocument ? "renewed" : "edited",
+            attachments: visaPayload?.document,
+            actor: req.user,
+            skipLive,
+            isRenewal: req.body?.isRenewal === true,
+        });
 
         return res.json({
             message: skipLive
-                ? `${visaType} visa change queued for HR activation approval.`
-                : `${visaType} visa details updated successfully.`,
+                ? "Visa change queued for HR activation approval."
+                : `${VISA_LABELS[visaType] || visaType} details updated successfully.`,
+            queuedForHrApproval: !!skipLive,
             visaDetails: {
                 visit: updatedVisa?.visit,
                 employment: updatedVisa?.employment,
                 spouse: updatedVisa?.spouse,
             },
-            employee: completeEmployee
+            employee: completeEmployee,
         });
     } catch (error) {
         console.error("Failed to update visa details:", error);
@@ -239,6 +255,3 @@ export const updateVisaDetails = async (req, res) => {
         });
     }
 };
-
-
-

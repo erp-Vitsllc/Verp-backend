@@ -68,7 +68,6 @@ export function validateTradeLicenseExpiryDate(value, issueDate) {
     if (expiry.getFullYear() < 1900) return "Expiry Date minimum year is 1900";
     const issue = parseDate(issueDate);
     if (issue && expiry <= issue) return "Expiry Date must be greater than Issue Date";
-    if (expiry < startOfDay(new Date())) return "Expiry Date cannot be in the past";
     return null;
 }
 

@@ -4,6 +4,7 @@ import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileRe
 import { shouldSkipLiveEmployeeSection, queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
 import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
 import { scheduleEmployeeProfileFileChangeHrEmailForRequest } from "../../utils/employeeInformativeHrNotify.js";
+import { validateEmployeeSignaturePayload } from "../../utils/employeeSignatureValidation.js";
 
 /**
  * Handle e-Signature upload and association with employee
@@ -11,7 +12,7 @@ import { scheduleEmployeeProfileFileChangeHrEmailForRequest } from "../../utils/
  */
 export const uploadSignature = async (req, res) => {
     const { id } = req.params;
-    const { signatureData, fileName: reqFileName } = req.body; // Expects base64 data string
+    const { signatureData, fileName: reqFileName, signedAt } = req.body;
 
     if (!signatureData) {
         return res.status(400).json({ message: "No signature data provided." });
@@ -26,11 +27,23 @@ export const uploadSignature = async (req, res) => {
         const isAdminUser = await isReqUserAdmin(req.user);
         const skipLive = !isAdminUser && shouldSkipLiveEmployeeSection(employee, "signature");
 
-        // Determine if it's an uploaded file or drawn signature
+        const signatureValidation = validateEmployeeSignaturePayload({
+            signatureData,
+            fileName: reqFileName,
+            signedAt,
+            dateOfJoining: employee.dateOfJoining,
+        });
+        if (!signatureValidation.ok) {
+            return res.status(400).json({ message: signatureValidation.message });
+        }
+
         const isDocument = !!reqFileName;
-        const extension = reqFileName ? reqFileName.split('.').pop() : 'png';
+        const extension = reqFileName ? reqFileName.split('.').pop().toLowerCase() : 'png';
+        if (extension === 'pdf') {
+            return res.status(400).json({ message: "Only JPG, JPEG, and PNG formats are allowed" });
+        }
         const fileName = reqFileName ? `signature_${Date.now()}_${reqFileName}` : `signature_${Date.now()}.png`;
-        const resourceType = isDocument ? 'auto' : 'image';
+        const resourceType = 'image';
         const parsedMimeType =
             (typeof signatureData === 'string' && signatureData.startsWith('data:') && signatureData.includes(';base64,'))
                 ? signatureData.substring(5, signatureData.indexOf(';base64,'))
@@ -47,7 +60,7 @@ export const uploadSignature = async (req, res) => {
             publicId: result.publicId,
             name: reqFileName || 'Signature',
             mimeType: parsedMimeType,
-            signedAt: new Date(),
+            signedAt: signedAt ? new Date(signedAt) : new Date(),
             ipAddress: req.ip || req.headers['x-forwarded-for'] || req.socket.remoteAddress,
             format: result.format || extension
         };

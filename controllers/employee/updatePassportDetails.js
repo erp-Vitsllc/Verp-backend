@@ -4,10 +4,15 @@ import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeS
 import { uploadDocumentToS3, deleteDocumentFromS3 } from "../../utils/s3Upload.js";
 import { archiveEmployeeDocument } from "../../utils/archiveEmployeeDocument.js";
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
-import { skipLiveProfileWritesPendingHr, queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
+import { shouldSkipLiveEmployeeSection, queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
 import { markProfileActivationHoldResolvedForSection } from "../../utils/markProfileActivationHoldResolved.js";
-
-const REQUIRED_FIELDS = ["number", "issueDate", "expiryDate"];
+import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
+import { isEmployeeProfileActivationDesignatedHr } from "../../utils/isEmployeeProfileActivationDesignatedHr.js";
+import {
+    normalizeEmployeePassportPayload,
+    validateEmployeePassportPayload,
+} from "../../utils/employeePassportValidation.js";
+import { scheduleEmployeeProfileFileChangeHrEmailForRequest } from "../../utils/employeeInformativeHrNotify.js";
 
 const normalizeDate = (value) => {
     if (!value) return null;
@@ -28,29 +33,6 @@ export const updatePassportDetails = async (req, res) => {
         passportCopyMime,
     } = req.body || {};
 
-    // Validate required fields
-    const missingFields = REQUIRED_FIELDS.filter((field) => {
-        const value = req.body[field];
-        return value === undefined || value === null || (typeof value === 'string' && value.trim() === "");
-    });
-
-    if (missingFields.length > 0) {
-        return res.status(400).json({
-            message: "Missing required passport fields.",
-            missingFields,
-        });
-    }
-
-    // Validate dates
-    const parsedIssueDate = normalizeDate(issueDate);
-    const parsedExpiryDate = normalizeDate(expiryDate);
-
-    if (!parsedIssueDate || !parsedExpiryDate) {
-        return res.status(400).json({
-            message: "Invalid issue or expiry date provided.",
-        });
-    }
-
     try {
         // Get employeeId from employee record using optimized resolver
         const employee = await resolveEmployeeId(id);
@@ -60,12 +42,42 @@ export const updatePassportDetails = async (req, res) => {
 
         const employeeId = employee.employeeId;
         const employeeBasic = await EmployeeBasic.findOne({ employeeId })
-            .select("company profileStatus profileWorkflow profileApprovalStatus")
+            .select("company profileStatus profileWorkflow profileApprovalStatus profileSubmittedTo")
             .lean();
-        const skipLive = skipLiveProfileWritesPendingHr(employeeBasic);
+        const isAdminUser = await isReqUserAdmin(req.user);
+        const canActAsHr = await isEmployeeProfileActivationDesignatedHr(req, employeeBasic);
+        const skipLive =
+            !isAdminUser && !canActAsHr && shouldSkipLiveEmployeeSection(employeeBasic, "passport");
+        const profileActive = String(employeeBasic?.profileStatus || "").toLowerCase() === "active";
 
         // Fetch existing passport to handle renewal/archiving
         const existingPassport = await EmployeePassport.findOne({ employeeId });
+
+        const validationInput = normalizeEmployeePassportPayload({
+            number,
+            nationality,
+            issueDate,
+            expiryDate,
+            placeOfIssue,
+            document: passportCopy || existingPassport?.document,
+            documentName: passportCopyName || existingPassport?.document?.name,
+        });
+        const validation = validateEmployeePassportPayload(validationInput, {
+            profileActive,
+            existingPassportNumber: existingPassport?.number || "",
+        });
+        if (!validation.ok) {
+            return res.status(400).json({ message: validation.message });
+        }
+
+        const parsedIssueDate = normalizeDate(issueDate);
+        const parsedExpiryDate = normalizeDate(expiryDate);
+
+        if (!parsedIssueDate || !parsedExpiryDate) {
+            return res.status(400).json({
+                message: "Invalid issue or expiry date provided.",
+            });
+        }
 
         const hasExistingDocument = Boolean(existingPassport?.document?.url || existingPassport?.document?.data);
         const hasNewDocumentUpload = Boolean(passportCopy && typeof passportCopy === "string" && passportCopy.trim() !== "");
@@ -124,11 +136,11 @@ export const updatePassportDetails = async (req, res) => {
 
 
         const passportPayload = {
-            number: (typeof number === 'string' ? number.trim() : number) || "",
-            nationality: (typeof nationality === 'string' ? nationality.trim() : nationality) || "",
+            number: validationInput.number || "",
+            nationality: validationInput.nationality || "",
             issueDate: parsedIssueDate,
             expiryDate: parsedExpiryDate,
-            placeOfIssue: (typeof placeOfIssue === 'string' ? placeOfIssue.trim() : placeOfIssue) || "",
+            placeOfIssue: validationInput.placeOfIssue || "",
             document: documentData,
             lastUpdated: new Date(),
             passportExp: parsedExpiryDate, // Update expiry date for quick reference
@@ -176,6 +188,18 @@ export const updatePassportDetails = async (req, res) => {
             /* ignore */
         }
         const completeEmployee = await getCompleteEmployee(employeeId);
+
+        scheduleEmployeeProfileFileChangeHrEmailForRequest({
+            employeeId,
+            employeeBasic,
+            sectionKey: "passport",
+            sectionLabel: "Passport",
+            action: hasNewDocumentUpload && hasExistingDocument ? "renewed" : "edited",
+            attachments: passportPayload?.document,
+            actor: req.user,
+            skipLive,
+            isRenewal: req.body?.isRenewal === true,
+        });
 
         return res.json({
             message: skipLive

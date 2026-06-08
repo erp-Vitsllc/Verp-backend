@@ -108,14 +108,16 @@ export function validateEmployeeAddBody(body) {
         }
     }
 
-    const contractDate = parseIsoDate(b.contractJoiningDate);
-    if (!contractDate) errors.push("Invalid contract joining date");
-    else {
-        if (startOfDay(contractDate) > startOfDay(new Date())) {
-            errors.push("Contract joining date cannot be in the future");
-        }
-        if (dojDate && startOfDay(contractDate) < startOfDay(dojDate)) {
-            errors.push("Contract joining date cannot be before date of joining");
+    if (b.contractJoiningDate) {
+        const contractDate = parseIsoDate(b.contractJoiningDate);
+        if (!contractDate) errors.push("Invalid contract joining date");
+        else {
+            if (startOfDay(contractDate) > startOfDay(new Date())) {
+                errors.push("Contract joining date cannot be in the future");
+            }
+            if (dojDate && startOfDay(contractDate) < startOfDay(dojDate)) {
+                errors.push("Contract joining date cannot be before date of joining");
+            }
         }
     }
 
