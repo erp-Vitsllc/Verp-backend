@@ -1,5 +1,4 @@
 const VISA_NUMBER_REGEX = /^[A-Za-z0-9]{5,20}$/;
-const VISA_SPONSOR_REGEX = /^[A-Za-z\s]{2,100}$/;
 
 export function stripDangerousText(value) {
     if (value === undefined || value === null) return "";
@@ -84,9 +83,6 @@ export function validateVisaSponsor(value) {
     if (!sponsor) return "Visa Sponsor is required";
     if (sponsor.length < 2) return "Visa Sponsor must be at least 2 characters";
     if (sponsor.length > 100) return "Visa Sponsor must be no more than 100 characters";
-    if (!VISA_SPONSOR_REGEX.test(sponsor)) {
-        return "Visa Sponsor may contain only letters and spaces";
-    }
     return null;
 }
 

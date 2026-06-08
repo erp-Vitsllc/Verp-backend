@@ -1,19 +1,5 @@
-export const COMPANY_LIVE_DOCUMENT_TYPE_OPTIONS = [
-    "VAT Certificate",
-    "Rental Agreement",
-    "Tenancy Contract",
-    "Chamber of Commerce Certificate",
-    "Civil Defense Certificate",
-    "Municipality Approval",
-    "Environmental Approval",
-    "Power of Attorney",
-    "Bank Guarantee",
-    "Trade Mark Certificate",
-    "Import Export Code",
-    "Other Approval",
-];
-
 const NOTE_REGEX = /^[A-Za-z0-9\s.,\-()/'"]*$/;
+const TYPE_REGEX = /^[A-Za-z0-9\s.,\-()/'"]*$/;
 
 export function stripDangerousText(value) {
     if (value === undefined || value === null) return "";
@@ -26,8 +12,7 @@ export function stripDangerousText(value) {
 }
 
 export function normalizeLiveDocumentType(value) {
-    const v = stripDangerousText(value);
-    return COMPANY_LIVE_DOCUMENT_TYPE_OPTIONS.includes(v) ? v : v;
+    return stripDangerousText(value);
 }
 
 export function normalizeLiveDocumentNote(value) {
@@ -49,10 +34,9 @@ function startOfDay(d) {
 export function validateLiveDocumentType(value) {
     const normalized = normalizeLiveDocumentType(value);
     if (!normalized) return "Document Type is required";
-    if (!COMPANY_LIVE_DOCUMENT_TYPE_OPTIONS.includes(normalized)) {
-        if (normalized.length >= 3 && normalized.length <= 100) return null;
-        return "Document Type must be selected from the list";
-    }
+    if (normalized.length < 3) return "Document Type must be at least 3 characters";
+    if (normalized.length > 100) return "Document Type must be no more than 100 characters";
+    if (!TYPE_REGEX.test(normalized)) return "Document Type contains invalid special characters";
     return null;
 }
 

@@ -3,26 +3,16 @@ import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { getCompleteEmployee, resolveEmployeeId } from "../../services/employeeService.js";
 import { uploadDocumentToS3 } from "../../utils/s3Upload.js";
 import { scheduleEmployeeProfileFileChangeHrEmailForRequest } from "../../utils/employeeInformativeHrNotify.js";
+import { validateEmployeeExperiencePayload } from "../../utils/employeeExperienceValidation.js";
 
 
 export const addExperience = async (req, res) => {
     const { id } = req.params;
     const { company, designation, startDate, endDate, certificate } = req.body;
 
-    // Validate required fields and types
-    if (typeof company !== 'string' || !company.trim() ||
-        typeof designation !== 'string' || !designation.trim() ||
-        !startDate) {
-        return res.status(400).json({
-            message: "Company and Designation must be valid strings, and Start Date is required"
-        });
-    }
-
-    // Validate that end date is after start date if both are provided
-    if (endDate && new Date(endDate) < new Date(startDate)) {
-        return res.status(400).json({
-            message: "End Date must be after Start Date"
-        });
+    const validation = validateEmployeeExperiencePayload(req.body, { requireCertificate: true });
+    if (!validation.ok) {
+        return res.status(400).json({ message: validation.message });
     }
 
     try {

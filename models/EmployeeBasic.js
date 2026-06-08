@@ -204,6 +204,7 @@ const employeeBasicSchema = new mongoose.Schema(
         // NOTICE REQUEST
         noticeRequest: {
             duration: { type: String }, // "1 Month", "2 Months", "3 Months"
+            exitDate: { type: Date },
             reason: { type: String, enum: ["Termination", "Resignation"] },
             attachment: {
                 url: { type: String },

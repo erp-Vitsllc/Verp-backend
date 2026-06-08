@@ -519,6 +519,7 @@ export const getCompleteEmployee = async (id) => {
                         url: labourCard.labourCard.labourContractAttachment.url,
                         publicId: labourCard.labourCard.labourContractAttachment.publicId
                     } : undefined,
+                    noticePeriodMonths: labourCard.labourCard.noticePeriodMonths ?? null,
                     lastUpdated: labourCard.labourCard.lastUpdated,
                 } : undefined,
             }),

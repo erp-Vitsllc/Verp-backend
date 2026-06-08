@@ -4,16 +4,12 @@ import { getCompleteEmployee, resolveEmployeeId } from "../../services/employeeS
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
 import { shouldSkipLiveEmployeeSection, queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
 import { scheduleEmployeeProfileFileChangeHrEmailForRequest } from "../../utils/employeeInformativeHrNotify.js";
+import { validateEmergencyContactPayload } from "../../utils/employeeEmergencyContactValidation.js";
+import EmployeeContact from "../../models/EmployeeContact.js";
 
 export const addEmergencyContact = async (req, res) => {
     const { id } = req.params;
     const { name, relation = 'Self', number } = req.body;
-
-    if (!name || !number) {
-        return res.status(400).json({ message: "Name and number are required" });
-    }
-
-    const normalizedNumber = number.startsWith('+') ? number : `+${number}`;
 
     try {
         // Get employeeId from employee record using optimized resolver
@@ -23,6 +19,15 @@ export const addEmergencyContact = async (req, res) => {
         }
 
         const employeeId = employee.employeeId;
+        const employeeContact = await EmployeeContact.findOne({ employeeId }).select("contactNumber").lean();
+        const validation = validateEmergencyContactPayload(req.body, {
+            employeeContactNumber: employeeContact?.contactNumber,
+        });
+        if (!validation.ok) {
+            return res.status(400).json({ message: validation.message });
+        }
+
+        const normalizedNumber = number.startsWith('+') ? number : `+${number}`;
         const employeeBasic = await EmployeeBasic.findOne({ employeeId })
             .select("profileStatus profileWorkflow profileApprovalStatus company")
             .lean();

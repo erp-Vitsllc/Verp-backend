@@ -3,31 +3,12 @@ import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { getCompleteEmployee, resolveEmployeeId } from "../../services/employeeService.js";
 import { uploadDocumentToS3 } from "../../utils/s3Upload.js";
 import { scheduleEmployeeProfileFileChangeHrEmailForRequest } from "../../utils/employeeInformativeHrNotify.js";
+import { validateEmployeeExperiencePayload } from "../../utils/employeeExperienceValidation.js";
 
 
 export const updateExperience = async (req, res) => {
     const { id, experienceId } = req.params;
     const { company, designation, startDate, endDate, certificate } = req.body;
-
-    // Validate required fields and types
-    if (!company || !designation || !startDate) {
-        return res.status(400).json({
-            message: "Company, Designation, and Start Date are required"
-        });
-    }
-
-    if (typeof company !== 'string' || typeof designation !== 'string') {
-        return res.status(400).json({
-            message: "Company and Designation must be valid strings"
-        });
-    }
-
-    // Validate that end date is after start date if both are provided
-    if (endDate && new Date(endDate) < new Date(startDate)) {
-        return res.status(400).json({
-            message: "End Date must be after Start Date"
-        });
-    }
 
     try {
         // Get employeeId from employee record using optimized resolver
@@ -49,6 +30,15 @@ export const updateExperience = async (req, res) => {
 
         if (!experience) {
             return res.status(404).json({ message: "Experience record not found" });
+        }
+
+        const hasExistingCertificate = Boolean(experience?.certificate?.url || experience?.certificate?.name);
+        const validation = validateEmployeeExperiencePayload(req.body, {
+            requireCertificate: false,
+            hasExistingCertificate,
+        });
+        if (!validation.ok) {
+            return res.status(400).json({ message: validation.message });
         }
 
         const previousExperience = experience?.toObject ? experience.toObject() : experience;

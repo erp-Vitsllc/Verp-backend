@@ -3,6 +3,7 @@ import { uploadDocumentToS3 } from "../../utils/s3Upload.js";
 import mongoose from "mongoose";
 import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeService.js";
 import { scheduleEmployeeProfileFileChangeHrEmailForRequest } from "../../utils/employeeInformativeHrNotify.js";
+import { validateEmployeeDocumentPayload } from "../../utils/employeeDocumentValidation.js";
 
 
 // @desc    Add a document to employee's documents list
@@ -36,7 +37,15 @@ export const addDocument = async (req, res) => {
             return res.status(404).json({ message: "Employee not found" });
         }
 
-
+        const isLabourModal = String(type || "").trim() === "Labour Card Salary";
+        const validation = validateEmployeeDocumentPayload(req.body, {
+            isLabourModal,
+            requireFile: true,
+            hasExistingFile: false,
+        });
+        if (!validation.ok) {
+            return res.status(400).json({ message: validation.message });
+        }
 
         let documentData = null;
 

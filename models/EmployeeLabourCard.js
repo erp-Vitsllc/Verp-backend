@@ -23,6 +23,7 @@ const labourCardDocumentSchema = new mongoose.Schema(
             name: { type: String },
             mimeType: { type: String },
         },
+        noticePeriodMonths: { type: Number },
         lastUpdated: { type: Date },
     },
     { _id: false }

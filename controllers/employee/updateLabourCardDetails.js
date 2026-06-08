@@ -6,8 +6,9 @@ import { archiveEmployeeDocument } from "../../utils/archiveEmployeeDocument.js"
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
 import { skipLiveProfileWritesPendingHr, queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
 import { markProfileActivationHoldResolvedForSection } from "../../utils/markProfileActivationHoldResolved.js";
+import { validateEmployeeLabourCardNoticePeriod } from "../../utils/employeeLabourCardValidation.js";
 
-const REQUIRED_FIELDS = ["number", "expiryDate", "upload", "contractUpload"];
+const REQUIRED_FIELDS = ["number", "issueDate", "expiryDate", "noticePeriodMonths", "upload", "contractUpload"];
 
 const buildMissingFields = (body, existingDocument, existingContractDocument) => {
     return REQUIRED_FIELDS.filter((field) => {
@@ -62,6 +63,7 @@ export const updateLabourCardDetails = async (req, res) => {
         contractUpload,
         contractUploadName,
         contractUploadMime,
+        noticePeriodMonths,
     } = req.body || {};
 
     // Type validation
@@ -95,8 +97,20 @@ export const updateLabourCardDetails = async (req, res) => {
         const existingDocument = existingLabourCard?.labourCard?.document?.url || existingLabourCard?.labourCard?.document?.data;
         const existingContractDocument = existingLabourCard?.labourCard?.labourContractAttachment?.url || existingLabourCard?.labourCard?.labourContractAttachment?.data;
 
+        const effectiveNoticePeriod =
+            noticePeriodMonths !== undefined && noticePeriodMonths !== null && noticePeriodMonths !== ""
+                ? noticePeriodMonths
+                : existingLabourCard?.labourCard?.noticePeriodMonths;
+
         const missingFields = buildMissingFields(
-            { number, issueDate, expiryDate, upload: normalizedUpload || upload, contractUpload: normalizedContractUpload || contractUpload },
+            {
+                number,
+                issueDate,
+                expiryDate,
+                noticePeriodMonths: effectiveNoticePeriod,
+                upload: normalizedUpload || upload,
+                contractUpload: normalizedContractUpload || contractUpload,
+            },
             existingDocument,
             existingContractDocument
         );
@@ -107,13 +121,29 @@ export const updateLabourCardDetails = async (req, res) => {
             });
         }
 
+        const noticePeriodErr = validateEmployeeLabourCardNoticePeriod(effectiveNoticePeriod);
+        if (noticePeriodErr) {
+            return res.status(400).json({ message: noticePeriodErr });
+        }
+
         const parsedIssueDate = normalizeDate(issueDate);
         const parsedExpiryDate = normalizeDate(expiryDate);
 
-        // Validate expiry date.
+        if (!parsedIssueDate) {
+            return res.status(400).json({
+                message: "Invalid issue date provided.",
+            });
+        }
+
         if (!parsedExpiryDate) {
             return res.status(400).json({
                 message: "Invalid expiry date provided.",
+            });
+        }
+
+        if (parsedExpiryDate <= parsedIssueDate) {
+            return res.status(400).json({
+                message: "Expiry date must be later than the issue date.",
             });
         }
 
@@ -218,6 +248,7 @@ export const updateLabourCardDetails = async (req, res) => {
             number: number,
             issueDate: parsedIssueDate,
             expiryDate: parsedExpiryDate,
+            noticePeriodMonths: parseInt(String(effectiveNoticePeriod), 10),
             document: documentData,
             labourContractAttachment: contractDocumentData,
             lastUpdated: new Date(),

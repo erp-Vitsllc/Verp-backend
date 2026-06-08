@@ -4,6 +4,11 @@ import { getCompleteEmployee } from "../../services/employeeService.js";
 import mongoose from "mongoose";
 import { getDepartmentHOD } from "../../utils/getDepartmentHOD.js";
 import { resolveEmployeeEmail } from "../../utils/resolveEmployeeEmail.js";
+import EmployeeLabourCard from "../../models/EmployeeLabourCard.js";
+import {
+    calculateExitDateFromNoticePeriod,
+    formatNoticeDurationLabel,
+} from "../../utils/employeeLabourCardValidation.js";
 
 // Helper to send email
 const sendEmail = async (to, subject, html) => {
@@ -60,6 +65,20 @@ export const requestNotice = async (req, res) => {
 
         if (!employee) return res.status(404).json({ message: "Employee not found" });
 
+        const labourCardRow = await EmployeeLabourCard.findOne({ employeeId: employee.employeeId })
+            .select("labourCard.noticePeriodMonths")
+            .lean();
+        const noticePeriodMonths = labourCardRow?.labourCard?.noticePeriodMonths;
+        if (!noticePeriodMonths) {
+            return res.status(400).json({
+                message: "Labour card notice period must be configured before submitting a notice request.",
+            });
+        }
+
+        const resignationDate = new Date();
+        const exitDate = calculateExitDateFromNoticePeriod(resignationDate, noticePeriodMonths);
+        const derivedDuration = formatNoticeDurationLabel(noticePeriodMonths);
+
         // Pre-fetch reportee for Snapshot Logic
         // We can use getCompleteEmployee here or populate
         const fullEmployeeInit = await getCompleteEmployee(employee._id);
@@ -76,7 +95,8 @@ export const requestNotice = async (req, res) => {
             employee.employeeId;
 
         employee.noticeRequest = {
-            duration,
+            duration: derivedDuration || duration,
+            exitDate,
             reason,
             attachment,
             status: "Pending",
@@ -294,6 +314,22 @@ export const updateNoticeStatus = async (req, res) => {
 
         if (status === "Approved") {
             employee.status = "Notice";
+            if (!employee.noticeRequest.exitDate) {
+                const labourCardRow = await EmployeeLabourCard.findOne({ employeeId: employee.employeeId })
+                    .select("labourCard.noticePeriodMonths")
+                    .lean();
+                const noticePeriodMonths = labourCardRow?.labourCard?.noticePeriodMonths;
+                const resignationDate = employee.noticeRequest.requestedAt || new Date();
+                if (noticePeriodMonths) {
+                    employee.noticeRequest.exitDate = calculateExitDateFromNoticePeriod(
+                        resignationDate,
+                        noticePeriodMonths,
+                    );
+                    if (!employee.noticeRequest.duration) {
+                        employee.noticeRequest.duration = formatNoticeDurationLabel(noticePeriodMonths);
+                    }
+                }
+            }
         }
 
         await employee.save();

@@ -56,6 +56,12 @@ export const deleteSalaryHistoryEntry = async (req, res) => {
             return res.status(404).json({ message: "Salary history entry not found" });
         }
 
+        if (history.length <= 1) {
+            return res.status(400).json({
+                message: "At least one salary record is required and cannot be deleted.",
+            });
+        }
+
         const targetId = target._id;
         const monthKey = monthKeyFromDate(target.fromDate);
         const targetSnapshot = target.toObject ? target.toObject() : { ...target };

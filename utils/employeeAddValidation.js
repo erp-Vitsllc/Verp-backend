@@ -60,7 +60,7 @@ export function validateInternationalPhone(phoneNumber) {
     }
     const digits = cleaned.replace(/\D/g, "");
     if (digits.length < 8 || digits.length > 15) {
-        return "Phone number must be between 7 and 15 digits (E.164 standard)";
+        return "Phone number must be between 8 and 15 digits (E.164 standard)";
     }
     return null;
 }
@@ -86,7 +86,7 @@ export function validateEmployeeAddBody(body) {
     }
 
     const email = stripDangerousText(b.email).toLowerCase();
-    if (!email || email.length > 100 || /\.\./.test(email) || !EMPLOYEE_ADD_PATTERNS.EMAIL.test(email)) {
+    if (!email || email.length > 254 || /\.\./.test(email) || !EMPLOYEE_ADD_PATTERNS.EMAIL.test(email)) {
         errors.push("Invalid email");
     }
 

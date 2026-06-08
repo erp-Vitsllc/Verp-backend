@@ -15,6 +15,9 @@ import {
     normalizeEmployeeProfileBasicDetailsPayload,
     validateEmployeeProfileBasicDetailsPayload,
 } from "../../utils/employeeProfileBasicDetailsValidation.js";
+import { validateSalaryHistoryNotEmpty } from "../../utils/employeeSalaryValidation.js";
+import { validateEmployeeBankPayload } from "../../utils/employeeBankValidation.js";
+import { validateEmployeeAddressPayload } from "../../utils/employeeAddressValidation.js";
 
 const PROFILE_BASIC_PATCH_KEYS = new Set([
     "firstName",
@@ -189,6 +192,53 @@ export const updateBasicDetails = async (req, res) => {
                 if (duplicateEmail) {
                     return res.status(400).json({ message: "Email must be unique" });
                 }
+            }
+        }
+
+        const touchesPermanentAddress = [
+            "addressLine1",
+            "addressLine2",
+            "city",
+            "state",
+            "postalCode",
+        ].some((key) => Object.prototype.hasOwnProperty.call(updatePayload, key)) ||
+            (Object.prototype.hasOwnProperty.call(updatePayload, "country") &&
+                !Object.prototype.hasOwnProperty.call(updatePayload, "nationality"));
+
+        if (touchesPermanentAddress) {
+            const addressValidation = validateEmployeeAddressPayload({
+                line1: updatePayload.addressLine1,
+                line2: updatePayload.addressLine2,
+                city: updatePayload.city,
+                state: updatePayload.state,
+                country: updatePayload.country,
+                postalCode: updatePayload.postalCode,
+            });
+            if (!addressValidation.ok) {
+                return res.status(400).json({ message: addressValidation.message });
+            }
+        }
+
+        const touchesCurrentAddress = [
+            "currentAddressLine1",
+            "currentAddressLine2",
+            "currentCity",
+            "currentState",
+            "currentCountry",
+            "currentPostalCode",
+        ].some((key) => Object.prototype.hasOwnProperty.call(updatePayload, key));
+
+        if (touchesCurrentAddress) {
+            const addressValidation = validateEmployeeAddressPayload({
+                line1: updatePayload.currentAddressLine1,
+                line2: updatePayload.currentAddressLine2,
+                city: updatePayload.currentCity,
+                state: updatePayload.currentState,
+                country: updatePayload.currentCountry,
+                postalCode: updatePayload.currentPostalCode,
+            });
+            if (!addressValidation.ok) {
+                return res.status(400).json({ message: addressValidation.message });
             }
         }
 
@@ -434,18 +484,59 @@ export const updateBasicDetails = async (req, res) => {
             }
         }
 
-        // 4. Enforce admin-only delete on salary history and training records.
+        // 4. Salary history delete guards and validation.
         if (updatePayload.salaryHistory !== undefined && Array.isArray(updatePayload.salaryHistory)) {
-            // Get current salary history from EmployeeSalary model
             const employeeSalary = await EmployeeSalary.findOne({ employeeId });
             const currentSalaryHistory = employeeSalary?.salaryHistory || [];
             const newSalaryHistory = updatePayload.salaryHistory;
 
-            // If new array is shorter, it means deletion occurred
+            const emptyErr = validateSalaryHistoryNotEmpty(newSalaryHistory);
+            if (emptyErr) {
+                return res.status(400).json({ message: emptyErr });
+            }
+
             if (newSalaryHistory.length < currentSalaryHistory.length && !isAdminUser) {
                 return res.status(403).json({
-                    message: "Only administrator can delete salary history records."
+                    message: "You do not have permission to delete salary history records.",
                 });
+            }
+
+            const monthKeys = new Set();
+            for (const entry of newSalaryHistory) {
+                const fromDate = entry?.fromDate;
+                if (!fromDate) continue;
+                const d = new Date(fromDate);
+                if (Number.isNaN(d.getTime())) continue;
+                const key = `${d.getFullYear()}-${d.getMonth()}`;
+                if (monthKeys.has(key)) {
+                    return res.status(400).json({
+                        message: "Duplicate salary records for the same month are not allowed.",
+                    });
+                }
+                monthKeys.add(key);
+            }
+        }
+
+        const bankTouched = ["bankName", "accountName", "accountNumber", "ibanNumber", "swiftCode", "bankOtherDetails", "bankAttachment"]
+            .some((k) => Object.prototype.hasOwnProperty.call(updatePayload, k));
+        if (bankTouched) {
+            const mergedBank = {
+                bankName: updatePayload.bankName ?? existingBank?.bankName,
+                accountName: updatePayload.accountName ?? existingBank?.accountName,
+                accountNumber: updatePayload.accountNumber ?? existingBank?.accountNumber,
+                ibanNumber: updatePayload.ibanNumber ?? existingBank?.ibanNumber,
+                swiftCode: updatePayload.swiftCode ?? existingBank?.swiftCode,
+                bankOtherDetails: updatePayload.bankOtherDetails ?? existingBank?.bankOtherDetails,
+                bankAttachment: updatePayload.bankAttachment ?? existingBank?.bankAttachment,
+            };
+            const hasExistingAttachment = Boolean(
+                mergedBank.bankAttachment?.url || mergedBank.bankAttachment?.data,
+            );
+            const bankErrors = validateEmployeeBankPayload(mergedBank, {
+                requireAttachment: !hasExistingAttachment,
+            });
+            if (bankErrors.length) {
+                return res.status(400).json({ message: bankErrors[0] });
             }
         }
 

@@ -4,27 +4,12 @@ import { getCompleteEmployee, resolveEmployeeId } from "../../services/employeeS
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
 import { shouldSkipLiveEmployeeSection, queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
 import { scheduleEmployeeProfileFileChangeHrEmailForRequest } from "../../utils/employeeInformativeHrNotify.js";
+import { validateEmergencyContactPayload } from "../../utils/employeeEmergencyContactValidation.js";
+import EmployeeContact from "../../models/EmployeeContact.js";
 
 export const updateEmergencyContact = async (req, res) => {
     const { id, contactId } = req.params;
     const { name, relation = 'Self', number } = req.body;
-
-    if (!name || !number) {
-        return res.status(400).json({ message: "Name and number are required" });
-    }
-
-    if (typeof name !== 'string' || (typeof number !== 'string' && typeof number !== 'number')) {
-        return res.status(400).json({ message: "Name must be a string and number must be a string or number" });
-    }
-
-    const trimmedName = name.trim();
-    const rawNumber = number.toString().trim();
-
-    if (!trimmedName || !rawNumber) {
-        return res.status(400).json({ message: "Name and number are required" });
-    }
-
-    const normalizedNumber = rawNumber.startsWith('+') ? rawNumber : `+${rawNumber}`;
 
     try {
         // Get employeeId from employee record using optimized resolver
@@ -34,6 +19,17 @@ export const updateEmergencyContact = async (req, res) => {
         }
 
         const employeeId = employee.employeeId;
+        const employeeContact = await EmployeeContact.findOne({ employeeId }).select("contactNumber").lean();
+        const validation = validateEmergencyContactPayload(req.body, {
+            employeeContactNumber: employeeContact?.contactNumber,
+        });
+        if (!validation.ok) {
+            return res.status(400).json({ message: validation.message });
+        }
+
+        const trimmedName = name.trim();
+        const rawNumber = number.toString().trim();
+        const normalizedNumber = rawNumber.startsWith('+') ? rawNumber : `+${rawNumber}`;
         const employeeBasic = await EmployeeBasic.findOne({ employeeId })
             .select("profileStatus profileWorkflow profileApprovalStatus company")
             .lean();

@@ -3,6 +3,7 @@ import { uploadDocumentToS3 } from "../../utils/s3Upload.js";
 import mongoose from "mongoose";
 import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeService.js";
 import { scheduleEmployeeProfileFileChangeHrEmailForRequest } from "../../utils/employeeInformativeHrNotify.js";
+import { validateEmployeeDocumentPayload } from "../../utils/employeeDocumentValidation.js";
 
 
 // @desc    Update a document in employee's documents list
@@ -45,6 +46,27 @@ export const updateDocument = async (req, res) => {
         }
 
         const currentDoc = employee.documents[docIndex];
+        const isLabourModal = String(type ?? currentDoc?.type ?? "").trim() === "Labour Card Salary";
+        const hasExistingFile = Boolean(currentDoc?.document?.url || currentDoc?.document?.name);
+        const validation = validateEmployeeDocumentPayload(
+            {
+                type: type ?? currentDoc?.type,
+                description: description ?? currentDoc?.description,
+                issueDate: issueDate ?? currentDoc?.issueDate,
+                expiryDate: expiryDate ?? currentDoc?.expiryDate,
+                cost: cost ?? currentDoc?.cost,
+                document: document ?? currentDoc?.document,
+            },
+            {
+                isLabourModal,
+                requireFile: false,
+                hasExistingFile,
+            },
+        );
+        if (!validation.ok) {
+            return res.status(400).json({ message: validation.message });
+        }
+
         const proposedDoc = currentDoc?.toObject ? currentDoc.toObject() : JSON.parse(JSON.stringify(currentDoc || {}));
         if (type !== undefined) proposedDoc.type = type;
         if (description !== undefined) proposedDoc.description = description;

@@ -3,36 +3,12 @@ import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { getCompleteEmployee, resolveEmployeeId } from "../../services/employeeService.js";
 import { uploadDocumentToS3 } from "../../utils/s3Upload.js";
 import { scheduleEmployeeProfileFileChangeHrEmailForRequest } from "../../utils/employeeInformativeHrNotify.js";
+import { validateEmployeeEducationPayload } from "../../utils/employeeEducationValidation.js";
 
 
 export const updateEducation = async (req, res) => {
     const { id, educationId } = req.params;
     const { universityOrBoard, collegeOrInstitute, course, fieldOfStudy, completedYear, certificate } = req.body;
-
-    // Required fields
-    if (!course || !fieldOfStudy || !completedYear) {
-        return res.status(400).json({
-            message: "Course, Field of Study, and Completed Year are required"
-        });
-    }
-
-    // course/field/year must be strings, university/college optional but if provided must be strings
-    if (typeof course !== 'string' ||
-        typeof fieldOfStudy !== 'string' ||
-        typeof completedYear !== 'string') {
-        return res.status(400).json({
-            message: "Course, Field of Study, and Completed Year must be valid strings"
-        });
-    }
-
-    if (
-        (universityOrBoard !== undefined && typeof universityOrBoard !== 'string') ||
-        (collegeOrInstitute !== undefined && typeof collegeOrInstitute !== 'string')
-    ) {
-        return res.status(400).json({
-            message: "University and College must be valid strings when provided"
-        });
-    }
 
     try {
         // Get employeeId from employee record using optimized resolver
@@ -54,6 +30,15 @@ export const updateEducation = async (req, res) => {
 
         if (!education) {
             return res.status(404).json({ message: "Education record not found" });
+        }
+
+        const hasExistingCertificate = Boolean(education?.certificate?.url || education?.certificate?.name);
+        const validation = validateEmployeeEducationPayload(req.body, {
+            requireCertificate: false,
+            hasExistingCertificate,
+        });
+        if (!validation.ok) {
+            return res.status(400).json({ message: validation.message });
         }
 
         const previousEducation = education?.toObject ? education.toObject() : education;
