@@ -1,7 +1,7 @@
 import { getSignedFileUrl, normalizeS3Key } from '../../utils/s3Upload.js';
 
 /**
- * Resolve a DB attachment value (S3 key, publicId, or prior signed URL) to a fresh iDrive signed URL.
+ * Resolve a DB attachment value (S3 key, publicId, or prior signed URL) to a fresh signed URL.
  */
 export const getSignedAttachmentUrl = async (req, res) => {
     try {

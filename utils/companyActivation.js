@@ -423,21 +423,21 @@ const sendCompanyActivationEmailToHr = async ({
                     <p style="margin:0;"><strong>Company:</strong> ${company.name || "N/A"}</p>
                     <p style="margin:6px 0 0;"><strong>Company ID:</strong> ${company.companyId || "N/A"}</p>
                     <p style="margin:6px 0 0;"><strong>Type:</strong> ${typeForDisplay}</p>
-                    <p style="margin:6px 0 0;"><strong>Requested by:</strong> ${requestedByName || "System"}</p>
+                    <p style="margin:6px 0 0;"><strong>Requested by:</strong> ${requestedByName || "System"} via VeRP</p>
                     <p style="margin:6px 0 0;"><strong>Reason:</strong> ${reasonHtml}</p>
                     ${descriptionHtml ? `<p style="margin:6px 0 0;"><strong>Edited Details:</strong> ${descriptionHtml}</p>` : ""}
                     ${changesHtml}
                     ${attachmentUrl ? `<p style="margin:6px 0 0;"><strong>Attachment:</strong> <a href="${attachmentUrl}" target="_blank" rel="noopener noreferrer">${attachmentLabel}</a></p>` : ""}
                 </div>
                 <p style="margin-top:20px;">
-                    <a href="${companyUrl}" style="background:#2563eb;color:#fff;text-decoration:none;padding:10px 16px;border-radius:6px;font-weight:600;display:inline-block;">Review Company</a>
+                    <a href="${companyUrl}" style="background:#2563eb;color:#fff;text-decoration:none;padding:10px 16px;border-radius:6px;font-weight:600;display:inline-block;">Review in VeRP</a>
                 </p>
             </div>
         </div>
     `;
 
     await transporter.sendMail({
-        from: `"VeRP Portal" <${emailUser}>`,
+        fromName: requestedByName || "VeRP Portal",
         to: hrEmail,
         subject,
         html,

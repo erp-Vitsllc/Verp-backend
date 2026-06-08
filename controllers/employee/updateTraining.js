@@ -1,6 +1,7 @@
 import EmployeeTraining from "../../models/EmployeeTraining.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { getCompleteEmployee, resolveEmployeeId } from "../../services/employeeService.js";
+import { scheduleEmployeeProfileFileChangeHrEmailForRequest } from "../../utils/employeeInformativeHrNotify.js";
 
 
 export const updateTraining = async (req, res) => {
@@ -81,6 +82,15 @@ export const updateTraining = async (req, res) => {
             await trainingRecord.save();
         
         const completeEmployee = await getCompleteEmployee(employeeId);
+
+        scheduleEmployeeProfileFileChangeHrEmailForRequest({
+            employeeId,
+            sectionKey: "training",
+            sectionLabel: "Training",
+            action: "edited",
+            attachments: proposedTraining.trainingCertificate,
+            actor: req.user,
+        });
 
         return res.status(200).json({
             message: "Training details updated successfully",

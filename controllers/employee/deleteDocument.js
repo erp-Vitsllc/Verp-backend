@@ -8,6 +8,7 @@ import {
     documentStorageFingerprint,
     purgeEmployeeOldDocuments,
 } from "../../utils/purgeEmployeeOldDocuments.js";
+import { scheduleEmployeeProfileFileChangeHrEmailForRequest } from "../../utils/employeeInformativeHrNotify.js";
 
 // @desc    Delete a document from employee's documents list
 // @route   DELETE /api/Employee/:id/document/:index
@@ -67,6 +68,15 @@ export const deleteDocument = async (req, res) => {
         });
         
         const completeEmployee = await getCompleteEmployee(employee.employeeId);
+
+        scheduleEmployeeProfileFileChangeHrEmailForRequest({
+            employeeId: employee.employeeId,
+            sectionKey: "documents",
+            sectionLabel: deletedDocLabel,
+            action: "deleted",
+            attachments: documentToDelete?.document,
+            actor: req.user,
+        });
 
         res.status(200).json({
             message: "Document deleted successfully",

@@ -5,6 +5,7 @@ import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.
 import { awaitAdminDeletionArchive } from "../../utils/adminDeletionArchiveRun.js";
 import { hasPermission } from "../../services/permissionService.js";
 import { PURGE_TYPES, purgeEmployeeOldDocuments } from "../../utils/purgeEmployeeOldDocuments.js";
+import { scheduleEmployeeProfileFileChangeHrEmailForRequest } from "../../utils/employeeInformativeHrNotify.js";
 
 const monthKeyFromDate = (value) => {
     if (!value) return null;
@@ -99,6 +100,14 @@ export const deleteSalaryHistoryEntry = async (req, res) => {
         if (!completeEmployee) {
             return res.status(404).json({ message: "Employee not found" });
         }
+
+        scheduleEmployeeProfileFileChangeHrEmailForRequest({
+            employeeId: employee.employeeId,
+            sectionKey: "salary",
+            sectionLabel: "Salary History",
+            action: "deleted",
+            actor: req.user,
+        });
 
         return res.status(200).json({
             message: "Salary history entry deleted successfully",

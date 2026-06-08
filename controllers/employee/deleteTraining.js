@@ -3,6 +3,7 @@ import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { getCompleteEmployee } from "../../services/employeeService.js";
 import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
 import { awaitAdminDeletionArchive } from "../../utils/adminDeletionArchiveRun.js";
+import { scheduleEmployeeProfileFileChangeHrEmailForRequest } from "../../utils/employeeInformativeHrNotify.js";
 
 export const deleteTraining = async (req, res) => {
     const { id, trainingId } = req.params;
@@ -49,6 +50,15 @@ export const deleteTraining = async (req, res) => {
         await trainingRecord.save();
         
         const completeEmployee = await getCompleteEmployee(employeeId);
+
+        scheduleEmployeeProfileFileChangeHrEmailForRequest({
+            employeeId,
+            sectionKey: "training",
+            sectionLabel: "Training",
+            action: "deleted",
+            attachments: trainingSnapshot?.trainingCertificate,
+            actor: req.user,
+        });
 
         return res.status(200).json({
             message: "Training record deleted successfully",

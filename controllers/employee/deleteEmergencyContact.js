@@ -2,9 +2,10 @@ import EmployeeEmergencyContact from "../../models/EmployeeEmergencyContact.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { getCompleteEmployee } from "../../services/employeeService.js";
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
-import { skipLiveProfileWritesPendingHr, queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
+import { shouldSkipLiveEmployeeSection, queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
 import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
 import { awaitAdminDeletionArchive } from "../../utils/adminDeletionArchiveRun.js";
+import { scheduleEmployeeProfileFileChangeHrEmailForRequest } from "../../utils/employeeInformativeHrNotify.js";
 
 export const deleteEmergencyContact = async (req, res) => {
     const { id, contactId } = req.params;
@@ -28,7 +29,7 @@ export const deleteEmergencyContact = async (req, res) => {
         const employeeBasic = await EmployeeBasic.findOne({ employeeId })
             .select("profileStatus profileWorkflow profileApprovalStatus company")
             .lean();
-        const skipLive = skipLiveProfileWritesPendingHr(employeeBasic);
+        const skipLive = shouldSkipLiveEmployeeSection(employeeBasic, "emergencyContact");
 
         const contactRecord = await EmployeeEmergencyContact.findOne({ employeeId });
 
@@ -90,6 +91,16 @@ export const deleteEmergencyContact = async (req, res) => {
             });
         }
         const completeEmployee = await getCompleteEmployee(employeeId);
+
+        scheduleEmployeeProfileFileChangeHrEmailForRequest({
+            employeeId,
+            employeeBasic,
+            sectionKey: "emergencyContact",
+            sectionLabel: "Emergency Contact",
+            action: "deleted",
+            actor: req.user,
+            skipLive,
+        });
 
         return res.status(200).json({
             message: skipLive

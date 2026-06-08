@@ -42,7 +42,7 @@ export async function notifyHrProfileActivationRequestEmail({
             </div>
             <div style="padding:24px;">
                 <p>Hello <strong>${hrName}</strong>,</p>
-                <p>A profile was submitted for <strong>${typeForDisplay}</strong>${submitterName ? ` by <strong>${submitterName}</strong>` : ""}.</p>
+                <p>A profile was submitted for <strong>${typeForDisplay}</strong>${submitterName ? ` by <strong>${submitterName}</strong> via VeRP` : " through VeRP"}.</p>
                 <p><strong>Employee:</strong> ${employeeName}<br/><strong>Employee ID:</strong> ${employeeId || "—"}</p>
                 <p><strong>Type:</strong> ${typeForDisplay}</p>
                 ${pendingCardsText ? `<p><strong>Requested changes:</strong> ${pendingCardsText}</p>` : ""}

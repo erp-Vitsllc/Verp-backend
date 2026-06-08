@@ -92,6 +92,10 @@ export const sendApprovalEmail = async (req, res) => {
 
         const employeeName = `${employeeBasic.firstName || ""} ${employeeBasic.lastName || ""}`.trim() || "Employee";
         const hrName = `${hrEmployee.firstName || ""} ${hrEmployee.lastName || ""}`.trim() || "HR";
+        const submitterName =
+            `${req.user?.firstName || ""} ${req.user?.lastName || ""}`.trim() ||
+            req.user?.name ||
+            "VeRP Portal";
         const wasPreviouslyActive = Array.isArray(employeeBasic.profileWorkflow)
             ? employeeBasic.profileWorkflow.some((w) => String(w?.status || "").toLowerCase() === "active")
             : false;
@@ -118,8 +122,7 @@ export const sendApprovalEmail = async (req, res) => {
                 </div>
                 <div style="padding: 30px;">
                     <p>Hello <strong>${hrName}</strong>,</p>
-                    <p>Greetings from VeRP Portal.</p>
-                    <p>The following employee is requesting <strong>${typeForDisplay}</strong>. As the <strong>HR</strong> contact assigned in the company Flowchart, please review and grant approval if everything is in order.</p>
+                    <p>The following employee is requesting <strong>${typeForDisplay}</strong> through VeRP${submitterName && submitterName !== "VeRP Portal" ? ` (submitted by <strong>${submitterName}</strong>)` : ""}. As the <strong>HR</strong> contact assigned in the company Flowchart, please review and grant approval if everything is in order.</p>
                     
                     <div style="background-color: #f8fafc; padding: 20px; border-radius: 8px; border: 1px solid #e2e8f0; margin: 25px 0;">
                         <p style="margin: 0;"><strong>Employee Name:</strong> ${employeeName}</p>
@@ -130,7 +133,7 @@ export const sendApprovalEmail = async (req, res) => {
                     </div>
                     
                     <p style="text-align: center; margin: 35px 0;">
-                        <a href="${profileUrl}" style="background-color: #2563eb; color: white; padding: 14px 30px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block; font-size: 16px;">View & Activate Profile</a>
+                        <a href="${profileUrl}" style="background-color: #2563eb; color: white; padding: 14px 30px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block; font-size: 16px;">Review in VeRP</a>
                     </p>
                     <div style="background-color: #f8fafc; padding: 14px 16px; border-radius: 8px; border: 1px solid #e2e8f0; margin: 18px 0;">
                         <p style="margin: 0;"><strong>Type:</strong> ${typeForDisplay}</p>
@@ -145,7 +148,7 @@ export const sendApprovalEmail = async (req, res) => {
 
         console.log(`[sendApprovalEmail] To (HR): ${hrEmail}`);
         await transporter.sendMail({
-            from: `"VeRP Portal" <${emailUser}>`,
+            fromName: submitterName,
             to: hrEmail,
             subject,
             html,

@@ -1,8 +1,9 @@
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { uploadDocumentToS3 } from "../../utils/s3Upload.js";
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
-import { skipLiveProfileWritesPendingHr, queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
+import { shouldSkipLiveEmployeeSection, queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
 import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
+import { scheduleEmployeeProfileFileChangeHrEmailForRequest } from "../../utils/employeeInformativeHrNotify.js";
 
 /**
  * Handle e-Signature upload and association with employee
@@ -23,7 +24,7 @@ export const uploadSignature = async (req, res) => {
             return res.status(404).json({ message: "Employee not found." });
         }
         const isAdminUser = await isReqUserAdmin(req.user);
-        const skipLive = !isAdminUser && skipLiveProfileWritesPendingHr(employee);
+        const skipLive = !isAdminUser && shouldSkipLiveEmployeeSection(employee, "signature");
 
         // Determine if it's an uploaded file or drawn signature
         const isDocument = !!reqFileName;
@@ -79,6 +80,17 @@ export const uploadSignature = async (req, res) => {
                 trackDefaultChange: true,
             });
         }
+
+        scheduleEmployeeProfileFileChangeHrEmailForRequest({
+            employeeId: employee.employeeId,
+            employeeBasic: employee,
+            sectionKey: "signature",
+            sectionLabel: "Digital Signature",
+            action: "edited",
+            attachments: proposedSignature,
+            actor: req.user,
+            skipLive,
+        });
 
         // 4. Return success (with fresh signed URL for display)
         return res.status(200).json({

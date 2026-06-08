@@ -2,6 +2,7 @@ import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { uploadDocumentToS3 } from "../../utils/s3Upload.js";
 import mongoose from "mongoose";
 import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeService.js";
+import { scheduleEmployeeProfileFileChangeHrEmailForRequest } from "../../utils/employeeInformativeHrNotify.js";
 
 
 // @desc    Update a document in employee's documents list
@@ -121,6 +122,16 @@ export const updateDocument = async (req, res) => {
             await employee.save();
         
         const completeEmployee = await getCompleteEmployee(employee.employeeId);
+
+        scheduleEmployeeProfileFileChangeHrEmailForRequest({
+            employeeId: employee.employeeId,
+            sectionKey: "documents",
+            sectionLabel: proposedDoc.type || proposedDoc.description || "Document",
+            action: isRenewMode === true ? "renewed" : "edited",
+            attachments: proposedDoc.document,
+            actor: req.user,
+            isRenewal: isRenewMode === true,
+        });
 
         res.status(200).json({
             message: "Document updated successfully",

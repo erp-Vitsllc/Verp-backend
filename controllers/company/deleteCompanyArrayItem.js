@@ -13,7 +13,7 @@ import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.
 import { isRequestUserDesignatedFlowchartHr } from "../../utils/isDesignatedFlowchartHr.js";
 import { hasPermission } from "../../services/permissionService.js";
 import { awaitAdminDeletionArchive } from "../../utils/adminDeletionArchiveRun.js";
-import { closeCreatorNotRenewFollowUpTasks } from "../../utils/companyNotRenewFollowUp.js";
+import { scheduleCompanyProfileFileDeleteHrEmail } from "../../utils/companyInformativeHrNotify.js";
 
 const ALLOWED_FIELDS = new Set(["ejari", "insurance"]);
 
@@ -133,6 +133,15 @@ export const deleteCompanyArrayItem = async (req, res) => {
             followUpTarget.closeAllOfKind = true;
         }
         await closeCreatorNotRenewFollowUpTasks(company._id, followUpTarget);
+
+        scheduleCompanyProfileFileDeleteHrEmail({
+            company: fullAfter,
+            sectionKey: fieldName,
+            sectionLabel: label,
+            action: "deleted",
+            attachment: resolved.row?.document || resolved.row?.attachment || null,
+            actor: req.user,
+        });
 
         return res.status(200).json({
             message: `${label} entry deleted successfully.`,

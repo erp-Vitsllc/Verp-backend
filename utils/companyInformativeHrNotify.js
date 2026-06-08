@@ -1,7 +1,12 @@
-import nodemailer from "nodemailer";
 import { getChangedOwnerNestedDocKeys } from "./ownerPatchScope.js";
 import { isActiveCompanyProfile } from "./companyActivation.js";
-import { resolveFlowchartHrEmployee } from "./resolveFlowchartHrEmployee.js";
+import {
+    buildCompanyProfileSectionUrl,
+    isInformativeCompanySectionKey,
+    notifyFlowchartHrOfProfileFileChanges,
+    resolveFileLinkEntries,
+    scheduleFlowchartHrProfileFileChangeEmail,
+} from "./profileFileChangeHrNotify.js";
 
 const INDEPENDENT_OWNER_DOC_KEYS = new Set([
     "visitVisa",
@@ -39,13 +44,7 @@ const isMoaDocumentRow = (d) => {
     return String(d?.type || "").toLowerCase().includes("moa");
 };
 
-const serializeArrayRows = (rows = [], rowNorm) => {
-    try {
-        return JSON.stringify((Array.isArray(rows) ? rows : []).map(rowNorm).sort((a, b) => a.id.localeCompare(b.id)));
-    } catch {
-        return String(Array.isArray(rows) ? rows.length : 0);
-    }
-};
+const rowAttachment = (row) => row?.document?.url || row?.document?.publicId || row?.attachment || null;
 
 const normalizeBundleRow = (row) => ({
     id: row?._id != null ? String(row._id) : "",
@@ -53,7 +52,7 @@ const normalizeBundleRow = (row) => ({
     description: String(row?.description || ""),
     issueDate: row?.issueDate ? new Date(row.issueDate).toISOString() : "",
     expiryDate: row?.expiryDate ? new Date(row.expiryDate).toISOString() : "",
-    url: String(row?.document?.url || row?.attachment || "").split("?")[0],
+    url: String(rowAttachment(row) || "").split("?")[0],
 });
 
 const normalizeLiveDocumentRow = (row) => ({
@@ -63,7 +62,7 @@ const normalizeLiveDocumentRow = (row) => ({
     description: String(row?.description || ""),
     issueDate: row?.issueDate ? new Date(row.issueDate).toISOString() : "",
     expiryDate: row?.expiryDate ? new Date(row.expiryDate).toISOString() : "",
-    url: String(row?.document?.url || row?.attachment || "").split("?")[0],
+    url: String(rowAttachment(row) || "").split("?")[0],
 });
 
 const liveNonMoaDocuments = (documents = []) =>
@@ -81,43 +80,141 @@ const documentRowInformLabel = (row) => {
     return type || "Document";
 };
 
-const actorDisplayName = (actor = {}) => {
-    if (actor?.name) return String(actor.name).trim();
-    const full = `${actor?.firstName || ""} ${actor?.lastName || ""}`.trim();
-    return full || actor?.employeeId || "System";
+const inferArrayAction = (beforeRows = [], afterRows = [], rowNorm) => {
+    const beforeMap = new Map((beforeRows || []).map((r) => [rowNorm(r).id, rowNorm(r)]).filter(([id]) => id));
+    const afterMap = new Map((afterRows || []).map((r) => [rowNorm(r).id, rowNorm(r)]).filter(([id]) => id));
+    const actions = [];
+
+    for (const [id, afterRow] of afterMap.entries()) {
+        const beforeRow = beforeMap.get(id);
+        if (!beforeRow) {
+            actions.push({ action: "added", row: afterRow });
+        } else if (JSON.stringify(beforeRow) !== JSON.stringify(afterRow)) {
+            actions.push({ action: "modified", row: afterRow });
+        }
+    }
+    for (const [id, beforeRow] of beforeMap.entries()) {
+        if (!afterMap.has(id)) actions.push({ action: "deleted", row: beforeRow });
+    }
+    return actions;
+};
+
+const serializeArrayRows = (rows = [], rowNorm) => {
+    try {
+        return JSON.stringify((Array.isArray(rows) ? rows : []).map(rowNorm).sort((a, b) => a.id.localeCompare(b.id)));
+    } catch {
+        return String(Array.isArray(rows) ? rows.length : 0);
+    }
 };
 
 /**
- * Cards that apply immediately on active companies — HR gets email only (no queue / dashboard task).
+ * Collect non-activation company file changes for HR informative email.
+ * @returns {Promise<object[]>}
  */
-export function collectCompanyInformativeHrNotifyLabels(beforeCompany = {}, updateData = {}) {
+export async function collectCompanyProfileFileChangeEvents(beforeCompany = {}, updateData = {}, options = {}) {
     if (!updateData || typeof updateData !== "object") return [];
-    const labels = [];
+    const companyId = beforeCompany?._id || options.companyId;
+    const events = [];
+
+    const pushEvent = async ({
+        sectionKey,
+        sectionLabel,
+        action = "modified",
+        attachment = null,
+        docContext = "",
+        ownerTabIndex = null,
+    }) => {
+        if (!isInformativeCompanySectionKey(sectionKey)) return;
+        const profileUrl = buildCompanyProfileSectionUrl(companyId, {
+            sectionKey,
+            docContext,
+            ownerTabIndex,
+        });
+        const files = attachment ? await resolveFileLinkEntries(attachment) : [];
+        events.push({
+            sectionKey,
+            sectionLabel,
+            action,
+            profileUrl,
+            files,
+        });
+    };
 
     if (Object.prototype.hasOwnProperty.call(updateData, "ejari")) {
-        const beforeSlice = serializeArrayRows(beforeCompany?.ejari, normalizeBundleRow);
-        const afterSlice = serializeArrayRows(updateData.ejari, normalizeBundleRow);
-        if (beforeSlice !== afterSlice) labels.push("Ejari");
+        const beforeRows = beforeCompany?.ejari || [];
+        const afterRows = updateData.ejari || [];
+        const rowActions = inferArrayAction(beforeRows, afterRows, normalizeBundleRow);
+        if (rowActions.length) {
+            for (const { action, row } of rowActions) {
+                const match = afterRows.concat(beforeRows).find((r) => String(r?._id) === row.id) || afterRows[0];
+                await pushEvent({
+                    sectionKey: "ejari",
+                    sectionLabel: "Ejari",
+                    action,
+                    attachment: match ? rowAttachment(match) : null,
+                });
+            }
+        } else if (serializeArrayRows(beforeRows, normalizeBundleRow) !== serializeArrayRows(afterRows, normalizeBundleRow)) {
+            await pushEvent({
+                sectionKey: "ejari",
+                sectionLabel: "Ejari",
+                action: options.isRenewal ? "renewed" : "modified",
+                attachment: afterRows[0] ? rowAttachment(afterRows[0]) : null,
+            });
+        }
     }
 
     if (Object.prototype.hasOwnProperty.call(updateData, "insurance")) {
-        const beforeSlice = serializeArrayRows(beforeCompany?.insurance, normalizeBundleRow);
-        const afterSlice = serializeArrayRows(updateData.insurance, normalizeBundleRow);
-        if (beforeSlice !== afterSlice) labels.push("Insurance");
+        const beforeRows = beforeCompany?.insurance || [];
+        const afterRows = updateData.insurance || [];
+        const rowActions = inferArrayAction(beforeRows, afterRows, normalizeBundleRow);
+        if (rowActions.length) {
+            for (const { action, row } of rowActions) {
+                const match = afterRows.concat(beforeRows).find((r) => String(r?._id) === row.id) || afterRows[0];
+                await pushEvent({
+                    sectionKey: "insurance",
+                    sectionLabel: "Insurance",
+                    action,
+                    attachment: match ? rowAttachment(match) : null,
+                });
+            }
+        } else if (serializeArrayRows(beforeRows, normalizeBundleRow) !== serializeArrayRows(afterRows, normalizeBundleRow)) {
+            await pushEvent({
+                sectionKey: "insurance",
+                sectionLabel: "Insurance",
+                action: options.isRenewal ? "renewed" : "modified",
+                attachment: afterRows[0] ? rowAttachment(afterRows[0]) : null,
+            });
+        }
     }
 
     if (Object.prototype.hasOwnProperty.call(updateData, "documents")) {
-        const beforeSlice = serializeArrayRows(
-            liveNonMoaDocuments(beforeCompany?.documents),
-            normalizeLiveDocumentRow,
-        );
-        const afterSlice = serializeArrayRows(
-            liveNonMoaDocuments(updateData.documents),
-            normalizeLiveDocumentRow,
-        );
-        if (beforeSlice !== afterSlice) {
-            for (const row of liveNonMoaDocuments(updateData.documents)) {
-                labels.push(documentRowInformLabel(row));
+        const beforeRows = liveNonMoaDocuments(beforeCompany?.documents);
+        const afterRows = liveNonMoaDocuments(updateData.documents);
+        const rowActions = inferArrayAction(beforeRows, afterRows, normalizeLiveDocumentRow);
+        if (rowActions.length) {
+            for (const { action, row } of rowActions) {
+                const match = afterRows.concat(beforeRows).find((r) => String(r?._id) === row.id);
+                await pushEvent({
+                    sectionKey: "documents",
+                    sectionLabel: documentRowInformLabel(match || row),
+                    action,
+                    attachment: match ? rowAttachment(match) : null,
+                    docContext: match?.context || row.context || "",
+                });
+            }
+        } else if (
+            serializeArrayRows(beforeRows, normalizeLiveDocumentRow) !==
+            serializeArrayRows(afterRows, normalizeLiveDocumentRow)
+        ) {
+            for (const row of afterRows) {
+                await pushEvent({
+                    sectionKey: "documents",
+                    sectionLabel: documentRowInformLabel(row),
+                    action: options.isRenewal ? "renewed" : "modified",
+                    attachment: rowAttachment(row),
+                    docContext: row?.context || "",
+                });
             }
         }
     }
@@ -126,87 +223,91 @@ export function collectCompanyInformativeHrNotifyLabels(beforeCompany = {}, upda
         const beforeOwners = beforeCompany?.owners || [];
         const changedKeys = getChangedOwnerNestedDocKeys(updateData.owners, beforeOwners);
         for (const key of changedKeys) {
-            if (INDEPENDENT_OWNER_DOC_KEYS.has(key) && INDEPENDENT_OWNER_LABELS[key]) {
-                labels.push(INDEPENDENT_OWNER_LABELS[key]);
-            }
+            if (!INDEPENDENT_OWNER_DOC_KEYS.has(key)) continue;
+            const ownerIdx = (updateData.owners || []).findIndex((o) => o?.[key]);
+            const ownerRow = ownerIdx >= 0 ? updateData.owners[ownerIdx] : null;
+            await pushEvent({
+                sectionKey: key,
+                sectionLabel: INDEPENDENT_OWNER_LABELS[key] || key,
+                action: options.isRenewal ? "renewed" : "modified",
+                attachment: ownerRow?.[key]?.attachment || ownerRow?.[key]?.document || null,
+                ownerTabIndex: ownerIdx >= 0 ? ownerIdx : null,
+            });
         }
     }
 
-    return [...new Set(labels.map((x) => String(x || "").trim()).filter(Boolean))];
+    return events;
 }
 
-/**
- * Informational email to Flowchart HR — not a dashboard task and not an activation submission.
- */
 export async function notifyHrOfCompanyInformativeCardUpdates({
     company = {},
     changedCards = [],
+    changeEvents = [],
     actor = {},
 }) {
-    const cards = (Array.isArray(changedCards) ? changedCards : [])
-        .map((c) => String(c || "").trim())
-        .filter(Boolean);
-    if (!cards.length || !isActiveCompanyProfile(company)) return { sent: false };
+    if (!isActiveCompanyProfile(company)) return { sent: false, reason: "NOT_ACTIVE" };
 
-    const hrResolved = await resolveFlowchartHrEmployee();
-    if (hrResolved?.error) {
-        console.warn("[notifyHrOfCompanyInformativeCardUpdates]", hrResolved.message);
-        return { sent: false, reason: hrResolved.error };
+    let events = Array.isArray(changeEvents) ? changeEvents : [];
+    if (!events.length && Array.isArray(changedCards) && changedCards.length) {
+        const baseUrl = buildCompanyProfileSectionUrl(company._id, { sectionKey: "documents" });
+        events = changedCards.map((label) => ({
+            sectionLabel: label,
+            sectionKey: "documents",
+            action: "modified",
+            profileUrl: baseUrl.replace(/\?.*$/, "") + "?tab=others",
+            files: [],
+        }));
     }
+    if (!events.length) return { sent: false, reason: "NO_CHANGES" };
 
-    const emailUser = process.env.EMAIL_USER?.trim();
-    const emailPass = process.env.EMAIL_PASS?.trim();
-    if (!emailUser || !emailPass) {
-        console.warn("[notifyHrOfCompanyInformativeCardUpdates] Email credentials not configured.");
-        return { sent: false, reason: "EMAIL_NOT_CONFIGURED" };
-    }
-
-    const hr = hrResolved.employee;
-    const hrEmail = hrResolved.email;
-    const hrName = `${hr?.firstName || ""} ${hr?.lastName || ""}`.trim() || "HR";
-    const updatedBy = actorDisplayName(actor);
-    const companyName = company?.name || "Company";
-    const companyCode = company?.companyId || "";
     const baseUrl = process.env.FRONTEND_URL || "http://localhost:3000";
-    const companyUrl = company?._id ? `${baseUrl}/Company/${company._id}` : `${baseUrl}/Company`;
-    const cardsHtml = cards.map((c) => `<li style="margin:4px 0;">${c}</li>`).join("");
+    const profileUrl = company?._id ? `${baseUrl}/Company/${company._id}` : `${baseUrl}/Company`;
 
-    const transporter = nodemailer.createTransport({
-        host: "smtp.office365.com",
-        port: 587,
-        secure: false,
-        auth: { user: emailUser, pass: emailPass },
+    return notifyFlowchartHrOfProfileFileChanges({
+        entityType: "company",
+        entityLabel: company?.name || "Company",
+        entityCode: company?.companyId || "",
+        profileUrl,
+        changes: events,
+        actor,
     });
+}
 
-    const subject = `Company profile updated: ${companyName}`;
-    const html = `
-        <div style="font-family:Segoe UI,Arial,sans-serif;color:#1e293b;line-height:1.55;max-width:640px;margin:0 auto;border:1px solid #e2e8f0;border-radius:10px;overflow:hidden;">
-            <div style="background:#0f766e;color:#fff;padding:18px 22px;">
-                <h2 style="margin:0;font-size:18px;">Company profile updated (information only)</h2>
-            </div>
-            <div style="padding:22px;">
-                <p>Hello <strong>${hrName}</strong>,</p>
-                <p>The following section(s) were saved immediately and do <strong>not</strong> require HR submission approval:</p>
-                <ul style="padding-left:20px;margin:12px 0;">${cardsHtml}</ul>
-                <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:14px 16px;margin:16px 0;">
-                    <p style="margin:0;"><strong>Company:</strong> ${companyName}</p>
-                    <p style="margin:6px 0 0;"><strong>Company ID:</strong> ${companyCode || "—"}</p>
-                    <p style="margin:6px 0 0;"><strong>Updated by:</strong> ${updatedBy}</p>
-                </div>
-                <p style="text-align:center;margin:24px 0;">
-                    <a href="${companyUrl}" style="background:#0f766e;color:#fff;padding:12px 24px;text-decoration:none;border-radius:6px;font-weight:bold;">View company profile</a>
-                </p>
-                <p style="font-size:12px;color:#64748b;margin:0;">This is an informational notice only — no action item was created in VeRP.</p>
-            </div>
-        </div>
-    `;
-
-    await transporter.sendMail({
-        from: `"VeRP Portal" <${emailUser}>`,
-        to: hrEmail,
-        subject,
-        html,
+export function scheduleCompanyProfileFileChangeHrEmail({ company, beforeCompany, updateData, actor, isRenewal = false }) {
+    if (!company?._id || !isActiveCompanyProfile(company)) return;
+    scheduleFlowchartHrProfileFileChangeEmail(async () => {
+        const events = await collectCompanyProfileFileChangeEvents(beforeCompany, updateData, {
+            companyId: company._id,
+            isRenewal,
+        });
+        if (!events.length) return { sent: false };
+        return notifyHrOfCompanyInformativeCardUpdates({
+            company,
+            changeEvents: events,
+            actor,
+        });
     });
+}
 
-    return { sent: true };
+export function scheduleCompanyProfileFileDeleteHrEmail({ company, sectionKey, sectionLabel, action = "deleted", attachment = null, actor = {} }) {
+    if (!company?._id || !isActiveCompanyProfile(company)) return;
+    if (!isInformativeCompanySectionKey(sectionKey)) return;
+
+    scheduleFlowchartHrProfileFileChangeEmail(async () => {
+        const profileUrl = buildCompanyProfileSectionUrl(company._id, { sectionKey });
+        const files = attachment ? await resolveFileLinkEntries(attachment) : [];
+        return notifyHrOfCompanyInformativeCardUpdates({
+            company,
+            changeEvents: [
+                {
+                    sectionKey,
+                    sectionLabel,
+                    action,
+                    profileUrl,
+                    files,
+                },
+            ],
+            actor,
+        });
+    });
 }

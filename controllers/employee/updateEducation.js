@@ -2,6 +2,7 @@ import EmployeeEducation from "../../models/EmployeeEducation.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { getCompleteEmployee, resolveEmployeeId } from "../../services/employeeService.js";
 import { uploadDocumentToS3 } from "../../utils/s3Upload.js";
+import { scheduleEmployeeProfileFileChangeHrEmailForRequest } from "../../utils/employeeInformativeHrNotify.js";
 
 
 export const updateEducation = async (req, res) => {
@@ -102,6 +103,15 @@ export const updateEducation = async (req, res) => {
             await educationRecord.save();
         
         const completeEmployee = await getCompleteEmployee(employeeId);
+
+        scheduleEmployeeProfileFileChangeHrEmailForRequest({
+            employeeId,
+            sectionKey: "education",
+            sectionLabel: "Education",
+            action: "edited",
+            attachments: proposedEducation.certificate,
+            actor: req.user,
+        });
 
         return res.status(200).json({
             message: "Education details updated successfully",

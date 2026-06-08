@@ -3,6 +3,7 @@ import { getCompleteEmployee } from "../../services/employeeService.js";
 
 import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
 import { awaitAdminDeletionArchive } from "../../utils/adminDeletionArchiveRun.js";
+import { scheduleEmployeeProfileFileChangeHrEmailForRequest } from "../../utils/employeeInformativeHrNotify.js";
 
 export const deleteExperience = async (req, res) => {
     const { id, experienceId } = req.params;
@@ -47,6 +48,15 @@ export const deleteExperience = async (req, res) => {
         experience.deleteOne();
         await experienceRecord.save();
         const completeEmployee = await getCompleteEmployee(employeeId);
+
+        scheduleEmployeeProfileFileChangeHrEmailForRequest({
+            employeeId,
+            sectionKey: "experience",
+            sectionLabel: "Experience",
+            action: "deleted",
+            attachments: experienceSnapshot?.certificate,
+            actor: req.user,
+        });
 
         return res.status(200).json({
             message: "Experience record deleted successfully",

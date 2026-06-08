@@ -1,4 +1,5 @@
 import EmployeeBasic from "../models/EmployeeBasic.js";
+import { EMPLOYEE_ACTIVATION_SECTION_KEYS } from "./profileFileChangeHrNotify.js";
 import { shouldQueueProfileChange, triggerProfileReactivationIfNeeded } from "./triggerProfileReactivation.js";
 
 const norm = (s) => String(s || "").toLowerCase().trim();
@@ -29,6 +30,17 @@ export function skipLiveProfileWritesPendingHr(employeeBasic) {
     if (!employeeBasic) return false;
     if (awaitingSubmittedHrOnly(employeeBasic)) return true;
     return shouldQueueProfileChange(employeeBasic);
+}
+
+/**
+ * Progress-bar / HR-approval sections queue on active profiles; other cards save live
+ * and trigger informative HR email only (no dashboard task).
+ */
+export function shouldSkipLiveEmployeeSection(employeeBasic, sectionKey = "") {
+    if (!employeeBasic) return false;
+    if (awaitingSubmittedHrOnly(employeeBasic)) return true;
+    if (!shouldQueueProfileChange(employeeBasic)) return false;
+    return EMPLOYEE_ACTIVATION_SECTION_KEYS.has(String(sectionKey || "").trim());
 }
 
 /**

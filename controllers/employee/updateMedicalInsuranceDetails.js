@@ -4,8 +4,9 @@ import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeS
 import { uploadDocumentToS3, deleteDocumentFromS3 } from "../../utils/s3Upload.js";
 import { archiveEmployeeDocument } from "../../utils/archiveEmployeeDocument.js";
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
-import { skipLiveProfileWritesPendingHr, queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
+import { shouldSkipLiveEmployeeSection, queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
 import { markProfileActivationHoldResolvedForSection } from "../../utils/markProfileActivationHoldResolved.js";
+import { scheduleEmployeeProfileFileChangeHrEmailForRequest } from "../../utils/employeeInformativeHrNotify.js";
 
 const REQUIRED_FIELDS = ["provider", "number", "issueDate", "expiryDate", "upload"];
 
@@ -73,7 +74,7 @@ export const updateMedicalInsuranceDetails = async (req, res) => {
         const employeeBasic = await EmployeeBasic.findOne({ employeeId })
             .select("company profileStatus profileWorkflow profileApprovalStatus")
             .lean();
-        const skipLive = skipLiveProfileWritesPendingHr(employeeBasic);
+        const skipLive = shouldSkipLiveEmployeeSection(employeeBasic, "medicalInsurance");
 
         // Check if existing document exists in database (check for both url and data for backward compatibility)
         const existingMedicalInsurance = await EmployeeMedicalInsurance.findOne({ employeeId });
@@ -207,6 +208,17 @@ export const updateMedicalInsuranceDetails = async (req, res) => {
         }
         
         const completeEmployee = await getCompleteEmployee(employeeId);
+
+        scheduleEmployeeProfileFileChangeHrEmailForRequest({
+            employeeId,
+            employeeBasic,
+            sectionKey: "medicalInsurance",
+            sectionLabel: "Medical Insurance",
+            action: hasNewDocumentUpload && hasExistingDocument ? "renewed" : "edited",
+            attachments: updatedMedicalInsurance?.medicalInsurance?.document || medicalInsurancePayload?.document,
+            actor: req.user,
+            skipLive,
+        });
 
         return res.json({
             message: skipLive

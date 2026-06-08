@@ -3,6 +3,7 @@ import { getCompleteEmployee } from "../../services/employeeService.js";
 
 import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
 import { awaitAdminDeletionArchive } from "../../utils/adminDeletionArchiveRun.js";
+import { scheduleEmployeeProfileFileChangeHrEmailForRequest } from "../../utils/employeeInformativeHrNotify.js";
 
 export const deleteEducation = async (req, res) => {
     const { id, educationId } = req.params;
@@ -47,6 +48,15 @@ export const deleteEducation = async (req, res) => {
         education.deleteOne();
         await educationRecord.save();
         const completeEmployee = await getCompleteEmployee(employeeId);
+
+        scheduleEmployeeProfileFileChangeHrEmailForRequest({
+            employeeId,
+            sectionKey: "education",
+            sectionLabel: "Education",
+            action: "deleted",
+            attachments: educationSnapshot?.certificate,
+            actor: req.user,
+        });
 
         return res.status(200).json({
             message: "Education record deleted successfully",

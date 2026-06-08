@@ -95,7 +95,6 @@ export const sendProfileActivationHoldEmail = async (params) => {
         const introOther = `<p>${hrName} reviewed your submitted activation for <strong>${profileName}</strong> (Employee ID: <strong>${employee.employeeId || "—"}</strong>) and placed it <strong>on hold</strong>. The profile is <strong>not activated</strong> until the listed items are addressed and activation is sent again.</p>`;
 
         const mailOpts = {
-            from: `"VeRP Portal" <${emailUser}>`,
             to: toEmail,
             subject: `${profileName}: profile activation — items to update (held by HR)`,
             html: `

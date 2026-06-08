@@ -45,8 +45,9 @@ import {
     labelsRequiredForActivationHoldEntry,
 } from "../../utils/markCompanyActivationHoldResolved.js";
 import {
-    collectCompanyInformativeHrNotifyLabels,
+    collectCompanyProfileFileChangeEvents,
     notifyHrOfCompanyInformativeCardUpdates,
+    scheduleCompanyProfileFileChangeHrEmail,
 } from "../../utils/companyInformativeHrNotify.js";
 import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
 import { isRequestUserDesignatedFlowchartHr } from "../../utils/isDesignatedFlowchartHr.js";
@@ -1103,14 +1104,15 @@ export const updateCompany = async (req, res) => {
         let informativeHrNotified = false;
         if (!queueForApproval) {
             try {
-                const informativeLabels = collectCompanyInformativeHrNotifyLabels(
+                const changeEvents = await collectCompanyProfileFileChangeEvents(
                     beforeCompany,
                     updateData,
+                    { companyId: mergedForResponse._id, isRenewal: Boolean(updateData?.isRenewalModal) },
                 );
-                if (informativeLabels.length > 0) {
+                if (changeEvents.length > 0) {
                     const notifyResult = await notifyHrOfCompanyInformativeCardUpdates({
                         company: mergedForResponse,
-                        changedCards: informativeLabels,
+                        changeEvents,
                         actor: req.user,
                     });
                     informativeHrNotified = notifyResult?.sent === true;

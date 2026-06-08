@@ -2,6 +2,7 @@ import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { uploadDocumentToS3 } from "../../utils/s3Upload.js";
 import mongoose from "mongoose";
 import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeService.js";
+import { scheduleEmployeeProfileFileChangeHrEmailForRequest } from "../../utils/employeeInformativeHrNotify.js";
 
 
 // @desc    Add a document to employee's documents list
@@ -93,6 +94,15 @@ export const addDocument = async (req, res) => {
             await employee.save();
         
         const completeEmployee = await getCompleteEmployee(employee.employeeId);
+
+        scheduleEmployeeProfileFileChangeHrEmailForRequest({
+            employeeId: employee.employeeId,
+            sectionKey: "documents",
+            sectionLabel: type || description || "Document",
+            action: "added",
+            attachments: documentData,
+            actor: req.user,
+        });
 
         res.status(200).json({
             message: "Document added successfully",

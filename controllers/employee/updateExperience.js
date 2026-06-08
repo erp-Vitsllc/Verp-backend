@@ -2,6 +2,7 @@ import EmployeeExperience from "../../models/EmployeeExperience.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { getCompleteEmployee, resolveEmployeeId } from "../../services/employeeService.js";
 import { uploadDocumentToS3 } from "../../utils/s3Upload.js";
+import { scheduleEmployeeProfileFileChangeHrEmailForRequest } from "../../utils/employeeInformativeHrNotify.js";
 
 
 export const updateExperience = async (req, res) => {
@@ -95,6 +96,15 @@ export const updateExperience = async (req, res) => {
             await experienceRecord.save();
         
         const completeEmployee = await getCompleteEmployee(employeeId);
+
+        scheduleEmployeeProfileFileChangeHrEmailForRequest({
+            employeeId,
+            sectionKey: "experience",
+            sectionLabel: "Experience",
+            action: "edited",
+            attachments: proposedExperience.certificate,
+            actor: req.user,
+        });
 
         return res.status(200).json({
             message: "Experience details updated successfully",
