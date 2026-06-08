@@ -18,6 +18,10 @@ import {
     purgeEmployeeOldDocuments,
 } from "../../utils/purgeEmployeeOldDocuments.js";
 import { isEmployeeProfileActivationDesignatedHr } from "../../utils/isEmployeeProfileActivationDesignatedHr.js";
+import {
+    pendingEntryIncludedInSubmittedCards,
+    resolveLatestActivationSubmissionLabels,
+} from "../../utils/companyActivation.js";
 
 export const approveProfile = async (req, res) => {
     const { id } = req.params;
@@ -77,26 +81,30 @@ export const approveProfile = async (req, res) => {
             })
             .sort((a, b) => new Date(a?.changedAt || 0) - new Date(b?.changedAt || 0));
 
-        const allApplyIds = sortedChanges.map((e) => e.__applyId);
+        const submissionLabels = resolveLatestActivationSubmissionLabels(updated.profileWorkflow || []);
+        const reviewRows =
+            submissionLabels.length > 0
+                ? sortedChanges.filter((entry) =>
+                      pendingEntryIncludedInSubmittedCards(entry, submissionLabels),
+                  )
+                : sortedChanges;
+        const reviewRowIds = reviewRows.map((entry) => entry.__applyId);
+
         /** Empty queue: HR activates profile as-is (no card rows to approve). */
-        if (hasExplicitSelection && allApplyIds.length > 0) {
+        if (hasExplicitSelection && reviewRowIds.length > 0) {
             const approvedNorm = approvedChangeIds.map(String);
-            const allApprovedPresent = allApplyIds.every((xid) => approvedNorm.includes(String(xid)));
-            const countsMatch =
-                approvedNorm.length === allApplyIds.length &&
-                [...approvedNorm].sort().join(",") === [...allApplyIds].sort().join(",");
-            if (!allApprovedPresent || !countsMatch) {
+            const missingScopeIds = reviewRowIds.filter((rowId) => !approvedNorm.includes(String(rowId)));
+            if (missingScopeIds.length > 0) {
                 return res.status(400).json({
                     message:
-                        "Activation requires approving every pending change listed, or use Hold if only some sections are acceptable.",
+                        "Activation requires approving every pending change in this submission, or send corrections back when only some sections are acceptable.",
                 });
             }
         }
 
-        const changesToApply = sortedChanges.filter((entry) => {
-            if (!hasExplicitSelection) return true;
-            return approvedChangeIds.includes(entry.__applyId);
-        });
+        const changesToApply = hasExplicitSelection
+            ? reviewRows.filter((entry) => approvedChangeIds.includes(entry.__applyId))
+            : sortedChanges;
 
         for (const change of changesToApply) {
             if (String(change?.section || "").toLowerCase() !== "documents") continue;
@@ -336,9 +344,14 @@ export const approveProfile = async (req, res) => {
             }
         }
 
+        const appliedIds = new Set(changesToApply.map((entry) => entry.__applyId));
+        updated.pendingReactivationChanges = sortedChanges
+            .filter((entry) => !appliedIds.has(entry.__applyId))
+            .map(({ __applyId, ...rest }) => rest);
+        updated.markModified("pendingReactivationChanges");
+
         updated.profileApprovalStatus = "active";
         updated.profileStatus = "active";
-        updated.pendingReactivationChanges = [];
         if (!Array.isArray(updated.profileWorkflow)) updated.profileWorkflow = [];
         updated.profileWorkflow = updated.profileWorkflow.map((step) => {
             if (String(step?.status || "").toLowerCase() === "submitted") {

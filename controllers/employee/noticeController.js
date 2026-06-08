@@ -75,8 +75,6 @@ export const requestNotice = async (req, res) => {
             });
         }
 
-        const resignationDate = new Date();
-        const exitDate = calculateExitDateFromNoticePeriod(resignationDate, noticePeriodMonths);
         const derivedDuration = formatNoticeDurationLabel(noticePeriodMonths);
 
         // Pre-fetch reportee for Snapshot Logic
@@ -96,7 +94,7 @@ export const requestNotice = async (req, res) => {
 
         employee.noticeRequest = {
             duration: derivedDuration || duration,
-            exitDate,
+            exitDate: null,
             reason,
             attachment,
             status: "Pending",
@@ -314,20 +312,19 @@ export const updateNoticeStatus = async (req, res) => {
 
         if (status === "Approved") {
             employee.status = "Notice";
-            if (!employee.noticeRequest.exitDate) {
-                const labourCardRow = await EmployeeLabourCard.findOne({ employeeId: employee.employeeId })
-                    .select("labourCard.noticePeriodMonths")
-                    .lean();
-                const noticePeriodMonths = labourCardRow?.labourCard?.noticePeriodMonths;
-                const resignationDate = employee.noticeRequest.requestedAt || new Date();
-                if (noticePeriodMonths) {
-                    employee.noticeRequest.exitDate = calculateExitDateFromNoticePeriod(
-                        resignationDate,
-                        noticePeriodMonths,
-                    );
-                    if (!employee.noticeRequest.duration) {
-                        employee.noticeRequest.duration = formatNoticeDurationLabel(noticePeriodMonths);
-                    }
+            const labourCardRow = await EmployeeLabourCard.findOne({ employeeId: employee.employeeId })
+                .select("labourCard.noticePeriodMonths")
+                .lean();
+            const noticePeriodMonths = labourCardRow?.labourCard?.noticePeriodMonths;
+            const approvalDate = new Date();
+            employee.noticeRequest.approvedAt = approvalDate;
+            if (noticePeriodMonths) {
+                employee.noticeRequest.exitDate = calculateExitDateFromNoticePeriod(
+                    approvalDate,
+                    noticePeriodMonths,
+                );
+                if (!employee.noticeRequest.duration) {
+                    employee.noticeRequest.duration = formatNoticeDurationLabel(noticePeriodMonths);
                 }
             }
         }

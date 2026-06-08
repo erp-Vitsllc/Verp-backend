@@ -881,7 +881,12 @@ export async function applyCompanyProposedActivationPatch(companyMongoId, propos
     }
     delete patch.__ownersReplaceRoster;
 
-    await archiveSupersededCompanyDocuments(before, patch);
+    const isRenewalRequest = patch?.isRenewalModal === true || patch?.isRenewal === true;
+    if (isRenewalRequest) {
+        await archiveSupersededCompanyDocuments(before, patch);
+    }
+    delete patch.isRenewalModal;
+    delete patch.isRenewal;
     const ownerArchives = archiveSupersededCompanyOwners(before, patch) || [];
 
     const { coreUpdate, partitionUpdate } = splitCompanyUpdatePayload(patch);

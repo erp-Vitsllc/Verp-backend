@@ -211,6 +211,7 @@ export const archiveCompanyDocument = async ({
 
 /**
  * Compare before/after state and archive any documents that were replaced.
+ * Call only for explicit Renew saves (`isRenewalModal` / `isRenewal`); Not Renew uses companyNotRenewController.
  */
 export const archiveSupersededCompanyDocuments = async (beforeCompany, updateData) => {
     if (!beforeCompany || !updateData) return;

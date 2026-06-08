@@ -6,6 +6,10 @@ import { sendProfileActivationHoldEmail } from "../../utils/sendProfileActivatio
 import { resolveProfileActivationSubmitterEmployee } from "../../utils/resolveProfileActivationSubmitterEmployee.js";
 import { applyApprovedPendingProfileChanges } from "../../utils/applyApprovedPendingProfileChanges.js";
 import { isEmployeeProfileActivationDesignatedHr } from "../../utils/isEmployeeProfileActivationDesignatedHr.js";
+import {
+    pendingEntryIncludedInSubmittedCards,
+    resolveLatestActivationSubmissionLabels,
+} from "../../utils/companyActivation.js";
 
 const idStrSub = (sub, idx) => String(sub._id ?? idx);
 
@@ -53,7 +57,15 @@ export const holdProfile = async (req, res) => {
             __idStr: idStrSub(sub, idx),
         }));
 
-        const allIds = entriesWithIds.map((e) => e.__idStr);
+        const submissionLabels = resolveLatestActivationSubmissionLabels(doc.profileWorkflow || []);
+        const reviewEntries =
+            submissionLabels.length > 0
+                ? entriesWithIds.filter(({ sub }) =>
+                      pendingEntryIncludedInSubmittedCards(sub, submissionLabels),
+                  )
+                : entriesWithIds;
+
+        const allIds = reviewEntries.map((e) => e.__idStr);
 
         if (!selectionProvided) {
             return res.status(400).json({
@@ -69,16 +81,16 @@ export const holdProfile = async (req, res) => {
             }
         }
 
-        if (approvedChangeIds.length >= allIds.length) {
+        if (allIds.length > 0 && approvedChangeIds.length >= allIds.length) {
             return res.status(400).json({
                 message:
-                    "All pending changes are selected as accepted — use Activate instead of Hold. Uncheck at least one row to place those items back with the employee.",
+                    "All changes in this submission are selected as accepted — use OK with every row checked to fully approve. Uncheck at least one row to send corrections back to the submitter.",
             });
         }
 
         const approved = new Set(approvedChangeIds);
-        const approvedEntries = entriesWithIds.filter((e) => approved.has(e.__idStr));
-        const unapprovedEntries = entriesWithIds.filter((e) => !approved.has(e.__idStr));
+        const approvedEntries = reviewEntries.filter((e) => approved.has(e.__idStr));
+        const unapprovedEntries = reviewEntries.filter((e) => !approved.has(e.__idStr));
 
         const unapprovedCards = [...new Set(unapprovedEntries.map((e) => String(e.sub?.card || "").trim()).filter(Boolean))];
 

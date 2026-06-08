@@ -55,7 +55,9 @@ export function isInformativeEmployeeSectionKey(sectionKey = "") {
 }
 
 export function isActiveEmployeeProfile(employeeBasic = {}) {
-    return String(employeeBasic?.profileStatus || "").toLowerCase() === "active";
+    const profileStatus = String(employeeBasic?.profileStatus || "").toLowerCase();
+    const profileApprovalStatus = String(employeeBasic?.profileApprovalStatus || "").toLowerCase();
+    return profileStatus === "active" && profileApprovalStatus === "active";
 }
 
 const OWNER_DOC_FOCUS_BY_KEY = {

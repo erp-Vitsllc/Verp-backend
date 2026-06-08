@@ -70,13 +70,14 @@ export const sendApprovalEmail = async (req, res) => {
             return res.status(404).json({ message: "Employee not found" });
         }
 
+        const pending = Array.isArray(eb.pendingReactivationChanges) ? [...eb.pendingReactivationChanges] : [];
+        let submittingThisRequest = pending;
         if (selectionProvided) {
             if (includedChangeEntryIds === null) {
                 return res.status(400).json({
                     message: "includedChangeEntryIds array is required when selectionProvided is true.",
                 });
             }
-            const pending = Array.isArray(eb.pendingReactivationChanges) ? [...eb.pendingReactivationChanges] : [];
             const allSet = new Set(pending.map((entry, idx) => pendingEntryId(entry, idx)));
             for (const wid of includedChangeEntryIds) {
                 if (!allSet.has(wid)) {
@@ -85,9 +86,14 @@ export const sendApprovalEmail = async (req, res) => {
                     });
                 }
             }
-            const keep = new Set(includedChangeEntryIds);
-            eb.pendingReactivationChanges = pending.filter((entry, idx) => keep.has(pendingEntryId(entry, idx)));
-            eb.markModified("pendingReactivationChanges");
+            if (pending.length > 0 && includedChangeEntryIds.length === 0) {
+                return res.status(400).json({
+                    message: "Select at least one requested change to submit.",
+                });
+            }
+            const keep = new Set(includedChangeEntryIds.map(String));
+            submittingThisRequest = pending.filter((entry, idx) => keep.has(pendingEntryId(entry, idx)));
+            // Keep full queue — unchecked rows stay until a later submission (matches Company).
         }
 
         const employeeName = `${employeeBasic.firstName || ""} ${employeeBasic.lastName || ""}`.trim() || "Employee";
@@ -101,9 +107,8 @@ export const sendApprovalEmail = async (req, res) => {
             : false;
         const activationTypeLabel = wasPreviouslyActive ? "Reactivation" : "New Activation";
         const typeForDisplay = wasPreviouslyActive ? "Reactivation (Resubmission)" : "New Activation";
-        const pendingCards = Array.isArray(eb.pendingReactivationChanges)
-            ? [...new Set(eb.pendingReactivationChanges.map((x) => String(x?.card || "").trim()).filter(Boolean))]
-            : [];
+        const pendingCards = [...new Set(submittingThisRequest.map((x) => String(x?.card || "").trim()).filter(Boolean))];
+        const workflowDescription = `${descriptionText || "Submitted for activation review"}${pendingCards.length ? `${descriptionText ? " | " : ""}Requested Changes: ${pendingCards.join(", ")}` : ""}`;
         const pendingCardsHtml = pendingCards.length
             ? `<p style="margin: 8px 0 0 0;"><strong>Requested Changes:</strong><br/>${pendingCards.map((c) => `- ${c}`).join("<br/>")}</p>`
             : "";
@@ -165,8 +170,8 @@ export const sendApprovalEmail = async (req, res) => {
             status: "submitted",
             assignedAt: new Date(),
             comment: `Type: ${activationTypeLabel}${reasonText ? ` | Reason: ${reasonText}` : ""}${descriptionText ? ` | Description: ${descriptionText}` : ""}${pendingCards.length ? ` | Requested Changes: ${pendingCards.join(", ")}` : ""}${attachmentText ? ` | Attachment: ${attachmentText}` : ""}`,
-            reason: reasonText,
-            description: descriptionText,
+            reason: reasonText || "Employee profile submitted for activation",
+            description: workflowDescription,
             attachment: attachmentText || "",
             attachmentName: attachmentNameText,
         });

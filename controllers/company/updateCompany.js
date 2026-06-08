@@ -298,6 +298,8 @@ export const updateCompany = async (req, res) => {
             updateData.skipArchive === true ||
             String(req.query?.skipArchive || "").toLowerCase() === "true";
         delete updateData.skipArchive;
+        const isRenewalRequest =
+            updateData.isRenewalModal === true || updateData.isRenewal === true;
 
         const requesterIsAdmin = await isReqUserAdmin(req.user);
         const requesterIsDesignatedHr = await isRequestUserDesignatedFlowchartHr(req);
@@ -940,12 +942,16 @@ export const updateCompany = async (req, res) => {
                 ? "Change queued for HR review. Submit for HR approval when you are finished editing."
                 : "Company change queued for HR activation approval.";
         } else {
-            if (!skipReactivationQueueForThisRequest) {
+            // Old Documents only on explicit Renew — not on regular card add/edit.
+            if (!skipReactivationQueueForThisRequest && isRenewalRequest) {
                 await archiveSupersededCompanyDocuments(beforeCompany, updateData);
             }
             if (!skipReactivationQueueForThisRequest) {
                 archiveSupersededCompanyOwners(beforeCompany, updateData);
             }
+
+            delete updateData.isRenewalModal;
+            delete updateData.isRenewal;
 
             const updateOps = {};
             if (Object.keys(updateData).length > 0) {
@@ -1107,7 +1113,7 @@ export const updateCompany = async (req, res) => {
                 const changeEvents = await collectCompanyProfileFileChangeEvents(
                     beforeCompany,
                     updateData,
-                    { companyId: mergedForResponse._id, isRenewal: Boolean(updateData?.isRenewalModal) },
+                    { companyId: mergedForResponse._id, isRenewal: isRenewalRequest },
                 );
                 if (changeEvents.length > 0) {
                     const notifyResult = await notifyHrOfCompanyInformativeCardUpdates({

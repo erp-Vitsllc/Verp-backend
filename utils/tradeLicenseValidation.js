@@ -93,13 +93,17 @@ export function validateNewOwnerName(value) {
 export function normalizeTradeLicenseOwners(owners = [], globalUsedIds = new Set()) {
     if (!Array.isArray(owners)) return [];
     const assigned = assignOwnerProfileIds(owners, globalUsedIds);
-    return assigned.map((owner) => {
+    const normalized = assigned.map((owner) => {
         const row = owner && typeof owner === "object" ? { ...owner } : {};
         row.name = sanitizeTradeLicenseField(row.name, "Owner Name");
         row.ownerProfileId = normalizeOwnerProfileId(row.ownerProfileId);
         if (row.sharePercentage != null) row.sharePercentage = String(row.sharePercentage).trim();
         return row;
     });
+    if (normalized.length === 1) {
+        normalized[0].sharePercentage = "100";
+    }
+    return normalized;
 }
 
 export function validateTradeLicenseOwnersPayload(owners = []) {
