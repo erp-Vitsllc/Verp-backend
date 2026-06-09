@@ -14,9 +14,21 @@ import {
     normalizeEmployeeProfileBasicDetailsPayload,
     validateEmployeeProfileBasicDetailsPayload,
 } from "../../utils/employeeProfileBasicDetailsValidation.js";
-import { validateSalaryHistoryNotEmpty } from "../../utils/employeeSalaryValidation.js";
+import {
+    validateSalaryHistoryNotEmpty,
+    oldestSalaryHistoryStillPresent,
+} from "../../utils/employeeSalaryValidation.js";
 import { validateEmployeeBankPayload } from "../../utils/employeeBankValidation.js";
 import { validateEmployeeAddressPayload } from "../../utils/employeeAddressValidation.js";
+import { denyCoreEmployeeProfileDelete } from "../../utils/employeeCardDeleteAccess.js";
+
+const isEmptyProfileValue = (value) =>
+    value === null ||
+    value === undefined ||
+    (typeof value === "string" && value.trim() === "");
+
+const isClearingProfileFields = (payload, keys) =>
+    keys.some((key) => Object.prototype.hasOwnProperty.call(payload, key) && isEmptyProfileValue(payload[key]));
 
 const PROFILE_BASIC_PATCH_KEYS = new Set([
     "firstName",
@@ -417,10 +429,16 @@ export const updateBasicDetails = async (req, res) => {
                 return res.status(400).json({ message: emptyErr });
             }
 
-            if (newSalaryHistory.length < currentSalaryHistory.length && !isAdminUser) {
-                return res.status(403).json({
-                    message: "You do not have permission to delete salary history records.",
-                });
+            if (newSalaryHistory.length < currentSalaryHistory.length) {
+                const emptyAfterDelete = validateSalaryHistoryNotEmpty(newSalaryHistory);
+                if (emptyAfterDelete) {
+                    return res.status(400).json({ message: emptyAfterDelete });
+                }
+                if (!oldestSalaryHistoryStillPresent(newSalaryHistory, currentSalaryHistory)) {
+                    return res.status(403).json({
+                        message: "The first salary record cannot be deleted.",
+                    });
+                }
             }
 
             const monthKeys = new Set();
@@ -468,6 +486,52 @@ export const updateBasicDetails = async (req, res) => {
                 return res.status(403).json({
                     message: "Only administrator can delete training records."
                 });
+            }
+        }
+
+        if (skipArchiveOnRequest) {
+            const coreDeleteChecks = [
+                {
+                    sectionKey: "personal",
+                    label: "Personal details",
+                    keys: ["dateOfBirth", "maritalStatus", "numberOfDependents", "fathersName", "gender", "nationality"],
+                },
+                {
+                    sectionKey: "permanentAddress",
+                    label: "Permanent address",
+                    keys: ["addressLine1", "addressLine2", "city", "state", "country", "postalCode"],
+                },
+                {
+                    sectionKey: "currentAddress",
+                    label: "Current address",
+                    keys: [
+                        "currentAddressLine1",
+                        "currentAddressLine2",
+                        "currentCity",
+                        "currentState",
+                        "currentCountry",
+                        "currentPostalCode",
+                    ],
+                },
+                {
+                    sectionKey: "bank",
+                    label: "Bank details",
+                    keys: [
+                        "bankName",
+                        "accountName",
+                        "accountNumber",
+                        "ibanNumber",
+                        "swiftCode",
+                        "bankOtherDetails",
+                        "bankAttachment",
+                    ],
+                },
+            ];
+
+            for (const check of coreDeleteChecks) {
+                if (!isClearingProfileFields(updatePayload, check.keys)) continue;
+                const denied = denyCoreEmployeeProfileDelete(check.sectionKey, check.label);
+                if (denied) return res.status(denied.status).json(denied.body);
             }
         }
 
@@ -551,17 +615,24 @@ export const updateBasicDetails = async (req, res) => {
                 return res.status(404).json({ message: "Employee not found" });
             }
 
+            const bankTouched = [...BANK_PREVIOUS_KEYS].some((k) =>
+                Object.prototype.hasOwnProperty.call(updatePayload, k),
+            );
+            const salaryTouched = [...SALARY_PREVIOUS_KEYS].some((k) =>
+                Object.prototype.hasOwnProperty.call(updatePayload, k),
+            );
+
+            // Salary increment/edit: keep history on Salary tab only — never in oldDocuments.
+            if (salaryTouched) {
+                await purgeEmployeeOldDocuments(employeeId, {
+                    types: PURGE_TYPES.salary,
+                    purgeDeletedArchiveReason: true,
+                });
+            }
+
             if (skipArchiveOnRequest) {
                 const purgeTypes = [];
-                const bankTouched = [...BANK_PREVIOUS_KEYS].some((k) =>
-                    Object.prototype.hasOwnProperty.call(updatePayload, k),
-                );
-                const salaryTouched = [...SALARY_PREVIOUS_KEYS].some((k) =>
-                    Object.prototype.hasOwnProperty.call(updatePayload, k),
-                );
-
                 if (bankTouched) purgeTypes.push(...PURGE_TYPES.bank);
-                if (salaryTouched) purgeTypes.push(...PURGE_TYPES.salary);
                 if (Object.prototype.hasOwnProperty.call(updatePayload, "trainingDetails")) {
                     purgeTypes.push(...PURGE_TYPES.training);
                 }

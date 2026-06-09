@@ -65,6 +65,7 @@ const router = express.Router();
 
 import { getLoanEligibleEmployees } from "../controllers/employee/getLoanEligibleEmployees.js";
 import { requestNotice, updateNoticeStatus } from "../controllers/employee/noticeController.js";
+import { getLeftUserEligibility, markEmployeeLeftUser } from "../controllers/employee/leftUserController.js";
 import { requestLoan } from "../controllers/employee/requestLoan.js";
 import { getLoans } from "../controllers/employee/getLoans.js";
 import { getLoanById } from "../controllers/employee/getLoanById.js";
@@ -259,6 +260,10 @@ router.post("/:id/request-notice", checkPermission('hrm_employees_view_work', 'e
 
 // Update Notice Status (Approve/Reject) - requires work details edit permission
 router.patch("/:id/update-notice-status", checkPermission('hrm_employees_view_work', 'edit'), updateNoticeStatus);
+
+// Left User eligibility and mark-as-left — work details edit permission
+router.get("/:id/left-user-eligibility", checkPermission('hrm_employees_view_work', 'edit'), getLeftUserEligibility);
+router.post("/:id/mark-left-user", checkPermission('hrm_employees_view_work', 'edit'), markEmployeeLeftUser);
 
 // Probation change workflow
 router.post("/:id/probation/request", checkPermission('hrm_employees_view_work', 'edit'), requestProbationChange);

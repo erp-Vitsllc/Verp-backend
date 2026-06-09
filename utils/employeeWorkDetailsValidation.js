@@ -5,7 +5,14 @@ import Company from "../models/Company.js";
 import Department from "../models/Department.js";
 import Designation from "../models/Designation.js";
 
-export const WORK_STATUS_VALUES = ["Probation", "Permanent", "Temporary", "Notice"];
+export const WORK_STATUS_VALUES = ["Probation", "Permanent", "Temporary", "Notice", "Left User"];
+
+export const WORK_STATUS_DIRECT_EDIT_BLOCKED = [
+    "Notice",
+    "Left User",
+    "Termination",
+    "Resignation",
+];
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const MAX_EMAIL_LENGTH = 100;
 

@@ -24,7 +24,7 @@ export const deleteEmergencyContact = async (req, res) => {
         const employeeBasic = await EmployeeBasic.findOne({ employeeId })
             .select("profileStatus profileWorkflow profileApprovalStatus company")
             .lean();
-        const denied = await denyEmployeeCardDeleteUnlessAllowed(req, employeeBasic, "emergency contacts");
+        const denied = await denyEmployeeCardDeleteUnlessAllowed(req, employeeBasic, "emergency contacts", "emergencyContact");
         if (denied) return res.status(denied.status).json(denied.body);
 
         const skipLive = shouldSkipLiveEmployeeSection(employeeBasic, "emergencyContact", req.user);

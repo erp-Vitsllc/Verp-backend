@@ -27,7 +27,7 @@ const employeeSchema = new mongoose.Schema(
         designation: { type: String, default: '' },
         status: {
             type: String,
-            enum: ["Probation", "Permanent", "Temporary", "Notice"],
+            enum: ["Probation", "Permanent", "Temporary", "Notice", "Left User"],
             default: "Probation",
         },
         probationPeriod: {

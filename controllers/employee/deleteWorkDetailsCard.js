@@ -18,7 +18,7 @@ export const deleteWorkDetailsCard = async (req, res) => {
                 "employeeId reportingAuthority primaryReportee secondaryReportee overtime department designation role company companyEmail contractJoiningDate dateOfJoining probationPeriod profileStatus profileApprovalStatus"
             )
             .lean();
-        const denied = await denyEmployeeCardDeleteUnlessAllowed(req, workSnapshot, "work details");
+        const denied = await denyEmployeeCardDeleteUnlessAllowed(req, workSnapshot, "work details", "workDetails");
         if (denied) return res.status(denied.status).json(denied.body);
 
         if (isActiveEmployeeProfile(workSnapshot)) await awaitAdminDeletionArchive(req, {

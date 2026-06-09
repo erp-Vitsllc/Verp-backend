@@ -5,6 +5,7 @@ import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.
 import { awaitAdminDeletionArchive } from "../../utils/adminDeletionArchiveRun.js";
 import { hasPermission } from "../../services/permissionService.js";
 import { PURGE_TYPES, purgeEmployeeOldDocuments } from "../../utils/purgeEmployeeOldDocuments.js";
+import { isOldestSalaryHistoryEntry } from "../../utils/employeeSalaryValidation.js";
 import { scheduleEmployeeProfileFileChangeHrEmailForRequest } from "../../utils/employeeInformativeHrNotify.js";
 
 const monthKeyFromDate = (value) => {
@@ -59,6 +60,12 @@ export const deleteSalaryHistoryEntry = async (req, res) => {
         if (history.length <= 1) {
             return res.status(400).json({
                 message: "At least one salary record is required and cannot be deleted.",
+            });
+        }
+
+        if (isOldestSalaryHistoryEntry(target, history)) {
+            return res.status(403).json({
+                message: "The first salary record cannot be deleted.",
             });
         }
 

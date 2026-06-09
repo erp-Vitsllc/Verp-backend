@@ -94,3 +94,39 @@ export function validateSalaryHistoryNotEmpty(salaryHistory) {
     }
     return null;
 }
+
+export function salaryHistoryEntriesMatch(a, b) {
+    if (!a || !b) return false;
+    if (a._id && b._id) return String(a._id) === String(b._id);
+    const keyA = monthKeyFromDate(a.fromDate);
+    const keyB = monthKeyFromDate(b.fromDate);
+    if (keyA && keyB && keyA === keyB) return true;
+    return false;
+}
+
+/** Earliest salary row (initial joining salary) — must always remain on the profile. */
+export function resolveOldestSalaryHistoryEntry(salaryHistory = []) {
+    const list = Array.isArray(salaryHistory) ? salaryHistory.filter(Boolean) : [];
+    if (!list.length) return null;
+    return [...list].sort((a, b) => {
+        const ta = parseDate(a?.fromDate)?.getTime() ?? Number.POSITIVE_INFINITY;
+        const tb = parseDate(b?.fromDate)?.getTime() ?? Number.POSITIVE_INFINITY;
+        if (ta !== tb) return ta - tb;
+        const ca = parseDate(a?.createdAt)?.getTime() ?? 0;
+        const cb = parseDate(b?.createdAt)?.getTime() ?? 0;
+        return ca - cb;
+    })[0];
+}
+
+export function isOldestSalaryHistoryEntry(entry, salaryHistory = []) {
+    const oldest = resolveOldestSalaryHistoryEntry(salaryHistory);
+    if (!entry || !oldest) return false;
+    return salaryHistoryEntriesMatch(entry, oldest);
+}
+
+export function oldestSalaryHistoryStillPresent(nextHistory = [], previousHistory = []) {
+    const oldest = resolveOldestSalaryHistoryEntry(previousHistory);
+    if (!oldest) return true;
+    const next = Array.isArray(nextHistory) ? nextHistory : [];
+    return next.some((entry) => salaryHistoryEntriesMatch(entry, oldest));
+}

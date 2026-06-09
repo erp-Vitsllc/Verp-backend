@@ -16,7 +16,7 @@ const employeeBasicSchema = new mongoose.Schema(
         company: { type: mongoose.Schema.Types.ObjectId, ref: "Company", default: null },
         status: {
             type: String,
-            enum: ["Probation", "Permanent", "Temporary", "Notice"],
+            enum: ["Probation", "Permanent", "Temporary", "Notice", "Left User"],
             default: "Probation",
         },
         probationPeriod: {
@@ -205,7 +205,7 @@ const employeeBasicSchema = new mongoose.Schema(
         noticeRequest: {
             duration: { type: String }, // "1 Month", "2 Months", "3 Months"
             exitDate: { type: Date },
-            reason: { type: String, enum: ["Termination", "Resignation"] },
+            reason: { type: String, enum: ["Termination", "Resignation", "Notice Period"] },
             attachment: {
                 url: { type: String },
                 name: { type: String },

@@ -16,6 +16,7 @@ import { archiveQueuedEmployeeSectionPreviousIfNeeded } from "../../utils/archiv
 import {
     documentStorageFingerprint,
     purgeEmployeeOldDocuments,
+    PURGE_TYPES,
 } from "../../utils/purgeEmployeeOldDocuments.js";
 import { isEmployeeProfileActivationDesignatedHr } from "../../utils/isEmployeeProfileActivationDesignatedHr.js";
 import {
@@ -261,6 +262,17 @@ export const approveProfile = async (req, res) => {
             }
             if (section === "basicdetails" || section === "workdetails") {
                 await saveEmployeeData(employeeId, proposedData);
+                if (
+                    section === "basicdetails" &&
+                    (Object.prototype.hasOwnProperty.call(proposedData, "salaryHistory") ||
+                        Object.prototype.hasOwnProperty.call(proposedData, "basic") ||
+                        Object.prototype.hasOwnProperty.call(proposedData, "offerLetter"))
+                ) {
+                    await purgeEmployeeOldDocuments(employeeId, {
+                        types: PURGE_TYPES.salary,
+                        purgeDeletedArchiveReason: true,
+                    });
+                }
                 if (section === "workdetails" && Object.prototype.hasOwnProperty.call(proposedData, "companyEmail")) {
                     await User.findOneAndUpdate(
                         { employeeId },

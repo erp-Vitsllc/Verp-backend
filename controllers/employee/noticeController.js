@@ -75,6 +75,21 @@ export const requestNotice = async (req, res) => {
             });
         }
 
+        const disabledNoticeReasons = ["Termination", "Resignation"];
+        const allowedNoticeReasons = ["Notice Period"];
+        if (!reason || !allowedNoticeReasons.includes(reason)) {
+            if (disabledNoticeReasons.includes(reason)) {
+                return res.status(400).json({
+                    message: "Termination and Resignation notice reasons are currently disabled.",
+                });
+            }
+            return res.status(400).json({ message: "Invalid notice reason." });
+        }
+
+        if (employee.status === "Left User") {
+            return res.status(400).json({ message: "Notice requests are not allowed for Left User employees." });
+        }
+
         const derivedDuration = formatNoticeDurationLabel(noticePeriodMonths);
 
         // Pre-fetch reportee for Snapshot Logic

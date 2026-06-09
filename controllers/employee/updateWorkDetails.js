@@ -4,7 +4,10 @@ import { getCompleteEmployee } from "../../services/employeeService.js";
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
 import { skipLiveProfileWritesPendingHr, queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
 import { markProfileActivationHoldResolvedForSection } from "../../utils/markProfileActivationHoldResolved.js";
-import { validateEmployeeWorkDetailsPayload } from "../../utils/employeeWorkDetailsValidation.js";
+import {
+    validateEmployeeWorkDetailsPayload,
+    WORK_STATUS_DIRECT_EDIT_BLOCKED,
+} from "../../utils/employeeWorkDetailsValidation.js";
 import { resolveEmployeeProfileStatusWrite } from "../../utils/employeeProfileStatusLock.js";
 
 export const updateWorkDetails = async (req, res) => {
@@ -57,6 +60,26 @@ export const updateWorkDetails = async (req, res) => {
         }
 
         const employeeId = employee.employeeId;
+
+        if (updatePayload.status !== undefined) {
+            const currentStatus = employee.status;
+            const nextStatus = updatePayload.status;
+
+            if (WORK_STATUS_DIRECT_EDIT_BLOCKED.includes(nextStatus)) {
+                return res.status(400).json({
+                    message: `Work status "${nextStatus}" cannot be set from work details. Use the dedicated workflow.`,
+                });
+            }
+
+            if (
+                ["Notice", "Left User"].includes(currentStatus) &&
+                nextStatus !== currentStatus
+            ) {
+                return res.status(400).json({
+                    message: "Work status cannot be changed from work details while the employee is on notice or marked as Left User.",
+                });
+            }
+        }
 
         if (updatePayload.profileStatus !== undefined) {
             updatePayload.profileStatus = resolveEmployeeProfileStatusWrite(

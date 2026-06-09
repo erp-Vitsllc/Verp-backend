@@ -15,6 +15,7 @@ import { archiveQueuedEmployeeSectionPreviousIfNeeded } from "./archiveEmployeeD
 import {
     documentStorageFingerprint,
     purgeEmployeeOldDocuments,
+    PURGE_TYPES,
 } from "./purgeEmployeeOldDocuments.js";
 
 /**
@@ -192,6 +193,17 @@ export async function applyApprovedPendingProfileChanges(employeeId, basicDoc, c
         }
         if (section === "basicdetails" || section === "workdetails") {
             await saveEmployeeData(employeeId, proposedData);
+            if (
+                section === "basicdetails" &&
+                (Object.prototype.hasOwnProperty.call(proposedData, "salaryHistory") ||
+                    Object.prototype.hasOwnProperty.call(proposedData, "basic") ||
+                    Object.prototype.hasOwnProperty.call(proposedData, "offerLetter"))
+            ) {
+                await purgeEmployeeOldDocuments(employeeId, {
+                    types: PURGE_TYPES.salary,
+                    purgeDeletedArchiveReason: true,
+                });
+            }
             if (section === "workdetails" && Object.prototype.hasOwnProperty.call(proposedData, "companyEmail")) {
                 await User.findOneAndUpdate(
                     { employeeId },
