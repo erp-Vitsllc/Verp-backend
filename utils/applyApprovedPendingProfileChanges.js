@@ -11,7 +11,7 @@ import EmployeeEmergencyContact from "../models/EmployeeEmergencyContact.js";
 import EmployeeBasic from "../models/EmployeeBasic.js";
 import User from "../models/User.js";
 import { saveEmployeeData } from "../services/employeeService.js";
-import { archiveQueuedPassportOrVisaPreviousIfNeeded } from "./archiveEmployeeDocument.js";
+import { archiveQueuedEmployeeSectionPreviousIfNeeded } from "./archiveEmployeeDocument.js";
 import {
     documentStorageFingerprint,
     purgeEmployeeOldDocuments,
@@ -45,14 +45,16 @@ export async function applyApprovedPendingProfileChanges(employeeId, basicDoc, c
 
         if (changeType === "update" && targetIndex !== null && change?.proposedData) {
             if (updated.documents[targetIndex]) {
-                updated.oldDocuments = Array.isArray(updated.oldDocuments) ? updated.oldDocuments : [];
-                const currentDoc = updated.documents[targetIndex];
-                updated.oldDocuments.push({
-                    ...currentDoc.toObject(),
-                    archivedAt: new Date(),
-                    archiveReason: "Replaced",
-                    createdAt: currentDoc.createdAt || null,
-                });
+                if (change?.isRenewal === true) {
+                    updated.oldDocuments = Array.isArray(updated.oldDocuments) ? updated.oldDocuments : [];
+                    const currentDoc = updated.documents[targetIndex];
+                    updated.oldDocuments.push({
+                        ...currentDoc.toObject(),
+                        archivedAt: new Date(),
+                        archiveReason: "Replaced",
+                        createdAt: currentDoc.createdAt || null,
+                    });
+                }
                 updated.documents[targetIndex] = change.proposedData;
             }
             continue;
@@ -98,6 +100,13 @@ export async function applyApprovedPendingProfileChanges(employeeId, basicDoc, c
         if (!proposedData) continue;
 
         if (section === "medicalinsurance") {
+            await archiveQueuedEmployeeSectionPreviousIfNeeded({
+                employeeId,
+                section,
+                previousData: change.previousData,
+                proposedData,
+                isRenewal: change?.isRenewal === true,
+            });
             await EmployeeMedicalInsurance.findOneAndUpdate(
                 { employeeId },
                 { $set: { medicalInsurance: proposedData } },
@@ -106,6 +115,13 @@ export async function applyApprovedPendingProfileChanges(employeeId, basicDoc, c
             continue;
         }
         if (section === "drivinglicense") {
+            await archiveQueuedEmployeeSectionPreviousIfNeeded({
+                employeeId,
+                section,
+                previousData: change.previousData,
+                proposedData,
+                isRenewal: change?.isRenewal === true,
+            });
             await EmployeeDrivingLicense.findOneAndUpdate(
                 { employeeId },
                 { $set: { drivingLicenceDetails: proposedData } },
@@ -114,6 +130,13 @@ export async function applyApprovedPendingProfileChanges(employeeId, basicDoc, c
             continue;
         }
         if (section === "emiratesid") {
+            await archiveQueuedEmployeeSectionPreviousIfNeeded({
+                employeeId,
+                section,
+                previousData: change.previousData,
+                proposedData,
+                isRenewal: change?.isRenewal === true,
+            });
             await EmployeeEmiratesId.findOneAndUpdate(
                 { employeeId },
                 { $set: { emiratesId: proposedData } },
@@ -122,6 +145,13 @@ export async function applyApprovedPendingProfileChanges(employeeId, basicDoc, c
             continue;
         }
         if (section === "labourcard") {
+            await archiveQueuedEmployeeSectionPreviousIfNeeded({
+                employeeId,
+                section,
+                previousData: change.previousData,
+                proposedData,
+                isRenewal: change?.isRenewal === true,
+            });
             await EmployeeLabourCard.findOneAndUpdate(
                 { employeeId },
                 { $set: { labourCard: proposedData } },
@@ -130,11 +160,12 @@ export async function applyApprovedPendingProfileChanges(employeeId, basicDoc, c
             continue;
         }
         if (section === "passport") {
-            await archiveQueuedPassportOrVisaPreviousIfNeeded({
+            await archiveQueuedEmployeeSectionPreviousIfNeeded({
                 employeeId,
                 section,
                 previousData: change.previousData,
                 proposedData,
+                isRenewal: change?.isRenewal === true,
             });
             await EmployeePassport.findOneAndUpdate({ employeeId }, proposedData, { upsert: true, new: true });
             continue;
@@ -142,11 +173,12 @@ export async function applyApprovedPendingProfileChanges(employeeId, basicDoc, c
         if (section === "visa") {
             const visaType = String(proposedData?.visaType || "").trim();
             if (visaType) {
-                await archiveQueuedPassportOrVisaPreviousIfNeeded({
+                await archiveQueuedEmployeeSectionPreviousIfNeeded({
                     employeeId,
                     section,
                     previousData: change.previousData,
                     proposedData,
+                    isRenewal: change?.isRenewal === true,
                 });
                 const visaPayload = { ...proposedData };
                 delete visaPayload.visaType;

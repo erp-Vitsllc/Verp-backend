@@ -2,7 +2,7 @@ import EmployeeVisa from "../../models/EmployeeVisa.js";
 import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeService.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { uploadDocumentToS3, deleteDocumentFromS3 } from "../../utils/s3Upload.js";
-import { archiveEmployeeDocument } from "../../utils/archiveEmployeeDocument.js";
+import { archiveAndClearLiveEmployeeRenewal } from "../../utils/employeeDocumentRenewal.js";
 import { markProfileActivationHoldResolvedForSection } from "../../utils/markProfileActivationHoldResolved.js";
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
 import { shouldSkipLiveEmployeeSection, queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
@@ -98,19 +98,25 @@ export const updateVisaDetails = async (req, res) => {
         }
 
         const previousVisaEntry = existingVisa?.[visaType];
+        const isRenewal = req.body?.isRenewal === true;
         const hasExistingDocument = Boolean(previousVisaEntry?.document?.url || previousVisaEntry?.document?.data);
         const hasNewDocumentUpload = Boolean(visaCopy && typeof visaCopy === "string" && visaCopy.trim() !== "");
-        const shouldArchivePrevious = !skipLive && hasExistingDocument && hasNewDocumentUpload;
-        if (shouldArchivePrevious) {
-            await archiveEmployeeDocument({
-                employeeId,
+        const shouldArchivePrevious = await archiveAndClearLiveEmployeeRenewal({
+            employeeId,
+            skipLive,
+            isRenewal,
+            hasExistingDocument,
+            hasNewDocumentUpload,
+            section: "visa",
+            visaType,
+            archiveParams: {
                 type: `${visaType.charAt(0).toUpperCase() + visaType.slice(1)} Visa`,
                 description: previousVisaEntry?.number ? `Visa No: ${previousVisaEntry.number}` : "",
                 issueDate: previousVisaEntry?.issueDate || null,
                 expiryDate: previousVisaEntry?.expiryDate || null,
-                document: previousVisaEntry.document,
-            });
-        }
+                document: previousVisaEntry?.document,
+            },
+        });
 
         let documentData = undefined;
         if (visaCopy && typeof visaCopy === "string" && visaCopy.trim() !== "") {
@@ -191,6 +197,7 @@ export const updateVisaDetails = async (req, res) => {
             section: "visa",
             changeType: "update",
             targetIndex: null,
+            isRenewal,
             previousData: previousVisaEntry
                 ? { visaType, ...previousVisaEntry.toObject?.() || previousVisaEntry }
                 : null,

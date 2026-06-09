@@ -15,7 +15,7 @@ import EmployeeExperience from "../models/EmployeeExperience.js";
 import EmployeeEmergencyContact from "../models/EmployeeEmergencyContact.js";
 import EmployeeTraining from "../models/EmployeeTraining.js";
 import User from "../models/User.js";
-import { getSignedFileUrl, normalizeS3Key } from "../utils/s3Upload.js";
+import { getSignedFileUrl, normalizeS3Key, isPresignedUrlStillFresh } from "../utils/s3Upload.js";
 import { getS3BucketName, looksLikeObjectStorageUrl } from "../config/storageConfig.js";
 import { checkAndUpdateProbationStatus } from "../utils/employeeStatusHelper.js";
 
@@ -90,102 +90,53 @@ export const getCompleteEmployee = async (id) => {
         employeeBasic = await checkAndUpdateProbationStatus(employeeBasic);
 
         const employeeId = employeeBasic.employeeId;
-        
-        // Log the employeeId we're using for salary query
-        console.log(`[getCompleteEmployee] ====== STARTING SALARY QUERY ======`);
-        console.log(`[getCompleteEmployee] EmployeeBasic found with employeeId: "${employeeId}" (type: ${typeof employeeId}, length: ${employeeId?.length})`);
 
-        // SIMPLIFIED SALARY QUERY - Run it directly and handle results properly
         const selectFields = '-__v -offerLetter.data -salaryHistory.attachment.data -salaryHistory.offerLetter.data';
         let salary = null;
-        
+
         try {
-            console.log(`[getCompleteEmployee] 🔍 Querying EmployeeSalary for: "${employeeId}"`);
-            
-            // Strategy 1: EXACT MATCH (should work for "VEGA -HR- 00003")
-            salary = await EmployeeSalary.findOne({ employeeId: employeeId }, null, queryOptions)
+            salary = await EmployeeSalary.findOne({ employeeId }, null, queryOptions)
                 .select(selectFields).lean();
-            
-            if (salary) {
-                console.log(`[getCompleteEmployee] ✅ SUCCESS - Salary found via EXACT MATCH for "${employeeId}"`);
-                console.log(`[getCompleteEmployee] Salary data: basic=${salary.basic}, monthlySalary=${salary.monthlySalary}, historyCount=${salary.salaryHistory?.length || 0}`);
-            } else {
-                console.log(`[getCompleteEmployee] Strategy 1 (exact) failed for "${employeeId}"`);
-                
-                // Strategy 2: Try normalized (trim + single space)
+
+            if (!salary) {
                 const normalizedId = employeeId.trim().replace(/\s+/g, ' ');
                 if (normalizedId !== employeeId) {
-                    console.log(`[getCompleteEmployee] Trying Strategy 2 (normalized): "${normalizedId}"`);
                     salary = await EmployeeSalary.findOne({ employeeId: normalizedId }, null, queryOptions)
                         .select(selectFields).lean();
-                    if (salary) {
-                        console.log(`[getCompleteEmployee] ✅ SUCCESS - Salary found via Strategy 2 (normalized) for "${employeeId}"`);
-                    }
-                }
-                
-                // Strategy 3: Case-insensitive
-                if (!salary) {
-                    console.log(`[getCompleteEmployee] Trying Strategy 3 (case-insensitive)`);
-                    const escapedId = employeeId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-                    salary = await EmployeeSalary.findOne(
-                        { employeeId: { $regex: new RegExp(`^${escapedId}$`, 'i') } }, 
-                        null, 
-                        queryOptions
-                    ).select(selectFields).lean();
-                    if (salary) {
-                        console.log(`[getCompleteEmployee] ✅ SUCCESS - Salary found via Strategy 3 (case-insensitive) for "${employeeId}"`);
-                    }
-                }
-                
-                // Strategy 4: Flexible spaces regex
-                if (!salary) {
-                    console.log(`[getCompleteEmployee] Trying Strategy 4 (flexible spaces)`);
-                    const escapedId = employeeId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-                    const flexibleRegex = escapedId.replace(/\s+/g, '\\s*');
-                    salary = await EmployeeSalary.findOne(
-                        { employeeId: { $regex: new RegExp(`^${flexibleRegex}$`, 'i') } }, 
-                        null, 
-                        queryOptions
-                    ).select(selectFields).lean();
-                    if (salary) {
-                        console.log(`[getCompleteEmployee] ✅ SUCCESS - Salary found via Strategy 4 (flexible spaces) for "${employeeId}"`);
-                    }
-                }
-                
-                // Strategy 5: No spaces
-                if (!salary) {
-                    const noSpacesId = employeeId.replace(/\s+/g, '');
-                    if (noSpacesId !== employeeId) {
-                        console.log(`[getCompleteEmployee] Trying Strategy 5 (no spaces): "${noSpacesId}"`);
-                        salary = await EmployeeSalary.findOne({ employeeId: noSpacesId }, null, queryOptions)
-                            .select(selectFields).lean();
-                        if (salary) {
-                            console.log(`[getCompleteEmployee] ✅ SUCCESS - Salary found via Strategy 5 (no spaces) for "${employeeId}"`);
-                        }
-                    }
                 }
             }
-            
+
             if (!salary) {
-                console.warn(`[getCompleteEmployee] ❌ NO SALARY FOUND for "${employeeId}" after all strategies`);
-                // Show sample IDs for debugging
-                try {
-                    const samples = await EmployeeSalary.find({}, 'employeeId').limit(10).lean();
-                    if (samples.length > 0) {
-                        console.warn(`[getCompleteEmployee] Sample EmployeeSalary IDs:`, samples.map(s => `"${s.employeeId}"`).join(', '));
-                    }
-                } catch (e) {}
+                const escapedId = employeeId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                salary = await EmployeeSalary.findOne(
+                    { employeeId: { $regex: new RegExp(`^${escapedId}$`, 'i') } },
+                    null,
+                    queryOptions,
+                ).select(selectFields).lean();
             }
-            
+
+            if (!salary) {
+                const escapedId = employeeId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                const flexibleRegex = escapedId.replace(/\s+/g, '\\s*');
+                salary = await EmployeeSalary.findOne(
+                    { employeeId: { $regex: new RegExp(`^${flexibleRegex}$`, 'i') } },
+                    null,
+                    queryOptions,
+                ).select(selectFields).lean();
+            }
+
+            if (!salary) {
+                const noSpacesId = employeeId.replace(/\s+/g, '');
+                if (noSpacesId !== employeeId) {
+                    salary = await EmployeeSalary.findOne({ employeeId: noSpacesId }, null, queryOptions)
+                        .select(selectFields).lean();
+                }
+            }
         } catch (error) {
-            console.error(`[getCompleteEmployee] ❌ SALARY QUERY EXCEPTION for "${employeeId}":`, error.message);
-            console.error(`[getCompleteEmployee] Error:`, error);
+            console.error(`[getCompleteEmployee] Salary query failed for "${employeeId}":`, error.message);
             salary = null;
         }
-        
-        console.log(`[getCompleteEmployee] ====== SALARY QUERY COMPLETE ======`);
-        
-        // Wrap salary result for Promise.allSettled compatibility
+
         const salaryQueryPromise = Promise.resolve({ status: 'fulfilled', value: salary });
         
         const [
@@ -236,14 +187,7 @@ export const getCompleteEmployee = async (id) => {
         if (!salary && salaryResult.status === 'fulfilled') {
             salary = salaryResult.value;
         }
-        
-        // Log final salary status
-        if (salary) {
-            console.log(`[getCompleteEmployee] ✅ FINAL: Salary data WILL BE INCLUDED in response for "${employeeId}"`);
-            console.log(`[getCompleteEmployee] Salary fields: basic=${salary.basic}, monthlySalary=${salary.monthlySalary}, totalSalary=${salary.totalSalary}`);
-        } else {
-            console.warn(`[getCompleteEmployee] ⚠ FINAL: Salary data WILL NOT BE INCLUDED in response for "${employeeId}"`);
-        }
+
         const bank = bankResult.status === 'fulfilled' ? bankResult.value : null;
         const education = educationResult.status === 'fulfilled' ? educationResult.value : null;
         const experience = experienceResult.status === 'fulfilled' ? experienceResult.value : null;
@@ -658,31 +602,23 @@ export const getCompleteEmployee = async (id) => {
         // --- POST-PROCESSING: Signed URL Generation ---
         const signUrl = async (obj, context = 'unknown') => {
             if (!obj || !obj.url) return;
+            if (isPresignedUrlStillFresh(obj.url)) return;
 
             let keyToSign = obj?.publicId;
 
-            // Fallback: If no publicId, try to extract key from URL (handles both signed and unsigned URLs)
             if (!keyToSign && obj?.url && typeof obj.url === 'string') {
                 try {
-                    // Check if it's an S3/iDrive URL
                     if (looksLikeObjectStorageUrl(obj.url) || obj.url.includes('.s3.')) {
                         const urlObj = new URL(obj.url);
                         let path = urlObj.pathname;
-                        
                         if (path.startsWith('/')) path = path.substring(1);
-                        
+
                         const bucketName = getS3BucketName() || 'verp-storage';
-                        
-                        // Check if path starts with bucket name (Path Style: s3...com/bucket/key)
                         const bucketPrefix = `${bucketName}/`;
                         if (path.startsWith(bucketPrefix)) {
                             path = path.substring(bucketPrefix.length);
                         }
-                        
-                        // For Virtual Hosted Style, the bucket is in the hostname, not path
-                        // So path should already be the key
-                        
-                        // Decode URI component - handle double encoding (e.g., %2520 -> %20 -> space)
+
                         let decodedPath = path;
                         try {
                             decodedPath = decodeURIComponent(decodeURIComponent(path));
@@ -690,74 +626,48 @@ export const getCompleteEmployee = async (id) => {
                             try {
                                 decodedPath = decodeURIComponent(path);
                             } catch {
-                                decodedPath = path; // If decoding fails, use as-is
+                                decodedPath = path;
                             }
                         }
-                        
                         keyToSign = decodedPath;
-                        
-                        console.log(`[getCompleteEmployee] Extracted key for ${context}: "${keyToSign}"`);
-                        console.log(`[getCompleteEmployee]   Original path: "${path}"`);
-                        console.log(`[getCompleteEmployee]   From URL: ${obj.url.substring(0, 150)}...`);
-                    } else {
-                        console.warn(`[getCompleteEmployee] ⚠ URL for ${context} is not an object-storage URL: ${obj.url?.substring(0, 100)}...`);
                     }
                 } catch (err) {
-                    console.error(`[getCompleteEmployee] ❌ Error parsing URL for ${context}:`, err.message);
-                    console.error(`[getCompleteEmployee]   URL was:`, obj.url);
-                    console.error(`[getCompleteEmployee]   Error stack:`, err.stack);
+                    console.error(`[getCompleteEmployee] URL parse failed for ${context}:`, err.message);
                 }
             }
 
-            if (keyToSign) {
+            if (!keyToSign) return;
+
+            try {
                 try {
-                    // Sanitize Key - handle double encoding
-                    try {
-                        keyToSign = decodeURIComponent(decodeURIComponent(keyToSign));
-                    } catch {
-                        keyToSign = decodeURIComponent(keyToSign);
-                    }
-
-                    // Remove leading slash
-                    if (keyToSign.startsWith('/')) keyToSign = keyToSign.substring(1);
-
-                    // Remove bucket name prefix if present
-                    const bucketName = getS3BucketName() || 'verp-storage';
-                    if (keyToSign.startsWith(`${bucketName}/`)) {
-                        keyToSign = keyToSign.substring(bucketName.length + 1);
-                    }
-
-                    // Specific fix for malformed keys containing bucket name in middle
-                    if (keyToSign.includes(bucketName)) {
-                        const match = keyToSign.match(/^(employee-documents\/.*?)(?:verp-storage|$)/);
-                        if (match && match[1]) {
-                            keyToSign = match[1];
-                        } else {
-                            keyToSign = keyToSign.replace(bucketName, '').replace('//', '/');
-                        }
-                    }
-
-                    console.log(`[getCompleteEmployee] Signing URL for ${context} with key: "${keyToSign}"`);
-                    const signedUrl = await getSignedFileUrl(keyToSign);
-                    if (signedUrl) {
-                        const oldUrl = obj.url;
-                        obj.url = signedUrl;
-                        console.log(`[getCompleteEmployee] ✓ Successfully signed URL for ${context}`);
-                        console.log(`[getCompleteEmployee]   Old URL: ${oldUrl?.substring(0, 100)}...`);
-                        console.log(`[getCompleteEmployee]   New URL: ${signedUrl?.substring(0, 100)}...`);
-                    } else {
-                        console.warn(`[getCompleteEmployee] ⚠ Failed to sign URL for ${context} - getSignedFileUrl returned null/undefined`);
-                        console.warn(`[getCompleteEmployee]   Key was: "${keyToSign}"`);
-                        console.warn(`[getCompleteEmployee]   Original URL: ${obj.url}`);
-                    }
-                } catch (e) {
-                    console.error(`[getCompleteEmployee] ❌ Exception signing URL for ${context}:`, e.message);
-                    console.error(`[getCompleteEmployee]   Key was: "${keyToSign}"`);
-                    console.error(`[getCompleteEmployee]   Error:`, e);
+                    keyToSign = decodeURIComponent(decodeURIComponent(keyToSign));
+                } catch {
+                    keyToSign = decodeURIComponent(keyToSign);
                 }
-            } else {
-                console.warn(`[getCompleteEmployee] ⚠ No key found to sign for ${context}`);
-                console.warn(`[getCompleteEmployee]   Object:`, { url: obj.url, publicId: obj.publicId, name: obj.name });
+
+                if (keyToSign.startsWith('/')) keyToSign = keyToSign.substring(1);
+
+                const bucketName = getS3BucketName() || 'verp-storage';
+                if (keyToSign.startsWith(`${bucketName}/`)) {
+                    keyToSign = keyToSign.substring(bucketName.length + 1);
+                }
+
+                if (keyToSign.includes(bucketName)) {
+                    const match = keyToSign.match(/^(employee-documents\/.*?)(?:verp-storage|$)/);
+                    if (match && match[1]) {
+                        keyToSign = match[1];
+                    } else {
+                        keyToSign = keyToSign.replace(bucketName, '').replace('//', '/');
+                    }
+                }
+
+                const signedUrl = await getSignedFileUrl(keyToSign);
+                if (signedUrl) {
+                    obj.url = signedUrl;
+                    if (!obj.publicId) obj.publicId = keyToSign;
+                }
+            } catch (e) {
+                console.error(`[getCompleteEmployee] Sign failed for ${context}:`, e.message);
             }
         };
 
@@ -886,26 +796,34 @@ export const getCompleteEmployee = async (id) => {
         // Wait for all URLs to be signed
         await Promise.all(signingPromises);
 
-        // Final verification: Log if salary data is included in response
-        if (completeEmployee.basic !== undefined || completeEmployee.monthlySalary !== undefined) {
-            console.log(`[getCompleteEmployee] ✓ Salary data included in response for ${employeeId}: basic=${completeEmployee.basic}, monthlySalary=${completeEmployee.monthlySalary}, salaryHistory.length=${completeEmployee.salaryHistory?.length || 0}`);
-            
-            // Log salary attachment URLs status
-            if (completeEmployee.salaryHistory && Array.isArray(completeEmployee.salaryHistory)) {
-                completeEmployee.salaryHistory.forEach((entry, idx) => {
-                    if (entry.offerLetter?.url) {
-                        console.log(`[getCompleteEmployee] ✓ SalaryHistory[${idx}].offerLetter URL: ${entry.offerLetter.url.substring(0, 100)}...`);
+        // Sign pending profile-picture proposals so the UI can preview queued uploads.
+        if (Array.isArray(completeEmployee.pendingReactivationChanges)) {
+            await Promise.all(
+                completeEmployee.pendingReactivationChanges.map(async (change) => {
+                    if (String(change?.section || '').toLowerCase() !== 'basicdetails') return;
+                    const proposed = change?.proposedData;
+                    const raw = proposed?.profilePicture;
+                    if (!raw || typeof raw !== 'string') return;
+                    if (proposed.profilePictureDisplayUrl && isPresignedUrlStillFresh(proposed.profilePictureDisplayUrl)) {
+                        return;
                     }
-                    if (entry.attachment?.url) {
-                        console.log(`[getCompleteEmployee] ✓ SalaryHistory[${idx}].attachment URL: ${entry.attachment.url.substring(0, 100)}...`);
+                    if (raw.startsWith('http') && isPresignedUrlStillFresh(raw)) {
+                        change.proposedData = { ...proposed, profilePictureDisplayUrl: raw };
+                        return;
                     }
-                });
-            }
-            if (completeEmployee.offerLetter?.url) {
-                console.log(`[getCompleteEmployee] ✓ Main offerLetter URL: ${completeEmployee.offerLetter.url.substring(0, 100)}...`);
-            }
-        } else {
-            console.warn(`[getCompleteEmployee] ⚠ Salary data NOT included in response for ${employeeId} - salary object was:`, salary ? 'found but not spread' : 'null/undefined');
+                    try {
+                        const key = raw.startsWith('http')
+                            ? normalizeS3Key(raw)
+                            : raw.replace(/^\/+/, '');
+                        const signedUrl = await getSignedFileUrl(key);
+                        if (signedUrl) {
+                            change.proposedData = { ...proposed, profilePictureDisplayUrl: signedUrl };
+                        }
+                    } catch (_err) {
+                        /* non-fatal — live or upload response may still provide a signed URL */
+                    }
+                }),
+            );
         }
 
         return completeEmployee;
@@ -921,6 +839,24 @@ export const getCompleteEmployee = async (id) => {
         throw enhancedError;
     }
 };
+
+/** Sign only oldDocuments attachments — used after fast archive deletes (avoids full getCompleteEmployee). */
+export async function getEmployeeOldDocumentsForClient(employeeId) {
+    const row = await EmployeeBasic.findOne({ employeeId }).select("oldDocuments").lean();
+    const list = Array.isArray(row?.oldDocuments) ? row.oldDocuments : [];
+    await Promise.all(
+        list.map(async (entry) => {
+            const doc = entry?.document;
+            if (!doc?.url) return;
+            if (isPresignedUrlStillFresh(doc.url)) return;
+            const key = doc.publicId || normalizeS3Key(doc.url);
+            if (!key) return;
+            const signed = await getSignedFileUrl(key);
+            if (signed) doc.url = signed;
+        }),
+    );
+    return list;
+}
 
 /**
  * Save/update employee data across multiple collections

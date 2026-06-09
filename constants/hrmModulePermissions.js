@@ -66,7 +66,7 @@ const employeeBasicChildren = [
 /** Salary tab in profile: Reward/Fine/NCR/Loan/Advance/Asset use top-level HRM modules (hrm_*), not duplicate rows here. */
 const employeeSalaryChildren = [
     { id: 'hrm_employees_view_salary', label: 'Salary', parent: 'hrm_employees_view_salary_section', hasDownload: true },
-    { id: 'hrm_employees_view_bank', label: 'Bank Details', parent: 'hrm_employees_view_salary_section', hasDownload: false },
+    { id: 'hrm_employees_view_bank', label: 'Bank Details', parent: 'hrm_employees_view_salary_section', hasDownload: true },
     { id: 'hrm_employees_view_salary_certificate', label: 'Certificate', parent: 'hrm_employees_view_salary_section', hasDownload: true },
 ];
 

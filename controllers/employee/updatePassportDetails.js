@@ -2,7 +2,7 @@ import EmployeePassport from "../../models/EmployeePassport.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeService.js";
 import { uploadDocumentToS3, deleteDocumentFromS3 } from "../../utils/s3Upload.js";
-import { archiveEmployeeDocument } from "../../utils/archiveEmployeeDocument.js";
+import { archiveAndClearLiveEmployeeRenewal } from "../../utils/employeeDocumentRenewal.js";
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
 import { shouldSkipLiveEmployeeSection, queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
 import { markProfileActivationHoldResolvedForSection } from "../../utils/markProfileActivationHoldResolved.js";
@@ -79,19 +79,24 @@ export const updatePassportDetails = async (req, res) => {
             });
         }
 
+        const isRenewal = req.body?.isRenewal === true;
         const hasExistingDocument = Boolean(existingPassport?.document?.url || existingPassport?.document?.data);
         const hasNewDocumentUpload = Boolean(passportCopy && typeof passportCopy === "string" && passportCopy.trim() !== "");
-        const shouldArchivePrevious = !skipLive && hasExistingDocument && hasNewDocumentUpload;
-        if (shouldArchivePrevious) {
-            await archiveEmployeeDocument({
-                employeeId,
+        const shouldArchivePrevious = await archiveAndClearLiveEmployeeRenewal({
+            employeeId,
+            skipLive,
+            isRenewal,
+            hasExistingDocument,
+            hasNewDocumentUpload,
+            section: "passport",
+            archiveParams: {
                 type: "Passport",
                 description: existingPassport?.number ? `Passport No: ${existingPassport.number}` : "",
                 issueDate: existingPassport?.issueDate || null,
                 expiryDate: existingPassport?.expiryDate || null,
-                document: existingPassport.document,
-            });
-        }
+                document: existingPassport?.document,
+            },
+        });
 
         // Handle document upload to IDrive (S3) if new document provided
         let documentData = undefined;
@@ -174,6 +179,7 @@ export const updatePassportDetails = async (req, res) => {
             section: "passport",
             changeType: "update",
             targetIndex: null,
+            isRenewal,
             previousData: passportSnapshot(existingPassport),
             proposedData: passportSnapshot(passportPayload),
         };

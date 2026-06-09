@@ -8,7 +8,7 @@ import User from "../../models/User.js";
 import Company from "../../models/Company.js";
 import CompanyWorkflow from "../../models/CompanyWorkflow.js";
 import { loadCompaniesForExpiryScanByIds } from "../../services/companyPartitionService.js";
-import { collectCompanyExpiryDocuments, buildEmployeeManualDocumentExpiryLabel } from "../../utils/companyExpiryScanUtils.js";
+import { collectCompanyExpiryDocuments, buildEmployeeManualDocumentExpiryLabel, isArchivedEmployeeManualDoc } from "../../utils/companyExpiryScanUtils.js";
 import { getDaysUntil, isExpiryHrTaskDueForDoc } from "../../utils/documentExpiryReminderStages.js";
 import { calculateProfileCompletionBackend } from "../../utils/calculateProfileCompletionBackend.js";
 
@@ -106,7 +106,7 @@ const buildCompanyLiveExpiryExtra1Set = (company = {}) => {
 const buildEmployeeLiveExpiryExtra1Set = (emp = {}) => {
     const labels = [];
     (emp?.documents || []).forEach((d) => {
-        if (!d?.expiryDate || isArchivedManualDoc(d)) return;
+        if (!d?.expiryDate || isArchivedEmployeeManualDoc(d)) return;
         labels.push({
             label: buildEmployeeManualDocumentExpiryLabel(d),
             expiryDate: d.expiryDate,

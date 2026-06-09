@@ -315,6 +315,32 @@ export const uploadDocumentToS3 = async (base64Data, folder = 'employee-document
 };
 
 /**
+ * True when an S3 presigned URL is still valid for at least minRemainingSeconds.
+ * Avoids re-signing the same object on every API response.
+ */
+export function isPresignedUrlStillFresh(url, minRemainingSeconds = 3600) {
+    if (!url || typeof url !== "string" || !url.startsWith("http")) return false;
+    try {
+        const u = new URL(url);
+        const amzDate = u.searchParams.get("X-Amz-Date");
+        const amzExpires = u.searchParams.get("X-Amz-Expires");
+        if (!amzDate || !amzExpires) return false;
+        const issuedMs = Date.parse(
+            amzDate.replace(
+                /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/,
+                "$1-$2-$3T$4:$5:$6Z",
+            ),
+        );
+        const ttlSec = Number(amzExpires);
+        if (Number.isNaN(issuedMs) || !Number.isFinite(ttlSec) || ttlSec <= 0) return false;
+        const expiryMs = issuedMs + ttlSec * 1000;
+        return Date.now() + minRemainingSeconds * 1000 < expiryMs;
+    } catch {
+        return false;
+    }
+}
+
+/**
  * Generate a signed URL for a private file
  * @param {string} key - The S3 key (file path) or an existing URL
  * @param {number} expiresIn - Expiration time in seconds (default 86400 = 24 hours)

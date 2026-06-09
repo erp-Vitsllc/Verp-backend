@@ -2,7 +2,7 @@ import EmployeeDrivingLicense from "../../models/EmployeeDrivingLicense.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeService.js";
 import { uploadDocumentToS3, deleteDocumentFromS3 } from "../../utils/s3Upload.js";
-import { archiveEmployeeDocument } from "../../utils/archiveEmployeeDocument.js";
+import { archiveAndClearLiveEmployeeRenewal } from "../../utils/employeeDocumentRenewal.js";
 import { markProfileActivationHoldResolvedForSection } from "../../utils/markProfileActivationHoldResolved.js";
 import {
     normalizeEmployeeDrivingLicensePayload,
@@ -78,19 +78,24 @@ export const updateDrivingLicenseDetails = async (req, res) => {
         }
 
         const previousDrivingLicense = existingDrivingLicense?.drivingLicenceDetails;
+        const isRenewal = req.body?.isRenewal === true;
         const hasExistingDocument = Boolean(previousDrivingLicense?.document?.url || previousDrivingLicense?.document?.data);
         const hasNewDocumentUpload = Boolean(normalizedDocument);
-        const shouldArchivePrevious = hasExistingDocument && hasNewDocumentUpload;
-        if (shouldArchivePrevious) {
-            await archiveEmployeeDocument({
-                employeeId,
+        const shouldArchivePrevious = await archiveAndClearLiveEmployeeRenewal({
+            employeeId,
+            skipLive: false,
+            isRenewal,
+            hasExistingDocument,
+            hasNewDocumentUpload,
+            section: "drivinglicense",
+            archiveParams: {
                 type: "Driving License",
                 description: previousDrivingLicense?.number ? `License No: ${previousDrivingLicense.number}` : "",
                 issueDate: previousDrivingLicense?.issueDate || null,
                 expiryDate: previousDrivingLicense?.expiryDate || null,
-                document: previousDrivingLicense.document,
-            });
-        }
+                document: previousDrivingLicense?.document,
+            },
+        });
 
         let documentData = undefined;
         if (normalizedDocument) {

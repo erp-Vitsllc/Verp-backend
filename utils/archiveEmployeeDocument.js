@@ -27,7 +27,7 @@ const isDuplicateReplacedArchive = async (employeeId, type, document) => {
 
 /**
  * Archive a replaced system/manual document into EmployeeBasic.oldDocuments.
- * This keeps old versions visible in Documents > Old Documents.
+ * Only call from explicit Renew or Not Renew flows — never from edit/add/delete.
  */
 export const archiveEmployeeDocument = async ({
     employeeId,
@@ -77,49 +77,90 @@ export const archiveEmployeeDocument = async ({
 };
 
 /**
- * When HR applies a queued passport/visa change, move the superseded file to oldDocuments.
- * Live PATCH skips archiving while profile edits are queued (see updatePassportDetails / updateVisaDetails).
+ * When HR applies a queued renewal change, move the superseded file to oldDocuments.
+ * Skipped for regular edits — Old Documents is renew / not-renew only.
  */
-export const archiveQueuedPassportOrVisaPreviousIfNeeded = async ({ employeeId, section, previousData, proposedData }) => {
-    const sec = String(section || "").toLowerCase();
-    if (!employeeId || !previousData || typeof previousData !== "object") return;
-
-    const prevDoc = previousData.document;
-    const hasPrevFile = Boolean(
-        prevDoc &&
-            ((typeof prevDoc.url === "string" && prevDoc.url.trim() !== "") ||
-                (typeof prevDoc.data === "string" && prevDoc.data.trim() !== "")),
+const hasStoredDocumentFile = (document) =>
+    Boolean(
+        document &&
+            ((typeof document.url === "string" && document.url.trim() !== "") ||
+                (typeof document.data === "string" && document.data.trim() !== "")),
     );
-    if (!hasPrevFile) return;
 
+const queuedDocumentWasSuperseded = (previousData, proposedData) => {
+    const prevDoc = previousData?.document;
+    if (!hasStoredDocumentFile(prevDoc)) return false;
     const propDoc = proposedData?.document;
     const prevUrl = typeof prevDoc.url === "string" ? prevDoc.url.trim() : "";
     const propUrl = typeof propDoc?.url === "string" ? propDoc.url.trim() : "";
-    const sameUrl = prevUrl && propUrl && prevUrl === propUrl;
-    if (sameUrl) return;
+    if (prevUrl && propUrl && prevUrl === propUrl) return false;
+    return true;
+};
 
-    if (sec === "passport") {
-        await archiveEmployeeDocument({
-            employeeId,
-            type: "Passport",
-            description: previousData.number ? `Passport No: ${previousData.number}` : "",
-            issueDate: previousData.issueDate || null,
-            expiryDate: previousData.expiryDate || null,
-            document: prevDoc,
-        });
-        return;
-    }
+const SECTION_ARCHIVE_META = {
+    passport: {
+        type: "Passport",
+        description: (data) => (data?.number ? `Passport No: ${data.number}` : ""),
+    },
+    visa: {
+        type: (data, proposedData) => {
+            const visaType = String(proposedData?.visaType || "").trim();
+            if (!visaType) return "Visa";
+            return `${visaType.charAt(0).toUpperCase() + visaType.slice(1)} Visa`;
+        },
+        description: (data) => (data?.number ? `Visa No: ${data.number}` : ""),
+    },
+    emiratesid: {
+        type: "Emirates ID",
+        description: (data) => (data?.number ? `Emirates ID No: ${data.number}` : ""),
+    },
+    labourcard: {
+        type: "Labour Card",
+        description: (data) => (data?.number ? `Labour Card No: ${data.number}` : ""),
+    },
+    medicalinsurance: {
+        type: "Medical Insurance",
+        description: (data) =>
+            data?.number ? `Policy No: ${data.number}` : String(data?.provider || ""),
+    },
+    drivinglicense: {
+        type: "Driving License",
+        description: (data) => (data?.number ? `License No: ${data.number}` : ""),
+    },
+};
 
-    if (sec === "visa") {
-        const visaType = String(proposedData?.visaType || "").trim();
-        if (!visaType) return;
-        await archiveEmployeeDocument({
-            employeeId,
-            type: `${visaType.charAt(0).toUpperCase() + visaType.slice(1)} Visa`,
-            description: previousData.number ? `Visa No: ${previousData.number}` : "",
-            issueDate: previousData.issueDate || null,
-            expiryDate: previousData.expiryDate || null,
-            document: prevDoc,
-        });
-    }
+export const archiveQueuedPassportOrVisaPreviousIfNeeded = async ({
+    employeeId,
+    section,
+    previousData,
+    proposedData,
+}) => archiveQueuedEmployeeSectionPreviousIfNeeded({ employeeId, section, previousData, proposedData });
+
+export const archiveQueuedEmployeeSectionPreviousIfNeeded = async ({
+    employeeId,
+    section,
+    previousData,
+    proposedData,
+    isRenewal = false,
+}) => {
+    if (isRenewal !== true) return;
+    const sec = String(section || "").toLowerCase();
+    if (!employeeId || !previousData || typeof previousData !== "object") return;
+    if (!queuedDocumentWasSuperseded(previousData, proposedData)) return;
+
+    const meta = SECTION_ARCHIVE_META[sec];
+    if (!meta) return;
+
+    const prevDoc = previousData.document;
+    const docType = typeof meta.type === "function" ? meta.type(previousData, proposedData) : meta.type;
+    if (sec === "visa" && docType === "Visa") return;
+
+    await archiveEmployeeDocument({
+        employeeId,
+        type: docType,
+        description: meta.description(previousData),
+        issueDate: previousData.issueDate || null,
+        expiryDate: previousData.expiryDate || null,
+        document: prevDoc,
+    });
 };

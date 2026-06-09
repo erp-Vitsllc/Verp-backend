@@ -2,7 +2,7 @@ import EmployeeMedicalInsurance from "../../models/EmployeeMedicalInsurance.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeService.js";
 import { uploadDocumentToS3, deleteDocumentFromS3 } from "../../utils/s3Upload.js";
-import { archiveEmployeeDocument } from "../../utils/archiveEmployeeDocument.js";
+import { archiveAndClearLiveEmployeeRenewal } from "../../utils/employeeDocumentRenewal.js";
 import { markProfileActivationHoldResolvedForSection } from "../../utils/markProfileActivationHoldResolved.js";
 import {
     normalizeEmployeeMedicalInsurancePayload,
@@ -77,21 +77,26 @@ export const updateMedicalInsuranceDetails = async (req, res) => {
         }
 
         const previousMedicalInsurance = existingMedicalInsurance?.medicalInsurance;
+        const isRenewal = req.body?.isRenewal === true;
         const hasExistingDocument = Boolean(previousMedicalInsurance?.document?.url || previousMedicalInsurance?.document?.data);
         const hasNewDocumentUpload = Boolean(normalizedUpload);
-        const shouldArchivePrevious = hasExistingDocument && hasNewDocumentUpload;
-        if (shouldArchivePrevious) {
-            await archiveEmployeeDocument({
-                employeeId,
+        const shouldArchivePrevious = await archiveAndClearLiveEmployeeRenewal({
+            employeeId,
+            skipLive: false,
+            isRenewal,
+            hasExistingDocument,
+            hasNewDocumentUpload,
+            section: "medicalinsurance",
+            archiveParams: {
                 type: "Medical Insurance",
                 description: previousMedicalInsurance?.number
                     ? `Policy No: ${previousMedicalInsurance.number}`
                     : (previousMedicalInsurance?.provider || ""),
                 issueDate: previousMedicalInsurance?.issueDate || null,
                 expiryDate: previousMedicalInsurance?.expiryDate || null,
-                document: previousMedicalInsurance.document,
-            });
-        }
+                document: previousMedicalInsurance?.document,
+            },
+        });
 
         let documentData = undefined;
         if (normalizedUpload) {

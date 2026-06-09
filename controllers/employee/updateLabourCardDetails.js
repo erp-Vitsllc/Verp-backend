@@ -3,12 +3,16 @@ import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeService.js";
 import { uploadDocumentToS3, deleteDocumentFromS3 } from "../../utils/s3Upload.js";
 import { archiveEmployeeDocument } from "../../utils/archiveEmployeeDocument.js";
+import {
+    archiveAndClearLiveEmployeeRenewal,
+    shouldArchiveEmployeeDocumentOnRenewal,
+} from "../../utils/employeeDocumentRenewal.js";
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
 import { skipLiveProfileWritesPendingHr, queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
 import { markProfileActivationHoldResolvedForSection } from "../../utils/markProfileActivationHoldResolved.js";
 import { validateEmployeeLabourCardNoticePeriod } from "../../utils/employeeLabourCardValidation.js";
 
-const REQUIRED_FIELDS = ["number", "issueDate", "expiryDate", "noticePeriodMonths", "upload", "contractUpload"];
+const REQUIRED_FIELDS = ["number", "issueDate", "expiryDate", "noticePeriodMonths", "upload"];
 
 const buildMissingFields = (body, existingDocument, existingContractDocument) => {
     return REQUIRED_FIELDS.filter((field) => {
@@ -49,6 +53,24 @@ const normalizeDate = (value) => {
     if (!value) return null;
     const date = new Date(value);
     return Number.isNaN(date.getTime()) ? null : date;
+};
+
+const isExistingStoredUpload = (value) => {
+    if (!value || typeof value !== "string") return false;
+    const trimmed = value.trim();
+    return trimmed.startsWith("http://") || trimmed.startsWith("https://");
+};
+
+const assertPdfUpload = (name, mime, label) => {
+    const fileName = String(name || "").toLowerCase();
+    const fileMime = String(mime || "").toLowerCase();
+    if (fileMime && fileMime !== "application/pdf" && !fileName.endsWith(".pdf")) {
+        return `${label}: Only PDF files are allowed`;
+    }
+    if (!fileMime && fileName && !fileName.endsWith(".pdf")) {
+        return `${label}: Only PDF files are allowed`;
+    }
+    return null;
 };
 
 export const updateLabourCardDetails = async (req, res) => {
@@ -102,6 +124,15 @@ export const updateLabourCardDetails = async (req, res) => {
                 ? noticePeriodMonths
                 : existingLabourCard?.labourCard?.noticePeriodMonths;
 
+        if (normalizedUpload && !isExistingStoredUpload(normalizedUpload)) {
+            const pdfError = assertPdfUpload(uploadName, uploadMime, "Labour Card document");
+            if (pdfError) return res.status(400).json({ message: pdfError });
+        }
+        if (normalizedContractUpload && !isExistingStoredUpload(normalizedContractUpload)) {
+            const pdfError = assertPdfUpload(contractUploadName, contractUploadMime, "Labour contract attachment");
+            if (pdfError) return res.status(400).json({ message: pdfError });
+        }
+
         const missingFields = buildMissingFields(
             {
                 number,
@@ -148,22 +179,31 @@ export const updateLabourCardDetails = async (req, res) => {
         }
 
         const previousLabourCard = existingLabourCard?.labourCard;
+        const isRenewal = req.body?.isRenewal === true;
         const hasExistingDocument = Boolean(previousLabourCard?.document?.url || previousLabourCard?.document?.data);
         const hasExistingContractDocument = Boolean(previousLabourCard?.labourContractAttachment?.url || previousLabourCard?.labourContractAttachment?.data);
         const hasNewDocumentUpload = Boolean(normalizedUpload);
         const hasNewContractDocumentUpload = Boolean(normalizedContractUpload);
-        const shouldArchivePrevious = !skipLive && hasExistingDocument && hasNewDocumentUpload;
-        const shouldArchivePreviousContract = !skipLive && hasExistingContractDocument && hasNewContractDocumentUpload;
-        if (shouldArchivePrevious) {
-            await archiveEmployeeDocument({
-                employeeId,
+        const shouldArchivePrevious = await archiveAndClearLiveEmployeeRenewal({
+            employeeId,
+            skipLive,
+            isRenewal,
+            hasExistingDocument,
+            hasNewDocumentUpload,
+            section: "labourCard",
+            archiveParams: {
                 type: "Labour Card",
                 description: previousLabourCard?.number ? `Labour Card No: ${previousLabourCard.number}` : "",
                 issueDate: previousLabourCard?.issueDate || null,
                 expiryDate: previousLabourCard?.expiryDate || null,
-                document: previousLabourCard.document,
-            });
-        }
+                document: previousLabourCard?.document,
+            },
+        });
+        const shouldArchivePreviousContract = shouldArchiveEmployeeDocumentOnRenewal({
+            isRenewal,
+            hasExistingDocument: hasExistingContractDocument,
+            hasNewDocumentUpload: hasNewContractDocumentUpload,
+        });
         if (shouldArchivePreviousContract) {
             await archiveEmployeeDocument({
                 employeeId,
@@ -279,6 +319,7 @@ export const updateLabourCardDetails = async (req, res) => {
             section: "labourCard",
             changeType: "update",
             targetIndex: null,
+            isRenewal,
             previousData: previousLabourCard || null,
             proposedData: labourCardPayload,
         };

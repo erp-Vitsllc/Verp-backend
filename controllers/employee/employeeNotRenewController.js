@@ -12,9 +12,10 @@ import DashboardAction from "../../models/DashboardAction.js";
 import { getDepartmentHOD } from "../../utils/getDepartmentHOD.js";
 import { resolveEmployeeEmail } from "../../utils/resolveEmployeeEmail.js";
 import { isRequestUserDesignatedFlowchartHr } from "../../utils/isDesignatedFlowchartHr.js";
-import { resolveEmployeeId } from "../../services/employeeService.js";
+import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeService.js";
 import { cleanupEmployeeExpiryNotificationsByLabels } from "../../utils/cleanupEmployeeExpiryNotifications.js";
 import { isActiveEmployeeProfile } from "../../utils/profileFileChangeHrNotify.js";
+import { stripPendingReactivationForNotRenew } from "../../utils/employeeDocumentRenewal.js";
 
 const createTransporter = () => {
     const emailUser = process.env.EMAIL_USER?.trim();
@@ -311,6 +312,20 @@ const applyApprovedEmployeeArchive = async (employee, entry) => {
     throw new Error("UNSUPPORTED_KIND");
 };
 
+const finalizeApprovedNotRenew = async (employee, entry) => {
+    let deletedDocLabel = entry.label || "Employee Document";
+    const result = await applyApprovedEmployeeArchive(employee, entry);
+    if (result?.cleanedLabel) deletedDocLabel = result.cleanedLabel;
+    stripPendingReactivationForNotRenew(employee, entry);
+    await employee.save();
+    await cleanupEmployeeExpiryNotificationsByLabels({
+        employeeObjectId: employee._id,
+        labels: [deletedDocLabel],
+    });
+    const completeEmployee = await getCompleteEmployee(employee.employeeId);
+    return { deletedDocLabel, completeEmployee };
+};
+
 /** POST /Employee/:id/document-not-renew-requests */
 export const submitEmployeeDocumentNotRenewRequest = async (req, res) => {
     try {
@@ -416,10 +431,12 @@ export const submitEmployeeDocumentNotRenewRequest = async (req, res) => {
         };
 
         if (autoApprove) {
-            let deletedDocLabel = row.label || "Employee Document";
             try {
-                const result = await applyApprovedEmployeeArchive(employee, row);
-                if (result?.cleanedLabel) deletedDocLabel = result.cleanedLabel;
+                const { completeEmployee } = await finalizeApprovedNotRenew(employee, row);
+                return res.status(201).json({
+                    message: "Not renew applied and moved to Old Documents.",
+                    employee: completeEmployee,
+                });
             } catch (e) {
                 const msg =
                     e.message === "DOCUMENT_NOT_FOUND"
@@ -433,13 +450,6 @@ export const submitEmployeeDocumentNotRenewRequest = async (req, res) => {
                               : "Could not apply not-renew.";
                 return res.status(400).json({ message: msg });
             }
-
-            await employee.save();
-            await cleanupEmployeeExpiryNotificationsByLabels({
-                employeeObjectId: employee._id,
-                labels: [deletedDocLabel],
-            });
-            return res.status(201).json({ message: "Not renew applied and moved to Old Documents." });
         }
 
         employee.pendingNotRenewRequests = [...(employee.pendingNotRenewRequests || []), row];
@@ -548,10 +558,11 @@ export const respondEmployeeDocumentNotRenewRequest = async (req, res) => {
             return res.json({ message: "Request rejected." });
         }
 
-        let deletedDocLabel = entry.label || "Employee Document";
+        let completeEmployee = null;
         try {
-            const result = await applyApprovedEmployeeArchive(employee, entry);
-            if (result?.cleanedLabel) deletedDocLabel = result.cleanedLabel;
+            employee.pendingNotRenewRequests = list.filter((r) => r.requestId !== requestId);
+            const finalized = await finalizeApprovedNotRenew(employee, entry);
+            completeEmployee = finalized.completeEmployee;
         } catch (e) {
             console.error(e);
             const msg =
@@ -566,14 +577,6 @@ export const respondEmployeeDocumentNotRenewRequest = async (req, res) => {
                       : "Could not apply not-renew.";
             return res.status(400).json({ message: msg });
         }
-
-        employee.pendingNotRenewRequests = list.filter((r) => r.requestId !== requestId);
-        await employee.save();
-
-        await cleanupEmployeeExpiryNotificationsByLabels({
-            employeeObjectId: employee._id,
-            labels: [deletedDocLabel],
-        });
 
         await closeDashboardAction(employee._id, requestId, "Approved", "", req.user.employeeObjectId);
 
@@ -593,7 +596,7 @@ export const respondEmployeeDocumentNotRenewRequest = async (req, res) => {
             });
         }
 
-        return res.json({ message: "Not renew approved and archived." });
+        return res.json({ message: "Not renew approved and archived.", employee: completeEmployee });
     } catch (error) {
         console.error("respondEmployeeDocumentNotRenewRequest", error);
         return res.status(500).json({ message: error.message || "Server error" });

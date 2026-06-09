@@ -105,6 +105,7 @@ export const uploadProfilePicture = async (req, res) => {
                 ? "Profile picture change queued for HR activation approval."
                 : "Profile picture uploaded successfully",
             profilePicture: signedUrl || storageKey,
+            queuedForHrApproval: !!skipLive,
             employee: completeEmployee
         });
 

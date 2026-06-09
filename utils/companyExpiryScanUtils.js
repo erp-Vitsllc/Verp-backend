@@ -78,6 +78,20 @@ export const isCertificateDocumentRow = (row = {}) =>
     String(row?.context || "").toLowerCase() === "certificate";
 
 /** Employee `documents[]` rows — align certificate labels with company expiry scan. */
+/** Employee live `documents[]` rows that must not drive expiry dashboard labels. */
+export const isArchivedEmployeeManualDoc = (row = {}) => {
+    if (!row || typeof row !== "object") return false;
+    if (row.archivedAt || row.isArchived === true) return true;
+    const reason = String(row.archiveReason || "").trim().toLowerCase();
+    if (reason.includes("replaced") || reason.includes("deleted") || reason.includes("not renew")) {
+        return true;
+    }
+    return false;
+};
+
+/** @deprecated alias — use isArchivedEmployeeManualDoc */
+export const isArchivedManualDoc = isArchivedEmployeeManualDoc;
+
 export const buildEmployeeManualDocumentExpiryLabel = (row = {}) => {
     if (isCertificateDocumentRow(row)) return buildDocumentsArrayExpiryLabel(row);
     const typeLabel = String(row?.type || "").trim();

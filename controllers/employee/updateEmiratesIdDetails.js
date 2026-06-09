@@ -2,7 +2,7 @@ import EmployeeEmiratesId from "../../models/EmployeeEmiratesId.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeService.js";
 import { uploadDocumentToS3, deleteDocumentFromS3 } from "../../utils/s3Upload.js";
-import { archiveEmployeeDocument } from "../../utils/archiveEmployeeDocument.js";
+import { archiveAndClearLiveEmployeeRenewal } from "../../utils/employeeDocumentRenewal.js";
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
 import { shouldSkipLiveEmployeeSection, queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
 import { markProfileActivationHoldResolvedForSection } from "../../utils/markProfileActivationHoldResolved.js";
@@ -91,19 +91,24 @@ export const updateEmiratesIdDetails = async (req, res) => {
         }
 
         const previousEmiratesId = existingEmiratesId?.emiratesId;
+        const isRenewal = req.body?.isRenewal === true;
         const hasExistingDocument = Boolean(previousEmiratesId?.document?.url || previousEmiratesId?.document?.data);
         const hasNewDocumentUpload = Boolean(normalizedUpload);
-        const shouldArchivePrevious = !skipLive && hasExistingDocument && hasNewDocumentUpload;
-        if (shouldArchivePrevious) {
-            await archiveEmployeeDocument({
-                employeeId,
+        const shouldArchivePrevious = await archiveAndClearLiveEmployeeRenewal({
+            employeeId,
+            skipLive,
+            isRenewal,
+            hasExistingDocument,
+            hasNewDocumentUpload,
+            section: "emiratesId",
+            archiveParams: {
                 type: "Emirates ID",
                 description: previousEmiratesId?.number ? `Emirates ID No: ${previousEmiratesId.number}` : "",
                 issueDate: previousEmiratesId?.issueDate || null,
                 expiryDate: previousEmiratesId?.expiryDate || null,
-                document: previousEmiratesId.document,
-            });
-        }
+                document: previousEmiratesId?.document,
+            },
+        });
 
         let documentData = undefined;
         if (normalizedUpload) {
@@ -163,6 +168,7 @@ export const updateEmiratesIdDetails = async (req, res) => {
             section: "emiratesId",
             changeType: "update",
             targetIndex: null,
+            isRenewal,
             previousData: previousEmiratesId || null,
             proposedData: emiratesIdPayload,
         };

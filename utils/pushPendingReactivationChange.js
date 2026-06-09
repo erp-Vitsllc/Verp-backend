@@ -33,13 +33,19 @@ export function isActorHrOrAdmin(actor) {
     return isAdmin || isHr;
 }
 
-/** Reactivation (ever active) OR submitted-for-activation: queue-only, no live writes. */
+/** Profile is live-active — mandatory card edits queue for HR instead of writing collections. */
+export function isEmployeeProfileLiveActiveForHrQueue(employeeBasic = {}) {
+    const profileStatus = String(employeeBasic?.profileStatus || "inactive").toLowerCase();
+    const profileApprovalStatus = String(employeeBasic?.profileApprovalStatus || "draft").toLowerCase();
+    return profileStatus === "active" && profileApprovalStatus === "active";
+}
+
+/** Reactivation (live-active) OR submitted-for-activation: queue-only, no live writes. */
 export function skipLiveProfileWritesPendingHr(employeeBasic, actor) {
     if (!employeeBasic) return false;
     if (isActorHrOrAdmin(actor)) return false;
     if (awaitingSubmittedHrOnly(employeeBasic)) return true;
-    // Controllers using this helper only touch mandatory progress-bar sections.
-    return true;
+    return isEmployeeProfileLiveActiveForHrQueue(employeeBasic);
 }
 
 /**
@@ -50,6 +56,7 @@ export function shouldSkipLiveEmployeeSection(employeeBasic, sectionKey = "", ac
     if (!employeeBasic) return false;
     if (isActorHrOrAdmin(actor)) return false;
     if (awaitingSubmittedHrOnly(employeeBasic)) return true;
+    if (!isEmployeeProfileLiveActiveForHrQueue(employeeBasic)) return false;
     return EMPLOYEE_ACTIVATION_SECTION_KEYS.has(String(sectionKey || "").trim());
 }
 

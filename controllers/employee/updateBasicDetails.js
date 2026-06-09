@@ -4,7 +4,6 @@ import EmployeeBank from "../../models/EmployeeBank.js";
 import EmployeeSalary from "../../models/EmployeeSalary.js";
 import { uploadDocumentToS3 } from "../../utils/s3Upload.js";
 import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
-import { archiveEmployeeDocument } from "../../utils/archiveEmployeeDocument.js";
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
 import { skipLiveProfileWritesPendingHr, queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
 import { markProfileActivationHoldResolvedForSection } from "../../utils/markProfileActivationHoldResolved.js";
@@ -404,82 +403,6 @@ export const updateBasicDetails = async (req, res) => {
                         }
                     }
                 }
-            }
-        }
-
-        if (!skipLive && !skipArchiveOnRequest) {
-            const previousBankAttachment = existingBank?.bankAttachment;
-            const nextBankAttachment = updatePayload.bankAttachment;
-            const bankCoreFields = ["bankName", "accountName", "accountNumber", "ibanNumber", "swiftCode"];
-            const bankFieldsChanged = bankCoreFields.some((field) => updatePayload[field] !== undefined);
-            const bankAttachmentReplaced = Boolean(
-                previousBankAttachment?.url &&
-                nextBankAttachment?.url &&
-                previousBankAttachment.url !== nextBankAttachment.url
-            );
-            if (previousBankAttachment?.url && (bankAttachmentReplaced || bankFieldsChanged)) {
-                const prevSummary = [
-                    existingBank?.bankName ? `Bank: ${existingBank.bankName}` : "",
-                    existingBank?.accountName ? `Account: ${existingBank.accountName}` : "",
-                    existingBank?.accountNumber ? `A/C: ${existingBank.accountNumber}` : "",
-                    existingBank?.ibanNumber ? `IBAN: ${existingBank.ibanNumber}` : "",
-                ].filter(Boolean).join(" | ");
-                await archiveEmployeeDocument({
-                    employeeId,
-                    type: "Bank Attachment",
-                    description: prevSummary || "Bank details attachment",
-                    document: previousBankAttachment,
-                });
-            }
-
-            const previousOfferLetter = existingSalary?.offerLetter;
-            const nextOfferLetter = updatePayload.offerLetter;
-
-            let isInPlaceActiveSalaryEdit = false;
-            if (Array.isArray(updatePayload.salaryHistory) && Array.isArray(existingSalary?.salaryHistory)) {
-                const prevActive = existingSalary.salaryHistory.find((entry) => !entry?.toDate);
-                const nextActive = updatePayload.salaryHistory.find((entry) => !entry?.toDate);
-                const prevId = prevActive?._id != null ? String(prevActive._id) : "";
-                const nextId = nextActive?._id != null ? String(nextActive._id) : "";
-                isInPlaceActiveSalaryEdit = Boolean(prevId && nextId && prevId === nextId);
-
-                const prevActiveDoc = prevActive?.offerLetter;
-                const nextActiveDoc = nextActive?.offerLetter;
-                const sameDoc = Boolean(
-                    prevActiveDoc?.url &&
-                    nextActiveDoc?.url &&
-                    prevActiveDoc.url === nextActiveDoc.url
-                );
-                if (!isInPlaceActiveSalaryEdit && prevActiveDoc?.url && nextActiveDoc?.url && !sameDoc) {
-                    await archiveEmployeeDocument({
-                        employeeId,
-                        type: "Salary Increment Letter",
-                        description: prevActive?.month ? `Previous active salary (${prevActive.month})` : "Previous active salary",
-                        issueDate: prevActive?.fromDate || null,
-                        expiryDate: prevActive?.toDate || null,
-                        basicSalary: prevActive?.basic ?? null,
-                        houseRentAllowance: prevActive?.houseRentAllowance ?? null,
-                        vehicleAllowance: prevActive?.vehicleAllowance ?? null,
-                        fuelAllowance: prevActive?.fuelAllowance ?? null,
-                        otherAllowance: prevActive?.otherAllowance ?? null,
-                        totalSalary: prevActive?.totalSalary ?? null,
-                        document: prevActiveDoc,
-                    });
-                }
-            }
-
-            if (
-                !isInPlaceActiveSalaryEdit &&
-                previousOfferLetter?.url &&
-                nextOfferLetter?.url &&
-                previousOfferLetter.url !== nextOfferLetter.url
-            ) {
-                await archiveEmployeeDocument({
-                    employeeId,
-                    type: "Salary Offer Letter",
-                    description: "Salary offer letter (previous version)",
-                    document: previousOfferLetter,
-                });
             }
         }
 
