@@ -1,6 +1,5 @@
 import { deleteEmployeeData, getCompleteEmployee } from "../../services/employeeService.js";
 import User from "../../models/User.js";
-import EmployeeBasic from "../../models/EmployeeBasic.js";
 import EmployeeContact from "../../models/EmployeeContact.js";
 import EmployeePersonal from "../../models/EmployeePersonal.js";
 import EmployeePassport from "../../models/EmployeePassport.js";
@@ -15,26 +14,26 @@ import EmployeeEducation from "../../models/EmployeeEducation.js";
 import EmployeeExperience from "../../models/EmployeeExperience.js";
 import EmployeeEmergencyContact from "../../models/EmployeeEmergencyContact.js";
 import EmployeeTraining from "../../models/EmployeeTraining.js";
-import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
+import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { awaitAdminDeletionArchive } from "../../utils/adminDeletionArchiveRun.js";
+import { denyEmployeeCardDeleteUnlessAllowed } from "../../utils/employeeCardDeleteAccess.js";
 
 // Delete employee
 export const deleteEmployee = async (req, res) => {
     try {
-        const isAdmin = await isReqUserAdmin(req.user);
-        if (!isAdmin) {
-            return res.status(403).json({ message: "Only administrator can delete employees." });
-        }
-
         const { id } = req.params;
 
-        // Get employeeId from employee record
         const employee = await getCompleteEmployee(id);
         if (!employee) {
             return res.status(404).json({ message: "Employee not found" });
         }
 
         const employeeId = employee.employeeId;
+        const employeeBasic = await EmployeeBasic.findOne({ employeeId })
+            .select("profileStatus profileApprovalStatus")
+            .lean();
+        const denied = await denyEmployeeCardDeleteUnlessAllowed(req, employeeBasic, "employees");
+        if (denied) return res.status(denied.status).json(denied.body);
         const mongoId = employee._id;
 
         // Dependency Checks

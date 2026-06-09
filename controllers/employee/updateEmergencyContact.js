@@ -33,7 +33,7 @@ export const updateEmergencyContact = async (req, res) => {
         const employeeBasic = await EmployeeBasic.findOne({ employeeId })
             .select("profileStatus profileWorkflow profileApprovalStatus company")
             .lean();
-        const skipLive = shouldSkipLiveEmployeeSection(employeeBasic, "emergencyContact");
+        const skipLive = shouldSkipLiveEmployeeSection(employeeBasic, "emergencyContact", req.user);
         const currentRecord = await EmployeeEmergencyContact.findOne({ employeeId });
         const currentContact = currentRecord?.emergencyContacts?.id(contactId);
         const proposedContact = {

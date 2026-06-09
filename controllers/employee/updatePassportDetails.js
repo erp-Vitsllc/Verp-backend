@@ -47,7 +47,7 @@ export const updatePassportDetails = async (req, res) => {
         const isAdminUser = await isReqUserAdmin(req.user);
         const canActAsHr = await isEmployeeProfileActivationDesignatedHr(req, employeeBasic);
         const skipLive =
-            !isAdminUser && !canActAsHr && shouldSkipLiveEmployeeSection(employeeBasic, "passport");
+            !isAdminUser && !canActAsHr && shouldSkipLiveEmployeeSection(employeeBasic, "passport", req.user);
         const profileActive = String(employeeBasic?.profileStatus || "").toLowerCase() === "active";
 
         // Fetch existing passport to handle renewal/archiving
@@ -155,14 +155,27 @@ export const updatePassportDetails = async (req, res) => {
             );
         }
 
+        const passportSnapshot = (doc) => {
+            if (!doc) return null;
+            const o = typeof doc.toObject === "function" ? doc.toObject() : doc;
+            return {
+                number: o.number || "",
+                nationality: o.nationality || "",
+                issueDate: o.issueDate || null,
+                expiryDate: o.expiryDate || null,
+                placeOfIssue: o.placeOfIssue || "",
+                document: o.document || null,
+            };
+        };
+
         const passportChangeEntry = {
             card: "Passport",
             reason: "Passport details updated",
             section: "passport",
             changeType: "update",
             targetIndex: null,
-            previousData: existingPassport || null,
-            proposedData: passportPayload,
+            previousData: passportSnapshot(existingPassport),
+            proposedData: passportSnapshot(passportPayload),
         };
 
         if (skipLive) {

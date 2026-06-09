@@ -25,21 +25,31 @@ export function awaitingSubmittedHrOnly(employeeBasic) {
     return String(employeeBasic?.profileApprovalStatus || "").toLowerCase() === "submitted";
 }
 
+export function isActorHrOrAdmin(actor) {
+    if (!actor) return false;
+    const role = String(actor.role || "").trim().toLowerCase();
+    const isAdmin = actor.isAdmin || /^(admin|administrator|root)$/i.test(role);
+    const isHr = role === "hr";
+    return isAdmin || isHr;
+}
+
 /** Reactivation (ever active) OR submitted-for-activation: queue-only, no live writes. */
-export function skipLiveProfileWritesPendingHr(employeeBasic) {
+export function skipLiveProfileWritesPendingHr(employeeBasic, actor) {
     if (!employeeBasic) return false;
+    if (isActorHrOrAdmin(actor)) return false;
     if (awaitingSubmittedHrOnly(employeeBasic)) return true;
-    return shouldQueueProfileChange(employeeBasic);
+    // Controllers using this helper only touch mandatory progress-bar sections.
+    return true;
 }
 
 /**
  * Progress-bar / HR-approval sections queue on active profiles; other cards save live
  * and trigger informative HR email only (no dashboard task).
  */
-export function shouldSkipLiveEmployeeSection(employeeBasic, sectionKey = "") {
+export function shouldSkipLiveEmployeeSection(employeeBasic, sectionKey = "", actor) {
     if (!employeeBasic) return false;
+    if (isActorHrOrAdmin(actor)) return false;
     if (awaitingSubmittedHrOnly(employeeBasic)) return true;
-    if (!shouldQueueProfileChange(employeeBasic)) return false;
     return EMPLOYEE_ACTIVATION_SECTION_KEYS.has(String(sectionKey || "").trim());
 }
 
@@ -140,12 +150,18 @@ export async function pushPendingReactivationChangeReplaceByDedupeKey(employeeId
     await doc.save();
 }
 
-/**
- * Submitted → push only (no workflow reset).
- * Reactivation draft → full trigger with optional changeEntry.
- * Otherwise → live path already ran; notify default profile edit tracking.
- */
 export async function queueOrTriggerProfileChange({ employeeId, actor, reason, employeeBasic, changeEntry }) {
+    // Check if profile is already active
+    const isProfileActive = String(employeeBasic?.profileStatus || "").toLowerCase() === "active";
+
+    if (isProfileActive) {
+        // Active profile: mandatory cards queue in pendingReactivationChanges until Submit + HR approval.
+        if (changeEntry) {
+            await pushPendingReactivationChangeReplaceByDedupeKey(employeeId, changeEntry);
+        }
+        return;
+    }
+
     const submitted = awaitingSubmittedHrOnly(employeeBasic);
     const needsReactivationQueue = shouldQueueProfileChange(employeeBasic);
 

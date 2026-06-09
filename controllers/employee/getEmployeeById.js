@@ -45,35 +45,7 @@ export const getEmployeeById = async (req, res) => {
             delete employee.password;
         }
 
-        // Check for Visa Expiry and Auto-Inactivate
-        if (employee.profileStatus === 'active' && employee.visaDetails) {
-            const today = new Date();
-            today.setHours(0, 0, 0, 0); // Compare dates without time
-
-            let isExpired = false;
-            const visaTypes = ['visit', 'employment', 'spouse'];
-
-            for (const type of visaTypes) {
-                const visa = employee.visaDetails[type];
-                if (visa && visa.expiryDate) {
-                    const expiryDate = new Date(visa.expiryDate);
-                    if (expiryDate <= today) {
-                        isExpired = true;
-                        break;
-                    }
-                }
-            }
-
-            if (isExpired) {
-                console.log(`[getEmployeeById] Active employee ${id} has expired visa. Auto-setting to inactive.`);
-                try {
-                    await saveEmployeeData(id, { profileStatus: 'inactive' });
-                    employee.profileStatus = 'inactive'; // Update local object for response
-                } catch (updateError) {
-                    console.error('[getEmployeeById] Failed to auto-inactivate employee:', updateError);
-                }
-            }
-        }
+        // Visa Expiry Auto-Inactivate disabled as per Rule 1: once activated, remains active.
 
         // Fetch Fines and Rewards
         try {

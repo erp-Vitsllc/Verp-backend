@@ -1,5 +1,6 @@
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import mongoose from "mongoose";
+import { resolveEmployeeProfileStatusWrite } from "../../utils/employeeProfileStatusLock.js";
 
 export const updateProfileStatus = async (req, res) => {
     try {
@@ -30,11 +31,8 @@ export const updateProfileStatus = async (req, res) => {
 
         employee.profileApprovalStatus = status;
 
-        // Sync profileStatus based on approval status (activation only via approve-profile)
-        if (status === 'draft') {
-            employee.profileStatus = 'inactive';
-        } else if (status === 'submitted') {
-            employee.profileStatus = 'inactive';
+        if (status === 'draft' || status === 'submitted') {
+            employee.profileStatus = resolveEmployeeProfileStatusWrite(employee, 'inactive');
         }
 
         await employee.save();

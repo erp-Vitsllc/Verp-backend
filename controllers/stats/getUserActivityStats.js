@@ -10,6 +10,7 @@ import CompanyWorkflow from "../../models/CompanyWorkflow.js";
 import { loadCompaniesForExpiryScanByIds } from "../../services/companyPartitionService.js";
 import { collectCompanyExpiryDocuments, buildEmployeeManualDocumentExpiryLabel } from "../../utils/companyExpiryScanUtils.js";
 import { getDaysUntil, isExpiryHrTaskDueForDoc } from "../../utils/documentExpiryReminderStages.js";
+import { calculateProfileCompletionBackend } from "../../utils/calculateProfileCompletionBackend.js";
 
 /** Matches owner-style company rows — allow ASCII/en/em dashes between name and document type (same intent as frontend). */
 const COMPANY_OWNER_EXPIRY_BODY_RE =
@@ -1029,6 +1030,57 @@ export const getUserActivityStats = async (req, res) => {
                 }
             }
         });
+
+        // 5.1.5 Incomplete Profile Notifications for HR/Admin
+        if (isHR || isAdmin) {
+            try {
+                const employeesForScan = await EmployeeBasic.find({})
+                    .select({
+                        employeeId: 1, firstName: 1, lastName: 1, status: 1, nationality: 1, country: 1,
+                        email: 1, workEmail: 1, companyEmail: 1, contactNumber: 1, dateOfBirth: 1,
+                        maritalStatus: 1, fathersName: 1, gender: 1, profilePicture: 1, profilePic: 1, avatar: 1,
+                        numberOfDependents: 1, probationPeriod: 1, passportDetails: 1, visaDetails: 1,
+                        emiratesIdDetails: 1, labourCardDetails: 1, salaryHistory: 1, salaryMonth: 1, basic: 1,
+                        bankName: 1, bank: 1, accountName: 1, bankAccountName: 1, accountNumber: 1, bankAccountNumber: 1,
+                        ibanNumber: 1, emergencyContacts: 1, emergencyContactName: 1, emergencyContactNumber: 1,
+                        company: 1, dateOfJoining: 1, contractJoiningDate: 1, department: 1, designation: 1,
+                        primaryReportee: 1, signature: 1, updatedAt: 1, createdAt: 1
+                    })
+                    .lean()
+                    .maxTimeMS(10000);
+
+                for (const emp of employeesForScan) {
+                    const { percentage, pendingFields } = calculateProfileCompletionBackend(emp);
+                    if (percentage < 100) {
+                        const sections = [...new Set(pendingFields.map(f => f.section))];
+                        sections.forEach(sec => {
+                            const sectionSlug = sec.toLowerCase().replace(/\s+/g, '-');
+                            const notifId = `${emp._id}_incomplete_${sectionSlug}`;
+                            if (!seenRequests.has(notifId)) {
+                                activityList.push({
+                                    id: notifId,
+                                    type: 'Profile Incomplete',
+                                    requestedBy: `${emp.firstName || ''} ${emp.lastName || ''}`.trim() || emp.employeeId || 'Unknown Employee',
+                                    requestedDate: emp.updatedAt || emp.createdAt || new Date(),
+                                    actionedDate: null,
+                                    status: 'Pending',
+                                    extra1: sec,
+                                    extra2: `${percentage}% complete`,
+                                    extra3: JSON.stringify({
+                                        pendingFields: pendingFields.filter(f => f.section === sec).map(f => f.field)
+                                    }),
+                                    targetEmployeeId: emp.employeeId,
+                                    scope: 'inbox'
+                                });
+                                seenRequests.set(notifId, 'Pending');
+                            }
+                        });
+                    }
+                }
+            } catch (err) {
+                console.error('[getUserActivityStats] Incomplete profile scan error:', err);
+            }
+        }
 
         // 5.2 Add "My Own Requests" to Activity List
         myLoans.forEach(l => {

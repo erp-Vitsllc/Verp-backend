@@ -294,7 +294,7 @@ router.get("/:id", checkPermission('hrm_employees_view', 'view'), getEmployeeByI
 router.put("/:id", checkPermission('hrm_employees_list', 'edit'), updateEmployee);
 
 // Delete employee - requires delete permission
-router.delete("/:id", checkPermission('hrm_employees', 'delete'), deleteEmployee);
+router.delete("/:id", checkPermission('hrm_employees_list', 'delete'), deleteEmployee);
 
 export default router;
 

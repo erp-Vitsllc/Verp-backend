@@ -29,7 +29,6 @@ const PROFILE_BASIC_PATCH_KEYS = new Set([
     "numberOfDependents",
     "fathersName",
     "nationality",
-    "country",
 ]);
 
 export const updateBasicDetails = async (req, res) => {
@@ -56,7 +55,7 @@ export const updateBasicDetails = async (req, res) => {
         ]);
 
         const isAdminUser = await isReqUserAdmin(req.user);
-        const skipLive = !isAdminUser && skipLiveProfileWritesPendingHr(existingBasic);
+        const skipLive = !isAdminUser && skipLiveProfileWritesPendingHr(existingBasic, req.user);
         const skipArchiveOnRequest =
             req.body?.skipArchive === true ||
             String(req.query?.skipArchive || "").toLowerCase() === "true";

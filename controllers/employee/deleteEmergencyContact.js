@@ -3,8 +3,8 @@ import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { getCompleteEmployee } from "../../services/employeeService.js";
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
 import { shouldSkipLiveEmployeeSection, queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
-import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
 import { awaitAdminDeletionArchive } from "../../utils/adminDeletionArchiveRun.js";
+import { denyEmployeeCardDeleteUnlessAllowed } from "../../utils/employeeCardDeleteAccess.js";
 import { scheduleEmployeeProfileFileChangeHrEmailForRequest } from "../../utils/employeeInformativeHrNotify.js";
 
 export const deleteEmergencyContact = async (req, res) => {
@@ -15,11 +15,6 @@ export const deleteEmergencyContact = async (req, res) => {
     }
 
     try {
-        const isAdmin = await isReqUserAdmin(req.user);
-        if (!isAdmin) {
-            return res.status(403).json({ message: "Only administrator can delete emergency contacts." });
-        }
-        // Get employeeId from employee record
         const employee = await getCompleteEmployee(id);
         if (!employee) {
             return res.status(404).json({ message: "Employee not found" });
@@ -29,7 +24,10 @@ export const deleteEmergencyContact = async (req, res) => {
         const employeeBasic = await EmployeeBasic.findOne({ employeeId })
             .select("profileStatus profileWorkflow profileApprovalStatus company")
             .lean();
-        const skipLive = shouldSkipLiveEmployeeSection(employeeBasic, "emergencyContact");
+        const denied = await denyEmployeeCardDeleteUnlessAllowed(req, employeeBasic, "emergency contacts");
+        if (denied) return res.status(denied.status).json(denied.body);
+
+        const skipLive = shouldSkipLiveEmployeeSection(employeeBasic, "emergencyContact", req.user);
 
         const contactRecord = await EmployeeEmergencyContact.findOne({ employeeId });
 

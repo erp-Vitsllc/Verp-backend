@@ -1,19 +1,15 @@
 import EmployeeBasic from "../models/EmployeeBasic.js";
+import { hasEmployeeProfileEverBeenActivated } from "./employeeProfileStatusLock.js";
 
 export const shouldQueueProfileChange = (employee = {}) => {
-    const profileStatus = String(employee?.profileStatus || "").toLowerCase();
-    const profileApprovalStatus = String(employee?.profileApprovalStatus || "").toLowerCase();
-    if (profileStatus === "active") return true;
-    // Older / inconsistent records: HR approved lifecycle but profileStatus not flipped — still require queue + HR path
-    if (profileApprovalStatus === "active") return true;
-    const workflow = Array.isArray(employee?.profileWorkflow) ? employee.profileWorkflow : [];
-    const hasEverBeenActive = workflow.some((step) => String(step?.status || "").toLowerCase() === "active");
-    return hasEverBeenActive;
+    if (String(employee?.profileStatus || "").toLowerCase() === "active") return false;
+    if (String(employee?.profileApprovalStatus || "").toLowerCase() === "active") return false;
+    return hasEmployeeProfileEverBeenActivated(employee);
 };
 
 /**
- * After an active profile is edited, mark it inactive and return approval status to draft.
- * No auto-submission to HR; submission is manual via "Submit for Approval".
+ * After a reactivation-eligible profile is edited, return approval status to draft.
+ * profileStatus never demotes to inactive once activated. Submit to HR is manual.
  */
 export const triggerProfileReactivationIfNeeded = async ({
     employeeId,
@@ -50,7 +46,7 @@ export const triggerProfileReactivationIfNeeded = async ({
     const profileStatus = String(employee?.profileStatus || "").toLowerCase();
     const profileApprovalStatus = String(employee?.profileApprovalStatus || "").toLowerCase();
     if (profileStatus === "active" || profileApprovalStatus === "submitted") {
-        updateOps.$set.profileStatus = "inactive";
+        // profileStatus stays active after first activation — only approval workflow resets.
         updateOps.$set.profileApprovalStatus = "draft";
         updateOps.$set.profileSubmittedTo = null;
     }

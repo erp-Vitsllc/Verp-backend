@@ -1,5 +1,6 @@
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { sendProbationWorkflowEmail, ensureProbationRequestForEmployee, ensureProbationDashboardTask } from "../../utils/sendProbationWorkflowEmail.js";
+import { resolveEmployeeProfileStatusWrite } from "../../utils/employeeProfileStatusLock.js";
 
 const toObjIdString = (v) => (v == null ? "" : String(v));
 
@@ -171,7 +172,7 @@ export const finalizeProbationByHR = async (req, res) => {
         if (isApprove) {
             employee.status = "Permanent";
             employee.probationPeriod = null;
-            employee.profileStatus = "inactive";
+            employee.profileStatus = resolveEmployeeProfileStatusWrite(employee, "inactive");
             employee.profileApprovalStatus = "draft";
         } else {
             employee.probationChangeRequest.rejectionReason = String(reason || "HR rejected final probation approval.");

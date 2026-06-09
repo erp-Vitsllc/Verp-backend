@@ -133,14 +133,13 @@ export async function validateEmployeeWorkDetailsPayload(payload = {}, { employe
     const selfEmpId = employee?.employeeId || skipId;
 
     const reportingAuthority = p.reportingAuthority ?? employee?.reportingAuthority;
-    if (!reportingAuthority) {
-        return { ok: false, message: "Reporting To is required" };
+    if (reportingAuthority) {
+        const ra = String(reportingAuthority);
+        if (selfId && ra === selfId) return { ok: false, message: "Employee cannot report to themselves" };
+        const mgr = await EmployeeBasic.findById(reportingAuthority).select("employeeId profileStatus").lean();
+        if (!mgr) return { ok: false, message: "Reporting manager must exist in the system" };
+        if (mgr.employeeId === selfEmpId) return { ok: false, message: "Employee cannot report to themselves" };
     }
-    const ra = String(reportingAuthority);
-    if (selfId && ra === selfId) return { ok: false, message: "Employee cannot report to themselves" };
-    const mgr = await EmployeeBasic.findById(reportingAuthority).select("employeeId profileStatus").lean();
-    if (!mgr) return { ok: false, message: "Reporting manager must exist in the system" };
-    if (mgr.employeeId === selfEmpId) return { ok: false, message: "Employee cannot report to themselves" };
 
     const dept = String(p.department || employee?.department || "").trim().toLowerCase();
     const isManagement = dept === "management";

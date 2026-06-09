@@ -1,27 +1,26 @@
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { resolveEmployeeId } from "../../services/employeeService.js";
-import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
 import { awaitAdminDeletionArchive } from "../../utils/adminDeletionArchiveRun.js";
+import { denyEmployeeCardDeleteUnlessAllowed } from "../../utils/employeeCardDeleteAccess.js";
+import { isActiveEmployeeProfile } from "../../utils/profileFileChangeHrNotify.js";
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
 import { PURGE_TYPES, purgeEmployeeOldDocuments } from "../../utils/purgeEmployeeOldDocuments.js";
 
 export const deleteSignatureCard = async (req, res) => {
     const { id } = req.params;
     try {
-        const isAdmin = await isReqUserAdmin(req.user);
-        if (!isAdmin) {
-            return res.status(403).json({ message: "Only administrator can delete signature." });
-        }
-
         const employee = await resolveEmployeeId(id);
         if (!employee) {
             return res.status(404).json({ message: "Employee not found." });
         }
 
         const sigEmployee = await EmployeeBasic.findOne({ employeeId: employee.employeeId })
-            .select("employeeId signature")
+            .select("employeeId signature profileStatus profileApprovalStatus")
             .lean();
-        if (sigEmployee?.signature) {
+        const denied = await denyEmployeeCardDeleteUnlessAllowed(req, sigEmployee, "signature");
+        if (denied) return res.status(denied.status).json(denied.body);
+
+        if (sigEmployee?.signature && isActiveEmployeeProfile(sigEmployee)) {
             await awaitAdminDeletionArchive(req, {
                 moduleName: "Employee Signature",
                 recordId: employee.employeeId,

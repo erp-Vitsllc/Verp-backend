@@ -2,8 +2,9 @@ import EmployeeVisa from "../../models/EmployeeVisa.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { resolveEmployeeId } from "../../services/employeeService.js";
 import { deleteDocumentFromS3 } from "../../utils/s3Upload.js";
-import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
 import { awaitAdminDeletionArchive } from "../../utils/adminDeletionArchiveRun.js";
+import { denyEmployeeCardDeleteUnlessAllowed } from "../../utils/employeeCardDeleteAccess.js";
+import { isActiveEmployeeProfile } from "../../utils/profileFileChangeHrNotify.js";
 import { cleanupEmployeeExpiryNotificationsByLabels } from "../../utils/cleanupEmployeeExpiryNotifications.js";
 import { PURGE_TYPES, purgeEmployeeOldDocuments } from "../../utils/purgeEmployeeOldDocuments.js";
 
@@ -30,20 +31,14 @@ export const deleteVisaDetails = async (req, res) => {
         const employeeId = employee.employeeId;
 
         const employeeBasic = await EmployeeBasic.findOne({ employeeId })
-            .select("profileStatus")
+            .select("profileStatus profileApprovalStatus")
             .lean();
-        const isProfileActive = String(employeeBasic?.profileStatus || "").toLowerCase() === "active";
-        const isAdmin = await isReqUserAdmin(req.user);
-
-        if (isProfileActive && !isAdmin) {
-            return res.status(403).json({
-                message: "Only administrator can delete visa details on an active profile.",
-            });
-        }
+        const denied = await denyEmployeeCardDeleteUnlessAllowed(req, employeeBasic, "visa details");
+        if (denied) return res.status(denied.status).json(denied.body);
 
         const existingVisa = await EmployeeVisa.findOne({ employeeId }).lean();
         if (existingVisa?.[type]) {
-            if (isProfileActive) {
+            if (isActiveEmployeeProfile(employeeBasic)) {
                 await awaitAdminDeletionArchive(req, {
                     moduleName: `Employee Visa (${type})`,
                     recordId: employeeId,

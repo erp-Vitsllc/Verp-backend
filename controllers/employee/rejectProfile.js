@@ -41,14 +41,17 @@ export const rejectProfile = async (req, res) => {
             pendingRowsForSubmitter,
         );
 
-        // Update EmployeeBasic
-        // Set profileApprovalStatus to 'rejected'
-        // Update workflow entry to 'rejected'
+        const wasPreviouslyActive = Array.isArray(employee.profileWorkflow)
+            ? employee.profileWorkflow.some((w) => String(w?.status || "").toLowerCase() === "active")
+            : false;
+        const keepActiveProfile =
+            wasPreviouslyActive || String(employee.profileStatus || "").toLowerCase() === "active";
+
         const updated = await EmployeeBasic.findOneAndUpdate(
             { employeeId },
             {
-                profileApprovalStatus: "rejected",
-                profileStatus: "inactive",
+                profileApprovalStatus: keepActiveProfile ? "active" : "rejected",
+                profileStatus: keepActiveProfile ? "active" : "inactive",
                 $unset: { profileActivationHold: 1, profileActivationSubmittedBy: 1 },
                 $set: {
                     pendingReactivationChanges: [],

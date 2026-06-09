@@ -61,7 +61,7 @@ export const updateEmiratesIdDetails = async (req, res) => {
         const isAdminUser = await isReqUserAdmin(req.user);
         const canActAsHr = await isEmployeeProfileActivationDesignatedHr(req, employeeBasic);
         const skipLive =
-            !isAdminUser && !canActAsHr && shouldSkipLiveEmployeeSection(employeeBasic, "emiratesId");
+            !isAdminUser && !canActAsHr && shouldSkipLiveEmployeeSection(employeeBasic, "emiratesId", req.user);
 
         const existingEmiratesId = await EmployeeEmiratesId.findOne({ employeeId });
         const existingDocument =

@@ -1,8 +1,9 @@
 import EmployeeEmiratesId from "../../models/EmployeeEmiratesId.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { resolveEmployeeId } from "../../services/employeeService.js";
-import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
 import { awaitAdminDeletionArchive } from "../../utils/adminDeletionArchiveRun.js";
+import { denyEmployeeCardDeleteUnlessAllowed } from "../../utils/employeeCardDeleteAccess.js";
+import { isActiveEmployeeProfile } from "../../utils/profileFileChangeHrNotify.js";
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
 import { cleanupEmployeeExpiryNotificationsByLabels } from "../../utils/cleanupEmployeeExpiryNotifications.js";
 import { PURGE_TYPES, purgeEmployeeOldDocuments } from "../../utils/purgeEmployeeOldDocuments.js";
@@ -14,19 +15,13 @@ export const deleteEmiratesIdDetails = async (req, res) => {
         if (!employee) return res.status(404).json({ message: "Employee not found." });
 
         const employeeBasic = await EmployeeBasic.findOne({ employeeId: employee.employeeId })
-            .select("profileStatus")
+            .select("profileStatus profileApprovalStatus")
             .lean();
-        const isProfileActive = String(employeeBasic?.profileStatus || "").toLowerCase() === "active";
-        const isAdmin = await isReqUserAdmin(req.user);
-
-        if (isProfileActive && !isAdmin) {
-            return res.status(403).json({
-                message: "Only administrator can delete Emirates ID details on an active profile.",
-            });
-        }
+        const denied = await denyEmployeeCardDeleteUnlessAllowed(req, employeeBasic, "Emirates ID details");
+        if (denied) return res.status(denied.status).json(denied.body);
 
         const card = await EmployeeEmiratesId.findOne({ employeeId: employee.employeeId }).lean();
-        if (isProfileActive) {
+        if (isActiveEmployeeProfile(employeeBasic)) {
             await awaitAdminDeletionArchive(req, {
                 moduleName: "Employee Emirates ID",
                 recordId: employee.employeeId,

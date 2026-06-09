@@ -25,7 +25,7 @@ export const uploadSignature = async (req, res) => {
             return res.status(404).json({ message: "Employee not found." });
         }
         const isAdminUser = await isReqUserAdmin(req.user);
-        const skipLive = !isAdminUser && shouldSkipLiveEmployeeSection(employee, "signature");
+        const skipLive = !isAdminUser && shouldSkipLiveEmployeeSection(employee, "signature", req.user);
 
         const signatureValidation = validateEmployeeSignaturePayload({
             signatureData,

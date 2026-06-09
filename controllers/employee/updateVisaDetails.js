@@ -64,7 +64,7 @@ export const updateVisaDetails = async (req, res) => {
         const isAdminUser = await isReqUserAdmin(req.user);
         const canActAsHr = await isEmployeeProfileActivationDesignatedHr(req, employeeBasic);
         const skipLive =
-            !isAdminUser && !canActAsHr && shouldSkipLiveEmployeeSection(employeeBasic, "visa");
+            !isAdminUser && !canActAsHr && shouldSkipLiveEmployeeSection(employeeBasic, "visa", req.user);
 
         const existingVisa = await EmployeeVisa.findOne({ employeeId });
         const existingDocument = existingVisa?.[visaType]?.document?.url || existingVisa?.[visaType]?.document?.data;

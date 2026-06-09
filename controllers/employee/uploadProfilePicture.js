@@ -64,7 +64,7 @@ export const uploadProfilePicture = async (req, res) => {
             return res.status(404).json({ message: "Employee not found during update" });
         }
 
-        const skipLive = skipLiveProfileWritesPendingHr(employeeBasic);
+        const skipLive = skipLiveProfileWritesPendingHr(employeeBasic, req.user);
         const previousPicture = employeeBasic.profilePicture || null;
 
         if (!skipLive) {

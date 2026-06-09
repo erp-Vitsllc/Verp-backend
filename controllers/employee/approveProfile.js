@@ -183,6 +183,15 @@ export const approveProfile = async (req, res) => {
                     { $set: { labourCard: proposedData } },
                     { upsert: true, new: true }
                 );
+                if (proposedData?.issueDate) {
+                    const contractDate = new Date(proposedData.issueDate);
+                    if (!Number.isNaN(contractDate.getTime())) {
+                        await EmployeeBasic.updateOne(
+                            { employeeId },
+                            { $set: { contractJoiningDate: contractDate } },
+                        );
+                    }
+                }
                 continue;
             }
             if (section === "passport") {

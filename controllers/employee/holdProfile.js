@@ -10,6 +10,7 @@ import {
     pendingEntryIncludedInSubmittedCards,
     resolveLatestActivationSubmissionLabels,
 } from "../../utils/companyActivation.js";
+import { resolveEmployeeProfileStatusWrite } from "../../utils/employeeProfileStatusLock.js";
 
 const idStrSub = (sub, idx) => String(sub._id ?? idx);
 
@@ -128,7 +129,7 @@ export const holdProfile = async (req, res) => {
         }
 
         doc.profileApprovalStatus = "submitted";
-        doc.profileStatus = "inactive";
+        doc.profileStatus = resolveEmployeeProfileStatusWrite(doc, "inactive");
 
         const nextUnapprovedIds = [...(doc.pendingReactivationChanges || [])].map((e, idx) =>
             String(e._id ?? idx),

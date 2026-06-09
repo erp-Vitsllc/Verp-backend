@@ -1,8 +1,8 @@
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import mongoose from "mongoose";
 import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeService.js";
-import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
 import { awaitAdminDeletionArchive } from "../../utils/adminDeletionArchiveRun.js";
+import { denyEmployeeCardDeleteUnlessAllowed } from "../../utils/employeeCardDeleteAccess.js";
 import { cleanupEmployeeExpiryNotificationsByLabels } from "../../utils/cleanupEmployeeExpiryNotifications.js";
 import {
     documentStorageFingerprint,
@@ -15,11 +15,6 @@ import { scheduleEmployeeProfileFileChangeHrEmailForRequest } from "../../utils/
 // @access  Private
 export const deleteDocument = async (req, res) => {
     try {
-        const isAdmin = await isReqUserAdmin(req.user);
-        if (!isAdmin) {
-            return res.status(403).json({ message: "Only administrator can delete employee documents." });
-        }
-
         const { id, index } = req.params;
 
         const resolved = await resolveEmployeeId(id);
@@ -32,6 +27,8 @@ export const deleteDocument = async (req, res) => {
             return res.status(404).json({ message: "Employee not found" });
         }
 
+        const denied = await denyEmployeeCardDeleteUnlessAllowed(req, employee, "employee documents");
+        if (denied) return res.status(denied.status).json(denied.body);
 
         // Validate index
         const docIndex = parseInt(index);

@@ -14,6 +14,7 @@ import { resolveEmployeeEmail } from "../../utils/resolveEmployeeEmail.js";
 import { isRequestUserDesignatedFlowchartHr } from "../../utils/isDesignatedFlowchartHr.js";
 import { resolveEmployeeId } from "../../services/employeeService.js";
 import { cleanupEmployeeExpiryNotificationsByLabels } from "../../utils/cleanupEmployeeExpiryNotifications.js";
+import { isActiveEmployeeProfile } from "../../utils/profileFileChangeHrNotify.js";
 
 const createTransporter = () => {
     const emailUser = process.env.EMAIL_USER?.trim();
@@ -338,6 +339,10 @@ export const submitEmployeeDocumentNotRenewRequest = async (req, res) => {
 
         const employee = await EmployeeBasic.findById(resolved._id);
         if (!employee) return res.status(404).json({ message: "Employee not found" });
+
+        if (!isActiveEmployeeProfile(employee)) {
+            return res.status(403).json({ message: "Renew and not-renew are only available on active employee profiles." });
+        }
 
         const pending = (employee.pendingNotRenewRequests || []).filter((p) => p.status === "pending");
         if (pending.some((p) => samePendingTarget(p, incoming))) {
