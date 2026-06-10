@@ -164,10 +164,13 @@ export const calculateProfileCompletionBackend = (employee = {}) => {
         }
     }
 
-    // 5. Labour Card Details
-    if (requiresEmiratesIdAndLabourCard) {
+    // 5. Labour Card Details — mandatory for all employees
+    {
         const lc = employee.labourCardDetails;
         const hasLabourDoc = Boolean(lc?.document?.url || lc?.document?.data);
+        const hasLabourContract = Boolean(
+            lc?.labourContractAttachment?.url || lc?.labourContractAttachment?.data,
+        );
         if (lc && checkField(lc.number)) {
             const lcFields = [
                 { value: lc.number, name: 'Labour Card Number', section: 'Labour Card' },
@@ -175,6 +178,11 @@ export const calculateProfileCompletionBackend = (employee = {}) => {
                 { value: lc.expiryDate, name: 'Labour Card Expiry Date', section: 'Labour Card' },
                 { value: lc.noticePeriodMonths, name: 'Notice Period', section: 'Labour Card' },
                 { value: hasLabourDoc ? 'Uploaded' : null, name: 'Labour Card Document', section: 'Labour Card' },
+                {
+                    value: hasLabourContract ? 'Uploaded' : null,
+                    name: 'Labour Contract Attachment',
+                    section: 'Labour Card',
+                },
             ];
             lcFields.forEach(({ value, name, section }) => {
                 totalFields++;
@@ -195,6 +203,7 @@ export const calculateProfileCompletionBackend = (employee = {}) => {
                 'Labour Card Expiry Date',
                 'Notice Period',
                 'Labour Card Document',
+                'Labour Contract Attachment',
             ].forEach((name) => {
                 totalFields++;
                 pendingFields.push({ section: 'Labour Card', field: name });
