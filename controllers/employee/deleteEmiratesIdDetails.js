@@ -6,6 +6,7 @@ import { disposeEmployeeProfileAttachment } from "../../utils/profileAttachmentD
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
 import { cleanupEmployeeExpiryNotificationsByLabels } from "../../utils/cleanupEmployeeExpiryNotifications.js";
 import { PURGE_TYPES, purgeEmployeeOldDocuments } from "../../utils/purgeEmployeeOldDocuments.js";
+import { scheduleEmployeeProfileFileChangeHrEmailForRequest } from "../../utils/employeeInformativeHrNotify.js";
 
 export const deleteEmiratesIdDetails = async (req, res) => {
     const { id } = req.params;
@@ -46,6 +47,17 @@ export const deleteEmiratesIdDetails = async (req, res) => {
             employeeId: employee.employeeId,
             actor: req.user,
             reason: "Emirates ID details deleted",
+        });
+
+        scheduleEmployeeProfileFileChangeHrEmailForRequest({
+            req,
+            employeeId: employee.employeeId,
+            employeeBasic,
+            sectionKey: "emiratesId",
+            sectionLabel: "Emirates ID",
+            action: "deleted",
+            attachments: card?.emiratesId?.document,
+            actor: req.user,
         });
 
         return res.status(200).json({ message: "Emirates ID details deleted successfully." });

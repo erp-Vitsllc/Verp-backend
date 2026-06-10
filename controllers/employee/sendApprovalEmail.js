@@ -7,6 +7,11 @@ import { syncDashboardAction } from "../../utils/syncDashboard.js";
 import { resolveProfileActivationSubmitterId } from "../../utils/resolveProfileActivationSubmitterId.js";
 import { clearProfileActivationHoldDashboardRows } from "../../utils/clearProfileActivationHoldDashboardRows.js";
 import { pickEffectiveEmail } from "../../utils/pickEffectiveEmail.js";
+import {
+    buildEmailAttachmentsFromRef,
+    renderEmailAttachmentLineHtml,
+} from "../../utils/emailAccessibleFiles.js";
+import { formatActivationAttachmentLine } from "../../utils/shortenUrlsInString.js";
 
 /** Subdocument id fallback must match frontend (String(entry._id || index)). */
 const pendingEntryId = (entry, idx) => String(entry?._id ?? idx);
@@ -119,6 +124,17 @@ export const sendApprovalEmail = async (req, res) => {
 
         const baseUrl = resolveFrontendBaseUrl(req);
         const profileUrl = `${baseUrl}/emp/${employeeBasic.employeeId}`;
+        const emailAttachments = attachmentText
+            ? await buildEmailAttachmentsFromRef(attachmentText, attachmentNameText)
+            : [];
+        const attachmentHtml = attachmentText
+            ? renderEmailAttachmentLineHtml(
+                  attachmentNameText ||
+                      formatActivationAttachmentLine(attachmentText, attachmentNameText)?.replace(/^Attachment:\s*/i, "") ||
+                      "Attachment",
+                  { attached: emailAttachments.length > 0 },
+              )
+            : "";
 
         const html = `
             <div style="font-family: Arial, sans-serif; color: #333; line-height: 1.6; max-width: 600px; margin: 0 auto; border: 1px solid #eee; border-radius: 10px; overflow: hidden;">
@@ -145,7 +161,7 @@ export const sendApprovalEmail = async (req, res) => {
                         ${reasonText ? `<p style="margin: 8px 0 0 0;"><strong>Reason:</strong> ${reasonText}</p>` : ""}
                         ${descriptionText ? `<p style="margin: 8px 0 0 0;"><strong>Description:</strong><br/>${descriptionText.replace(/\n/g, '<br/>')}</p>` : ""}
                         ${pendingCardsHtml}
-                        ${attachmentText ? `<p style="margin: 8px 0 0 0;"><strong>Attachment:</strong> <a href="${attachmentText}" target="_blank" rel="noopener noreferrer">${attachmentNameText || 'View attachment'}</a></p>` : ''}
+                        ${attachmentHtml}
                     </div>
                 </div>
             </div>
@@ -157,6 +173,7 @@ export const sendApprovalEmail = async (req, res) => {
             to: hrEmail,
             subject,
             html,
+            ...(emailAttachments.length ? { attachments: emailAttachments } : {}),
         });
 
         eb.profileApprovalStatus = "submitted";

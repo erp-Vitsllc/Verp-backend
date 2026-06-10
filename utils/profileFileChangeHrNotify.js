@@ -140,6 +140,12 @@ export function buildCompanyProfileSectionUrl(
 }
 
 const EMPLOYEE_SECTION_ROUTES = {
+    basicDetails: { tab: "basic", focusLabel: "Basic Details" },
+    passport: { tab: "basic", focusLabel: "Passport" },
+    visa: { tab: "basic", focusLabel: "Visa" },
+    emiratesId: { tab: "basic", focusLabel: "Emirates ID" },
+    labourCard: { tab: "basic", focusLabel: "Labour Card" },
+    workDetails: { tab: "work", focusLabel: "Work Details" },
     medicalInsurance: { tab: "basic", focusLabel: "Medical Insurance" },
     drivingLicense: { tab: "basic", focusLabel: "Driving License" },
     documents: { tab: "documents", docStatusTab: "live" },
@@ -189,7 +195,7 @@ export async function resolveFileLinkEntries(attachments = []) {
     for (const raw of list) {
         const ref = attachmentFromValue(raw);
         if (!ref?.key) continue;
-        refs.push({ name: ref.name, storageKey: ref.key, url: ref.key });
+        refs.push({ name: ref.name, storageKey: ref.key });
     }
     return resolveEmailFileLinksForHtml(refs);
 }
@@ -202,6 +208,8 @@ const actionLabel = (action = "modified") => {
         modified: "Modified",
         deleted: "Deleted",
         renewed: "Renewed",
+        not_renewed: "Not Renewed",
+        notrenewed: "Not Renewed",
     };
     return map[String(action || "").toLowerCase()] || "Modified";
 };
@@ -232,10 +240,14 @@ const renderChangeRowsHtml = (changes = []) =>
             const files = Array.isArray(change.files) ? change.files : [];
             const detailsHtml = renderChangeDetailRows(change.details || {});
             const filesHtml = renderEmailFileListHtml(files, { showAttachHint: true });
+            const queuedNote = change.queuedForActivation
+                ? `<p style="margin:8px 0 0;font-size:12px;color:#92400e;">Queued for HR activation review — not yet live on the profile.</p>`
+                : "";
 
             return `
                 <li style="margin:12px 0;padding:12px;border:1px solid #e2e8f0;border-radius:8px;background:#f8fafc;">
                     <p style="margin:0;"><strong>${act}</strong> — ${section}</p>
+                    ${queuedNote}
                     ${detailsHtml}
                     ${filesHtml}
                     <p style="margin:12px 0 0;text-align:left;">
@@ -304,8 +316,11 @@ export async function notifyFlowchartHrOfProfileFileChanges({
             ? `<p style="margin:0 0 14px;padding:10px 12px;background:#ecfdf5;border:1px solid #a7f3d0;border-radius:8px;font-size:13px;color:#065f46;"><strong>${emailAttachments.length} file(s) attached</strong> — open directly from this email without signing in to VeRP.</p>`
             : "";
 
+    const hasActivationSectionChange = rows.some(
+        (c) => c.sectionKey && EMPLOYEE_ACTIVATION_SECTION_KEYS.has(String(c.sectionKey)),
+    );
     const adminNote = actor?.isAdmin || actor?.isAdministrator
-        ? `<p style="margin:0 0 12px;padding:10px 12px;background:#fff7ed;border:1px solid #fed7aa;border-radius:8px;font-size:13px;color:#9a3412;"><strong>Administrator change</strong> — an admin modified this profile outside activation / progress-bar sections.</p>`
+        ? `<p style="margin:0 0 12px;padding:10px 12px;background:#fff7ed;border:1px solid #fed7aa;border-radius:8px;font-size:13px;color:#9a3412;"><strong>Administrator change</strong> — an admin ${hasActivationSectionChange ? "updated a profile card on an active employee." : "modified this profile outside activation / progress-bar mandatory sections."}</p>`
         : "";
 
     const transporter = nodemailer.createTransport({
@@ -325,7 +340,9 @@ export async function notifyFlowchartHrOfProfileFileChanges({
                 <p>Hello <strong>${escapeHtml(hrName)}</strong>,</p>
                 ${adminNote}
                 ${attachmentSummary}
-                <p>The following file change(s) were made outside profile activation / progress-bar mandatory sections:</p>
+                <p>${hasActivationSectionChange
+                    ? "The following administrator card change(s) were recorded on an active employee profile:"
+                    : "The following file change(s) were made outside profile activation / progress-bar mandatory sections:"}</p>
                 <ul style="list-style:none;padding:0;margin:16px 0;">${renderChangeRowsHtml(rows)}</ul>
                 <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:14px 16px;margin:16px 0;">
                     <p style="margin:0;"><strong>${entityType === "company" ? "Company" : "Employee"}:</strong> ${label}</p>

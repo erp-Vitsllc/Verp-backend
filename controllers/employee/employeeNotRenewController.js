@@ -17,6 +17,8 @@ import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeS
 import { cleanupEmployeeExpiryNotificationsByLabels } from "../../utils/cleanupEmployeeExpiryNotifications.js";
 import { isActiveEmployeeProfile } from "../../utils/profileFileChangeHrNotify.js";
 import { stripPendingReactivationForNotRenew } from "../../utils/employeeDocumentRenewal.js";
+import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
+import { scheduleAdminEmployeeCardNotRenewHrEmail } from "../../utils/employeeInformativeHrNotify.js";
 
 const createTransporter = () => {
     const emailUser = process.env.EMAIL_USER?.trim();
@@ -412,7 +414,8 @@ export const submitEmployeeDocumentNotRenewRequest = async (req, res) => {
             if (!label) label = "Driving License";
         }
 
-        const autoApprove = await isHrLoggedInUser(req);
+        const isAdminActor = await isReqUserAdmin(req.user);
+        const autoApprove = (await isHrLoggedInUser(req)) || isAdminActor;
         const requestId = crypto.randomUUID();
         const row = {
             requestId,
@@ -433,7 +436,18 @@ export const submitEmployeeDocumentNotRenewRequest = async (req, res) => {
 
         if (autoApprove) {
             try {
-                const { completeEmployee } = await finalizeApprovedNotRenew(employee, row);
+                const { completeEmployee, deletedDocLabel } = await finalizeApprovedNotRenew(employee, row);
+                if (isAdminActor && !(await isHrLoggedInUser(req))) {
+                    scheduleAdminEmployeeCardNotRenewHrEmail({
+                        req,
+                        employeeId: employee.employeeId,
+                        employeeBasic: employee,
+                        kind: row.kind,
+                        sectionLabel: row.label || deletedDocLabel,
+                        reason,
+                        actor: req.user,
+                    });
+                }
                 return res.status(201).json({
                     message: "Not renew applied and moved to Old Documents.",
                     employee: completeEmployee,
@@ -462,12 +476,22 @@ export const submitEmployeeDocumentNotRenewRequest = async (req, res) => {
         const slug = encodeURIComponent(employee.employeeId || "");
         const employeeLink = `${baseUrl}/emp/${slug}?tab=documents`;
 
-        if (hrEmail) {
+        if (isAdminActor) {
+            scheduleAdminEmployeeCardNotRenewHrEmail({
+                req,
+                employeeId: employee.employeeId,
+                employeeBasic: employee,
+                kind: row.kind,
+                sectionLabel: row.label,
+                reason: `Pending HR approval — ${reason}`,
+                actor: req.user,
+            });
+        } else if (hrEmail) {
             await sendMail({
                 to: [hrEmail],
                 subject: `Employee document not-renew approval: ${employee.firstName} ${employee.lastName} (${employee.employeeId})`,
                 html: `<div style="font-family:Arial,sans-serif;line-height:1.6;">
-                    <p><strong>Flowchart HR</strong> — a user submitted <strong>Not renew</strong> for an employee manual document.</p>
+                    <p><strong>Flowchart HR</strong> — a user submitted <strong>Not renew</strong> for an employee document.</p>
                     <p><strong>Employee:</strong> ${employee.firstName} ${employee.lastName} (${employee.employeeId})</p>
                     <p><strong>Document:</strong> ${row.label}</p>
                     <p><strong>Reason:</strong> ${reason.replace(/</g, "&lt;")}</p>

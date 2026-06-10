@@ -12,6 +12,7 @@ import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileRe
 import { skipLiveProfileWritesPendingHr, queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
 import { markProfileActivationHoldResolvedForSection } from "../../utils/markProfileActivationHoldResolved.js";
 import { validateEmployeeLabourCardNoticePeriod } from "../../utils/employeeLabourCardValidation.js";
+import { scheduleEmployeeProfileFileChangeHrEmailForRequest } from "../../utils/employeeInformativeHrNotify.js";
 
 const REQUIRED_FIELDS = ["number", "issueDate", "expiryDate", "noticePeriodMonths", "upload"];
 
@@ -374,6 +375,19 @@ export const updateLabourCardDetails = async (req, res) => {
             /* non-fatal */
         }
         const completeEmployee = await getCompleteEmployee(employeeId);
+
+        scheduleEmployeeProfileFileChangeHrEmailForRequest({
+            req,
+            employeeId,
+            employeeBasic,
+            sectionKey: "labourCard",
+            sectionLabel: "Labour Card",
+            action: (isRenewal || (hasNewDocumentUpload && hasExistingDocument)) ? "renewed" : "edited",
+            attachments: [labourCardPayload?.document, labourCardPayload?.labourContractAttachment].filter(Boolean),
+            actor: req.user,
+            skipLive,
+            isRenewal,
+        });
 
         return res.json({
             message: skipLive

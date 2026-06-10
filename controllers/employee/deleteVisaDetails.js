@@ -5,6 +5,7 @@ import { denyEmployeeCardDeleteUnlessAllowed } from "../../utils/employeeCardDel
 import { disposeEmployeeProfileAttachment } from "../../utils/profileAttachmentDisposition.js";
 import { cleanupEmployeeExpiryNotificationsByLabels } from "../../utils/cleanupEmployeeExpiryNotifications.js";
 import { PURGE_TYPES, purgeEmployeeOldDocuments } from "../../utils/purgeEmployeeOldDocuments.js";
+import { scheduleEmployeeProfileFileChangeHrEmailForRequest } from "../../utils/employeeInformativeHrNotify.js";
 
 const ALLOWED_VISA_TYPES = ["visit", "employment", "spouse"];
 
@@ -70,6 +71,17 @@ export const deleteVisaDetails = async (req, res) => {
         await cleanupEmployeeExpiryNotificationsByLabels({
             employeeObjectId: employee._id,
             labels: [visaLabelByType[type] || "Visa"],
+        });
+
+        scheduleEmployeeProfileFileChangeHrEmailForRequest({
+            req,
+            employeeId,
+            employeeBasic,
+            sectionKey: "visa",
+            sectionLabel: visaLabelByType[type] || "Visa",
+            action: "deleted",
+            attachments: existingVisa?.[type]?.document,
+            actor: req.user,
         });
 
         return res.json({

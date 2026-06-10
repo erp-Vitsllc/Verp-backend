@@ -16,7 +16,11 @@ import {
     clearCreatorCompanyActivationDashboardTasks,
     clearStaleCompanyActivationOutcomeRows,
 } from "./clearCompanyActivationHoldDashboardRows.js";
-import { shortenUrlsInString } from "./shortenUrlsInString.js";
+import { formatActivationAttachmentLine, shortenUrlsInString } from "./shortenUrlsInString.js";
+import {
+    buildEmailAttachmentsFromRef,
+    renderEmailAttachmentLineHtml,
+} from "./emailAccessibleFiles.js";
 import {
     getOwnerRowEmail,
     validateOwnerDetailsOwnersPayload,
@@ -403,10 +407,16 @@ const sendCompanyActivationEmailToHr = async ({
     const reasonHtml = shortenUrlsInString(reason || "Activation request");
     const descriptionHtml = shortenUrlsInString(description || "");
     const attachmentUrl = attachment ? String(attachment).trim() : "";
-    const attachmentLabel =
+    const emailAttachments = attachmentUrl
+        ? await buildEmailAttachmentsFromRef(attachmentUrl, attachmentName)
+        : [];
+    const attachmentDisplayName =
         attachmentName ||
-        shortenUrlsInString(attachmentUrl) ||
-        "View attachment";
+        formatActivationAttachmentLine(attachmentUrl, attachmentName)?.replace(/^Attachment:\s*/i, "") ||
+        "Attachment";
+    const attachmentHtml = attachmentUrl
+        ? renderEmailAttachmentLineHtml(attachmentDisplayName, { attached: emailAttachments.length > 0 })
+        : "";
 
     const changesHtml = Array.isArray(requestedChanges) && requestedChanges.length
         ? `<p style="margin:6px 0 0;"><strong>Requested Changes:</strong><br/>${requestedChanges.map((c) => `- ${c}`).join("<br/>")}</p>`
@@ -428,7 +438,7 @@ const sendCompanyActivationEmailToHr = async ({
                     <p style="margin:6px 0 0;"><strong>Reason:</strong> ${reasonHtml}</p>
                     ${descriptionHtml ? `<p style="margin:6px 0 0;"><strong>Edited Details:</strong> ${descriptionHtml}</p>` : ""}
                     ${changesHtml}
-                    ${attachmentUrl ? `<p style="margin:6px 0 0;"><strong>Attachment:</strong> <a href="${attachmentUrl}" target="_blank" rel="noopener noreferrer">${attachmentLabel}</a></p>` : ""}
+                    ${attachmentHtml}
                 </div>
                 <p style="margin-top:20px;">
                     <a href="${companyUrl}" style="background:#2563eb;color:#fff;text-decoration:none;padding:10px 16px;border-radius:6px;font-weight:600;display:inline-block;">Review in VeRP</a>
@@ -442,6 +452,7 @@ const sendCompanyActivationEmailToHr = async ({
         to: hrEmail,
         subject,
         html,
+        ...(emailAttachments.length ? { attachments: emailAttachments } : {}),
     });
 };
 

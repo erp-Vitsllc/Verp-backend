@@ -6,6 +6,7 @@ import { disposeEmployeeProfileAttachment } from "../../utils/profileAttachmentD
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
 import { cleanupEmployeeExpiryNotificationsByLabels } from "../../utils/cleanupEmployeeExpiryNotifications.js";
 import { PURGE_TYPES, purgeEmployeeOldDocuments } from "../../utils/purgeEmployeeOldDocuments.js";
+import { scheduleEmployeeProfileFileChangeHrEmailForRequest } from "../../utils/employeeInformativeHrNotify.js";
 
 export const deletePassportDetails = async (req, res) => {
     const { id } = req.params;
@@ -47,6 +48,17 @@ export const deletePassportDetails = async (req, res) => {
             employeeId: employee.employeeId,
             actor: req.user,
             reason: "Passport details deleted",
+        });
+
+        scheduleEmployeeProfileFileChangeHrEmailForRequest({
+            req,
+            employeeId: employee.employeeId,
+            employeeBasic,
+            sectionKey: "passport",
+            sectionLabel: "Passport",
+            action: "deleted",
+            attachments: passport?.document,
+            actor: req.user,
         });
 
         return res.status(200).json({ message: "Passport details deleted successfully." });

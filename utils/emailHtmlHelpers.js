@@ -1,4 +1,6 @@
 export {
+    buildEmailAttachmentsFromRef,
+    renderEmailAttachmentLineHtml,
     renderEmailFileListHtml,
     renderEmailPrimaryButton,
     renderEmailSiteFooter,

@@ -10,9 +10,20 @@ import {
 } from "./profileFileChangeHrNotify.js";
 import { shouldSkipLiveEmployeeSection } from "./pushPendingReactivationChange.js";
 
+/** Map not-renew request kind → profile section key for HR email deep links. */
+export const EMPLOYEE_NOT_RENEW_KIND_TO_SECTION = {
+    passport: "passport",
+    visa: "visa",
+    emiratesId: "emiratesId",
+    labourCard: "labourCard",
+    medicalInsurance: "medicalInsurance",
+    drivingLicense: "drivingLicense",
+    manualDocument: "documents",
+};
+
 /**
- * Notify Flowchart HR when an admin changes a non-activation employee file section on an active profile
- * and the change was saved live (not queued for activation HR review).
+ * Notify Flowchart HR when an admin changes an employee profile card on an active profile.
+ * Includes activation/progress-bar cards (passport, visa, labour card, etc.) and informative sections.
  */
 export async function notifyHrOfEmployeeProfileFileChange({
     employeeBasic = null,
@@ -23,30 +34,36 @@ export async function notifyHrOfEmployeeProfileFileChange({
     attachments = [],
     actor = {},
     skipLive = false,
+    details = null,
     req = null,
     frontendBaseUrl = null,
 }) {
     const eid = String(employeeId || employeeBasic?.employeeId || "").trim();
     const section = String(sectionKey || "").trim();
-    if (!eid || !section || !isInformativeEmployeeSectionKey(section)) {
-        return { sent: false, reason: "SKIPPED_SECTION" };
+    if (!eid || !section) {
+        return { sent: false, reason: "MISSING_CONTEXT" };
     }
-    if (skipLive) return { sent: false, reason: "QUEUED_FOR_ACTIVATION" };
 
     const isAdminActor = await isReqUserAdmin(actor);
-    if (!isAdminActor) return { sent: false, reason: "NOT_ADMIN" };
+    if (!isAdminActor) {
+        if (!isInformativeEmployeeSectionKey(section)) {
+            return { sent: false, reason: "SKIPPED_SECTION" };
+        }
+        if (skipLive) return { sent: false, reason: "QUEUED_FOR_ACTIVATION" };
+    }
 
     let basic = employeeBasic;
     if (!basic?._id && eid) {
         basic = await EmployeeBasic.findOne({ employeeId: eid })
-            .select("employeeId firstName lastName profileStatus company")
+            .select("employeeId firstName lastName profileStatus profileApprovalStatus company")
             .lean();
     }
     if (!isActiveEmployeeProfile(basic)) return { sent: false, reason: "NOT_ACTIVE" };
 
     const base = frontendBaseUrl || req?.frontendBaseUrl || null;
     const profileUrl = buildEmployeeProfileSectionUrl(eid, section, base);
-    const files = await resolveFileLinkEntries(attachments);
+    const attachmentList = Array.isArray(attachments) ? attachments : [attachments].filter(Boolean);
+    const files = await resolveFileLinkEntries(attachmentList);
 
     return notifyFlowchartHrOfProfileFileChanges({
         entityType: "employee",
@@ -60,6 +77,8 @@ export async function notifyHrOfEmployeeProfileFileChange({
                 action,
                 profileUrl,
                 files,
+                queuedForActivation: Boolean(skipLive),
+                details: details && typeof details === "object" ? details : undefined,
             },
         ],
         actor: { ...actor, isAdmin: true },
@@ -83,6 +102,7 @@ export async function scheduleEmployeeProfileFileChangeHrEmailForRequest({
     employeeBasic = null,
     skipLive = null,
     isRenewal = false,
+    details = null,
     req = null,
     frontendBaseUrl = null,
 }) {
@@ -103,6 +123,35 @@ export async function scheduleEmployeeProfileFileChangeHrEmailForRequest({
         attachments,
         actor,
         skipLive: liveSkipped,
+        details,
+        req,
+        frontendBaseUrl: frontendBaseUrl || req?.frontendBaseUrl || null,
+    });
+}
+
+/** Notify HR when an administrator marks a card as not renewed (applied immediately). */
+export function scheduleAdminEmployeeCardNotRenewHrEmail({
+    employeeId,
+    employeeBasic = null,
+    kind = "",
+    sectionLabel = "",
+    reason = "",
+    attachments = [],
+    actor = {},
+    req = null,
+    frontendBaseUrl = null,
+}) {
+    const sectionKey = EMPLOYEE_NOT_RENEW_KIND_TO_SECTION[kind] || "documents";
+    scheduleEmployeeProfileFileChangeHrEmail({
+        employeeBasic,
+        employeeId,
+        sectionKey,
+        sectionLabel: sectionLabel || kind || "Document",
+        action: "not_renewed",
+        attachments,
+        actor,
+        skipLive: false,
+        details: reason ? { description: reason } : null,
         req,
         frontendBaseUrl: frontendBaseUrl || req?.frontendBaseUrl || null,
     });

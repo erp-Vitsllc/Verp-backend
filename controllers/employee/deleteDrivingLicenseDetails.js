@@ -5,6 +5,7 @@ import { denyEmployeeCardDeleteUnlessAllowed } from "../../utils/employeeCardDel
 import { disposeEmployeeProfileAttachment } from "../../utils/profileAttachmentDisposition.js";
 import { cleanupEmployeeExpiryNotificationsByLabels } from "../../utils/cleanupEmployeeExpiryNotifications.js";
 import { PURGE_TYPES, purgeEmployeeOldDocuments } from "../../utils/purgeEmployeeOldDocuments.js";
+import { scheduleEmployeeProfileFileChangeHrEmailForRequest } from "../../utils/employeeInformativeHrNotify.js";
 
 export const deleteDrivingLicenseDetails = async (req, res) => {
     const { id } = req.params;
@@ -40,6 +41,17 @@ export const deleteDrivingLicenseDetails = async (req, res) => {
         await cleanupEmployeeExpiryNotificationsByLabels({
             employeeObjectId: employee._id,
             labels: ["Driving License"],
+        });
+
+        scheduleEmployeeProfileFileChangeHrEmailForRequest({
+            req,
+            employeeId: employee.employeeId,
+            employeeBasic,
+            sectionKey: "drivingLicense",
+            sectionLabel: "Driving License",
+            action: "deleted",
+            attachments: card?.drivingLicenceDetails?.document,
+            actor: req.user,
         });
 
         return res.status(200).json({ message: "Driving License details deleted successfully." });

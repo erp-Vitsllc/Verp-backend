@@ -1,7 +1,8 @@
 import axios from "axios";
+import { isValidStorageUrl } from "../config/storageConfig.js";
 import { getSignedFileUrl, normalizeS3Key, s3ObjectExists } from "./s3Upload.js";
 
-/** Signed download links in email HTML — valid 7 days. */
+/** Internal fetch TTL when downloading files for email attachments (never exposed in HTML). */
 export const EMAIL_FILE_LINK_TTL_SECONDS = 7 * 24 * 60 * 60;
 
 const MAX_INLINE_ATTACHMENTS = 8;
@@ -103,34 +104,51 @@ export async function buildInlineEmailAttachments(fileRefs = [], maxCount = MAX_
     return attachments;
 }
 
-/**
- * Resolve user-clickable file links for email HTML (long-lived signed URLs).
- */
+function displayNameFromRef(raw) {
+    if (typeof raw === "string") {
+        const trimmed = raw.trim();
+        if (!trimmed || trimmed.startsWith("data:")) return null;
+        try {
+            if (/^https?:\/\//i.test(trimmed)) {
+                const seg = new URL(trimmed).pathname.split("/").filter(Boolean).pop();
+                if (seg) return decodeURIComponent(seg);
+            }
+        } catch {
+            /* ignore */
+        }
+        return trimmed.split("/").filter(Boolean).pop() || "File";
+    }
+    if (raw && typeof raw === "object") {
+        const name = raw.name || raw.fileName;
+        if (name && String(name).trim()) return String(name).trim();
+        const key = raw.storageKey || raw.publicId || raw.key || raw.url || raw.href || null;
+        if (key) return String(key).split("/").filter(Boolean).pop() || "File";
+    }
+    return null;
+}
+
+function storageKeyFromRef(raw) {
+    if (typeof raw === "string") {
+        const trimmed = raw.trim();
+        return trimmed && !trimmed.startsWith("data:") ? trimmed : null;
+    }
+    if (raw && typeof raw === "object") {
+        return raw.storageKey || raw.publicId || raw.key || raw.url || raw.href || null;
+    }
+    return null;
+}
+
+/** File metadata for email HTML — never includes storage or presigned URLs. */
 export async function resolveEmailFileLinksForHtml(attachments = []) {
     const list = Array.isArray(attachments) ? attachments : [attachments];
     const out = [];
 
     for (const raw of list) {
-        let name = "File";
-        let key = null;
-
-        if (typeof raw === "string") {
-            const trimmed = raw.trim();
-            if (!trimmed || trimmed.startsWith("data:")) continue;
-            key = trimmed;
-            name = trimmed.split("/").pop() || "File";
-        } else if (raw && typeof raw === "object") {
-            name = raw.name || raw.fileName || "File";
-            key = raw.storageKey || raw.publicId || raw.key || raw.url || raw.href || null;
-            if (!key && raw.url) key = raw.url;
-            if (key && !name) name = String(key).split("/").pop() || "File";
-        }
-
+        const key = storageKeyFromRef(raw);
         if (!key) continue;
-        const signed = await getSignedFileUrl(key, EMAIL_FILE_LINK_TTL_SECONDS);
+        const name = displayNameFromRef(raw) || "File";
         out.push({
-            name: name || "File",
-            url: signed || key,
+            name,
             storageKey: normalizeS3Key(key) || key,
         });
     }
@@ -138,23 +156,31 @@ export async function resolveEmailFileLinksForHtml(attachments = []) {
     return out;
 }
 
+/** Plain-text attachment line for activation / workflow emails (no storage links). */
+export function renderEmailAttachmentLineHtml(fileName, { attached = true } = {}) {
+    const label = escapeHtml(fileName || "Attachment");
+    const note = attached
+        ? " — attached to this email"
+        : " — open the VeRP link below to view in the application";
+    return `<p style="margin:6px 0 0;font-size:13px;color:#334155;"><strong>Attachment:</strong> ${label}<span style="color:#64748b;">${note}</span></p>`;
+}
+
 export function renderEmailFileListHtml(files = [], { showAttachHint = true } = {}) {
-    const list = Array.isArray(files) ? files.filter((f) => f?.url || f?.name) : [];
+    const list = Array.isArray(files) ? files.filter((f) => f?.name || f?.storageKey) : [];
     if (!list.length) {
         return `<p style="margin:6px 0 0;font-size:12px;color:#64748b;">No file on record for this change.</p>`;
     }
 
     const items = list
         .map((f) => {
-            const label = escapeHtml(f.name || "Download file");
-            const href = escapeHtml(f.url || "#");
-            return `<li style="margin:4px 0;"><a href="${href}" style="color:#2563eb;font-weight:500;text-decoration:underline;">${label}</a></li>`;
+            const label = escapeHtml(f.name || "File");
+            return `<li style="margin:4px 0;color:#1e293b;">${label}</li>`;
         })
         .join("");
 
     const hint = showAttachHint
-        ? `<p style="margin:8px 0 0;font-size:11px;color:#475569;">These files are <strong>attached to this email</strong> so you can open them from your inbox. Links above stay valid for 7 days.</p>`
-        : `<p style="margin:8px 0 0;font-size:11px;color:#475569;">Download links stay valid for 7 days.</p>`;
+        ? `<p style="margin:8px 0 0;font-size:11px;color:#475569;">These files are <strong>attached to this email</strong>. Use the VeRP button below to review changes in the application — storage links are not included in email for security.</p>`
+        : `<p style="margin:8px 0 0;font-size:11px;color:#475569;">Open the VeRP link in this email to view files in the application.</p>`;
 
     return `
         <div style="margin:8px 0 0;padding:10px 12px;background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;">
@@ -162,6 +188,15 @@ export function renderEmailFileListHtml(files = [], { showAttachHint = true } = 
             <ul style="margin:0;padding-left:18px;">${items}</ul>
             ${hint}
         </div>`;
+}
+
+/** Build nodemailer attachments from a single activation/workflow upload reference. */
+export async function buildEmailAttachmentsFromRef(attachment, attachmentName) {
+    const raw = attachment != null ? String(attachment).trim() : "";
+    if (!raw || raw.startsWith("data:")) return [];
+    const name = attachmentName && String(attachmentName).trim() ? String(attachmentName).trim() : undefined;
+    if (/^https?:\/\//i.test(raw) && !isValidStorageUrl(raw)) return [];
+    return buildInlineEmailAttachments([{ url: raw, storageKey: raw, name }], 1);
 }
 
 export function renderEmailPrimaryButton(href, label, color = "#0f766e") {
