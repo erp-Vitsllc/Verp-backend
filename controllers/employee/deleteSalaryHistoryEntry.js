@@ -2,7 +2,8 @@ import mongoose from "mongoose";
 import EmployeeSalary from "../../models/EmployeeSalary.js";
 import { resolveEmployeeId, getCompleteEmployee, syncSalaryTopLevelFromHistory } from "../../services/employeeService.js";
 import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
-import { awaitAdminDeletionArchive } from "../../utils/adminDeletionArchiveRun.js";
+import EmployeeBasic from "../../models/EmployeeBasic.js";
+import { disposeEmployeeProfileAttachment } from "../../utils/profileAttachmentDisposition.js";
 import { hasPermission } from "../../services/permissionService.js";
 import { PURGE_TYPES, purgeEmployeeOldDocuments } from "../../utils/purgeEmployeeOldDocuments.js";
 import { isOldestSalaryHistoryEntry } from "../../utils/employeeSalaryValidation.js";
@@ -74,11 +75,18 @@ export const deleteSalaryHistoryEntry = async (req, res) => {
         const targetSnapshot = target.toObject ? target.toObject() : { ...target };
 
         if (isAdminUser) {
-            await awaitAdminDeletionArchive(req, {
-                moduleName: "Employee Salary History",
-                recordId: employee.employeeId,
-                details: `Salary history ${targetSnapshot?.month || monthKey || historyId}`,
-                deletedPayload: { employeeId: employee.employeeId, salaryHistoryEntry: targetSnapshot },
+            const employeeBasic = await EmployeeBasic.findOne({ employeeId: employee.employeeId })
+                .select("profileStatus profileApprovalStatus")
+                .lean();
+            await disposeEmployeeProfileAttachment(req, {
+                employeeBasic,
+                attachment: targetSnapshot?.offerLetter || targetSnapshot?.incrementLetter,
+                archive: {
+                    moduleName: "Employee Salary History",
+                    recordId: employee.employeeId,
+                    details: `Salary history ${targetSnapshot?.month || monthKey || historyId}`,
+                    deletedPayload: { employeeId: employee.employeeId, salaryHistoryEntry: targetSnapshot },
+                },
             });
         }
 
@@ -115,6 +123,7 @@ export const deleteSalaryHistoryEntry = async (req, res) => {
         }
 
         scheduleEmployeeProfileFileChangeHrEmailForRequest({
+            req,
             employeeId: employee.employeeId,
             sectionKey: "salary",
             sectionLabel: "Salary History",

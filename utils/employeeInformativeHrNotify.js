@@ -1,4 +1,5 @@
 import EmployeeBasic from "../models/EmployeeBasic.js";
+import { isReqUserAdmin } from "./sendAdminDeletionNotificationEmails.js";
 import {
     buildEmployeeProfileSectionUrl,
     isActiveEmployeeProfile,
@@ -10,7 +11,7 @@ import {
 import { shouldSkipLiveEmployeeSection } from "./pushPendingReactivationChange.js";
 
 /**
- * Notify Flowchart HR when a non-activation employee file section changes on an active profile
+ * Notify Flowchart HR when an admin changes a non-activation employee file section on an active profile
  * and the change was saved live (not queued for activation HR review).
  */
 export async function notifyHrOfEmployeeProfileFileChange({
@@ -22,6 +23,8 @@ export async function notifyHrOfEmployeeProfileFileChange({
     attachments = [],
     actor = {},
     skipLive = false,
+    req = null,
+    frontendBaseUrl = null,
 }) {
     const eid = String(employeeId || employeeBasic?.employeeId || "").trim();
     const section = String(sectionKey || "").trim();
@@ -29,6 +32,9 @@ export async function notifyHrOfEmployeeProfileFileChange({
         return { sent: false, reason: "SKIPPED_SECTION" };
     }
     if (skipLive) return { sent: false, reason: "QUEUED_FOR_ACTIVATION" };
+
+    const isAdminActor = await isReqUserAdmin(actor);
+    if (!isAdminActor) return { sent: false, reason: "NOT_ADMIN" };
 
     let basic = employeeBasic;
     if (!basic?._id && eid) {
@@ -38,7 +44,8 @@ export async function notifyHrOfEmployeeProfileFileChange({
     }
     if (!isActiveEmployeeProfile(basic)) return { sent: false, reason: "NOT_ACTIVE" };
 
-    const profileUrl = buildEmployeeProfileSectionUrl(eid, section);
+    const base = frontendBaseUrl || req?.frontendBaseUrl || null;
+    const profileUrl = buildEmployeeProfileSectionUrl(eid, section, base);
     const files = await resolveFileLinkEntries(attachments);
 
     return notifyFlowchartHrOfProfileFileChanges({
@@ -55,7 +62,9 @@ export async function notifyHrOfEmployeeProfileFileChange({
                 files,
             },
         ],
-        actor,
+        actor: { ...actor, isAdmin: true },
+        req,
+        frontendBaseUrl: base,
     });
 }
 
@@ -74,6 +83,8 @@ export async function scheduleEmployeeProfileFileChangeHrEmailForRequest({
     employeeBasic = null,
     skipLive = null,
     isRenewal = false,
+    req = null,
+    frontendBaseUrl = null,
 }) {
     let basic = employeeBasic;
     if (!basic && employeeId) {
@@ -92,5 +103,7 @@ export async function scheduleEmployeeProfileFileChangeHrEmailForRequest({
         attachments,
         actor,
         skipLive: liveSkipped,
+        req,
+        frontendBaseUrl: frontendBaseUrl || req?.frontendBaseUrl || null,
     });
 }

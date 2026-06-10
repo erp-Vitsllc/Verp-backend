@@ -2,7 +2,7 @@ import EmployeeTraining from "../../models/EmployeeTraining.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { getCompleteEmployee } from "../../services/employeeService.js";
 import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
-import { awaitAdminDeletionArchive } from "../../utils/adminDeletionArchiveRun.js";
+import { disposeEmployeeProfileAttachment } from "../../utils/profileAttachmentDisposition.js";
 import { scheduleEmployeeProfileFileChangeHrEmailForRequest } from "../../utils/employeeInformativeHrNotify.js";
 
 export const deleteTraining = async (req, res) => {
@@ -40,11 +40,18 @@ export const deleteTraining = async (req, res) => {
         }
 
         const trainingSnapshot = training.toObject ? training.toObject() : { ...training };
-        await awaitAdminDeletionArchive(req, {
-            moduleName: "Employee Training",
-            recordId: employeeId,
-            details: trainingSnapshot?.trainingName || trainingSnapshot?.course || "Training record",
-            deletedPayload: { employeeId, training: trainingSnapshot },
+        const employeeBasic = await EmployeeBasic.findOne({ employeeId })
+            .select("profileStatus profileApprovalStatus")
+            .lean();
+        await disposeEmployeeProfileAttachment(req, {
+            employeeBasic,
+            attachment: trainingSnapshot?.trainingCertificate,
+            archive: {
+                moduleName: "Employee Training",
+                recordId: employeeId,
+                details: trainingSnapshot?.trainingName || trainingSnapshot?.course || "Training record",
+                deletedPayload: { employeeId, training: trainingSnapshot },
+            },
         });
         training.deleteOne();
         await trainingRecord.save();
@@ -52,6 +59,7 @@ export const deleteTraining = async (req, res) => {
         const completeEmployee = await getCompleteEmployee(employeeId);
 
         scheduleEmployeeProfileFileChangeHrEmailForRequest({
+            req,
             employeeId,
             sectionKey: "training",
             sectionLabel: "Training",

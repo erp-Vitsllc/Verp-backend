@@ -77,6 +77,7 @@ export const addExperience = async (req, res) => {
         const completeEmployee = await getCompleteEmployee(employeeId);
 
         scheduleEmployeeProfileFileChangeHrEmailForRequest({
+            req,
             employeeId,
             sectionKey: "experience",
             sectionLabel: "Experience",

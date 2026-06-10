@@ -1,4 +1,5 @@
 import nodemailer from "nodemailer";
+import { resolveFrontendBaseUrl, emailFrontendUrl } from './resolveFrontendBaseUrl.js';
 import {
     buildAssetControllerResponsibilityPdfAttachment,
     buildCompanyAssetsResponsibilityPdfAttachment
@@ -54,7 +55,7 @@ export const sendResponsibilityApprovalEmail = async ({
         });
 
         const subject = `New Responsibility Assigned: ${category} for ${companyName}`;
-        const frontendUrl = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/'/g, "");
+        const frontendUrl = emailFrontendUrl();
         const dashId = dashboardDeepLinkId != null ? String(dashboardDeepLinkId) : String(requestId || "");
         const buttonUrl = `${frontendUrl}/Dashboard?requestId=${encodeURIComponent(dashId)}`;
         const flowchartUrl = `${frontendUrl}/Settings/FlowChart`;

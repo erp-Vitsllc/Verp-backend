@@ -1,4 +1,5 @@
 import nodemailer from "nodemailer";
+import { resolveFrontendBaseUrl, emailFrontendUrl } from './resolveFrontendBaseUrl.js';
 import { normalizePdfAttachments } from "./normalizeEmailAttachments.js";
 import {
     resolveEmployeeEmailWithReporteeLoaded,
@@ -91,7 +92,7 @@ export const sendAssetAssignmentEmail = async ({
                 ? (isBulk ? `New Batch Asset Assignment: ${assetCount} Items Assigned to You` : `New Asset Assigned to You: ${asset.name} (${asset.assetId})`)
                 : (isBulk ? `New Batch Asset Assignment for ${employeeName}: ${assetCount} Items` : `Asset Assignment Notification for ${employeeName}: ${asset.name} (${asset.assetId})`));
 
-        const frontendUrl = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/'/g, "");
+        const frontendUrl = emailFrontendUrl();
         const assetId = asset._id?.toString() || asset.id?.toString();
         const buttonUrl =
             isBulk && bulkAssignmentGroupId

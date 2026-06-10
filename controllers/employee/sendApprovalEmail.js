@@ -1,4 +1,5 @@
 import nodemailer from "nodemailer";
+import { resolveFrontendBaseUrl, emailFrontendUrl } from '../../utils/resolveFrontendBaseUrl.js';
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { getCompleteEmployee } from "../../services/employeeService.js";
 import { resolveFlowchartHrEmployee } from "../../utils/resolveFlowchartHrEmployee.js";
@@ -116,8 +117,7 @@ export const sendApprovalEmail = async (req, res) => {
         const employeeEmail = pickEffectiveEmail(employeeBasic);
         const subject = `${typeForDisplay} request: ${employeeName}`;
 
-        const origin = req.headers.origin || (req.headers.referer ? new URL(req.headers.referer).origin : null);
-        const baseUrl = process.env.FRONTEND_URL || origin || "http://localhost:3000";
+        const baseUrl = resolveFrontendBaseUrl(req);
         const profileUrl = `${baseUrl}/emp/${employeeBasic.employeeId}`;
 
         const html = `

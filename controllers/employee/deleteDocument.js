@@ -1,7 +1,7 @@
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import mongoose from "mongoose";
 import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeService.js";
-import { awaitAdminDeletionArchive } from "../../utils/adminDeletionArchiveRun.js";
+import { disposeEmployeeProfileAttachment } from "../../utils/profileAttachmentDisposition.js";
 import { denyEmployeeCardDeleteUnlessAllowed } from "../../utils/employeeCardDeleteAccess.js";
 import { cleanupEmployeeExpiryNotificationsByLabels } from "../../utils/cleanupEmployeeExpiryNotifications.js";
 import {
@@ -39,13 +39,17 @@ export const deleteDocument = async (req, res) => {
         const documentToDelete = employee.documents[docIndex];
         const deletedDocLabel = (documentToDelete?.type || "Employee Document").toString().trim();
 
-        await awaitAdminDeletionArchive(req, {
-            moduleName: "Employee Document",
-            recordId: employee.employeeId,
-            details: `${deletedDocLabel} (live document index ${docIndex})`,
-            deletedPayload: {
-                employeeId: employee.employeeId,
-                document: documentToDelete,
+        await disposeEmployeeProfileAttachment(req, {
+            employeeBasic: employee,
+            attachment: documentToDelete?.document,
+            archive: {
+                moduleName: "Employee Document",
+                recordId: employee.employeeId,
+                details: `${deletedDocLabel} (live document index ${docIndex})`,
+                deletedPayload: {
+                    employeeId: employee.employeeId,
+                    document: documentToDelete,
+                },
             },
         });
 
@@ -67,6 +71,7 @@ export const deleteDocument = async (req, res) => {
         const completeEmployee = await getCompleteEmployee(employee.employeeId);
 
         scheduleEmployeeProfileFileChangeHrEmailForRequest({
+            req,
             employeeId: employee.employeeId,
             sectionKey: "documents",
             sectionLabel: deletedDocLabel,

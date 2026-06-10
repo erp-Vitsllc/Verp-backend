@@ -48,6 +48,69 @@ function dedupeKeyForRef(ref) {
     return String(ref.url || '').trim();
 }
 
+/** Field paths like `visa.document.url` must not become email filenames (Gmail treats `.url` as a shortcut). */
+function looksLikeFieldPathName(name) {
+    const s = String(name || '').trim();
+    if (!s || !s.includes('.')) return false;
+    return /\.(url|publicId|data)$/i.test(s);
+}
+
+function basenameFromStorageRef(storageRef) {
+    try {
+        const s = String(storageRef || '').trim();
+        if (!s) return '';
+        if (s.startsWith('http')) {
+            const path = new URL(s).pathname;
+            const base = path.split('/').filter(Boolean).pop();
+            if (base) return decodeURIComponent(base);
+        }
+        const base = s.split('/').filter(Boolean).pop();
+        if (base) return decodeURIComponent(base);
+    } catch {
+        /* ignore */
+    }
+    return '';
+}
+
+function resolveNameFromSnapshot(snapshot, fieldPath) {
+    if (!snapshot || !fieldPath || typeof fieldPath !== 'string') return '';
+    const parts = fieldPath.split('.').filter(Boolean);
+    const leaf = parts[parts.length - 1]?.toLowerCase();
+    if (leaf === 'url' || leaf === 'publicid' || leaf === 'data') {
+        parts.pop();
+    }
+    let obj = snapshot;
+    for (const p of parts) {
+        if (obj == null || typeof obj !== 'object') return '';
+        obj = obj[p];
+    }
+    if (obj && typeof obj === 'object') {
+        return String(obj.name || obj.fileName || '').trim();
+    }
+    return '';
+}
+
+/**
+ * Resolve a safe attachment filename for admin-deletion emails and recovery copies.
+ */
+export function resolveDeletionAttachmentFileName(fieldPath, storageRef, snapshot = null, index = 0) {
+    const fromDoc = snapshot ? resolveNameFromSnapshot(snapshot, fieldPath) : '';
+    if (fromDoc && !looksLikeFieldPathName(fromDoc)) return fromDoc;
+
+    const fromKey = basenameFromStorageRef(storageRef);
+    if (fromKey && fromKey.includes('.')) return fromKey;
+
+    const field = String(fieldPath || '').trim();
+    if (field && /attachment$/i.test(field) && !field.includes('.')) {
+        return field;
+    }
+
+    if (fromKey) return fromKey.includes('.') ? fromKey : `${fromKey}.pdf`;
+    return `deleted-attachment-${index + 1}.pdf`;
+}
+
+export { looksLikeFieldPathName, basenameFromStorageRef };
+
 /** Push one uploaded file candidate (deduped by normalized storage key). */
 function pushFileCandidate(files, seen, { url, name, label, data }) {
     const storageRef = String(url || '').trim();
@@ -80,13 +143,15 @@ function pushExplicitAttachmentStorageKeys(payload, files, seen) {
 
     const attachmentKeys = payload.attachmentKeys;
     if (attachmentKeys && typeof attachmentKeys === 'object') {
+        let keyIndex = 0;
         for (const [field, key] of Object.entries(attachmentKeys)) {
             if (typeof key !== 'string' || !key.trim()) continue;
             pushFileCandidate(files, seen, {
                 url: key,
-                name: field,
+                name: resolveDeletionAttachmentFileName(field, key, payload, keyIndex),
                 label: field.replace(/Attachment$/i, ' attachment'),
             });
+            keyIndex += 1;
         }
     }
 

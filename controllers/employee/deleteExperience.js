@@ -2,7 +2,8 @@ import EmployeeExperience from "../../models/EmployeeExperience.js";
 import { getCompleteEmployee } from "../../services/employeeService.js";
 
 import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
-import { awaitAdminDeletionArchive } from "../../utils/adminDeletionArchiveRun.js";
+import EmployeeBasic from "../../models/EmployeeBasic.js";
+import { disposeEmployeeProfileAttachment } from "../../utils/profileAttachmentDisposition.js";
 import { scheduleEmployeeProfileFileChangeHrEmailForRequest } from "../../utils/employeeInformativeHrNotify.js";
 
 export const deleteExperience = async (req, res) => {
@@ -39,17 +40,25 @@ export const deleteExperience = async (req, res) => {
         }
 
         const experienceSnapshot = experience.toObject ? experience.toObject() : { ...experience };
-        await awaitAdminDeletionArchive(req, {
-            moduleName: "Employee Experience",
-            recordId: employeeId,
-            details: experienceSnapshot?.companyName || experienceSnapshot?.designation || "Experience record",
-            deletedPayload: { employeeId, experience: experienceSnapshot },
+        const employeeBasic = await EmployeeBasic.findOne({ employeeId })
+            .select("profileStatus profileApprovalStatus")
+            .lean();
+        await disposeEmployeeProfileAttachment(req, {
+            employeeBasic,
+            attachment: experienceSnapshot?.certificate || experienceSnapshot?.document,
+            archive: {
+                moduleName: "Employee Experience",
+                recordId: employeeId,
+                details: experienceSnapshot?.companyName || experienceSnapshot?.designation || "Experience record",
+                deletedPayload: { employeeId, experience: experienceSnapshot },
+            },
         });
         experience.deleteOne();
         await experienceRecord.save();
         const completeEmployee = await getCompleteEmployee(employeeId);
 
         scheduleEmployeeProfileFileChangeHrEmailForRequest({
+            req,
             employeeId,
             sectionKey: "experience",
             sectionLabel: "Experience",

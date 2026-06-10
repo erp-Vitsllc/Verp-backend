@@ -1,4 +1,5 @@
 import nodemailer from "nodemailer";
+import { resolveFrontendBaseUrl, emailFrontendUrl } from './resolveFrontendBaseUrl.js';
 import Company from "../models/Company.js";
 import EmployeeBasic from "../models/EmployeeBasic.js";
 import {
@@ -393,7 +394,7 @@ const sendCompanyActivationEmailToHr = async ({
         auth: { user: emailUser, pass: emailPass },
     });
 
-    const baseUrl = process.env.FRONTEND_URL || "http://localhost:3000";
+    const baseUrl = resolveFrontendBaseUrl();
     const companyUrl = `${baseUrl}/Company/${company._id}`;
     const isResubmission = String(activationTypeLabel).toLowerCase() === "reactivation";
     const typeForDisplay = isResubmission ? "Reactivation (Resubmission)" : "New Activation";

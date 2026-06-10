@@ -20,6 +20,7 @@ import flowchartRoute from "./routes/flowchartRoutes.js";
 import adminDeletionArchiveRoute from "./routes/adminDeletionArchiveRoutes.js"; // <-- Add flowchart routes
 import storageRoute from "./routes/storageRoutes.js";
 import { commonLimiter } from "./middleware/rateLimitMiddleware.js";
+import { resolveFrontendBaseUrl, runWithRequestFrontendBaseUrl } from "./utils/resolveFrontendBaseUrl.js";
 import dotenv from "dotenv";
 import { connectDB } from "./config/db.js";
 import dns from "dns";
@@ -157,6 +158,12 @@ app.use(
 app.use(commonLimiter);
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
+
+app.use((req, _res, next) => {
+    const base = resolveFrontendBaseUrl(req);
+    req.frontendBaseUrl = base;
+    runWithRequestFrontendBaseUrl(base, next);
+});
 
 // Reject API traffic until MongoDB is connected (avoids hung requests during startup/reconnect).
 app.use((req, res, next) => {

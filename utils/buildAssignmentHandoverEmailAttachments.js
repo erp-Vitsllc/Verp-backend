@@ -3,9 +3,10 @@ import {
     resolveSignatureUrlForPdf,
 } from './generateBulkAssetInventoryPdf.js';
 import { getSignedFileUrl } from './s3Upload.js';
+import { resolveFrontendBaseUrl, emailFrontendUrl } from './resolveFrontendBaseUrl.js';
 
 function frontendBaseUrl() {
-    return (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/'/g, '');
+    return emailFrontendUrl();
 }
 
 function employeeDisplayName(emp) {

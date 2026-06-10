@@ -12,7 +12,7 @@ import { calculateCompanyActivationProgress } from "../../utils/companyActivatio
 import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
 import { isRequestUserDesignatedFlowchartHr } from "../../utils/isDesignatedFlowchartHr.js";
 import { hasPermission } from "../../services/permissionService.js";
-import { awaitAdminDeletionArchive } from "../../utils/adminDeletionArchiveRun.js";
+import { disposeCompanyProfileAttachment } from "../../utils/profileAttachmentDisposition.js";
 import { scheduleCompanyProfileFileDeleteHrEmail } from "../../utils/companyInformativeHrNotify.js";
 
 const ALLOWED_FIELDS = new Set(["ejari", "insurance"]);
@@ -104,15 +104,19 @@ export const deleteCompanyArrayItem = async (req, res) => {
         const label = fieldName === "ejari" ? "Ejari" : "Insurance";
         const rowLabel = resolved.row.type || resolved.row.description || label;
 
-        await awaitAdminDeletionArchive(req, {
-            moduleName: `Company ${label}`,
-            recordId: company.companyId || String(company._id),
-            details: `${rowLabel} removed from ${company.name || company.companyId}`,
-            deletedPayload: {
-                companyId: company.companyId,
-                companyName: company.name,
-                field: fieldName,
-                item: resolved.row,
+        await disposeCompanyProfileAttachment(req, {
+            company: fullProfile,
+            attachment: resolved.row?.document || resolved.row?.attachment,
+            archive: {
+                moduleName: `Company ${label}`,
+                recordId: company.companyId || String(company._id),
+                details: `${rowLabel} removed from ${company.name || company.companyId}`,
+                deletedPayload: {
+                    companyId: company.companyId,
+                    companyName: company.name,
+                    field: fieldName,
+                    item: resolved.row,
+                },
             },
         });
 
@@ -141,6 +145,7 @@ export const deleteCompanyArrayItem = async (req, res) => {
             action: "deleted",
             attachment: resolved.row?.document || resolved.row?.attachment || null,
             actor: req.user,
+            req,
         });
 
         return res.status(200).json({

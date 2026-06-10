@@ -1,4 +1,5 @@
 import nodemailer from 'nodemailer';
+import { resolveFrontendBaseUrl, emailFrontendUrl } from './resolveFrontendBaseUrl.js';
 import { resolveEmployeeEmail } from './resolveEmployeeEmail.js';
 import { normalizePdfAttachments } from './normalizeEmailAttachments.js';
 
@@ -57,7 +58,7 @@ export const sendAssetActionApprovedEmail = async (asset, actionType, employee, 
             auth: { user: emailUser, pass: emailPass }
         });
 
-        const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+        const frontendUrl = resolveFrontendBaseUrl();
         const link = `${frontendUrl}/HRM/Asset/details/${asset._id || asset.id}`;
 
         const actionText = approvedOutcomeDescription(actionType, asset);
@@ -169,7 +170,7 @@ export const sendAssetBulkActionApprovedEmail = async (assets, actionType, emplo
             auth: { user: emailUser, pass: emailPass }
         });
 
-        const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+        const frontendUrl = resolveFrontendBaseUrl();
         const actionText = approvedOutcomeDescription(actionType, assets[0]);
 
         const assetRows = assets.map((a) => {

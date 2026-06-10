@@ -3,7 +3,7 @@ import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { getCompleteEmployee } from "../../services/employeeService.js";
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
 import { shouldSkipLiveEmployeeSection, queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
-import { awaitAdminDeletionArchive } from "../../utils/adminDeletionArchiveRun.js";
+import { disposeEmployeeProfileAttachment } from "../../utils/profileAttachmentDisposition.js";
 import { denyEmployeeCardDeleteUnlessAllowed } from "../../utils/employeeCardDeleteAccess.js";
 import { scheduleEmployeeProfileFileChangeHrEmailForRequest } from "../../utils/employeeInformativeHrNotify.js";
 
@@ -61,11 +61,14 @@ export const deleteEmergencyContact = async (req, res) => {
             });
         } else {
             const contactSnapshot = contact.toObject ? contact.toObject() : { ...contact };
-            await awaitAdminDeletionArchive(req, {
-                moduleName: "Employee Emergency Contact",
-                recordId: employeeId,
-                details: contactSnapshot?.name || "Emergency contact",
-                deletedPayload: { employeeId, contact: contactSnapshot },
+            await disposeEmployeeProfileAttachment(req, {
+                employeeBasic,
+                archive: {
+                    moduleName: "Employee Emergency Contact",
+                    recordId: employeeId,
+                    details: contactSnapshot?.name || "Emergency contact",
+                    deletedPayload: { employeeId, contact: contactSnapshot },
+                },
             });
             contact.deleteOne();
             const primaryContact = contactRecord.emergencyContacts?.[0];
@@ -91,6 +94,7 @@ export const deleteEmergencyContact = async (req, res) => {
         const completeEmployee = await getCompleteEmployee(employeeId);
 
         scheduleEmployeeProfileFileChangeHrEmailForRequest({
+            req,
             employeeId,
             employeeBasic,
             sectionKey: "emergencyContact",

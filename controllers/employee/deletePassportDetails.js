@@ -1,9 +1,8 @@
 import EmployeePassport from "../../models/EmployeePassport.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { resolveEmployeeId } from "../../services/employeeService.js";
-import { awaitAdminDeletionArchive } from "../../utils/adminDeletionArchiveRun.js";
 import { denyEmployeeCardDeleteUnlessAllowed } from "../../utils/employeeCardDeleteAccess.js";
-import { isActiveEmployeeProfile } from "../../utils/profileFileChangeHrNotify.js";
+import { disposeEmployeeProfileAttachment } from "../../utils/profileAttachmentDisposition.js";
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
 import { cleanupEmployeeExpiryNotificationsByLabels } from "../../utils/cleanupEmployeeExpiryNotifications.js";
 import { PURGE_TYPES, purgeEmployeeOldDocuments } from "../../utils/purgeEmployeeOldDocuments.js";
@@ -22,12 +21,16 @@ export const deletePassportDetails = async (req, res) => {
 
         const passport = await EmployeePassport.findOne({ employeeId: employee.employeeId }).lean();
 
-        if (isActiveEmployeeProfile(employeeBasic)) {
-            await awaitAdminDeletionArchive(req, {
-                moduleName: "Employee Passport",
-                recordId: employee.employeeId,
-                details: `Passport card for ${employee.employeeId}`,
-                deletedPayload: { employeeId: employee.employeeId, passport },
+        if (passport?.document) {
+            await disposeEmployeeProfileAttachment(req, {
+                employeeBasic,
+                attachment: passport.document,
+                archive: {
+                    moduleName: "Employee Passport",
+                    recordId: employee.employeeId,
+                    details: `Passport card for ${employee.employeeId}`,
+                    deletedPayload: { employeeId: employee.employeeId, passport },
+                },
             });
         }
 

@@ -1,4 +1,5 @@
 import nodemailer from 'nodemailer';
+import { resolveFrontendBaseUrl, emailFrontendUrl } from './resolveFrontendBaseUrl.js';
 import { resolveEmployeeEmail } from './resolveEmployeeEmail.js';
 
 const getTransporter = () => {
@@ -28,7 +29,7 @@ export const sendAssetCreationDecisionEmail = async ({ asset, recipient, approve
         if (!setup) return false;
 
         const { transporter, emailUser } = setup;
-        const frontendUrl = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/'/g, '');
+        const frontendUrl = emailFrontendUrl();
         const assetId = asset?._id?.toString() || asset?.id?.toString();
         const plate = String(asset?.plateNumber || '').trim();
         const isFleetVehicle = !!plate;
@@ -84,7 +85,7 @@ export const sendAssetCreationRejectedEmail = async ({
         if (!setup) return false;
 
         const { transporter, emailUser } = setup;
-        const frontendUrl = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/'/g, '');
+        const frontendUrl = emailFrontendUrl();
         const assetId = asset?._id?.toString() || asset?.id?.toString();
         const plate = String(asset?.plateNumber || '').trim();
         const isFleetVehicle = !!plate;
@@ -138,7 +139,7 @@ export const sendAssetCreatedByAdminInfoEmail = async ({ asset, recipient, creat
         if (!setup) return false;
 
         const { transporter, emailUser } = setup;
-        const frontendUrl = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/'/g, '');
+        const frontendUrl = emailFrontendUrl();
         const assetId = asset?._id?.toString() || asset?.id?.toString();
         const buttonUrl = `${frontendUrl}/HRM/Asset/details/${assetId}`;
         const subject = `Asset Created by Admin: ${asset?.assetId || asset?.name || 'Asset'}`;

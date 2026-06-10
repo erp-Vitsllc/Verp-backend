@@ -1,7 +1,8 @@
 import EmployeeEmiratesId from "../../models/EmployeeEmiratesId.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeService.js";
-import { uploadDocumentToS3, deleteDocumentFromS3 } from "../../utils/s3Upload.js";
+import { uploadDocumentToS3 } from "../../utils/s3Upload.js";
+import { disposeEmployeeProfileAttachment } from "../../utils/profileAttachmentDisposition.js";
 import { archiveAndClearLiveEmployeeRenewal } from "../../utils/employeeDocumentRenewal.js";
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
 import { shouldSkipLiveEmployeeSection, queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
@@ -126,8 +127,21 @@ export const updateEmiratesIdDetails = async (req, res) => {
                     "raw",
                 );
 
-                if (!shouldArchivePrevious && existingEmiratesId?.emiratesId?.document?.publicId) {
-                    await deleteDocumentFromS3(existingEmiratesId.emiratesId.document.publicId);
+                if (!shouldArchivePrevious && existingEmiratesId?.emiratesId?.document) {
+                    await disposeEmployeeProfileAttachment(req, {
+                        employeeBasic,
+                        attachment: existingEmiratesId.emiratesId.document,
+                        isActivationDocumentChange: skipLive,
+                        archive: {
+                            moduleName: "Employee Emirates ID Attachment",
+                            recordId: employeeId,
+                            details: `Emirates ID attachment replaced for ${employeeId}`,
+                            deletedPayload: {
+                                employeeId,
+                                emiratesId: existingEmiratesId.emiratesId,
+                            },
+                        },
+                    });
                 }
 
                 documentData = {
@@ -199,6 +213,7 @@ export const updateEmiratesIdDetails = async (req, res) => {
         const completeEmployee = await getCompleteEmployee(employeeId);
 
         scheduleEmployeeProfileFileChangeHrEmailForRequest({
+            req,
             employeeId,
             employeeBasic,
             sectionKey: "emiratesId",

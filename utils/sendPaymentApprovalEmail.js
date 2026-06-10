@@ -1,4 +1,5 @@
 import nodemailer from 'nodemailer';
+import { resolveFrontendBaseUrl, emailFrontendUrl } from './resolveFrontendBaseUrl.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 
 /**
@@ -29,7 +30,7 @@ export const sendPaymentApprovalEmail = async (payment, accountsHOD) => {
             }
         });
 
-        const frontendUrl = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/'/g, "");
+        const frontendUrl = emailFrontendUrl();
         const buttonUrl = `${frontendUrl}/Accounts/Payments?paymentId=${payment.paymentId}`;
 
         const subject = `Payment Pending Approval: ${payment.paymentId} - AED ${parseFloat(payment.amount).toLocaleString()}`;

@@ -1,4 +1,5 @@
 import nodemailer from "nodemailer";
+import { resolveFrontendBaseUrl, emailFrontendUrl } from './resolveFrontendBaseUrl.js';
 import { getDepartmentHOD } from "./getDepartmentHOD.js";
 import DashboardAction from "../models/DashboardAction.js";
 import EmployeeBasic from "../models/EmployeeBasic.js";
@@ -96,7 +97,7 @@ export const sendProbationWorkflowEmail = async ({
         const probText = probationEndDate
             ? new Date(probationEndDate).toLocaleDateString()
             : "N/A";
-        const baseUrl = process.env.FRONTEND_URL || "http://localhost:3000";
+        const baseUrl = resolveFrontendBaseUrl();
         const profileUrl = `${baseUrl}/emp/${employee.employeeId}`;
         const workDetailsUrl = `${baseUrl}/emp/${employee.employeeId}?tab=work-details`;
 
@@ -195,7 +196,7 @@ export const ensureProbationRequestForEmployee = async (employeeDoc) => {
     const primaryReportee = employeeDoc.primaryReportee;
     const primaryReporteeEmail = resolveEmployeeEmail(primaryReportee || {}).email;
     const primaryReporteeName = `${primaryReportee?.firstName || ""} ${primaryReportee?.lastName || ""}`.trim() || primaryReportee?.employeeId || "Primary reportee";
-    const baseUrl = process.env.FRONTEND_URL || "http://localhost:3000";
+    const baseUrl = resolveFrontendBaseUrl();
     const workDetailsUrl = `${baseUrl}/emp/${employeeDoc.employeeId}?tab=work-details`;
     employeeDoc.probationChangeRequest = {
         status: "pending_hod",

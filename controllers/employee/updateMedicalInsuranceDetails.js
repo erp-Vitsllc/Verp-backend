@@ -1,7 +1,8 @@
 import EmployeeMedicalInsurance from "../../models/EmployeeMedicalInsurance.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeService.js";
-import { uploadDocumentToS3, deleteDocumentFromS3 } from "../../utils/s3Upload.js";
+import { uploadDocumentToS3 } from "../../utils/s3Upload.js";
+import { disposeEmployeeProfileAttachment } from "../../utils/profileAttachmentDisposition.js";
 import { archiveAndClearLiveEmployeeRenewal } from "../../utils/employeeDocumentRenewal.js";
 import { markProfileActivationHoldResolvedForSection } from "../../utils/markProfileActivationHoldResolved.js";
 import {
@@ -113,8 +114,20 @@ export const updateMedicalInsuranceDetails = async (req, res) => {
                     uploadName || "medical-insurance.pdf",
                     "raw",
                 );
-                if (!shouldArchivePrevious && existingMedicalInsurance?.medicalInsurance?.document?.publicId) {
-                    await deleteDocumentFromS3(existingMedicalInsurance.medicalInsurance.document.publicId);
+                if (!shouldArchivePrevious && existingMedicalInsurance?.medicalInsurance?.document) {
+                    await disposeEmployeeProfileAttachment(req, {
+                        employeeBasic,
+                        attachment: existingMedicalInsurance.medicalInsurance.document,
+                        archive: {
+                            moduleName: "Employee Medical Insurance Attachment",
+                            recordId: employeeId,
+                            details: `Medical insurance attachment replaced for ${employeeId}`,
+                            deletedPayload: {
+                                employeeId,
+                                medicalInsurance: existingMedicalInsurance.medicalInsurance,
+                            },
+                        },
+                    });
                 }
                 documentData = {
                     url: uploadResult.url,
@@ -151,6 +164,7 @@ export const updateMedicalInsuranceDetails = async (req, res) => {
         const completeEmployee = await getCompleteEmployee(employeeId);
 
         scheduleEmployeeProfileFileChangeHrEmailForRequest({
+            req,
             employeeId,
             employeeBasic,
             sectionKey: "medicalInsurance",

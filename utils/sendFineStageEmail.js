@@ -1,4 +1,5 @@
 import nodemailer from 'nodemailer';
+import { resolveFrontendBaseUrl, emailFrontendUrl } from './resolveFrontendBaseUrl.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 
 export const sendFineStageEmail = async (fine, recipients, stageName, allAssignedEmployees = []) => {
@@ -30,7 +31,7 @@ export const sendFineStageEmail = async (fine, recipients, stageName, allAssigne
     // Ensure recipients is an array or string
     const to = Array.isArray(recipients) ? recipients.join(',') : recipients;
 
-    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+    const frontendUrl = resolveFrontendBaseUrl();
     const actionLink = `${frontendUrl}/HRM/Fine/${fine._id}`;
     
     // Support group lists for the email body if provided, otherwise use fine.assignedEmployees

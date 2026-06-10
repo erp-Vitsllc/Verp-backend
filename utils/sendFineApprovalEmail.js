@@ -1,4 +1,5 @@
 import nodemailer from 'nodemailer';
+import { resolveFrontendBaseUrl, emailFrontendUrl } from './resolveFrontendBaseUrl.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import User from '../models/User.js';
 import { getDepartmentHOD } from './getDepartmentHOD.js';
@@ -103,7 +104,7 @@ export const sendFineApprovalEmail = async (fine, assignedEmployees) => {
 
 
         // 4. Send Emails
-        const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+        const frontendUrl = resolveFrontendBaseUrl();
         const fineLink = `${frontendUrl}/HRM/Fine/${fine._id}`;
 
         // Generate HTML Table for Employees

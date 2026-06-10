@@ -1,8 +1,7 @@
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { resolveEmployeeId } from "../../services/employeeService.js";
-import { awaitAdminDeletionArchive } from "../../utils/adminDeletionArchiveRun.js";
 import { denyEmployeeCardDeleteUnlessAllowed } from "../../utils/employeeCardDeleteAccess.js";
-import { isActiveEmployeeProfile } from "../../utils/profileFileChangeHrNotify.js";
+import { disposeEmployeeProfileAttachment } from "../../utils/profileAttachmentDisposition.js";
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
 import { PURGE_TYPES, purgeEmployeeOldDocuments } from "../../utils/purgeEmployeeOldDocuments.js";
 
@@ -20,12 +19,16 @@ export const deleteSignatureCard = async (req, res) => {
         const denied = await denyEmployeeCardDeleteUnlessAllowed(req, sigEmployee, "signature");
         if (denied) return res.status(denied.status).json(denied.body);
 
-        if (sigEmployee?.signature && isActiveEmployeeProfile(sigEmployee)) {
-            await awaitAdminDeletionArchive(req, {
-                moduleName: "Employee Signature",
-                recordId: employee.employeeId,
-                details: `Digital signature for ${employee.employeeId}`,
-                deletedPayload: { employeeId: employee.employeeId, signature: sigEmployee.signature },
+        if (sigEmployee?.signature) {
+            await disposeEmployeeProfileAttachment(req, {
+                employeeBasic: sigEmployee,
+                attachment: sigEmployee.signature,
+                archive: {
+                    moduleName: "Employee Signature",
+                    recordId: employee.employeeId,
+                    details: `Digital signature for ${employee.employeeId}`,
+                    deletedPayload: { employeeId: employee.employeeId, signature: sigEmployee.signature },
+                },
             });
         }
         await EmployeeBasic.updateOne(

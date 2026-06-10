@@ -8,6 +8,7 @@ import {
     BULK_ASSIGNEE_DISPOSITION_PDF_SELECTOR,
     BULK_ASSIGNMENT_HANDOVER_PDF_SELECTOR,
 } from './assetHandoverPdfConstants.js';
+import { resolveFrontendBaseUrl } from './resolveFrontendBaseUrl.js';
 
 function escapeHtml(s) {
     if (s == null) return '';
@@ -502,7 +503,7 @@ export async function requireBulkAssetInventoryPdfAttachment(req, assetIds, file
  * Mirrors frontend HandoverFormView getSignatureUrl behavior.
  */
 export function resolveSignatureUrlForPdf(sig, frontendBase) {
-    const fe = String(frontendBase || process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/+$/, '');
+    const fe = String(frontendBase || resolveFrontendBaseUrl()).replace(/\/+$/, '');
     const apiRoot = String(
         process.env.BACKEND_PUBLIC_URL || process.env.SERVER_URL || process.env.API_URL || 'http://localhost:5000',
     )
@@ -623,7 +624,7 @@ function buildBulkAssignmentHandoverHtmlDoc(rows, ctx) {
         sumValue += Number(r.assetValue) || 0;
     }
 
-    const frontendBase = String(process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/+$/, '');
+    const frontendBase = String(resolveFrontendBaseUrl()).replace(/\/+$/, '');
     const handoverBgUrl = `${frontendBase}/assets/loan_bg_clean.jpg`;
     const handoverBgCssUrl = JSON.stringify(handoverBgUrl);
 

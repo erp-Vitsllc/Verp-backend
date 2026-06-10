@@ -1,4 +1,5 @@
 import nodemailer from 'nodemailer';
+import { resolveFrontendBaseUrl, emailFrontendUrl } from './resolveFrontendBaseUrl.js';
 
 /**
  * Sends email notification for asset transfer request
@@ -36,7 +37,7 @@ export const sendAssetTransferEmail = async (asset, fromEmployee, toEmployee, ap
             auth: { user: emailUser, pass: emailPass }
         });
 
-        const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+        const frontendUrl = resolveFrontendBaseUrl();
         const link = `${frontendUrl}/HRM/Asset/details/${asset._id}?authAction=transfer`;
 
         const htmlContent = `

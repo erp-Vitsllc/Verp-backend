@@ -1,4 +1,5 @@
 import nodemailer from 'nodemailer';
+import { resolveFrontendBaseUrl, emailFrontendUrl } from '../utils/resolveFrontendBaseUrl.js';
 import AssetItem from '../models/AssetItem.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import { getDepartmentHOD, isUserInFlowchart } from '../utils/getDepartmentHOD.js';
@@ -177,7 +178,7 @@ export const submitVehicleProfileActivation = async (req, res) => {
         const vehicleLabel = `${asset.name || 'Vehicle'} (${asset.assetId || id})`;
         const hrGreetingName = `${designatedHr.firstName || ''} ${designatedHr.lastName || ''}`.trim() || 'HR';
         const origin = req.headers.origin || (req.headers.referer ? new URL(req.headers.referer).origin : null);
-        const baseUrl = process.env.FRONTEND_URL || origin || 'http://localhost:3000';
+        const baseUrl = resolveFrontendBaseUrl(req);
         const detailUrl = `${baseUrl}/HRM/Asset/Vehicle/details/${id}`;
         const descText = String(description || '').trim();
         const sectionsHtml = sections.map((s) => `<li>${SECTION_LABEL[s] || s}</li>`).join('');
@@ -371,7 +372,7 @@ export const approveVehicleProfileActivation = async (req, res) => {
                   .lean()
             : null;
         const origin = req.headers.origin || (req.headers.referer ? new URL(req.headers.referer).origin : null);
-        const baseUrl = process.env.FRONTEND_URL || origin || 'http://localhost:3000';
+        const baseUrl = resolveFrontendBaseUrl(req);
         const detailUrl = `${baseUrl}/HRM/Asset/Vehicle/details/${id}`;
         const vehicleLabel = `${asset.name || 'Vehicle'} (${asset.assetId || id})`;
         sendVehicleProfileActivationOutcomeEmail({
@@ -524,7 +525,7 @@ export const holdVehicleProfileActivation = async (req, res) => {
         });
 
         const origin = req.headers.origin || (req.headers.referer ? new URL(req.headers.referer).origin : null);
-        const baseUrl = process.env.FRONTEND_URL || origin || 'http://localhost:3000';
+        const baseUrl = resolveFrontendBaseUrl(req);
         const detailUrl = `${baseUrl}/HRM/Asset/Vehicle/details/${id}`;
         const notesObj = rowNotesBySectionId || {};
         const holdItems = unapproved.map((sid) => ({
@@ -668,7 +669,7 @@ export const rejectVehicleProfileActivation = async (req, res) => {
         }
 
         const origin = req.headers.origin || (req.headers.referer ? new URL(req.headers.referer).origin : null);
-        const baseUrl = process.env.FRONTEND_URL || origin || 'http://localhost:3000';
+        const baseUrl = resolveFrontendBaseUrl(req);
         const detailUrl = `${baseUrl}/HRM/Asset/Vehicle/details/${id}`;
         sendVehicleProfileActivationOutcomeEmail({
             submitterEmployee: submitterEmp,

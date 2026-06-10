@@ -1,4 +1,5 @@
 import nodemailer from 'nodemailer';
+import { resolveFrontendBaseUrl, emailFrontendUrl } from './resolveFrontendBaseUrl.js';
 import { resolveEmployeeEmailTargets } from './resolveEmployeeEmail.js';
 import { normalizePdfAttachments } from './normalizeEmailAttachments.js';
 
@@ -37,7 +38,7 @@ export const sendAssetActionApprovalEmail = async (asset, actionType, manager, r
             auth: { user: emailUser, pass: emailPass }
         });
 
-        const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+        const frontendUrl = resolveFrontendBaseUrl();
         const authAction =
             actionType === 'End of Life' ? 'eol' :
             actionType === 'Transfer' ? 'transfer' :

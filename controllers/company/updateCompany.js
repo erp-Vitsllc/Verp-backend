@@ -49,6 +49,7 @@ import {
     notifyHrOfCompanyInformativeCardUpdates,
     scheduleCompanyProfileFileChangeHrEmail,
 } from "../../utils/companyInformativeHrNotify.js";
+import { disposeCommittedCompanyProfileAttachmentChanges } from "../../utils/disposeCompanyProfileAttachmentChanges.js";
 import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
 import { isRequestUserDesignatedFlowchartHr } from "../../utils/isDesignatedFlowchartHr.js";
 import {
@@ -1056,6 +1057,20 @@ export const updateCompany = async (req, res) => {
 
         if (!queueForApproval) {
             try {
+                await disposeCommittedCompanyProfileAttachmentChanges(req, beforeCompany, updateData, {
+                    queueForApproval,
+                    isRenewal: isRenewalRequest,
+                });
+            } catch (disposeErr) {
+                console.warn(
+                    "[updateCompany] disposeCommittedCompanyProfileAttachmentChanges:",
+                    disposeErr?.message || disposeErr,
+                );
+            }
+        }
+
+        if (!queueForApproval) {
+            try {
                 await reconcileCompanyDocumentExpiryDashboard(updatedCompany._id);
             } catch (expiryErr) {
                 console.warn(
@@ -1129,18 +1144,25 @@ export const updateCompany = async (req, res) => {
         }
 
         let informativeHrNotified = false;
-        if (!queueForApproval) {
+        if (!queueForApproval && requesterIsAdmin) {
             try {
+                const frontendBaseUrl = req.frontendBaseUrl || null;
                 const changeEvents = await collectCompanyProfileFileChangeEvents(
                     beforeCompany,
                     updateData,
-                    { companyId: mergedForResponse._id, isRenewal: isRenewalRequest },
+                    {
+                        companyId: mergedForResponse._id,
+                        isRenewal: isRenewalRequest,
+                        frontendBaseUrl,
+                    },
                 );
                 if (changeEvents.length > 0) {
                     const notifyResult = await notifyHrOfCompanyInformativeCardUpdates({
                         company: mergedForResponse,
                         changeEvents,
-                        actor: req.user,
+                        actor: { ...req.user, isAdmin: true },
+                        req,
+                        frontendBaseUrl,
                     });
                     informativeHrNotified = notifyResult?.sent === true;
                 }

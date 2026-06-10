@@ -1,9 +1,8 @@
 import EmployeeDrivingLicense from "../../models/EmployeeDrivingLicense.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { resolveEmployeeId } from "../../services/employeeService.js";
-import { awaitAdminDeletionArchive } from "../../utils/adminDeletionArchiveRun.js";
 import { denyEmployeeCardDeleteUnlessAllowed } from "../../utils/employeeCardDeleteAccess.js";
-import { isActiveEmployeeProfile } from "../../utils/profileFileChangeHrNotify.js";
+import { disposeEmployeeProfileAttachment } from "../../utils/profileAttachmentDisposition.js";
 import { cleanupEmployeeExpiryNotificationsByLabels } from "../../utils/cleanupEmployeeExpiryNotifications.js";
 import { PURGE_TYPES, purgeEmployeeOldDocuments } from "../../utils/purgeEmployeeOldDocuments.js";
 
@@ -20,12 +19,16 @@ export const deleteDrivingLicenseDetails = async (req, res) => {
         if (denied) return res.status(denied.status).json(denied.body);
 
         const card = await EmployeeDrivingLicense.findOne({ employeeId: employee.employeeId }).lean();
-        if (isActiveEmployeeProfile(employeeBasic)) {
-            await awaitAdminDeletionArchive(req, {
-                moduleName: "Employee Driving License",
-                recordId: employee.employeeId,
-                details: `Driving license for ${employee.employeeId}`,
-                deletedPayload: { employeeId: employee.employeeId, drivingLicense: card },
+        if (card?.drivingLicenceDetails?.document) {
+            await disposeEmployeeProfileAttachment(req, {
+                employeeBasic,
+                attachment: card.drivingLicenceDetails.document,
+                archive: {
+                    moduleName: "Employee Driving License",
+                    recordId: employee.employeeId,
+                    details: `Driving license for ${employee.employeeId}`,
+                    deletedPayload: { employeeId: employee.employeeId, drivingLicense: card },
+                },
             });
         }
 

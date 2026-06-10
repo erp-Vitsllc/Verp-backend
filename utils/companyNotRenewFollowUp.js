@@ -1,4 +1,5 @@
 import DashboardAction from "../models/DashboardAction.js";
+import { resolveFrontendBaseUrl, emailFrontendUrl } from './resolveFrontendBaseUrl.js';
 import User from "../models/User.js";
 import EmployeeBasic from "../models/EmployeeBasic.js";
 
@@ -151,7 +152,7 @@ export const createCreatorNotRenewFollowUpAfterReject = async ({ core, entry, hr
     const targetMeta = buildNotRenewTargetFromEntry(entry);
     await closeCreatorNotRenewFollowUpTasks(core._id, targetMeta);
 
-    const baseUrl = (process.env.FRONTEND_URL || "http://localhost:3000").replace(/\/$/, "");
+    const baseUrl = (resolveFrontendBaseUrl()).replace(/\/$/, "");
     const companyLink = `${baseUrl}/Company/${encodeURIComponent(core.companyId || core._id)}`;
 
     const label = entry.label || entry.kind;

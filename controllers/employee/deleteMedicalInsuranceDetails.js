@@ -1,9 +1,8 @@
 import EmployeeMedicalInsurance from "../../models/EmployeeMedicalInsurance.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { resolveEmployeeId } from "../../services/employeeService.js";
-import { awaitAdminDeletionArchive } from "../../utils/adminDeletionArchiveRun.js";
 import { denyEmployeeCardDeleteUnlessAllowed } from "../../utils/employeeCardDeleteAccess.js";
-import { isActiveEmployeeProfile } from "../../utils/profileFileChangeHrNotify.js";
+import { disposeEmployeeProfileAttachment } from "../../utils/profileAttachmentDisposition.js";
 import { cleanupEmployeeExpiryNotificationsByLabels } from "../../utils/cleanupEmployeeExpiryNotifications.js";
 import { PURGE_TYPES, purgeEmployeeOldDocuments } from "../../utils/purgeEmployeeOldDocuments.js";
 
@@ -20,12 +19,16 @@ export const deleteMedicalInsuranceDetails = async (req, res) => {
         if (denied) return res.status(denied.status).json(denied.body);
 
         const card = await EmployeeMedicalInsurance.findOne({ employeeId: employee.employeeId }).lean();
-        if (isActiveEmployeeProfile(employeeBasic)) {
-            await awaitAdminDeletionArchive(req, {
-                moduleName: "Employee Medical Insurance",
-                recordId: employee.employeeId,
-                details: `Medical insurance for ${employee.employeeId}`,
-                deletedPayload: { employeeId: employee.employeeId, medicalInsurance: card },
+        if (card?.medicalInsurance?.document) {
+            await disposeEmployeeProfileAttachment(req, {
+                employeeBasic,
+                attachment: card.medicalInsurance.document,
+                archive: {
+                    moduleName: "Employee Medical Insurance",
+                    recordId: employee.employeeId,
+                    details: `Medical insurance for ${employee.employeeId}`,
+                    deletedPayload: { employeeId: employee.employeeId, medicalInsurance: card },
+                },
             });
         }
 

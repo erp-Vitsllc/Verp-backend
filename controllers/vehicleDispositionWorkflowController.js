@@ -1,4 +1,5 @@
 import AssetItem from '../models/AssetItem.js';
+import { resolveFrontendBaseUrl, emailFrontendUrl } from '../utils/resolveFrontendBaseUrl.js';
 import Company from '../models/Company.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import DashboardAction from '../models/DashboardAction.js';
@@ -57,7 +58,7 @@ const vehicleSubjectForDashboard = (asset) => ({
 
 const detailUrlFor = (req, assetId, dispositionRole = null) => {
     const origin = req.headers.origin || (req.headers.referer ? new URL(req.headers.referer).origin : null);
-    const baseUrl = process.env.FRONTEND_URL || origin || 'http://localhost:3000';
+    const baseUrl = resolveFrontendBaseUrl(req);
     const roleQs =
         dispositionRole && ['hr', 'accounts', 'management'].includes(String(dispositionRole).toLowerCase())
             ? `&dispositionRole=${encodeURIComponent(String(dispositionRole).toLowerCase())}`

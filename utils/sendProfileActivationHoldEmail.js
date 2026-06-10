@@ -1,4 +1,5 @@
 import nodemailer from "nodemailer";
+import { resolveFrontendBaseUrl, emailFrontendUrl } from './resolveFrontendBaseUrl.js';
 
 import { pickEffectiveEmail as pickSubmitterEmail } from "./pickEffectiveEmail.js";
 
@@ -66,7 +67,7 @@ export const sendProfileActivationHoldEmail = async (params) => {
             return n || "HR";
         })();
 
-        const baseUrl = process.env.FRONTEND_URL || "http://localhost:3000";
+        const baseUrl = resolveFrontendBaseUrl();
         const profileUrl = `${baseUrl}/emp/${employee.employeeId}`;
         const items =
             Array.isArray(holdLineItems) && holdLineItems.some((x) => x && String(x.cardLabel || "").trim())

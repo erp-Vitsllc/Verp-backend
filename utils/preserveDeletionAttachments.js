@@ -1,5 +1,10 @@
 import { randomUUID } from 'crypto';
-import { listDeletionAttachmentRefs } from './listDeletionAttachmentRefs.js';
+import {
+    listDeletionAttachmentRefs,
+    resolveDeletionAttachmentFileName,
+    looksLikeFieldPathName,
+    basenameFromStorageRef,
+} from './listDeletionAttachmentRefs.js';
 import {
     normalizeS3Key,
     s3ObjectExists,
@@ -8,11 +13,16 @@ import {
     replicateS3ObjectToKey,
 } from './s3Upload.js';
 
-function sanitizeArchiveFileName(name, index) {
-    const base = String(name || '')
+function sanitizeArchiveFileName(name, index, storageRef = '') {
+    let base = String(name || '')
         .replace(/[/\\?%*:|"<>]/g, '-')
         .trim();
-    if (base && base.includes('.')) return base;
+    if (looksLikeFieldPathName(base)) {
+        base = basenameFromStorageRef(storageRef);
+    }
+    if (base && base.includes('.') && !looksLikeFieldPathName(base)) return base;
+    const fromKey = basenameFromStorageRef(storageRef);
+    if (fromKey && fromKey.includes('.')) return fromKey;
     return `file-${index + 1}.pdf`;
 }
 
@@ -71,9 +81,12 @@ export async function preserveDeletionAttachments(archiveId, snapshot) {
 
     for (let i = 0; i < refs.length; i += 1) {
         const ref = refs[i];
-        const name = ref.name || sanitizeArchiveFileName(null, i);
+        const name =
+            ref.name && !looksLikeFieldPathName(ref.name)
+                ? ref.name
+                : resolveDeletionAttachmentFileName(ref.label || ref.name, ref.url, snapshot, i);
         const label = ref.label ? humanizeLabel(ref.label) : name;
-        const fileName = sanitizeArchiveFileName(name, i);
+        const fileName = sanitizeArchiveFileName(name, i, ref.url);
         const storageKey = `admin-deletion-archive/${archiveId}/${randomUUID()}-${fileName}`;
         const candidates = storageKeyCandidates(ref);
         const originalKey = candidates[0] || normalizeS3Key(ref.url) || '';

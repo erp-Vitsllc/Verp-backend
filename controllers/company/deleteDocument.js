@@ -6,7 +6,7 @@ import {
     findCompanyDocumentRow,
 } from "../../services/companyPartitionService.js";
 import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
-import { awaitAdminDeletionArchive } from "../../utils/adminDeletionArchiveRun.js";
+import { disposeCompanyProfileAttachment } from "../../utils/profileAttachmentDisposition.js";
 
 const buildCompanyFilter = (id) => ({
     $or: [
@@ -36,15 +36,19 @@ export const deleteDocument = async (req, res) => {
 
         const { field, row: deletedDoc } = located;
 
-        await awaitAdminDeletionArchive(req, {
-            moduleName: field === "oldDocuments" ? "Company Old Document" : "Company Document",
-            recordId: company.companyId || String(company._id),
-            details: (deletedDoc?.type || "Company document").toString(),
-            deletedPayload: {
-                companyId: company.companyId,
-                companyName: company.name,
-                document: deletedDoc,
-                storageField: field,
+        await disposeCompanyProfileAttachment(req, {
+            company: fullProfile,
+            attachment: deletedDoc?.document || deletedDoc?.attachment,
+            archive: {
+                moduleName: field === "oldDocuments" ? "Company Old Document" : "Company Document",
+                recordId: company.companyId || String(company._id),
+                details: (deletedDoc?.type || "Company document").toString(),
+                deletedPayload: {
+                    companyId: company.companyId,
+                    companyName: company.name,
+                    document: deletedDoc,
+                    storageField: field,
+                },
             },
         });
 

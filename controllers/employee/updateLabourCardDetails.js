@@ -1,7 +1,8 @@
 import EmployeeLabourCard from "../../models/EmployeeLabourCard.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeService.js";
-import { uploadDocumentToS3, deleteDocumentFromS3 } from "../../utils/s3Upload.js";
+import { uploadDocumentToS3 } from "../../utils/s3Upload.js";
+import { disposeEmployeeProfileAttachment } from "../../utils/profileAttachmentDisposition.js";
 import { archiveEmployeeDocument } from "../../utils/archiveEmployeeDocument.js";
 import {
     archiveAndClearLiveEmployeeRenewal,
@@ -235,9 +236,21 @@ export const updateLabourCardDetails = async (req, res) => {
                     'raw'
                 );
 
-                // Delete old file only when it is not archived in oldDocuments.
-                if (!shouldArchivePrevious && existingLabourCard?.labourCard?.document?.publicId) {
-                    await deleteDocumentFromS3(existingLabourCard.labourCard.document.publicId);
+                if (!shouldArchivePrevious && existingLabourCard?.labourCard?.document) {
+                    await disposeEmployeeProfileAttachment(req, {
+                        employeeBasic,
+                        attachment: existingLabourCard.labourCard.document,
+                        isActivationDocumentChange: skipLive,
+                        archive: {
+                            moduleName: "Employee Labour Card Attachment",
+                            recordId: employeeId,
+                            details: `Labour card attachment replaced for ${employeeId}`,
+                            deletedPayload: {
+                                employeeId,
+                                labourCard: existingLabourCard.labourCard,
+                            },
+                        },
+                    });
                 }
 
                 documentData = {
@@ -268,8 +281,22 @@ export const updateLabourCardDetails = async (req, res) => {
                     'raw'
                 );
 
-                if (!shouldArchivePreviousContract && existingLabourCard?.labourCard?.labourContractAttachment?.publicId) {
-                    await deleteDocumentFromS3(existingLabourCard.labourCard.labourContractAttachment.publicId);
+                if (!shouldArchivePreviousContract && existingLabourCard?.labourCard?.labourContractAttachment) {
+                    await disposeEmployeeProfileAttachment(req, {
+                        employeeBasic,
+                        attachment: existingLabourCard.labourCard.labourContractAttachment,
+                        isActivationDocumentChange: skipLive,
+                        movedToOldDocuments: shouldArchivePreviousContract,
+                        archive: {
+                            moduleName: "Employee Labour Contract Attachment",
+                            recordId: employeeId,
+                            details: `Labour contract attachment replaced for ${employeeId}`,
+                            deletedPayload: {
+                                employeeId,
+                                labourContractAttachment: existingLabourCard.labourCard.labourContractAttachment,
+                            },
+                        },
+                    });
                 }
 
                 contractDocumentData = {

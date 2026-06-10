@@ -1,4 +1,5 @@
 import nodemailer from "nodemailer";
+import { resolveFrontendBaseUrl, emailFrontendUrl } from './resolveFrontendBaseUrl.js';
 import { resolveEmployeeEmail } from "./resolveEmployeeEmail.js";
 import { normalizePdfAttachments } from "./normalizeEmailAttachments.js";
 
@@ -36,7 +37,7 @@ export const sendAssetCreationApprovalEmail = async ({ asset, recipient, creator
         const assetName = isBulk ? `${assetCount} Assets` : asset.name;
         const subject = `New Asset Approval Required: ${assetName}`;
 
-        const frontendUrl = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/'/g, "");
+        const frontendUrl = emailFrontendUrl();
         const assetId = asset._id?.toString() || asset.id?.toString();
 
         // Redirection button: for bulk creation, deep-link with selected IDs.

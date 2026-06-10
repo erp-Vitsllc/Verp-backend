@@ -1,4 +1,5 @@
 import nodemailer from 'nodemailer';
+import { resolveFrontendBaseUrl, emailFrontendUrl } from './resolveFrontendBaseUrl.js';
 
 /**
  * Sends an email to the Reportee (Assigned User) after a Manager has approved an EOL or Loss & Damage request.
@@ -35,7 +36,7 @@ export const sendAssetActionFinalAcknowledgeEmail = async (asset, actionType, em
             auth: { user: emailUser, pass: emailPass }
         });
 
-        const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+        const frontendUrl = resolveFrontendBaseUrl();
         // Note: reporteeAction triggers the final step in the frontend
         const link = `${frontendUrl}/HRM/Asset/details/${asset._id}?reporteeAction=${actionType === 'End of Life' ? 'eol' : 'damage'}`;
 

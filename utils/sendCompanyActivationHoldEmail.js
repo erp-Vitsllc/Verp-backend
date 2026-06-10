@@ -1,4 +1,5 @@
 import nodemailer from "nodemailer";
+import { resolveFrontendBaseUrl, emailFrontendUrl } from './resolveFrontendBaseUrl.js';
 
 const escapeHtmlBasic = (s) =>
     String(s || "")
@@ -43,7 +44,7 @@ export const sendCompanyActivationHoldEmail = async ({
         return n || "HR";
     })();
 
-    const baseUrl = process.env.FRONTEND_URL || "http://localhost:3000";
+    const baseUrl = resolveFrontendBaseUrl();
     const items =
         Array.isArray(holdLineItems) && holdLineItems.some((x) => x && String(x.cardLabel || "").trim())
             ? holdLineItems.filter((x) => x && String(x.cardLabel || "").trim())

@@ -1,4 +1,5 @@
 import nodemailer from "nodemailer";
+import { resolveFrontendBaseUrl, emailFrontendUrl } from './resolveFrontendBaseUrl.js';
 
 import { pickEffectiveEmail as pickEmployeeEmail } from "./pickEffectiveEmail.js";
 
@@ -30,7 +31,7 @@ export async function sendCompanyActivationOutcomeEmail({
             console.warn("[sendCompanyActivationOutcomeEmail] Email not configured.");
             return;
         }
-        const baseUrl = process.env.FRONTEND_URL || "http://localhost:3000";
+        const baseUrl = resolveFrontendBaseUrl();
         const companyUrl = companyMongoId ? `${baseUrl}/Company/${encodeURIComponent(companyMongoId)}` : baseUrl;
 
         const managerName =

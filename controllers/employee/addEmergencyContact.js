@@ -88,6 +88,7 @@ export const addEmergencyContact = async (req, res) => {
         const completeEmployee = await getCompleteEmployee(employeeId);
 
         scheduleEmployeeProfileFileChangeHrEmailForRequest({
+            req,
             employeeId,
             employeeBasic,
             sectionKey: "emergencyContact",

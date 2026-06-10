@@ -12,15 +12,7 @@ import {
 } from './formatAdminDeletionPayloadForEmail.js';
 import { createAdminDeletionArchiveFromDeletion } from '../services/adminDeletionArchiveService.js';
 import { awaitAdminDeletionArchive } from './adminDeletionArchiveRun.js';
-
-function getFrontendRestoreBaseUrl() {
-    const base =
-        process.env.FRONTEND_URL ||
-        process.env.CLIENT_URL ||
-        process.env.NEXT_PUBLIC_APP_URL ||
-        'http://localhost:3000';
-    return String(base).replace(/\/$/, '');
-}
+import { resolveFrontendHostLabel, withFrontendPath } from './resolveFrontendBaseUrl.js';
 
 export async function isReqUserAdmin(reqUser) {
     if (!reqUser) return false;
@@ -275,17 +267,18 @@ export async function notifyAdminDeletedBusinessRecordToManagement(
         const to = await getManagementNotificationEmail();
         if (!to) return false;
         const performedBy = performedByLine(req);
+        const siteHost = resolveFrontendHostLabel(req);
         const subject = `${moduleName} deleted (admin): ${recordId || 'record'}`;
         const restoreLink = archiveId
-            ? `${getFrontendRestoreBaseUrl()}/Settings/DeletedRecords?item=${archiveId}`
-            : `${getFrontendRestoreBaseUrl()}/Settings/DeletedRecords`;
+            ? withFrontendPath(`/Settings/DeletedRecords?item=${archiveId}&focusCard=deletedRecords`, req)
+            : withFrontendPath('/Settings/DeletedRecords?focusCard=deletedRecords', req);
         const restoreBlock = `
             <div style="margin-top:20px;padding:16px;background:#f8fafc;border-radius:8px;border:1px solid #e2e8f0">
                 <p style="margin:0 0 12px;font-size:14px;color:#334155">
-                    This deletion is held in recovery. You may restore the record or permanently remove it from recovery.
+                    This deletion is held in recovery on <strong>${siteHost}</strong>. You may restore the record or permanently remove it from recovery.
                 </p>
                 <a href="${restoreLink}" style="display:inline-block;background:#0ea5e9;color:#fff;text-decoration:none;padding:10px 18px;border-radius:6px;font-weight:600;font-size:14px">
-                    Open Deleted Records
+                    View deletion &amp; recover
                 </a>
             </div>`;
         const html = `
@@ -298,6 +291,7 @@ export async function notifyAdminDeletedBusinessRecordToManagement(
                     <p><strong>Record ID:</strong> ${recordId || '—'}</p>
                     <p><strong>Details:</strong> ${details || '—'}</p>
                     <p><strong>Performed by:</strong> ${performedBy}</p>
+                    <p><strong>VeRP site:</strong> ${siteHost}</p>
                     <div id="mgmt-del-fields"></div>
                     <p id="mgmt-del-attach-note" style="font-size:12px;color:#64748b;"></p>
                     ${restoreBlock}
@@ -318,10 +312,22 @@ export async function notifyAdminDeletedBusinessRecordToManagement(
         const listDeleteNote = !showFieldDetails
             ? `<p style="font-size:13px;color:#64748b;margin-top:12px;">Full record data and attachments are available under <strong>Deleted Records</strong> in Settings.</p>`
             : '';
+        const attachNames =
+            attachments.length > 0
+                ? attachments
+                      .map((a) => String(a.filename || "file").trim())
+                      .filter(Boolean)
+                      .slice(0, 8)
+                      .join(", ")
+                : "";
         const attachLine =
             attachments.length > 0
-                ? `<p style="font-size:12px;color:#64748b;">Uploaded file(s) are attached to this email (${attachments.length}).</p>`
-                : '';
+                ? `<div style="margin-top:12px;padding:10px 12px;background:#ecfdf5;border:1px solid #a7f3d0;border-radius:8px;font-size:13px;color:#065f46;">
+                    <p style="margin:0 0 6px;font-weight:600;">${attachments.length} file(s) attached to this email</p>
+                    <p style="margin:0;font-size:12px;color:#047857;">Open directly from your inbox: ${attachNames}</p>
+                    <p style="margin:8px 0 0;font-size:11px;color:#475569;">You can also restore the record using the button below after signing in to VeRP.</p>
+                   </div>`
+                : "";
         let htmlFinal = html.replace('<div id="mgmt-del-fields"></div>', fieldsBlock + listDeleteNote);
         htmlFinal = htmlFinal.replace(
             '<p id="mgmt-del-attach-note" style="font-size:12px;color:#64748b;"></p>',

@@ -1,4 +1,5 @@
 import nodemailer from "nodemailer";
+import { resolveFrontendBaseUrl, emailFrontendUrl } from './resolveFrontendBaseUrl.js';
 import { resolveEmployeeEmail } from "./resolveEmployeeEmail.js";
 
 /**
@@ -40,7 +41,7 @@ export const sendAssetServiceEmail = async ({ asset, recipient, type, details, s
         let headerTitle = "";
         let message = "";
 
-        const frontendUrl = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/'/g, "");
+        const frontendUrl = emailFrontendUrl();
         const buttonUrl = `${frontendUrl}/HRM/Asset/details/${asset._id}`;
 
         if (type === 'Started') {

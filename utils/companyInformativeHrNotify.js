@@ -1,5 +1,6 @@
 import { getChangedOwnerNestedDocKeys } from "./ownerPatchScope.js";
 import { isActiveCompanyProfile } from "./companyActivation.js";
+import { withFrontendPath } from "./resolveFrontendBaseUrl.js";
 import {
     buildCompanyProfileSectionUrl,
     isInformativeCompanySectionKey,
@@ -114,6 +115,7 @@ const serializeArrayRows = (rows = [], rowNorm) => {
 export async function collectCompanyProfileFileChangeEvents(beforeCompany = {}, updateData = {}, options = {}) {
     if (!updateData || typeof updateData !== "object") return [];
     const companyId = beforeCompany?._id || options.companyId;
+    const frontendBaseUrl = options.frontendBaseUrl || null;
     const events = [];
 
     const pushEvent = async ({
@@ -123,12 +125,14 @@ export async function collectCompanyProfileFileChangeEvents(beforeCompany = {}, 
         attachment = null,
         docContext = "",
         ownerTabIndex = null,
+        details = null,
     }) => {
         if (!isInformativeCompanySectionKey(sectionKey)) return;
         const profileUrl = buildCompanyProfileSectionUrl(companyId, {
             sectionKey,
             docContext,
             ownerTabIndex,
+            frontendBaseUrl,
         });
         const files = attachment ? await resolveFileLinkEntries(attachment) : [];
         events.push({
@@ -137,8 +141,16 @@ export async function collectCompanyProfileFileChangeEvents(beforeCompany = {}, 
             action,
             profileUrl,
             files,
+            details: details && typeof details === "object" ? details : undefined,
         });
     };
+
+    const rowDetails = (row = {}) => ({
+        type: row?.type || "",
+        description: row?.description || "",
+        issueDate: row?.issueDate || "",
+        expiryDate: row?.expiryDate || "",
+    });
 
     if (Object.prototype.hasOwnProperty.call(updateData, "ejari")) {
         const beforeRows = beforeCompany?.ejari || [];
@@ -152,6 +164,7 @@ export async function collectCompanyProfileFileChangeEvents(beforeCompany = {}, 
                     sectionLabel: "Ejari",
                     action,
                     attachment: match ? rowAttachment(match) : null,
+                    details: rowDetails(match || row),
                 });
             }
         } else if (serializeArrayRows(beforeRows, normalizeBundleRow) !== serializeArrayRows(afterRows, normalizeBundleRow)) {
@@ -176,6 +189,7 @@ export async function collectCompanyProfileFileChangeEvents(beforeCompany = {}, 
                     sectionLabel: "Insurance",
                     action,
                     attachment: match ? rowAttachment(match) : null,
+                    details: rowDetails(match || row),
                 });
             }
         } else if (serializeArrayRows(beforeRows, normalizeBundleRow) !== serializeArrayRows(afterRows, normalizeBundleRow)) {
@@ -201,6 +215,7 @@ export async function collectCompanyProfileFileChangeEvents(beforeCompany = {}, 
                     action,
                     attachment: match ? rowAttachment(match) : null,
                     docContext: match?.context || row.context || "",
+                    details: rowDetails(match || row),
                 });
             }
         } else if (
@@ -244,6 +259,8 @@ export async function notifyHrOfCompanyInformativeCardUpdates({
     changedCards = [],
     changeEvents = [],
     actor = {},
+    frontendBaseUrl = null,
+    req = null,
 }) {
     if (!isActiveCompanyProfile(company)) return { sent: false, reason: "NOT_ACTIVE" };
 
@@ -260,8 +277,9 @@ export async function notifyHrOfCompanyInformativeCardUpdates({
     }
     if (!events.length) return { sent: false, reason: "NO_CHANGES" };
 
-    const baseUrl = process.env.FRONTEND_URL || "http://localhost:3000";
-    const profileUrl = company?._id ? `${baseUrl}/Company/${company._id}` : `${baseUrl}/Company`;
+    const profileUrl = company?._id
+        ? withFrontendPath(`/Company/${company._id}`, frontendBaseUrl || req)
+        : withFrontendPath("/Company", frontendBaseUrl || req);
 
     return notifyFlowchartHrOfProfileFileChanges({
         entityType: "company",
@@ -270,31 +288,54 @@ export async function notifyHrOfCompanyInformativeCardUpdates({
         profileUrl,
         changes: events,
         actor,
+        frontendBaseUrl,
+        req,
     });
 }
 
-export function scheduleCompanyProfileFileChangeHrEmail({ company, beforeCompany, updateData, actor, isRenewal = false }) {
+export function scheduleCompanyProfileFileChangeHrEmail({
+    company,
+    beforeCompany,
+    updateData,
+    actor,
+    isRenewal = false,
+    req = null,
+    frontendBaseUrl = null,
+}) {
     if (!company?._id || !isActiveCompanyProfile(company)) return;
     scheduleFlowchartHrProfileFileChangeEmail(async () => {
         const events = await collectCompanyProfileFileChangeEvents(beforeCompany, updateData, {
             companyId: company._id,
             isRenewal,
+            frontendBaseUrl: frontendBaseUrl || req?.frontendBaseUrl || null,
         });
         if (!events.length) return { sent: false };
         return notifyHrOfCompanyInformativeCardUpdates({
             company,
             changeEvents: events,
             actor,
+            req,
+            frontendBaseUrl: frontendBaseUrl || req?.frontendBaseUrl || null,
         });
     });
 }
 
-export function scheduleCompanyProfileFileDeleteHrEmail({ company, sectionKey, sectionLabel, action = "deleted", attachment = null, actor = {} }) {
+export function scheduleCompanyProfileFileDeleteHrEmail({
+    company,
+    sectionKey,
+    sectionLabel,
+    action = "deleted",
+    attachment = null,
+    actor = {},
+    req = null,
+    frontendBaseUrl = null,
+}) {
     if (!company?._id || !isActiveCompanyProfile(company)) return;
     if (!isInformativeCompanySectionKey(sectionKey)) return;
 
     scheduleFlowchartHrProfileFileChangeEmail(async () => {
-        const profileUrl = buildCompanyProfileSectionUrl(company._id, { sectionKey });
+        const base = frontendBaseUrl || req?.frontendBaseUrl || null;
+        const profileUrl = buildCompanyProfileSectionUrl(company._id, { sectionKey, frontendBaseUrl: base });
         const files = attachment ? await resolveFileLinkEntries(attachment) : [];
         return notifyHrOfCompanyInformativeCardUpdates({
             company,
@@ -308,6 +349,8 @@ export function scheduleCompanyProfileFileDeleteHrEmail({ company, sectionKey, s
                 },
             ],
             actor,
+            req,
+            frontendBaseUrl: base,
         });
     });
 }

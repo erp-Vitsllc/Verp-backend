@@ -1,6 +1,11 @@
 import axios from 'axios';
 import { getSignedFileUrl, normalizeS3Key, s3ObjectExists } from './s3Upload.js';
-import { listDeletionAttachmentRefs } from './listDeletionAttachmentRefs.js';
+import {
+    listDeletionAttachmentRefs,
+    looksLikeFieldPathName,
+    basenameFromStorageRef,
+    resolveDeletionAttachmentFileName,
+} from './listDeletionAttachmentRefs.js';
 
 const MAX_FILE_ATTACHMENTS = 8;
 const MAX_FETCH_BYTES = 8 * 1024 * 1024;
@@ -28,21 +33,23 @@ function looksLikeStorageRef(value) {
     return STORAGE_KEY_HINT.test(s) || (s.includes('/') && !s.includes(' '));
 }
 
+function inferMimeFromFilename(filename) {
+    const ext = String(filename || '').split('.').pop()?.toLowerCase();
+    if (ext === 'pdf') return 'application/pdf';
+    if (ext === 'png') return 'image/png';
+    if (ext === 'jpg' || ext === 'jpeg') return 'image/jpeg';
+    if (ext === 'webp') return 'image/webp';
+    return null;
+}
+
 function guessFilename(urlOrKey, preferredName, index) {
-    if (preferredName && String(preferredName).trim()) {
-        return String(preferredName).trim();
+    const preferred = String(preferredName || '').trim();
+    if (preferred && !looksLikeFieldPathName(preferred)) {
+        return preferred;
     }
-    try {
-        if (urlOrKey.startsWith('http')) {
-            const path = new URL(urlOrKey).pathname;
-            const base = path.split('/').filter(Boolean).pop();
-            if (base && base.includes('.')) return decodeURIComponent(base);
-        }
-        const base = String(urlOrKey).split('/').filter(Boolean).pop();
-        if (base && base.includes('.')) return decodeURIComponent(base);
-    } catch {
-        /* ignore */
-    }
+    const fromKey = basenameFromStorageRef(urlOrKey);
+    if (fromKey && fromKey.includes('.')) return fromKey;
+    if (fromKey) return `${fromKey}.pdf`;
     return `deleted-attachment-${index + 1}.pdf`;
 }
 
@@ -72,10 +79,13 @@ async function fetchAsEmailAttachment(rawUrl, preferredName, index) {
         });
         const content = Buffer.from(response.data);
         if (!content.length) return null;
+        const filename = guessFilename(fetchUrl, preferredName, index);
+        const contentType = inferMimeFromFilename(filename);
         return {
-            filename: guessFilename(fetchUrl, preferredName, index),
+            filename,
             content,
             contentDisposition: 'attachment',
+            ...(contentType ? { contentType } : {}),
         };
     } catch (e) {
         console.warn('[buildAdminDeletionEmailAttachments] fetch failed:', e?.message || e);
@@ -83,10 +93,18 @@ async function fetchAsEmailAttachment(rawUrl, preferredName, index) {
     }
 }
 
-function filesFromPreserved(preservedAttachments = []) {
+function filesFromPreserved(preservedAttachments = [], deletedPayload = null) {
     return preservedAttachments
         .filter((p) => !p.unavailable && p.storageKey)
-        .map((p) => ({ url: p.storageKey, name: p.name }));
+        .map((p, i) => ({
+            url: p.storageKey,
+            name: resolveDeletionAttachmentFileName(
+                p.label || p.name,
+                p.storageKey || p.originalKey,
+                deletedPayload,
+                i
+            ),
+        }));
 }
 
 /**
@@ -98,7 +116,7 @@ export async function buildAdminDeletionEmailAttachments(deletedPayload, preserv
     if (deletedPayload == null && !preservedAttachments?.length) return [];
 
     const files = preservedAttachments?.length
-        ? filesFromPreserved(preservedAttachments)
+        ? filesFromPreserved(preservedAttachments, deletedPayload)
         : listDeletionAttachmentRefs(deletedPayload);
     const attachments = [];
     let i = 0;

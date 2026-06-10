@@ -1,4 +1,5 @@
 import nodemailer from 'nodemailer';
+import { resolveFrontendBaseUrl, emailFrontendUrl } from './resolveFrontendBaseUrl.js';
 import { resolveEmployeeEmail } from './resolveEmployeeEmail.js';
 
 const getTransporter = () => {
@@ -27,7 +28,7 @@ const formatDate = (d) => {
 };
 
 const getAssetLink = (asset) => {
-    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+    const frontendUrl = resolveFrontendBaseUrl();
     const assetId = asset?._id?.toString?.() || asset?.id?.toString?.() || '';
     return `${frontendUrl}/HRM/Asset/details/${assetId}`;
 };

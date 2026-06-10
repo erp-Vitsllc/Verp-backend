@@ -9,9 +9,13 @@ const SKIP_KEYS = new Set([
     'pendingReactivationChanges',
     'password',
     'refreshToken',
+    'attachmentKeys',
 ]);
 
-const SKIP_SUFFIXES = ['.data', '.publicId', '.mimeType'];
+const SKIP_SUFFIXES = ['.data', '.publicId', '.mimeType', '.url'];
+
+const STORAGE_KEY_HINT =
+    /employee-documents|company-documents|asset-|fines\/|rewards\/|signatures|profile-pictures|admin-deletion-archive/i;
 
 function escapeHtml(value) {
     return String(value ?? '')
@@ -43,7 +47,17 @@ function isSkippablePath(path) {
     if (SKIP_SUFFIXES.some((s) => path.endsWith(s))) return true;
     const lower = path.toLowerCase();
     if (lower.includes('password')) return true;
+    if (lower === 'attachmentkeys' || lower.startsWith('attachmentkeys.')) return true;
     return false;
+}
+
+function isInternalStorageScalar(value, path) {
+    if (typeof value !== 'string') return false;
+    const s = value.trim();
+    if (!s || s.startsWith('data:')) return false;
+    if (!STORAGE_KEY_HINT.test(s) && !s.startsWith('https://')) return false;
+    const lower = String(path || '').toLowerCase();
+    return lower.endsWith('.url') || lower.endsWith('.publicid') || lower.startsWith('attachmentkeys');
 }
 
 function formatScalar(value) {
@@ -121,6 +135,8 @@ function flattenPayloadRows(obj, rows, path = '', depth = 0) {
             flattenPayloadRows(val, rows, nextPath, depth + 1);
             continue;
         }
+
+        if (isInternalStorageScalar(val, nextPath)) continue;
 
         const formatted = formatScalar(val);
         if (formatted != null) {

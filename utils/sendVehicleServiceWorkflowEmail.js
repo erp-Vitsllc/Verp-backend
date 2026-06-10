@@ -1,4 +1,5 @@
 import nodemailer from 'nodemailer';
+import { resolveFrontendBaseUrl, emailFrontendUrl } from './resolveFrontendBaseUrl.js';
 import { resolveEmployeeEmail } from './resolveEmployeeEmail.js';
 
 /**
@@ -29,7 +30,7 @@ export async function sendVehicleServiceWorkflowEmail({
             auth: { user: emailUser, pass: emailPass }
         });
 
-        const base = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/$/, '');
+        const base = (resolveFrontendBaseUrl()).replace(/\/$/, '');
         const link = linkPath ? `${base}${linkPath.startsWith('/') ? linkPath : `/${linkPath}`}` : `${base}/HRM/Asset/Vehicle/details/${asset._id}`;
 
         const subject = `[VeRP] Vehicle service — ${actionLabel}: ${asset.assetId || asset.name}`;

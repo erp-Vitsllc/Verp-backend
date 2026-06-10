@@ -146,6 +146,7 @@ export const updateDocument = async (req, res) => {
         const completeEmployee = await getCompleteEmployee(employee.employeeId);
 
         scheduleEmployeeProfileFileChangeHrEmailForRequest({
+            req,
             employeeId: employee.employeeId,
             sectionKey: "documents",
             sectionLabel: proposedDoc.type || proposedDoc.description || "Document",

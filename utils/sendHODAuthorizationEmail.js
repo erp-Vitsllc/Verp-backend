@@ -1,4 +1,5 @@
 import nodemailer from 'nodemailer';
+import { resolveFrontendBaseUrl, emailFrontendUrl } from './resolveFrontendBaseUrl.js';
 
 /**
  * Sends an email to the HOD requesting authorization for an action (Fine, Reward, Loan).
@@ -41,7 +42,7 @@ export const sendHODAuthorizationEmail = async (type, item, hod, requester) => {
             }
         });
 
-        const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+        const frontendUrl = resolveFrontendBaseUrl();
         let link = '';
         let detailsHtml = '';
         let subjectId = '';

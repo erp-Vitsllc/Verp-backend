@@ -1,7 +1,8 @@
 import EmployeePassport from "../../models/EmployeePassport.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeService.js";
-import { uploadDocumentToS3, deleteDocumentFromS3 } from "../../utils/s3Upload.js";
+import { uploadDocumentToS3 } from "../../utils/s3Upload.js";
+import { disposeEmployeeProfileAttachment } from "../../utils/profileAttachmentDisposition.js";
 import { archiveAndClearLiveEmployeeRenewal } from "../../utils/employeeDocumentRenewal.js";
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
 import { shouldSkipLiveEmployeeSection, queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
@@ -119,9 +120,18 @@ export const updatePassportDetails = async (req, res) => {
                     'raw'
                 );
 
-                // Delete old file only when it is not archived in oldDocuments.
-                if (!shouldArchivePrevious && existingPassport?.document?.publicId) {
-                    await deleteDocumentFromS3(existingPassport.document.publicId);
+                if (!shouldArchivePrevious && existingPassport?.document) {
+                    await disposeEmployeeProfileAttachment(req, {
+                        employeeBasic,
+                        attachment: existingPassport.document,
+                        isActivationDocumentChange: skipLive,
+                        archive: {
+                            moduleName: "Employee Passport Attachment",
+                            recordId: employeeId,
+                            details: `Passport attachment replaced for ${employeeId}`,
+                            deletedPayload: { employeeId, passport: existingPassport },
+                        },
+                    });
                 }
 
                 documentData = {
@@ -209,6 +219,7 @@ export const updatePassportDetails = async (req, res) => {
         const completeEmployee = await getCompleteEmployee(employeeId);
 
         scheduleEmployeeProfileFileChangeHrEmailForRequest({
+            req,
             employeeId,
             employeeBasic,
             sectionKey: "passport",

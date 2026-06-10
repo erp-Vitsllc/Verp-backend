@@ -1,4 +1,5 @@
 import Reward from "../../models/Reward.js";
+import { resolveFrontendBaseUrl, emailFrontendUrl } from '../../utils/resolveFrontendBaseUrl.js';
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import Company from "../../models/Company.js";
 import User from "../../models/User.js";
@@ -490,7 +491,7 @@ ${rewardData.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.padEnd(12)} As
                                     auth: { user: emailUser, pass: emailPass }
                                 });
 
-                                const baseUrl = process.env.FRONTEND_URL || "http://localhost:3000";
+                                const baseUrl = resolveFrontendBaseUrl();
                                 const rewardUrl = `${baseUrl}/HRM/Reward/${savedReward._id}`;
 
                                 const subject = `Reward Approval Request: ${rewardType} - ${empName}`;

@@ -1,4 +1,5 @@
 import crypto from "crypto";
+import { resolveFrontendBaseUrl, emailFrontendUrl } from '../../utils/resolveFrontendBaseUrl.js';
 import nodemailer from "nodemailer";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import EmployeePassport from "../../models/EmployeePassport.js";
@@ -457,7 +458,7 @@ export const submitEmployeeDocumentNotRenewRequest = async (req, res) => {
 
         const hr = await getDepartmentHOD("hr");
         const hrEmail = pickEmail(hr);
-        const baseUrl = (process.env.FRONTEND_URL || "http://localhost:3000").replace(/\/$/, "");
+        const baseUrl = (resolveFrontendBaseUrl()).replace(/\/$/, "");
         const slug = encodeURIComponent(employee.employeeId || "");
         const employeeLink = `${baseUrl}/emp/${slug}?tab=documents`;
 

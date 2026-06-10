@@ -1,7 +1,8 @@
 import EmployeeDrivingLicense from "../../models/EmployeeDrivingLicense.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeService.js";
-import { uploadDocumentToS3, deleteDocumentFromS3 } from "../../utils/s3Upload.js";
+import { uploadDocumentToS3 } from "../../utils/s3Upload.js";
+import { disposeEmployeeProfileAttachment } from "../../utils/profileAttachmentDisposition.js";
 import { archiveAndClearLiveEmployeeRenewal } from "../../utils/employeeDocumentRenewal.js";
 import { markProfileActivationHoldResolvedForSection } from "../../utils/markProfileActivationHoldResolved.js";
 import {
@@ -112,8 +113,20 @@ export const updateDrivingLicenseDetails = async (req, res) => {
                     documentName || "driving-license.pdf",
                     "raw",
                 );
-                if (!shouldArchivePrevious && existingDrivingLicense?.drivingLicenceDetails?.document?.publicId) {
-                    await deleteDocumentFromS3(existingDrivingLicense.drivingLicenceDetails.document.publicId);
+                if (!shouldArchivePrevious && existingDrivingLicense?.drivingLicenceDetails?.document) {
+                    await disposeEmployeeProfileAttachment(req, {
+                        employeeBasic,
+                        attachment: existingDrivingLicense.drivingLicenceDetails.document,
+                        archive: {
+                            moduleName: "Employee Driving License Attachment",
+                            recordId: employeeId,
+                            details: `Driving license attachment replaced for ${employeeId}`,
+                            deletedPayload: {
+                                employeeId,
+                                drivingLicense: existingDrivingLicense.drivingLicenceDetails,
+                            },
+                        },
+                    });
                 }
                 documentData = {
                     url: uploadResult.url,
@@ -149,6 +162,7 @@ export const updateDrivingLicenseDetails = async (req, res) => {
         const completeEmployee = await getCompleteEmployee(employeeId);
 
         scheduleEmployeeProfileFileChangeHrEmailForRequest({
+            req,
             employeeId,
             employeeBasic,
             sectionKey: "drivingLicense",

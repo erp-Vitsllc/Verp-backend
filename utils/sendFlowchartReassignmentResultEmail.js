@@ -1,4 +1,5 @@
 import nodemailer from "nodemailer";
+import { resolveFrontendBaseUrl, emailFrontendUrl } from './resolveFrontendBaseUrl.js';
 import EmployeeBasic from "../models/EmployeeBasic.js";
 import User from "../models/User.js";
 import { generatePdf } from "./generatePdf.js";
@@ -142,7 +143,7 @@ export async function sendFlowchartReassignmentResultEmail(
         }
     } else if (action === "Reject") {
         try {
-            const frontendUrl = (process.env.FRONTEND_URL || "http://localhost:3000").replace(/'/g, "");
+            const frontendUrl = emailFrontendUrl();
             const baseUrl = frontendUrl.replace(/\/$/, "");
             const previewAs = oldSnapshot.empObjectId ? String(oldSnapshot.empObjectId) : "";
             const printUrl = `${baseUrl}/print/flowchart-position-assets/${encodeURIComponent(cat)}?previewAs=${encodeURIComponent(previewAs)}`;

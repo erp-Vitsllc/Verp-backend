@@ -1,4 +1,5 @@
 import nodemailer from "nodemailer";
+import { resolveFrontendBaseUrl, emailFrontendUrl } from './resolveFrontendBaseUrl.js';
 
 import { pickEffectiveEmail as pickEmployeeEmail } from "./pickEffectiveEmail.js";
 
@@ -106,7 +107,7 @@ export const sendProfileNotification = async ({ employee, recipientEmployee = nu
                     }
 
                     <div style="text-align: center; margin-top: 40px;">
-                        <a href="${process.env.FRONTEND_URL || "http://localhost:3000"}/emp/${employee.employeeId}" 
+                        <a href="${resolveFrontendBaseUrl()}/emp/${employee.employeeId}" 
                            style="background-color: ${isApproved ? "#059669" : "#1e293b"}; color: white; padding: 14px 28px; text-decoration: none; border-radius: 8px; font-weight: bold; display: inline-block; font-size: 15px;">
                            ${sameRecipientAsSubject ? "View My Profile" : "Open employee profile"}
                         </a>

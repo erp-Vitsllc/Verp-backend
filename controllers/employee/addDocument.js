@@ -105,6 +105,7 @@ export const addDocument = async (req, res) => {
         const completeEmployee = await getCompleteEmployee(employee.employeeId);
 
         scheduleEmployeeProfileFileChangeHrEmailForRequest({
+            req,
             employeeId: employee.employeeId,
             sectionKey: "documents",
             sectionLabel: type || description || "Document",

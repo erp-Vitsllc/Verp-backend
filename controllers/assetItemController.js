@@ -1,4 +1,5 @@
 import AssetItem from '../models/AssetItem.js';
+import { resolveFrontendBaseUrl, emailFrontendUrl } from '../utils/resolveFrontendBaseUrl.js';
 import mongoose from 'mongoose';
 import AssetType from '../models/AssetType.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
@@ -93,7 +94,7 @@ async function persistHandoverPdfBufferToHistory(pdfBuffer, filename) {
 }
 
 function frontendBaseUrl() {
-    return String(process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/+$/, '');
+    return String(resolveFrontendBaseUrl()).replace(/\/+$/, '');
 }
 import {
     notifyAdminDeletedWholeAsset,
@@ -4658,7 +4659,7 @@ export const downloadHistoryHandoverPdf = async (req, res) => {
 
         // URL to the frontend print page
         const origin = req.headers.origin || (req.headers.referer ? new URL(req.headers.referer).origin : null);
-        const baseUrl = origin || process.env.FRONTEND_URL || 'http://localhost:3000';
+        const baseUrl = resolveFrontendBaseUrl(req);
 
         // We pass the historyId to the print page so it knows to fetch data from history instead of current asset
         const printUrl = `${baseUrl}/print/asset-handover/${assetSnapshot._id}?historyId=${historyId}`;
@@ -4702,7 +4703,7 @@ export const downloadHandoverPdf = async (req, res) => {
 
         // URL to the frontend print page we created
         const origin = req.headers.origin || (req.headers.referer ? new URL(req.headers.referer).origin : null);
-        const baseUrl = origin || process.env.FRONTEND_URL || 'http://localhost:3000';
+        const baseUrl = resolveFrontendBaseUrl(req);
         const printUrl = `${baseUrl}/print/asset-handover/${id}`;
 
         console.log(`Generating Asset Handover PDF from: ${printUrl}`);

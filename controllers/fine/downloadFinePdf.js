@@ -1,4 +1,5 @@
 import Fine from "../../models/Fine.js";
+import { resolveFrontendBaseUrl, emailFrontendUrl } from '../../utils/resolveFrontendBaseUrl.js';
 import { generatePdf } from "../../utils/generatePdf.js";
 
 /**
@@ -25,7 +26,7 @@ export const downloadFinePdf = async (req, res) => {
 
         // Construct Frontend URL
         const origin = req.headers.origin || (req.headers.referer ? new URL(req.headers.referer).origin : null);
-        const baseUrl = origin || process.env.FRONTEND_URL || "http://localhost:3000";
+        const baseUrl = resolveFrontendBaseUrl(req);
         const printUrl = `${baseUrl}/print/fine/${fine._id}`;
 
         console.log(`Generating Fine PDF from: ${printUrl}`);

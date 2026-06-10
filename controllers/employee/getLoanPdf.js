@@ -1,4 +1,5 @@
 import { generatePdf } from "../../utils/generatePdf.js";
+import { resolveFrontendBaseUrl, emailFrontendUrl } from '../../utils/resolveFrontendBaseUrl.js';
 import Loan from "../../models/Loan.js";
 import User from "../../models/User.js";
 
@@ -20,7 +21,7 @@ export const getLoanPdf = async (req, res) => {
         try {
             const referer = req.headers.referer;
             const origin = req.headers.origin || (referer ? new URL(referer).origin : null);
-            const baseUrl = origin || process.env.FRONTEND_URL || "http://localhost:3000";
+            const baseUrl = resolveFrontendBaseUrl(req);
 
             // Be consistent with the URL format used in other notifications
             const typeSlug = loan.type ? loan.type.replace(/\s+/g, '-') : 'Loan';

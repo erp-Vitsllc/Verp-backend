@@ -1,4 +1,5 @@
 import nodemailer from "nodemailer";
+import { resolveFrontendHostLabel } from "./resolveFrontendBaseUrl.js";
 
 const PATCH_FLAG = "__verpEmailSubjectTagPatched";
 
@@ -14,8 +15,8 @@ const getCurrentDomain = () => {
     const explicit = (process.env.EMAIL_TAG_DOMAIN || "").trim().toLowerCase();
     if (explicit) return explicit;
 
-    const frontendHost = parseUrlHostname((process.env.FRONTEND_URL || "").trim());
-    if (frontendHost) return frontendHost;
+    const frontendHost = resolveFrontendHostLabel();
+    if (frontendHost && frontendHost !== "VeRP") return frontendHost.toLowerCase();
 
     const backendHost = parseUrlHostname((process.env.BACKEND_URL || "").trim());
     if (backendHost) return backendHost;

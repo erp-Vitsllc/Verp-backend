@@ -1,4 +1,5 @@
 import nodemailer from "nodemailer";
+import { resolveFrontendBaseUrl, emailFrontendUrl } from './resolveFrontendBaseUrl.js';
 import { resolveEmployeeEmailWithReporteeLoaded } from "./resolveEmployeeEmail.js";
 import { normalizePdfAttachments } from "./normalizeEmailAttachments.js";
 
@@ -62,7 +63,7 @@ export const sendAssetReassignmentEmail = async ({
 
         const subject = `Asset Reassigned: ${asset.assetId} - ${asset.name}`;
 
-        const frontendUrl = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/'/g, "");
+        const frontendUrl = emailFrontendUrl();
         const assetId = asset._id?.toString() || asset.id?.toString();
         const buttonUrl = `${frontendUrl}/HRM/Asset/details/${assetId}`;
 

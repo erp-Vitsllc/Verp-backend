@@ -1,4 +1,5 @@
 import nodemailer from "nodemailer";
+import { resolveFrontendBaseUrl, emailFrontendUrl } from '../../utils/resolveFrontendBaseUrl.js';
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import Loan from "../../models/Loan.js";
 import EmployeeSalary from "../../models/EmployeeSalary.js";
@@ -231,7 +232,7 @@ export const requestLoan = async (req, res) => {
 
                     // Dynamic URL
                     const origin = req.headers.origin || (req.headers.referer ? new URL(req.headers.referer).origin : null);
-                    const baseUrl = process.env.FRONTEND_URL || origin || "http://localhost:3000";
+                    const baseUrl = resolveFrontendBaseUrl(req);
                     const typeSlug = type ? type.replace(/\s+/g, '-') : 'Loan';
                     const actionUrl = `${baseUrl}/HRM/LoanAndAdvance/${typeSlug}-${savedLoan._id}`;
 

@@ -65,6 +65,7 @@ export const addTraining = async (req, res) => {
         const completeEmployee = await getCompleteEmployee(employeeId);
 
         scheduleEmployeeProfileFileChangeHrEmailForRequest({
+            req,
             employeeId,
             sectionKey: "training",
             sectionLabel: "Training",

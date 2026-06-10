@@ -1,4 +1,4 @@
-import { awaitAdminDeletionArchive } from './adminDeletionArchiveRun.js';
+import { disposeCompanyProfileAttachment } from './profileAttachmentDisposition.js';
 import { normalizeS3Key } from './s3Upload.js';
 
 const OWNER_DOC_LABELS = {
@@ -77,11 +77,16 @@ export async function archiveAdminOwnerDocCardDeletion(req, company, ownerRow, d
     const companyName = company.name || companyId;
     const ownerName = ownerRow.name || 'Owner';
 
-    return awaitAdminDeletionArchive(req, {
-        moduleName: 'Company Owner Document',
-        recordId: companyId,
-        details: `${label} removed from ${ownerName} (${companyName})`,
-        deletedPayload: buildOwnerDocDeletionPayload(company, ownerRow, docKey, ownerTarget),
+    const payload = buildOwnerDocDeletionPayload(company, ownerRow, docKey, ownerTarget);
+    return disposeCompanyProfileAttachment(req, {
+        company,
+        attachment: payload?.document?.attachment || ownerRow?.[docKey]?.attachment || ownerRow?.attachment,
+        archive: {
+            moduleName: 'Company Owner Document',
+            recordId: companyId,
+            details: `${label} removed from ${ownerName} (${companyName})`,
+            deletedPayload: payload,
+        },
     });
 }
 

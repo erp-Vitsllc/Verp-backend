@@ -1,10 +1,17 @@
 import nodemailer from "nodemailer";
 import { resolveFlowchartHrEmployee } from "./resolveFlowchartHrEmployee.js";
-import { getSignedFileUrl } from "./s3Upload.js";
 import {
     buildCompanyPathWithFocus,
     buildEmployeePathWithFocus,
 } from "./notificationFocusNavigation.js";
+import { resolveFrontendBaseUrl, withFrontendPath, resolveFrontendHostLabel } from "./resolveFrontendBaseUrl.js";
+import {
+    buildInlineEmailAttachments,
+    resolveEmailFileLinksForHtml,
+    renderEmailFileListHtml,
+    renderEmailPrimaryButton,
+    renderEmailSiteFooter,
+} from "./emailAccessibleFiles.js";
 
 /** Company progress-bar sections — changes here go through activation HR queue, not informative email. */
 export const COMPANY_ACTIVATION_PROGRESS_KEYS = new Set([
@@ -75,41 +82,61 @@ const COMPANY_DOC_CONTEXT_TAB = {
     certificate: "certificate",
 };
 
-const withFrontendBase = (path = "") => {
-    const baseUrl = process.env.FRONTEND_URL || "http://localhost:3000";
-    const p = String(path || "").trim();
-    if (!p) return baseUrl;
-    if (p.startsWith("http://") || p.startsWith("https://")) return p;
-    return `${baseUrl}${p.startsWith("/") ? p : `/${p}`}`;
+const COMPANY_DOC_FOCUS_BY_CONTEXT = {
+    memo: "documentsMemo",
+    certificate: "documentsCertificate",
+    document_with_expiry: "documentsWithExpiry",
+    document_without_expiry: "documentsWithoutExpiry",
+    other_document: "documentsLive",
+    insurance: "insurance",
+    live: "documentsLive",
+};
+
+const formatDetailDate = (value) => {
+    if (!value) return "";
+    try {
+        const d = new Date(value);
+        if (Number.isNaN(d.getTime())) return "";
+        return d.toISOString().slice(0, 10);
+    } catch {
+        return "";
+    }
 };
 
 /** Deep link to a company profile section (non-activation cards). */
-export function buildCompanyProfileSectionUrl(companyMongoId, { sectionKey = "", docContext = "", ownerTabIndex = null } = {}) {
-    if (!companyMongoId) return withFrontendBase("/Company");
+export function buildCompanyProfileSectionUrl(
+    companyMongoId,
+    { sectionKey = "", docContext = "", ownerTabIndex = null, frontendBaseUrl = null } = {},
+) {
+    const baseOpts = frontendBaseUrl;
+    if (!companyMongoId) return withFrontendPath("/Company", baseOpts);
 
     const key = String(sectionKey || "").trim();
     let path = `/Company/${encodeURIComponent(String(companyMongoId))}`;
 
     if (key === "ejari") {
         path += "?tab=basic";
-        return withFrontendBase(buildCompanyPathWithFocus(path, { focusCard: "ejari" }));
+        return withFrontendPath(buildCompanyPathWithFocus(path, { focusCard: "ejari" }), baseOpts);
     }
     if (key === "insurance") {
-        return withFrontendBase(`${path}?tab=others&docStatusTab=live`);
+        path = `${path}?tab=others&docStatusTab=live`;
+        return withFrontendPath(buildCompanyPathWithFocus(path, { focusCard: "insurance" }), baseOpts);
     }
     if (key === "documents") {
         const ctx = String(docContext || "").toLowerCase();
         const docTab = COMPANY_DOC_CONTEXT_TAB[ctx] || "live";
-        return withFrontendBase(`${path}?tab=others&docStatusTab=${encodeURIComponent(docTab)}`);
+        const focusCard = COMPANY_DOC_FOCUS_BY_CONTEXT[ctx] || "documentsLive";
+        path = `${path}?tab=others&docStatusTab=${encodeURIComponent(docTab)}`;
+        return withFrontendPath(buildCompanyPathWithFocus(path, { focusCard }), baseOpts);
     }
     if (OWNER_DOC_FOCUS_BY_KEY[key]) {
         path += "?tab=owner";
         const focusCard = OWNER_DOC_FOCUS_BY_KEY[key];
         const ownerTab = Number.isInteger(ownerTabIndex) && ownerTabIndex >= 0 ? ownerTabIndex : null;
-        return withFrontendBase(buildCompanyPathWithFocus(path, { focusCard, ownerTab }));
+        return withFrontendPath(buildCompanyPathWithFocus(path, { focusCard, ownerTab }), baseOpts);
     }
 
-    return withFrontendBase(`${path}?tab=basic`);
+    return withFrontendPath(`${path}?tab=basic`, baseOpts);
 }
 
 const EMPLOYEE_SECTION_ROUTES = {
@@ -125,18 +152,18 @@ const EMPLOYEE_SECTION_ROUTES = {
 };
 
 /** Deep link to an employee profile section. */
-export function buildEmployeeProfileSectionUrl(employeeId, sectionKey = "") {
+export function buildEmployeeProfileSectionUrl(employeeId, sectionKey = "", frontendBaseUrl = null) {
     const eid = encodeURIComponent(String(employeeId || "").trim());
-    if (!eid) return withFrontendBase("");
+    if (!eid) return withFrontendPath("", frontendBaseUrl);
 
     const route = EMPLOYEE_SECTION_ROUTES[String(sectionKey || "").trim()] || { tab: "basic" };
     let path = `/emp/${eid}?tab=${encodeURIComponent(route.tab)}`;
     if (route.subTab) path += `&subTab=${encodeURIComponent(route.subTab)}`;
     if (route.docStatusTab) path += `&docStatusTab=${encodeURIComponent(route.docStatusTab)}`;
     if (route.focusLabel) {
-        return withFrontendBase(buildEmployeePathWithFocus(path, route.focusLabel));
+        return withFrontendPath(buildEmployeePathWithFocus(path, route.focusLabel), frontendBaseUrl);
     }
-    return withFrontendBase(path);
+    return withFrontendPath(path, frontendBaseUrl);
 }
 
 const attachmentFromValue = (value) => {
@@ -158,17 +185,13 @@ const attachmentFromValue = (value) => {
 
 export async function resolveFileLinkEntries(attachments = []) {
     const list = Array.isArray(attachments) ? attachments : [attachments];
-    const out = [];
+    const refs = [];
     for (const raw of list) {
         const ref = attachmentFromValue(raw);
         if (!ref?.key) continue;
-        const signed = await getSignedFileUrl(ref.key);
-        out.push({
-            name: ref.name || "File",
-            url: signed || ref.key,
-        });
+        refs.push({ name: ref.name, storageKey: ref.key, url: ref.key });
     }
-    return out;
+    return resolveEmailFileLinksForHtml(refs);
 }
 
 const actionLabel = (action = "modified") => {
@@ -183,6 +206,23 @@ const actionLabel = (action = "modified") => {
     return map[String(action || "").toLowerCase()] || "Modified";
 };
 
+const renderChangeDetailRows = (details = {}) => {
+    const rows = [];
+    const push = (label, value) => {
+        const v = String(value ?? "").trim();
+        if (!v) return;
+        rows.push(
+            `<tr><td style="padding:4px 10px 4px 0;color:#64748b;vertical-align:top;white-space:nowrap;">${escapeHtml(label)}</td><td style="padding:4px 0;color:#1e293b;">${escapeHtml(v)}</td></tr>`,
+        );
+    };
+    push("Type", details.type);
+    push("Description", details.description);
+    push("Issue date", formatDetailDate(details.issueDate));
+    push("Expiry date", formatDetailDate(details.expiryDate));
+    if (!rows.length) return "";
+    return `<table style="margin:8px 0 0;font-size:12px;border-collapse:collapse;">${rows.join("")}</table>`;
+};
+
 const renderChangeRowsHtml = (changes = []) =>
     changes
         .map((change) => {
@@ -190,20 +230,17 @@ const renderChangeRowsHtml = (changes = []) =>
             const act = escapeHtml(actionLabel(change.action));
             const sectionUrl = escapeHtml(change.profileUrl || "");
             const files = Array.isArray(change.files) ? change.files : [];
-            const filesHtml = files.length
-                ? `<ul style="margin:6px 0 0;padding-left:18px;">${files
-                      .map(
-                          (f) =>
-                              `<li style="margin:2px 0;"><a href="${escapeHtml(f.url)}" style="color:#2563eb;">${escapeHtml(f.name || "View file")}</a></li>`,
-                      )
-                      .join("")}</ul>`
-                : `<p style="margin:6px 0 0;font-size:12px;color:#64748b;">No attachment link on record.</p>`;
+            const detailsHtml = renderChangeDetailRows(change.details || {});
+            const filesHtml = renderEmailFileListHtml(files, { showAttachHint: true });
 
             return `
                 <li style="margin:12px 0;padding:12px;border:1px solid #e2e8f0;border-radius:8px;background:#f8fafc;">
                     <p style="margin:0;"><strong>${act}</strong> — ${section}</p>
-                    <p style="margin:6px 0 0;"><a href="${sectionUrl}" style="color:#0f766e;font-weight:600;">Open section in VeRP</a></p>
+                    ${detailsHtml}
                     ${filesHtml}
+                    <p style="margin:12px 0 0;text-align:left;">
+                        ${renderEmailPrimaryButton(sectionUrl, "View modification in VeRP", "#0f766e")}
+                    </p>
                 </li>`;
         })
         .join("");
@@ -219,6 +256,8 @@ export async function notifyFlowchartHrOfProfileFileChanges({
     profileUrl = "",
     changes = [],
     actor = {},
+    frontendBaseUrl = null,
+    req = null,
 }) {
     const rows = (Array.isArray(changes) ? changes : []).filter(
         (c) => c && String(c.sectionLabel || c.section || "").trim(),
@@ -244,13 +283,30 @@ export async function notifyFlowchartHrOfProfileFileChanges({
     const updatedBy = escapeHtml(actorDisplayName(actor));
     const label = escapeHtml(entityLabel || (entityType === "company" ? "Company" : "Employee"));
     const code = escapeHtml(entityCode || "—");
-    const baseUrl = process.env.FRONTEND_URL || "http://localhost:3000";
+    const resolvedBase = frontendBaseUrl || resolveFrontendBaseUrl(req);
+    const siteHost = escapeHtml(resolveFrontendHostLabel(req || resolvedBase));
     const profileLink = escapeHtml(
         profileUrl && profileUrl.startsWith("http")
             ? profileUrl
-            : withFrontendBase(profileUrl || (entityType === "company" ? "/Company" : "")),
+            : withFrontendPath(profileUrl || (entityType === "company" ? "/Company" : ""), resolvedBase),
     );
     const entityHeading = entityType === "company" ? "Company profile file update" : "Employee profile file update";
+    const fileRefs = rows.flatMap((change) =>
+        (Array.isArray(change.files) ? change.files : []).map((f) => ({
+            name: f.name,
+            storageKey: f.storageKey,
+            url: f.storageKey || f.url,
+        })),
+    );
+    const emailAttachments = await buildInlineEmailAttachments(fileRefs);
+    const attachmentSummary =
+        emailAttachments.length > 0
+            ? `<p style="margin:0 0 14px;padding:10px 12px;background:#ecfdf5;border:1px solid #a7f3d0;border-radius:8px;font-size:13px;color:#065f46;"><strong>${emailAttachments.length} file(s) attached</strong> — open directly from this email without signing in to VeRP.</p>`
+            : "";
+
+    const adminNote = actor?.isAdmin || actor?.isAdministrator
+        ? `<p style="margin:0 0 12px;padding:10px 12px;background:#fff7ed;border:1px solid #fed7aa;border-radius:8px;font-size:13px;color:#9a3412;"><strong>Administrator change</strong> — an admin modified this profile outside activation / progress-bar sections.</p>`
+        : "";
 
     const transporter = nodemailer.createTransport({
         host: process.env.SMTP_HOST || "smtp.office365.com",
@@ -267,26 +323,31 @@ export async function notifyFlowchartHrOfProfileFileChanges({
             </div>
             <div style="padding:22px;">
                 <p>Hello <strong>${escapeHtml(hrName)}</strong>,</p>
-                <p>A file was added, edited, renewed, or deleted outside profile activation / progress-bar mandatory sections:</p>
+                ${adminNote}
+                ${attachmentSummary}
+                <p>The following file change(s) were made outside profile activation / progress-bar mandatory sections:</p>
                 <ul style="list-style:none;padding:0;margin:16px 0;">${renderChangeRowsHtml(rows)}</ul>
                 <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:14px 16px;margin:16px 0;">
                     <p style="margin:0;"><strong>${entityType === "company" ? "Company" : "Employee"}:</strong> ${label}</p>
                     <p style="margin:6px 0 0;"><strong>ID:</strong> ${code}</p>
                     <p style="margin:6px 0 0;"><strong>Updated by:</strong> ${updatedBy} via VeRP</p>
+                    <p style="margin:6px 0 0;"><strong>VeRP site:</strong> ${siteHost}</p>
                 </div>
                 <p style="text-align:center;margin:24px 0;">
-                    <a href="${profileLink}" style="background:#0f766e;color:#fff;padding:12px 24px;text-decoration:none;border-radius:6px;font-weight:bold;">View in VeRP</a>
+                    ${renderEmailPrimaryButton(profileLink, "View full profile in VeRP")}
                 </p>
-                <p style="font-size:12px;color:#64748b;margin:0;">Information only — sent through VeRP. This is not a profile activation submission and no dashboard approval task was created.</p>
+                ${renderEmailSiteFooter(siteHost)}
+                <p style="font-size:12px;color:#64748b;margin:8px 0 0;">Information only — not a profile activation submission and no dashboard approval task was created.</p>
             </div>
         </div>
     `;
 
     await transporter.sendMail({
-        fromName: actorDisplayName(actor) || "VeRP Portal",
+        from: `"${actorDisplayName(actor) || "VeRP Portal"}" <${emailUser}>`,
         to: hrEmail,
         subject,
         html,
+        ...(emailAttachments.length ? { attachments: emailAttachments } : {}),
     });
 
     return { sent: true };

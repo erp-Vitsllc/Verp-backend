@@ -1,4 +1,5 @@
 import User from "../../models/User.js";
+import { resolveFrontendBaseUrl, emailFrontendUrl } from '../../utils/resolveFrontendBaseUrl.js';
 import Group from "../../models/Group.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import bcrypt from "bcryptjs";
@@ -329,7 +330,7 @@ const updateUserHandler = async (req, res) => {
         if (unlockRequested) {
             try {
                 const recipientEmail = (updatedUser.companyEmail || '').trim() || (updatedUser.email || '').trim();
-                const baseUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+                const baseUrl = resolveFrontendBaseUrl(req);
                 let resetUrl = '';
                 if (process.env.JWT_SECRET) {
                     const resetToken = jwt.sign(

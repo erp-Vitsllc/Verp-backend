@@ -1,4 +1,5 @@
 import nodemailer from 'nodemailer';
+import { resolveFrontendBaseUrl, emailFrontendUrl } from './resolveFrontendBaseUrl.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import axios from 'axios';
 import { resolveEmployeeEmail, addEmployeeEmailToSet } from './resolveEmployeeEmail.js';
@@ -97,7 +98,7 @@ export const sendFineConfirmedEmail = async (fine, assignedEmployees, req = null
                 } else {
                     console.log(`[FineConfirmedEmail] Attempting to generate PDF via Puppeteer...`);
                     const origin = req.headers.origin || (req.headers.referer ? new URL(req.headers.referer).origin : null);
-                    const baseUrl = origin || process.env.FRONTEND_URL || "http://localhost:3000";
+                    const baseUrl = resolveFrontendBaseUrl(req);
                     const printUrl = `${baseUrl}/print/fine/${fine._id || fine.fineId}`;
                     const token = req.headers.authorization?.split(' ')[1] || '';
 

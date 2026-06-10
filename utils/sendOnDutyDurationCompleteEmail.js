@@ -1,4 +1,5 @@
 import nodemailer from 'nodemailer';
+import { resolveFrontendBaseUrl, emailFrontendUrl } from './resolveFrontendBaseUrl.js';
 
 /**
  * Sends email notification after On Duty duration completes
@@ -40,7 +41,7 @@ export const sendOnDutyDurationCompleteEmail = async (asset, assignedUser, asset
             auth: { user: emailUser, pass: emailPass }
         });
 
-        const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+        const frontendUrl = resolveFrontendBaseUrl();
         const link = `${frontendUrl}/HRM/Asset/details/${asset._id}`;
 
         const htmlContent = `

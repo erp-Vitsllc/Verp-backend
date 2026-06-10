@@ -6,6 +6,7 @@ import { getSignedFileUrl } from '../../utils/s3Upload.js';
 import { randomUUID } from 'crypto';
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
 import { skipLiveProfileWritesPendingHr, queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
+import { disposeEmployeeProfileAttachment } from "../../utils/profileAttachmentDisposition.js";
 
 export const uploadProfilePicture = async (req, res) => {
     try {
@@ -66,6 +67,19 @@ export const uploadProfilePicture = async (req, res) => {
 
         const skipLive = skipLiveProfileWritesPendingHr(employeeBasic, req.user);
         const previousPicture = employeeBasic.profilePicture || null;
+
+        if (previousPicture && !skipLive) {
+            await disposeEmployeeProfileAttachment(req, {
+                employeeBasic,
+                attachment: previousPicture,
+                archive: {
+                    moduleName: "Employee Profile Picture",
+                    recordId: employeeId,
+                    details: `Profile picture replaced for ${employeeId}`,
+                    deletedPayload: { employeeId, profilePicture: previousPicture },
+                },
+            });
+        }
 
         if (!skipLive) {
             await EmployeeBasic.findOneAndUpdate(

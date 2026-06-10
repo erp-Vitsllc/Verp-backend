@@ -1,4 +1,5 @@
 import nodemailer from "nodemailer";
+import { resolveFrontendBaseUrl, emailFrontendUrl } from './resolveFrontendBaseUrl.js';
 
 /**
  * Lightweight HR inbox email when a profile is queued for activation (e.g. submit-approval API without full form body).
@@ -22,7 +23,7 @@ export async function notifyHrProfileActivationRequestEmail({
         return;
     }
 
-    const baseUrl = process.env.FRONTEND_URL || "http://localhost:3000";
+    const baseUrl = resolveFrontendBaseUrl();
     const profileUrl = employeeId ? `${baseUrl}/emp/${encodeURIComponent(employeeId)}` : baseUrl;
 
     const transporter = nodemailer.createTransport({

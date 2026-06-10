@@ -1,4 +1,5 @@
 import { generatePdf } from "../../utils/generatePdf.js";
+import { resolveFrontendBaseUrl, emailFrontendUrl } from '../../utils/resolveFrontendBaseUrl.js';
 import Loan from "../../models/Loan.js";
 import User from "../../models/User.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
@@ -373,7 +374,7 @@ export const approveLoan = async (req, res) => {
             });
 
             const origin = req.headers.origin || (req.headers.referer ? new URL(req.headers.referer).origin : null);
-            const baseUrl = origin || process.env.FRONTEND_URL || "http://localhost:3000";
+            const baseUrl = resolveFrontendBaseUrl(req);
             const typeSlug = loan.type ? loan.type.replace(/\s+/g, '-') : 'Loan';
             const actionUrl = `${baseUrl}/HRM/LoanAndAdvance/${typeSlug}-${loan._id}`;
 

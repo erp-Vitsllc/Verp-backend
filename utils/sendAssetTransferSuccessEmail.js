@@ -1,4 +1,5 @@
 import nodemailer from 'nodemailer';
+import { resolveFrontendBaseUrl, emailFrontendUrl } from './resolveFrontendBaseUrl.js';
 import { normalizePdfAttachments } from './normalizeEmailAttachments.js';
 
 /**
@@ -37,7 +38,7 @@ export const sendAssetTransferSuccessEmail = async (asset, actionType, assetCont
             auth: { user: emailUser, pass: emailPass }
         });
 
-        const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+        const frontendUrl = resolveFrontendBaseUrl();
         const link = `${frontendUrl}/HRM/Asset/details/${asset._id}`;
 
         const actionText = actionType === 'Leave' ? 'placed On Leave' : 'marked as End of Life (Unassigned)';

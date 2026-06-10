@@ -2,7 +2,8 @@ import EmployeeEducation from "../../models/EmployeeEducation.js";
 import { getCompleteEmployee } from "../../services/employeeService.js";
 
 import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
-import { awaitAdminDeletionArchive } from "../../utils/adminDeletionArchiveRun.js";
+import EmployeeBasic from "../../models/EmployeeBasic.js";
+import { disposeEmployeeProfileAttachment } from "../../utils/profileAttachmentDisposition.js";
 import { scheduleEmployeeProfileFileChangeHrEmailForRequest } from "../../utils/employeeInformativeHrNotify.js";
 
 export const deleteEducation = async (req, res) => {
@@ -39,17 +40,25 @@ export const deleteEducation = async (req, res) => {
         }
 
         const educationSnapshot = education.toObject ? education.toObject() : { ...education };
-        await awaitAdminDeletionArchive(req, {
-            moduleName: "Employee Education",
-            recordId: employeeId,
-            details: educationSnapshot?.qualification || educationSnapshot?.institution || "Education record",
-            deletedPayload: { employeeId, education: educationSnapshot },
+        const employeeBasic = await EmployeeBasic.findOne({ employeeId })
+            .select("profileStatus profileApprovalStatus")
+            .lean();
+        await disposeEmployeeProfileAttachment(req, {
+            employeeBasic,
+            attachment: educationSnapshot?.certificate || educationSnapshot?.document,
+            archive: {
+                moduleName: "Employee Education",
+                recordId: employeeId,
+                details: educationSnapshot?.qualification || educationSnapshot?.institution || "Education record",
+                deletedPayload: { employeeId, education: educationSnapshot },
+            },
         });
         education.deleteOne();
         await educationRecord.save();
         const completeEmployee = await getCompleteEmployee(employeeId);
 
         scheduleEmployeeProfileFileChangeHrEmailForRequest({
+            req,
             employeeId,
             sectionKey: "education",
             sectionLabel: "Education",

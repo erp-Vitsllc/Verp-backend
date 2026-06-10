@@ -1,8 +1,7 @@
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { resolveEmployeeId } from "../../services/employeeService.js";
-import { awaitAdminDeletionArchive } from "../../utils/adminDeletionArchiveRun.js";
 import { denyEmployeeCardDeleteUnlessAllowed } from "../../utils/employeeCardDeleteAccess.js";
-import { isActiveEmployeeProfile } from "../../utils/profileFileChangeHrNotify.js";
+import { disposeEmployeeProfileAttachment } from "../../utils/profileAttachmentDisposition.js";
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
 
 export const deleteWorkDetailsCard = async (req, res) => {
@@ -21,11 +20,14 @@ export const deleteWorkDetailsCard = async (req, res) => {
         const denied = await denyEmployeeCardDeleteUnlessAllowed(req, workSnapshot, "work details", "workDetails");
         if (denied) return res.status(denied.status).json(denied.body);
 
-        if (isActiveEmployeeProfile(workSnapshot)) await awaitAdminDeletionArchive(req, {
-            moduleName: "Employee Work Details",
-            recordId: employee.employeeId,
-            details: `Work details for ${employee.employeeId}`,
-            deletedPayload: workSnapshot,
+        await disposeEmployeeProfileAttachment(req, {
+            employeeBasic: workSnapshot,
+            archive: {
+                moduleName: "Employee Work Details",
+                recordId: employee.employeeId,
+                details: `Work details for ${employee.employeeId}`,
+                deletedPayload: workSnapshot,
+            },
         });
 
         await EmployeeBasic.updateOne(

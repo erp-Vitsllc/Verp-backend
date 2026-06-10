@@ -5,6 +5,7 @@ import { shouldSkipLiveEmployeeSection, queueOrTriggerProfileChange } from "../.
 import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
 import { scheduleEmployeeProfileFileChangeHrEmailForRequest } from "../../utils/employeeInformativeHrNotify.js";
 import { validateEmployeeSignaturePayload } from "../../utils/employeeSignatureValidation.js";
+import { disposeEmployeeProfileAttachment } from "../../utils/profileAttachmentDisposition.js";
 
 /**
  * Handle e-Signature upload and association with employee
@@ -74,6 +75,19 @@ export const uploadSignature = async (req, res) => {
             proposedData: proposedSignature,
         };
 
+        if (employee.signature && !skipLive) {
+            await disposeEmployeeProfileAttachment(req, {
+                employeeBasic: employee,
+                attachment: employee.signature,
+                archive: {
+                    moduleName: "Employee Signature",
+                    recordId: employee.employeeId,
+                    details: `Signature replaced for ${employee.employeeId}`,
+                    deletedPayload: { employeeId: employee.employeeId, signature: employee.signature },
+                },
+            });
+        }
+
         if (skipLive) {
             await queueOrTriggerProfileChange({
                 employeeId: employee.employeeId,
@@ -95,6 +109,7 @@ export const uploadSignature = async (req, res) => {
         }
 
         scheduleEmployeeProfileFileChangeHrEmailForRequest({
+            req,
             employeeId: employee.employeeId,
             employeeBasic: employee,
             sectionKey: "signature",

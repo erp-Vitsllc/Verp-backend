@@ -1,10 +1,8 @@
 import EmployeeVisa from "../../models/EmployeeVisa.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { resolveEmployeeId } from "../../services/employeeService.js";
-import { deleteDocumentFromS3 } from "../../utils/s3Upload.js";
-import { awaitAdminDeletionArchive } from "../../utils/adminDeletionArchiveRun.js";
 import { denyEmployeeCardDeleteUnlessAllowed } from "../../utils/employeeCardDeleteAccess.js";
-import { isActiveEmployeeProfile } from "../../utils/profileFileChangeHrNotify.js";
+import { disposeEmployeeProfileAttachment } from "../../utils/profileAttachmentDisposition.js";
 import { cleanupEmployeeExpiryNotificationsByLabels } from "../../utils/cleanupEmployeeExpiryNotifications.js";
 import { PURGE_TYPES, purgeEmployeeOldDocuments } from "../../utils/purgeEmployeeOldDocuments.js";
 
@@ -37,22 +35,17 @@ export const deleteVisaDetails = async (req, res) => {
         if (denied) return res.status(denied.status).json(denied.body);
 
         const existingVisa = await EmployeeVisa.findOne({ employeeId }).lean();
-        if (existingVisa?.[type]) {
-            if (isActiveEmployeeProfile(employeeBasic)) {
-                await awaitAdminDeletionArchive(req, {
+        if (existingVisa?.[type]?.document) {
+            await disposeEmployeeProfileAttachment(req, {
+                employeeBasic,
+                attachment: existingVisa[type].document,
+                archive: {
                     moduleName: `Employee Visa (${type})`,
                     recordId: employeeId,
                     details: `Visa type ${type} for ${employeeId}`,
                     deletedPayload: { employeeId, visaType: type, visa: existingVisa[type] },
-                });
-            }
-        }
-        if (existingVisa?.[type]?.document?.publicId) {
-            try {
-                await deleteDocumentFromS3(existingVisa[type].document.publicId);
-            } catch (s3Error) {
-                console.error("Error deleting document from S3:", s3Error);
-            }
+                },
+            });
         }
 
         const updatedVisa = await EmployeeVisa.findOneAndUpdate(

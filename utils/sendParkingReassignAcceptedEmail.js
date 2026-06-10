@@ -1,4 +1,5 @@
 import nodemailer from "nodemailer";
+import { resolveFrontendBaseUrl, emailFrontendUrl } from './resolveFrontendBaseUrl.js';
 import { resolveEmployeeEmail } from "./resolveEmployeeEmail.js";
 
 export const sendParkingReassignAcceptedEmail = async ({
@@ -26,7 +27,7 @@ export const sendParkingReassignAcceptedEmail = async ({
         const oldName = `${oldAssignee?.firstName || ''} ${oldAssignee?.lastName || ''}`.trim() || 'Employee';
         const newName = `${newAssignee?.firstName || ''} ${newAssignee?.lastName || ''}`.trim() || 'Employee';
         const controllerName = `${assetController?.firstName || ''} ${assetController?.lastName || ''}`.trim() || 'Asset Controller';
-        const frontendUrl = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/'/g, "");
+        const frontendUrl = emailFrontendUrl();
         const assetId = asset?._id?.toString?.() || asset?.id?.toString?.();
         const link = `${frontendUrl}/HRM/Asset/details/${assetId}`;
 

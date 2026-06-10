@@ -1,4 +1,5 @@
 import crypto from "crypto";
+import { resolveFrontendBaseUrl, emailFrontendUrl } from '../../utils/resolveFrontendBaseUrl.js';
 import nodemailer from "nodemailer";
 import Company from "../../models/Company.js";
 import User from "../../models/User.js";
@@ -443,7 +444,7 @@ export const submitCompanyNotRenewRequest = async (req, res) => {
 
         const hr = await getDepartmentHOD("hr");
         const hrEmail = pickEmail(hr);
-        const baseUrl = (process.env.FRONTEND_URL || "http://localhost:3000").replace(/\/$/, "");
+        const baseUrl = (resolveFrontendBaseUrl()).replace(/\/$/, "");
         const companyLink = `${baseUrl}/Company/${encodeURIComponent(core.companyId || core._id)}?tab=others`;
 
         if (hrEmail) {
@@ -537,7 +538,7 @@ export const respondCompanyNotRenewRequest = async (req, res) => {
                 ? await User.findById(entry.submittedByUserId).select("email companyEmail name").lean()
                 : null;
             const to = resolveEmployeeEmail(submitter || {}).email || "";
-            const baseUrl = (process.env.FRONTEND_URL || "http://localhost:3000").replace(/\/$/, "");
+            const baseUrl = (resolveFrontendBaseUrl()).replace(/\/$/, "");
             const companyLink = `${baseUrl}/Company/${encodeURIComponent(core.companyId || core._id)}`;
             if (to) {
                 await sendMail({

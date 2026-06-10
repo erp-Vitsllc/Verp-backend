@@ -1,7 +1,8 @@
 import EmployeeVisa from "../../models/EmployeeVisa.js";
 import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeService.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
-import { uploadDocumentToS3, deleteDocumentFromS3 } from "../../utils/s3Upload.js";
+import { uploadDocumentToS3 } from "../../utils/s3Upload.js";
+import { disposeEmployeeProfileAttachment } from "../../utils/profileAttachmentDisposition.js";
 import { archiveAndClearLiveEmployeeRenewal } from "../../utils/employeeDocumentRenewal.js";
 import { markProfileActivationHoldResolvedForSection } from "../../utils/markProfileActivationHoldResolved.js";
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
@@ -134,8 +135,22 @@ export const updateVisaDetails = async (req, res) => {
                     "raw",
                 );
 
-                if (!shouldArchivePrevious && existingVisa?.[visaType]?.document?.publicId) {
-                    await deleteDocumentFromS3(existingVisa[visaType].document.publicId);
+                if (!shouldArchivePrevious && existingVisa?.[visaType]?.document) {
+                    await disposeEmployeeProfileAttachment(req, {
+                        employeeBasic,
+                        attachment: existingVisa[visaType].document,
+                        isActivationDocumentChange: skipLive,
+                        archive: {
+                            moduleName: `Employee Visa (${visaType}) Attachment`,
+                            recordId: employeeId,
+                            details: `${visaType} visa attachment replaced for ${employeeId}`,
+                            deletedPayload: {
+                                employeeId,
+                                visaType,
+                                visa: existingVisa[visaType],
+                            },
+                        },
+                    });
                 }
 
                 documentData = {
@@ -231,6 +246,7 @@ export const updateVisaDetails = async (req, res) => {
         const completeEmployee = await getCompleteEmployee(employeeId);
 
         scheduleEmployeeProfileFileChangeHrEmailForRequest({
+            req,
             employeeId,
             employeeBasic,
             sectionKey: "visa",

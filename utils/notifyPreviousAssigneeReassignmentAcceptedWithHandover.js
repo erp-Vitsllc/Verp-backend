@@ -1,4 +1,5 @@
 import nodemailer from 'nodemailer';
+import { resolveFrontendBaseUrl, emailFrontendUrl } from './resolveFrontendBaseUrl.js';
 import AssetHistory from '../models/AssetHistory.js';
 import AssetItem from '../models/AssetItem.js';
 import { buildAcceptedAssetHandoverAttachments } from './buildAssignmentHandoverEmailAttachments.js';
@@ -82,7 +83,7 @@ export async function notifyPreviousAssigneeReassignmentAcceptedWithHandover(req
             ? `${current.acceptedBy.firstName || ''} ${current.acceptedBy.lastName || ''}`.trim() || 'Assignee'
             : newAssigneeName;
 
-        const frontendUrl = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/'/g, '');
+        const frontendUrl = emailFrontendUrl();
 
         let attachments = [];
         try {
