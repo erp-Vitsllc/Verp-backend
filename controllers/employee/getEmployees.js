@@ -4,6 +4,7 @@ import mongoose from "mongoose";
 import { getSignedFileUrl, normalizeS3Key } from "../../utils/s3Upload.js";
 import { escapeRegex } from "../../utils/regexHelper.js";
 import { ensureProbationRequestForEmployee } from "../../utils/sendProbationWorkflowEmail.js";
+import { buildEmployeeListStatusMatch } from "../../utils/applyEmployeeLeftUserStatus.js";
 
 // Get all employees (lightweight list response with optional pagination)
 export const getEmployees = async (req, res) => {
@@ -35,7 +36,7 @@ export const getEmployees = async (req, res) => {
 
         if (department) filters.department = department;
         if (designation) filters.designation = designation;
-        if (status) filters.status = status;
+        Object.assign(filters, buildEmployeeListStatusMatch(status));
         if (profileStatus) filters.profileStatus = profileStatus;
         if (search) {
             const regex = new RegExp(escapeRegex(search), 'i');
@@ -52,7 +53,12 @@ export const getEmployees = async (req, res) => {
 
         // Optimize: Exclude large fields (documents, profilePicture base64) for list view
         // Use populate with options to handle invalid references gracefully
-        const [employees, total] = await Promise.all([
+        const rosterCountFilter = {
+            employeeId: { $ne: "VEGA-HR-0000" },
+            status: { $ne: "Left User" },
+        };
+
+        const [employees, total, activeRosterTotal, leftUserTotal] = await Promise.all([
             EmployeeBasic.aggregate([
                 { $match: filters },
                 {
@@ -302,6 +308,11 @@ export const getEmployees = async (req, res) => {
                 }
             ]).option(queryOptions), // Passing options to aggregate
             EmployeeBasic.countDocuments(filters, queryOptions),
+            EmployeeBasic.countDocuments(rosterCountFilter, queryOptions),
+            EmployeeBasic.countDocuments(
+                { employeeId: { $ne: "VEGA-HR-0000" }, status: "Left User" },
+                queryOptions,
+            ),
         ]);
 
         // AUTOMATION: Create probation-change requests after probation period completes.
@@ -427,6 +438,8 @@ export const getEmployees = async (req, res) => {
                 total,
                 totalPages: Math.max(1, Math.ceil(total / limit)),
             },
+            activeRosterTotal,
+            leftUserTotal,
         });
     } catch (error) {
         clearTimeout(timeout);

@@ -8,7 +8,6 @@ import { resolveFrontendBaseUrl, withFrontendPath, resolveFrontendHostLabel } fr
 import {
     buildInlineEmailAttachments,
     resolveEmailFileLinksForHtml,
-    renderEmailFileListHtml,
     renderEmailPrimaryButton,
     renderEmailSiteFooter,
 } from "./emailAccessibleFiles.js";
@@ -90,17 +89,6 @@ const COMPANY_DOC_FOCUS_BY_CONTEXT = {
     other_document: "documentsLive",
     insurance: "insurance",
     live: "documentsLive",
-};
-
-const formatDetailDate = (value) => {
-    if (!value) return "";
-    try {
-        const d = new Date(value);
-        if (Number.isNaN(d.getTime())) return "";
-        return d.toISOString().slice(0, 10);
-    } catch {
-        return "";
-    }
 };
 
 /** Deep link to a company profile section (non-activation cards). */
@@ -214,46 +202,16 @@ const actionLabel = (action = "modified") => {
     return map[String(action || "").toLowerCase()] || "Modified";
 };
 
-const renderChangeDetailRows = (details = {}) => {
-    const rows = [];
-    const push = (label, value) => {
-        const v = String(value ?? "").trim();
-        if (!v) return;
-        rows.push(
-            `<tr><td style="padding:4px 10px 4px 0;color:#64748b;vertical-align:top;white-space:nowrap;">${escapeHtml(label)}</td><td style="padding:4px 0;color:#1e293b;">${escapeHtml(v)}</td></tr>`,
-        );
-    };
-    push("Type", details.type);
-    push("Description", details.description);
-    push("Issue date", formatDetailDate(details.issueDate));
-    push("Expiry date", formatDetailDate(details.expiryDate));
-    if (!rows.length) return "";
-    return `<table style="margin:8px 0 0;font-size:12px;border-collapse:collapse;">${rows.join("")}</table>`;
-};
-
 const renderChangeRowsHtml = (changes = []) =>
     changes
         .map((change) => {
             const section = escapeHtml(change.sectionLabel || change.section || "Section");
             const act = escapeHtml(actionLabel(change.action));
-            const sectionUrl = escapeHtml(change.profileUrl || "");
-            const files = Array.isArray(change.files) ? change.files : [];
-            const detailsHtml = renderChangeDetailRows(change.details || {});
-            const filesHtml = renderEmailFileListHtml(files, { showAttachHint: true });
             const queuedNote = change.queuedForActivation
-                ? `<p style="margin:8px 0 0;font-size:12px;color:#92400e;">Queued for HR activation review — not yet live on the profile.</p>`
+                ? ` <span style="color:#92400e;font-size:12px;">(queued for activation)</span>`
                 : "";
 
-            return `
-                <li style="margin:12px 0;padding:12px;border:1px solid #e2e8f0;border-radius:8px;background:#f8fafc;">
-                    <p style="margin:0;"><strong>${act}</strong> — ${section}</p>
-                    ${queuedNote}
-                    ${detailsHtml}
-                    ${filesHtml}
-                    <p style="margin:12px 0 0;text-align:left;">
-                        ${renderEmailPrimaryButton(sectionUrl, "View modification in VeRP", "#0f766e")}
-                    </p>
-                </li>`;
+            return `<li style="margin:6px 0;">${act} — <strong>${section}</strong>${queuedNote}</li>`;
         })
         .join("");
 
@@ -341,9 +299,9 @@ export async function notifyFlowchartHrOfProfileFileChanges({
                 ${adminNote}
                 ${attachmentSummary}
                 <p>${hasActivationSectionChange
-                    ? "The following administrator card change(s) were recorded on an active employee profile:"
-                    : "The following file change(s) were made outside profile activation / progress-bar mandatory sections:"}</p>
-                <ul style="list-style:none;padding:0;margin:16px 0;">${renderChangeRowsHtml(rows)}</ul>
+                    ? "The following card(s) were updated on an active employee profile:"
+                    : "The following card(s) were updated:"}</p>
+                <ul style="margin:12px 0;padding-left:20px;font-size:14px;">${renderChangeRowsHtml(rows)}</ul>
                 <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:14px 16px;margin:16px 0;">
                     <p style="margin:0;"><strong>${entityType === "company" ? "Company" : "Employee"}:</strong> ${label}</p>
                     <p style="margin:6px 0 0;"><strong>ID:</strong> ${code}</p>

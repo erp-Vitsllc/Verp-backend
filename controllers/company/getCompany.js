@@ -37,7 +37,8 @@ export const getCompany = async (req, res) => {
         // Get employee count (excluding placeholder) for this specific company
         const employeeCount = await EmployeeBasic.countDocuments({
             company: company._id,
-            employeeId: { $ne: "VEGA-HR-0000" }
+            employeeId: { $ne: "VEGA-HR-0000" },
+            status: { $ne: "Left User" },
         });
 
         const companyObj = await loadCompanyFullProfile(company);

@@ -5,7 +5,7 @@ import s3Client, { bucketName } from '../../config/s3Client.js';
 import { getSignedFileUrl } from '../../utils/s3Upload.js';
 import { randomUUID } from 'crypto';
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
-import { skipLiveProfileWritesPendingHr, queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
+import { skipLiveProfileWritesPendingHrAsync, queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
 import { disposeEmployeeProfileAttachment } from "../../utils/profileAttachmentDisposition.js";
 
 export const uploadProfilePicture = async (req, res) => {
@@ -65,7 +65,7 @@ export const uploadProfilePicture = async (req, res) => {
             return res.status(404).json({ message: "Employee not found during update" });
         }
 
-        const skipLive = skipLiveProfileWritesPendingHr(employeeBasic, req.user);
+        const skipLive = await skipLiveProfileWritesPendingHrAsync(req, employeeBasic);
         const previousPicture = employeeBasic.profilePicture || null;
 
         if (previousPicture && !skipLive) {

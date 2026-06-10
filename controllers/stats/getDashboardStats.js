@@ -70,11 +70,21 @@ export const getDashboardStats = async (req, res) => {
         }
 
         // 5. Employees Stats
-        const totalEmployees = await EmployeeBasic.countDocuments({ profileStatus: 'active' });
+        const totalEmployees = await EmployeeBasic.countDocuments({
+            profileStatus: "active",
+            status: { $ne: "Left User" },
+            employeeId: { $ne: "VEGA-HR-0000" },
+        });
 
         // Employee Breakdown by Department
         const employeesByDept = await EmployeeBasic.aggregate([
-            { $match: { profileStatus: 'active' } },
+            {
+                $match: {
+                    profileStatus: "active",
+                    status: { $ne: "Left User" },
+                    employeeId: { $ne: "VEGA-HR-0000" },
+                },
+            },
             { $group: { _id: "$department", count: { $sum: 1 } } },
             { $sort: { count: -1 } },
             { $limit: 5 } // Top 5 departments

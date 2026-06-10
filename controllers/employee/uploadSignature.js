@@ -1,8 +1,7 @@
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { uploadDocumentToS3 } from "../../utils/s3Upload.js";
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
-import { shouldSkipLiveEmployeeSection, queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
-import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
+import { shouldSkipLiveEmployeeSectionAsync, queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
 import { scheduleEmployeeProfileFileChangeHrEmailForRequest } from "../../utils/employeeInformativeHrNotify.js";
 import { validateEmployeeSignaturePayload } from "../../utils/employeeSignatureValidation.js";
 import { disposeEmployeeProfileAttachment } from "../../utils/profileAttachmentDisposition.js";
@@ -25,8 +24,7 @@ export const uploadSignature = async (req, res) => {
         if (!employee) {
             return res.status(404).json({ message: "Employee not found." });
         }
-        const isAdminUser = await isReqUserAdmin(req.user);
-        const skipLive = !isAdminUser && shouldSkipLiveEmployeeSection(employee, "signature", req.user);
+        const skipLive = await shouldSkipLiveEmployeeSectionAsync(req, employee, "signature");
 
         const signatureValidation = validateEmployeeSignaturePayload({
             signatureData,

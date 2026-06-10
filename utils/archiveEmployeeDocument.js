@@ -87,14 +87,16 @@ const hasStoredDocumentFile = (document) =>
                 (typeof document.data === "string" && document.data.trim() !== "")),
     );
 
-const queuedDocumentWasSuperseded = (previousData, proposedData) => {
+export const employeeDocumentWasSuperseded = (previousData, proposedData) => {
     const prevDoc = previousData?.document;
     if (!hasStoredDocumentFile(prevDoc)) return false;
     const propDoc = proposedData?.document;
     const prevUrl = typeof prevDoc.url === "string" ? prevDoc.url.trim() : "";
     const propUrl = typeof propDoc?.url === "string" ? propDoc.url.trim() : "";
     if (prevUrl && propUrl && prevUrl === propUrl) return false;
-    return true;
+    const propData = typeof propDoc?.data === "string" ? propDoc.data.trim() : "";
+    if (propData) return true;
+    return Boolean(propUrl && (!prevUrl || propUrl !== prevUrl));
 };
 
 const SECTION_ARCHIVE_META = {
@@ -146,7 +148,7 @@ export const archiveQueuedEmployeeSectionPreviousIfNeeded = async ({
     if (isRenewal !== true) return;
     const sec = String(section || "").toLowerCase();
     if (!employeeId || !previousData || typeof previousData !== "object") return;
-    if (!queuedDocumentWasSuperseded(previousData, proposedData)) return;
+    if (!employeeDocumentWasSuperseded(previousData, proposedData)) return;
 
     const meta = SECTION_ARCHIVE_META[sec];
     if (!meta) return;

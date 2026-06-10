@@ -145,17 +145,9 @@ function flattenPayloadRows(obj, rows, path = '', depth = 0) {
     }
 }
 
-/**
- * Whole-record / list deletes (employee, company, asset row, fine, etc.) — short email only.
- * Card/section deletes (labour card, passport, single document) — include field table in email.
- */
-export function shouldShowDeletionFieldsInManagementEmail({ moduleName, deletedPayload } = {}) {
-    if (deletedPayload?.complete != null && deletedPayload?.collections != null) {
-        return false;
-    }
-    const meta = inferAdminDeletionArchiveMeta({ moduleName, deletedPayload });
-    if (meta.category === 'list') return false;
-    return true;
+/** Management deletion emails list the record only — field tables stay in VeRP Deleted Records. */
+export function shouldShowDeletionFieldsInManagementEmail() {
+    return false;
 }
 
 /**

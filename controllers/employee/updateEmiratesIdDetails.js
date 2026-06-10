@@ -5,10 +5,8 @@ import { uploadDocumentToS3 } from "../../utils/s3Upload.js";
 import { disposeEmployeeProfileAttachment } from "../../utils/profileAttachmentDisposition.js";
 import { archiveAndClearLiveEmployeeRenewal } from "../../utils/employeeDocumentRenewal.js";
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
-import { shouldSkipLiveEmployeeSection, queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
+import { shouldSkipLiveEmployeeSectionAsync, queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
 import { markProfileActivationHoldResolvedForSection } from "../../utils/markProfileActivationHoldResolved.js";
-import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
-import { isEmployeeProfileActivationDesignatedHr } from "../../utils/isEmployeeProfileActivationDesignatedHr.js";
 import {
     normalizeEmployeeEmiratesIdPayload,
     validateEmployeeEmiratesIdPayload,
@@ -59,17 +57,15 @@ export const updateEmiratesIdDetails = async (req, res) => {
         const employeeBasic = await EmployeeBasic.findOne({ employeeId })
             .select("company profileStatus profileWorkflow profileApprovalStatus profileSubmittedTo")
             .lean();
-        const isAdminUser = await isReqUserAdmin(req.user);
-        const canActAsHr = await isEmployeeProfileActivationDesignatedHr(req, employeeBasic);
-        const skipLive =
-            !isAdminUser && !canActAsHr && shouldSkipLiveEmployeeSection(employeeBasic, "emiratesId", req.user);
+        const skipLive = await shouldSkipLiveEmployeeSectionAsync(req, employeeBasic, "emiratesId");
 
         const existingEmiratesId = await EmployeeEmiratesId.findOne({ employeeId });
         const existingDocument =
             existingEmiratesId?.emiratesId?.document?.url || existingEmiratesId?.emiratesId?.document?.data;
 
+        const lockedEmiratesIdNumber = String(existingEmiratesId?.emiratesId?.number || "").trim();
         const validationInput = normalizeEmployeeEmiratesIdPayload({
-            number,
+            number: lockedEmiratesIdNumber || number,
             issueDate,
             expiryDate,
             document: normalizedUpload || existingEmiratesId?.emiratesId?.document,

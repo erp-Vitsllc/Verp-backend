@@ -4,6 +4,8 @@ import mongoose from "mongoose";
 import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeService.js";
 import { scheduleEmployeeProfileFileChangeHrEmailForRequest } from "../../utils/employeeInformativeHrNotify.js";
 import { validateEmployeeDocumentPayload } from "../../utils/employeeDocumentValidation.js";
+import { archiveEmployeeDocument, employeeDocumentWasSuperseded } from "../../utils/archiveEmployeeDocument.js";
+import { shouldArchiveEmployeeDocumentOnRenewal } from "../../utils/employeeDocumentRenewal.js";
 
 
 // @desc    Update a document in employee's documents list
@@ -119,29 +121,40 @@ export const updateDocument = async (req, res) => {
                 proposedDoc.document = documentData;
             }
         }
-            // Archive current version only when user explicitly performs renewal.
-            if (currentDoc && isRenewMode === true) {
-                if (!employee.oldDocuments) employee.oldDocuments = [];
-                employee.oldDocuments.push({
-                    type: currentDoc.type || '',
-                    description: currentDoc.description || '',
-                    issueDate: currentDoc.issueDate || null,
-                    expiryDate: currentDoc.expiryDate || null,
-                    cost: currentDoc.cost ?? null,
-                    basicSalary: currentDoc.basicSalary ?? null,
-                    houseRentAllowance: currentDoc.houseRentAllowance ?? null,
-                    vehicleAllowance: currentDoc.vehicleAllowance ?? null,
-                    fuelAllowance: currentDoc.fuelAllowance ?? null,
-                    otherAllowance: currentDoc.otherAllowance ?? null,
-                    totalSalary: currentDoc.totalSalary ?? null,
-                    createdAt: currentDoc.createdAt || null,
-                    archivedAt: new Date(),
-                    archiveReason: 'Replaced',
-                    document: currentDoc.document || null
-                });
-            }
-            employee.documents[docIndex] = proposedDoc;
-            await employee.save();
+
+        const hasExistingDocument = Boolean(
+            currentDoc?.document?.url || currentDoc?.document?.data || currentDoc?.document?.name,
+        );
+        const hasNewDocumentUpload = employeeDocumentWasSuperseded(currentDoc, proposedDoc);
+        const shouldArchivePrevious =
+            isRenewMode === true &&
+            Boolean(currentDoc?.expiryDate) &&
+            shouldArchiveEmployeeDocumentOnRenewal({
+                isRenewal: true,
+                hasExistingDocument,
+                hasNewDocumentUpload,
+            });
+
+        if (shouldArchivePrevious) {
+            await archiveEmployeeDocument({
+                employeeId: employee.employeeId,
+                type: currentDoc.type || "Document",
+                description: currentDoc.description || "",
+                issueDate: currentDoc.issueDate || null,
+                expiryDate: currentDoc.expiryDate || null,
+                cost: currentDoc.cost ?? null,
+                basicSalary: currentDoc.basicSalary ?? null,
+                houseRentAllowance: currentDoc.houseRentAllowance ?? null,
+                vehicleAllowance: currentDoc.vehicleAllowance ?? null,
+                fuelAllowance: currentDoc.fuelAllowance ?? null,
+                otherAllowance: currentDoc.otherAllowance ?? null,
+                totalSalary: currentDoc.totalSalary ?? null,
+                document: currentDoc.document || null,
+            });
+        }
+
+        employee.documents[docIndex] = proposedDoc;
+        await employee.save();
         
         const completeEmployee = await getCompleteEmployee(employee.employeeId);
 

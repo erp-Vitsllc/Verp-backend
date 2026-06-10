@@ -62,6 +62,7 @@ export const getCompanies = async (req, res) => {
                         $match: {
                             company: { $in: companyIds },
                             employeeId: { $ne: "VEGA-HR-0000" },
+                            status: { $ne: "Left User" },
                         },
                     },
                     { $group: { _id: "$company", n: { $sum: 1 } } },

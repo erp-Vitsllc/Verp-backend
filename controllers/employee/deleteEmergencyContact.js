@@ -2,7 +2,7 @@ import EmployeeEmergencyContact from "../../models/EmployeeEmergencyContact.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { getCompleteEmployee } from "../../services/employeeService.js";
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
-import { shouldSkipLiveEmployeeSection, queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
+import { shouldSkipLiveEmployeeSectionAsync, queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
 import { disposeEmployeeProfileAttachment } from "../../utils/profileAttachmentDisposition.js";
 import { denyEmployeeCardDeleteUnlessAllowed } from "../../utils/employeeCardDeleteAccess.js";
 import { scheduleEmployeeProfileFileChangeHrEmailForRequest } from "../../utils/employeeInformativeHrNotify.js";
@@ -27,7 +27,7 @@ export const deleteEmergencyContact = async (req, res) => {
         const denied = await denyEmployeeCardDeleteUnlessAllowed(req, employeeBasic, "emergency contacts", "emergencyContact");
         if (denied) return res.status(denied.status).json(denied.body);
 
-        const skipLive = shouldSkipLiveEmployeeSection(employeeBasic, "emergencyContact", req.user);
+        const skipLive = await shouldSkipLiveEmployeeSectionAsync(req, employeeBasic, "emergencyContact");
 
         const contactRecord = await EmployeeEmergencyContact.findOne({ employeeId });
 

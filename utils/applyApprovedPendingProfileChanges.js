@@ -11,12 +11,21 @@ import EmployeeEmergencyContact from "../models/EmployeeEmergencyContact.js";
 import EmployeeBasic from "../models/EmployeeBasic.js";
 import User from "../models/User.js";
 import { saveEmployeeData } from "../services/employeeService.js";
-import { archiveQueuedEmployeeSectionPreviousIfNeeded } from "./archiveEmployeeDocument.js";
+import {
+    archiveQueuedEmployeeSectionPreviousIfNeeded,
+    employeeDocumentWasSuperseded,
+} from "./archiveEmployeeDocument.js";
+import { shouldArchiveEmployeeDocumentOnRenewal } from "./employeeDocumentRenewal.js";
 import {
     documentStorageFingerprint,
     purgeEmployeeOldDocuments,
     PURGE_TYPES,
 } from "./purgeEmployeeOldDocuments.js";
+import {
+    archiveSalaryIncrementIfNeeded,
+    purgeSalaryOldDocumentsUnlessIncrement,
+} from "./archiveSupersededSalaryOnIncrement.js";
+import { applyEmployeeLeftUserStatus, isLeftUserStatus } from "./applyEmployeeLeftUserStatus.js";
 
 /**
  * Applies a subset of pendingReactivationChanges (HR-checked rows during partial hold).
@@ -46,14 +55,29 @@ export async function applyApprovedPendingProfileChanges(employeeId, basicDoc, c
 
         if (changeType === "update" && targetIndex !== null && change?.proposedData) {
             if (updated.documents[targetIndex]) {
-                if (change?.isRenewal === true) {
+                const currentDoc = updated.documents[targetIndex];
+                const plainCurrent = currentDoc?.toObject ? currentDoc.toObject() : { ...currentDoc };
+                const hasExistingDocument = Boolean(
+                    plainCurrent?.document?.url || plainCurrent?.document?.data,
+                );
+                const shouldArchivePrevious =
+                    change?.isRenewal === true &&
+                    Boolean(plainCurrent?.expiryDate) &&
+                    shouldArchiveEmployeeDocumentOnRenewal({
+                        isRenewal: true,
+                        hasExistingDocument,
+                        hasNewDocumentUpload: employeeDocumentWasSuperseded(
+                            plainCurrent,
+                            change.proposedData,
+                        ),
+                    });
+                if (shouldArchivePrevious) {
                     updated.oldDocuments = Array.isArray(updated.oldDocuments) ? updated.oldDocuments : [];
-                    const currentDoc = updated.documents[targetIndex];
                     updated.oldDocuments.push({
-                        ...currentDoc.toObject(),
+                        ...plainCurrent,
                         archivedAt: new Date(),
                         archiveReason: "Replaced",
-                        createdAt: currentDoc.createdAt || null,
+                        createdAt: plainCurrent.createdAt || null,
                     });
                 }
                 updated.documents[targetIndex] = change.proposedData;
@@ -192,6 +216,13 @@ export async function applyApprovedPendingProfileChanges(employeeId, basicDoc, c
             continue;
         }
         if (section === "basicdetails" || section === "workdetails") {
+            let salaryIncrementResult = { isIncrement: false };
+            if (
+                section === "basicdetails" &&
+                Object.prototype.hasOwnProperty.call(proposedData, "salaryHistory")
+            ) {
+                salaryIncrementResult = await archiveSalaryIncrementIfNeeded(employeeId, proposedData);
+            }
             await saveEmployeeData(employeeId, proposedData);
             if (
                 section === "basicdetails" &&
@@ -199,12 +230,14 @@ export async function applyApprovedPendingProfileChanges(employeeId, basicDoc, c
                     Object.prototype.hasOwnProperty.call(proposedData, "basic") ||
                     Object.prototype.hasOwnProperty.call(proposedData, "offerLetter"))
             ) {
-                await purgeEmployeeOldDocuments(employeeId, {
-                    types: PURGE_TYPES.salary,
-                    purgeDeletedArchiveReason: true,
+                await purgeSalaryOldDocumentsUnlessIncrement(employeeId, {
+                    isIncrement: salaryIncrementResult.isIncrement,
                 });
             }
-            if (section === "workdetails" && Object.prototype.hasOwnProperty.call(proposedData, "companyEmail")) {
+            if (section === "workdetails" && isLeftUserStatus(proposedData?.status)) {
+                const basicDoc = await EmployeeBasic.findOne({ employeeId });
+                if (basicDoc) await applyEmployeeLeftUserStatus(basicDoc);
+            } else if (section === "workdetails" && Object.prototype.hasOwnProperty.call(proposedData, "companyEmail")) {
                 await User.findOneAndUpdate(
                     { employeeId },
                     { $set: { companyEmail: proposedData.companyEmail } },

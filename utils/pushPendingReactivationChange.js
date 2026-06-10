@@ -1,4 +1,7 @@
 import EmployeeBasic from "../models/EmployeeBasic.js";
+import Company from "../models/Company.js";
+import { isActiveCompanyProfile } from "./companyActivation.js";
+import { isRequestUserDesignatedFlowchartHr } from "./isDesignatedFlowchartHr.js";
 import { EMPLOYEE_ACTIVATION_SECTION_KEYS } from "./profileFileChangeHrNotify.js";
 import { shouldQueueProfileChange, triggerProfileReactivationIfNeeded } from "./triggerProfileReactivation.js";
 
@@ -25,12 +28,9 @@ export function awaitingSubmittedHrOnly(employeeBasic) {
     return String(employeeBasic?.profileApprovalStatus || "").toLowerCase() === "submitted";
 }
 
-export function isActorHrOrAdmin(actor) {
-    if (!actor) return false;
-    const role = String(actor.role || "").trim().toLowerCase();
-    const isAdmin = actor.isAdmin || /^(admin|administrator|root)$/i.test(role);
-    const isHr = role === "hr";
-    return isAdmin || isHr;
+/** @deprecated Only designated Flowchart HR may bypass the activation queue — not admins. */
+export function isActorHrOrAdmin() {
+    return false;
 }
 
 /** Profile is live-active — mandatory card edits queue for HR instead of writing collections. */
@@ -40,23 +40,55 @@ export function isEmployeeProfileLiveActiveForHrQueue(employeeBasic = {}) {
     return profileStatus === "active" && profileApprovalStatus === "active";
 }
 
-/** Reactivation (live-active) OR submitted-for-activation: queue-only, no live writes. */
-export function skipLiveProfileWritesPendingHr(employeeBasic, actor) {
-    if (!employeeBasic) return false;
-    if (isActorHrOrAdmin(actor)) return false;
+export async function isEmployeeCompanyActive(employeeBasic = {}) {
+    const companyId = employeeBasic?.company;
+    if (!companyId) return false;
+    const company = await Company.findById(companyId).select("status").lean();
+    return isActiveCompanyProfile(company || {});
+}
+
+/** Only the Flowchart HR contact may edit activation cards live on an active company. */
+export async function shouldBypassEmployeeActivationHrQueue(req) {
+    return isRequestUserDesignatedFlowchartHr(req);
+}
+
+function employeeProfileNeedsActivationHrQueue(employeeBasic = {}) {
     if (awaitingSubmittedHrOnly(employeeBasic)) return true;
     return isEmployeeProfileLiveActiveForHrQueue(employeeBasic);
 }
 
 /**
- * Progress-bar / HR-approval sections queue on active profiles; other cards save live
- * and trigger informative HR email only (no dashboard task).
+ * Active company + active/submitted employee profile: queue mandatory card edits for HR.
+ * Admins follow the same queue — only designated Flowchart HR applies live.
  */
-export function shouldSkipLiveEmployeeSection(employeeBasic, sectionKey = "", actor) {
+export async function skipLiveProfileWritesPendingHrAsync(req, employeeBasic) {
     if (!employeeBasic) return false;
-    if (isActorHrOrAdmin(actor)) return false;
-    if (awaitingSubmittedHrOnly(employeeBasic)) return true;
-    if (!isEmployeeProfileLiveActiveForHrQueue(employeeBasic)) return false;
+    if (await shouldBypassEmployeeActivationHrQueue(req)) return false;
+    if (!(await isEmployeeCompanyActive(employeeBasic))) return false;
+    return employeeProfileNeedsActivationHrQueue(employeeBasic);
+}
+
+/**
+ * Progress-bar / HR-approval sections queue on active company profiles; other cards save live.
+ */
+export async function shouldSkipLiveEmployeeSectionAsync(req, employeeBasic, sectionKey = "") {
+    if (!employeeBasic) return false;
+    if (await shouldBypassEmployeeActivationHrQueue(req)) return false;
+    if (!(await isEmployeeCompanyActive(employeeBasic))) return false;
+    if (!employeeProfileNeedsActivationHrQueue(employeeBasic)) return false;
+    return EMPLOYEE_ACTIVATION_SECTION_KEYS.has(String(sectionKey || "").trim());
+}
+
+/** @deprecated Use skipLiveProfileWritesPendingHrAsync — sync path no longer bypasses admin. */
+export function skipLiveProfileWritesPendingHr(employeeBasic) {
+    if (!employeeBasic) return false;
+    return employeeProfileNeedsActivationHrQueue(employeeBasic);
+}
+
+/** @deprecated Use shouldSkipLiveEmployeeSectionAsync. */
+export function shouldSkipLiveEmployeeSection(employeeBasic, sectionKey = "") {
+    if (!employeeBasic) return false;
+    if (!employeeProfileNeedsActivationHrQueue(employeeBasic)) return false;
     return EMPLOYEE_ACTIVATION_SECTION_KEYS.has(String(sectionKey || "").trim());
 }
 

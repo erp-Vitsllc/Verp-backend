@@ -5,10 +5,8 @@ import { uploadDocumentToS3 } from "../../utils/s3Upload.js";
 import { disposeEmployeeProfileAttachment } from "../../utils/profileAttachmentDisposition.js";
 import { archiveAndClearLiveEmployeeRenewal } from "../../utils/employeeDocumentRenewal.js";
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
-import { shouldSkipLiveEmployeeSection, queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
+import { shouldSkipLiveEmployeeSectionAsync, queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
 import { markProfileActivationHoldResolvedForSection } from "../../utils/markProfileActivationHoldResolved.js";
-import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
-import { isEmployeeProfileActivationDesignatedHr } from "../../utils/isEmployeeProfileActivationDesignatedHr.js";
 import {
     normalizeEmployeePassportPayload,
     validateEmployeePassportPayload,
@@ -45,10 +43,7 @@ export const updatePassportDetails = async (req, res) => {
         const employeeBasic = await EmployeeBasic.findOne({ employeeId })
             .select("company profileStatus profileWorkflow profileApprovalStatus profileSubmittedTo")
             .lean();
-        const isAdminUser = await isReqUserAdmin(req.user);
-        const canActAsHr = await isEmployeeProfileActivationDesignatedHr(req, employeeBasic);
-        const skipLive =
-            !isAdminUser && !canActAsHr && shouldSkipLiveEmployeeSection(employeeBasic, "passport", req.user);
+        const skipLive = await shouldSkipLiveEmployeeSectionAsync(req, employeeBasic, "passport");
         const profileActive = String(employeeBasic?.profileStatus || "").toLowerCase() === "active";
 
         // Fetch existing passport to handle renewal/archiving

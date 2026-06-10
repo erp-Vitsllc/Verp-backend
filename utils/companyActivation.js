@@ -405,7 +405,6 @@ const sendCompanyActivationEmailToHr = async ({
     const subject = `${typeForDisplay} request: ${company.name}`;
 
     const reasonHtml = shortenUrlsInString(reason || "Activation request");
-    const descriptionHtml = shortenUrlsInString(description || "");
     const attachmentUrl = attachment ? String(attachment).trim() : "";
     const emailAttachments = attachmentUrl
         ? await buildEmailAttachmentsFromRef(attachmentUrl, attachmentName)
@@ -419,7 +418,9 @@ const sendCompanyActivationEmailToHr = async ({
         : "";
 
     const changesHtml = Array.isArray(requestedChanges) && requestedChanges.length
-        ? `<p style="margin:6px 0 0;"><strong>Requested Changes:</strong><br/>${requestedChanges.map((c) => `- ${c}`).join("<br/>")}</p>`
+        ? `<p style="margin:8px 0 0;"><strong>Cards to review:</strong></p>
+           <ul style="margin:4px 0 0;padding-left:20px;font-size:14px;">${requestedChanges.map((c) => `<li>${String(c).replace(/</g, "&lt;")}</li>`).join("")}</ul>
+           <p style="margin:8px 0 0;font-size:12px;color:#64748b;">Open VeRP to compare current and proposed values.</p>`
         : "";
 
     const html = `
@@ -436,7 +437,6 @@ const sendCompanyActivationEmailToHr = async ({
                     <p style="margin:6px 0 0;"><strong>Type:</strong> ${typeForDisplay}</p>
                     <p style="margin:6px 0 0;"><strong>Requested by:</strong> ${requestedByName || "System"} via VeRP</p>
                     <p style="margin:6px 0 0;"><strong>Reason:</strong> ${reasonHtml}</p>
-                    ${descriptionHtml ? `<p style="margin:6px 0 0;"><strong>Edited Details:</strong> ${descriptionHtml}</p>` : ""}
                     ${changesHtml}
                     ${attachmentHtml}
                 </div>

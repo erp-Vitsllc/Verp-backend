@@ -2,7 +2,7 @@ import EmployeeEmergencyContact from "../../models/EmployeeEmergencyContact.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { getCompleteEmployee, resolveEmployeeId } from "../../services/employeeService.js";
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
-import { shouldSkipLiveEmployeeSection, queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
+import { shouldSkipLiveEmployeeSectionAsync, queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
 import { scheduleEmployeeProfileFileChangeHrEmailForRequest } from "../../utils/employeeInformativeHrNotify.js";
 import { validateEmergencyContactPayload } from "../../utils/employeeEmergencyContactValidation.js";
 import EmployeeContact from "../../models/EmployeeContact.js";
@@ -31,7 +31,7 @@ export const addEmergencyContact = async (req, res) => {
         const employeeBasic = await EmployeeBasic.findOne({ employeeId })
             .select("profileStatus profileWorkflow profileApprovalStatus company")
             .lean();
-        const skipLive = shouldSkipLiveEmployeeSection(employeeBasic, "emergencyContact", req.user);
+        const skipLive = await shouldSkipLiveEmployeeSectionAsync(req, employeeBasic, "emergencyContact");
 
         const newContact = {
             name,

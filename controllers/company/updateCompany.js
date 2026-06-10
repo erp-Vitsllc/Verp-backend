@@ -305,7 +305,7 @@ export const updateCompany = async (req, res) => {
 
         const requesterIsAdmin = await isReqUserAdmin(req.user);
         const requesterIsDesignatedHr = await isRequestUserDesignatedFlowchartHr(req);
-        const requesterBypassesHrQueue = requesterIsAdmin || requesterIsDesignatedHr;
+        const requesterBypassesHrQueue = requesterIsDesignatedHr;
 
         let clearLiveOwnerDocCard = null;
         let clearOldOwnerDocCard = null;

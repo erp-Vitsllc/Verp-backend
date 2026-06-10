@@ -1,8 +1,12 @@
 import nodemailer from "nodemailer";
-import { resolveFrontendBaseUrl, emailFrontendUrl } from './resolveFrontendBaseUrl.js';
+import { resolveFrontendBaseUrl, resolveFrontendHostLabel } from "./resolveFrontendBaseUrl.js";
+import {
+    buildEmployeeActivationHrEmailHtml,
+    buildEmployeeActivationHrEmailSubject,
+} from "./buildEmployeeActivationHrEmail.js";
 
 /**
- * Lightweight HR inbox email when a profile is queued for activation (e.g. submit-approval API without full form body).
+ * HR inbox email when a profile is queued for activation (submit-approval API or lightweight notify).
  */
 export async function notifyHrProfileActivationRequestEmail({
     hrEmail,
@@ -11,7 +15,12 @@ export async function notifyHrProfileActivationRequestEmail({
     employeeId = "",
     activationTypeLabel = "Activation",
     pendingCardsText = "",
+    pendingChanges = [],
     submitterName = "",
+    isAdminSubmitter = false,
+    reason = "",
+    description = "",
+    req = null,
 }) {
     const to = (hrEmail || "").trim();
     if (!to) return;
@@ -23,8 +32,9 @@ export async function notifyHrProfileActivationRequestEmail({
         return;
     }
 
-    const baseUrl = resolveFrontendBaseUrl();
+    const baseUrl = resolveFrontendBaseUrl(req);
     const profileUrl = employeeId ? `${baseUrl}/emp/${encodeURIComponent(employeeId)}` : baseUrl;
+    const siteHost = resolveFrontendHostLabel(req);
 
     const transporter = nodemailer.createTransport({
         host: "smtp.office365.com",
@@ -35,27 +45,42 @@ export async function notifyHrProfileActivationRequestEmail({
 
     const isResubmission = String(activationTypeLabel).toLowerCase() === "reactivation";
     const typeForDisplay = isResubmission ? "Reactivation (Resubmission)" : "New Activation";
-    const subject = `${typeForDisplay} request: ${employeeName}`.trim();
-    const html = `
-        <div style="font-family:Segoe UI,Arial,sans-serif;color:#1e293b;line-height:1.55;max-width:600px;margin:0 auto;border:1px solid #e2e8f0;border-radius:10px;overflow:hidden;">
-            <div style="background:#2563eb;color:#fff;padding:18px;text-align:center;">
-                <h2 style="margin:0;font-size:18px;">Profile activation — action required</h2>
-            </div>
-            <div style="padding:24px;">
-                <p>Hello <strong>${hrName}</strong>,</p>
-                <p>A profile was submitted for <strong>${typeForDisplay}</strong>${submitterName ? ` by <strong>${submitterName}</strong> via VeRP` : " through VeRP"}.</p>
-                <p><strong>Employee:</strong> ${employeeName}<br/><strong>Employee ID:</strong> ${employeeId || "—"}</p>
-                <p><strong>Type:</strong> ${typeForDisplay}</p>
-                ${pendingCardsText ? `<p><strong>Requested changes:</strong> ${pendingCardsText}</p>` : ""}
-                <p style="text-align:center;margin:28px 0;">
-                    <a href="${profileUrl}" style="background:#2563eb;color:#fff;padding:12px 24px;text-decoration:none;border-radius:6px;font-weight:bold;">Review in VeRP</a>
-                </p>
-            </div>
-        </div>
-    `;
+    const submitterDisplay = submitterName
+        ? `${submitterName}${isAdminSubmitter ? " (Administrator)" : ""}`
+        : isAdminSubmitter
+          ? "Administrator"
+          : "";
+
+    const subject = buildEmployeeActivationHrEmailSubject({
+        employeeName,
+        typeForDisplay,
+        isAdminSubmitter,
+    });
+
+    const pendingFromText = pendingCardsText
+        ? String(pendingCardsText)
+              .split(",")
+              .map((c) => c.trim())
+              .filter(Boolean)
+              .map((card) => ({ card, proposedData: {} }))
+        : [];
+
+    const html = buildEmployeeActivationHrEmailHtml({
+        hrName,
+        employeeName,
+        employeeId,
+        profileUrl,
+        typeForDisplay,
+        submitterName: submitterDisplay,
+        isAdminSubmitter,
+        reason: reason || "Profile submitted for activation review",
+        description: description || "",
+        pendingChanges: pendingChanges?.length ? pendingChanges : pendingFromText,
+        siteHost,
+    });
 
     await transporter.sendMail({
-        fromName: submitterName || "VeRP Portal",
+        fromName: submitterDisplay || "VeRP Portal",
         to,
         subject,
         html,

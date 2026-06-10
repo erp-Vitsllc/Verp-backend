@@ -2,7 +2,7 @@ import EmployeeBasic from "../../models/EmployeeBasic.js";
 import User from "../../models/User.js";
 import { getCompleteEmployee } from "../../services/employeeService.js";
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
-import { skipLiveProfileWritesPendingHr, queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
+import { skipLiveProfileWritesPendingHrAsync, queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
 import { markProfileActivationHoldResolvedForSection } from "../../utils/markProfileActivationHoldResolved.js";
 import {
     validateEmployeeWorkDetailsPayload,
@@ -119,7 +119,7 @@ export const updateWorkDetails = async (req, res) => {
             updatePayload.probationPeriod = 6;
         }
 
-        const skipLive = skipLiveProfileWritesPendingHr(employee, req.user);
+        const skipLive = await skipLiveProfileWritesPendingHrAsync(req, employee);
 
         const workChangeEntry = {
             card: "Work Details",

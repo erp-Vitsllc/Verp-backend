@@ -6,12 +6,15 @@ import { resolveFlowchartHrEmployee } from "../../utils/resolveFlowchartHrEmploy
 import { syncDashboardAction } from "../../utils/syncDashboard.js";
 import { resolveProfileActivationSubmitterId } from "../../utils/resolveProfileActivationSubmitterId.js";
 import { clearProfileActivationHoldDashboardRows } from "../../utils/clearProfileActivationHoldDashboardRows.js";
-import { pickEffectiveEmail } from "../../utils/pickEffectiveEmail.js";
-import {
-    buildEmailAttachmentsFromRef,
-    renderEmailAttachmentLineHtml,
-} from "../../utils/emailAccessibleFiles.js";
+import { buildEmailAttachmentsFromRef } from "../../utils/emailAccessibleFiles.js";
 import { formatActivationAttachmentLine } from "../../utils/shortenUrlsInString.js";
+import {
+    buildEmployeeActivationHrEmailHtml,
+    buildEmployeeActivationHrEmailSubject,
+    renderEmailAttachmentLineHtml,
+} from "../../utils/buildEmployeeActivationHrEmail.js";
+import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
+import { resolveFrontendHostLabel } from "../../utils/resolveFrontendBaseUrl.js";
 
 /** Subdocument id fallback must match frontend (String(entry._id || index)). */
 const pendingEntryId = (entry, idx) => String(entry?._id ?? idx);
@@ -115,15 +118,23 @@ export const sendApprovalEmail = async (req, res) => {
         const typeForDisplay = wasPreviouslyActive ? "Reactivation (Resubmission)" : "New Activation";
         const pendingCards = [...new Set(submittingThisRequest.map((x) => String(x?.card || "").trim()).filter(Boolean))];
         const workflowDescription = `${descriptionText || "Submitted for activation review"}${pendingCards.length ? `${descriptionText ? " | " : ""}Requested Changes: ${pendingCards.join(", ")}` : ""}`;
-        const pendingCardsHtml = pendingCards.length
-            ? `<p style="margin: 8px 0 0 0;"><strong>Requested Changes:</strong><br/>${pendingCards.map((c) => `- ${c}`).join("<br/>")}</p>`
-            : "";
         const pendingCardsText = pendingCards.length ? ` | Requested Changes: ${pendingCards.join(", ")}` : "";
-        const employeeEmail = pickEffectiveEmail(employeeBasic);
-        const subject = `${typeForDisplay} request: ${employeeName}`;
+        const isAdminSubmitter = await isReqUserAdmin(req.user);
+        const submitterDisplayName =
+            submitterName && submitterName !== "VeRP Portal"
+                ? `${submitterName}${isAdminSubmitter ? " (Administrator)" : ""}`
+                : isAdminSubmitter
+                  ? "Administrator"
+                  : "VeRP Portal";
 
         const baseUrl = resolveFrontendBaseUrl(req);
         const profileUrl = `${baseUrl}/emp/${employeeBasic.employeeId}`;
+        const siteHost = resolveFrontendHostLabel(req);
+        const subject = buildEmployeeActivationHrEmailSubject({
+            employeeName,
+            typeForDisplay,
+            isAdminSubmitter,
+        });
         const emailAttachments = attachmentText
             ? await buildEmailAttachmentsFromRef(attachmentText, attachmentNameText)
             : [];
@@ -136,36 +147,20 @@ export const sendApprovalEmail = async (req, res) => {
               )
             : "";
 
-        const html = `
-            <div style="font-family: Arial, sans-serif; color: #333; line-height: 1.6; max-width: 600px; margin: 0 auto; border: 1px solid #eee; border-radius: 10px; overflow: hidden;">
-                <div style="background-color: #2563eb; color: white; padding: 20px; text-align: center;">
-                    <h2 style="margin: 0;">Profile Activation Request</h2>
-                </div>
-                <div style="padding: 30px;">
-                    <p>Hello <strong>${hrName}</strong>,</p>
-                    <p>The following employee is requesting <strong>${typeForDisplay}</strong> through VeRP${submitterName && submitterName !== "VeRP Portal" ? ` (submitted by <strong>${submitterName}</strong>)` : ""}. As the <strong>HR</strong> contact assigned in the company Flowchart, please review and grant approval if everything is in order.</p>
-                    
-                    <div style="background-color: #f8fafc; padding: 20px; border-radius: 8px; border: 1px solid #e2e8f0; margin: 25px 0;">
-                        <p style="margin: 0;"><strong>Employee Name:</strong> ${employeeName}</p>
-                        <p style="margin: 8px 0 0 0;"><strong>Employee ID:</strong> ${employeeBasic.employeeId || "N/A"}</p>
-                        <p style="margin: 8px 0 0 0;"><strong>Department:</strong> ${employeeBasic.department || "N/A"}</p>
-                        <p style="margin: 8px 0 0 0;"><strong>Designation:</strong> ${employeeBasic.designation || "N/A"}</p>
-                        ${employeeEmail ? `<p style="margin: 8px 0 0 0;"><strong>Contact Email:</strong> ${employeeEmail}</p>` : ""}
-                    </div>
-                    
-                    <p style="text-align: center; margin: 35px 0;">
-                        <a href="${profileUrl}" style="background-color: #2563eb; color: white; padding: 14px 30px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block; font-size: 16px;">Review in VeRP</a>
-                    </p>
-                    <div style="background-color: #f8fafc; padding: 14px 16px; border-radius: 8px; border: 1px solid #e2e8f0; margin: 18px 0;">
-                        <p style="margin: 0;"><strong>Type:</strong> ${typeForDisplay}</p>
-                        ${reasonText ? `<p style="margin: 8px 0 0 0;"><strong>Reason:</strong> ${reasonText}</p>` : ""}
-                        ${descriptionText ? `<p style="margin: 8px 0 0 0;"><strong>Description:</strong><br/>${descriptionText.replace(/\n/g, '<br/>')}</p>` : ""}
-                        ${pendingCardsHtml}
-                        ${attachmentHtml}
-                    </div>
-                </div>
-            </div>
-        `;
+        const html = buildEmployeeActivationHrEmailHtml({
+            hrName,
+            employeeName,
+            employeeId: employeeBasic.employeeId,
+            profileUrl,
+            typeForDisplay,
+            submitterName: submitterDisplayName,
+            isAdminSubmitter,
+            reason: reasonText,
+            description: descriptionText,
+            pendingChanges: submittingThisRequest,
+            attachmentHtml,
+            siteHost,
+        });
 
         console.log(`[sendApprovalEmail] To (HR): ${hrEmail}`);
         await transporter.sendMail({
@@ -212,7 +207,7 @@ export const sendApprovalEmail = async (req, res) => {
             status: "Pending",
             subjectEmployee: subjectForDashboard || employeeBasic,
             requestedByName,
-            extra1: `[Employee profile] ${activationTypeLabel}${reasonText ? ` — ${reasonText}` : ""}${pendingCardsText}`,
+            extra1: `[Employee profile] ${isAdminSubmitter ? "Administrator submission — " : ""}${activationTypeLabel}${reasonText ? ` — ${reasonText}` : ""}${pendingCardsText}`,
             extra2: employeeBasic.designation || "",
             extra3: JSON.stringify({ activationSubject: "employee", activationViewerRole: "hr" }),
         });

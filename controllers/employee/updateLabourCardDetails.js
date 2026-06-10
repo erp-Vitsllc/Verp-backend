@@ -9,7 +9,7 @@ import {
     shouldArchiveEmployeeDocumentOnRenewal,
 } from "../../utils/employeeDocumentRenewal.js";
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
-import { skipLiveProfileWritesPendingHr, queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
+import { skipLiveProfileWritesPendingHrAsync, queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
 import { markProfileActivationHoldResolvedForSection } from "../../utils/markProfileActivationHoldResolved.js";
 import { validateEmployeeLabourCardNoticePeriod } from "../../utils/employeeLabourCardValidation.js";
 import { scheduleEmployeeProfileFileChangeHrEmailForRequest } from "../../utils/employeeInformativeHrNotify.js";
@@ -114,7 +114,7 @@ export const updateLabourCardDetails = async (req, res) => {
         const employeeBasic = await EmployeeBasic.findOne({ employeeId })
             .select("company profileStatus profileWorkflow profileApprovalStatus")
             .lean();
-        const skipLive = skipLiveProfileWritesPendingHr(employeeBasic, req.user);
+        const skipLive = await skipLiveProfileWritesPendingHrAsync(req, employeeBasic);
 
         // Check if existing document exists in database (check for both url and data for backward compatibility)
         const existingLabourCard = await EmployeeLabourCard.findOne({ employeeId });

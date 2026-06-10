@@ -6,9 +6,7 @@ import { disposeEmployeeProfileAttachment } from "../../utils/profileAttachmentD
 import { archiveAndClearLiveEmployeeRenewal } from "../../utils/employeeDocumentRenewal.js";
 import { markProfileActivationHoldResolvedForSection } from "../../utils/markProfileActivationHoldResolved.js";
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
-import { shouldSkipLiveEmployeeSection, queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
-import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
-import { isEmployeeProfileActivationDesignatedHr } from "../../utils/isEmployeeProfileActivationDesignatedHr.js";
+import { shouldSkipLiveEmployeeSectionAsync, queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
 import {
     normalizeEmployeeVisaPayload,
     validateEmployeeVisaPayload,
@@ -62,17 +60,15 @@ export const updateVisaDetails = async (req, res) => {
         const employeeBasic = await EmployeeBasic.findOne({ employeeId })
             .select("company profileStatus status profileWorkflow profileApprovalStatus")
             .lean();
-        const isAdminUser = await isReqUserAdmin(req.user);
-        const canActAsHr = await isEmployeeProfileActivationDesignatedHr(req, employeeBasic);
-        const skipLive =
-            !isAdminUser && !canActAsHr && shouldSkipLiveEmployeeSection(employeeBasic, "visa", req.user);
+        const skipLive = await shouldSkipLiveEmployeeSectionAsync(req, employeeBasic, "visa");
 
         const existingVisa = await EmployeeVisa.findOne({ employeeId });
         const existingDocument = existingVisa?.[visaType]?.document?.url || existingVisa?.[visaType]?.document?.data;
 
+        const lockedVisaNumber = String(existingVisa?.[visaType]?.number || "").trim();
         const validationInput = normalizeEmployeeVisaPayload(
             {
-                number: visaNumber,
+                number: lockedVisaNumber || visaNumber,
                 issueDate,
                 expiryDate,
                 sponsor,

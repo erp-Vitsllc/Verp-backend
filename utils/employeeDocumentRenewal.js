@@ -2,6 +2,8 @@ import EmployeePassport from "../models/EmployeePassport.js";
 import EmployeeVisa from "../models/EmployeeVisa.js";
 import EmployeeEmiratesId from "../models/EmployeeEmiratesId.js";
 import EmployeeLabourCard from "../models/EmployeeLabourCard.js";
+import EmployeeMedicalInsurance from "../models/EmployeeMedicalInsurance.js";
+import EmployeeDrivingLicense from "../models/EmployeeDrivingLicense.js";
 import { archiveEmployeeDocument } from "./archiveEmployeeDocument.js";
 
 /** Archive superseded file only on explicit Renew (not on edit/add/delete). */
@@ -33,6 +35,14 @@ export async function clearLiveEmployeeDocumentSection({ employeeId, section, vi
     }
     if (sec === "labourcard") {
         await EmployeeLabourCard.updateOne({ employeeId }, { $unset: { labourCard: "" } });
+        return;
+    }
+    if (sec === "medicalinsurance") {
+        await EmployeeMedicalInsurance.updateOne({ employeeId }, { $unset: { medicalInsurance: "" } });
+        return;
+    }
+    if (sec === "drivinglicense") {
+        await EmployeeDrivingLicense.updateOne({ employeeId }, { $unset: { drivingLicenceDetails: "" } });
     }
 }
 

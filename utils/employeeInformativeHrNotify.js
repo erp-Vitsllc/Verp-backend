@@ -8,7 +8,7 @@ import {
     resolveFileLinkEntries,
     scheduleFlowchartHrProfileFileChangeEmail,
 } from "./profileFileChangeHrNotify.js";
-import { shouldSkipLiveEmployeeSection } from "./pushPendingReactivationChange.js";
+import { shouldSkipLiveEmployeeSectionAsync } from "./pushPendingReactivationChange.js";
 
 /** Map not-renew request kind → profile section key for HR email deep links. */
 export const EMPLOYEE_NOT_RENEW_KIND_TO_SECTION = {
@@ -113,7 +113,9 @@ export async function scheduleEmployeeProfileFileChangeHrEmailForRequest({
             .lean();
     }
     const liveSkipped =
-        skipLive == null ? shouldSkipLiveEmployeeSection(basic, sectionKey) : Boolean(skipLive);
+        skipLive == null
+            ? await shouldSkipLiveEmployeeSectionAsync(req, basic, sectionKey)
+            : Boolean(skipLive);
     scheduleEmployeeProfileFileChangeHrEmail({
         employeeBasic: basic,
         employeeId: employeeId || basic?.employeeId,

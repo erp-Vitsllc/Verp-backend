@@ -5,9 +5,13 @@ import EmployeeSalary from "../../models/EmployeeSalary.js";
 import { uploadDocumentToS3 } from "../../utils/s3Upload.js";
 import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
-import { skipLiveProfileWritesPendingHr, queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
+import { skipLiveProfileWritesPendingHrAsync, queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
 import { markProfileActivationHoldResolvedForSection } from "../../utils/markProfileActivationHoldResolved.js";
 import { PURGE_TYPES, purgeEmployeeOldDocuments } from "../../utils/purgeEmployeeOldDocuments.js";
+import {
+    archiveSalaryIncrementIfNeeded,
+    purgeSalaryOldDocumentsUnlessIncrement,
+} from "../../utils/archiveSupersededSalaryOnIncrement.js";
 import EmployeePersonal from "../../models/EmployeePersonal.js";
 import EmployeeContact from "../../models/EmployeeContact.js";
 import {
@@ -66,7 +70,7 @@ export const updateBasicDetails = async (req, res) => {
         ]);
 
         const isAdminUser = await isReqUserAdmin(req.user);
-        const skipLive = !isAdminUser && skipLiveProfileWritesPendingHr(existingBasic, req.user);
+        const skipLive = await skipLiveProfileWritesPendingHrAsync(req, existingBasic);
         const skipArchiveOnRequest =
             req.body?.skipArchive === true ||
             String(req.query?.skipArchive || "").toLowerCase() === "true";
@@ -605,10 +609,17 @@ export const updateBasicDetails = async (req, res) => {
 
         let updated = null;
         const basicChangeEntry = buildBasicDetailsReactivationEntry();
-
-        const applyLiveNow = !skipLive || skipArchiveOnRequest;
+        const salaryTouchedEarly = [...SALARY_PREVIOUS_KEYS].some((k) =>
+            Object.prototype.hasOwnProperty.call(updatePayload, k),
+        );
+        let salaryIncrementResult = { isIncrement: false, archived: false };
+        // HR queue must never be bypassed by skipArchive (edit/add sends skipArchive: true).
+        const applyLiveNow = !skipLive;
 
         if (applyLiveNow) {
+            if (salaryTouchedEarly && Object.prototype.hasOwnProperty.call(updatePayload, "salaryHistory")) {
+                salaryIncrementResult = await archiveSalaryIncrementIfNeeded(employeeId, updatePayload);
+            }
             updated = await saveEmployeeData(employeeId, updatePayload);
 
             if (!updated) {
@@ -622,11 +633,9 @@ export const updateBasicDetails = async (req, res) => {
                 Object.prototype.hasOwnProperty.call(updatePayload, k),
             );
 
-            // Salary increment/edit: keep history on Salary tab only — never in oldDocuments.
             if (salaryTouched) {
-                await purgeEmployeeOldDocuments(employeeId, {
-                    types: PURGE_TYPES.salary,
-                    purgeDeletedArchiveReason: true,
+                await purgeSalaryOldDocumentsUnlessIncrement(employeeId, {
+                    isIncrement: salaryIncrementResult.isIncrement,
                 });
             }
 
@@ -681,7 +690,8 @@ export const updateBasicDetails = async (req, res) => {
             message: skipLive
                 ? "Basic details change queued for HR activation approval."
                 : "Basic details updated",
-            employee: updated
+            queuedForHrApproval: !!skipLive,
+            employee: updated,
         });
 
     } catch (err) {

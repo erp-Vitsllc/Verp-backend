@@ -4,6 +4,7 @@ import { resolveFlowchartHrEmployee } from "../../utils/resolveFlowchartHrEmploy
 import { resolveProfileActivationSubmitterId } from "../../utils/resolveProfileActivationSubmitterId.js";
 import { notifyHrProfileActivationRequestEmail } from "../../utils/notifyHrProfileActivationRequestEmail.js";
 import { clearProfileActivationHoldDashboardRows } from "../../utils/clearProfileActivationHoldDashboardRows.js";
+import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
 
 export const submitApproval = async (req, res) => {
     const { id } = req.params;
@@ -41,6 +42,7 @@ export const submitApproval = async (req, res) => {
             ? [...new Set(employeeBasic.pendingReactivationChanges.map((x) => String(x?.card || "").trim()).filter(Boolean))]
             : [];
         const pendingCardsText = pendingCards.length ? ` | Requested Changes: ${pendingCards.join(", ")}` : "";
+        const isAdminSubmitter = await isReqUserAdmin(req.user);
 
         const updated = await EmployeeBasic.findOneAndUpdate(
             { employeeId },
@@ -75,7 +77,7 @@ export const submitApproval = async (req, res) => {
                 status: "Pending",
                 subjectEmployee: updated,
                 requestedByName: req.user?.name || "",
-                extra1: `${activationTypeLabel} — HR review${pendingCardsText}`,
+                extra1: `${isAdminSubmitter ? "Administrator submission — " : ""}${activationTypeLabel} — HR review${pendingCardsText}`,
                 extra2: updated.designation || "",
                 extra3: JSON.stringify({ activationSubject: "employee", activationViewerRole: "hr" }),
             });
@@ -88,6 +90,10 @@ export const submitApproval = async (req, res) => {
             `${employeeBasic.firstName || ""} ${employeeBasic.lastName || ""}`.trim() || "Employee";
         const hrName =
             `${hrEmployee.firstName || ""} ${hrEmployee.lastName || ""}`.trim() || "HR";
+        const submitterName =
+            req.user?.name ||
+            [req.user?.firstName, req.user?.lastName].filter(Boolean).join(" ").trim() ||
+            "";
         notifyHrProfileActivationRequestEmail({
             hrEmail,
             hrName,
@@ -95,10 +101,13 @@ export const submitApproval = async (req, res) => {
             employeeId,
             activationTypeLabel,
             pendingCardsText: pendingCards.length ? pendingCards.join(", ") : "",
-            submitterName:
-                req.user?.name ||
-                [req.user?.firstName, req.user?.lastName].filter(Boolean).join(" ").trim() ||
-                "",
+            pendingChanges: Array.isArray(employeeBasic.pendingReactivationChanges)
+                ? employeeBasic.pendingReactivationChanges
+                : [],
+            submitterName,
+            isAdminSubmitter,
+            reason: "Profile submitted for activation review",
+            req,
         }).catch((e) => console.error("[SubmitApproval] HR email error:", e));
 
         const completeEmployee = await getCompleteEmployee(employeeId);
