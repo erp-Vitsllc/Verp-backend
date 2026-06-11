@@ -64,12 +64,23 @@ export function detectSupersededSalaryHistoryEntries(previousHistory = [], newHi
     return { superseded, isIncrement };
 }
 
-async function archiveSupersededSalaryEntries(employeeId, supersededEntries = []) {
+const resolveSupersededSalaryDocument = (entry, fallbackOfferLetter = null) => {
+    let doc = entry?.offerLetter || entry?.attachment;
+    if (hasStoredSalaryDocument({ offerLetter: doc, attachment: doc })) {
+        return doc;
+    }
+    if (hasStoredSalaryDocument({ offerLetter: fallbackOfferLetter })) {
+        return fallbackOfferLetter;
+    }
+    return null;
+};
+
+async function archiveSupersededSalaryEntries(employeeId, supersededEntries = [], { fallbackOfferLetter = null } = {}) {
     const archivedFingerprints = new Set();
 
     for (const entry of supersededEntries) {
-        const doc = entry?.offerLetter || entry?.attachment;
         const period = formatSalaryPeriod(entry);
+        const resolvedDoc = resolveSupersededSalaryDocument(entry, fallbackOfferLetter);
         const archivePayload = {
             employeeId,
             type: `Previous Salary (${period})`,
@@ -82,17 +93,19 @@ async function archiveSupersededSalaryEntries(employeeId, supersededEntries = []
             fuelAllowance: entry.fuelAllowance ?? null,
             otherAllowance: entry.otherAllowance ?? null,
             totalSalary: entry.totalSalary ?? null,
-            document: hasStoredSalaryDocument(entry)
-                ? doc
-                : { name: `Previous salary — ${period}`, url: "", mimeType: "application/pdf" },
+            document: resolvedDoc || { name: `Previous salary — ${period}`, url: "", mimeType: "application/pdf" },
         };
 
-        const fp = hasStoredSalaryDocument(entry) ? documentFingerprint(doc) : `period:${period}:total:${entry.totalSalary ?? ""}`;
+        const fp = resolvedDoc
+            ? documentFingerprint(resolvedDoc)
+            : `period:${period}:total:${entry.totalSalary ?? ""}`;
         if (fp && archivedFingerprints.has(fp)) continue;
         if (fp) archivedFingerprints.add(fp);
 
         await archiveEmployeeDocument(archivePayload);
     }
+
+    return archivedFingerprints;
 }
 
 async function archiveTopLevelOfferLetterIfReplaced(employeeId, previousOfferLetter, newOfferLetter) {
@@ -133,10 +146,15 @@ export async function archiveSalaryIncrementIfNeeded(employeeId, proposedData = 
         return { isIncrement: false, archived: false };
     }
 
-    await archiveSupersededSalaryEntries(employeeId, superseded);
+    const archivedFingerprints = await archiveSupersededSalaryEntries(employeeId, superseded, {
+        fallbackOfferLetter: prior?.offerLetter || null,
+    });
 
     if (Object.prototype.hasOwnProperty.call(proposedData, "offerLetter") && prior?.offerLetter) {
-        await archiveTopLevelOfferLetterIfReplaced(employeeId, prior.offerLetter, proposedData.offerLetter);
+        const priorOfferFp = documentFingerprint(prior.offerLetter);
+        if (!priorOfferFp || !archivedFingerprints.has(priorOfferFp)) {
+            await archiveTopLevelOfferLetterIfReplaced(employeeId, prior.offerLetter, proposedData.offerLetter);
+        }
     }
 
     return { isIncrement: true, archived: true };

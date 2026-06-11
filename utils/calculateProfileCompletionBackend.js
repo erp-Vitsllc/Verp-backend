@@ -1,4 +1,4 @@
-import { employeeRequiresEmiratesId } from "./employeeRequiresEmiratesId.js";
+import { employeeRequiresEmiratesId, employeeRequiresLabourCard } from "./employeeRequiresEmiratesId.js";
 
 const checkField = (val) => {
     if (val === null || val === undefined) return false;
@@ -160,8 +160,8 @@ export const calculateProfileCompletionBackend = (employee = {}) => {
         }
     }
 
-    // 5. Labour Card Details — mandatory for all employees
-    {
+    // 5. Labour Card Details — not required for visit-visa-only employees
+    if (employeeRequiresLabourCard(employee)) {
         const lc = employee.labourCardDetails;
         const hasLabourDoc = Boolean(lc?.document?.url || lc?.document?.data);
         const hasLabourContract = Boolean(

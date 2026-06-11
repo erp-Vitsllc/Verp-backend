@@ -1,11 +1,20 @@
 import { getDepartmentHOD } from "./getDepartmentHOD.js";
 
+const normEmpId = (value) => String(value || "").trim().toLowerCase().replace(/\s+/g, "");
+
 /** True when the authenticated user's linked employee is the active Flowchart HR holder. */
 export const isRequestUserDesignatedFlowchartHr = async (req) => {
-    if (!req?.user?.employeeObjectId) return false;
+    if (!req?.user) return false;
     const hr = await getDepartmentHOD("hr");
     if (!hr?._id) return false;
-    return String(hr._id) === String(req.user.employeeObjectId);
+
+    const myObj = req.user.employeeObjectId || req.user.empObjectId;
+    if (myObj && String(hr._id) === String(myObj)) return true;
+
+    const myEid = String(req.user.employeeId || "").trim();
+    if (myEid && hr.employeeId && normEmpId(hr.employeeId) === normEmpId(myEid)) return true;
+
+    return false;
 };
 
 /** True when `actor` (e.g. req.user) is the same employee as the resolved Flowchart HR document. */

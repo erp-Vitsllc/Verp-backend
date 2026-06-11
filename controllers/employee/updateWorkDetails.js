@@ -8,6 +8,7 @@ import {
     validateEmployeeWorkDetailsPayload,
     WORK_STATUS_DIRECT_EDIT_BLOCKED,
 } from "../../utils/employeeWorkDetailsValidation.js";
+import { isUserAdministrator } from "../../services/permissionService.js";
 import { resolveEmployeeProfileStatusWrite } from "../../utils/employeeProfileStatusLock.js";
 
 export const updateWorkDetails = async (req, res) => {
@@ -30,21 +31,13 @@ export const updateWorkDetails = async (req, res) => {
             "dateOfJoining",
             "companyEmail",
             "enablePortalAccess",
-            "profileStatus",
-            "profileApprovalStatus"
         ];
 
-        // 2. Build updatePayload
+        // 2. Filter request body to only include allowed fields
         const updatePayload = {};
-
-        allowedFields.forEach(field => {
-            if (req.body[field] !== undefined) {
-                // Handle null/empty strings for reportee fields
-                if ((field === 'primaryReportee' || field === 'secondaryReportee' || field === 'reportingAuthority') && (req.body[field] === '' || req.body[field] === null)) {
-                    updatePayload[field] = null;
-                } else {
-                    updatePayload[field] = req.body[field];
-                }
+        Object.keys(req.body).forEach((key) => {
+            if (allowedFields.includes(key)) {
+                updatePayload[key] = req.body[key];
             }
         });
 
@@ -61,23 +54,32 @@ export const updateWorkDetails = async (req, res) => {
 
         const employeeId = employee.employeeId;
 
+        const isSystemAdmin = req.user?.id ? await isUserAdministrator(req.user.id) : false;
+        const isPortalAdmin =
+            req.user?.role === "Admin" ||
+            req.user?.role === "ROOT" ||
+            req.user?.isAdmin === true ||
+            isSystemAdmin;
+
         if (updatePayload.status !== undefined) {
             const currentStatus = employee.status;
             const nextStatus = updatePayload.status;
 
-            if (WORK_STATUS_DIRECT_EDIT_BLOCKED.includes(nextStatus)) {
-                return res.status(400).json({
-                    message: `Work status "${nextStatus}" cannot be set from work details. Use the dedicated workflow.`,
-                });
-            }
+            if (!isPortalAdmin) {
+                if (nextStatus !== currentStatus && WORK_STATUS_DIRECT_EDIT_BLOCKED.includes(nextStatus)) {
+                    return res.status(400).json({
+                        message: `Work status "${nextStatus}" cannot be set from work details. Use the dedicated workflow.`,
+                    });
+                }
 
-            if (
-                ["Notice", "Left User"].includes(currentStatus) &&
-                nextStatus !== currentStatus
-            ) {
-                return res.status(400).json({
-                    message: "Work status cannot be changed from work details while the employee is on notice or marked as Left User.",
-                });
+                if (
+                    ["Notice", "Left User"].includes(currentStatus) &&
+                    nextStatus !== currentStatus
+                ) {
+                    return res.status(400).json({
+                        message: "Work status cannot be changed from work details while the employee is on notice or marked as Left User.",
+                    });
+                }
             }
         }
 
@@ -121,6 +123,25 @@ export const updateWorkDetails = async (req, res) => {
 
         const skipLive = await skipLiveProfileWritesPendingHrAsync(req, employee);
 
+        const adminStatusChanged =
+            isPortalAdmin &&
+            updatePayload.status !== undefined &&
+            updatePayload.status !== employee.status;
+
+        const queuePayload = { ...updatePayload };
+        const liveAdminStatusPatch = {};
+
+        // Admins expect work status (Probation/Permanent) to apply immediately even when
+        // other work-detail fields are queued for HR on active/submitted profiles.
+        if (skipLive && adminStatusChanged) {
+            liveAdminStatusPatch.status = updatePayload.status;
+            if (updatePayload.probationPeriod !== undefined) {
+                liveAdminStatusPatch.probationPeriod = updatePayload.probationPeriod;
+            }
+            delete queuePayload.status;
+            delete queuePayload.probationPeriod;
+        }
+
         const workChangeEntry = {
             card: "Work Details",
             reason: "Work details updated",
@@ -144,8 +165,10 @@ export const updateWorkDetails = async (req, res) => {
                 profileStatus: employee.profileStatus,
                 profileApprovalStatus: employee.profileApprovalStatus,
             },
-            proposedData: updatePayload,
+            proposedData: skipLive ? queuePayload : updatePayload,
         };
+
+        let statusAppliedLiveByAdmin = false;
 
         if (!skipLive) {
             const updated = await EmployeeBasic.findOneAndUpdate(
@@ -173,6 +196,19 @@ export const updateWorkDetails = async (req, res) => {
                 );
             }
         } else {
+            if (Object.keys(liveAdminStatusPatch).length > 0) {
+                const statusUpdated = await EmployeeBasic.findOneAndUpdate(
+                    { employeeId },
+                    { $set: liveAdminStatusPatch },
+                    { new: true, runValidators: true },
+                ).select("-password");
+
+                if (!statusUpdated) {
+                    return res.status(404).json({ message: "Employee not found" });
+                }
+                statusAppliedLiveByAdmin = true;
+            }
+
             await queueOrTriggerProfileChange({
                 employeeId,
                 actor: req.user,
@@ -193,11 +229,16 @@ export const updateWorkDetails = async (req, res) => {
         delete completeEmployee.password;
 
         // 7. Return success
+        let message = "Work details updated";
+        if (skipLive) {
+            message = statusAppliedLiveByAdmin
+                ? "Work status updated. Other work detail changes are queued for HR activation approval."
+                : "Work details change queued for HR activation approval.";
+        }
+
         return res.status(200).json({
-            message: skipLive
-                ? "Work details change queued for HR activation approval."
-                : "Work details updated",
-            employee: completeEmployee
+            message,
+            employee: completeEmployee,
         });
 
     } catch (err) {

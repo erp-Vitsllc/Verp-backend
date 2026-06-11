@@ -1,4 +1,5 @@
 import EmployeeBasic from "../models/EmployeeBasic.js";
+import { normalizeS3Key } from "./s3Upload.js";
 
 const documentStorageFingerprint = (document) => {
     if (!document || typeof document !== "object") return "";
@@ -96,8 +97,35 @@ const hasStoredDocumentFile = (document) =>
     Boolean(
         document &&
             ((typeof document.url === "string" && document.url.trim() !== "") ||
-                (typeof document.data === "string" && document.data.trim() !== "")),
+                (typeof document.data === "string" && document.data.trim() !== "") ||
+                (typeof document.publicId === "string" && document.publicId.trim() !== "")),
     );
+
+/** Persist stable S3 keys in oldDocuments — not expiring presigned URLs. */
+export const normalizeArchivedDocumentStorageRef = (document) => {
+    if (!document || typeof document !== "object") return null;
+    const storageKey =
+        normalizeS3Key(document.publicId) ||
+        normalizeS3Key(document.url) ||
+        (typeof document.publicId === "string" && document.publicId.trim() ? document.publicId.trim() : null) ||
+        (typeof document.url === "string" &&
+        document.url.trim() &&
+        !document.url.trim().startsWith("http")
+            ? document.url.trim()
+            : null);
+    if (!storageKey && !document.data) return null;
+    return {
+        name: document.name || "Document",
+        mimeType: document.mimeType || "application/pdf",
+        ...(document.data ? { data: document.data } : {}),
+        ...(storageKey
+            ? {
+                  url: storageKey,
+                  publicId: storageKey,
+              }
+            : {}),
+    };
+};
 
 export const employeeDocumentWasSuperseded = (previousData, proposedData) => {
     const prevDoc = previousData?.document;
@@ -207,7 +235,8 @@ export const archiveQueuedEmployeeSectionPreviousIfNeeded = async ({
 /** Archive superseded signature into oldDocuments when replaced (edit or HR-approved queue). */
 export const archiveEmployeeSignaturePreviousIfNeeded = async ({ employeeId, previousSignature }) => {
     if (!employeeId || !previousSignature || typeof previousSignature !== "object") return;
-    const hasFile = hasStoredDocumentFile(previousSignature);
+    const archivedDocument = normalizeArchivedDocumentStorageRef(previousSignature);
+    const hasFile = Boolean(archivedDocument?.url || archivedDocument?.data || archivedDocument?.publicId);
     if (!hasFile && !previousSignature.signedAt) return;
     await archiveEmployeeDocument({
         employeeId,
@@ -217,6 +246,6 @@ export const archiveEmployeeSignaturePreviousIfNeeded = async ({ employeeId, pre
             : "Digital Signature",
         issueDate: previousSignature.signedAt || null,
         expiryDate: null,
-        document: hasFile ? previousSignature : null,
+        document: hasFile ? archivedDocument : null,
     });
 };

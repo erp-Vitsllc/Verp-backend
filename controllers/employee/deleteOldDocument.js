@@ -1,6 +1,19 @@
+import mongoose from "mongoose";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
-import { resolveEmployeeId, getEmployeeOldDocumentsForClient } from "../../services/employeeService.js";
 import { isReqUserAdmin, scheduleManagementAdminDeletionEmail } from "../../utils/sendAdminDeletionNotificationEmails.js";
+
+function buildEmployeeLookupFilter(id) {
+    if (mongoose.Types.ObjectId.isValid(id) && String(id).length === 24) {
+        return { _id: new mongoose.Types.ObjectId(id) };
+    }
+    return { employeeId: id };
+}
+
+function scheduleOldDocumentDeletionEmail(req, opts) {
+    setImmediate(() => {
+        scheduleManagementAdminDeletionEmail(req, opts);
+    });
+}
 
 // @desc    Delete a document from employee's oldDocuments list (Archive)
 // @route   DELETE /api/Employee/:id/old-document/:target
@@ -13,63 +26,81 @@ export const deleteOldDocument = async (req, res) => {
         }
 
         const { id, target } = req.params;
-        const resolved = await resolveEmployeeId(id);
-        if (!resolved) {
-            return res.status(404).json({ message: "Employee not found" });
-        }
+        const employeeFilter = buildEmployeeLookupFilter(id);
+        const targetStr = String(target || "").trim();
+        const isMongoIdTarget = /^[0-9a-fA-F]{24}$/.test(targetStr);
 
-        const employee = await EmployeeBasic.findById(resolved._id).select("employeeId oldDocuments");
-        if (!employee) {
-            return res.status(404).json({ message: "Employee not found" });
-        }
+        let archivedDoc = null;
+        let employeeIdLabel = null;
 
-        if (!employee.oldDocuments || employee.oldDocuments.length === 0) {
-            return res.status(404).json({ message: "No archived documents found" });
-        }
+        if (isMongoIdTarget) {
+            const targetOid = new mongoose.Types.ObjectId(targetStr);
+            const before = await EmployeeBasic.findOneAndUpdate(
+                { ...employeeFilter, "oldDocuments._id": targetOid },
+                { $pull: { oldDocuments: { _id: targetOid } } },
+                { select: "employeeId oldDocuments", returnDocument: "before" },
+            ).lean();
 
-        let docIndex = -1;
+            if (!before) {
+                const exists = await EmployeeBasic.findOne(employeeFilter).select("_id").lean();
+                if (!exists) {
+                    return res.status(404).json({ message: "Employee not found" });
+                }
+                return res.status(400).json({ message: "Document not found in archive" });
+            }
 
-        if (target.match(/^[0-9a-fA-F]{24}$/)) {
-            docIndex = employee.oldDocuments.findIndex((d) => String(d._id || d.id) === target);
-        }
+            archivedDoc = (before.oldDocuments || []).find((d) => String(d._id) === targetStr);
+            employeeIdLabel = before.employeeId;
+        } else {
+            const indexValue = parseInt(targetStr, 10);
+            if (isNaN(indexValue) || indexValue < 0) {
+                return res.status(400).json({ message: "Document not found in archive" });
+            }
 
-        if (docIndex === -1) {
-            const indexValue = parseInt(target, 10);
-            if (!isNaN(indexValue) && indexValue >= 0 && indexValue < employee.oldDocuments.length) {
-                docIndex = indexValue;
+            const employee = await EmployeeBasic.findOne(employeeFilter).select("employeeId oldDocuments");
+            if (!employee) {
+                return res.status(404).json({ message: "Employee not found" });
+            }
+
+            if (!employee.oldDocuments || employee.oldDocuments.length === 0) {
+                return res.status(404).json({ message: "No archived documents found" });
+            }
+
+            if (indexValue >= employee.oldDocuments.length) {
+                return res.status(400).json({ message: "Document not found in archive" });
+            }
+
+            archivedDoc = employee.oldDocuments[indexValue];
+            employeeIdLabel = employee.employeeId;
+            const archivedId = archivedDoc?._id;
+
+            if (archivedId) {
+                await EmployeeBasic.updateOne(
+                    employeeFilter,
+                    { $pull: { oldDocuments: { _id: archivedId } } },
+                );
+            } else {
+                employee.oldDocuments.splice(indexValue, 1);
+                employee.markModified("oldDocuments");
+                await employee.save();
             }
         }
 
-        if (docIndex === -1) {
+        if (!archivedDoc) {
             return res.status(400).json({ message: "Document not found in archive" });
         }
 
-        const archivedDoc = employee.oldDocuments[docIndex];
-        const archivedId = archivedDoc?._id;
-
-        scheduleManagementAdminDeletionEmail(req, {
-            moduleName: "Employee Old Document",
-            recordId: employee.employeeId,
-            details: (archivedDoc?.type || "Archived document").toString(),
-            deletedPayload: { employeeId: employee.employeeId, document: archivedDoc },
-        });
-
-        if (archivedId) {
-            await EmployeeBasic.updateOne(
-                { _id: resolved._id },
-                { $pull: { oldDocuments: { _id: archivedId } } },
-            );
-        } else {
-            employee.oldDocuments.splice(docIndex, 1);
-            employee.markModified("oldDocuments");
-            await employee.save();
-        }
-
-        const oldDocuments = await getEmployeeOldDocumentsForClient(employee.employeeId);
-
         res.status(200).json({
             message: "Archived document deleted successfully",
-            oldDocuments,
+            deleted: true,
+            deletedId: archivedDoc._id ? String(archivedDoc._id) : null,
+        });
+
+        scheduleOldDocumentDeletionEmail(req, {
+            moduleName: "Employee Old Document",
+            recordId: employeeIdLabel,
+            details: (archivedDoc?.type || "Archived document").toString(),
+            deletedPayload: { employeeId: employeeIdLabel, document: archivedDoc },
         });
     } catch (error) {
         console.error("Error deleting archived document:", error);

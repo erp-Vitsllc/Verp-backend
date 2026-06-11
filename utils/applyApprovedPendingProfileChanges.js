@@ -213,6 +213,12 @@ export async function applyApprovedPendingProfileChanges(employeeId, basicDoc, c
                     { $set: { [visaType]: visaPayload } },
                     { upsert: true, new: true },
                 );
+                const replacedVisaType = String(
+                    change?.replacedVisaType || change?.previousData?.visaType || "",
+                ).trim();
+                if (replacedVisaType && replacedVisaType !== visaType) {
+                    await EmployeeVisa.updateOne({ employeeId }, { $unset: { [replacedVisaType]: "" } });
+                }
             }
             continue;
         }

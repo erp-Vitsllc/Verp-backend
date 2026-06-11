@@ -608,6 +608,13 @@ export const getCompleteEmployee = async (id) => {
             let keyToSign = obj?.publicId;
 
             if (!keyToSign && obj?.url && typeof obj.url === 'string') {
+                const rawUrl = obj.url.trim();
+                if (rawUrl && !rawUrl.startsWith('http://') && !rawUrl.startsWith('https://')) {
+                    keyToSign = normalizeS3Key(rawUrl) || rawUrl;
+                }
+            }
+
+            if (!keyToSign && obj?.url && typeof obj.url === 'string') {
                 try {
                     if (looksLikeObjectStorageUrl(obj.url) || obj.url.includes('.s3.')) {
                         const urlObj = new URL(obj.url);

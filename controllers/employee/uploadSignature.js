@@ -73,11 +73,13 @@ export const uploadSignature = async (req, res) => {
             proposedData: proposedSignature,
         };
 
-        if (employee.signature && !skipLive) {
-            await archiveEmployeeSignaturePreviousIfNeeded({
-                employeeId: employee.employeeId,
-                previousSignature: employee.signature,
-            });
+        if (employee.signature) {
+            if (!skipLive) {
+                await archiveEmployeeSignaturePreviousIfNeeded({
+                    employeeId: employee.employeeId,
+                    previousSignature: employee.signature,
+                });
+            }
         }
 
         if (skipLive) {

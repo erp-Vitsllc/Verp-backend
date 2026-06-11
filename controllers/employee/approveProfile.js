@@ -39,6 +39,12 @@ import { mapPendingReactivationEntriesWithIds } from "../../utils/pendingReactiv
 import { resolveFlowchartHrEmployee } from "../../utils/resolveFlowchartHrEmployee.js";
 import { notifyHrProfileActivationRequestEmail } from "../../utils/notifyHrProfileActivationRequestEmail.js";
 import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
+import {
+    removePrematureRenewalArchiveFromBasic,
+    revertAllPendingEmployeeChanges,
+    revertSinglePendingEmployeeChange,
+} from "../../utils/revertPendingEmployeeProfileChange.js";
+import { withdrawEmployeeActivationSubmissionIfQueueEmpty } from "../../utils/reconcileEmployeeActivationAfterEmptyQueue.js";
 
 export const approveProfile = async (req, res) => {
     const { id } = req.params;
@@ -46,12 +52,88 @@ export const approveProfile = async (req, res) => {
     const selectionProvided = req.body?.selectionProvided === true;
     /** HR “Review Activation” direct path: any approval status; apply every queued card then set profile active (server checks designated HR). */
     const directHrBypass = req.body?.directHrBypass === true;
+    /** Admin only: clear the pending queue without applying any proposed changes. */
+    const rejectAllPending = req.body?.rejectAllPending === true;
 
     try {
         // Get employeeId from employee record
         const employee = await getCompleteEmployee(id);
         if (!employee) {
             return res.status(404).json({ message: "Employee not found" });
+        }
+
+        const employeeId = employee.employeeId;
+        const isAdminUser = await isReqUserAdmin(req.user);
+
+        if (rejectAllPending) {
+            if (!directHrBypass || !isAdminUser) {
+                return res.status(403).json({
+                    message: "Only an administrator can reject all pending changes without applying them.",
+                });
+            }
+
+            const basicDoc = await EmployeeBasic.findOne({ employeeId });
+            if (!basicDoc) {
+                return res.status(404).json({ message: "Employee not found" });
+            }
+
+            if (Array.isArray(basicDoc.pendingReactivationChanges) && basicDoc.pendingReactivationChanges.length > 0) {
+                const pendingPlain = basicDoc.pendingReactivationChanges.map((entry) =>
+                    typeof entry?.toObject === "function" ? entry.toObject() : { ...entry }
+                );
+                await revertAllPendingEmployeeChanges(employeeId, basicDoc, pendingPlain);
+            }
+
+            basicDoc.pendingReactivationChanges = [];
+            basicDoc.markModified("pendingReactivationChanges");
+
+            const profileStatus = String(basicDoc.profileStatus || "inactive").toLowerCase();
+            const profileWasActive = profileStatus === "active";
+            const approvalWasSubmitted = String(basicDoc.profileApprovalStatus || "").toLowerCase() === "submitted";
+            const hasSubmissionMeta = Boolean(
+                approvalWasSubmitted ||
+                    basicDoc.profileSubmittedTo ||
+                    basicDoc.profileActivationSubmittedBy ||
+                    basicDoc.profileActivationDraftEditor ||
+                    basicDoc.profileActivationHold,
+            );
+
+            if (hasSubmissionMeta) {
+                basicDoc.profileApprovalStatus = profileWasActive ? "active" : "draft";
+                basicDoc.profileSubmittedTo = undefined;
+                basicDoc.profileActivationSubmittedBy = undefined;
+                basicDoc.profileActivationDraftEditor = undefined;
+                basicDoc.profileActivationHold = undefined;
+                basicDoc.markModified("profileActivationHold");
+                if (Array.isArray(basicDoc.profileWorkflow)) {
+                    let workflowTouched = false;
+                    for (const step of basicDoc.profileWorkflow) {
+                        if (String(step?.status || "").toLowerCase() === "submitted") {
+                            step.status = "rejected";
+                            step.actionedAt = new Date();
+                            step.comment = "Administrator rejected all pending changes without applying updates.";
+                            workflowTouched = true;
+                        }
+                    }
+                    if (workflowTouched) {
+                        basicDoc.markModified("profileWorkflow");
+                    }
+                }
+            }
+
+            await basicDoc.save();
+
+            await withdrawEmployeeActivationSubmissionIfQueueEmpty(basicDoc, {
+                actionedBy: req.user?.employeeObjectId || req.user?._id || null,
+            });
+
+            const completeEmployee = await getCompleteEmployee(employeeId);
+            delete completeEmployee.password;
+
+            return res.status(200).json({
+                message: "All pending changes were rejected and removed from the queue. No profile updates were applied.",
+                employee: completeEmployee,
+            });
         }
 
         const canActAsHr = await isEmployeeProfileActivationDesignatedHr(req, employee);
@@ -70,8 +152,6 @@ export const approveProfile = async (req, res) => {
                 });
             }
         }
-
-        const employeeId = employee.employeeId;
 
         if (!directHrBypass && employee.profileApprovalStatus !== "submitted") {
             return res.status(400).json({
@@ -98,17 +178,24 @@ export const approveProfile = async (req, res) => {
 
         const submissionLabels = resolveLatestActivationSubmissionLabels(updated.profileWorkflow || []);
         const reviewRows =
-            submissionLabels.length > 0
-                ? sortedChanges.filter((entry) =>
+            directHrBypass || submissionLabels.length === 0
+                ? sortedChanges
+                : sortedChanges.filter((entry) =>
                       pendingEntryIncludedInSubmittedCards(entry, submissionLabels),
-                  )
-                : sortedChanges;
+                  );
         const reviewRowIds = reviewRows.map((entry) => entry.__applyId);
+        const selectionScopeRows = directHrBypass ? sortedChanges : reviewRows;
+        const approvedIdSet = new Set(approvedChangeIds.map(String));
 
-        /** Empty queue: HR activates profile as-is (no card rows to approve). */
-        if (hasExplicitSelection && reviewRowIds.length > 0) {
-            const approvedNorm = approvedChangeIds.map(String);
-            const missingScopeIds = reviewRowIds.filter((rowId) => !approvedNorm.includes(String(rowId)));
+        if (directHrBypass && hasExplicitSelection && sortedChanges.length > 0 && approvedIdSet.size === 0) {
+            return res.status(400).json({
+                message: "Select at least one change to apply.",
+            });
+        }
+
+        /** HR full activation after submission: every row in this submission must be approved or sent back via hold. */
+        if (hasExplicitSelection && reviewRowIds.length > 0 && !directHrBypass) {
+            const missingScopeIds = reviewRowIds.filter((rowId) => !approvedIdSet.has(String(rowId)));
             if (missingScopeIds.length > 0) {
                 return res.status(400).json({
                     message:
@@ -118,8 +205,10 @@ export const approveProfile = async (req, res) => {
         }
 
         const changesToApply = hasExplicitSelection
-            ? reviewRows.filter((entry) => approvedChangeIds.includes(entry.__applyId))
-            : sortedChanges;
+            ? selectionScopeRows.filter((entry) => approvedIdSet.has(String(entry.__applyId)))
+            : directHrBypass
+              ? []
+              : sortedChanges;
 
         for (const change of changesToApply) {
             if (String(change?.section || "").toLowerCase() !== "documents") continue;
@@ -284,6 +373,12 @@ export const approveProfile = async (req, res) => {
                         { $set: { [visaType]: visaPayload } },
                         { upsert: true, new: true }
                     );
+                    const replacedVisaType = String(
+                        change?.replacedVisaType || change?.previousData?.visaType || "",
+                    ).trim();
+                    if (replacedVisaType && replacedVisaType !== visaType) {
+                        await EmployeeVisa.updateOne({ employeeId }, { $unset: { [replacedVisaType]: "" } });
+                    }
                 }
                 continue;
             }
@@ -454,8 +549,23 @@ export const approveProfile = async (req, res) => {
         }
 
         const appliedIds = new Set(changesToApply.map((entry) => entry.__applyId));
+        const scopedIdSet = new Set(selectionScopeRows.map((entry) => String(entry.__applyId)));
+
+        if (directHrBypass && hasExplicitSelection) {
+            for (const entry of selectionScopeRows) {
+                if (!appliedIds.has(String(entry.__applyId))) {
+                    await revertSinglePendingEmployeeChange(employeeId, updated, entry);
+                }
+            }
+        }
+
         updated.pendingReactivationChanges = sortedChanges
-            .filter((entry) => !appliedIds.has(entry.__applyId))
+            .filter((entry) => {
+                const entryId = String(entry.__applyId);
+                if (appliedIds.has(entryId)) return false;
+                if (directHrBypass && hasExplicitSelection && scopedIdSet.has(entryId)) return false;
+                return true;
+            })
             .map(({ __applyId, ...rest }) => rest);
         updated.markModified("pendingReactivationChanges");
 

@@ -65,7 +65,18 @@ export const updateVisaDetails = async (req, res) => {
         const existingVisa = await EmployeeVisa.findOne({ employeeId });
         const existingDocument = existingVisa?.[visaType]?.document?.url || existingVisa?.[visaType]?.document?.data;
 
-        const lockedVisaNumber = String(existingVisa?.[visaType]?.number || "").trim();
+        const isRenewal = req.body?.isRenewal === true;
+        const previousVisaTypeRaw = String(req.body?.previousVisaType || "").trim().toLowerCase();
+        const replacedVisaType =
+            isRenewal &&
+            ALLOWED_VISA_TYPES.includes(previousVisaTypeRaw) &&
+            previousVisaTypeRaw !== visaType
+                ? previousVisaTypeRaw
+                : null;
+
+        const lockedVisaNumber = replacedVisaType
+            ? ""
+            : String(existingVisa?.[visaType]?.number || "").trim();
         const validationInput = normalizeEmployeeVisaPayload(
             {
                 number: lockedVisaNumber || visaNumber,
@@ -94,8 +105,8 @@ export const updateVisaDetails = async (req, res) => {
             });
         }
 
-        const previousVisaEntry = existingVisa?.[visaType];
-        const isRenewal = req.body?.isRenewal === true;
+        const archiveVisaType = replacedVisaType || visaType;
+        const previousVisaEntry = existingVisa?.[archiveVisaType];
         const hasExistingDocument = employeeRenewalHasExistingCard(previousVisaEntry);
         const hasNewDocumentUpload = Boolean(visaCopy && typeof visaCopy === "string" && visaCopy.trim() !== "");
         const shouldArchivePrevious = await archiveAndClearLiveEmployeeRenewal({
@@ -105,9 +116,9 @@ export const updateVisaDetails = async (req, res) => {
             hasExistingDocument,
             hasNewDocumentUpload,
             section: "visa",
-            visaType,
+            visaType: archiveVisaType,
             archiveParams: {
-                type: `${visaType.charAt(0).toUpperCase() + visaType.slice(1)} Visa`,
+                type: VISA_LABELS[archiveVisaType] || `${archiveVisaType} Visa`,
                 description: previousVisaEntry?.number ? `Visa No: ${previousVisaEntry.number}` : "",
                 issueDate: previousVisaEntry?.issueDate || null,
                 expiryDate: previousVisaEntry?.expiryDate || null,
@@ -200,17 +211,23 @@ export const updateVisaDetails = async (req, res) => {
                     { $set: { status: "Inactive" } },
                 );
             }
+
+            if (replacedVisaType) {
+                await EmployeeVisa.updateOne({ employeeId }, { $unset: { [replacedVisaType]: "" } });
+                updatedVisa = await EmployeeVisa.findOne({ employeeId });
+            }
         }
 
         const visaChangeEntry = {
             card: VISA_LABELS[visaType] || "Visa",
-            reason: "Visa details updated",
+            reason: replacedVisaType ? "Visa renewed with type change" : "Visa details updated",
             section: "visa",
             changeType: "update",
             targetIndex: null,
             isRenewal,
+            replacedVisaType: replacedVisaType || undefined,
             previousData: previousVisaEntry
-                ? { visaType, ...previousVisaEntry.toObject?.() || previousVisaEntry }
+                ? { visaType: archiveVisaType, ...(previousVisaEntry.toObject?.() || previousVisaEntry) }
                 : null,
             proposedData: visaPayload,
         };

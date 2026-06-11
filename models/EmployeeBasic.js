@@ -198,6 +198,7 @@ const employeeBasicSchema = new mongoose.Schema(
                 archiveReason: { type: String, enum: ['Replaced', 'Deleted', 'Not Renewed'], default: 'Replaced' },
                 document: {
                     url: { type: String },
+                    publicId: { type: String },
                     data: { type: String },
                     name: { type: String },
                     mimeType: { type: String }
