@@ -1,5 +1,6 @@
 import { isEmployeeProfileActivationDesignatedHr } from "./isEmployeeProfileActivationDesignatedHr.js";
 import { isReqUserAdmin } from "./sendAdminDeletionNotificationEmails.js";
+import { portalActorMatchesStoredId } from "./resolvePortalActorId.js";
 
 const normEmpId = (s) => String(s || "").trim().toLowerCase().replace(/\s+/g, "");
 
@@ -34,20 +35,17 @@ function viewerIsEmployeeProfileSubject(req, employee) {
 
 function viewerIsProfileActivationDraftEditor(req, employee) {
     if (!req?.user || !employee) return false;
-    const editor = String(employee.profileActivationDraftEditor || "").trim();
-    const myObj = portalUserEmployeeObjectId(req);
-    return Boolean(editor && myObj && editor === myObj);
+    return portalActorMatchesStoredId(req, employee.profileActivationDraftEditor);
 }
 
 function viewerIsProfileActivationSubmitter(req, employee) {
     if (!req?.user || !employee) return false;
-    const myObj = portalUserEmployeeObjectId(req);
     if (!isProfileApprovalSubmitted(employee)) {
         if (viewerIsEmployeeProfileSubject(req, employee)) return true;
         if (viewerIsProfileActivationDraftEditor(req, employee)) return true;
     }
     const sid = employee.profileActivationSubmittedBy;
-    if (sid && myObj && String(sid) === String(myObj)) return true;
+    if (sid && portalActorMatchesStoredId(req, sid)) return true;
     if (!sid) return viewerIsEmployeeProfileSubject(req, employee);
     return false;
 }

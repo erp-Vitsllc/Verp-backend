@@ -36,6 +36,9 @@ import {
     resolveLatestActivationSubmissionLabels,
 } from "../../utils/companyActivation.js";
 import { mapPendingReactivationEntriesWithIds } from "../../utils/pendingReactivationEntryId.js";
+import { resolveFlowchartHrEmployee } from "../../utils/resolveFlowchartHrEmployee.js";
+import { notifyHrProfileActivationRequestEmail } from "../../utils/notifyHrProfileActivationRequestEmail.js";
+import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
 
 export const approveProfile = async (req, res) => {
     const { id } = req.params;
@@ -86,7 +89,7 @@ export const approveProfile = async (req, res) => {
         const pendingChanges = Array.isArray(updated.pendingReactivationChanges)
             ? updated.pendingReactivationChanges
             : [];
-        const hasExplicitSelection = selectionProvided === true && !directHrBypass;
+        const hasExplicitSelection = selectionProvided === true;
 
         const sortedChanges = mapPendingReactivationEntriesWithIds(pendingChanges).map(({ entry, id }) => {
             const o = entry?.toObject ? entry.toObject() : entry;
@@ -519,10 +522,45 @@ export const approveProfile = async (req, res) => {
             status: 'active'
         }).catch(err => console.error("Async Email Error:", err));
 
+        if (directHrBypass && (await isReqUserAdmin(req.user))) {
+            const hrResolved = await resolveFlowchartHrEmployee();
+            if (!hrResolved.error && hrResolved.email) {
+                const appliedCards = [...new Set(changesToApply.map((x) => String(x?.card || "").trim()).filter(Boolean))];
+                const employeeName =
+                    `${completeEmployee.firstName || ""} ${completeEmployee.lastName || ""}`.trim() || "Employee";
+                const hrName =
+                    `${hrResolved.employee?.firstName || ""} ${hrResolved.employee?.lastName || ""}`.trim() || "HR";
+                const submitterName =
+                    req.user?.name ||
+                    [req.user?.firstName, req.user?.lastName].filter(Boolean).join(" ").trim() ||
+                    "Administrator";
+                const wasPreviouslyActive = Array.isArray(completeEmployee.profileWorkflow)
+                    ? completeEmployee.profileWorkflow.some((w) => String(w?.status || "").toLowerCase() === "active")
+                    : false;
+                notifyHrProfileActivationRequestEmail({
+                    hrEmail: hrResolved.email,
+                    hrName,
+                    employeeName,
+                    employeeId: completeEmployee.employeeId,
+                    activationTypeLabel: wasPreviouslyActive ? "Reactivation" : "New Activation",
+                    pendingCardsText: appliedCards.join(", "),
+                    pendingChanges: changesToApply,
+                    submitterName,
+                    isAdminSubmitter: true,
+                    adminDirectApplied: true,
+                    reason: "Administrator applied profile changes directly",
+                    description: "Changes are now live on the employee profile. No HR approval action is required.",
+                    req,
+                }).catch((err) => console.error("[ApproveProfile] Admin direct HR notify error:", err));
+            }
+        }
+
         delete completeEmployee.password;
 
         return res.status(200).json({
-            message: "Employee profile marked as approved.",
+            message: directHrBypass
+                ? "Profile changes applied successfully."
+                : "Employee profile marked as approved.",
             employee: completeEmployee
         });
     } catch (error) {

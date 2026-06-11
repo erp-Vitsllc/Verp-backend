@@ -48,6 +48,7 @@ export function buildEmployeeActivationHrEmailHtml({
     typeForDisplay = "New Activation",
     submitterName = "",
     isAdminSubmitter = false,
+    adminDirectApplied = false,
     reason = "",
     description = "",
     pendingChanges = [],
@@ -61,20 +62,24 @@ export function buildEmployeeActivationHrEmailHtml({
     const safeSubmitter = escapeHtml(submitterName || "VeRP Portal");
     const safeReason = reason ? escapeHtml(reason) : "";
 
-    const adminBanner = isAdminSubmitter
-        ? `<p style="margin:0 0 12px;padding:10px 12px;background:#fff7ed;border:1px solid #fed7aa;border-radius:8px;font-size:13px;color:#9a3412;"><strong>Administrator submission</strong> — review the cards below in VeRP.</p>`
-        : "";
+    const adminBanner = adminDirectApplied
+        ? `<p style="margin:0 0 12px;padding:10px 12px;background:#ecfdf5;border:1px solid #86efac;border-radius:8px;font-size:13px;color:#166534;"><strong>Administrator applied changes</strong> — the live profile is already updated. This email is for your information only.</p>`
+        : isAdminSubmitter
+          ? `<p style="margin:0 0 12px;padding:10px 12px;background:#fff7ed;border:1px solid #fed7aa;border-radius:8px;font-size:13px;color:#9a3412;"><strong>Administrator submission</strong> — review the cards below in VeRP.</p>`
+          : "";
 
-    const intro = isAdminSubmitter
-        ? `<p><strong>${safeSubmitter}</strong> submitted <strong>${safeEmployee}</strong> (${safeEid}) for <strong>${safeType}</strong>.</p>`
-        : `<p><strong>${safeEmployee}</strong> (${safeEid}) was submitted for <strong>${safeType}</strong>${submitterName && submitterName !== "VeRP Portal" ? ` by <strong>${safeSubmitter}</strong>` : ""}.</p>`;
+    const intro = adminDirectApplied
+        ? `<p><strong>${safeSubmitter}</strong> applied profile changes for <strong>${safeEmployee}</strong> (${safeEid}) — <strong>${safeType}</strong>.</p>`
+        : isAdminSubmitter
+          ? `<p><strong>${safeSubmitter}</strong> submitted <strong>${safeEmployee}</strong> (${safeEid}) for <strong>${safeType}</strong>.</p>`
+          : `<p><strong>${safeEmployee}</strong> (${safeEid}) was submitted for <strong>${safeType}</strong>${submitterName && submitterName !== "VeRP Portal" ? ` by <strong>${safeSubmitter}</strong>` : ""}.</p>`;
 
     const pendingHtml = renderPendingCardList(pendingChanges);
 
     return `
         <div style="font-family:Segoe UI,Arial,sans-serif;color:#1e293b;line-height:1.5;max-width:600px;margin:0 auto;border:1px solid #e2e8f0;border-radius:10px;overflow:hidden;">
             <div style="background:${isAdminSubmitter ? "#c2410c" : "#2563eb"};color:#fff;padding:16px 20px;text-align:center;">
-                <h2 style="margin:0;font-size:17px;">${isAdminSubmitter ? "Administrator — Profile Activation" : "Profile Activation Request"}</h2>
+                <h2 style="margin:0;font-size:17px;">${adminDirectApplied ? "Administrator — Changes Applied" : isAdminSubmitter ? "Administrator — Profile Activation" : "Profile Activation Request"}</h2>
             </div>
             <div style="padding:20px;">
                 <p>Hello <strong>${safeHr}</strong>,</p>
@@ -89,7 +94,7 @@ export function buildEmployeeActivationHrEmailHtml({
                 </div>
                 ${pendingHtml}
                 <p style="text-align:center;margin:20px 0;">
-                    ${renderEmailPrimaryButton(profileUrl, "Review in VeRP", isAdminSubmitter ? "#c2410c" : "#2563eb")}
+                    ${renderEmailPrimaryButton(profileUrl, adminDirectApplied ? "View profile in VeRP" : "Review in VeRP", adminDirectApplied ? "#059669" : isAdminSubmitter ? "#c2410c" : "#2563eb")}
                 </p>
                 ${attachmentHtml}
                 ${renderEmailSiteFooter(siteHost)}

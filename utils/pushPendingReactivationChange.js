@@ -4,6 +4,7 @@ import { isActiveCompanyProfile } from "./companyActivation.js";
 import { isRequestUserDesignatedFlowchartHr } from "./isDesignatedFlowchartHr.js";
 import { EMPLOYEE_ACTIVATION_SECTION_KEYS } from "./profileFileChangeHrNotify.js";
 import { shouldQueueProfileChange, triggerProfileReactivationIfNeeded } from "./triggerProfileReactivation.js";
+import { resolvePortalActorId } from "./resolvePortalActorId.js";
 
 const norm = (s) => String(s || "").toLowerCase().trim();
 
@@ -198,7 +199,7 @@ export async function queueOrTriggerProfileChange({ employeeId, actor, reason, e
         if (changeEntry) {
             await pushPendingReactivationChangeReplaceByDedupeKey(employeeId, changeEntry);
         }
-        const editorId = actor?.employeeObjectId || actor?.empObjectId || null;
+        const editorId = resolvePortalActorId(actor);
         if (editorId) {
             await EmployeeBasic.updateOne(
                 { employeeId },
