@@ -18,3 +18,19 @@ export function resolveEmployeeProfileStatusWrite(employee = {}, requestedStatus
     }
     return requestedStatus;
 }
+
+/** API/list/detail: once activated, always expose profileStatus as active. */
+export function normalizeEmployeeProfileStatusForApi(employee = {}) {
+    if (!employee || typeof employee !== "object") return employee;
+    if (hasEmployeeProfileEverBeenActivated(employee)) {
+        employee.profileStatus = "active";
+    }
+    return employee;
+}
+
+export function employeeProfileStatusNeedsRepair(employee = {}) {
+    return (
+        hasEmployeeProfileEverBeenActivated(employee) &&
+        String(employee?.profileStatus || "").toLowerCase() !== "active"
+    );
+}

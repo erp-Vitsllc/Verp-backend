@@ -3,7 +3,7 @@ import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeService.js";
 import { uploadDocumentToS3 } from "../../utils/s3Upload.js";
 import { disposeEmployeeProfileAttachment } from "../../utils/profileAttachmentDisposition.js";
-import { archiveAndClearLiveEmployeeRenewal } from "../../utils/employeeDocumentRenewal.js";
+import { archiveAndClearLiveEmployeeRenewal, employeeRenewalHasExistingCard } from "../../utils/employeeDocumentRenewal.js";
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
 import { shouldSkipLiveEmployeeSectionAsync, queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
 import { markProfileActivationHoldResolvedForSection } from "../../utils/markProfileActivationHoldResolved.js";
@@ -76,7 +76,7 @@ export const updatePassportDetails = async (req, res) => {
         }
 
         const isRenewal = req.body?.isRenewal === true;
-        const hasExistingDocument = Boolean(existingPassport?.document?.url || existingPassport?.document?.data);
+        const hasExistingDocument = employeeRenewalHasExistingCard(existingPassport);
         const hasNewDocumentUpload = Boolean(passportCopy && typeof passportCopy === "string" && passportCopy.trim() !== "");
         const shouldArchivePrevious = await archiveAndClearLiveEmployeeRenewal({
             employeeId,

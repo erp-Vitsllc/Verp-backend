@@ -5,6 +5,10 @@ import { getSignedFileUrl, normalizeS3Key } from "../../utils/s3Upload.js";
 import { escapeRegex } from "../../utils/regexHelper.js";
 import { ensureProbationRequestForEmployee } from "../../utils/sendProbationWorkflowEmail.js";
 import { buildEmployeeListStatusMatch } from "../../utils/applyEmployeeLeftUserStatus.js";
+import {
+    employeeProfileStatusNeedsRepair,
+    normalizeEmployeeProfileStatusForApi,
+} from "../../utils/employeeProfileStatusLock.js";
 
 // Get all employees (lightweight list response with optional pagination)
 export const getEmployees = async (req, res) => {
@@ -37,7 +41,6 @@ export const getEmployees = async (req, res) => {
         if (department) filters.department = department;
         if (designation) filters.designation = designation;
         Object.assign(filters, buildEmployeeListStatusMatch(status));
-        if (profileStatus) filters.profileStatus = profileStatus;
         if (search) {
             const regex = new RegExp(escapeRegex(search), 'i');
             filters.$or = [
@@ -46,6 +49,36 @@ export const getEmployees = async (req, res) => {
                 { employeeId: regex },
                 { email: regex },
             ];
+        }
+        if (profileStatus) {
+            const ps = String(profileStatus).toLowerCase();
+            const activatedClause =
+                ps === "active"
+                    ? {
+                          $or: [
+                              { profileStatus: "active" },
+                              { profileApprovalStatus: "active" },
+                              { "profileWorkflow.status": "active" },
+                          ],
+                      }
+                    : ps === "inactive"
+                      ? {
+                            $and: [
+                                { profileStatus: { $ne: "active" } },
+                                { profileApprovalStatus: { $ne: "active" } },
+                                { "profileWorkflow.status": { $ne: "active" } },
+                            ],
+                        }
+                      : { profileStatus: profileStatus };
+            if (filters.$or) {
+                const searchOr = filters.$or;
+                delete filters.$or;
+                filters.$and = [...(filters.$and || []), { $or: searchOr }, activatedClause];
+            } else if (activatedClause.$and) {
+                filters.$and = [...(filters.$and || []), ...activatedClause.$and];
+            } else {
+                Object.assign(filters, activatedClause);
+            }
         }
 
         // Add query timeout options
@@ -235,6 +268,7 @@ export const getEmployees = async (req, res) => {
                     $project: {
                         firstName: 1, lastName: 1, employeeId: 1, role: 1, department: 1, designation: 1,
                         status: 1, probationPeriod: 1, overtime: 1, profileApprovalStatus: 1, profileStatus: 1,
+                        profileWorkflow: 1,
                         email: 1, companyEmail: 1,
                         // Update enablePortalAccess to be true if they have an active user OR manual flag, AND a company email
                         enablePortalAccess: {
@@ -393,6 +427,15 @@ export const getEmployees = async (req, res) => {
                 }
             }
         }));
+
+        const repairIds = employeesWithVisas
+            .filter((emp) => employeeProfileStatusNeedsRepair(emp))
+            .map((emp) => emp._id)
+            .filter(Boolean);
+        if (repairIds.length > 0) {
+            await EmployeeBasic.updateMany({ _id: { $in: repairIds } }, { $set: { profileStatus: "active" } });
+        }
+        employeesWithVisas.forEach((emp) => normalizeEmployeeProfileStatusForApi(emp));
 
         // Calculate companies with employees using only valid (existing) company references.
         // This prevents deleted/orphaned company IDs from inflating dashboard company counts.

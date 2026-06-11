@@ -3,7 +3,7 @@ import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeService.js";
 import { uploadDocumentToS3 } from "../../utils/s3Upload.js";
 import { disposeEmployeeProfileAttachment } from "../../utils/profileAttachmentDisposition.js";
-import { archiveAndClearLiveEmployeeRenewal } from "../../utils/employeeDocumentRenewal.js";
+import { archiveAndClearLiveEmployeeRenewal, employeeRenewalHasExistingCard } from "../../utils/employeeDocumentRenewal.js";
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
 import { shouldSkipLiveEmployeeSectionAsync, queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
 import { markProfileActivationHoldResolvedForSection } from "../../utils/markProfileActivationHoldResolved.js";
@@ -89,7 +89,7 @@ export const updateEmiratesIdDetails = async (req, res) => {
 
         const previousEmiratesId = existingEmiratesId?.emiratesId;
         const isRenewal = req.body?.isRenewal === true;
-        const hasExistingDocument = Boolean(previousEmiratesId?.document?.url || previousEmiratesId?.document?.data);
+        const hasExistingDocument = employeeRenewalHasExistingCard(previousEmiratesId);
         const hasNewDocumentUpload = Boolean(normalizedUpload);
         const shouldArchivePrevious = await archiveAndClearLiveEmployeeRenewal({
             employeeId,

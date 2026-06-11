@@ -11,6 +11,7 @@ import { sendApprovalEmail } from "../controllers/employee/sendApprovalEmail.js"
 import { approveProfile } from "../controllers/employee/approveProfile.js";
 import { holdProfile } from "../controllers/employee/holdProfile.js";
 import { rejectProfile } from "../controllers/employee/rejectProfile.js";
+import { discardEmployeePendingActivationEntry } from "../controllers/employee/discardEmployeePendingActivationEntry.js";
 import { deleteEmployee } from "../controllers/employee/deleteEmployee.js";
 import { updateVisaDetails } from "../controllers/employee/updateVisaDetails.js";
 import { deleteVisaDetails } from "../controllers/employee/deleteVisaDetails.js";
@@ -246,12 +247,18 @@ router.delete("/:id/training/:trainingId", checkPermission('hrm_employees_list',
 // Send for activation (notify HR) — view + create on Employees or Profile Activation (see middleware)
 router.post("/:id/send-approval-email", checkEmployeeProfileActivationAction(), sendApprovalEmail);
 
-// Approve / hold / reject — designated HR enforced in controllers; still require some employee access
-router.post("/:id/approve-profile", checkPermission("hrm_employees_view", "view"), approveProfile);
+// Approve / hold / reject — designated HR or admin enforced in controllers
+router.post("/:id/approve-profile", checkEmployeeProfileActivationAction(), approveProfile);
 
-router.post("/:id/hold-profile", checkPermission("hrm_employees_view", "view"), holdProfile);
+router.post("/:id/hold-profile", checkEmployeeProfileActivationAction(), holdProfile);
 
-router.post("/:id/reject-profile", checkPermission("hrm_employees_view", "view"), rejectProfile);
+router.post("/:id/reject-profile", checkEmployeeProfileActivationAction(), rejectProfile);
+
+router.delete(
+    "/:id/pending-activation-entry/:entryId",
+    checkPermission("hrm_employees_list", "edit"),
+    discardEmployeePendingActivationEntry,
+);
 
 router.patch("/:id/profile-status", checkEmployeeProfileActivationAction(), updateProfileStatus);
 

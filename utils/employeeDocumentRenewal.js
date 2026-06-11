@@ -6,14 +6,21 @@ import EmployeeMedicalInsurance from "../models/EmployeeMedicalInsurance.js";
 import EmployeeDrivingLicense from "../models/EmployeeDrivingLicense.js";
 import { archiveEmployeeDocument } from "./archiveEmployeeDocument.js";
 
-/** Archive superseded file only on explicit Renew (not on edit/add/delete). */
+/** True when a card row has a file or identity fields worth archiving on renew. */
+export function employeeRenewalHasExistingCard(entry) {
+    if (!entry || typeof entry !== "object") return false;
+    const doc = entry.document;
+    if (doc?.url || doc?.data) return true;
+    return Boolean(String(entry.number || entry.provider || "").trim());
+}
+
+/** Archive superseded file on explicit renew — any renewal with an existing stored document. */
 export function shouldArchiveEmployeeDocumentOnRenewal({
     isRenewal,
     hasExistingDocument,
-    hasNewDocumentUpload,
 }) {
     if (isRenewal !== true) return false;
-    return Boolean(hasExistingDocument && hasNewDocumentUpload);
+    return Boolean(hasExistingDocument);
 }
 
 export async function clearLiveEmployeeDocumentSection({ employeeId, section, visaType }) {
@@ -51,7 +58,7 @@ export async function archiveAndClearLiveEmployeeRenewal({
     skipLive,
     isRenewal,
     hasExistingDocument,
-    hasNewDocumentUpload,
+    hasNewDocumentUpload: _hasNewDocumentUpload,
     section,
     visaType,
     archiveParams,
@@ -59,9 +66,8 @@ export async function archiveAndClearLiveEmployeeRenewal({
     const shouldArchive = shouldArchiveEmployeeDocumentOnRenewal({
         isRenewal,
         hasExistingDocument,
-        hasNewDocumentUpload,
     });
-    if (shouldArchive && archiveParams?.document) {
+    if (shouldArchive && archiveParams) {
         await archiveEmployeeDocument({ employeeId, ...archiveParams });
     }
     if (skipLive && isRenewal === true && hasExistingDocument) {

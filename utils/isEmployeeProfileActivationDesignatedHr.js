@@ -1,5 +1,6 @@
 import { resolveFlowchartHrEmployee } from "./resolveFlowchartHrEmployee.js";
 import { hasPermission, isUserAdministrator } from "../services/permissionService.js";
+import { isReqUserAdmin } from "./sendAdminDeletionNotificationEmails.js";
 
 const normEmpId = (s) => String(s || "").trim().toLowerCase().replace(/\s+/g, "");
 
@@ -10,6 +11,8 @@ const normEmpId = (s) => String(s || "").trim().toLowerCase().replace(/\s+/g, ""
  */
 export async function isEmployeeProfileActivationDesignatedHr(req, employee) {
     if (!req?.user) return false;
+
+    if (await isReqUserAdmin(req.user)) return true;
 
     if (req.user.isAdmin === true || /^admin$/i.test(String(req.user.role || "").trim()) || req.user.role === "ROOT") {
         return true;

@@ -12,6 +12,7 @@ import {
     archiveSalaryIncrementIfNeeded,
     purgeSalaryOldDocumentsUnlessIncrement,
 } from "../../utils/archiveSupersededSalaryOnIncrement.js";
+import { archiveSupersededBankIfNeeded, bankUpdateTouchesFields } from "../../utils/archiveSupersededBankIfNeeded.js";
 import EmployeePersonal from "../../models/EmployeePersonal.js";
 import EmployeeContact from "../../models/EmployeeContact.js";
 import {
@@ -613,13 +614,19 @@ export const updateBasicDetails = async (req, res) => {
             Object.prototype.hasOwnProperty.call(updatePayload, k),
         );
         let salaryIncrementResult = { isIncrement: false, archived: false };
+        const bankTouchedEarly = bankUpdateTouchesFields(updatePayload);
         // HR queue must never be bypassed by skipArchive (edit/add sends skipArchive: true).
         const applyLiveNow = !skipLive;
 
+        if (salaryTouchedEarly && Object.prototype.hasOwnProperty.call(updatePayload, "salaryHistory")) {
+            salaryIncrementResult = await archiveSalaryIncrementIfNeeded(employeeId, updatePayload);
+        }
+
+        if (bankTouchedEarly && applyLiveNow) {
+            await archiveSupersededBankIfNeeded(employeeId, updatePayload, existingBank);
+        }
+
         if (applyLiveNow) {
-            if (salaryTouchedEarly && Object.prototype.hasOwnProperty.call(updatePayload, "salaryHistory")) {
-                salaryIncrementResult = await archiveSalaryIncrementIfNeeded(employeeId, updatePayload);
-            }
             updated = await saveEmployeeData(employeeId, updatePayload);
 
             if (!updated) {
@@ -641,7 +648,6 @@ export const updateBasicDetails = async (req, res) => {
 
             if (skipArchiveOnRequest) {
                 const purgeTypes = [];
-                if (bankTouched) purgeTypes.push(...PURGE_TYPES.bank);
                 if (Object.prototype.hasOwnProperty.call(updatePayload, "trainingDetails")) {
                     purgeTypes.push(...PURGE_TYPES.training);
                 }
@@ -662,6 +668,11 @@ export const updateBasicDetails = async (req, res) => {
                 trackDefaultChange: true,
             });
         } else {
+            if (salaryTouchedEarly) {
+                await purgeSalaryOldDocumentsUnlessIncrement(employeeId, {
+                    isIncrement: salaryIncrementResult.isIncrement,
+                });
+            }
             await queueOrTriggerProfileChange({
                 employeeId,
                 actor: req.user,

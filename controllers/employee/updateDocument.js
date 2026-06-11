@@ -4,7 +4,7 @@ import mongoose from "mongoose";
 import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeService.js";
 import { scheduleEmployeeProfileFileChangeHrEmailForRequest } from "../../utils/employeeInformativeHrNotify.js";
 import { validateEmployeeDocumentPayload } from "../../utils/employeeDocumentValidation.js";
-import { archiveEmployeeDocument, employeeDocumentWasSuperseded } from "../../utils/archiveEmployeeDocument.js";
+import { archiveEmployeeDocument } from "../../utils/archiveEmployeeDocument.js";
 import { shouldArchiveEmployeeDocumentOnRenewal } from "../../utils/employeeDocumentRenewal.js";
 
 
@@ -123,16 +123,14 @@ export const updateDocument = async (req, res) => {
         }
 
         const hasExistingDocument = Boolean(
-            currentDoc?.document?.url || currentDoc?.document?.data || currentDoc?.document?.name,
+            currentDoc?.document?.url || currentDoc?.document?.data || currentDoc?.document?.name || currentDoc?.expiryDate,
         );
-        const hasNewDocumentUpload = employeeDocumentWasSuperseded(currentDoc, proposedDoc);
         const shouldArchivePrevious =
             isRenewMode === true &&
             Boolean(currentDoc?.expiryDate) &&
             shouldArchiveEmployeeDocumentOnRenewal({
                 isRenewal: true,
                 hasExistingDocument,
-                hasNewDocumentUpload,
             });
 
         if (shouldArchivePrevious) {

@@ -1,4 +1,5 @@
 import User from "../models/User.js";
+import { resolveEmployeeProfileStatusWrite } from "./employeeProfileStatusLock.js";
 
 export const LEFT_USER_STATUS = "Left User";
 
@@ -20,9 +21,10 @@ export async function applyEmployeeLeftUserStatus(employeeDoc) {
 
     employeeDoc.status = LEFT_USER_STATUS;
     employeeDoc.enablePortalAccess = false;
-    if (String(employeeDoc.profileStatus || "").toLowerCase() === "active") {
-        employeeDoc.profileStatus = "inactive";
-    }
+    employeeDoc.profileStatus = resolveEmployeeProfileStatusWrite(
+        employeeDoc,
+        employeeDoc.profileStatus || "inactive",
+    );
     await employeeDoc.save();
 
     await User.findOneAndUpdate(

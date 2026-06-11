@@ -42,11 +42,21 @@ export const archiveEmployeeDocument = async ({
     fuelAllowance = null,
     otherAllowance = null,
     totalSalary = null,
+    bankName = null,
+    accountNumber = null,
     document,
 }) => {
-    if (!employeeId || !document) return;
+    if (!employeeId) return;
+    const hasStoredFile = Boolean(documentStorageFingerprint(document));
+    const hasMetadata = Boolean(
+        String(type || "").trim() ||
+            String(description || "").trim() ||
+            issueDate ||
+            expiryDate,
+    );
+    if (!hasStoredFile && !hasMetadata) return;
 
-    if (await isDuplicateReplacedArchive(employeeId, type || "Document", document)) {
+    if (hasStoredFile && (await isDuplicateReplacedArchive(employeeId, type || "Document", document))) {
         return;
     }
 
@@ -66,6 +76,8 @@ export const archiveEmployeeDocument = async ({
                     fuelAllowance: fuelAllowance ?? null,
                     otherAllowance: otherAllowance ?? null,
                     totalSalary: totalSalary ?? null,
+                    bankName: bankName ?? null,
+                    accountNumber: accountNumber ?? null,
                     createdAt: new Date(),
                     archivedAt: new Date(),
                     archiveReason: "Replaced",
@@ -148,12 +160,20 @@ export const archiveQueuedEmployeeSectionPreviousIfNeeded = async ({
     if (isRenewal !== true) return;
     const sec = String(section || "").toLowerCase();
     if (!employeeId || !previousData || typeof previousData !== "object") return;
-    if (!employeeDocumentWasSuperseded(previousData, proposedData)) return;
 
     const meta = SECTION_ARCHIVE_META[sec];
     if (!meta) return;
 
     const prevDoc = previousData.document;
+    const hasPrevFile = hasStoredDocumentFile(prevDoc);
+    const hasMetadata = Boolean(
+        previousData.number ||
+            previousData.provider ||
+            previousData.issueDate ||
+            previousData.expiryDate,
+    );
+    if (!hasPrevFile && !hasMetadata) return;
+
     const docType = typeof meta.type === "function" ? meta.type(previousData, proposedData) : meta.type;
     if (sec === "visa" && docType === "Visa") return;
 
@@ -163,6 +183,40 @@ export const archiveQueuedEmployeeSectionPreviousIfNeeded = async ({
         description: meta.description(previousData),
         issueDate: previousData.issueDate || null,
         expiryDate: previousData.expiryDate || null,
-        document: prevDoc,
+        document: hasPrevFile ? prevDoc : null,
+    });
+
+    if (sec === "labourcard") {
+        const contractDoc = previousData.labourContractAttachment;
+        const hasContractFile = hasStoredDocumentFile(contractDoc);
+        if (hasContractFile || previousData.number) {
+            await archiveEmployeeDocument({
+                employeeId,
+                type: "Labour Contract",
+                description: previousData?.number
+                    ? `Labour Contract (Labour Card No: ${previousData.number})`
+                    : "Labour Contract",
+                issueDate: previousData.issueDate || null,
+                expiryDate: previousData.expiryDate || null,
+                document: hasContractFile ? contractDoc : null,
+            });
+        }
+    }
+};
+
+/** Archive superseded signature into oldDocuments when replaced (edit or HR-approved queue). */
+export const archiveEmployeeSignaturePreviousIfNeeded = async ({ employeeId, previousSignature }) => {
+    if (!employeeId || !previousSignature || typeof previousSignature !== "object") return;
+    const hasFile = hasStoredDocumentFile(previousSignature);
+    if (!hasFile && !previousSignature.signedAt) return;
+    await archiveEmployeeDocument({
+        employeeId,
+        type: "Digital Signature",
+        description: previousSignature.name
+            ? `Signature: ${previousSignature.name}`
+            : "Digital Signature",
+        issueDate: previousSignature.signedAt || null,
+        expiryDate: null,
+        document: hasFile ? previousSignature : null,
     });
 };

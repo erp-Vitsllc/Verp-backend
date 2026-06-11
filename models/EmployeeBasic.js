@@ -42,6 +42,8 @@ const employeeBasicSchema = new mongoose.Schema(
         profileSubmittedTo: { type: mongoose.Schema.Types.ObjectId, ref: "EmployeeBasic", default: null },
         /** EmployeeBasic _id of the portal user who clicked "Send for Activation" (hold / resubmit UX is for them only, not primary reportee). */
         profileActivationSubmittedBy: { type: mongoose.Schema.Types.ObjectId, ref: "EmployeeBasic", default: null },
+        /** Who last queued activation changes before submit — only they (and profile subject) see draft pending UI. */
+        profileActivationDraftEditor: { type: mongoose.Schema.Types.ObjectId, ref: "EmployeeBasic", default: null },
 
         // NEW: Profile Workflow Array
         profileWorkflow: [{
@@ -185,6 +187,8 @@ const employeeBasicSchema = new mongoose.Schema(
                 fuelAllowance: { type: Number, default: null },
                 otherAllowance: { type: Number, default: null },
                 totalSalary: { type: Number, default: null },
+                bankName: { type: String, default: null },
+                accountNumber: { type: String, default: null },
                 createdAt: { type: Date },
                 archivedAt: { type: Date, default: Date.now },
                 // Why archived:

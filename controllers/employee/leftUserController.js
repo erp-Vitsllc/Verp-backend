@@ -4,6 +4,7 @@ import { checkLeftUserEligibility } from "../../utils/employeeLeftUserEligibilit
 import { applyEmployeeLeftUserStatus, LEFT_USER_STATUS } from "../../utils/applyEmployeeLeftUserStatus.js";
 import { isRequestUserDesignatedFlowchartHr } from "../../utils/isDesignatedFlowchartHr.js";
 import { queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
+import { notifyLeftUserPendingHr } from "../../utils/employeeLeftUserWorkflow.js";
 
 export const getLeftUserEligibility = async (req, res) => {
     try {
@@ -62,6 +63,22 @@ export const markEmployeeLeftUser = async (req, res) => {
                     proposedData: { status: LEFT_USER_STATUS },
                 },
             });
+
+            try {
+                await notifyLeftUserPendingHr({
+                    req,
+                    employee: {
+                        _id: employee._id,
+                        employeeId: employee.employeeId,
+                        firstName: employee.firstName,
+                        lastName: employee.lastName,
+                        status: employee.status,
+                    },
+                    previousStatus: employee.status,
+                });
+            } catch (notifyErr) {
+                console.error("[markEmployeeLeftUser] notifyLeftUserPendingHr:", notifyErr);
+            }
 
             const completeEmployee = await getCompleteEmployee(employee.employeeId);
             delete completeEmployee.password;

@@ -13,6 +13,7 @@ import User from "../models/User.js";
 import { saveEmployeeData } from "../services/employeeService.js";
 import {
     archiveQueuedEmployeeSectionPreviousIfNeeded,
+    archiveEmployeeSignaturePreviousIfNeeded,
     employeeDocumentWasSuperseded,
 } from "./archiveEmployeeDocument.js";
 import { shouldArchiveEmployeeDocumentOnRenewal } from "./employeeDocumentRenewal.js";
@@ -25,7 +26,9 @@ import {
     archiveSalaryIncrementIfNeeded,
     purgeSalaryOldDocumentsUnlessIncrement,
 } from "./archiveSupersededSalaryOnIncrement.js";
+import { archiveSupersededBankIfNeeded, bankUpdateTouchesFields } from "./archiveSupersededBankIfNeeded.js";
 import { applyEmployeeLeftUserStatus, isLeftUserStatus } from "./applyEmployeeLeftUserStatus.js";
+import { closeLeftUserDashboardTasks } from "./employeeLeftUserWorkflow.js";
 
 /**
  * Applies a subset of pendingReactivationChanges (HR-checked rows during partial hold).
@@ -58,7 +61,9 @@ export async function applyApprovedPendingProfileChanges(employeeId, basicDoc, c
                 const currentDoc = updated.documents[targetIndex];
                 const plainCurrent = currentDoc?.toObject ? currentDoc.toObject() : { ...currentDoc };
                 const hasExistingDocument = Boolean(
-                    plainCurrent?.document?.url || plainCurrent?.document?.data,
+                    plainCurrent?.document?.url ||
+                        plainCurrent?.document?.data ||
+                        plainCurrent?.expiryDate,
                 );
                 const shouldArchivePrevious =
                     change?.isRenewal === true &&
@@ -66,10 +71,6 @@ export async function applyApprovedPendingProfileChanges(employeeId, basicDoc, c
                     shouldArchiveEmployeeDocumentOnRenewal({
                         isRenewal: true,
                         hasExistingDocument,
-                        hasNewDocumentUpload: employeeDocumentWasSuperseded(
-                            plainCurrent,
-                            change.proposedData,
-                        ),
                     });
                 if (shouldArchivePrevious) {
                     updated.oldDocuments = Array.isArray(updated.oldDocuments) ? updated.oldDocuments : [];
@@ -223,6 +224,13 @@ export async function applyApprovedPendingProfileChanges(employeeId, basicDoc, c
             ) {
                 salaryIncrementResult = await archiveSalaryIncrementIfNeeded(employeeId, proposedData);
             }
+            if (section === "basicdetails" && bankUpdateTouchesFields(proposedData)) {
+                await archiveSupersededBankIfNeeded(
+                    employeeId,
+                    proposedData,
+                    change?.previousData || null,
+                );
+            }
             await saveEmployeeData(employeeId, proposedData);
             if (
                 section === "basicdetails" &&
@@ -237,6 +245,14 @@ export async function applyApprovedPendingProfileChanges(employeeId, basicDoc, c
             if (section === "workdetails" && isLeftUserStatus(proposedData?.status)) {
                 const basicDoc = await EmployeeBasic.findOne({ employeeId });
                 if (basicDoc) await applyEmployeeLeftUserStatus(basicDoc);
+                try {
+                    await closeLeftUserDashboardTasks({
+                        employeeMongoId: updated._id,
+                        status: "Approved",
+                    });
+                } catch (syncErr) {
+                    console.error("[applyApprovedPendingProfileChanges] Left User dashboard sync:", syncErr);
+                }
             } else if (section === "workdetails" && Object.prototype.hasOwnProperty.call(proposedData, "companyEmail")) {
                 await User.findOneAndUpdate(
                     { employeeId },
@@ -356,6 +372,10 @@ export async function applyApprovedPendingProfileChanges(employeeId, basicDoc, c
             if (ct === "delete") {
                 await EmployeeBasic.updateOne({ employeeId }, { $set: { signature: null } });
             } else {
+                await archiveEmployeeSignaturePreviousIfNeeded({
+                    employeeId,
+                    previousSignature: change.previousData,
+                });
                 await EmployeeBasic.updateOne({ employeeId }, { $set: { signature: proposedData } });
             }
         }

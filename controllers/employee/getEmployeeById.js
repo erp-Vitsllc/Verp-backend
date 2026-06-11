@@ -6,7 +6,17 @@ import Loan from "../../models/Loan.js";
 import { getSignedFileUrl } from "../../utils/s3Upload.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { isRequestUserDesignatedFlowchartHr } from "../../utils/isDesignatedFlowchartHr.js";
+import { mapPendingReactivationEntriesWithIds } from "../../utils/pendingReactivationEntryId.js";
+import {
+    employeeProfileStatusNeedsRepair,
+    normalizeEmployeeProfileStatusForApi,
+} from "../../utils/employeeProfileStatusLock.js";
 import { ensureProbationRequestForEmployee } from "../../utils/sendProbationWorkflowEmail.js";
+import {
+    canViewerSeeEmployeePendingActivation,
+    redactEmployeePendingActivationForViewer,
+} from "../../utils/canViewerSeeEmployeePendingActivation.js";
+import { withdrawEmployeeActivationSubmissionIfQueueEmpty } from "../../utils/reconcileEmployeeActivationAfterEmptyQueue.js";
 
 // Get single employee by ID
 export const getEmployeeById = async (req, res) => {
@@ -126,6 +136,17 @@ export const getEmployeeById = async (req, res) => {
 
         const viewerIsDesignatedFlowchartHr = await isRequestUserDesignatedFlowchartHr(req);
 
+        const viewerMaySeePending = await canViewerSeeEmployeePendingActivation(req, employee);
+        if (!viewerMaySeePending) {
+            redactEmployeePendingActivationForViewer(employee);
+        } else if (Array.isArray(employee.pendingReactivationChanges) && employee.pendingReactivationChanges.length) {
+            const withStableIds = mapPendingReactivationEntriesWithIds(employee.pendingReactivationChanges);
+            employee.pendingReactivationChanges = withStableIds.map(({ entry, id }) => ({
+                ...entry,
+                _id: id,
+            }));
+        }
+
         if (Array.isArray(employee.pendingNotRenewRequests) && employee.pendingNotRenewRequests.length) {
             for (const p of employee.pendingNotRenewRequests) {
                 const key = (p.supportingAttachmentKey || "").trim();
@@ -138,6 +159,33 @@ export const getEmployeeById = async (req, res) => {
                 }
             }
         }
+
+        if (employeeProfileStatusNeedsRepair(employee) && employee._id) {
+            await EmployeeBasic.updateOne({ _id: employee._id }, { $set: { profileStatus: "active" } });
+        }
+
+        const queueEmpty =
+            !Array.isArray(employee.pendingReactivationChanges) ||
+            employee.pendingReactivationChanges.length === 0;
+        if (queueEmpty && employee._id) {
+            const basicDoc = await EmployeeBasic.findById(employee._id);
+            if (
+                basicDoc &&
+                (await withdrawEmployeeActivationSubmissionIfQueueEmpty(basicDoc, {
+                    actionedBy: req.user?.employeeObjectId || req.user?._id || null,
+                }))
+            ) {
+                employee.profileApprovalStatus = "active";
+                employee.profileSubmittedTo = null;
+                employee.profileActivationSubmittedBy = null;
+                employee.profileActivationDraftEditor = null;
+                employee.profileActivationHold = null;
+                employee.pendingReactivationChanges = [];
+                employee.profileWorkflow = basicDoc.profileWorkflow;
+            }
+        }
+
+        normalizeEmployeeProfileStatusForApi(employee);
 
         // Calculate approximate response size for logging
         const responseSize = JSON.stringify(employee).length;

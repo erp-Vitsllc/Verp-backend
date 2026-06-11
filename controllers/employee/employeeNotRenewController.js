@@ -68,11 +68,6 @@ const REQUEST_KINDS = new Set([
 ]);
 
 const ALLOWED_VISA_TYPES = new Set(["visit", "employment", "spouse"]);
-const isHrLoggedInUser = async (req) => {
-    if (await isRequestUserDesignatedFlowchartHr(req)) return true;
-    const role = String(req?.user?.role || "").trim().toLowerCase();
-    return role === "hr" || role === "human resource" || role === "human resources";
-};
 
 const resolveDocumentIndex = (employee, entry) => {
     const arr = employee.documents || [];
@@ -274,6 +269,20 @@ const applyApprovedEmployeeArchive = async (employee, entry) => {
             archiveReason: "Not Renewed",
             document: asPlainDocument(details.document),
         });
+        if (details.labourContractAttachment?.url || details.labourContractAttachment?.data) {
+            pushOldDocumentRow(employee, {
+                type: "Previous Labour Contract",
+                description: historyDescription(
+                    `Not Renewed - Labour Contract (${details.number || ""})`,
+                    reason,
+                ),
+                issueDate: details.issueDate || details.lastUpdated || null,
+                expiryDate: details.expiryDate || null,
+                archivedAt: new Date(),
+                archiveReason: "Not Renewed",
+                document: asPlainDocument(details.labourContractAttachment),
+            });
+        }
         await EmployeeLabourCard.deleteOne({ employeeId: employee.employeeId });
         return { cleanedLabel: "Labour Card" };
     }
@@ -415,7 +424,8 @@ export const submitEmployeeDocumentNotRenewRequest = async (req, res) => {
         }
 
         const isAdminActor = await isReqUserAdmin(req.user);
-        const autoApprove = (await isHrLoggedInUser(req)) || isAdminActor;
+        const isDesignatedHr = await isRequestUserDesignatedFlowchartHr(req);
+        const autoApprove = isDesignatedHr;
         const requestId = crypto.randomUUID();
         const row = {
             requestId,
@@ -437,17 +447,6 @@ export const submitEmployeeDocumentNotRenewRequest = async (req, res) => {
         if (autoApprove) {
             try {
                 const { completeEmployee, deletedDocLabel } = await finalizeApprovedNotRenew(employee, row);
-                if (isAdminActor && !(await isHrLoggedInUser(req))) {
-                    scheduleAdminEmployeeCardNotRenewHrEmail({
-                        req,
-                        employeeId: employee.employeeId,
-                        employeeBasic: employee,
-                        kind: row.kind,
-                        sectionLabel: row.label || deletedDocLabel,
-                        reason,
-                        actor: req.user,
-                    });
-                }
                 return res.status(201).json({
                     message: "Not renew applied and moved to Old Documents.",
                     employee: completeEmployee,
@@ -521,7 +520,12 @@ export const submitEmployeeDocumentNotRenewRequest = async (req, res) => {
             });
         }
 
-        return res.status(201).json({ message: "Request submitted for HR approval.", requestId });
+        const completeEmployee = await getCompleteEmployee(employee.employeeId);
+        return res.status(201).json({
+            message: "Request submitted for HR approval.",
+            requestId,
+            employee: completeEmployee,
+        });
     } catch (error) {
         console.error("submitEmployeeDocumentNotRenewRequest", error);
         return res.status(500).json({ message: error.message || "Server error" });
@@ -538,9 +542,12 @@ export const respondEmployeeDocumentNotRenewRequest = async (req, res) => {
             return res.status(400).json({ message: "action must be approve or reject." });
         }
 
-        const allowed = await isRequestUserDesignatedFlowchartHr(req);
+        const allowed =
+            (await isRequestUserDesignatedFlowchartHr(req)) || (await isReqUserAdmin(req.user));
         if (!allowed) {
-            return res.status(403).json({ message: "Only designated Flowchart HR can approve or reject this request." });
+            return res.status(403).json({
+                message: "Only designated Flowchart HR or an administrator can approve or reject this request.",
+            });
         }
 
         const resolved = await resolveEmployeeId(id);

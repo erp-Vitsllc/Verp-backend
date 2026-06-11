@@ -3,7 +3,7 @@ import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeService.js";
 import { uploadDocumentToS3 } from "../../utils/s3Upload.js";
 import { disposeEmployeeProfileAttachment } from "../../utils/profileAttachmentDisposition.js";
-import { archiveAndClearLiveEmployeeRenewal } from "../../utils/employeeDocumentRenewal.js";
+import { archiveAndClearLiveEmployeeRenewal, employeeRenewalHasExistingCard } from "../../utils/employeeDocumentRenewal.js";
 import { markProfileActivationHoldResolvedForSection } from "../../utils/markProfileActivationHoldResolved.js";
 import {
     normalizeEmployeeMedicalInsurancePayload,
@@ -79,7 +79,7 @@ export const updateMedicalInsuranceDetails = async (req, res) => {
 
         const previousMedicalInsurance = existingMedicalInsurance?.medicalInsurance;
         const isRenewal = req.body?.isRenewal === true;
-        const hasExistingDocument = Boolean(previousMedicalInsurance?.document?.url || previousMedicalInsurance?.document?.data);
+        const hasExistingDocument = employeeRenewalHasExistingCard(previousMedicalInsurance);
         const hasNewDocumentUpload = Boolean(normalizedUpload);
         const shouldArchivePrevious = await archiveAndClearLiveEmployeeRenewal({
             employeeId,

@@ -69,14 +69,8 @@ async function archiveSupersededSalaryEntries(employeeId, supersededEntries = []
 
     for (const entry of supersededEntries) {
         const doc = entry?.offerLetter || entry?.attachment;
-        if (!hasStoredSalaryDocument(entry)) continue;
-
-        const fp = documentFingerprint(doc);
-        if (fp && archivedFingerprints.has(fp)) continue;
-        if (fp) archivedFingerprints.add(fp);
-
         const period = formatSalaryPeriod(entry);
-        await archiveEmployeeDocument({
+        const archivePayload = {
             employeeId,
             type: `Previous Salary (${period})`,
             description: `Basic: ${entry.basic ?? 0}, HRA: ${entry.houseRentAllowance ?? 0}, Vehicle: ${entry.vehicleAllowance ?? 0}, Fuel: ${entry.fuelAllowance ?? 0}, Other: ${entry.otherAllowance ?? 0}, Total: ${entry.totalSalary ?? 0}`,
@@ -88,8 +82,16 @@ async function archiveSupersededSalaryEntries(employeeId, supersededEntries = []
             fuelAllowance: entry.fuelAllowance ?? null,
             otherAllowance: entry.otherAllowance ?? null,
             totalSalary: entry.totalSalary ?? null,
-            document: doc,
-        });
+            document: hasStoredSalaryDocument(entry)
+                ? doc
+                : { name: `Previous salary — ${period}`, url: "", mimeType: "application/pdf" },
+        };
+
+        const fp = hasStoredSalaryDocument(entry) ? documentFingerprint(doc) : `period:${period}:total:${entry.totalSalary ?? ""}`;
+        if (fp && archivedFingerprints.has(fp)) continue;
+        if (fp) archivedFingerprints.add(fp);
+
+        await archiveEmployeeDocument(archivePayload);
     }
 }
 

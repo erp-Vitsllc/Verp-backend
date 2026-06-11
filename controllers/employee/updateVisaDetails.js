@@ -3,7 +3,7 @@ import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeS
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { uploadDocumentToS3 } from "../../utils/s3Upload.js";
 import { disposeEmployeeProfileAttachment } from "../../utils/profileAttachmentDisposition.js";
-import { archiveAndClearLiveEmployeeRenewal } from "../../utils/employeeDocumentRenewal.js";
+import { archiveAndClearLiveEmployeeRenewal, employeeRenewalHasExistingCard } from "../../utils/employeeDocumentRenewal.js";
 import { markProfileActivationHoldResolvedForSection } from "../../utils/markProfileActivationHoldResolved.js";
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
 import { shouldSkipLiveEmployeeSectionAsync, queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
@@ -96,7 +96,7 @@ export const updateVisaDetails = async (req, res) => {
 
         const previousVisaEntry = existingVisa?.[visaType];
         const isRenewal = req.body?.isRenewal === true;
-        const hasExistingDocument = Boolean(previousVisaEntry?.document?.url || previousVisaEntry?.document?.data);
+        const hasExistingDocument = employeeRenewalHasExistingCard(previousVisaEntry);
         const hasNewDocumentUpload = Boolean(visaCopy && typeof visaCopy === "string" && visaCopy.trim() !== "");
         const shouldArchivePrevious = await archiveAndClearLiveEmployeeRenewal({
             employeeId,

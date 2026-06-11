@@ -198,6 +198,13 @@ export async function queueOrTriggerProfileChange({ employeeId, actor, reason, e
         if (changeEntry) {
             await pushPendingReactivationChangeReplaceByDedupeKey(employeeId, changeEntry);
         }
+        const editorId = actor?.employeeObjectId || actor?.empObjectId || null;
+        if (editorId) {
+            await EmployeeBasic.updateOne(
+                { employeeId },
+                { $set: { profileActivationDraftEditor: editorId } },
+            );
+        }
         return;
     }
 

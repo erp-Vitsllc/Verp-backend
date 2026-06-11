@@ -4,6 +4,12 @@ import { sendProfileNotification } from "../../utils/sendProfileNotification.js"
 import { syncDashboardAction } from "../../utils/syncDashboard.js";
 import { resolveProfileActivationSubmitterEmployee } from "../../utils/resolveProfileActivationSubmitterEmployee.js";
 import { isEmployeeProfileActivationDesignatedHr } from "../../utils/isEmployeeProfileActivationDesignatedHr.js";
+import {
+    closeLeftUserDashboardTasks,
+    pendingChangesIncludeLeftUser,
+} from "../../utils/employeeLeftUserWorkflow.js";
+import { resolveEmployeeProfileStatusWrite } from "../../utils/employeeProfileStatusLock.js";
+import { revertAllPendingEmployeeChanges } from "../../utils/revertPendingEmployeeProfileChange.js";
 
 export const rejectProfile = async (req, res) => {
     const { id } = req.params;
@@ -26,6 +32,17 @@ export const rejectProfile = async (req, res) => {
         }
 
         const employeeId = employee.employeeId;
+
+        const hadLeftUserPending = pendingChangesIncludeLeftUser(employee.pendingReactivationChanges);
+
+        const basicDoc = await EmployeeBasic.findOne({ employeeId });
+        if (basicDoc && Array.isArray(basicDoc.pendingReactivationChanges) && basicDoc.pendingReactivationChanges.length > 0) {
+            const pendingPlain = basicDoc.pendingReactivationChanges.map((entry) =>
+                typeof entry?.toObject === "function" ? entry.toObject() : { ...entry },
+            );
+            await revertAllPendingEmployeeChanges(employeeId, basicDoc, pendingPlain);
+            await basicDoc.save();
+        }
 
         const DashboardAction = (await import("../../models/DashboardAction.js")).default;
         const pendingRowsForSubmitter = await DashboardAction.find({
@@ -51,8 +68,15 @@ export const rejectProfile = async (req, res) => {
             { employeeId },
             {
                 profileApprovalStatus: keepActiveProfile ? "active" : "rejected",
-                profileStatus: keepActiveProfile ? "active" : "inactive",
-                $unset: { profileActivationHold: 1, profileActivationSubmittedBy: 1 },
+                profileStatus: resolveEmployeeProfileStatusWrite(
+                    employee,
+                    keepActiveProfile ? "active" : "inactive",
+                ),
+                $unset: {
+                    profileActivationHold: 1,
+                    profileActivationSubmittedBy: 1,
+                    profileActivationDraftEditor: 1,
+                },
                 $set: {
                     pendingReactivationChanges: [],
                     "profileWorkflow.$[elem].status": "rejected",
@@ -123,6 +147,19 @@ export const rejectProfile = async (req, res) => {
             });
         } catch (syncErr) {
             console.error("[RejectProfile] Dashboard Update Error:", syncErr);
+        }
+
+        if (hadLeftUserPending) {
+            try {
+                await closeLeftUserDashboardTasks({
+                    employeeMongoId: updated._id,
+                    status: "Rejected",
+                    actionedBy: req.user?.employeeObjectId || req.user?._id,
+                    comment: reason || "",
+                });
+            } catch (syncErr) {
+                console.error("[RejectProfile] Left User dashboard sync:", syncErr);
+            }
         }
 
         // Get complete employee data for response

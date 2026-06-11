@@ -1,3 +1,5 @@
+import { employeeRequiresEmiratesId } from "./employeeRequiresEmiratesId.js";
+
 const checkField = (val) => {
     if (val === null || val === undefined) return false;
     if (typeof val === 'string' && val.trim() === '') return false;
@@ -18,12 +20,6 @@ export const calculateProfileCompletionBackend = (employee = {}) => {
     let totalFields = 0;
     let completedFields = 0;
     const pendingFields = [];
-
-    const isPermanentEmployee = employee.status === 'Permanent';
-    const nationality = String(employee.nationality || employee.country || '').toLowerCase().trim();
-    const isUAE = ['uae', 'ae', 'united arab emirates', 'united arab emirate'].includes(nationality);
-    const isVisaRequired = !nationality || !isUAE;
-    const requiresEmiratesIdAndLabourCard = isPermanentEmployee || isUAE;
 
     // 1. Basic Details
     const basicFields = [
@@ -91,8 +87,8 @@ export const calculateProfileCompletionBackend = (employee = {}) => {
         });
     }
 
-    // 3. Visa Details (if required)
-    if (isVisaRequired) {
+    // 3. Visa Details — required for all nationalities
+    {
         const visaTypes = ['visit', 'employment', 'spouse'];
         const visaDetails = employee.visaDetails || {};
         let activeVisaType = null;
@@ -135,8 +131,8 @@ export const calculateProfileCompletionBackend = (employee = {}) => {
         }
     }
 
-    // 4. Emirates ID Details
-    if (requiresEmiratesIdAndLabourCard) {
+    // 4. Emirates ID — not required for visit-visa-only employees
+    if (employeeRequiresEmiratesId(employee)) {
         const eid = employee.emiratesIdDetails;
         if (eid && checkField(eid.number)) {
             const eidFields = [
@@ -211,8 +207,8 @@ export const calculateProfileCompletionBackend = (employee = {}) => {
         }
     }
 
-    // 6. Salary Details
-    if (isPermanentEmployee) {
+    // 6. Salary Details — required for all employees
+    {
         const activeHistory = Array.isArray(employee.salaryHistory)
             ? employee.salaryHistory.find((entry) => !entry.toDate) || employee.salaryHistory[0]
             : null;
@@ -231,6 +227,23 @@ export const calculateProfileCompletionBackend = (employee = {}) => {
             completedFields++;
         } else {
             pendingFields.push({ section: 'Salary Details', field: 'Basic Salary' });
+        }
+
+        let hasSalaryAttachment = false;
+        if (employee.offerLetter?.url || employee.offerLetter?.data) {
+            hasSalaryAttachment = true;
+        }
+        if (!hasSalaryAttachment && Array.isArray(employee.salaryHistory)) {
+            hasSalaryAttachment = employee.salaryHistory.some(
+                (entry) => entry?.offerLetter?.url || entry?.offerLetter?.data,
+            );
+        }
+
+        totalFields++;
+        if (checkField(hasSalaryAttachment ? 'Uploaded' : null)) {
+            completedFields++;
+        } else {
+            pendingFields.push({ section: 'Salary Details', field: 'Salary Letter' });
         }
     }
 

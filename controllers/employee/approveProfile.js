@@ -14,6 +14,7 @@ import { getCompleteEmployee, saveEmployeeData } from "../../services/employeeSe
 import { sendProfileNotification } from "../../utils/sendProfileNotification.js";
 import {
     archiveQueuedEmployeeSectionPreviousIfNeeded,
+    archiveEmployeeSignaturePreviousIfNeeded,
     employeeDocumentWasSuperseded,
 } from "../../utils/archiveEmployeeDocument.js";
 import { shouldArchiveEmployeeDocumentOnRenewal } from "../../utils/employeeDocumentRenewal.js";
@@ -26,12 +27,15 @@ import {
     archiveSalaryIncrementIfNeeded,
     purgeSalaryOldDocumentsUnlessIncrement,
 } from "../../utils/archiveSupersededSalaryOnIncrement.js";
+import { archiveSupersededBankIfNeeded, bankUpdateTouchesFields } from "../../utils/archiveSupersededBankIfNeeded.js";
 import { isEmployeeProfileActivationDesignatedHr } from "../../utils/isEmployeeProfileActivationDesignatedHr.js";
 import { applyEmployeeLeftUserStatus, isLeftUserStatus } from "../../utils/applyEmployeeLeftUserStatus.js";
+import { closeLeftUserDashboardTasks } from "../../utils/employeeLeftUserWorkflow.js";
 import {
     pendingEntryIncludedInSubmittedCards,
     resolveLatestActivationSubmissionLabels,
 } from "../../utils/companyActivation.js";
+import { mapPendingReactivationEntriesWithIds } from "../../utils/pendingReactivationEntryId.js";
 
 export const approveProfile = async (req, res) => {
     const { id } = req.params;
@@ -84,12 +88,10 @@ export const approveProfile = async (req, res) => {
             : [];
         const hasExplicitSelection = selectionProvided === true && !directHrBypass;
 
-        const sortedChanges = pendingChanges
-            .map((entry, idx) => {
-                const o = entry?.toObject ? entry.toObject() : entry;
-                return { ...o, __applyId: String(o?._id || idx) };
-            })
-            .sort((a, b) => new Date(a?.changedAt || 0) - new Date(b?.changedAt || 0));
+        const sortedChanges = mapPendingReactivationEntriesWithIds(pendingChanges).map(({ entry, id }) => {
+            const o = entry?.toObject ? entry.toObject() : entry;
+            return { ...o, __applyId: id };
+        });
 
         const submissionLabels = resolveLatestActivationSubmissionLabels(updated.profileWorkflow || []);
         const reviewRows =
@@ -133,7 +135,9 @@ export const approveProfile = async (req, res) => {
                     const currentDoc = updated.documents[targetIndex];
                     const plainCurrent = currentDoc?.toObject ? currentDoc.toObject() : { ...currentDoc };
                     const hasExistingDocument = Boolean(
-                        plainCurrent?.document?.url || plainCurrent?.document?.data,
+                        plainCurrent?.document?.url ||
+                            plainCurrent?.document?.data ||
+                            plainCurrent?.expiryDate,
                     );
                     const shouldArchivePrevious =
                         change?.isRenewal === true &&
@@ -141,10 +145,6 @@ export const approveProfile = async (req, res) => {
                         shouldArchiveEmployeeDocumentOnRenewal({
                             isRenewal: true,
                             hasExistingDocument,
-                            hasNewDocumentUpload: employeeDocumentWasSuperseded(
-                                plainCurrent,
-                                change.proposedData,
-                            ),
                         });
                     if (shouldArchivePrevious) {
                         updated.oldDocuments = Array.isArray(updated.oldDocuments) ? updated.oldDocuments : [];
@@ -292,6 +292,13 @@ export const approveProfile = async (req, res) => {
                 ) {
                     salaryIncrementResult = await archiveSalaryIncrementIfNeeded(employeeId, proposedData);
                 }
+                if (section === "basicdetails" && bankUpdateTouchesFields(proposedData)) {
+                    await archiveSupersededBankIfNeeded(
+                        employeeId,
+                        proposedData,
+                        change?.previousData || null,
+                    );
+                }
                 await saveEmployeeData(employeeId, proposedData);
                 if (
                     section === "basicdetails" &&
@@ -306,6 +313,15 @@ export const approveProfile = async (req, res) => {
                 if (section === "workdetails" && isLeftUserStatus(proposedData?.status)) {
                     const basicDoc = await EmployeeBasic.findOne({ employeeId });
                     if (basicDoc) await applyEmployeeLeftUserStatus(basicDoc);
+                    try {
+                        await closeLeftUserDashboardTasks({
+                            employeeMongoId: updated._id,
+                            status: "Approved",
+                            actionedBy: req.user?.employeeObjectId || req.user?._id,
+                        });
+                    } catch (syncErr) {
+                        console.error("[ApproveProfile] Left User dashboard sync:", syncErr);
+                    }
                 } else if (section === "workdetails" && Object.prototype.hasOwnProperty.call(proposedData, "companyEmail")) {
                     await User.findOneAndUpdate(
                         { employeeId },
@@ -425,6 +441,10 @@ export const approveProfile = async (req, res) => {
                 if (changeType === "delete") {
                     await EmployeeBasic.updateOne({ employeeId }, { $set: { signature: null } });
                 } else {
+                    await archiveEmployeeSignaturePreviousIfNeeded({
+                        employeeId,
+                        previousSignature: change.previousData,
+                    });
                     await EmployeeBasic.updateOne({ employeeId }, { $set: { signature: proposedData } });
                 }
             }
@@ -451,7 +471,13 @@ export const approveProfile = async (req, res) => {
         await updated.save();
         await EmployeeBasic.updateOne(
             { employeeId },
-            { $unset: { profileActivationHold: 1, profileActivationSubmittedBy: 1 } },
+            {
+                $unset: {
+                    profileActivationHold: 1,
+                    profileActivationSubmittedBy: 1,
+                    profileActivationDraftEditor: 1,
+                },
+            },
         );
 
         // Close every open dashboard row for this activation (HR Pending + submitter On Hold, any assignee).

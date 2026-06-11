@@ -6,6 +6,7 @@ import { disposeEmployeeProfileAttachment } from "../../utils/profileAttachmentD
 import { archiveEmployeeDocument } from "../../utils/archiveEmployeeDocument.js";
 import {
     archiveAndClearLiveEmployeeRenewal,
+    employeeRenewalHasExistingCard,
     shouldArchiveEmployeeDocumentOnRenewal,
 } from "../../utils/employeeDocumentRenewal.js";
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
@@ -14,10 +15,14 @@ import { markProfileActivationHoldResolvedForSection } from "../../utils/markPro
 import { validateEmployeeLabourCardNoticePeriod } from "../../utils/employeeLabourCardValidation.js";
 import { scheduleEmployeeProfileFileChangeHrEmailForRequest } from "../../utils/employeeInformativeHrNotify.js";
 
-const REQUIRED_FIELDS = ["number", "issueDate", "expiryDate", "noticePeriodMonths", "upload"];
+const BASE_REQUIRED_FIELDS = ["number", "issueDate", "expiryDate", "noticePeriodMonths", "upload"];
 
-const buildMissingFields = (body, existingDocument, existingContractDocument) => {
-    return REQUIRED_FIELDS.filter((field) => {
+const buildMissingFields = (body, existingDocument, existingContractDocument, { isRenewal = false } = {}) => {
+    const requiredFields = isRenewal
+        ? [...BASE_REQUIRED_FIELDS, "contractUpload"]
+        : BASE_REQUIRED_FIELDS;
+
+    return requiredFields.filter((field) => {
         if (field === "upload") {
             // Check if upload is provided OR if existing document exists in DB
             const hasUploadString = body.upload && typeof body.upload === "string" && body.upload.trim() !== "";
@@ -135,6 +140,8 @@ export const updateLabourCardDetails = async (req, res) => {
             if (pdfError) return res.status(400).json({ message: pdfError });
         }
 
+        const isRenewal = req.body?.isRenewal === true;
+
         const missingFields = buildMissingFields(
             {
                 number,
@@ -144,12 +151,15 @@ export const updateLabourCardDetails = async (req, res) => {
                 upload: normalizedUpload || upload,
                 contractUpload: normalizedContractUpload || contractUpload,
             },
-            existingDocument,
-            existingContractDocument
+            isRenewal ? null : existingDocument,
+            isRenewal ? null : existingContractDocument,
+            { isRenewal },
         );
         if (missingFields.length > 0) {
             return res.status(400).json({
-                message: "Missing required Labour Card fields.",
+                message: isRenewal
+                    ? "Missing required Labour Card renewal fields (including labour contract)."
+                    : "Missing required Labour Card fields.",
                 missingFields,
             });
         }
@@ -181,8 +191,7 @@ export const updateLabourCardDetails = async (req, res) => {
         }
 
         const previousLabourCard = existingLabourCard?.labourCard;
-        const isRenewal = req.body?.isRenewal === true;
-        const hasExistingDocument = Boolean(previousLabourCard?.document?.url || previousLabourCard?.document?.data);
+        const hasExistingDocument = employeeRenewalHasExistingCard(previousLabourCard);
         const hasExistingContractDocument = Boolean(previousLabourCard?.labourContractAttachment?.url || previousLabourCard?.labourContractAttachment?.data);
         const hasNewDocumentUpload = Boolean(normalizedUpload);
         const hasNewContractDocumentUpload = Boolean(normalizedContractUpload);
@@ -204,7 +213,6 @@ export const updateLabourCardDetails = async (req, res) => {
         const shouldArchivePreviousContract = shouldArchiveEmployeeDocumentOnRenewal({
             isRenewal,
             hasExistingDocument: hasExistingContractDocument,
-            hasNewDocumentUpload: hasNewContractDocumentUpload,
         });
         if (shouldArchivePreviousContract) {
             await archiveEmployeeDocument({

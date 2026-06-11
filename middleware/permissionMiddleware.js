@@ -369,6 +369,11 @@ export const checkEmployeeProfileActivationAction = () => {
             }
 
             const { hasPermission, isUserAdministrator } = await import("../services/permissionService.js");
+            const { isReqUserAdmin } = await import("../utils/sendAdminDeletionNotificationEmails.js");
+
+            if (await isReqUserAdmin(req.user)) {
+                return next();
+            }
 
             const isAdmin = await isUserAdministrator(userId);
             const isJwtAdmin =

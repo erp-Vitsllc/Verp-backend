@@ -11,8 +11,7 @@ import {
     resolveLatestActivationSubmissionLabels,
 } from "../../utils/companyActivation.js";
 import { resolveEmployeeProfileStatusWrite } from "../../utils/employeeProfileStatusLock.js";
-
-const idStrSub = (sub, idx) => String(sub._id ?? idx);
+import { mapPendingReactivationEntriesWithIds } from "../../utils/pendingReactivationEntryId.js";
 
 /**
  * Partial HR review: keep profile submitted + inactive; record which change cards need employee fixes.
@@ -49,14 +48,12 @@ export const holdProfile = async (req, res) => {
             return res.status(404).json({ message: "Employee not found" });
         }
 
-        const sortedSubs = [...(doc.pendingReactivationChanges || [])].sort(
-            (a, b) => new Date(a?.changedAt || 0) - new Date(b?.changedAt || 0),
+        const entriesWithIds = mapPendingReactivationEntriesWithIds(doc.pendingReactivationChanges || []).map(
+            ({ entry, id }) => ({
+                sub: entry,
+                __idStr: id,
+            }),
         );
-
-        const entriesWithIds = sortedSubs.map((sub, idx) => ({
-            sub,
-            __idStr: idStrSub(sub, idx),
-        }));
 
         const submissionLabels = resolveLatestActivationSubmissionLabels(doc.profileWorkflow || []);
         const reviewEntries =
@@ -121,18 +118,33 @@ export const holdProfile = async (req, res) => {
             );
             await applyApprovedPendingProfileChanges(employeeId, doc, changesPlain);
 
-            const approvedIdStrSet = new Set(approvedEntries.map((e) => e.__idStr));
-            doc.pendingReactivationChanges = (doc.pendingReactivationChanges || []).filter(
-                (sub, idx) => !approvedIdStrSet.has(idStrSub(sub, idx)),
+            const approvedMongoIdSet = new Set(
+                approvedEntries
+                    .map((e) => (e.sub?._id != null ? String(e.sub._id) : ""))
+                    .filter(Boolean),
             );
+            const approvedIdStrSet = new Set(approvedEntries.map((e) => e.__idStr));
+            const sortedForId = mapPendingReactivationEntriesWithIds(doc.pendingReactivationChanges || []);
+            doc.pendingReactivationChanges = (doc.pendingReactivationChanges || []).filter((sub) => {
+                if (sub?._id != null && approvedMongoIdSet.has(String(sub._id))) return false;
+                const row = sortedForId.find(
+                    ({ entry }) =>
+                        (entry?._id != null &&
+                            sub?._id != null &&
+                            String(entry._id) === String(sub._id)) ||
+                        entry === sub,
+                );
+                if (row && approvedIdStrSet.has(row.id)) return false;
+                return true;
+            });
             doc.markModified("pendingReactivationChanges");
         }
 
         doc.profileApprovalStatus = "submitted";
         doc.profileStatus = resolveEmployeeProfileStatusWrite(doc, "inactive");
 
-        const nextUnapprovedIds = [...(doc.pendingReactivationChanges || [])].map((e, idx) =>
-            String(e._id ?? idx),
+        const nextUnapprovedIds = mapPendingReactivationEntriesWithIds(doc.pendingReactivationChanges || []).map(
+            ({ id }) => id,
         );
 
         doc.profileActivationHold = {

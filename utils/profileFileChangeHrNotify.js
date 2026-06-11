@@ -11,6 +11,7 @@ import {
     renderEmailPrimaryButton,
     renderEmailSiteFooter,
 } from "./emailAccessibleFiles.js";
+import { hasEmployeeProfileEverBeenActivated } from "./employeeProfileStatusLock.js";
 
 /** Company progress-bar sections — changes here go through activation HR queue, not informative email. */
 export const COMPANY_ACTIVATION_PROGRESS_KEYS = new Set([
@@ -60,10 +61,9 @@ export function isInformativeEmployeeSectionKey(sectionKey = "") {
     return !EMPLOYEE_ACTIVATION_SECTION_KEYS.has(key);
 }
 
+/** HR-activated employee — once active, always treated as active across the app. */
 export function isActiveEmployeeProfile(employeeBasic = {}) {
-    const profileStatus = String(employeeBasic?.profileStatus || "").toLowerCase();
-    const profileApprovalStatus = String(employeeBasic?.profileApprovalStatus || "").toLowerCase();
-    return profileStatus === "active" && profileApprovalStatus === "active";
+    return hasEmployeeProfileEverBeenActivated(employeeBasic);
 }
 
 const OWNER_DOC_FOCUS_BY_KEY = {

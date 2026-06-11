@@ -80,6 +80,18 @@ export const sendApprovalEmail = async (req, res) => {
         }
 
         const pending = Array.isArray(eb.pendingReactivationChanges) ? [...eb.pendingReactivationChanges] : [];
+        const wasPreviouslyActive = Array.isArray(employeeBasic.profileWorkflow)
+            ? employeeBasic.profileWorkflow.some((w) => String(w?.status || "").toLowerCase() === "active")
+            : false;
+        const profileAlreadyLive =
+            String(employeeBasic.profileStatus || "").toLowerCase() === "active" ||
+            wasPreviouslyActive;
+        if (profileAlreadyLive && pending.length === 0) {
+            return res.status(400).json({
+                message: "No pending changes to submit. The activation queue is empty.",
+            });
+        }
+
         let submittingThisRequest = pending;
         if (selectionProvided) {
             if (includedChangeEntryIds === null) {
@@ -111,9 +123,6 @@ export const sendApprovalEmail = async (req, res) => {
             `${req.user?.firstName || ""} ${req.user?.lastName || ""}`.trim() ||
             req.user?.name ||
             "VeRP Portal";
-        const wasPreviouslyActive = Array.isArray(employeeBasic.profileWorkflow)
-            ? employeeBasic.profileWorkflow.some((w) => String(w?.status || "").toLowerCase() === "active")
-            : false;
         const activationTypeLabel = wasPreviouslyActive ? "Reactivation" : "New Activation";
         const typeForDisplay = wasPreviouslyActive ? "Reactivation (Resubmission)" : "New Activation";
         const pendingCards = [...new Set(submittingThisRequest.map((x) => String(x?.card || "").trim()).filter(Boolean))];
@@ -189,7 +198,10 @@ export const sendApprovalEmail = async (req, res) => {
         });
         eb.markModified("profileWorkflow");
         await eb.save();
-        await EmployeeBasic.updateOne({ _id: eb._id }, { $unset: { profileActivationHold: "" } });
+        await EmployeeBasic.updateOne(
+            { _id: eb._id },
+            { $unset: { profileActivationHold: "", profileActivationDraftEditor: "" } },
+        );
 
         const subjectForDashboard = await EmployeeBasic.findById(employeeBasic._id)
             .select("firstName lastName employeeId designation department")

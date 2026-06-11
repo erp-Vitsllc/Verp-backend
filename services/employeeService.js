@@ -18,6 +18,7 @@ import User from "../models/User.js";
 import { getSignedFileUrl, normalizeS3Key, isPresignedUrlStillFresh } from "../utils/s3Upload.js";
 import { getS3BucketName, looksLikeObjectStorageUrl } from "../config/storageConfig.js";
 import { checkAndUpdateProbationStatus } from "../utils/employeeStatusHelper.js";
+import { normalizeEmployeeProfileStatusForApi } from "../utils/employeeProfileStatusLock.js";
 
 
 /**
@@ -826,6 +827,7 @@ export const getCompleteEmployee = async (id) => {
             );
         }
 
+        normalizeEmployeeProfileStatusForApi(completeEmployee);
         return completeEmployee;
     } catch (error) {
         console.error('[getCompleteEmployee] Error fetching employee:', id);
