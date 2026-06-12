@@ -53,7 +53,6 @@ const extractPassportDetails = (text = "") => {
     const MAX_TEXT_LENGTH = 15000;
     const safeText = text.length > MAX_TEXT_LENGTH ? text.substring(0, MAX_TEXT_LENGTH) : text;
 
-    console.log("\n🔍 Starting extraction with text length:", text.length, text.length > MAX_TEXT_LENGTH ? `(Truncated to ${MAX_TEXT_LENGTH} for safety)` : "");
 
     const cleanedText = safeText.replace(/\s+/g, " ").trim();
     const mrzReadyText = safeText.replace(/\r/g, "").trim();
@@ -76,7 +75,6 @@ const extractPassportDetails = (text = "") => {
     };
 
     // 1. MRZ Extraction (Highest Reliability) - Multiple patterns
-    console.log("🔍 Looking for MRZ...");
     const mrzPatterns = [
         /([A-Z0-9<]{30,})\s*\n?\s*([A-Z0-9<]{30,})\s*$/m,
         /P<[A-Z]{3}([A-Z0-9<]{30,})\s*\n?\s*([A-Z0-9<]{30,})/m,
@@ -90,15 +88,11 @@ const extractPassportDetails = (text = "") => {
     }
 
     if (mrzMatch && mrzMatch.length >= 2) {
-        console.log("✅ MRZ Found!");
         const mrzLine1 = mrzMatch[1] || "";
         const mrzLine2 = mrzMatch[2] || "";
-        console.log("   MRZ Line 1:", mrzLine1.substring(0, 50));
-        console.log("   MRZ Line 2:", mrzLine2.substring(0, 50));
 
         if (mrzLine2.length >= 9) {
             result.number = mrzLine2.substring(0, 9).replace(/<| /g, "").trim();
-            console.log("   Extracted Passport # from MRZ:", result.number);
         }
 
         if (mrzLine2.length >= 27) {
@@ -107,17 +101,14 @@ const extractPassportDetails = (text = "") => {
 
             if (dobMrz.length === 6 && !dobMrz.includes("<")) {
                 result.dateOfBirth = formatDate(dobMrz);
-                console.log("   Extracted DOB from MRZ:", dobMrz, "->", result.dateOfBirth);
             }
 
             if (expiryMrz.length === 6 && !expiryMrz.includes("<")) {
                 result.expiryDate = formatDate(expiryMrz);
-                console.log("   Extracted Expiry from MRZ:", expiryMrz, "->", result.expiryDate);
             }
 
             if (mrzLine2.length > 20) {
                 result.sex = mrzLine2.substring(20, 21);
-                console.log("   Extracted Sex from MRZ:", result.sex);
             }
         }
 
@@ -125,19 +116,15 @@ const extractPassportDetails = (text = "") => {
             const mrzNameSections = mrzLine1.substring(5).split("<<").filter(Boolean);
             if (mrzNameSections.length >= 1) {
                 result.surname = mrzNameSections[0].replace(/<+/g, " ").trim();
-                console.log("   Extracted Surname from MRZ:", result.surname);
             }
             if (mrzNameSections.length >= 2) {
                 result.givenNames = mrzNameSections[1].replace(/<+/g, " ").trim();
-                console.log("   Extracted Given Names from MRZ:", result.givenNames);
             }
         }
     } else {
-        console.log("❌ No MRZ found");
     }
 
     // 2. Passport Number - Multiple patterns
-    console.log("\n🔍 Looking for Passport Number...");
     if (!result.number) {
         const numberPatterns = [
             /(?:पासपोर्ट\s*न\.|Passport\s*(?:No\.?|Number|No)[:\s]*)([A-Z0-9]{6,12})/i,
@@ -151,14 +138,12 @@ const extractPassportDetails = (text = "") => {
             const match = originalText.match(pattern);
             if (match && match[1] && match[1].length >= 7) {
                 result.number = match[1].replace(/[^A-Z0-9]/gi, "").trim();
-                console.log("   ✅ Found Passport #:", result.number, "using pattern:", pattern.toString().substring(0, 50));
                 break;
             }
         }
     }
 
     // 3. Nationality - Multiple patterns
-    console.log("\n🔍 Looking for Nationality...");
     const nationalityPatterns = [
         /(?:राष्ट्रीयता|Nationality)[:\s]*([A-Z]+)/i,
         /(INDIAN|IND)/i,
@@ -168,13 +153,11 @@ const extractPassportDetails = (text = "") => {
         const match = originalText.match(pattern);
         if (match) {
             result.nationality = match[1] || "INDIAN";
-            console.log("   ✅ Found Nationality:", result.nationality);
             break;
         }
     }
 
     // 4. Place of Issue - Multiple patterns
-    console.log("\n🔍 Looking for Place of Issue...");
     const placePatterns = [
         /(?:जारी\s*करने\s*का\s*स्थान|Place\s*of\s*Issue)[:\s]*([A-Z][A-Z\s]{2,30})/i,
         /(COCHIN|MUMBAI|DELHI|KOLKATA|CHENNAI|BANGALORE|HYDERABAD|PUNE|AHMEDABAD)/i
@@ -183,13 +166,11 @@ const extractPassportDetails = (text = "") => {
         const match = originalText.match(pattern);
         if (match) {
             result.placeOfIssue = (match[1] || match[0]).trim();
-            console.log("   ✅ Found Place of Issue:", result.placeOfIssue);
             break;
         }
     }
 
     // 5. Issue Date - Multiple patterns
-    console.log("\n🔍 Looking for Issue Date...");
     const issueDatePatterns = [
         /(?:जारी\s*करने\s*की\s*तिथि|Date\s*of\s*Issue)[:\s]*(\d{1,2}[.\-\/]\d{1,2}[.\-\/]\d{2,4})/i,
         /Issue[:\s]*(\d{1,2}[.\-\/]\d{1,2}[.\-\/]\d{2,4})/i,
@@ -202,14 +183,12 @@ const extractPassportDetails = (text = "") => {
             const formatted = formatDate(dateStr);
             if (formatted) {
                 result.issueDate = formatted;
-                console.log("   ✅ Found Issue Date:", dateStr, "->", formatted);
                 break;
             }
         }
     }
 
     // 6. Expiry Date - Multiple patterns
-    console.log("\n🔍 Looking for Expiry Date...");
     if (!result.expiryDate) {
         const expiryDatePatterns = [
             /(?:समाप्ति\s*की\s*तिथि|Date\s*of\s*Expiry)[:\s]*(\d{1,2}[.\-\/]\d{1,2}[.\-\/]\d{2,4})/i,
@@ -224,7 +203,6 @@ const extractPassportDetails = (text = "") => {
                 const formatted = formatDate(dateStr);
                 if (formatted) {
                     result.expiryDate = formatted;
-                    console.log("   ✅ Found Expiry Date:", dateStr, "->", formatted);
                     break;
                 }
             }
@@ -232,7 +210,6 @@ const extractPassportDetails = (text = "") => {
     }
 
     // 7. Date of Birth - Multiple patterns
-    console.log("\n🔍 Looking for Date of Birth...");
     if (!result.dateOfBirth) {
         const dobPatterns = [
             /(?:जन्मतिथि|Date\s*of\s*Birth)[:\s]*(\d{1,2}[.\-\/]\d{1,2}[.\-\/]\d{2,4})/i,
@@ -245,7 +222,6 @@ const extractPassportDetails = (text = "") => {
                 const formatted = formatDate(match[1] || match[0]);
                 if (formatted) {
                     result.dateOfBirth = formatted;
-                    console.log("   ✅ Found DOB:", match[1] || match[0], "->", formatted);
                     break;
                 }
             }
@@ -253,7 +229,6 @@ const extractPassportDetails = (text = "") => {
     }
 
     // 8. Names - Surname and Given Names
-    console.log("\n🔍 Looking for Names...");
     if (!result.surname || !result.givenNames) {
         const namePatterns = [
             /(?:उपनाम|Surname)[:\s]*([A-Z\s]{2,50})/i,
@@ -265,17 +240,14 @@ const extractPassportDetails = (text = "") => {
                 const name = match[1].trim();
                 if (pattern.toString().includes("Surname") && !result.surname) {
                     result.surname = name;
-                    console.log("   ✅ Found Surname:", result.surname);
                 } else if (pattern.toString().includes("Given") && !result.givenNames) {
                     result.givenNames = name;
-                    console.log("   ✅ Found Given Names:", result.givenNames);
                 }
             }
         }
     }
 
     // 9. Father's Name
-    console.log("\n🔍 Looking for Father's Name...");
     const fatherPatterns = [
         /(?:पिता|Name\s*of\s*Father)[:\s\/]*([A-Z\s]{3,50})/i,
         /Father[:\s]*([A-Z\s]{3,50})/i
@@ -384,21 +356,12 @@ const callOcrSpace = async (fileBuffer, mimeType = "application/octet-stream") =
 
 // --- Controller Function ---
 export const parsePassport = async (req, res) => {
-    console.log("hyyy");
-
-    console.log("==========================================");
-    console.log("📄 PASSPORT PARSING REQUEST RECEIVED");
-    console.log("==========================================");
 
     if (!req.file) {
         return res.status(400).json({ message: "Passport file is required." });
     }
 
-    console.log("📋 File Information:");
-    console.log("   - Original Name:", req.file.originalname);
-    console.log("   - MIME Type:", req.file.mimetype);
-    console.log("   - File Size:", req.file.size, "bytes");
-    console.log("   - Buffer Length:", req.file.buffer?.length || 0, "bytes");
+
 
     const mimeType = req.file.mimetype || "";
     const isSupported = SUPPORTED_MIME_TYPES.some((type) =>
@@ -423,10 +386,7 @@ export const parsePassport = async (req, res) => {
                 const result = await parser.getText();
                 text = result?.text || "";
 
-                console.log("✅ PDF Text Extraction Successful!");
-                console.log("   - Text Length:", text.length, "characters");
-                console.log("   - First 500 characters:");
-                console.log("   " + text.substring(0, 500).replace(/\n/g, "\\n"));
+
                 if (text.length > 500) {
                     console.log("   ... (truncated)");
                 }
@@ -447,9 +407,6 @@ export const parsePassport = async (req, res) => {
             }
             if (ocrText) {
                 text = `${text}\n${ocrText}`.trim();
-                console.log("✅ OCR Text Extraction Successful!");
-                console.log("   - OCR Text Length:", ocrText.length, "characters");
-                console.log("   - Combined Text Length:", text.length, "characters");
                 sourcesUsed.push("ocr-space");
             }
         }
@@ -462,33 +419,9 @@ export const parsePassport = async (req, res) => {
             });
         }
 
-        console.log("\n📝 Full Extracted Text:");
-        console.log("==========================================");
-        console.log(text);
-        console.log("==========================================");
-        console.log("   Total Length:", text.length, "characters");
-
-        console.log("\n🔍 Extracting passport details from text...");
         const details = extractPassportDetails(text);
 
-        console.log("\n✅ Extracted Passport Details:");
-        console.log("==========================================");
-        console.log("   Passport Number:", details.number);
-        console.log("   Nationality:", details.nationality || "NOT FOUND");
-        console.log("   Date of Birth:", details.dateOfBirth || "NOT FOUND");
-        console.log("   Issue Date:", details.issueDate || "NOT FOUND");
-        console.log("   Expiry Date:", details.expiryDate || "NOT FOUND");
-        console.log("   Place of Issue:", details.placeOfIssue || "NOT FOUND");
-        console.log("   Sex:", details.sex || "NOT FOUND");
-        console.log("   Surname:", details.surname || "NOT FOUND");
-        console.log("   Given Names:", details.givenNames || "NOT FOUND");
-        console.log("   Father's Name:", details.fatherName || "NOT FOUND");
-        console.log("   Mother's Name:", details.motherName || "NOT FOUND");
-        console.log("   Spouse Name:", details.spouseName || "NOT FOUND");
-        console.log("   Address:", details.address || "NOT FOUND");
-        console.log("==========================================");
-        console.log("\n📤 Sending response to client...");
-        console.log("   Sources Used:", sourcesUsed.join(", "));
+
         if (warnings.length > 0) {
             console.log("   Warnings:", warnings.join(", "));
         }
