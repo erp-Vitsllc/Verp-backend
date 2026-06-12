@@ -155,19 +155,29 @@ export const submitCompanyActivationRequest = async (req, res) => {
             (await loadCompanyFullProfile(company)) ||
             (typeof company.toObject === "function" ? company.toObject() : company);
         const progressQuick = calculateCompanyActivationProgress(mergedForProgress);
-        const isDesignatedHr = await isRequestUserDesignatedFlowchartHr(req);
-        if (isDesignatedHr) {
-            if (progressQuick.percentage < 100) {
+        const canActivateDirectly = await canProcessCompanyActivation(req);
+        if (canActivateDirectly) {
+            const profileFullyActive = isCompanyFullyActivated(mergedForProgress);
+            if (!profileFullyActive && progressQuick.percentage < 100) {
                 return res.status(400).json({
                     message: "Company profile is not 100% complete for activation.",
                     activationProgress: progressQuick,
                 });
             }
-            req.body = {
-                ...(typeof req.body === "object" && req.body ? req.body : {}),
-                approvedChangeIds: [],
-                selectionProvided: false,
-            };
+            const baseBody = typeof req.body === "object" && req.body ? req.body : {};
+            if (selectionProvided && Array.isArray(includedChangeEntryIds)) {
+                req.body = {
+                    ...baseBody,
+                    approvedChangeIds: includedChangeEntryIds,
+                    selectionProvided: true,
+                };
+            } else {
+                req.body = {
+                    ...baseBody,
+                    approvedChangeIds: [],
+                    selectionProvided: false,
+                };
+            }
             return approveCompanyActivationRequest(req, res);
         }
 
