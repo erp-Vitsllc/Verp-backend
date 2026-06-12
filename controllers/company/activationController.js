@@ -10,6 +10,7 @@ import {
     isCompanyFullyActivated,
     pendingEntryIncludedInSubmittedCards,
     resolveLatestActivationSubmissionLabels,
+    isCompanyPendingChangeRenewal,
 } from "../../utils/companyActivation.js";
 import { syncDashboardAction } from "../../utils/syncDashboard.js";
 import {
@@ -297,6 +298,10 @@ export const approveCompanyActivationRequest = async (req, res) => {
             const { ownerArchivesToPush: archives } = await applyCompanyProposedActivationPatch(
                 company._id,
                 proposedData,
+                {
+                    isRenewal: isCompanyPendingChangeRenewal(change),
+                    previousData: change?.previousData,
+                },
             );
             if (archives?.length) ownerArchivesToPush.push(...archives);
         }
@@ -462,6 +467,10 @@ export const holdCompanyActivationRequest = async (req, res) => {
             const { ownerArchivesToPush: archives } = await applyCompanyProposedActivationPatch(
                 company._id,
                 proposedData,
+                {
+                    isRenewal: isCompanyPendingChangeRenewal(change),
+                    previousData: change?.previousData,
+                },
             );
             if (archives?.length) ownerArchivesToPush.push(...archives);
         }
@@ -737,7 +746,6 @@ export const rejectCompanyActivationRequest = async (req, res) => {
     }
 };
 
-/** Creator removes one held pending change from the queue (does not delete live profile data). */
 export const discardCompanyPendingActivationEntry = async (req, res) => {
     try {
         const { id, entryId } = req.params;

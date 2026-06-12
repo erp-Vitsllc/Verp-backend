@@ -864,8 +864,17 @@ export async function clearCompanyWorkflowActivationHold(companyMongoId) {
     await CompanyWorkflow.updateOne({ company: companyMongoId }, { $unset: { activationHold: 1 } });
 }
 
+function mergeCompanyArchiveBaseline(before = {}, previousData = {}) {
+    if (!previousData || typeof previousData !== "object") return before;
+    const out = { ...before };
+    for (const [key, value] of Object.entries(previousData)) {
+        if (value !== undefined) out[key] = value;
+    }
+    return out;
+}
+
 /** Apply one HR-approved proposedData patch (compliance, owners, documents, core fields). */
-export async function applyCompanyProposedActivationPatch(companyMongoId, proposedData) {
+export async function applyCompanyProposedActivationPatch(companyMongoId, proposedData, options = {}) {
     if (!proposedData || typeof proposedData !== "object") {
         return { ownerArchivesToPush: [] };
     }
@@ -881,9 +890,11 @@ export async function applyCompanyProposedActivationPatch(companyMongoId, propos
     }
     delete patch.__ownersReplaceRoster;
 
-    const isRenewalRequest = patch?.isRenewalModal === true || patch?.isRenewal === true;
+    const isRenewalRequest =
+        options.isRenewal === true || patch?.isRenewalModal === true || patch?.isRenewal === true;
     if (isRenewalRequest) {
-        await archiveSupersededCompanyDocuments(before, patch);
+        const archiveBaseline = mergeCompanyArchiveBaseline(before, options.previousData);
+        await archiveSupersededCompanyDocuments(archiveBaseline, patch);
     }
     delete patch.isRenewalModal;
     delete patch.isRenewal;

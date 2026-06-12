@@ -188,6 +188,7 @@ export const companyWorkflowSchema = new mongoose.Schema(
                 section: { type: String, default: "" },
                 changeType: { type: String, enum: ["add", "update", "delete", ""], default: "" },
                 targetIndex: { type: Number, default: null },
+                isRenewal: { type: Boolean, default: false },
                 previousData: { type: mongoose.Schema.Types.Mixed, default: null },
                 proposedData: { type: mongoose.Schema.Types.Mixed, default: null },
                 changedAt: { type: Date, default: Date.now },

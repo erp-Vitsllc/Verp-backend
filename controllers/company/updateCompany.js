@@ -20,6 +20,7 @@ import { getSignedFileUrl } from "../../utils/s3Upload.js";
 import {
     calculateCompanyActivationProgress,
     shouldTriggerCompanyReactivation,
+    shouldBypassCompanyActivationHrQueue,
     collectCompanyReactivationChangeLabels,
     upsertPendingReactivationEntry,
     pickCompanyPendingPreviousSnapshot,
@@ -305,7 +306,7 @@ export const updateCompany = async (req, res) => {
 
         const requesterIsAdmin = await isReqUserAdmin(req.user);
         const requesterIsDesignatedHr = await isRequestUserDesignatedFlowchartHr(req);
-        const requesterBypassesHrQueue = requesterIsDesignatedHr;
+        const requesterBypassesHrQueue = await shouldBypassCompanyActivationHrQueue(req);
 
         let clearLiveOwnerDocCard = null;
         let clearOldOwnerDocCard = null;
@@ -909,6 +910,7 @@ export const updateCompany = async (req, res) => {
                 section: "companyProfile",
                 changeType: "update",
                 targetIndex: null,
+                isRenewal: isRenewalRequest,
                 previousData: toSerializable(pickCompanyPendingPreviousSnapshot(beforeCompany, updateData)),
                 proposedData: proposedForQueue,
                 changedAt: new Date(),
@@ -941,6 +943,7 @@ export const updateCompany = async (req, res) => {
                         reason: cardLabel,
                         section: entry.section || "companyProfile",
                         changeType: entry.changeType || "update",
+                        isRenewal: Boolean(pendingEntry.isRenewal || entry.isRenewal),
                         previousData: pendingEntry.previousData,
                         proposedData: pendingEntry.proposedData,
                         changedAt: pendingEntry.changedAt,
@@ -1055,11 +1058,11 @@ export const updateCompany = async (req, res) => {
             );
         }
 
-        if (!queueForApproval) {
+        if (!queueForApproval && !isRenewalRequest) {
             try {
                 await disposeCommittedCompanyProfileAttachmentChanges(req, beforeCompany, updateData, {
                     queueForApproval,
-                    isRenewal: isRenewalRequest,
+                    isRenewal: false,
                 });
             } catch (disposeErr) {
                 console.warn(

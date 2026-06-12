@@ -8,7 +8,8 @@ import {
     clearCompanyWorkflowActivationHold,
     upsertCompanyPartitions,
 } from "../services/companyPartitionService.js";
-import { isActorDesignatedFlowchartHr } from "./isDesignatedFlowchartHr.js";
+import { isActorDesignatedFlowchartHr, isRequestUserDesignatedFlowchartHr } from "./isDesignatedFlowchartHr.js";
+import { isReqUserAdmin } from "./sendAdminDeletionNotificationEmails.js";
 import { resolveFlowchartHrEmployee } from "./resolveFlowchartHrEmployee.js";
 import { syncDashboardAction } from "./syncDashboard.js";
 import {
@@ -930,6 +931,41 @@ const stripOwnerNestedDocs = (owner = {}) => {
 const sliceOwnersBasicOnly = (owners = []) =>
     (Array.isArray(owners) ? owners : []).map((o) => stripOwnerNestedDocs(o));
 
+const COMPANY_RENEWAL_META_KEYS = ["isRenewalModal", "isRenewal"];
+
+/** Preserve renew intent when pending rows are sliced per HR card. */
+export function copyCompanyRenewalMeta(target = {}, source = {}) {
+    const out = target && typeof target === "object" ? { ...target } : {};
+    if (!source || typeof source !== "object") return out;
+    for (const key of COMPANY_RENEWAL_META_KEYS) {
+        if (Object.prototype.hasOwnProperty.call(source, key)) out[key] = source[key];
+    }
+    if (source.isRenewalModal === true || source.isRenewal === true) {
+        out.isRenewalModal = true;
+    }
+    return out;
+}
+
+export function isCompanyPendingChangeRenewal(change = {}) {
+    if (change?.isRenewal === true) return true;
+    const pd = change?.proposedData;
+    return pd?.isRenewalModal === true || pd?.isRenewal === true;
+}
+
+const isHrPortalRole = (user = {}) => {
+    const role = String(user?.role || user?.groupName || "").trim().toLowerCase();
+    return role === "hr" || role === "human resource" || role === "human resources";
+};
+
+/** Admin, HR role, and designated Flowchart HR apply activation-card edits live (renew archives immediately). */
+export async function shouldBypassCompanyActivationHrQueue(req) {
+    if (!req?.user) return false;
+    if (await isReqUserAdmin(req.user)) return true;
+    if (await isRequestUserDesignatedFlowchartHr(req)) return true;
+    if (isHrPortalRole(req.user)) return true;
+    return false;
+}
+
 const pendingPayloadHasContent = (payload = {}) => {
     if (!payload || typeof payload !== "object") return false;
     if (Array.isArray(payload.owners)) return payload.owners.length > 0;
@@ -1009,30 +1045,42 @@ const slicePendingEntryForCard = (entry, cardLabel) => {
     if (label === "owner passport") {
         return {
             ...entry,
+            isRenewal: isCompanyPendingChangeRenewal({ ...entry, proposedData: proposed }),
             card: cardLabel,
             reason: cardLabel,
-            proposedData: { owners: sliceOwnersPassportOnly(proposed.owners) },
+            proposedData: copyCompanyRenewalMeta(
+                { owners: sliceOwnersPassportOnly(proposed.owners) },
+                proposed,
+            ),
             previousData: { owners: sliceOwnersPassportOnly(previous.owners) },
         };
     }
     if (label === "owner emirates id") {
         return {
             ...entry,
+            isRenewal: isCompanyPendingChangeRenewal({ ...entry, proposedData: proposed }),
             card: cardLabel,
             reason: cardLabel,
-            proposedData: { owners: sliceOwnersEmiratesIdOnly(proposed.owners) },
+            proposedData: copyCompanyRenewalMeta(
+                { owners: sliceOwnersEmiratesIdOnly(proposed.owners) },
+                proposed,
+            ),
             previousData: { owners: sliceOwnersEmiratesIdOnly(previous.owners) },
         };
     }
     if (label === "owner details") {
         return {
             ...entry,
+            isRenewal: isCompanyPendingChangeRenewal({ ...entry, proposedData: proposed }),
             card: cardLabel,
             reason: cardLabel,
-            proposedData: {
-                owners: sliceOwnersBasicOnly(proposed.owners),
-                ...(proposed.__ownersReplaceRoster ? { __ownersReplaceRoster: true } : {}),
-            },
+            proposedData: copyCompanyRenewalMeta(
+                {
+                    owners: sliceOwnersBasicOnly(proposed.owners),
+                    ...(proposed.__ownersReplaceRoster ? { __ownersReplaceRoster: true } : {}),
+                },
+                proposed,
+            ),
             previousData: { owners: sliceOwnersBasicOnly(previous.owners) },
         };
     }
@@ -1052,7 +1100,14 @@ const slicePendingEntryForCard = (entry, cardLabel) => {
             if (Array.isArray(src.owners)) out.owners = src.owners;
             return out;
         };
-        return { ...entry, card: cardLabel, reason: cardLabel, proposedData: pick(proposed), previousData: pick(previous) };
+        return {
+            ...entry,
+            isRenewal: isCompanyPendingChangeRenewal({ ...entry, proposedData: proposed }),
+            card: cardLabel,
+            reason: cardLabel,
+            proposedData: copyCompanyRenewalMeta(pick(proposed), proposed),
+            previousData: pick(previous),
+        };
     }
     if (label === "establishment card") {
         const keys = [
@@ -1068,7 +1123,14 @@ const slicePendingEntryForCard = (entry, cardLabel) => {
             }
             return out;
         };
-        return { ...entry, card: cardLabel, reason: cardLabel, proposedData: pick(proposed), previousData: pick(previous) };
+        return {
+            ...entry,
+            isRenewal: isCompanyPendingChangeRenewal({ ...entry, proposedData: proposed }),
+            card: cardLabel,
+            reason: cardLabel,
+            proposedData: copyCompanyRenewalMeta(pick(proposed), proposed),
+            previousData: pick(previous),
+        };
     }
     if (label === "basic details") {
         const keys = ["name", "nickName", "email", "phone", "establishedDate", "companyId"];
@@ -1079,7 +1141,14 @@ const slicePendingEntryForCard = (entry, cardLabel) => {
             }
             return out;
         };
-        return { ...entry, card: cardLabel, reason: cardLabel, proposedData: pick(proposed), previousData: pick(previous) };
+        return {
+            ...entry,
+            isRenewal: isCompanyPendingChangeRenewal({ ...entry, proposedData: proposed }),
+            card: cardLabel,
+            reason: cardLabel,
+            proposedData: copyCompanyRenewalMeta(pick(proposed), proposed),
+            previousData: pick(previous),
+        };
     }
     if (label === "moa") {
         const { changedPropDocs, changedPrevDocs } = collectPendingMoaDocumentChanges(
@@ -1090,13 +1159,21 @@ const slicePendingEntryForCard = (entry, cardLabel) => {
         const previousData = changedPrevDocs.length ? { documents: changedPrevDocs } : {};
         return {
             ...entry,
+            isRenewal: isCompanyPendingChangeRenewal({ ...entry, proposedData: proposed }),
             card: cardLabel,
             reason: cardLabel,
-            proposedData,
+            proposedData: copyCompanyRenewalMeta(proposedData, proposed),
             previousData,
         };
     }
-    return { ...entry, card: cardLabel, reason: cardLabel };
+    return {
+        ...entry,
+        isRenewal: isCompanyPendingChangeRenewal({ ...entry, proposedData: proposed }),
+        card: cardLabel,
+        reason: cardLabel,
+        proposedData: copyCompanyRenewalMeta(proposed, proposed),
+        previousData: copyCompanyRenewalMeta(previous, previous),
+    };
 };
 
 /**
@@ -1138,16 +1215,20 @@ export const upsertPendingReactivationEntry = (existingPending = [], newEntry, c
                 newEntry?.proposedData && typeof newEntry.proposedData === "object"
                     ? JSON.parse(JSON.stringify(newEntry.proposedData))
                     : {};
-            mergedProposed = { ...prior, ...patch };
+            mergedProposed = copyCompanyRenewalMeta({ ...prior, ...patch }, patch);
+            mergedProposed = copyCompanyRenewalMeta(mergedProposed, prior);
             if (Array.isArray(prior.owners) && Array.isArray(patch.owners)) {
                 mergedProposed.owners = mergeCompanyOwnersSnapshot(prior.owners, patch.owners);
             }
         } catch {
             mergedProposed = newEntry.proposedData;
         }
+        const mergedIsRenewal =
+            isCompanyPendingChangeRenewal(entry) || isCompanyPendingChangeRenewal(newEntry);
         return {
             ...entry,
             ...newEntry,
+            isRenewal: mergedIsRenewal,
             card: newEntry.card || entry.card,
             reason: newEntry.reason || entry.reason,
             previousData: prevSnapshot,
