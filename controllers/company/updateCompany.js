@@ -964,7 +964,7 @@ export const updateCompany = async (req, res) => {
             partitionUpdatePayload = { pendingReactivationChanges: nextPending };
             updatedCompany = await company.save();
             responseMessage = isCompanyFullyActivated(beforeCompany)
-                ? "Change queued for HR review. Submit for HR approval when you are finished editing."
+                ? "Change queued for HR review. Submit pending when you are finished editing."
                 : "Company change queued for HR activation approval.";
         } else {
             // Old Documents only on explicit Renew — not on regular card add/edit.

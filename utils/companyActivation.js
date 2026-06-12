@@ -1234,11 +1234,11 @@ export const upsertPendingReactivationEntry = (existingPending = [], newEntry, c
             previousData: prevSnapshot,
             proposedData: mergedProposed,
             changedAt: newEntry.changedAt || entry.changedAt,
-            queuedByUserId: entry.queuedByUserId || newEntry.queuedByUserId || "",
-            queuedByEmployeeId: entry.queuedByEmployeeId || newEntry.queuedByEmployeeId || "",
+            queuedByUserId: newEntry.queuedByUserId || entry.queuedByUserId || "",
+            queuedByEmployeeId: newEntry.queuedByEmployeeId || entry.queuedByEmployeeId || "",
             queuedByEmployeeObjectId:
-                entry.queuedByEmployeeObjectId || newEntry.queuedByEmployeeObjectId || "",
-            queuedByName: entry.queuedByName || newEntry.queuedByName || "",
+                newEntry.queuedByEmployeeObjectId || entry.queuedByEmployeeObjectId || "",
+            queuedByName: newEntry.queuedByName || entry.queuedByName || "",
         };
     });
     if (!merged) next.push(newEntry);
