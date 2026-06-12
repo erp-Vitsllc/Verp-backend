@@ -166,6 +166,17 @@ export async function resolveCurrentCreationApproverForAsset(asset) {
     });
 }
 
+/** Employee/company assignment waiting on accept/reject — not creation approval. */
+export function isAssetAssignmentAcknowledgmentPending(asset) {
+    if (!asset) return false;
+    if (asset.pendingAction) return false;
+    if (String(asset.acceptanceStatus || '') !== 'Pending') return false;
+    if (!(String(asset.status || '') === 'Pending' || String(asset.status || '') === 'Assigned')) {
+        return false;
+    }
+    return !!(asset.assignedTo || asset.assignedCompany);
+}
+
 /**
  * For an asset awaiting creation approval, re-point `actionRequiredBy` and any pending
  * Asset Approval DashboardAction at the *current* role holder when the stored approver is stale.
@@ -175,6 +186,9 @@ export async function resolveCurrentCreationApproverForAsset(asset) {
  */
 export async function syncStaleAssetCreationApprover(asset) {
     if (!asset || !asset._id) return null;
+
+    // Assignment acknowledgments also use status Pending — never replace assignee/reportee routing.
+    if (isAssetAssignmentAcknowledgmentPending(asset)) return null;
 
     const awaiting =
         asset.status === 'Submitted for Approval' ||

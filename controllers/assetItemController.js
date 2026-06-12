@@ -42,6 +42,7 @@ import {
     creationApproverRoleLabel,
     isFleetVehicleAssetFields,
     syncStaleAssetCreationApprover,
+    isAssetAssignmentAcknowledgmentPending,
     rerouteAllPendingAssetCreationApprovals,
 } from '../utils/assetApprovalHelpers.js';
 import AssetAccessoryCatalog from '../models/AssetAccessoryCatalog.js';
@@ -472,17 +473,21 @@ const buildAssetActionApprovalHandoverAttachments = async (req, assets) => {
 const assigneeHasCompanyEmailOnRecord = (emp) =>
     !!(emp?.companyEmail && String(emp.companyEmail).trim().length > 0);
 
+const assigneeCanSelfAcknowledgeAssignment = (emp) =>
+    assigneeHasCompanyEmailOnRecord(emp) || emp?.enablePortalAccess === true;
+
 /**
  * Employee assignment: assignee keeps `assignedTo`; accept task goes to assignee or primary reportee.
- * When assigner === designated acceptor (e.g. AC is also HOD / primary reportee) and assignee has no
- * company email, skip the redundant pending step — asset is directly Assigned to the employee.
+ * When assigner === designated acceptor (e.g. AC is also HOD / primary reportee) and assignee cannot
+ * self-acknowledge, skip the redundant pending step — asset is directly Assigned to the employee.
  */
 const resolveEmployeeAssignmentActors = (employeeToAssign, assignerEmpObjectId) => {
     const assigneeHasCompanyEmail = assigneeHasCompanyEmailOnRecord(employeeToAssign);
+    const assigneeCanSelfAcknowledge = assigneeCanSelfAcknowledgeAssignment(employeeToAssign);
     let pendingActionActorId = employeeToAssign._id;
     let actionRecipientDoc = employeeToAssign;
 
-    if (!assigneeHasCompanyEmail && employeeToAssign.primaryReportee) {
+    if (!assigneeCanSelfAcknowledge && employeeToAssign.primaryReportee) {
         pendingActionActorId =
             employeeToAssign.primaryReportee._id || employeeToAssign.primaryReportee;
         const pr = employeeToAssign.primaryReportee;
@@ -498,10 +503,11 @@ const resolveEmployeeAssignmentActors = (employeeToAssign, assignerEmpObjectId) 
         '';
 
     const autoAcceptOnAssign =
-        !assigneeHasCompanyEmail && !!assignerId && !!actorId && assignerId === actorId;
+        !assigneeCanSelfAcknowledge && !!assignerId && !!actorId && assignerId === actorId;
 
     return {
         assigneeHasCompanyEmail,
+        assigneeCanSelfAcknowledge,
         pendingActionActorId,
         actionRecipientDoc,
         autoAcceptOnAssign,
@@ -3414,6 +3420,63 @@ export const getAssetItemDetail = async (req, res) => {
             console.error('[getAssetItemDetail] creation approver sync failed:', syncErr?.message || syncErr);
         }
 
+        // Heal assignment rows where creation-approver sync previously overwrote assignee routing.
+        if (
+            isAssetAssignmentAcknowledgmentPending(item) &&
+            item.assignedToType === 'Employee' &&
+            item.assignedTo &&
+            !item.pendingAction
+        ) {
+            try {
+                const assigneeDoc =
+                    typeof item.assignedTo === 'object' && item.assignedTo.employeeId
+                        ? item.assignedTo
+                        : await EmployeeBasic.findById(item.assignedTo._id || item.assignedTo)
+                              .select(
+                                  'employeeId firstName lastName companyEmail primaryReportee enablePortalAccess',
+                              )
+                              .populate({
+                                  path: 'primaryReportee',
+                                  select: '_id firstName lastName employeeId companyEmail',
+                              })
+                              .lean();
+                const assignerRef = item.assignedBy?._id || item.assignedBy;
+                const resolved = resolveEmployeeAssignmentActors(assigneeDoc, assignerRef);
+                if (!resolved.autoAcceptOnAssign && resolved.pendingActionActorId) {
+                    const expectedId =
+                        resolved.pendingActionActorId?._id?.toString?.() ||
+                        resolved.pendingActionActorId?.toString?.();
+                    const currentId =
+                        item.actionRequiredBy?._id?.toString?.() ||
+                        item.actionRequiredBy?.toString?.() ||
+                        null;
+                    if (expectedId && currentId !== expectedId) {
+                        await AssetItem.updateOne(
+                            { _id: item._id },
+                            { $set: { actionRequiredBy: resolved.pendingActionActorId } },
+                        );
+                        const healed = await EmployeeBasic.findById(resolved.pendingActionActorId)
+                            .select('firstName lastName employeeId')
+                            .lean();
+                        if (healed) item.actionRequiredBy = healed;
+                        await DashboardAction.findOneAndUpdate(
+                            {
+                                requestId: item._id,
+                                requestType: 'Asset Assignment',
+                                status: 'Pending',
+                            },
+                            {
+                                assignedTo: resolved.pendingActionActorId,
+                                assignedToEmpId: resolved.actionRecipientDoc?.employeeId,
+                            },
+                        );
+                    }
+                }
+            } catch (healErr) {
+                console.error('[getAssetItemDetail] assignment actionRequiredBy heal failed:', healErr?.message || healErr);
+            }
+        }
+
         // acceptedBy (e.g. HR who acknowledged company allocation): ensure names + signature for handover form
         if (item.acceptedBy) {
             const abRaw = item.acceptedBy;
@@ -3972,7 +4035,7 @@ export const assignAssetItem = async (req, res) => {
         } else {
             // Assigning to an Employee (Default)
             employeeToAssign = await EmployeeBasic.findById(assignedTo).select(
-                'employeeId firstName lastName companyEmail workEmail personalEmail email primaryReportee department signature'
+                'employeeId firstName lastName companyEmail workEmail personalEmail email primaryReportee department signature enablePortalAccess'
             ).populate({
                 path: 'primaryReportee',
                 select: '_id firstName lastName employeeId companyEmail workEmail',
@@ -4303,7 +4366,7 @@ export const bulkAssignAssetItems = async (req, res) => {
         }
 
         const employeeToAssign = await EmployeeBasic.findById(assignedTo).select(
-            'employeeId companyEmail workEmail personalEmail email primaryReportee firstName lastName department signature'
+            'employeeId companyEmail workEmail personalEmail email primaryReportee firstName lastName department signature enablePortalAccess'
         ).populate({ path: 'primaryReportee', select: '_id firstName lastName employeeId companyEmail workEmail' });
         if (!employeeToAssign) {
             return res.status(404).json({ message: 'Target employee not found' });
