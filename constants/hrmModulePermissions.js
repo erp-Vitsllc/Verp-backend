@@ -95,6 +95,18 @@ const employeeDocumentsChildren = [
     { id: 'hrm_employees_view_documents_old', label: 'Old Documents', parent: 'hrm_employees_view_documents', hasDownload: true },
 ];
 
+/** Asset permissions — child of HRM in group matrix. */
+export const ASSET_MODULE = {
+    id: 'hrm_asset',
+    label: 'Asset',
+    parent: 'hrm',
+    hasDownload: true,
+    children: [
+        { id: 'hrm_asset_vehicle', label: 'Vehicle Asset', parent: 'hrm_asset', hasDownload: true },
+        { id: 'hrm_asset_tools', label: 'Tools Asset', parent: 'hrm_asset', hasDownload: true },
+    ],
+};
+
 /** Full HRM node for group permission UI (merged into MODULES array). */
 export const HRM_MODULE = {
     id: 'hrm',
@@ -241,7 +253,7 @@ export const HRM_MODULE = {
         { id: 'hrm_fine', label: 'Fine', parent: 'hrm', hasDownload: true },
         { id: 'hrm_loan', label: 'Loan / Advance', parent: 'hrm', hasDownload: true },
         { id: 'hrm_reward', label: 'Reward', parent: 'hrm', hasDownload: true },
-        { id: 'hrm_asset', label: 'Asset', parent: 'hrm', hasDownload: true },
+        ASSET_MODULE,
     ],
 };
 
