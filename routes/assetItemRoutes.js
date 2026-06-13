@@ -4,6 +4,11 @@ import User from '../models/User.js';
 import { createAssetItem, getAssetItems, getVehicleFleetDashboard, getVehicleFleetServiceRequests, getAllAssignedAssets, getMyAssignedAssetsForReturn, getUnassignedAssetsForEmployee, getHRCompanyAssets, getOnLeaveAssetsForEmployee, getOnServiceAssetsForEmployee, runAssetServiceOverdueCheck, handleOnLeaveAction, bulkHandleOnLeaveAction, handleOnServiceAction, bulkHandleOnServiceAction, getAssetItemDetail, assignAssetItem, bulkAssignAssetItems, downloadHandoverPdf, downloadHistoryHandoverPdf, respondToAssignment, bulkRespondToAssignment, getBulkAssignmentPendingGroup, respondBulkAssignmentGroup, getAssetHistory, getHistoryRecord, returnAssetItem, updateAssetStatus, addAssetDocument, updateAssetDocument, deleteAssetDocument, addAssetService, deleteAssetService, submitAssetServiceDraft, addAssetImage, deleteAssetImage, transferAssetAccessory, manageAccessoryStatus, updateAssetItem, deleteAssetItem, endOfLifeAsset, requestAssetAction, bulkRequestAssetAction, handleAssetActionApproval, finalizeAssetAction, uploadAccessoriesAttachment, requestAccessoryAction, respondAccessoryAction, finalizeAccessoryAction, respondToAssetCreation, bulkRespondToAssetCreation, getBulkAssetDetails, getBulkAssetInventoryForPrint, transferAsset, submitDraftForCreationApproval, getPendingAssetDashboardInbox, deletePendingAssetDashboardInboxItem, getEmployeePreviousAssets } from '../controllers/assetItemController.js';
 import { respondVehicleServiceWorkflow, respondVehicleServiceScheduledPeriod } from '../controllers/vehicleServiceWorkflowController.js';
 import {
+    requestOwnerOnDuty,
+    getOwnerOnDutyReview,
+    respondOwnerOnDuty,
+} from '../controllers/ownerOnDutyController.js';
+import {
     submitVehicleProfileActivation,
     approveVehicleProfileActivation,
     holdVehicleProfileActivation,
@@ -590,6 +595,9 @@ router.route('/')
 
 router.get('/dashboard/pending-inbox', protect, getPendingAssetDashboardInbox);
 router.delete('/dashboard/pending-inbox/:id', protect, deletePendingAssetDashboardInboxItem);
+router.post('/owner-on-duty/request', protect, requestOwnerOnDuty);
+router.get('/owner-on-duty/review/:dashboardActionId', protect, getOwnerOnDutyReview);
+router.put('/owner-on-duty/respond', protect, respondOwnerOnDuty);
 router.get('/vehicle-fleet-dashboard', protect, getVehicleFleetDashboard);
 router.get('/vehicle-fleet-service-requests', protect, getVehicleFleetServiceRequests);
 router.get('/assigned/all', protect, getAllAssignedAssets);

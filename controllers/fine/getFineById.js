@@ -5,6 +5,46 @@ import { getDepartmentHOD } from "../../utils/getDepartmentHOD.js";
 import { getManagementHOD } from "../../utils/getManagementHOD.js";
 import { isUserAdministrator } from "../../services/permissionService.js";
 
+/** Fix legacy L&D saves where base was stored as (wrongGrand − serviceCharge). */
+function normalizeFineBaseAmounts(fine) {
+    if (!fine) return fine;
+
+    const sc = parseFloat(fine.serviceCharge || 0);
+    let emp = parseFloat(fine.employeeAmount || 0);
+    const comp = parseFloat(fine.companyAmount || 0);
+
+    if (emp < 0 && sc > 0) {
+        emp = emp + sc;
+        fine.employeeAmount = emp.toFixed(2);
+    }
+
+    const computedTotal = emp + comp + sc;
+    const storedTotal = parseFloat(fine.totalFineAmount || fine.fineAmount || 0);
+    if (computedTotal > 0 && (storedTotal <= 0 || storedTotal < computedTotal - 0.01)) {
+        fine.totalFineAmount = computedTotal.toFixed(2);
+    }
+
+    if (Array.isArray(fine.assignedEmployees) && fine.assignedEmployees.length > 0) {
+        fine.assignedEmployees = fine.assignedEmployees.map((e) => {
+            let rowBase = parseFloat(e.employeeAmount ?? fine.employeeAmount ?? 0);
+            if (rowBase < 0 && sc > 0) rowBase = rowBase + sc;
+            const rowSc = parseFloat(e.serviceCharge ?? fine.serviceCharge ?? 0);
+            const individualAmt = Math.max(
+                parseFloat(e.individualAmount || 0) || 0,
+                rowBase + rowSc,
+            );
+            return {
+                ...e,
+                employeeAmount: rowBase,
+                fineAmount: rowBase,
+                individualAmount: individualAmt,
+            };
+        });
+    }
+
+    return fine;
+}
+
 export const getFineById = async (req, res) => {
     try {
         let { id } = req.params;
@@ -93,11 +133,15 @@ export const getFineById = async (req, res) => {
                         const isCompanyRecord = e.employeeId === 'VEGA-HR-0000';
                         // individualAmount = total (base + service charge) for display
                         let individualAmt = e.individualAmount;
-                        if (!individualAmt) {
-                            individualAmt = (parseFloat(rf.employeeAmount) || 0) + (parseFloat(rf.companyAmount) || 0) + (parseFloat(rf.serviceCharge) || 0);
+                        const baseEmp = parseFloat(rf.employeeAmount) || 0;
+                        const baseComp = parseFloat(rf.companyAmount) || 0;
+                        const sc = parseFloat(rf.serviceCharge) || 0;
+                        const expectedWithSc = baseEmp + baseComp + sc;
+                        if (!individualAmt || parseFloat(individualAmt) < expectedWithSc - 0.01) {
+                            individualAmt = expectedWithSc;
                         }
                         // Base amount (without service charge) - for edit form per-person input
-                        const baseAmount = parseFloat(rf.employeeAmount) || 0;
+                        const baseAmount = baseEmp;
                         return {
                             ...e,
                             fineId: rf.fineId,
@@ -158,12 +202,23 @@ export const getFineById = async (req, res) => {
             }
             // Enrich assignedEmployees for edit: add employeeAmount (base) per person
             if (fine.assignedEmployees && fine.assignedEmployees.length > 0) {
-                fine.assignedEmployees = fine.assignedEmployees.map(e => ({
-                    ...e,
-                    employeeAmount: e.employeeAmount ?? fine.employeeAmount,
-                    fineAmount: (e.employeeAmount ?? fine.employeeAmount) ?? e.fineAmount,
-                    payableDuration: e.payableDuration ?? fine.payableDuration
-                }));
+                fine.assignedEmployees = fine.assignedEmployees.map(e => {
+                    const baseEmp = parseFloat(e.employeeAmount ?? fine.employeeAmount ?? 0);
+                    const baseComp = parseFloat(e.companyAmount ?? fine.companyAmount ?? 0);
+                    const sc = parseFloat(fine.serviceCharge || 0);
+                    const expectedWithSc = baseEmp + baseComp + sc;
+                    let individualAmt = e.individualAmount;
+                    if (!individualAmt || parseFloat(individualAmt) < expectedWithSc - 0.01) {
+                        individualAmt = expectedWithSc;
+                    }
+                    return {
+                        ...e,
+                        employeeAmount: e.employeeAmount ?? fine.employeeAmount,
+                        fineAmount: (e.employeeAmount ?? fine.employeeAmount) ?? e.fineAmount,
+                        individualAmount: individualAmt,
+                        payableDuration: e.payableDuration ?? fine.payableDuration
+                    };
+                });
             }
         }
 
@@ -179,12 +234,7 @@ export const getFineById = async (req, res) => {
         }
 
         // Ensure totalFineAmount is always set (fallback for any edge cases)
-        if (!fine.totalFineAmount) {
-            const empAmt = parseFloat(fine.employeeAmount || 0);
-            const compAmt = parseFloat(fine.companyAmount || 0);
-            const servCharge = parseFloat(fine.serviceCharge || 0);
-            fine.totalFineAmount = (empAmt + compAmt + servCharge).toFixed(2);
-        }
+        normalizeFineBaseAmounts(fine);
 
         // Generate signed URL if attachment exists
         if (fine.attachment?.publicId) {

@@ -9,11 +9,14 @@ import { protect } from "../middleware/authMiddleware.js";
 import { checkPermission } from "../middleware/permissionMiddleware.js";
 
 import { downloadFinePdf } from "../controllers/fine/downloadFinePdf.js";
+import { getPendingFineDashboardInbox } from "../controllers/fine/getPendingFineDashboardInbox.js";
 
 const router = express.Router();
 
 // All fine routes require authentication
 router.use(protect);
+
+router.get("/dashboard/pending-inbox", getPendingFineDashboardInbox);
 
 // Get all fines - temporarily open for all authenticated users
 router.get("/", getFines);

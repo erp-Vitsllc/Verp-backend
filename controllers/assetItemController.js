@@ -514,13 +514,81 @@ const resolveEmployeeAssignmentActors = (employeeToAssign, assignerEmpObjectId) 
     };
 };
 
-const applyAcceptedAssignmentState = (item, acceptedByEmpObjectId) => {
-    item.status = 'Assigned';
+const normalizeAssetStatusKey = (status) => String(status || '').toLowerCase().trim();
+
+const isParkingStatus = (status) => normalizeAssetStatusKey(status) === 'on leave';
+
+const isServiceOperationalStatus = (status) => {
+    const key = normalizeAssetStatusKey(status);
+    return key === 'service' || key === 'on service' || key === 'waiting for service' || key === 'maintenance';
+};
+
+const hasActiveParkingContext = (item) =>
+    isParkingStatus(item?.status) ||
+    item?.onLeaveEndDate != null ||
+    item?.onLeaveStartDate != null ||
+    (item?.onLeaveDuration != null && item?.onLeaveDuration !== '');
+
+const snapshotParkingFields = (item) => ({
+    onLeaveStartDate: item?.onLeaveStartDate ?? null,
+    onLeaveEndDate: item?.onLeaveEndDate ?? null,
+    onLeaveDuration: item?.onLeaveDuration ?? null,
+    parkingExtendedDays: item?.parkingExtendedDays ?? 0,
+    parkingReminderSentAt: item?.parkingReminderSentAt ?? null,
+    parkingDurationCompleteSentAt: item?.parkingDurationCompleteSentAt ?? null,
+});
+
+const restoreParkingFields = (item, snapshot) => {
+    if (!snapshot) return;
+    item.onLeaveStartDate = snapshot.onLeaveStartDate ?? null;
+    item.onLeaveEndDate = snapshot.onLeaveEndDate ?? null;
+    item.onLeaveDuration = snapshot.onLeaveDuration ?? null;
+    item.parkingExtendedDays = snapshot.parkingExtendedDays ?? 0;
+    item.parkingReminderSentAt = snapshot.parkingReminderSentAt ?? null;
+    item.parkingDurationCompleteSentAt = snapshot.parkingDurationCompleteSentAt ?? null;
+};
+
+const resolvePostServiceStatus = (item, serviceRecord) => {
+    const before = serviceRecord?.statusBeforeService;
+    if (before && isParkingStatus(before)) return 'On Leave';
+    if (hasActiveParkingContext(item)) return 'On Leave';
+    return item.assignedTo ? 'Assigned' : 'Unassigned';
+};
+
+const applyParkingLeaveStatus = (item, leaveDays) => {
+    if (isServiceOperationalStatus(item.status)) {
+        return false;
+    }
+    if (hasActiveParkingContext(item)) {
+        return false;
+    }
+    if (!leaveDays) return false;
+    const start = new Date();
+    const end = new Date(start);
+    end.setDate(end.getDate() + leaveDays);
+    item.status = 'On Leave';
+    item.onLeaveStartDate = start;
+    item.onLeaveDuration = leaveDays;
+    item.onLeaveEndDate = end;
+    item.parkingExtendedDays = 0;
+    item.parkingReminderSentAt = null;
+    return true;
+};
+
+const applyAcceptedAssignmentState = (item, acceptedByEmpObjectId, options = {}) => {
+    const { preserveParking = false, preserveServiceStatus = null } = options;
+    if (preserveParking) {
+        item.status = 'On Leave';
+    } else if (preserveServiceStatus) {
+        item.status = preserveServiceStatus;
+    } else {
+        item.status = 'Assigned';
+    }
     item.acceptanceStatus = 'Accepted';
     item.actionRequiredBy = null;
     item.acceptedBy = acceptedByEmpObjectId;
 
-    if (item.assignmentType === 'Temporary' && item.assignedDays) {
+    if (!preserveParking && item.assignmentType === 'Temporary' && item.assignedDays) {
         const parsedDays = Number(item.assignedDays);
         const start = new Date();
         const end = new Date(start);
@@ -1882,7 +1950,7 @@ export const handleOnServiceAction = async (req, res) => {
                 });
             }
         } else if (action === 'Return' || action === 'Live') {
-            item.status = item.assignedTo ? 'Assigned' : 'Unassigned';
+            item.status = resolvePostServiceStatus(item, currentService);
             if (currentService.durationCompleteSentAt == null) {
                 currentService.durationCompleteSentAt = new Date();
             }
@@ -2045,7 +2113,9 @@ export const bulkHandleOnServiceAction = async (req, res) => {
                         });
                     }
                 } else if (action === 'Return' || action === 'Live') {
-                    item.status = item.assignedTo ? 'Assigned' : 'Unassigned';
+                    const prevServiceStatus = item.status;
+                    const nextStatus = resolvePostServiceStatus(item, currentService);
+                    item.status = nextStatus;
                     if (currentService.durationCompleteSentAt == null) {
                         currentService.durationCompleteSentAt = new Date();
                     }
@@ -2064,8 +2134,8 @@ export const bulkHandleOnServiceAction = async (req, res) => {
                         details: buildServiceReceiveHistoryDetails({
                             action: action === 'Live' ? 'live' : 'return',
                             currentService,
-                            prevStatus: item.status,
-                            nextStatus: item.assignedTo ? 'Assigned' : 'Unassigned',
+                            prevStatus: prevServiceStatus,
+                            nextStatus,
                             isBulk: true,
                         }),
                     });
@@ -3910,9 +3980,17 @@ export const assignAssetItem = async (req, res) => {
             return res.status(404).json({ message: 'Asset not found' });
         }
 
+        if (isParkingStatus(item.status)) {
+            return res.status(400).json({
+                message: 'Assets on leave cannot be transferred or reassigned. Use Return or Loss & Damage only.',
+            });
+        }
+
         // Check if this is a reassignment (asset was previously assigned)
         const isReassignment = item.status === 'Assigned' && (item.assignedTo || item.assignedCompany);
-        const isParkingReassignment = item.status === 'On Leave' && item.assignedToType === 'Employee' && !!item.assignedTo;
+        const isServiceReassignment =
+            isServiceOperationalStatus(item.status) && item.assignedToType === 'Employee' && !!item.assignedTo;
+        const preservedServiceStatus = isServiceReassignment ? item.status : null;
         let previousAssignee = null;
         let previousAssigneeType = null;
         let newAssignee = null;
@@ -3929,12 +4007,13 @@ export const assignAssetItem = async (req, res) => {
             }
         }
 
-        if (isParkingReassignment) {
+        if (isServiceReassignment) {
             const oldAssignedToId = (item.assignedTo?._id || item.assignedTo)?.toString?.() || null;
             item.pendingActionDetails = {
                 ...(item.pendingActionDetails || {}),
-                parkingReassignContext: {
-                    isParkingReassign: true,
+                serviceReassignContext: {
+                    isServiceReassign: true,
+                    preservedStatus: preservedServiceStatus,
                     oldAssignedTo: oldAssignedToId,
                     oldAssignedBy: (item.assignedBy?._id || item.assignedBy)?.toString?.() || null,
                     oldAssignmentType: item.assignmentType || null,
@@ -3942,7 +4021,7 @@ export const assignAssetItem = async (req, res) => {
                     oldAssignedDate: item.assignedDate || null,
                     oldTemporaryEndDate: item.temporaryEndDate || null,
                     oldTemporaryReminderSentAt: item.temporaryReminderSentAt || null,
-                    oldTemporaryExpiredSentAt: item.temporaryExpiredSentAt || null
+                    oldTemporaryExpiredSentAt: item.temporaryExpiredSentAt || null,
                 }
             };
         }
@@ -3985,8 +4064,8 @@ export const assignAssetItem = async (req, res) => {
             return res.status(403).json({ message: "Only Asset Controller or Admin can manage unassigned assets." });
         }
 
-        // New assignments from the pool (not reassignment / parking handoff) must start from Unassigned only.
-        if (!isReassignment && !isParkingReassignment && item.status !== 'Unassigned') {
+        // New assignments from the pool (not reassignment / parking / service handoff) must start from Unassigned only.
+        if (!isReassignment && !isServiceReassignment && item.status !== 'Unassigned') {
             return res.status(400).json({
                 message: 'Assets can only be assigned from Unassigned status.'
             });
@@ -4073,13 +4152,19 @@ export const assignAssetItem = async (req, res) => {
                             'Cannot assign: The employee must have a digital signature on their profile before direct assignment.',
                     });
                 }
-                applyAcceptedAssignmentState(item, employeeToAssign._id);
+                applyAcceptedAssignmentState(item, employeeToAssign._id, {
+                    preserveServiceStatus: preservedServiceStatus,
+                });
                 actionRequiredBy = null;
             } else {
-                item.status = 'Pending';
                 item.acceptanceStatus = 'Pending';
                 item.actionRequiredBy = resolvedActors.pendingActionActorId;
                 actionRequiredBy = resolvedActors.pendingActionActorId;
+                if (isServiceReassignment) {
+                    item.status = preservedServiceStatus;
+                } else {
+                    item.status = 'Pending';
+                }
             }
 
             actionRecipient = actionRecipientDoc;
@@ -4993,6 +5078,7 @@ export const respondToAssignment = async (req, res) => {
         };
 
         const parkingCtx = item.pendingActionDetails?.parkingReassignContext;
+        const serviceCtx = item.pendingActionDetails?.serviceReassignContext;
 
         if (action === 'Reject') {
             await notifyParties();
@@ -5041,12 +5127,32 @@ export const respondToAssignment = async (req, res) => {
                 item.temporaryEndDate = parkingCtx.oldTemporaryEndDate ?? item.temporaryEndDate;
                 item.temporaryReminderSentAt = parkingCtx.oldTemporaryReminderSentAt ?? item.temporaryReminderSentAt;
                 item.temporaryExpiredSentAt = parkingCtx.oldTemporaryExpiredSentAt ?? item.temporaryExpiredSentAt;
+                restoreParkingFields(item, parkingCtx.parkingSnapshot);
                 item.acceptanceStatus = 'Accepted';
                 item.actionRequiredBy = null;
                 item.negotiationHistory = [];
                 item.pendingAction = null;
                 if (item.pendingActionDetails?.parkingReassignContext) {
                     delete item.pendingActionDetails.parkingReassignContext;
+                }
+            } else if (serviceCtx?.isServiceReassign && serviceCtx?.oldAssignedTo) {
+                item.status = serviceCtx.preservedStatus || item.status;
+                item.assignedToType = 'Employee';
+                item.assignedTo = serviceCtx.oldAssignedTo;
+                item.assignedCompany = null;
+                item.assignedBy = serviceCtx.oldAssignedBy || item.assignedBy;
+                item.assignmentType = serviceCtx.oldAssignmentType || item.assignmentType;
+                item.assignedDays = serviceCtx.oldAssignedDays ?? item.assignedDays;
+                item.assignedDate = serviceCtx.oldAssignedDate ?? item.assignedDate;
+                item.temporaryEndDate = serviceCtx.oldTemporaryEndDate ?? item.temporaryEndDate;
+                item.temporaryReminderSentAt = serviceCtx.oldTemporaryReminderSentAt ?? item.temporaryReminderSentAt;
+                item.temporaryExpiredSentAt = serviceCtx.oldTemporaryExpiredSentAt ?? item.temporaryExpiredSentAt;
+                item.acceptanceStatus = 'Accepted';
+                item.actionRequiredBy = null;
+                item.negotiationHistory = [];
+                item.pendingAction = null;
+                if (item.pendingActionDetails?.serviceReassignContext) {
+                    delete item.pendingActionDetails.serviceReassignContext;
                 }
             } else {
                 item.status = 'Unassigned';
@@ -5080,15 +5186,22 @@ export const respondToAssignment = async (req, res) => {
             }
 
             if (action === 'Accept') {
-                // When accepting a parking (On Leave) reassignment, the asset must stay in "On Leave".
-                item.status = parkingCtx?.isParkingReassign ? 'On Leave' : 'Assigned';
+                // Parking reassignment stays On Leave; service reassignment keeps service status.
+                if (parkingCtx?.isParkingReassign) {
+                    item.status = 'On Leave';
+                    restoreParkingFields(item, parkingCtx.parkingSnapshot);
+                } else if (serviceCtx?.isServiceReassign) {
+                    item.status = serviceCtx.preservedStatus || item.status;
+                } else {
+                    item.status = 'Assigned';
+                }
                 item.acceptanceStatus = 'Accepted';
                 item.actionRequiredBy = null;
                 item.acceptedBy = req.user.employeeObjectId;
 
                 // Temporary assignment expiration applies only to normal "Assigned" assets,
-                // not parking reassignment (On Leave) assets.
-                if (!parkingCtx?.isParkingReassign) {
+                // not parking or service reassignment.
+                if (!parkingCtx?.isParkingReassign && !serviceCtx?.isServiceReassign) {
                     if (item.assignmentType === 'Temporary' && item.assignedDays) {
                         const parsedDays = Number(item.assignedDays);
                         const start = item.assignedDate ? new Date(item.assignedDate) : new Date();
@@ -5104,14 +5217,20 @@ export const respondToAssignment = async (req, res) => {
                         item.temporaryReminderSentAt = null;
                         item.temporaryExpiredSentAt = null;
                     }
-                } else {
-                    // Clear temporary-assignment fields when the asset is staying "On Leave".
-                    item.assignmentType = null;
-                    item.assignedDays = null;
-                    item.assignedDate = null;
-                    item.temporaryEndDate = null;
-                    item.temporaryReminderSentAt = null;
-                    item.temporaryExpiredSentAt = null;
+                } else if (parkingCtx?.isParkingReassign) {
+                    item.assignmentType = parkingCtx.oldAssignmentType ?? item.assignmentType;
+                    item.assignedDays = parkingCtx.oldAssignedDays ?? item.assignedDays;
+                    item.assignedDate = parkingCtx.oldAssignedDate ?? item.assignedDate;
+                    item.temporaryEndDate = parkingCtx.oldTemporaryEndDate ?? item.temporaryEndDate;
+                    item.temporaryReminderSentAt = parkingCtx.oldTemporaryReminderSentAt ?? item.temporaryReminderSentAt;
+                    item.temporaryExpiredSentAt = parkingCtx.oldTemporaryExpiredSentAt ?? item.temporaryExpiredSentAt;
+                } else if (serviceCtx?.isServiceReassign) {
+                    item.assignmentType = serviceCtx.oldAssignmentType ?? item.assignmentType;
+                    item.assignedDays = serviceCtx.oldAssignedDays ?? item.assignedDays;
+                    item.assignedDate = serviceCtx.oldAssignedDate ?? item.assignedDate;
+                    item.temporaryEndDate = serviceCtx.oldTemporaryEndDate ?? item.temporaryEndDate;
+                    item.temporaryReminderSentAt = serviceCtx.oldTemporaryReminderSentAt ?? item.temporaryReminderSentAt;
+                    item.temporaryExpiredSentAt = serviceCtx.oldTemporaryExpiredSentAt ?? item.temporaryExpiredSentAt;
                 }
 
                 // Parking reassignment accepted: notify old assignee.
@@ -5143,6 +5262,9 @@ export const respondToAssignment = async (req, res) => {
 
                 if (item.pendingActionDetails?.parkingReassignContext) {
                     delete item.pendingActionDetails.parkingReassignContext;
+                }
+                if (item.pendingActionDetails?.serviceReassignContext) {
+                    delete item.pendingActionDetails.serviceReassignContext;
                 }
             }
 
@@ -6717,6 +6839,7 @@ export const updateAssetStatus = async (req, res) => {
             item.actionRequiredBy = null;
             item.negotiationHistory = [];
         } else if (status === 'Service') {
+            const statusBeforeService = item.status;
             item.status = 'Service';
 
             // Calculate expiry date if duration is provided
@@ -6741,7 +6864,8 @@ export const updateAssetStatus = async (req, res) => {
                 expiryDate: expiryDate,
                 serviceDuration: serviceDuration || null,
                 description: description || note || null,
-                requestedBy: req.user.employeeObjectId
+                requestedBy: req.user.employeeObjectId,
+                statusBeforeService: statusBeforeService || null,
             };
 
             // Upload invoice if provided (base64)
@@ -6777,8 +6901,8 @@ export const updateAssetStatus = async (req, res) => {
             item.services.push(serviceRecord);
 
         } else if (status === 'Live') {
-            // Restore from Service back to previous status
-            item.status = item.assignedTo ? 'Assigned' : 'Unassigned';
+            const openService = item.services?.length ? item.services[item.services.length - 1] : null;
+            item.status = resolvePostServiceStatus(item, openService);
 
             // Add completion record if data provided
             if (serviceReport || amount) {
@@ -7990,6 +8114,12 @@ export const requestAssetAction = async (req, res) => {
             return res.status(404).json({ message: 'Asset not found' });
         }
 
+        if (originalActionType === 'Leave' && hasActiveParkingContext(asset)) {
+            return res.status(400).json({
+                message: 'Asset is already on leave and cannot be transferred again. Use Return or Loss & Damage only.',
+            });
+        }
+
         // Permission: asset controller/admin OR assignee
         // Also allow assigner + primary reportee delegation
         const actorFlags = await getActorPermissionFlagsForAsset(req.user, asset);
@@ -8024,17 +8154,34 @@ export const requestAssetAction = async (req, res) => {
                 if (!leaveDays) {
                     return res.status(400).json({ message: 'Leave duration is required.' });
                 }
-                const start = new Date();
-                const end = new Date(start);
-                end.setDate(end.getDate() + leaveDays);
+                if (isServiceOperationalStatus(asset.status)) {
+                    asset.acceptanceStatus = 'Accepted';
+                    asset.pendingAction = null;
+                    asset.pendingActionDetails = null;
+                    asset.actionRequiredBy = null;
+                    asset.negotiationHistory = [];
+                    await asset.save();
+                    await AssetHistory.create({
+                        assetId: asset._id,
+                        action: 'Comment',
+                        performedBy: req.user.employeeObjectId || req.user._id,
+                        comments: 'Leave/parking skipped: asset remains on service until Mark Live or Return.',
+                        date: new Date(),
+                        details: { status: 'OnServiceUnchanged', originalAction: originalActionType }
+                    });
+                    return res.status(200).json({
+                        message: 'Asset is on service; parking not applied (status unchanged).',
+                        asset
+                    });
+                }
+                if (hasActiveParkingContext(asset)) {
+                    return res.status(400).json({
+                        message: 'Asset is already on leave and cannot be transferred again. Use Return or Loss & Damage only.',
+                    });
+                }
 
-                asset.status = 'On Leave';
+                applyParkingLeaveStatus(asset, leaveDays);
                 asset.acceptanceStatus = 'Accepted';
-                asset.onLeaveStartDate = start;
-                asset.onLeaveDuration = leaveDays;
-                asset.onLeaveEndDate = end;
-                asset.parkingExtendedDays = 0;
-                asset.parkingReminderSentAt = null;
 
                 // Clear any pending request fields (if present)
                 asset.pendingAction = null;
@@ -8157,7 +8304,14 @@ export const requestAssetAction = async (req, res) => {
 
         // actionRequiredBy references EmployeeBasic, so use EmployeeBasic._id
         asset.actionRequiredBy = nextApprover._id;
-        asset.status = 'Pending';
+        if (
+            originalActionType === 'Leave' &&
+            (isParkingStatus(asset.status) || isServiceOperationalStatus(asset.status))
+        ) {
+            // Parking and on-service assets keep their operational status while leave is pending approval.
+        } else {
+            asset.status = 'Pending';
+        }
 
         await asset.save();
 
@@ -8275,17 +8429,38 @@ export const bulkRequestAssetAction = async (req, res) => {
                     if (!leaveDays) {
                         return res.status(400).json({ message: 'Leave duration is required.' });
                     }
-                    const start = new Date();
-                    const end = new Date(start);
-                    end.setDate(end.getDate() + leaveDays);
+                    if (isServiceOperationalStatus(currentAsset.status)) {
+                        currentAsset.pendingAction = null;
+                        currentAsset.pendingActionDetails = null;
+                        currentAsset.actionRequiredBy = null;
+                        currentAsset.negotiationHistory = [];
+                        await currentAsset.save();
+                        await AssetHistory.create({
+                            assetId: currentAsset._id,
+                            action: 'Comment',
+                            performedBy: req.user.employeeObjectId || req.user._id,
+                            comments: 'Bulk leave skipped: asset remains on service until Mark Live or Return.',
+                            date: new Date(),
+                            details: { status: 'OnServiceUnchanged', originalAction: originalActionType, isBulk: true }
+                        });
+                        processed.push(currentAsset);
+                        continue;
+                    }
+                    if (hasActiveParkingContext(currentAsset)) {
+                        await AssetHistory.create({
+                            assetId: currentAsset._id,
+                            action: 'Comment',
+                            performedBy: req.user.employeeObjectId || req.user._id,
+                            comments: 'Bulk leave skipped: asset is already on leave and cannot be transferred again.',
+                            date: new Date(),
+                            details: { status: 'OnLeaveUnchanged', originalAction: originalActionType, isBulk: true }
+                        });
+                        processed.push(currentAsset);
+                        continue;
+                    }
 
-                    currentAsset.status = 'On Leave';
+                    applyParkingLeaveStatus(currentAsset, leaveDays);
                     currentAsset.acceptanceStatus = 'Accepted';
-                    currentAsset.onLeaveStartDate = start;
-                    currentAsset.onLeaveDuration = leaveDays;
-                    currentAsset.onLeaveEndDate = end;
-                    currentAsset.parkingExtendedDays = 0;
-                    currentAsset.parkingReminderSentAt = null;
 
                     currentAsset.pendingAction = null;
                     currentAsset.pendingActionDetails = null;
@@ -8765,29 +8940,37 @@ export const handleAssetActionApproval = async (req, res) => {
                     }
                     // Process "Leave" action
                     else if (op === 'leave') {
-                        currentAsset.status = 'On Leave';
-                        // Keep assignedTo as is (don't remove it)
-
-                        // Store duration if provided in pendingActionDetails
                         const leaveDuration = currentAsset.pendingActionDetails?.duration || currentAsset.pendingActionDetails?.leaveDuration;
-                        if (leaveDuration) {
-                            currentAsset.onLeaveStartDate = new Date();
-                            currentAsset.onLeaveDuration = leaveDuration; // Duration in days
-                            const endDate = new Date();
-                            endDate.setDate(endDate.getDate() + leaveDuration);
-                            currentAsset.onLeaveEndDate = endDate;
-                            currentAsset.parkingExtendedDays = 0;
-                            currentAsset.parkingReminderSentAt = null;
-                        }
+                        if (isServiceOperationalStatus(currentAsset.status)) {
+                            await AssetHistory.create({
+                                assetId: currentAsset._id,
+                                action: 'Comment',
+                                performedBy: req.user._id,
+                                comments: `Asset Controller approved "${actionType}"${isBulkTransfer ? ' (Bulk Transfer)' : ''}. Asset remains on service (parking not applied). ${comment || ''}`,
+                                date: new Date(),
+                                details: { status: 'OnServiceUnchanged', originalAction: actionType, isBulk: isBulkTransfer }
+                            });
+                        } else if (hasActiveParkingContext(currentAsset)) {
+                            await AssetHistory.create({
+                                assetId: currentAsset._id,
+                                action: 'Comment',
+                                performedBy: req.user._id,
+                                comments: `Asset Controller approved "${actionType}"${isBulkTransfer ? ' (Bulk Transfer)' : ''}. Asset is already on leave; transfer not applied. ${comment || ''}`,
+                                date: new Date(),
+                                details: { status: 'OnLeaveUnchanged', originalAction: actionType, isBulk: isBulkTransfer }
+                            });
+                        } else {
+                            applyParkingLeaveStatus(currentAsset, leaveDuration);
 
-                        await AssetHistory.create({
-                            assetId: currentAsset._id,
-                            action: 'On Leave',
-                            performedBy: req.user._id,
-                            comments: `Asset Controller approved "${actionType}"${isBulkTransfer ? ' (Bulk Transfer)' : ''}. Asset placed on leave${leaveDuration ? ` for ${leaveDuration} day(s)` : ''}. ${comment || ''}`,
-                            date: new Date(),
-                            details: { status: 'ApprovedAndFinalized', originalAction: actionType, isBulk: isBulkTransfer, duration: leaveDuration }
-                        });
+                            await AssetHistory.create({
+                                assetId: currentAsset._id,
+                                action: 'On Leave',
+                                performedBy: req.user._id,
+                                comments: `Asset Controller approved "${actionType}"${isBulkTransfer ? ' (Bulk Transfer)' : ''}. Asset placed on leave${leaveDuration ? ` for ${leaveDuration} day(s)` : ''}. ${comment || ''}`,
+                                date: new Date(),
+                                details: { status: 'ApprovedAndFinalized', originalAction: actionType, isBulk: isBulkTransfer, duration: leaveDuration }
+                            });
+                        }
                     }
                     // Process "End of Life" / End of Services (store return)
                     else if (op === 'eos' || op === 'eol') {
@@ -8914,7 +9097,13 @@ export const handleAssetActionApproval = async (req, res) => {
                         for (const rid of rejectedFromBulk) {
                             const rejAsset = byIdRej.get(String(rid));
                             if (!rejAsset) continue;
-                            rejAsset.status = rejAsset.assignedTo ? 'Assigned' : 'Unassigned';
+                            if (isServiceOperationalStatus(rejAsset.status)) {
+                                // keep service status
+                            } else if (isParkingStatus(rejAsset.status) || hasActiveParkingContext(rejAsset)) {
+                                rejAsset.status = 'On Leave';
+                            } else {
+                                rejAsset.status = rejAsset.assignedTo ? 'Assigned' : 'Unassigned';
+                            }
                             rejAsset.pendingAction = null;
                             rejAsset.pendingActionDetails = null;
                             rejAsset.actionRequiredBy = null;
@@ -11149,6 +11338,16 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
 
         const allIdSet = new Set();
         for (const da of unique) {
+            if (da.requestType === 'Asset Owner On Duty') {
+                const meta = parseExtra3(da.extra3);
+                if (Array.isArray(meta?.parkingAssetIds)) {
+                    meta.parkingAssetIds.forEach((id) => {
+                        const s = oidStr(id);
+                        if (validOid(s)) allIdSet.add(s);
+                    });
+                }
+                continue;
+            }
             if (da.requestId) allIdSet.add(da.requestId.toString());
             const { isBulk, bulkAssetIds } = resolveBulkIdsFromExtra3(da);
             if (isBulk && bulkAssetIds.length) {
