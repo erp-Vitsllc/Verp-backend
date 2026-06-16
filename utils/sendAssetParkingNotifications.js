@@ -54,17 +54,26 @@ const buildLeaveExpiryHtml = ({ asset, recipient, expiresToday }) => {
     `;
 };
 
-export const sendParkingReminderEmail = async ({ asset, assignedEmployee, assetController, daysLeft }) => {
+export const sendParkingReminderEmail = async ({
+    asset,
+    assignedEmployee,
+    assetController,
+    hodEmployee,
+    packedCustodian,
+    daysLeft,
+}) => {
     try {
-        const recipients = [assignedEmployee, assetController].filter(Boolean);
+        const recipients = [assignedEmployee, hodEmployee, packedCustodian, assetController].filter(Boolean);
+        const seen = new Set();
         for (const emp of recipients) {
             const { email } = resolveEmployeeEmail(emp);
-            if (!email) continue;
+            if (!email || seen.has(email)) continue;
+            seen.add(email);
             await sendOperationalExpiryMail({
                 to: email,
                 subject: `Reminder: On Leave ends in ${daysLeft} day(s) for ${asset.assetId}`,
-                html: `<p>Asset <strong>${asset.assetId} - ${asset.name}</strong> is On Leave and will expire in <strong>${daysLeft} day(s)</strong>.</p>
-                       <p>Please take action before expiry.</p>
+                html: `<p>Asset <strong>${asset.assetId} - ${asset.name}</strong> is On Leave and will expire in <strong>${daysLeft} day(s)</strong> (${asset.onLeaveEndDate ? new Date(asset.onLeaveEndDate).toLocaleDateString('en-GB') : '—'}).</p>
+                       <p>Please extend the duration or mark the asset On Duty before expiry. Maximum total leave duration is 40 days.</p>
                        <p><a href="${assetDetailUrl(asset)}">Open asset in VeRP</a></p>`,
             });
         }
@@ -99,6 +108,35 @@ export const sendParkingDurationCompleteEmail = async ({
     }
 };
 
+export const sendLeaveAutoUnassignedEmail = async ({ asset, parties = [], packedRole = null }) => {
+    try {
+        const seen = new Set();
+        const custodyLabel =
+            packedRole === 'hod'
+                ? 'HOD'
+                : packedRole === 'controller'
+                  ? 'Asset Controller'
+                  : 'custodian';
+
+        for (const emp of parties) {
+            const { email } = resolveEmployeeEmail(emp);
+            if (!email || seen.has(email)) continue;
+            seen.add(email);
+            await sendOperationalExpiryMail({
+                to: email,
+                subject: `On Leave expired — ${asset.assetId} moved to Unassigned`,
+                html: `<p>Hello <strong>${emp?.firstName || 'there'}</strong>,</p>
+                       <p>The On Leave period for <strong>${asset.assetId} — ${asset.name}</strong> has ended (maximum 40 days total).</p>
+                       <p>The packed asset held by the ${custodyLabel} has been automatically marked <strong>Unassigned</strong> and returned to the Asset Controller pool.</p>
+                       <p><a href="${assetDetailUrl(asset)}">Open asset in VeRP</a></p>`,
+            });
+        }
+    } catch (e) {
+        console.error('[sendLeaveAutoUnassignedEmail] Non-fatal error:', e?.message || e);
+    }
+};
+
+/** @deprecated Use sendLeaveAutoUnassignedEmail */
 export const sendParkingExpiredEmail = async ({ asset, assignedEmployee, assetController }) => {
     try {
         for (const emp of [assignedEmployee, assetController].filter(Boolean)) {

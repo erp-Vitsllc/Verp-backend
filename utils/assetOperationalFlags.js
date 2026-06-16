@@ -6,6 +6,9 @@
 /** Maximum total leave / parking duration (initial + extensions). */
 export const MAX_ASSET_LEAVE_DAYS = 40;
 
+/** Dashboard + email reminder this many days before on-leave end date. */
+export const ON_LEAVE_ADVANCE_NOTICE_DAYS = 5;
+
 /** Maximum total service duration (initial request + extensions). */
 export const MAX_ASSET_SERVICE_DAYS = 30;
 
@@ -53,6 +56,17 @@ export const isServiceOperationalStatus = (statusOrItem) => {
 
 export const hasActiveParkingContext = (item) => isLeaveActive(item);
 
+/** Shown when transfer / reassignment is attempted while asset is on leave. */
+export const ON_LEAVE_TRANSFER_BLOCKED_MESSAGE =
+    'Assets on leave cannot be transferred. Only Return and Loss & Damage are allowed.';
+
+export const assertAssetNotOnLeaveForTransfer = (item) => {
+    if (hasActiveParkingContext(item)) {
+        return { ok: false, message: ON_LEAVE_TRANSFER_BLOCKED_MESSAGE };
+    }
+    return { ok: true };
+};
+
 export const snapshotParkingFields = (item) => ({
     onLeaveActive: item?.onLeaveActive === true,
     onLeaveStartDate: item?.onLeaveStartDate ?? null,
@@ -61,6 +75,9 @@ export const snapshotParkingFields = (item) => ({
     parkingExtendedDays: item?.parkingExtendedDays ?? 0,
     parkingReminderSentAt: item?.parkingReminderSentAt ?? null,
     parkingDurationCompleteSentAt: item?.parkingDurationCompleteSentAt ?? null,
+    onLeaveOriginalAssignee: item?.onLeaveOriginalAssignee ?? null,
+    onLeavePackedTo: item?.onLeavePackedTo ?? null,
+    onLeavePackedToRole: item?.onLeavePackedToRole ?? null,
 });
 
 export const restoreParkingFields = (item, snapshot) => {
@@ -72,6 +89,9 @@ export const restoreParkingFields = (item, snapshot) => {
     item.parkingExtendedDays = snapshot.parkingExtendedDays ?? 0;
     item.parkingReminderSentAt = snapshot.parkingReminderSentAt ?? null;
     item.parkingDurationCompleteSentAt = snapshot.parkingDurationCompleteSentAt ?? null;
+    item.onLeaveOriginalAssignee = snapshot.onLeaveOriginalAssignee ?? null;
+    item.onLeavePackedTo = snapshot.onLeavePackedTo ?? null;
+    item.onLeavePackedToRole = snapshot.onLeavePackedToRole ?? null;
 };
 
 export const clearParkingFlags = (item) => {
@@ -83,6 +103,9 @@ export const clearParkingFlags = (item) => {
     item.parkingExtendedDays = 0;
     item.parkingReminderSentAt = null;
     item.parkingDurationCompleteSentAt = null;
+    item.onLeaveOriginalAssignee = null;
+    item.onLeavePackedTo = null;
+    item.onLeavePackedToRole = null;
 };
 
 /** Clear leftover parking dates when onLeaveActive is already false (post on-duty heal). */
@@ -103,6 +126,9 @@ export const healStaleParkingFields = (item) => {
     item.parkingExtendedDays = 0;
     item.parkingReminderSentAt = null;
     item.parkingDurationCompleteSentAt = null;
+    item.onLeaveOriginalAssignee = null;
+    item.onLeavePackedTo = null;
+    item.onLeavePackedToRole = null;
     return true;
 };
 
@@ -171,6 +197,53 @@ export const applyPostServiceOperationalState = (item, serviceRecord) => {
 
 /** @deprecated alias */
 export const resolvePostServiceStatus = applyPostServiceOperationalState;
+
+/**
+ * Record packed custody: HOD (primary reportee) when available, otherwise Asset Controller.
+ * Original assignee stays on assignedTo for owner / on-duty flows.
+ */
+export const applyLeavePackToCustodian = (item, { hodEmployee, assetControllerEmployee } = {}) => {
+    if (!item || item.assignedToType === 'Company') return null;
+
+    const originalId = item.assignedTo?._id || item.assignedTo;
+    if (!originalId) return null;
+
+    item.onLeaveOriginalAssignee = originalId;
+
+    const hodId = hodEmployee?._id || hodEmployee;
+    const acId = assetControllerEmployee?._id || assetControllerEmployee;
+
+    if (hodId && String(hodId) !== String(originalId)) {
+        item.onLeavePackedTo = hodId;
+        item.onLeavePackedToRole = 'hod';
+    } else if (acId) {
+        item.onLeavePackedTo = acId;
+        item.onLeavePackedToRole = 'controller';
+    } else {
+        item.onLeavePackedTo = null;
+        item.onLeavePackedToRole = null;
+    }
+
+    return item.onLeavePackedTo;
+};
+
+/** After leave window expires: return asset to controller unassigned pool. */
+export const applyLeaveExpiredAutoUnassign = (item) => {
+    if (!item) return false;
+
+    clearParkingFlags(item);
+    item.assignedTo = null;
+    item.assignedCompany = null;
+    item.assignedToType = null;
+    item.assignmentType = null;
+    item.assignedDays = null;
+    item.assignedDate = null;
+    item.acceptanceStatus = null;
+    item.actionRequiredBy = null;
+    item.status = 'Unassigned';
+
+    return true;
+};
 
 export const applyParkingLeaveStatus = (item, leaveDays) => {
     if (isLeaveActive(item)) return false;

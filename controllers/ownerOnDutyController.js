@@ -27,6 +27,11 @@ const applyOnDutyToAsset = async (item, performedBy) => {
 
     await item.save();
 
+    const ownerAfterDuty = item.assignedTo?._id || item.assignedTo;
+    if (ownerAfterDuty) {
+        await refreshStaleOwnerOnDutyDashboardForOwner(ownerAfterDuty).catch(() => null);
+    }
+
     await completeOperationalExpiryDashboardTasks(item._id, ['leave']);
 
     await AssetHistory.create({
@@ -96,10 +101,62 @@ const resolveScopedParkingAssets = async (ownerId, requestedAssetIds = null) => 
     return all.filter((a) => idSet.has(a._id.toString()));
 };
 
+/** Live parked assets still covered by a pending owner on-duty dashboard row. */
+export const resolveOwnerOnDutyParkingAssetsForDashboard = async (da) => {
+    if (!da) return [];
+    const meta = parseOwnerOnDutyMeta(da.extra3);
+    const ownerId = meta.ownerEmployeeId || da.assignedTo || da.requestId;
+    const scopedIds = meta.requestedAssetIds || meta.parkingAssetIds;
+    return resolveScopedParkingAssets(ownerId, scopedIds);
+};
+
+/** Close owner on-duty bell row when assets are no longer on leave (stale notification). */
+export const closeStaleOwnerOnDutyDashboardAction = async (
+    dashboardActionId,
+    comment = 'Auto-closed: no parked assets remain.',
+) => {
+    if (!dashboardActionId) return;
+    await DashboardAction.findOneAndUpdate(
+        { _id: dashboardActionId, status: 'Pending', requestType: OWNER_ON_DUTY_REQUEST_TYPE },
+        {
+            $set: {
+                status: 'Approved',
+                actionedDate: new Date(),
+                comment,
+            },
+        },
+    );
+};
+
+/** Close pending owner on-duty bells for an owner when parking is fully resolved elsewhere. */
+export const refreshStaleOwnerOnDutyDashboardForOwner = async (ownerId) => {
+    const oidStr = String(ownerId ?? '').trim();
+    if (!mongoose.Types.ObjectId.isValid(oidStr)) return;
+    const oid = new mongoose.Types.ObjectId(oidStr);
+
+    const pendingRows = await DashboardAction.find({
+        assignedTo: oid,
+        requestType: OWNER_ON_DUTY_REQUEST_TYPE,
+        status: 'Pending',
+    })
+        .select('_id extra3')
+        .lean();
+
+    for (const da of pendingRows) {
+        const parking = await resolveOwnerOnDutyParkingAssetsForDashboard(da);
+        if (!parking.length) {
+            await closeStaleOwnerOnDutyDashboardAction(da._id);
+        }
+    }
+};
+
 const applyDirectOnDutyFromLeave = async (item, performedBy) => {
     const prevAssignedTo = item.assignedTo?._id || item.assignedTo;
     const dutyResult = applyOnDutyFromLeaveState(item);
     await item.save();
+    if (prevAssignedTo) {
+        await refreshStaleOwnerOnDutyDashboardForOwner(prevAssignedTo).catch(() => null);
+    }
     await completeOperationalExpiryDashboardTasks(item._id, ['leave']);
     await AssetHistory.create({
         assetId: item._id,
@@ -493,6 +550,10 @@ export const respondOnDutyAcRequest = async (req, res) => {
             });
         }
 
+        if (ownerId) {
+            await refreshStaleOwnerOnDutyDashboardForOwner(ownerId).catch(() => null);
+        }
+
         res.status(200).json({
             message: approve ? 'On duty request approved.' : 'On duty request rejected.',
             approved: !!approve,
@@ -690,6 +751,11 @@ export const getOwnerOnDutyReview = async (req, res) => {
         const ownerId = meta.ownerEmployeeId || da.assignedTo;
         const scopedIds = meta.requestedAssetIds || meta.parkingAssetIds;
         const parkingAssets = await resolveScopedParkingAssets(ownerId, scopedIds);
+
+        if (!parkingAssets.length) {
+            await closeStaleOwnerOnDutyDashboardAction(da._id);
+            return res.status(404).json({ message: 'No parked assets found for this request.' });
+        }
 
         res.status(200).json({
             dashboardActionId: da._id,

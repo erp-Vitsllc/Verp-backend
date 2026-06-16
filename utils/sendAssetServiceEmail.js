@@ -116,6 +116,12 @@ export const sendAssetServiceEmail = async ({ asset, recipient, type, details, s
                                 <td style="padding: 8px 0; font-weight: 700; color: #0f172a;">${new Date(details.currentExpiryDate).toLocaleDateString()}</td>
                             </tr>
                             ` : ''}
+                            ${details?.newExpiryDate ? `
+                            <tr>
+                                <td style="padding: 8px 0; color: #64748b; font-size: 12px; text-transform: uppercase; font-weight: 800;">New Expiry Date</td>
+                                <td style="padding: 8px 0; font-weight: 700; color: #0f172a;">${new Date(details.newExpiryDate).toLocaleDateString()}</td>
+                            </tr>
+                            ` : ''}
                             ${details?.extensionReason ? `
                             <tr>
                                 <td style="padding: 8px 0; color: #64748b; font-size: 12px; text-transform: uppercase; font-weight: 800;">Extension Reason</td>
@@ -139,7 +145,7 @@ export const sendAssetServiceEmail = async ({ asset, recipient, type, details, s
         `;
 
         await transporter.sendMail({
-            fromName: sender ? `${sender.firstName} ${sender.lastName}` : "Asset Management",
+            from: `"${sender ? `${sender.firstName || ''} ${sender.lastName || ''}`.trim() || 'Asset Management' : 'Asset Management'}" <${emailUser}>`,
             to: recipientEmail,
             subject,
             html

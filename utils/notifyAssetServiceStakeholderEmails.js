@@ -1,6 +1,7 @@
 import { getDepartmentHOD } from './getDepartmentHOD.js';
 import { resolveAssetControllerEmployee } from './assetApprovalHelpers.js';
 import { sendAssetServiceEmail } from './sendAssetServiceEmail.js';
+import { resolveEmployeeEmail } from './resolveEmployeeEmail.js';
 
 async function loadEmployeeWithReportee(id) {
     if (!id) return null;
@@ -18,23 +19,35 @@ function pushUnique(list, emp) {
     list.push(emp);
 }
 
-function pushHod(list, emp) {
-    const hod = emp?.primaryReportee;
-    if (hod && typeof hod === 'object' && hod._id) {
-        pushUnique(list, hod);
-    }
-}
-
-function isSameEmployee(a, b) {
-    if (!a?._id || !b?._id) return false;
-    return String(a._id) === String(b._id);
+function pushIfHasCompanyEmail(list, emp) {
+    if (!emp?._id) return;
+    const { email } = resolveEmployeeEmail(emp);
+    if (!email) return;
+    pushUnique(list, emp);
 }
 
 /**
- * Notify asset controller, assignee, initiator, and HODs for service start / live events.
- * - Started (assigned): AC initiates → assignee + both HODs; assignee initiates → AC + both HODs.
- * - Started (unassigned): AC only may initiate → AC HOD.
- * - Done: AC, assignee (if any), initiator, HOD of assignee, HOD of AC.
+ * Asset Controller + assigned owner (company email required).
+ */
+export async function collectAssetServiceAcAndOwnerRecipients(asset) {
+    const recipients = [];
+
+    const acRaw = await getDepartmentHOD('assetcontroller');
+    const ac = acRaw ? await resolveAssetControllerEmployee(acRaw) : null;
+    const acFull = ac ? await loadEmployeeWithReportee(ac._id) : null;
+    pushIfHasCompanyEmail(recipients, acFull);
+
+    const assigneeId = asset?.assignedTo?._id || asset?.assignedTo;
+    const assignee = assigneeId ? await loadEmployeeWithReportee(assigneeId) : null;
+    pushIfHasCompanyEmail(recipients, assignee);
+
+    return recipients;
+}
+
+/**
+ * Notify asset controller and asset owner for service lifecycle events.
+ * - Started / Extended / DurationComplete: AC + owner (both parties).
+ * - Done: AC + owner + initiator.
  */
 export async function notifyAssetServiceStakeholderEmails({
     asset,
@@ -45,54 +58,29 @@ export async function notifyAssetServiceStakeholderEmails({
 }) {
     if (!asset || !type) return { sent: 0 };
 
-    const acRaw = await getDepartmentHOD('assetcontroller');
-    const ac = await resolveAssetControllerEmployee(acRaw);
-    const acFull = ac ? await loadEmployeeWithReportee(ac._id) : null;
-
-    const assigneeId = asset.assignedTo?._id || asset.assignedTo;
-    const assignee = assigneeId ? await loadEmployeeWithReportee(assigneeId) : null;
-
     const initiatorFull = initiator?._id
         ? (initiator.primaryReportee !== undefined
             ? initiator
             : await loadEmployeeWithReportee(initiator._id))
         : null;
 
-    const acInitiated =
-        initiatorIsAssetController ||
-        (initiatorFull && acFull && isSameEmployee(initiatorFull, acFull));
-    const assigneeInitiated =
-        initiatorFull && assignee && isSameEmployee(initiatorFull, assignee);
+    const senderInfo = {
+        firstName: initiatorFull?.firstName || initiator?.firstName || 'Asset',
+        lastName: initiatorFull?.lastName || initiator?.lastName || 'Management',
+    };
 
     const recipients = [];
 
-    if (type === 'Started') {
-        if (assignee) {
-            if (acInitiated) {
-                pushUnique(recipients, assignee);
-            } else if (assigneeInitiated && acFull) {
-                pushUnique(recipients, acFull);
-            } else {
-                pushUnique(recipients, assignee);
-                if (acFull) pushUnique(recipients, acFull);
-            }
-            pushHod(recipients, assignee);
-        }
-        if (acFull) pushHod(recipients, acFull);
+    if (type === 'Started' || type === 'Extended' || type === 'DurationComplete') {
+        const acAndOwner = await collectAssetServiceAcAndOwnerRecipients(asset);
+        for (const r of acAndOwner) pushUnique(recipients, r);
     } else if (type === 'Done') {
-        if (acFull) pushUnique(recipients, acFull);
-        if (assignee) pushUnique(recipients, assignee);
-        if (initiatorFull) pushUnique(recipients, initiatorFull);
-        if (assignee) pushHod(recipients, assignee);
-        if (acFull) pushHod(recipients, acFull);
+        const acAndOwner = await collectAssetServiceAcAndOwnerRecipients(asset);
+        for (const r of acAndOwner) pushUnique(recipients, r);
+        if (initiatorFull) pushIfHasCompanyEmail(recipients, initiatorFull);
     } else {
         return { sent: 0 };
     }
-
-    const senderInfo = {
-        firstName: initiatorFull?.firstName || initiator?.firstName || 'User',
-        lastName: initiatorFull?.lastName || initiator?.lastName || '',
-    };
 
     let sent = 0;
     for (const recipient of recipients) {

@@ -3,9 +3,16 @@ import EmployeeBasic from '../models/EmployeeBasic.js';
 import AssetHistory from '../models/AssetHistory.js';
 import DashboardAction from '../models/DashboardAction.js';
 import { getDepartmentHOD } from './getDepartmentHOD.js';
-import { sendParkingReminderEmail, sendParkingDurationCompleteEmail } from './sendAssetParkingNotifications.js';
-import { onLeaveQueryFilter } from './assetOperationalFlags.js';
-import { upsertOperationalExpiryDashboardTask } from './upsertOperationalExpiryDashboardTask.js';
+import {
+    sendParkingReminderEmail,
+    sendLeaveAutoUnassignedEmail,
+} from './sendAssetParkingNotifications.js';
+import {
+    applyLeaveExpiredAutoUnassign,
+    onLeaveQueryFilter,
+    ON_LEAVE_ADVANCE_NOTICE_DAYS,
+} from './assetOperationalFlags.js';
+import { upsertOperationalExpiryDashboardTask, completeOperationalExpiryDashboardTasks } from './upsertOperationalExpiryDashboardTask.js';
 
 const startOfDay = (d) => {
     const x = new Date(d);
@@ -20,6 +27,41 @@ const daysUntilLeaveEnd = (endDate, today = new Date()) => {
     return Math.ceil((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24));
 };
 
+const loadEmployeeLean = async (id) => {
+    if (!id) return null;
+    return EmployeeBasic.findById(id)
+        .select('firstName lastName employeeId companyEmail workEmail primaryReportee')
+        .populate('primaryReportee', 'firstName lastName employeeId companyEmail workEmail')
+        .lean();
+};
+
+const collectLeaveNotifyParties = async (asset, assetController, assignedEmployee) => {
+    const originalId =
+        asset.onLeaveOriginalAssignee ||
+        assignedEmployee?._id ||
+        asset.assignedTo?._id ||
+        asset.assignedTo;
+    const packedId = asset.onLeavePackedTo;
+
+    const [originalEmployee, packedCustodian] = await Promise.all([
+        originalId && String(originalId) !== String(assignedEmployee?._id)
+            ? loadEmployeeLean(originalId)
+            : assignedEmployee,
+        packedId ? loadEmployeeLean(packedId) : null,
+    ]);
+
+    const hod = originalEmployee?.primaryReportee || null;
+    const parties = [originalEmployee, hod, packedCustodian, assetController].filter((p) => p?._id);
+
+    const seen = new Set();
+    return parties.filter((p) => {
+        const key = String(p._id);
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+    });
+};
+
 export const processParkingAssets = async () => {
     try {
         const today = startOfDay(new Date());
@@ -28,36 +70,28 @@ export const processParkingAssets = async () => {
         const parkedAssets = await AssetItem.find({
             ...onLeaveQueryFilter(),
             onLeaveEndDate: { $ne: null },
-            assignedTo: { $ne: null }
         }).populate('assignedTo');
 
         for (const asset of parkedAssets) {
-            if (!asset.onLeaveEndDate || !asset.assignedTo) continue;
+            if (!asset.onLeaveEndDate) continue;
 
             const diffDays = daysUntilLeaveEnd(asset.onLeaveEndDate, today);
-
-            const assignedEmployee = await EmployeeBasic.findById(asset.assignedTo._id || asset.assignedTo)
-                .select('firstName lastName employeeId companyEmail workEmail primaryReportee')
-                .populate('primaryReportee', 'firstName lastName companyEmail workEmail')
-                .lean();
-
-            if (diffDays === 2 && !asset.parkingReminderSentAt) {
-                await sendParkingReminderEmail({
-                    asset,
-                    assignedEmployee,
-                    assetController,
-                    daysLeft: 2
-                });
-                asset.parkingReminderSentAt = new Date();
-                await asset.save();
-            }
-
             if (diffDays == null) continue;
 
-            const expiryDate = startOfDay(asset.onLeaveEndDate);
-            const notifyRecipients = [assignedEmployee, assetController].filter((r) => r?._id);
+            const assignedEmployee = await loadEmployeeLean(
+                asset.onLeaveOriginalAssignee ||
+                    asset.assignedTo?._id ||
+                    asset.assignedTo,
+            );
 
-            const ensureLeaveDashboardTasks = async () => {
+            const expiryDate = startOfDay(asset.onLeaveEndDate);
+            const notifyRecipients = await collectLeaveNotifyParties(
+                asset,
+                assetController,
+                assignedEmployee,
+            );
+
+            const ensureLeaveDashboardTasks = async (daysLeft) => {
                 for (const recipient of notifyRecipients) {
                     await upsertOperationalExpiryDashboardTask({
                         asset,
@@ -65,28 +99,67 @@ export const processParkingAssets = async () => {
                         requestType: 'Asset Leave',
                         kind: 'leave',
                         expiryDate,
-                        daysLeft: diffDays,
+                        daysLeft,
                     });
                 }
             };
 
-            // Last day is today: email AC + owner (company email) + notification.
-            if (diffDays === 0 && !asset.parkingDurationCompleteSentAt) {
-                await sendParkingDurationCompleteEmail({
+            // 5 days before end: email + taskbar (not on the expiry day).
+            if (diffDays === ON_LEAVE_ADVANCE_NOTICE_DAYS && !asset.parkingReminderSentAt) {
+                await sendParkingReminderEmail({
                     asset,
                     assignedEmployee,
                     assetController,
-                    expiresToday: true,
+                    hodEmployee: assignedEmployee?.primaryReportee || null,
+                    packedCustodian: asset.onLeavePackedTo
+                        ? await loadEmployeeLean(asset.onLeavePackedTo)
+                        : null,
+                    daysLeft: ON_LEAVE_ADVANCE_NOTICE_DAYS,
                 });
-                await ensureLeaveDashboardTasks();
+                await ensureLeaveDashboardTasks(ON_LEAVE_ADVANCE_NOTICE_DAYS);
 
                 await AssetHistory.create({
                     assetId: asset._id,
                     action: 'Comment',
                     performedBy: null,
-                    comments: 'On Leave duration ends today. Notification sent to Asset Controller and assigned owner to Extend or mark On Duty.',
+                    comments: `On Leave duration reminder: ${ON_LEAVE_ADVANCE_NOTICE_DAYS} days remaining. Notification sent to owner, custodian, and Asset Controller.`,
                     date: new Date(),
-                    details: { auto: true, reason: 'LeaveDurationExpiryTodayNotification' }
+                    details: { auto: true, reason: 'LeaveAdvanceNotice', daysLeft: ON_LEAVE_ADVANCE_NOTICE_DAYS },
+                }).catch(() => null);
+
+                asset.parkingReminderSentAt = new Date();
+                await asset.save();
+                continue;
+            }
+
+            // Past end date: auto-unassign to controller pool + email all parties (once).
+            if (diffDays < 0 && !asset.parkingDurationCompleteSentAt) {
+                const prevAssignee = asset.assignedTo?._id || asset.assignedTo;
+                const packedRole = asset.onLeavePackedToRole;
+
+                applyLeaveExpiredAutoUnassign(asset);
+
+                await sendLeaveAutoUnassignedEmail({
+                    asset,
+                    parties: notifyRecipients,
+                    packedRole,
+                });
+
+                await completeOperationalExpiryDashboardTasks(asset._id, ['leave']);
+
+                await AssetHistory.create({
+                    assetId: asset._id,
+                    action: 'Unassigned',
+                    assignedTo: prevAssignee || undefined,
+                    performedBy: null,
+                    comments:
+                        'On Leave duration expired (max 40 days total). Asset automatically moved to Unassigned for Asset Controller.',
+                    date: new Date(),
+                    details: {
+                        auto: true,
+                        reason: 'LeaveDurationExpiredAutoUnassign',
+                        packedRole: packedRole || null,
+                    },
                 }).catch(() => null);
 
                 asset.parkingDurationCompleteSentAt = new Date();
@@ -94,14 +167,12 @@ export const processParkingAssets = async () => {
                 continue;
             }
 
-            // Overdue: notification bar only (no repeat email).
+            // Keep overdue taskbar rows updated without sending expiry-day alerts.
             if (diffDays < 0) {
-                await ensureLeaveDashboardTasks();
-                await asset.save();
+                await ensureLeaveDashboardTasks(diffDays);
             }
         }
 
-        // Close stale leave expiry tasks when asset is no longer on leave.
         const staleLeaveTasks = await DashboardAction.find({
             requestType: 'Asset Leave',
             status: 'Pending',

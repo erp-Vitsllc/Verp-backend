@@ -284,6 +284,23 @@ const assetItemSchema = new mongoose.Schema({
         type: Date,
         default: null
     },
+    /** Employee who went on leave (ownership); assignedTo may still reference them. */
+    onLeaveOriginalAssignee: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'EmployeeBasic',
+        default: null,
+    },
+    /** HOD or Asset Controller holding the packed asset. */
+    onLeavePackedTo: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'EmployeeBasic',
+        default: null,
+    },
+    onLeavePackedToRole: {
+        type: String,
+        enum: ['hod', 'controller', null],
+        default: null,
+    },
     acceptedBy: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'EmployeeBasic',

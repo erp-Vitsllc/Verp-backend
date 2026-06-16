@@ -31,6 +31,7 @@ import { processDocumentExpiryReminders } from "./utils/processDocumentExpiryRem
 import { processVehicleServiceHoldReminders } from "./utils/processVehicleServiceHoldReminders.js";
 import { processVehicleServiceScheduledPhase } from "./utils/processVehicleServiceScheduledPhase.js";
 import { processAssetServiceOverdue } from "./utils/processAssetServiceOverdue.js";
+import { processBirthdayWishes } from "./utils/processBirthdayWishes.js";
 import { setupEmailSubjectTag } from "./utils/setupEmailSubjectTag.js";
 import { purgeExpiredAdminDeletionArchives } from "./services/adminDeletionArchiveService.js";
 import { rerouteAllPendingAssetCreationApprovals } from "./utils/assetApprovalHelpers.js";
@@ -69,6 +70,18 @@ setInterval(() => { processAccidentAssets(); }, 24 * 60 * 60 * 1000);
 // Run company/employee document expiry reminders (30/20/10/0 day emails + HR tasks).
 setTimeout(() => { processDocumentExpiryReminders(); }, 90 * 1000);
 setInterval(() => { processDocumentExpiryReminders(); }, 24 * 60 * 60 * 1000);
+
+// Birthday wishes for active employees (personal email only).
+setTimeout(() => {
+    processBirthdayWishes().catch((e) =>
+        console.error("[BirthdayWish] startup run failed:", e?.message || e),
+    );
+}, 100 * 1000);
+setInterval(() => {
+    processBirthdayWishes().catch((e) =>
+        console.error("[BirthdayWish] scheduled run failed:", e?.message || e),
+    );
+}, 24 * 60 * 60 * 1000);
 
 // Run vehicle service hold reminders (creates deferred task/email near hold date).
 setTimeout(() => { processVehicleServiceHoldReminders(); }, 120 * 1000);

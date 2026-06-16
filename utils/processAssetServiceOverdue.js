@@ -1,13 +1,10 @@
 import AssetItem from '../models/AssetItem.js';
-import EmployeeBasic from '../models/EmployeeBasic.js';
 import DashboardAction from '../models/DashboardAction.js';
-import { getDepartmentHOD } from './getDepartmentHOD.js';
-import { resolveEmployeeEmail } from './resolveEmployeeEmail.js';
-import { sendAssetServiceEmail } from './sendAssetServiceEmail.js';
 import { onServiceQueryFilter, isServiceActive } from './assetOperationalFlags.js';
 import {
     upsertOperationalExpiryDashboardTask,
 } from './upsertOperationalExpiryDashboardTask.js';
+import { collectAssetServiceAcAndOwnerRecipients, notifyAssetServiceStakeholderEmails } from './notifyAssetServiceStakeholderEmails.js';
 
 const utcDayStart = (value) => {
     const d = value ? new Date(value) : new Date();
@@ -24,32 +21,7 @@ export const serviceDaysUntilExpiry = (expiryDate, today = new Date()) => {
     return Math.ceil((end.getTime() - start.getTime()) / (24 * 60 * 60 * 1000));
 };
 
-export const collectAssetServiceRecipients = async (asset) => {
-    const recipients = [];
-    const seen = new Set();
-
-    const pushIfHasCompanyEmail = (emp) => {
-        if (!emp?._id) return;
-        const id = String(emp._id);
-        if (seen.has(id)) return;
-        const { email } = resolveEmployeeEmail(emp);
-        if (!email) return;
-        seen.add(id);
-        recipients.push(emp);
-    };
-
-    const assetController = await getDepartmentHOD('assetcontroller');
-    pushIfHasCompanyEmail(assetController);
-
-    if (asset?.assignedTo) {
-        const assignedPerson = await EmployeeBasic.findById(asset.assignedTo)
-            .select('firstName lastName employeeId companyEmail workEmail primaryReportee')
-            .lean();
-        pushIfHasCompanyEmail(assignedPerson);
-    }
-
-    return recipients;
-};
+export const collectAssetServiceRecipients = collectAssetServiceAcAndOwnerRecipients;
 
 /**
  * Mark pending service-overdue bell/dashboard tasks as completed for an asset.
@@ -75,8 +47,8 @@ export const completeAssetServiceOverdueTasks = async (assetId, actionedBy = nul
 
 /**
  * Daily checks for tools/equipment sent on service:
- * - Expiry date === today → one email + bell + dashboard task (AC + assigned owner)
- * - Expiry date &lt; today → bell + dashboard task only (no email)
+ * - Expiry date === today (or missed) → email to AC + owner + bell + dashboard task
+ * - Expiry date &lt; today → bell + dashboard task (email catch-up if expiry email was missed)
  */
 const closeStaleOverdueTasks = async () => {
     const pending = await DashboardAction.find({
@@ -145,22 +117,19 @@ export const processAssetServiceOverdue = async () => {
             }
         };
 
-        // Service end date is today: email once + bell + dashboard task.
-        if (daysLeft === 0) {
+        // Service end date is today (or missed): email once + bell + dashboard task.
+        if (daysLeft === 0 || (daysLeft < 0 && !liveService.expiryDayEmailSentAt)) {
             if (!liveService.expiryDayEmailSentAt) {
-                for (const recipient of recipients) {
-                    await sendAssetServiceEmail({
-                        asset: assetDoc,
-                        recipient,
-                        type: 'DurationComplete',
-                        details: {
-                            serviceDuration: liveService.serviceDuration,
-                            description: liveService.description,
-                            expiresToday: true,
-                        },
-                        sender: { firstName: 'System', lastName: 'Automated' },
-                    });
-                }
+                await notifyAssetServiceStakeholderEmails({
+                    asset: assetDoc,
+                    type: 'DurationComplete',
+                    details: {
+                        serviceDuration: liveService.serviceDuration,
+                        description: liveService.description,
+                        expiresToday: daysLeft === 0,
+                    },
+                    initiator: { firstName: 'System', lastName: 'Automated' },
+                });
                 liveService.expiryDayEmailSentAt = new Date();
                 expiryEmailCount += 1;
             }
@@ -169,7 +138,7 @@ export const processAssetServiceOverdue = async () => {
             continue;
         }
 
-        // Overdue: bell + dashboard only (no email).
+        // Overdue: bell + dashboard only (email already sent on expiry day or catch-up above).
         if (daysLeft < 0) {
             await ensureExpiryDashboardTasks();
             await assetDoc.save();

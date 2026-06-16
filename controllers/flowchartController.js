@@ -13,6 +13,7 @@ import { sendFlowchartReassignmentResultEmail } from "../utils/sendFlowchartReas
 import { isUserAdministrator } from "../services/permissionService.js";
 import { resolveFlowchartHrEmployee } from "../utils/resolveFlowchartHrEmployee.js";
 import { rerouteAllPendingAssetCreationApprovals } from "../utils/assetApprovalHelpers.js";
+import { reroutePendingHrResponsibilities } from "../utils/reroutePendingHrResponsibilities.js";
 import AssetHistory from "../models/AssetHistory.js";
 
 /**
@@ -546,27 +547,46 @@ export const respondToResponsibility = async (req, res) => {
             await dashboardAction.save();
         }
 
-        // Re-route every pending Asset Approval (creation flow) to the new role holder so the bell + email
-        // recipient catches up. Fleet vehicles → new HR, tools → new Asset Controller.
-        if (action === 'Approve' && ['hr', 'assetcontroller'].includes(catNorm)) {
+        // Re-route every pending HR inbox item + fleet asset approvals to the new Flowchart HR holder.
+        if (action === "Approve" && catNorm === "hr" && oldSnapshot?.empObjectId && responsibility.empObjectId) {
             try {
-                const counts = await rerouteAllPendingAssetCreationApprovals({ category: catNorm });
+                const newHR = await EmployeeBasic.findById(responsibility.empObjectId)
+                    .select("_id employeeId firstName lastName")
+                    .lean();
+                const hrReroute = await reroutePendingHrResponsibilities({
+                    oldHrEmpObjectId: oldSnapshot.empObjectId,
+                    newHrEmployee: newHR,
+                });
                 console.log(
-                    `[Flowchart] Re-routed pending asset creation approvals after ${catNorm} change: ${JSON.stringify(counts)}`
+                    `[Flowchart] HR responsibility reroute after approve: ${JSON.stringify(hrReroute)}`,
                 );
             } catch (rerouteErr) {
-                console.error('[Flowchart] Failed to re-route pending asset creation approvals:', rerouteErr?.message || rerouteErr);
+                console.error(
+                    "[Flowchart] Failed to re-route pending HR responsibilities:",
+                    rerouteErr?.message || rerouteErr,
+                );
+            }
+        } else if (action === "Approve" && catNorm === "assetcontroller") {
+            try {
+                const counts = await rerouteAllPendingAssetCreationApprovals({ category: "assetcontroller" });
+                console.log(
+                    `[Flowchart] Re-routed pending asset creation approvals after assetcontroller change: ${JSON.stringify(counts)}`,
+                );
+            } catch (rerouteErr) {
+                console.error(
+                    "[Flowchart] Failed to re-route pending asset creation approvals:",
+                    rerouteErr?.message || rerouteErr,
+                );
             }
         }
 
         // Trigger asset handover if HR responsibility approved
-        if (action === 'Approve' && category === 'hr') {
+        if (action === "Approve" && catNorm === "hr") {
             try {
                 const targetHREmpId = responsibility.empObjectId;
                 const newHR = await EmployeeBasic.findById(targetHREmpId).select('_id employeeId firstName lastName');
 
                 if (newHR) {
-                    // Find assets of other HRs (similar logic as company response)
                     const otherHRsWithAssets = await AssetItem.find({
                         assignedTo: { $ne: targetHREmpId, $ne: null }
                     }).distinct('assignedTo');
@@ -594,7 +614,6 @@ export const respondToResponsibility = async (req, res) => {
                                     }
                                 );
 
-                                // Create Dashboard Actions for each
                                 const dashboardActions = assetsToTransfer.map(asset => ({
                                     assignedTo: targetHREmpId,
                                     assignedToEmpId: newHR.employeeId,

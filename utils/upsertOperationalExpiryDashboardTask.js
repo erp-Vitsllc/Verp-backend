@@ -1,5 +1,6 @@
 import DashboardAction from '../models/DashboardAction.js';
 import { emailFrontendUrl } from './resolveFrontendBaseUrl.js';
+import { ON_LEAVE_ADVANCE_NOTICE_DAYS } from './assetOperationalFlags.js';
 
 const buildExpiryMessage = ({ kind, daysLeft, expiryDate }) => {
     const dateLabel = expiryDate.toLocaleDateString('en-GB');
@@ -19,8 +20,8 @@ const buildExpiryMessage = ({ kind, daysLeft, expiryDate }) => {
     }
 
     if (kind === 'leave') {
-        if (isToday) {
-            return `On Leave duration ends today (${dateLabel}). Extend the duration or mark the asset On Duty.`;
+        if (daysLeft === ON_LEAVE_ADVANCE_NOTICE_DAYS) {
+            return `On Leave duration ends in ${ON_LEAVE_ADVANCE_NOTICE_DAYS} days (${dateLabel}). Extend the duration or mark the asset On Duty.`;
         }
         if (isOverdue) {
             return `On Leave duration ended ${dateLabel} — ${overdueLabel}. Extend the duration or mark the asset On Duty.`;
@@ -48,6 +49,8 @@ export async function upsertOperationalExpiryDashboardTask({
     const extra2 = buildExpiryMessage({ kind, daysLeft, expiryDate });
     if (!extra2) return false;
 
+    const isToday = daysLeft === 0;
+
     const extra3 = JSON.stringify({
         focusCard: 'operationalExpiry',
         kind,
@@ -63,8 +66,17 @@ export async function upsertOperationalExpiryDashboardTask({
         extra3: { $regex: `"kind"\\s*:\\s*"${kind}"`, $options: 'i' },
     }).lean();
 
+    const extra1 =
+        kind === 'service'
+            ? isToday
+                ? `Asset Service due today — ${asset.assetId} - ${asset.name}`
+                : `Asset Service overdue — ${asset.assetId} - ${asset.name}`
+            : daysLeft === ON_LEAVE_ADVANCE_NOTICE_DAYS
+              ? `On Leave ends in ${ON_LEAVE_ADVANCE_NOTICE_DAYS} days — ${asset.assetId} - ${asset.name}`
+              : `${asset.assetId} - ${asset.name}`;
+
     const payload = {
-        extra1: `${asset.assetId} - ${asset.name}`,
+        extra1,
         extra2,
         extra3,
         subjectEmployeeId: recipient.employeeId || asset.assetId,
