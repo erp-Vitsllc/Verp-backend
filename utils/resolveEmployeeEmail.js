@@ -19,6 +19,11 @@ function reporteeBusinessEmail(reportee) {
 export const resolveEmployeeEmail = (emp) => {
     if (!emp) return { email: null, isFallbackToReportee: false };
 
+    // Skip Left Users and inactive/rejected profiles
+    if (emp.status === 'Left User' || emp.profileStatus === 'inactive' || emp.profileStatus === 'rejected') {
+        return { email: null, isFallbackToReportee: false };
+    }
+
     const company = String(emp.companyEmail || '').trim();
     if (company) {
         return { email: company, isFallbackToReportee: false };
@@ -62,6 +67,11 @@ export async function resolveEmployeeEmailWithReporteeLoaded(emp) {
         return { email: null, isFallbackToReportee: false, employee: null };
     }
 
+    // Skip Left Users and inactive/rejected profiles
+    if (emp.status === 'Left User' || emp.profileStatus === 'inactive' || emp.profileStatus === 'rejected') {
+        return { email: null, isFallbackToReportee: false, employee: emp };
+    }
+
     let full = emp;
     const initial = resolveEmployeeEmail(emp);
 
@@ -81,13 +91,18 @@ export async function resolveEmployeeEmailWithReporteeLoaded(emp) {
             ? EmployeeBasic.findById(emp._id)
             : EmployeeBasic.findOne({ employeeId: emp.employeeId });
         full = await query
-            .select('firstName lastName employeeId companyEmail workEmail primaryReportee')
-            .populate('primaryReportee', 'firstName lastName employeeId companyEmail workEmail')
+            .select('firstName lastName employeeId companyEmail workEmail primaryReportee status profileStatus')
+            .populate('primaryReportee', 'firstName lastName employeeId companyEmail workEmail status profileStatus')
             .lean();
     }
 
     if (!full) {
         return { email: null, isFallbackToReportee: false, employee: emp };
+    }
+
+    // Double check full after DB load
+    if (full.status === 'Left User' || full.profileStatus === 'inactive' || full.profileStatus === 'rejected') {
+        return { email: null, isFallbackToReportee: false, employee: full };
     }
 
     const resolved = resolveEmployeeEmail(full);

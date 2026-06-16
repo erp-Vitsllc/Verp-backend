@@ -83,6 +83,7 @@ import { sendParkingReassignAcceptedEmail } from '../utils/sendParkingReassignAc
 import { sendParkingExtensionEmail } from '../utils/sendAssetParkingNotifications.js';
 import { notifyAssetControllerReassignmentAcceptedWithHandover } from '../utils/notifyAssetControllerReassignmentAcceptedWithHandover.js';
 import { notifyPreviousAssigneeReassignmentAcceptedWithHandover } from '../utils/notifyPreviousAssigneeReassignmentAcceptedWithHandover.js';
+import { pickEffectiveEmail } from '../utils/resolveEmployeeEmail.js';
 import { ASSET_HANDOVER_PDF_SELECTOR } from '../utils/assetHandoverPdfConstants.js';
 import {
     requireBulkAssetInventoryPdfAttachment,
@@ -2614,10 +2615,11 @@ export const getHRCompanyAssets = async (req, res) => {
         // Company Assets tab must follow CURRENT flowchart responsibility only
         // (Assigned User/Admin Controller active entries), not legacy company.responsibilities.
         const isCompanyCoordinatorFlow = await isUserActiveCompanyAssetCoordinator(employeeObjectId, employeeId);
-        console.log(`[getHRCompanyAssets] Employee ${employeeId} - isCompanyCoordinatorFlow (Active): ${isCompanyCoordinatorFlow}`);
+        const isHRFlow = await isUserActiveInFlowchart({ employeeObjectId, employeeId }, 'hr');
+        console.log(`[getHRCompanyAssets] Employee ${employeeId} - isCompanyCoordinatorFlow (Active): ${isCompanyCoordinatorFlow}, isHRFlow: ${isHRFlow}`);
 
-        if (!isCompanyCoordinatorFlow) {
-            console.log(`[getHRCompanyAssets] Employee ${employeeId} - Not company-asset coordinator, returning empty`);
+        if (!isCompanyCoordinatorFlow && !isHRFlow) {
+            console.log(`[getHRCompanyAssets] Employee ${employeeId} - Not company-asset coordinator or HR, returning empty`);
             return res.status(200).json({ isHR: false, items: [], designatedCompanies: [] });
         }
 
@@ -4175,13 +4177,12 @@ export const assignAssetItem = async (req, res) => {
             const targetCompany = await Company.findById(assignedTo);
             if (!targetCompany) return res.status(404).json({ message: "Target company not found" });
 
-            const companyCoordinatorRaw = await getCompanyAssetCoordinator();
-            const companyCoordinator = companyCoordinatorRaw
-                ? await resolveAssetControllerEmployee(companyCoordinatorRaw)
-                : null;
-            if (!companyCoordinator?._id) {
+            const adminCoordinator = await getDepartmentHOD('admincontroller');
+            const adminEmail = adminCoordinator ? pickEffectiveEmail(adminCoordinator) : null;
+
+            if (!adminCoordinator?._id || !adminEmail) {
                 return res.status(400).json({
-                    message: `No Assigned User or Admin in Flowchart. Configure one in Settings → Flowchart before allocating to ${targetCompany.name}.`,
+                    message: "No Admin email assigned in the flowchart. Please configure one in Settings → Flowchart before allocating to a company.",
                 });
             }
 
@@ -4190,10 +4191,10 @@ export const assignAssetItem = async (req, res) => {
             item.assignedTo = null;
             item.status = 'Pending';
             item.acceptanceStatus = 'Pending';
-            item.actionRequiredBy = companyCoordinator._id;
-            actionRequiredBy = companyCoordinator._id;
+            item.actionRequiredBy = adminCoordinator._id;
+            actionRequiredBy = adminCoordinator._id;
 
-            actionRecipient = companyCoordinator;
+            actionRecipient = adminCoordinator;
             subjectName = targetCompany.name;
             subjectEmpId = targetCompany.companyId;
             newAssignee = targetCompany;
@@ -6945,10 +6946,20 @@ export const returnAssetItem = async (req, res) => {
                     });
                 }
 
+                let adminCoordinator = null;
                 if (assignedToType === 'Company') {
                     const targetCompany = await Company.findById(reassignTo);
                     if (!targetCompany) {
                         return res.status(404).json({ message: "Target company not found" });
+                    }
+
+                    adminCoordinator = await getDepartmentHOD('admincontroller');
+                    const adminEmail = adminCoordinator ? pickEffectiveEmail(adminCoordinator) : null;
+
+                    if (!adminCoordinator?._id || !adminEmail) {
+                        return res.status(400).json({
+                            message: "No Admin email assigned in the flowchart. Please configure one in Settings → Flowchart before allocating to a company.",
+                        });
                     }
 
                     item.assignedToType = 'Company';
@@ -6957,7 +6968,7 @@ export const returnAssetItem = async (req, res) => {
                     item.status = 'Pending';
                     item.acceptanceStatus = 'Pending';
                     // actionRequiredBy references EmployeeBasic, so use EmployeeBasic._id
-                    item.actionRequiredBy = companyCoordinator._id;
+                    item.actionRequiredBy = adminCoordinator._id;
                 } else {
                     const newAssignee = await EmployeeBasic.findById(reassignTo);
                     if (!newAssignee) {
@@ -6978,7 +6989,7 @@ export const returnAssetItem = async (req, res) => {
                 item.assignedDays = assignmentType === 'Temporary' ? (assignedDays || null) : null;
                 item.negotiationHistory = [];
 
-                // For company transfers, notify company coordinator
+                // For company transfers, notify company coordinator or admin coordinator
                 try {
                     const assigner = await EmployeeBasic.findById(req.user.employeeObjectId).select('firstName lastName employeeId');
                     const targetCompany = assignedToType === 'Company'
@@ -6991,9 +7002,11 @@ export const returnAssetItem = async (req, res) => {
                     const subjectName = targetCompany ? targetCompany.name : (targetEmployee ? `${targetEmployee.firstName} ${targetEmployee.lastName}` : 'Unknown');
                     const subjectEmpId = targetCompany ? targetCompany.companyId : (targetEmployee ? targetEmployee.employeeId : 'N/A');
 
+                    const approver = assignedToType === 'Company' ? adminCoordinator : companyCoordinator;
+
                     await DashboardAction.create({
-                        assignedTo: companyCoordinator._id,
-                        assignedToEmpId: companyCoordinator.employeeId,
+                        assignedTo: approver._id,
+                        assignedToEmpId: approver.employeeId,
                         requestId: item._id,
                         requestType: 'Asset Assignment',
                         subjectEmployeeId: subjectEmpId,
@@ -7022,11 +7035,11 @@ export const returnAssetItem = async (req, res) => {
                         targetCompany: assignedToType === 'Company' ? targetCompany : null,
                         assignedToType,
                         senderEmployeeId: req.user.employeeObjectId,
-                        companyCoordinator,
+                        companyCoordinator: approver,
                     });
 
                     console.log(
-                        `[Dashboard] Created asset transfer action for company coordinator (${companyCoordinator.employeeId}) for company asset ${item.assetId}`
+                        `[Dashboard] Created asset transfer action for company coordinator/admin (${approver.employeeId}) for company asset ${item.assetId}`
                     );
                 } catch (err) {
                     console.error(`[Dashboard/Email Error] Failed to create action/email for company asset transfer ${item.assetId}: `, err);
@@ -10245,6 +10258,21 @@ export const handleAssetActionApproval = async (req, res) => {
                         asset.status = 'Lost';
 
                         await asset.save();
+                        
+                        if (asset.assignedTo) {
+                            try {
+                                const { sendAssetLostOwnerEmail } = await import('../utils/sendAssetLostOwnerEmail.js');
+                                await sendAssetLostOwnerEmail({
+                                    asset,
+                                    employee: asset.assignedTo,
+                                    lossValue: fineModel.fineAmount,
+                                    fineId: uniqueFineId,
+                                });
+                            } catch (mailErr) {
+                                console.error('[Asset L&D Approval] Owner notification email failed (non-fatal):', mailErr);
+                            }
+                        }
+
                         await notifyAssignedEmployeeIfController(req, asset, actionType, `${actionType} was approved by Asset Controller and moved to Pending HR.`);
                         return res.status(200).json({
                             message: `Approved by Asset Controller. Fine created (${uniqueFineId}) with status Pending HR.`,
@@ -11387,6 +11415,22 @@ export const respondAccessoryAction = async (req, res) => {
                             return res.status(404).json({ message: 'Accessory not found' });
                         }
                         const accToDetach = asset.accessories[accIdx].toObject();
+                        
+                        if (asset.assignedTo) {
+                            try {
+                                const { sendAssetLostOwnerEmail } = await import('../utils/sendAssetLostOwnerEmail.js');
+                                await sendAssetLostOwnerEmail({
+                                    asset,
+                                    employee: asset.assignedTo,
+                                    lossValue: fineModel.fineAmount,
+                                    accessoryName: accToDetach.name,
+                                    fineId: uniqueFineId,
+                                });
+                            } catch (mailErr) {
+                                console.error('[Accessory L&D Approval] Owner notification email failed (non-fatal):', mailErr);
+                            }
+                        }
+
                         asset.accessories.splice(accIdx, 1);
                         asset.actionRequiredBy = null;
 

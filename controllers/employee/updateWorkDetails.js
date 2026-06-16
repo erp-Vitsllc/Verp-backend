@@ -81,6 +81,24 @@ export const updateWorkDetails = async (req, res) => {
                     });
                 }
             }
+
+            if (currentStatus === "Left User" && nextStatus !== "Left User" && nextStatus !== "Probation") {
+                return res.status(400).json({
+                    message: "A Left User employee can only be changed to Probation status.",
+                });
+            }
+
+            if (currentStatus === "Left User" && nextStatus === "Probation") {
+                const todayStr = new Date().toISOString().split('T')[0];
+                updatePayload.dateOfJoining = todayStr;
+                updatePayload.contractJoiningDate = todayStr;
+                const reqProbation = updatePayload.probationPeriod !== undefined && updatePayload.probationPeriod !== null
+                    ? Number(updatePayload.probationPeriod)
+                    : 6;
+                updatePayload.probationPeriod = !Number.isNaN(reqProbation) && reqProbation >= 0 && reqProbation <= 6
+                    ? reqProbation
+                    : 6;
+            }
         }
 
         if (updatePayload.profileStatus !== undefined) {
@@ -121,7 +139,7 @@ export const updateWorkDetails = async (req, res) => {
             updatePayload.probationPeriod = 6;
         }
 
-        const skipLive = await skipLiveProfileWritesPendingHrAsync(req, employee);
+        const skipLive = employee.status === "Left User" ? false : await skipLiveProfileWritesPendingHrAsync(req, employee);
 
         const adminStatusChanged =
             isPortalAdmin &&

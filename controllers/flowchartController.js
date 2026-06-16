@@ -703,8 +703,49 @@ export const respondToResponsibility = async (req, res) => {
 // @access  Private
 export const deleteFlowchartResponsibility = async (req, res) => {
     try {
-        return res.status(403).json({
-            message: 'Removing flowchart assignments is disabled. Use Reassign in Settings → Flowchart to change the holder.'
+        const isJwtAdmin =
+            req.user?.isAdmin === true || req.user?.role === 'Admin' || req.user?.role === 'ROOT';
+        let isSysAdmin = false;
+        try {
+            isSysAdmin = await isUserAdministrator(req.user?.id);
+        } catch {
+            isSysAdmin = false;
+        }
+        const privileged = isJwtAdmin || isSysAdmin;
+
+        if (!privileged) {
+            return res.status(403).json({
+                message: 'Only Administrators have permission to delete flowchart designations.'
+            });
+        }
+
+        const { id, category } = req.params;
+
+        let deletedDoc = null;
+        if (id && mongoose.Types.ObjectId.isValid(id)) {
+            deletedDoc = await Flowchart.findByIdAndDelete(id);
+        } else if (category) {
+            deletedDoc = await Flowchart.findOneAndDelete({ category: category.toLowerCase().replace(/\s+/g, '') });
+        } else if (id) {
+            // Check if id is actually a category name instead of ObjectId
+            deletedDoc = await Flowchart.findOneAndDelete({ category: id.toLowerCase().replace(/\s+/g, '') });
+        }
+
+        if (!deletedDoc) {
+            return res.status(404).json({ message: 'Flowchart responsibility not found' });
+        }
+
+        // Delete any pending dashboard actions for this responsibility
+        await DashboardAction.deleteMany({
+            $or: [
+                { requestId: deletedDoc._id, requestType: 'Responsibility Approval' },
+                { extra1: deletedDoc.category, requestType: 'Responsibility Approval' }
+            ]
+        });
+
+        res.status(200).json({
+            message: 'Responsibility deleted successfully from database',
+            responsibility: deletedDoc
         });
     } catch (error) {
         console.error('Error deleting flowchart responsibility:', error);

@@ -30,7 +30,7 @@ export const getDepartmentHOD = async (departmentType) => {
         const categoryRegex = new RegExp(`^${category.split('').join('\\s*')}$`, 'i');
 
         const empPopulateSelect =
-            'employeeId firstName lastName companyEmail workEmail personalEmail email designation department profileStatus signature';
+            'employeeId firstName lastName companyEmail workEmail personalEmail email designation department profileStatus status signature';
 
         // For org "Administrator" workflows, Settings labels the row **Admin** (schema category `admin`).
         // Legacy rows may still use `admincontroller`. Prefer `admin` / `administrator` first so email + dashboard
@@ -94,13 +94,13 @@ export const getDepartmentHOD = async (departmentType) => {
                 const snapshotEmployeeId = pending.reassignmentSnapshot.employeeId;
                 const snapDoc = snapshotEmpObjectId
                     ? await EmployeeBasic.findById(snapshotEmpObjectId).select(
-                        'employeeId firstName lastName companyEmail workEmail personalEmail email designation department profileStatus signature'
+                        'employeeId firstName lastName companyEmail workEmail personalEmail email designation department profileStatus status signature'
                     )
                     : (snapshotEmployeeId
                         ? await EmployeeBasic.findOne({
                             employeeId: { $regex: buildWhitespaceAgnosticExactRegex(snapshotEmployeeId) || /^$/ }
                         }).select(
-                            'employeeId firstName lastName companyEmail workEmail personalEmail email designation department profileStatus signature'
+                            'employeeId firstName lastName companyEmail workEmail personalEmail email designation department profileStatus status signature'
                         )
                         : null);
 
@@ -124,7 +124,7 @@ export const getDepartmentHOD = async (departmentType) => {
             const employee = safeEmployeeIdRegex
                 ? await EmployeeBasic.findOne({
                     employeeId: { $regex: safeEmployeeIdRegex }
-                }).select('employeeId firstName lastName companyEmail workEmail personalEmail email designation department profileStatus signature')
+                }).select('employeeId firstName lastName companyEmail workEmail personalEmail email designation department profileStatus status signature')
                 : null;
 
             if (employee) {

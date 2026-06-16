@@ -11,7 +11,7 @@ export const checkAndUpdateProbationStatus = async (employee) => {
     }
 
     const joinDate = new Date(employee.dateOfJoining);
-    const probationPeriod = employee.probationPeriod || 6; // Default to 6 months
+    const probationPeriod = (employee.probationPeriod !== undefined && employee.probationPeriod !== null) ? employee.probationPeriod : 6;
 
     const probationEndDate = new Date(joinDate);
     probationEndDate.setMonth(joinDate.getMonth() + probationPeriod);

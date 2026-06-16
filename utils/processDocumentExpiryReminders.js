@@ -192,10 +192,15 @@ const markReminderSent = async ({ targetType, targetId, docKey, daysBefore, expi
     );
 };
 
-const pickCompanyAddress = (emp = {}) =>
-    (emp?.companyEmail || "").trim() ||
-    resolveEmployeeEmail(emp || {}).email ||
-    null;
+const pickCompanyAddress = (emp = {}) => {
+    if (!emp) return null;
+    if (emp.status === "Left User" || emp.profileStatus === "inactive" || emp.profileStatus === "rejected") {
+        return null;
+    }
+    return (emp?.companyEmail || "").trim() ||
+        resolveEmployeeEmail(emp || {}).email ||
+        null;
+};
 
 const getFlowchartRecipientBundle = async () => {
     const [admin, hr] = await Promise.all([
@@ -230,8 +235,12 @@ const getEmployeeStaticRecipientBundle = async () => {
 
     const adminEmployeeIds = [...new Set(adminUsers.map((u) => String(u.employeeId || "").trim()).filter(Boolean))];
     const adminEmployees = adminEmployeeIds.length
-        ? await EmployeeBasic.find({ employeeId: { $in: adminEmployeeIds } })
-            .select("employeeId firstName lastName companyEmail workEmail personalEmail email")
+        ? await EmployeeBasic.find({
+            employeeId: { $in: adminEmployeeIds },
+            profileStatus: "active",
+            status: { $ne: "Left User" },
+        })
+            .select("employeeId firstName lastName companyEmail workEmail personalEmail email status profileStatus")
             .lean()
         : [];
 
@@ -257,7 +266,7 @@ const getEmployeeRecipientBundle = async (employee) => {
     const [hod] = await Promise.all([
         employee?.primaryReportee
             ? EmployeeBasic.findById(employee.primaryReportee)
-                .select("employeeId firstName lastName companyEmail workEmail personalEmail email")
+                .select("employeeId firstName lastName companyEmail workEmail personalEmail email status profileStatus")
                 .lean()
             : null,
     ]);
@@ -571,7 +580,11 @@ export const buildEmployeeDocumentMap = async (employeeIds) => {
 };
 
 const processEmployeeReminders = async () => {
-    const employees = await EmployeeBasic.find({ employeeId: { $ne: "VEGA-HR-0000" } })
+    const employees = await EmployeeBasic.find({ 
+        employeeId: { $ne: "VEGA-HR-0000" }, 
+        profileStatus: "active",
+        status: { $ne: "Left User" } 
+    })
         .select("_id employeeId firstName lastName documents contractExpiryDate primaryReportee")
         .lean();
     const employeeIds = employees.map((e) => e.employeeId);

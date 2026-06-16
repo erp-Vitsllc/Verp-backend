@@ -31,4 +31,13 @@ export async function applyEmployeeLeftUserStatus(employeeDoc) {
         { employeeId: employeeDoc.employeeId },
         { $set: { enablePortalAccess: false } },
     );
+
+    const DashboardAction = (await import("../models/DashboardAction.js")).default;
+    await DashboardAction.deleteMany({
+        $or: [
+            { requestId: employeeDoc._id },
+            { subjectEmployeeId: employeeDoc.employeeId }
+        ],
+        status: "Pending"
+    });
 }
