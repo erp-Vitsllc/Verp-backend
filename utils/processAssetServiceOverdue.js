@@ -2,9 +2,12 @@ import AssetItem from '../models/AssetItem.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import DashboardAction from '../models/DashboardAction.js';
 import { getDepartmentHOD } from './getDepartmentHOD.js';
+import { resolveEmployeeEmail } from './resolveEmployeeEmail.js';
 import { sendAssetServiceEmail } from './sendAssetServiceEmail.js';
-
-const SERVICE_STATUSES = ['Service', 'On Service'];
+import { onServiceQueryFilter, isServiceActive } from './assetOperationalFlags.js';
+import {
+    upsertOperationalExpiryDashboardTask,
+} from './upsertOperationalExpiryDashboardTask.js';
 
 const utcDayStart = (value) => {
     const d = value ? new Date(value) : new Date();
@@ -23,25 +26,26 @@ export const serviceDaysUntilExpiry = (expiryDate, today = new Date()) => {
 
 export const collectAssetServiceRecipients = async (asset) => {
     const recipients = [];
+    const seen = new Set();
+
+    const pushIfHasCompanyEmail = (emp) => {
+        if (!emp?._id) return;
+        const id = String(emp._id);
+        if (seen.has(id)) return;
+        const { email } = resolveEmployeeEmail(emp);
+        if (!email) return;
+        seen.add(id);
+        recipients.push(emp);
+    };
+
     const assetController = await getDepartmentHOD('assetcontroller');
-    if (assetController) recipients.push(assetController);
+    pushIfHasCompanyEmail(assetController);
 
     if (asset?.assignedTo) {
         const assignedPerson = await EmployeeBasic.findById(asset.assignedTo)
-            .select('firstName lastName employeeId companyEmail workEmail email primaryReportee')
+            .select('firstName lastName employeeId companyEmail workEmail primaryReportee')
             .lean();
-        if (assignedPerson) {
-            const hasEmail = !!(assignedPerson.companyEmail || assignedPerson.workEmail || assignedPerson.email);
-            let targetRecipient = assignedPerson;
-            if (!hasEmail && assignedPerson.primaryReportee) {
-                const manager = await EmployeeBasic.findById(assignedPerson.primaryReportee)
-                    .select('firstName lastName employeeId companyEmail workEmail email')
-                    .lean();
-                if (manager) targetRecipient = manager;
-            }
-            const isDuplicate = recipients.some((r) => String(r._id) === String(targetRecipient._id));
-            if (!isDuplicate) recipients.push(targetRecipient);
-        }
+        pushIfHasCompanyEmail(assignedPerson);
     }
 
     return recipients;
@@ -69,55 +73,9 @@ export const completeAssetServiceOverdueTasks = async (assetId, actionedBy = nul
     );
 };
 
-const upsertServiceExpiryDashboardTask = async ({ asset, recipient, expiryDate, daysLeft }) => {
-    const assigneeId = recipient?._id;
-    if (!assigneeId) return;
-
-    const dateLabel = expiryDate.toLocaleDateString('en-GB');
-    let extra2;
-    if (daysLeft === 0) {
-        extra2 = `Service return due today (${dateLabel}). Use Extend or Mark Live on the On Service list.`;
-    } else if (daysLeft < 0) {
-        const overdueDays = Math.abs(daysLeft);
-        const overdueLabel =
-            overdueDays === 1 ? '1 day overdue' : `${overdueDays} days overdue`;
-        extra2 = `Service return due ${dateLabel} — ${overdueLabel}. Use Extend or Mark Live on the On Service list.`;
-    } else {
-        return;
-    }
-
-    const existing = await DashboardAction.findOne({
-        requestId: asset._id,
-        requestType: 'Asset Overdue',
-        status: 'Pending',
-        assignedTo: assigneeId,
-    }).lean();
-
-    if (existing) {
-        await DashboardAction.findByIdAndUpdate(existing._id, {
-            extra1: `${asset.assetId} - ${asset.name}`,
-            extra2,
-        });
-        return;
-    }
-
-    await DashboardAction.create({
-        assignedTo: assigneeId,
-        assignedToEmpId: recipient.employeeId,
-        requestId: asset._id,
-        requestType: 'Asset Overdue',
-        subjectEmployeeId: recipient.employeeId || asset.assetId,
-        subjectName: `${recipient.firstName || ''} ${recipient.lastName || ''}`.trim() || 'Asset Controller',
-        requestedByName: 'System Monitor',
-        extra1: `${asset.assetId} - ${asset.name}`,
-        extra2,
-        status: 'Pending',
-    });
-};
-
 /**
  * Daily checks for tools/equipment sent on service:
- * - Expiry date === today → one email + bell + dashboard task
+ * - Expiry date === today → one email + bell + dashboard task (AC + assigned owner)
  * - Expiry date &lt; today → bell + dashboard task only (no email)
  */
 const closeStaleOverdueTasks = async () => {
@@ -129,9 +87,8 @@ const closeStaleOverdueTasks = async () => {
         .lean();
 
     for (const row of pending) {
-        const asset = await AssetItem.findById(row.requestId).select('status').lean();
-        const stillOnService =
-            asset && SERVICE_STATUSES.some((s) => String(asset.status) === s);
+        const asset = await AssetItem.findById(row.requestId).select('status onServiceActive').lean();
+        const stillOnService = asset && isServiceActive(asset);
         if (!stillOnService) {
             await DashboardAction.updateOne(
                 { _id: row._id },
@@ -150,9 +107,9 @@ const closeStaleOverdueTasks = async () => {
 export const processAssetServiceOverdue = async () => {
     await closeStaleOverdueTasks();
 
-    const assetsInService = await AssetItem.find({
-        status: { $in: SERVICE_STATUSES },
-    }).select('assetId name status assignedTo services');
+    const assetsInService = await AssetItem.find(onServiceQueryFilter()).select(
+        'assetId name status onServiceActive assignedTo services',
+    );
 
     const today = new Date();
     let expiryEmailCount = 0;
@@ -170,17 +127,19 @@ export const processAssetServiceOverdue = async () => {
         if (daysLeft == null) continue;
 
         const recipients = await collectAssetServiceRecipients(assetDoc);
-        const primaryRecipient = recipients[0];
 
-        const ensureExpiryDashboardTask = async () => {
-            if (!primaryRecipient) return;
-            await upsertServiceExpiryDashboardTask({
-                asset: assetDoc,
-                recipient: primaryRecipient,
-                expiryDate,
-                daysLeft,
-            });
-            expiryTaskCount += 1;
+        const ensureExpiryDashboardTasks = async () => {
+            for (const recipient of recipients) {
+                const created = await upsertOperationalExpiryDashboardTask({
+                    asset: assetDoc,
+                    recipient,
+                    requestType: 'Asset Overdue',
+                    kind: 'service',
+                    expiryDate,
+                    daysLeft,
+                });
+                if (created) expiryTaskCount += 1;
+            }
             if (!liveService.serviceOverdueTaskAt) {
                 liveService.serviceOverdueTaskAt = new Date();
             }
@@ -197,6 +156,7 @@ export const processAssetServiceOverdue = async () => {
                         details: {
                             serviceDuration: liveService.serviceDuration,
                             description: liveService.description,
+                            expiresToday: true,
                         },
                         sender: { firstName: 'System', lastName: 'Automated' },
                     });
@@ -204,14 +164,14 @@ export const processAssetServiceOverdue = async () => {
                 liveService.expiryDayEmailSentAt = new Date();
                 expiryEmailCount += 1;
             }
-            await ensureExpiryDashboardTask();
+            await ensureExpiryDashboardTasks();
             await assetDoc.save();
             continue;
         }
 
         // Overdue: bell + dashboard only (no email).
         if (daysLeft < 0) {
-            await ensureExpiryDashboardTask();
+            await ensureExpiryDashboardTasks();
             await assetDoc.save();
         }
     }

@@ -1,6 +1,7 @@
 import AssetItem from '../models/AssetItem.js';
 import { getDepartmentHOD } from './getDepartmentHOD.js';
 import { sendVehicleServiceWorkflowEmail } from './sendVehicleServiceWorkflowEmail.js';
+import { applyServiceActiveState } from './assetOperationalFlags.js';
 
 const STAGE_SCHEDULED = 'scheduled_service';
 
@@ -40,8 +41,8 @@ export async function processVehicleServiceScheduledPhase() {
 
             let changed = false;
 
-            if (asset.status === 'Waiting for Service' && today >= start && today <= end) {
-                asset.status = 'On Service';
+            if (isServiceActive(asset) && today >= start && today <= end) {
+                applyServiceActiveState(asset);
                 changed = true;
             }
 

@@ -360,7 +360,7 @@ export const getUserActivityStats = async (req, res) => {
         const flowchartHrEmp = await getDepartmentHOD("hr");
         const flowchartAdminEmp = await getDepartmentHOD("admincontroller");
 
-        const allAssetTypes = ['Asset', 'Asset Overdue', 'Asset Approval', 'Asset Assignment', 'Asset Transfer', 'Asset Loss Damage', 'Asset End of Life', 'Asset Accessory', 'Asset Accessory Approval', 'Asset Accessory Unattach', 'Vehicle Service Request'];
+        const allAssetTypes = ['Asset', 'Asset Overdue', 'Asset Leave', 'Asset Approval', 'Asset Assignment', 'Asset Transfer', 'Asset Loss Damage', 'Asset End of Life', 'Asset Accessory', 'Asset Accessory Approval', 'Asset Accessory Unattach', 'Vehicle Service Request'];
 
         const normEmpForAssigneeEarly = (s) => (s || "").toString().trim().toLowerCase();
         const dashboardAssigneeMongoIds = [...relevantIds].filter(Boolean);

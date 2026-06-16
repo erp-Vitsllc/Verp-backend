@@ -126,6 +126,17 @@ export async function userCanDirectAddAssetToPool(req, assetControllerEmp = null
     return isAssetController;
 }
 
+/** Asset Controller or Administrator — required to assign / reassign assets. */
+export async function userCanAssignAssets(req, assetControllerEmp = null) {
+    return userCanDirectAddAssetToPool(req, assetControllerEmp);
+}
+
+/** Current flowchart Asset Controller as EmployeeBasic (for notifications). */
+export async function getResolvedAssetControllerEmployee() {
+    const acRaw = await getDepartmentHOD('assetcontroller');
+    return acRaw ? resolveAssetControllerEmployee(acRaw) : null;
+}
+
 export function isFleetVehicleAssetFields({ plateNumber, typeName } = {}) {
     const plate = String(plateNumber || '').trim();
     if (plate) return true;

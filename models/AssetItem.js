@@ -262,6 +262,16 @@ const assetItemSchema = new mongoose.Schema({
         type: Number, // Duration in days
         default: null
     },
+    /** Independent from asset.status — parking / on-leave transfer (yes/no). */
+    onLeaveActive: {
+        type: Boolean,
+        default: false,
+    },
+    /** Independent from asset.status — asset sent for service / maintenance (yes/no). */
+    onServiceActive: {
+        type: Boolean,
+        default: false,
+    },
     parkingExtendedDays: {
         type: Number,
         default: 0

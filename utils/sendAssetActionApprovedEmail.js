@@ -1,6 +1,6 @@
 import nodemailer from 'nodemailer';
 import { resolveFrontendBaseUrl, emailFrontendUrl } from './resolveFrontendBaseUrl.js';
-import { resolveEmployeeEmail } from './resolveEmployeeEmail.js';
+import { resolveEmployeeEmail, resolveEmployeeEmailTargets } from './resolveEmployeeEmail.js';
 import { normalizePdfAttachments } from './normalizeEmailAttachments.js';
 
 /**
@@ -28,12 +28,12 @@ export const sendAssetActionApprovedEmail = async (asset, actionType, employee, 
 
         const att = normalizePdfAttachments(attachments);
 
-        const employeeEmail = employee.companyEmail || employee.email;
-        const reporteeEmail = reportee?.companyEmail || reportee?.email;
+        const { email: employeeEmail } = resolveEmployeeEmail({ ...employee, primaryReportee: employee.primaryReportee || reportee });
+        const reporteeEmail = reportee ? resolveEmployeeEmail(reportee).email : null;
 
         let toEmails = [];
         if (employeeEmail) toEmails.push(employeeEmail);
-        if (reporteeEmail) toEmails.push(reporteeEmail);
+        if (reporteeEmail && !toEmails.includes(reporteeEmail)) toEmails.push(reporteeEmail);
 
         if (toEmails.length === 0) {
             console.warn('[AssetEmail] No emails found for employee or reportee, skipping approval notification.');

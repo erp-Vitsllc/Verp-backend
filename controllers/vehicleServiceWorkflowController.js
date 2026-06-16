@@ -9,6 +9,11 @@ import { getManagementHOD } from '../utils/getManagementHOD.js';
 import { sendVehicleServiceWorkflowEmail } from '../utils/sendVehicleServiceWorkflowEmail.js';
 import { resolveEmployeeEmail } from '../utils/resolveEmployeeEmail.js';
 import { isUserAdministrator } from '../services/permissionService.js';
+import {
+    applyServiceActiveState,
+    applyPostServiceOperationalState,
+    isServiceActive,
+} from '../utils/assetOperationalFlags.js';
 
 const STAGE = {
     HR: 'pending_hr',
@@ -46,13 +51,10 @@ function vehicleServiceDashboardMeta(asset, serviceRecordId) {
 }
 
 function resolveStatusAfterService(asset, wf) {
-    const prev = String(wf?.previousStatus || '').trim();
-    // We should never remain in service-like statuses after "mark live"/reject/cancel.
-    if (prev && !['on service', 'waiting for service'].includes(prev.toLowerCase())) {
-        return prev;
-    }
-    // Fallback for older rows that didn't store previousStatus correctly.
-    return asset?.assignedTo ? 'Assigned' : 'Unassigned';
+    applyPostServiceOperationalState(asset, {
+        statusBeforeService: wf?.previousStatus || null,
+    });
+    return asset.status;
 }
 
 function uniqRecipients(list) {
@@ -882,7 +884,9 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
                 : startUtc;
             const now = new Date();
             const todayUtc = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
-            asset.status = todayUtc >= startUtc && todayUtc <= endUtc ? 'On Service' : 'Waiting for Service';
+            asset.onServiceActive = true;
+            asset.status = asset.assignedTo ? 'Assigned' : 'Unassigned';
+            wf.stage = STAGE.SCHEDULED;
             persistWorkflowSnapshotToServiceSubdoc(asset);
             await asset.save();
 
@@ -1134,7 +1138,9 @@ export const respondVehicleServiceScheduledPeriod = async (req, res) => {
                 : startUtc;
             const now = new Date();
             const todayUtc = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
-            asset.status = todayUtc >= startUtc && todayUtc <= endUtc ? 'On Service' : 'Waiting for Service';
+            asset.onServiceActive = true;
+            asset.status = asset.assignedTo ? 'Assigned' : 'Unassigned';
+            wf.stage = STAGE.SCHEDULED;
 
             if (serviceRecordId) {
                 const isoDay = newStart.toISOString().slice(0, 10);
@@ -1462,7 +1468,7 @@ export const respondVehicleServiceScheduledPeriod = async (req, res) => {
                     });
                 }
             } else if (normalized === 'on_service') {
-                asset.status = 'On Service';
+                applyServiceActiveState(asset);
                 wf.stage = STAGE.SCHEDULED;
             }
 

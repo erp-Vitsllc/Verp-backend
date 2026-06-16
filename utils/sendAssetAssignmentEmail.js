@@ -15,6 +15,8 @@ export const sendAssetAssignmentEmail = async ({
     assetCount = 1,
     attachments = [],
     bulkAssignmentGroupId = null,
+    /** When true, email includes Accept / Reject action links (assignee must confirm in portal). */
+    pendingAssignment = false,
     /** 'assignment' | 'transfer' — same handover PDF; transfer wording for reassign flows */
     notificationContext = 'assignment',
     /** transfer only: 'target' | 'target_reportee' | 'asset_controller' | 'sender' */
@@ -101,6 +103,27 @@ export const sendAssetAssignmentEmail = async ({
                   ? `${frontendUrl}/HRM/Asset`
                   : `${frontendUrl}/HRM/Asset/details/${assetId}`;
 
+        const acceptUrl = !isBulk && assetId ? `${buttonUrl}?assignmentRespond=Accept` : buttonUrl;
+        const rejectUrl = !isBulk && assetId ? `${buttonUrl}?assignmentRespond=Reject` : buttonUrl;
+
+        const respondButtonsHtml =
+            pendingAssignment && !isBulk
+                ? `
+                    <div style="text-align: center; margin-top: 24px; margin-bottom: 12px;">
+                        <p style="font-size: 14px; color: #64748b; margin-bottom: 16px;">Please accept or reject this assignment:</p>
+                        <a href="${acceptUrl}"
+                           style="background-color: #10b981; color: #ffffff; padding: 14px 28px; text-decoration: none; border-radius: 10px; font-weight: bold; display: inline-block; font-size: 14px; margin: 0 8px 8px 0;">
+                           Accept
+                        </a>
+                        <a href="${rejectUrl}"
+                           style="background-color: #ef4444; color: #ffffff; padding: 14px 28px; text-decoration: none; border-radius: 10px; font-weight: bold; display: inline-block; font-size: 14px; margin: 0 8px 8px 0;">
+                           Reject
+                        </a>
+                    </div>
+                    <p style="font-size: 12px; color: #94a3b8; text-align: center;">You will be asked to confirm after signing in to the portal.</p>
+                `
+                : '';
+
         const recipientName = employeeDisplayName(recipientRecord);
         const fallbackNote = isPrimaryReporteeRecipient
             ? `
@@ -173,13 +196,15 @@ export const sendAssetAssignmentEmail = async ({
                     ${att.length ? `<p style="font-size: 13px; color: #64748b; margin-bottom: 12px;">The attached handover form includes the requester&rsquo;s name and signature. After acceptance, a completed copy with the assignee&rsquo;s name and signature is emailed and shown on the asset page.</p>` : ''}
 
                     <p style="font-size: 14px; color: #64748b; margin-bottom: 30px;">
-                        ${isBulk && bulkAssignmentGroupId ? 'Use the button below to open the batch review: tick the assets you accept. Unticked assets are declined (returned to Unassigned, or to the prior assignee when applicable).' : 'Please log in to the portal to view the details and confirm receipt.'}
+                        ${isBulk && bulkAssignmentGroupId ? 'Use the button below to open the batch review: tick the assets you accept. Unticked assets are declined (returned to Unassigned, or to the prior assignee when applicable).' : pendingAssignment ? 'Review the assignment below and use Accept or Reject, or open the asset page for full details.' : 'Please log in to the portal to view the details and confirm receipt.'}
                     </p>
+
+                    ${respondButtonsHtml}
 
                     <div style="text-align: center; margin-top: 30px; margin-bottom: 20px;">
                         <a href="${buttonUrl}" 
                            style="background-color: #2563eb; color: #ffffff; padding: 16px 36px; text-decoration: none; border-radius: 10px; font-weight: bold; display: inline-block; font-size: 15px; box-shadow: 0 4px 15px rgba(37, 99, 235, 0.3);">
-                           View Assignment Details
+                           ${pendingAssignment && !isBulk ? 'View Asset Details' : 'View Assignment Details'}
                         </a>
                     </div>
                 </div>

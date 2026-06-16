@@ -1,5 +1,6 @@
 import nodemailer from 'nodemailer';
 import { resolveFrontendBaseUrl, emailFrontendUrl } from './resolveFrontendBaseUrl.js';
+import { resolveEmployeeEmail } from './resolveEmployeeEmail.js';
 import { normalizePdfAttachments } from './normalizeEmailAttachments.js';
 
 /**
@@ -14,7 +15,7 @@ export const sendAssetTransferSuccessEmail = async (asset, actionType, assetCont
     try {
         const att = normalizePdfAttachments(attachments);
 
-        const controllerEmail = assetController.companyEmail || assetController.email;
+        const controllerEmail = resolveEmployeeEmail(assetController).email;
         if (!controllerEmail) {
             console.warn('[TransferSuccessEmail] Asset Controller has no email, skipping.');
             return;

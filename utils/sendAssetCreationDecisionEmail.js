@@ -161,7 +161,7 @@ export const sendAssetCreatedByAdminInfoEmail = async ({ asset, recipient, creat
         `;
 
         await transporter.sendMail({
-            fromName: creatorName,
+            from: `"VeRP Assets" <${emailUser}>`,
             to: recipientEmail,
             subject,
             html

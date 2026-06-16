@@ -40,6 +40,7 @@ import {
 } from '../utils/syncAssetAccessoryCatalog.js';
 import { cleanupDashboardActionsForDeletedAsset } from '../utils/cleanupAssetDashboardActions.js';
 import { isTransientMongoError } from '../utils/mongoTransientRetry.js';
+import { migrateLegacyOperationalFlags } from '../utils/assetOperationalFlags.js';
 
 /** Collapse duplicate accessory rows in a PUT payload (match by Mongo subdoc _id or accessoryId, not name). */
 function dedupeAccessoryPayloadById(arr) {
@@ -701,6 +702,12 @@ export const getAssetTypes = async (req, res) => {
                         gearOilDueDate: a.gearOilDueDate,
                         lastServiceDate: a.lastServiceDate,
                         nextServiceDate: a.nextServiceDate,
+                        onLeaveActive: a.onLeaveActive === true,
+                        onServiceActive: a.onServiceActive === true,
+                        onLeaveStartDate: a.onLeaveStartDate,
+                        onLeaveEndDate: a.onLeaveEndDate,
+                        onLeaveDuration: a.onLeaveDuration,
+                        services: Array.isArray(a.services) ? a.services : [],
                     };
                 }),
             ),
@@ -1212,6 +1219,11 @@ export const updateAssetItem = async (req, res) => {
                         isCreator && (initialAssetStatus === 'Draft' || initialAssetStatus === 'Rejected');
                     if (!creatorMaySetValue) continue;
                 }
+                if (key === 'onServiceActive' || key === 'onLeaveActive') {
+                    if (!isAdmin && !isAssetControllerEffective) continue;
+                    asset[key] = updates[key] === true || updates[key] === 'yes';
+                    continue;
+                }
                 if (key === 'accessories' && Array.isArray(updates[key])) {
                     updates[key] = dedupeAccessoryPayloadById(updates[key]);
                     const isAssigned = asset.status === 'Assigned' && asset.assignedTo;
@@ -1699,12 +1711,24 @@ export const submitAssetForApproval = async (req, res) => {
             asset.status = 'Unassigned';
             asset.actionRequiredBy = null;
         } else {
-            asset.status = 'Pending';
+            asset.status = 'Submitted for Approval';
             asset.actionRequiredBy = assetController._id;
         }
         await asset.save();
 
-        if (asset.status === 'Pending' && assetController?._id) {
+        if (asset.status === 'Unassigned' && isAdmin && !isAssetController && assetController?._id) {
+            try {
+                await sendAssetCreatedByAdminInfoEmail({
+                    asset,
+                    recipient: assetController,
+                    creatorName: requesterDisplayName,
+                });
+            } catch (infoErr) {
+                console.error('[submitAssetForApproval] Admin info email failed (non-fatal):', infoErr?.message || infoErr);
+            }
+        }
+
+        if (asset.status === 'Submitted for Approval' && assetController?._id) {
             try {
                 await DashboardAction.findOneAndUpdate(
                     { requestId: asset._id, requestType: 'Asset Approval', status: 'Pending' },

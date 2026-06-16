@@ -27,7 +27,7 @@ import {
 } from '../utils/getDepartmentHOD.js';
 import { getManagementHOD } from '../utils/getManagementHOD.js';
 import { sendAssetCreationApprovalEmail } from '../utils/sendAssetCreationApprovalEmail.js';
-import { sendAssetCreationDecisionEmail } from '../utils/sendAssetCreationDecisionEmail.js';
+import { sendAssetCreationDecisionEmail, sendAssetCreatedByAdminInfoEmail } from '../utils/sendAssetCreationDecisionEmail.js';
 import { notifyAssetCreationRejectedToCreator } from '../utils/notifyAssetCreationRejectedToCreator.js';
 import { resolveAssetCreatorEmployee } from '../utils/assetApprovalHelpers.js';
 import { hasPermission, isUserAdministrator } from '../services/permissionService.js';
@@ -44,10 +44,39 @@ import {
     syncStaleAssetCreationApprover,
     isAssetAssignmentAcknowledgmentPending,
     rerouteAllPendingAssetCreationApprovals,
+    userCanAssignAssets,
+    getResolvedAssetControllerEmployee,
 } from '../utils/assetApprovalHelpers.js';
 import AssetAccessoryCatalog from '../models/AssetAccessoryCatalog.js';
 import { sendAssignedEmployeeActionEmail } from '../utils/sendAssignedEmployeeActionEmail.js';
 import { processParkingAssets } from '../utils/processParkingAssets.js';
+import {
+    isLeaveActive,
+    isServiceActive,
+    isParkingStatus,
+    isServiceOperationalStatus,
+    hasActiveParkingContext,
+    snapshotParkingFields,
+    restoreParkingFields,
+    applyPostServiceOperationalState,
+    resolvePostServiceStatus,
+    applyParkingLeaveStatus,
+    applyServiceActiveState,
+    applyAcceptedAssignmentState,
+    clearParkingFlags,
+    healStaleParkingFields,
+    clearServiceFlag,
+    migrateLegacyOperationalFlags,
+    onLeaveQueryFilter,
+    onServiceQueryFilter,
+    onLeaveActiveOnlyQueryFilter,
+    onServiceActiveOnlyQueryFilter,
+    applyOnDutyFromLeaveState,
+    applyOnDutyFromServiceState,
+    requiresOwnerOnDutyApproval,
+    MAX_ASSET_LEAVE_DAYS,
+    MAX_ASSET_SERVICE_DAYS,
+} from '../utils/assetOperationalFlags.js';
 import { sendParkingReassignAcceptedEmail } from '../utils/sendParkingReassignAcceptedEmail.js';
 import { sendParkingExtensionEmail } from '../utils/sendAssetParkingNotifications.js';
 import { notifyAssetControllerReassignmentAcceptedWithHandover } from '../utils/notifyAssetControllerReassignmentAcceptedWithHandover.js';
@@ -61,6 +90,21 @@ import {
     resolveSignatureUrlForPdf,
 } from '../utils/generateBulkAssetInventoryPdf.js';
 import { sendAssetBulkDispositionResultEmail } from '../utils/sendAssetBulkDispositionResultEmail.js';
+import { sendAssetTransferDecisionEmail, sendLeaveEosTransferOwnerHodEmail } from '../utils/sendAssetTransferDecisionEmail.js';
+import {
+    sendAssigneeTransferRequestEmails,
+    sendAssigneeTransferResultEmails,
+    buildAssigneeTransferHandoverAttachments,
+    loadEmployeeWithReportee,
+} from '../utils/sendAssigneeTransferEmails.js';
+import { notifyAssetServiceStakeholderEmails } from '../utils/notifyAssetServiceStakeholderEmails.js';
+import { assertAssetActionStakeholderEmails } from '../utils/assertAssetActionStakeholderEmails.js';
+import {
+    notifyLossDamageRequestStakeholders,
+    notifyLossDamageDecisionToRequester,
+    notifyAccessoryTransferApprovedEmails,
+} from '../utils/notifyAssetLossDamageStakeholderEmails.js';
+import { completeOperationalExpiryDashboardTasks } from '../utils/upsertOperationalExpiryDashboardTask.js';
 import {
     buildServiceExtendHistoryDetails,
     buildServiceReceiveHistoryDetails,
@@ -514,89 +558,42 @@ const resolveEmployeeAssignmentActors = (employeeToAssign, assignerEmpObjectId) 
     };
 };
 
-const normalizeAssetStatusKey = (status) => String(status || '').toLowerCase().trim();
+const notifyLeaveEosOwnerHod = async ({
+    asset,
+    actionType,
+    requesterName,
+    phase,
+    approver = null,
+    approved = null,
+    reason = '',
+    attachments = [],
+}) => {
+    try {
+        const assigneeRef = asset?.assignedTo;
+        if (!assigneeRef || asset?.assignedToType === 'Company') return;
 
-const isParkingStatus = (status) => normalizeAssetStatusKey(status) === 'on leave';
+        let owner = assigneeRef;
+        if (typeof owner !== 'object' || !owner?.primaryReportee) {
+            owner = await EmployeeBasic.findById(owner._id || owner)
+                .select('firstName lastName employeeId primaryReportee')
+                .populate('primaryReportee', 'firstName lastName employeeId companyEmail workEmail')
+                .lean();
+        }
+        if (!owner) return;
 
-const isServiceOperationalStatus = (status) => {
-    const key = normalizeAssetStatusKey(status);
-    return key === 'service' || key === 'on service' || key === 'waiting for service' || key === 'maintenance';
-};
-
-const hasActiveParkingContext = (item) =>
-    isParkingStatus(item?.status) ||
-    item?.onLeaveEndDate != null ||
-    item?.onLeaveStartDate != null ||
-    (item?.onLeaveDuration != null && item?.onLeaveDuration !== '');
-
-const snapshotParkingFields = (item) => ({
-    onLeaveStartDate: item?.onLeaveStartDate ?? null,
-    onLeaveEndDate: item?.onLeaveEndDate ?? null,
-    onLeaveDuration: item?.onLeaveDuration ?? null,
-    parkingExtendedDays: item?.parkingExtendedDays ?? 0,
-    parkingReminderSentAt: item?.parkingReminderSentAt ?? null,
-    parkingDurationCompleteSentAt: item?.parkingDurationCompleteSentAt ?? null,
-});
-
-const restoreParkingFields = (item, snapshot) => {
-    if (!snapshot) return;
-    item.onLeaveStartDate = snapshot.onLeaveStartDate ?? null;
-    item.onLeaveEndDate = snapshot.onLeaveEndDate ?? null;
-    item.onLeaveDuration = snapshot.onLeaveDuration ?? null;
-    item.parkingExtendedDays = snapshot.parkingExtendedDays ?? 0;
-    item.parkingReminderSentAt = snapshot.parkingReminderSentAt ?? null;
-    item.parkingDurationCompleteSentAt = snapshot.parkingDurationCompleteSentAt ?? null;
-};
-
-const resolvePostServiceStatus = (item, serviceRecord) => {
-    const before = serviceRecord?.statusBeforeService;
-    if (before && isParkingStatus(before)) return 'On Leave';
-    if (hasActiveParkingContext(item)) return 'On Leave';
-    return item.assignedTo ? 'Assigned' : 'Unassigned';
-};
-
-const applyParkingLeaveStatus = (item, leaveDays) => {
-    if (isServiceOperationalStatus(item.status)) {
-        return false;
-    }
-    if (hasActiveParkingContext(item)) {
-        return false;
-    }
-    if (!leaveDays) return false;
-    const start = new Date();
-    const end = new Date(start);
-    end.setDate(end.getDate() + leaveDays);
-    item.status = 'On Leave';
-    item.onLeaveStartDate = start;
-    item.onLeaveDuration = leaveDays;
-    item.onLeaveEndDate = end;
-    item.parkingExtendedDays = 0;
-    item.parkingReminderSentAt = null;
-    return true;
-};
-
-const applyAcceptedAssignmentState = (item, acceptedByEmpObjectId, options = {}) => {
-    const { preserveParking = false, preserveServiceStatus = null } = options;
-    if (preserveParking) {
-        item.status = 'On Leave';
-    } else if (preserveServiceStatus) {
-        item.status = preserveServiceStatus;
-    } else {
-        item.status = 'Assigned';
-    }
-    item.acceptanceStatus = 'Accepted';
-    item.actionRequiredBy = null;
-    item.acceptedBy = acceptedByEmpObjectId;
-
-    if (!preserveParking && item.assignmentType === 'Temporary' && item.assignedDays) {
-        const parsedDays = Number(item.assignedDays);
-        const start = new Date();
-        const end = new Date(start);
-        end.setDate(end.getDate() + parsedDays);
-        item.assignedDate = start;
-        item.temporaryEndDate = end;
-        item.temporaryReminderSentAt = null;
-        item.temporaryExpiredSentAt = null;
+        await sendLeaveEosTransferOwnerHodEmail({
+            asset,
+            actionType,
+            owner,
+            requesterName,
+            phase,
+            approver,
+            approved,
+            reason,
+            attachments,
+        });
+    } catch (err) {
+        console.error('[notifyLeaveEosOwnerHod] Non-fatal:', err?.message || err);
     }
 };
 
@@ -1657,10 +1654,8 @@ export const getOnLeaveAssetsForEmployee = async (req, res) => {
         }
 
         console.log(`[getOnLeaveAssetsForEmployee] ACCESS GRANTED, fetching assets...`);
-        // Fetch assets with "On Leave" status (case-insensitive match)
-        const onLeaveQuery = { status: { $regex: /^on\s+leave$/i } };
-        const items = await AssetItem.find(onLeaveQuery)
-            .select('assetId name assetValue status purchaseDate invoiceFile typeId categoryId assignedTo assignedDate onLeaveStartDate onLeaveEndDate onLeaveDuration')
+        const items = await AssetItem.find(onLeaveActiveOnlyQueryFilter())
+            .select('assetId name assetValue status onLeaveActive onServiceActive purchaseDate invoiceFile typeId categoryId assignedTo assignedToType assignedCompany assignedDate onLeaveStartDate onLeaveEndDate onLeaveDuration')
             .populate('typeId', 'name type')
             .populate('categoryId', 'name category')
             .populate('assignedTo', 'firstName lastName employeeId')
@@ -1760,18 +1755,22 @@ export const getOnServiceAssetsForEmployee = async (req, res) => {
         }
 
         // Match HRM Tools Assets list (`GET /AssetType?scope=tools`): VEGA-ASSET rows only,
-        // no fleet vehicles (plate / vehicle type), same On Service statuses as the list filter.
+        // no fleet vehicles (plate / vehicle type), onServiceActive=true only.
         const onServiceQuery = {
-            status: { $regex: /^(service|on\s+service)$/i },
-            assetId: { $regex: /^VEGA-ASSET-/i },
-            $or: [
-                { plateNumber: { $exists: false } },
-                { plateNumber: null },
-                { plateNumber: '' },
+            $and: [
+                onServiceActiveOnlyQueryFilter(),
+                { assetId: { $regex: /^VEGA-ASSET-/i } },
+                {
+                    $or: [
+                        { plateNumber: { $exists: false } },
+                        { plateNumber: null },
+                        { plateNumber: '' },
+                    ],
+                },
             ],
         };
         const rawItems = await AssetItem.find(onServiceQuery)
-            .select('assetId name assetValue status purchaseDate invoiceFile plateNumber typeId categoryId assignedTo assignedDate services')
+            .select('assetId name assetValue status onLeaveActive onServiceActive purchaseDate invoiceFile plateNumber typeId categoryId assignedTo assignedDate services')
             .populate('typeId', 'name type')
             .populate('categoryId', 'name category')
             .populate('assignedTo', 'firstName lastName employeeId')
@@ -1780,6 +1779,7 @@ export const getOnServiceAssetsForEmployee = async (req, res) => {
 
         const terminalStatuses = new Set(['lost', 'rejected', 'end of life', 'endoflife']);
         const items = rawItems.filter((row) => {
+            if (row.onServiceActive !== true) return false;
             const statusLow = String(row.status || '').trim().toLowerCase();
             if (terminalStatuses.has(statusLow)) return false;
             const typeName = row.typeId?.name || row.typeId?.type;
@@ -1847,16 +1847,49 @@ export const handleOnServiceAction = async (req, res) => {
 
         const isAdmin = req.user?.isAdmin === true || req.user?.role === 'Admin' || req.user?.role === 'ROOT';
         const isAssetController = await isUserInFlowchart(req.user, 'assetcontroller');
-        if (!isAdmin && !isAssetController) {
-            return res.status(403).json({ message: 'Access denied. Only Asset Controller or Admin can perform this action.' });
+        let actingEmpId = req.user?.employeeObjectId?.toString();
+        if (!actingEmpId && req.user?.employeeId) {
+            const me = await EmployeeBasic.findOne({
+                employeeId: {
+                    $regex: new RegExp(
+                        `^${String(req.user.employeeId).replace(/\s+/g, '\\s*')}$`,
+                        'i'
+                    ),
+                },
+            })
+                .select('_id')
+                .lean()
+                .catch(() => null);
+            if (me?._id) actingEmpId = me._id.toString();
         }
 
         const item = await AssetItem.findById(id).populate('assignedTo');
         if (!item) return res.status(404).json({ message: 'Asset not found' });
 
-        const statusLower = String(item.status || '').toLowerCase().trim();
-        if (statusLower !== 'service' && statusLower !== 'on service') {
-            return res.status(400).json({ message: 'Asset is not in "Service/On Service" status' });
+        const isAssignedAsset = !!(item.assignedTo || item.assignedCompany);
+        const isAssignedUser =
+            !!item.assignedTo &&
+            !!actingEmpId &&
+            (item.assignedTo?._id || item.assignedTo).toString() === actingEmpId;
+
+        if (action === 'Extend') {
+            if (!isAdmin && !isAssetController) {
+                return res.status(403).json({ message: 'Access denied. Only Asset Controller or Admin can extend service.' });
+            }
+        } else if (action === 'Live') {
+            if (!isAssignedAsset) {
+                if (!isAdmin && !isAssetController) {
+                    return res.status(403).json({ message: 'Access denied. Only Asset Controller or Admin can mark an unassigned asset as Live.' });
+                }
+            } else if (!isAdmin && !isAssetController && !isAssignedUser) {
+                return res.status(403).json({ message: 'Access denied. Only Asset Controller, Admin, or the assigned user can mark this asset as Live.' });
+            }
+        } else if (!isAdmin && !isAssetController) {
+            return res.status(403).json({ message: 'Access denied. Only Asset Controller or Admin can perform this action.' });
+        }
+
+        if (!isServiceActive(item)) {
+            return res.status(400).json({ message: 'Asset is not on service (onServiceActive is false).' });
         }
 
         const snapshotItem = await AssetItem.findById(item._id)
@@ -1887,6 +1920,11 @@ export const handleOnServiceAction = async (req, res) => {
                 parseServiceDurationDays(currentService.serviceDuration) ||
                 Math.max(1, Math.ceil((baseExpiry.getTime() - new Date(currentService.date || new Date()).getTime()) / (1000 * 60 * 60 * 24)));
             const updatedTotalDays = previousDurationDays + ext;
+            if (updatedTotalDays > MAX_ASSET_SERVICE_DAYS) {
+                return res.status(400).json({
+                    message: `Maximum total service duration is ${MAX_ASSET_SERVICE_DAYS} days (including extensions). Current: ${previousDurationDays} day(s).`,
+                });
+            }
 
             currentService.expiryDate = newExpiry;
             currentService.serviceDuration = `${updatedTotalDays} days`;
@@ -1950,13 +1988,14 @@ export const handleOnServiceAction = async (req, res) => {
                 });
             }
         } else if (action === 'Return' || action === 'Live') {
-            item.status = resolvePostServiceStatus(item, currentService);
-            if (currentService.durationCompleteSentAt == null) {
-                currentService.durationCompleteSentAt = new Date();
-            }
-
             if (action === 'Live') {
+                applyOnDutyFromServiceState(item, currentService);
                 await completeAssetServiceOverdueTasks(item._id, req.user?.employeeObjectId);
+            } else {
+                applyPostServiceOperationalState(item, currentService);
+                if (currentService.durationCompleteSentAt == null) {
+                    currentService.durationCompleteSentAt = new Date();
+                }
             }
 
             const receiveDetails = buildServiceReceiveHistoryDetails({
@@ -1971,14 +2010,36 @@ export const handleOnServiceAction = async (req, res) => {
                 assignedTo: prevAssignedTo,
                 performedBy: req.user.employeeObjectId,
                 comments: action === 'Live'
-                    ? `Marked Live on ${new Date().toLocaleDateString('en-GB')}. Service started ${currentService.date ? new Date(currentService.date).toLocaleDateString('en-GB') : '—'}; planned return ${currentService.expiryDate ? new Date(currentService.expiryDate).toLocaleDateString('en-GB') : '—'}.`
-                    : 'Returned from service and restored to active assignment status.',
+                    ? `Marked Live on ${new Date().toLocaleDateString('en-GB')}. On service cleared; on leave unchanged. Service started ${currentService.date ? new Date(currentService.date).toLocaleDateString('en-GB') : '—'}; planned return ${currentService.expiryDate ? new Date(currentService.expiryDate).toLocaleDateString('en-GB') : '—'}.`
+                    : 'Returned from service. On service cleared; on leave unchanged.',
                 date: new Date(),
                 details: receiveDetails,
             });
         }
 
         await item.save();
+
+        if (action === 'Live') {
+            try {
+                const initiator = await EmployeeBasic.findById(req.user.employeeObjectId)
+                    .select('firstName lastName employeeId companyEmail workEmail primaryReportee')
+                    .populate('primaryReportee', 'firstName lastName employeeId companyEmail workEmail')
+                    .lean();
+                await notifyAssetServiceStakeholderEmails({
+                    asset: item,
+                    type: 'Done',
+                    details: {
+                        serviceDuration: currentService?.serviceDuration || null,
+                        description: 'Service Completed',
+                    },
+                    initiator,
+                    initiatorIsAssetController: isAssetController,
+                });
+            } catch (emailErr) {
+                console.error('[Service Live Email Error]', emailErr?.message || emailErr);
+            }
+        }
+
         await notifyAssignedEmployeeIfController(req, item, 'Edit Asset', 'Asset service status updated by Asset Controller.');
         await updateAssetTypeCounts(item.typeId);
 
@@ -2035,9 +2096,8 @@ export const bulkHandleOnServiceAction = async (req, res) => {
 
         for (const item of items) {
             try {
-                const statusLower = String(item.status || '').toLowerCase().trim();
-                if (statusLower !== 'service' && statusLower !== 'on service') {
-                    results.failed.push({ id: item._id, message: `Asset is not in Service/On Service status (Current: ${item.status})` });
+                if (!isServiceActive(item)) {
+                    results.failed.push({ id: item._id, message: `Asset is not on service (Current: onServiceActive=${!!item.onServiceActive}, status=${item.status})` });
                     continue;
                 }
 
@@ -2114,13 +2174,15 @@ export const bulkHandleOnServiceAction = async (req, res) => {
                     }
                 } else if (action === 'Return' || action === 'Live') {
                     const prevServiceStatus = item.status;
-                    const nextStatus = resolvePostServiceStatus(item, currentService);
-                    item.status = nextStatus;
-                    if (currentService.durationCompleteSentAt == null) {
-                        currentService.durationCompleteSentAt = new Date();
-                    }
                     if (action === 'Live') {
+                        applyOnDutyFromServiceState(item, currentService);
                         await completeAssetServiceOverdueTasks(item._id, req.user?.employeeObjectId);
+                    } else {
+                        const nextStatus = applyPostServiceOperationalState(item, currentService);
+                        item.status = nextStatus;
+                        if (currentService.durationCompleteSentAt == null) {
+                            currentService.durationCompleteSentAt = new Date();
+                        }
                     }
                     await AssetHistory.create({
                         assetId: item._id,
@@ -2128,14 +2190,14 @@ export const bulkHandleOnServiceAction = async (req, res) => {
                         assignedTo: item.assignedTo?._id || item.assignedTo,
                         performedBy: req.user.employeeObjectId,
                         comments: action === 'Live'
-                            ? `Bulk Mark Live (${new Date().toLocaleDateString('en-GB')}). Service window closed.`
-                            : 'Bulk return from service.',
+                            ? `Bulk Mark Live (${new Date().toLocaleDateString('en-GB')}) — on service cleared; on leave unchanged.`
+                            : 'Bulk return from service — on service cleared; on leave unchanged.',
                         date: new Date(),
                         details: buildServiceReceiveHistoryDetails({
                             action: action === 'Live' ? 'live' : 'return',
                             currentService,
                             prevStatus: prevServiceStatus,
-                            nextStatus,
+                            nextStatus: item.status,
                             isBulk: true,
                         }),
                     });
@@ -2187,10 +2249,8 @@ export const handleOnLeaveAction = async (req, res) => {
             return res.status(404).json({ message: 'Asset not found' });
         }
 
-        // Check status case-insensitively
-        const statusLower = item.status?.toString().toLowerCase().trim();
-        if (statusLower !== 'on leave') {
-            return res.status(400).json({ message: 'Asset is not in "On Leave" status' });
+        if (!isLeaveActive(item)) {
+            return res.status(400).json({ message: 'Asset is not on leave (onLeaveActive is false).' });
         }
 
         // Capture snapshot before mutation
@@ -2201,7 +2261,7 @@ export const handleOnLeaveAction = async (req, res) => {
         const prevAssignedTo = item.assignedTo?._id || item.assignedTo;
 
         if (action === 'Return') {
-            // Return: status becomes Unassigned, assignedTo becomes null
+            clearParkingFlags(item);
             item.status = 'Unassigned';
             item.assignedTo = null;
             item.assignedBy = null;
@@ -2210,11 +2270,14 @@ export const handleOnLeaveAction = async (req, res) => {
             item.acceptanceStatus = null;
             item.actionRequiredBy = null;
             item.negotiationHistory = [];
+            item.onLeaveStartDate = null;
+            item.onLeaveEndDate = null;
+            item.onLeaveDuration = null;
             item.parkingExtendedDays = 0;
             item.parkingReminderSentAt = null;
             item.parkingDurationCompleteSentAt = null;
 
-            // Log History
+            // Log History (parking fields cleared via clearParkingFlags above; explicit nulls for assignee clear)
             await AssetHistory.create({
                 assetId: item._id,
                 action: 'Returned',
@@ -2225,64 +2288,44 @@ export const handleOnLeaveAction = async (req, res) => {
                 details: statusSnapshot
             });
         } else if (action === 'OnDuty') {
-            // On Duty: status becomes Assigned, keep the same assignedTo
-            if (!item.assignedTo) {
-                return res.status(400).json({ message: 'Cannot set to On Duty: Asset has no assigned user' });
+            if (requiresOwnerOnDutyApproval(item)) {
+                return res.status(400).json({
+                    message:
+                        'This asset is assigned to an employee. Owner confirmation is required before On Duty. Use the Parking On Duty action.',
+                    requiresOwnerApproval: true,
+                });
+            }
+            const dutyResult = applyOnDutyFromLeaveState(item);
+            if (!dutyResult.ok) {
+                return res.status(400).json({ message: 'Cannot set to On Duty for this asset.' });
             }
 
-            item.status = 'Assigned';
-            // Keep assignedTo, assignedBy, assignmentType, etc. as they were
-
-            // Check if there's a duration set from the original "On Leave" request
-            // When "On Duty" is clicked, we start tracking the duration from this point
-            const originalDuration = item.onLeaveDuration;
-
-            if (originalDuration) {
-                // Set new start date (when On Duty begins) and calculate end date
-                item.onLeaveStartDate = new Date(); // On Duty start date
-                item.onLeaveDuration = originalDuration; // Keep the duration
-                const endDate = new Date();
-                endDate.setDate(endDate.getDate() + originalDuration);
-                item.onLeaveEndDate = endDate; // When duration will complete
-
-                console.log(`[On Duty] Duration tracking started: ${originalDuration} days. End date: ${endDate.toISOString()}. Email will be sent after duration completes.`);
-            } else {
-                // No duration set, clear any existing duration fields
-                item.onLeaveStartDate = null;
-                item.onLeaveEndDate = null;
-                item.onLeaveDuration = null;
-                item.parkingExtendedDays = 0;
-                item.parkingReminderSentAt = null;
-                item.parkingDurationCompleteSentAt = null;
-            }
-
-            // Log History
             await AssetHistory.create({
                 assetId: item._id,
                 action: 'Assigned',
                 assignedTo: prevAssignedTo,
                 performedBy: req.user.employeeObjectId,
-                comments: `Asset status changed from On Leave to Assigned (On Duty) by Asset Controller${originalDuration ? `. Duration tracking started: ${originalDuration} day(s)` : ''}`,
+                comments: `Asset returned from leave and set On Duty by Asset Controller${dutyResult.originalDuration ? `. Duration tracking started: ${dutyResult.originalDuration} day(s)` : ''}. On service status unchanged.`,
                 date: new Date(),
                 details: {
                     previousStatus: statusSnapshot.status,
-                    duration: originalDuration,
+                    duration: dutyResult.originalDuration,
                     onDutyStartDate: item.onLeaveStartDate,
-                    onDutyEndDate: item.onLeaveEndDate
-                }
+                    onDutyEndDate: item.onLeaveEndDate,
+                    onDutyPath: 'leave',
+                },
             });
         } else if (action === 'Extend') {
             const extensionDays = parseInt(req.body.extensionDays);
-            if (isNaN(extensionDays) || extensionDays <= 0) {
+            if (!Number.isInteger(extensionDays) || extensionDays <= 0) {
                 return res.status(400).json({ message: 'Invalid extension days. Must be a positive number.' });
             }
-            if (extensionDays > 10) {
-                return res.status(400).json({ message: 'Maximum extension request is 10 days.' });
-            }
-
             const usedExtensionDays = Number(item.parkingExtendedDays || 0);
-            if (usedExtensionDays + extensionDays > 10) {
-                return res.status(400).json({ message: `Maximum total extension is 10 days. Already used ${usedExtensionDays} day(s).` });
+            const projectedTotal = (item.onLeaveDuration || 0) + extensionDays;
+            if (projectedTotal > MAX_ASSET_LEAVE_DAYS) {
+                return res.status(400).json({
+                    message: `Maximum total leave duration is ${MAX_ASSET_LEAVE_DAYS} days (including extensions). Current: ${item.onLeaveDuration || 0} day(s).`,
+                });
             }
             const reason = String(extensionReason || '').trim();
             if (!reason) {
@@ -2329,6 +2372,11 @@ export const handleOnLeaveAction = async (req, res) => {
         }
 
         await item.save();
+
+        if (['Return', 'OnDuty', 'Extend'].includes(action)) {
+            await completeOperationalExpiryDashboardTasks(item._id, ['leave']);
+        }
+
         await notifyAssignedEmployeeIfController(req, item, 'Edit Asset', 'Asset details were edited by Asset Controller.');
         await updateAssetTypeCounts(item.typeId);
 
@@ -2384,15 +2432,15 @@ export const bulkHandleOnLeaveAction = async (req, res) => {
 
         for (const item of items) {
             try {
-                const statusLower = item.status?.toString().toLowerCase().trim();
-                if (statusLower !== 'on leave') {
-                    results.failed.push({ id: item._id, message: `Asset is not in "On Leave" status (Current: ${item.status})` });
+                if (!isLeaveActive(item)) {
+                    results.failed.push({ id: item._id, message: `Asset is not on leave (onLeaveActive=false, status=${item.status})` });
                     continue;
                 }
 
                 const prevAssignedTo = item.assignedTo?._id || item.assignedTo;
 
                 if (action === 'Return') {
+                    clearParkingFlags(item);
                     item.status = 'Unassigned';
                     item.assignedTo = null;
                     item.assignedBy = null;
@@ -2420,27 +2468,17 @@ export const bulkHandleOnLeaveAction = async (req, res) => {
                     });
                     results.success.push(item._id);
                 } else if (action === 'OnDuty') {
-                    if (!item.assignedTo) {
-                        results.failed.push({ id: item._id, message: 'Cannot set to On Duty: Asset has no assigned user' });
+                    if (requiresOwnerOnDutyApproval(item)) {
+                        results.failed.push({
+                            id: item._id,
+                            message: 'Assigned employee assets require owner confirmation before On Duty.',
+                        });
                         continue;
                     }
-
-                    item.status = 'Assigned';
-                    const originalDuration = item.onLeaveDuration;
-
-                    if (originalDuration) {
-                        item.onLeaveStartDate = new Date();
-                        item.onLeaveDuration = originalDuration;
-                        const endDate = new Date();
-                        endDate.setDate(endDate.getDate() + originalDuration);
-                        item.onLeaveEndDate = endDate;
-                    } else {
-                        item.onLeaveStartDate = null;
-                        item.onLeaveEndDate = null;
-                        item.onLeaveDuration = null;
-                        item.parkingExtendedDays = 0;
-                        item.parkingReminderSentAt = null;
-                        item.parkingDurationCompleteSentAt = null;
+                    const dutyResult = applyOnDutyFromLeaveState(item);
+                    if (!dutyResult.ok) {
+                        results.failed.push({ id: item._id, message: 'Cannot set to On Duty for this asset.' });
+                        continue;
                     }
 
                     await item.save();
@@ -2450,8 +2488,8 @@ export const bulkHandleOnLeaveAction = async (req, res) => {
                         action: 'Assigned',
                         assignedTo: prevAssignedTo,
                         performedBy: req.user.employeeObjectId,
-                        comments: `Asset status changed from On Leave to Assigned (On Duty) by Asset Controller (Bulk)${originalDuration ? `. Duration tracking started: ${originalDuration} day(s)` : ''}`,
-                        date: new Date()
+                        comments: `Asset returned from leave and set On Duty by Asset Controller (Bulk)${dutyResult.originalDuration ? `. Duration tracking started: ${dutyResult.originalDuration} day(s)` : ''}. On service status unchanged.`,
+                        date: new Date(),
                     });
                     results.success.push(item._id);
                 } else if (action === 'Extend') {
@@ -2760,6 +2798,20 @@ export const createAssetItem = async (req, res) => {
                 creatorName: requesterDisplayName,
                 attachments: creationAttachments
             });
+        }
+
+        const isJwtAdmin = req.user.isAdmin === true || req.user.role === 'Admin' || req.user.role === 'ROOT';
+        const isSysAdmin = await isUserAdministrator(req.user?.id);
+        if (initialStatus === 'Unassigned' && (isJwtAdmin || isSysAdmin) && assetController?._id) {
+            try {
+                await sendAssetCreatedByAdminInfoEmail({
+                    asset: newItem,
+                    recipient: assetController,
+                    creatorName: requesterDisplayName,
+                });
+            } catch (adminInfoErr) {
+                console.error('[createAssetItem] Admin-created asset info email failed (non-fatal):', adminInfoErr?.message || adminInfoErr);
+            }
         }
 
         res.status(201).json(newItem);
@@ -3328,7 +3380,7 @@ export const getBulkAssetInventoryForPrint = async (req, res) => {
 export const updateAssetItem = async (req, res) => {
     try {
         const { id } = req.params;
-        let { name, photo, status, categoryId, assetValue, purchaseDate, warrantyYears, lastServiceDate } = req.body;
+        let { name, photo, status, categoryId, assetValue, purchaseDate, warrantyYears, lastServiceDate, onServiceActive, onLeaveActive } = req.body;
 
         const isJwtAdmin = req.user.isAdmin || req.user.role === 'Admin' || req.user.role === 'ROOT';
         const isSysAdmin = await isUserAdministrator(req.user?.id);
@@ -3391,6 +3443,13 @@ export const updateAssetItem = async (req, res) => {
             item.status = status;
         }
         if (lastServiceDate !== undefined) item.lastServiceDate = lastServiceDate || null;
+
+        if (onServiceActive !== undefined && (isAdmin || isAssetController)) {
+            item.onServiceActive = onServiceActive === true || onServiceActive === 'yes';
+        }
+        if (onLeaveActive !== undefined && (isAdmin || isAssetController)) {
+            item.onLeaveActive = onLeaveActive === true || onLeaveActive === 'yes';
+        }
 
         // Handle Photo Upload if changed
         if (photo && photo.startsWith('data:image')) {
@@ -3466,6 +3525,10 @@ export const getAssetItemDetail = async (req, res) => {
 
         if (!item) {
             return res.status(404).json({ message: 'Asset not found' });
+        }
+
+        if (healStaleParkingFields(item)) {
+            await item.save();
         }
 
         // Populate sometimes leaves a bare ObjectId; load EmployeeBasic so UI + canApprove match correctly
@@ -3650,6 +3713,11 @@ export const getAssetItemDetail = async (req, res) => {
             if (!canViewDraft) {
                 return res.status(404).json({ message: 'Asset not found' });
             }
+        }
+
+        migrateLegacyOperationalFlags(item);
+        if (item.isModified()) {
+            await item.save();
         }
 
         const itemObj = item.toObject();
@@ -3980,17 +4048,23 @@ export const assignAssetItem = async (req, res) => {
             return res.status(404).json({ message: 'Asset not found' });
         }
 
-        if (isParkingStatus(item.status)) {
+        // Check if this is a reassignment (asset was previously assigned)
+        const isReassignment = item.status === 'Assigned' && (item.assignedTo || item.assignedCompany);
+        const isParkingReassignment =
+            isLeaveActive(item) &&
+            isReassignment &&
+            assignedToType === 'Employee' &&
+            !!item.assignedTo;
+
+        if (isLeaveActive(item) && !isParkingReassignment) {
             return res.status(400).json({
-                message: 'Assets on leave cannot be transferred or reassigned. Use Return or Loss & Damage only.',
+                message: 'Assets on leave can only be reassigned to another employee (parking transfer). Use Return or Loss & Damage to send to store.',
             });
         }
 
-        // Check if this is a reassignment (asset was previously assigned)
-        const isReassignment = item.status === 'Assigned' && (item.assignedTo || item.assignedCompany);
         const isServiceReassignment =
-            isServiceOperationalStatus(item.status) && item.assignedToType === 'Employee' && !!item.assignedTo;
-        const preservedServiceStatus = isServiceReassignment ? item.status : null;
+            isServiceActive(item) && item.assignedToType === 'Employee' && !!item.assignedTo;
+        const preserveServiceOnReassign = isServiceReassignment;
         let previousAssignee = null;
         let previousAssigneeType = null;
         let newAssignee = null;
@@ -4008,12 +4082,14 @@ export const assignAssetItem = async (req, res) => {
         }
 
         if (isServiceReassignment) {
+            const preserveOnLeave = item.onLeaveActive === true;
             const oldAssignedToId = (item.assignedTo?._id || item.assignedTo)?.toString?.() || null;
             item.pendingActionDetails = {
                 ...(item.pendingActionDetails || {}),
                 serviceReassignContext: {
                     isServiceReassign: true,
-                    preservedStatus: preservedServiceStatus,
+                    preservedOnService: true,
+                    preservedOnLeave: preserveOnLeave,
                     oldAssignedTo: oldAssignedToId,
                     oldAssignedBy: (item.assignedBy?._id || item.assignedBy)?.toString?.() || null,
                     oldAssignmentType: item.assignmentType || null,
@@ -4026,46 +4102,39 @@ export const assignAssetItem = async (req, res) => {
             };
         }
 
-        // Check if assigner (current user) has authorization
-        // Use both ObjectId match and employeeId match (employeeId can have spacing differences).
-        const norm = (s) => (s || '').toString().toLowerCase().replace(/\s+/g, '');
+        if (isParkingReassignment) {
+            const oldAssignedToId = (item.assignedTo?._id || item.assignedTo)?.toString?.() || null;
+            item.pendingActionDetails = {
+                ...(item.pendingActionDetails || {}),
+                parkingReassignContext: {
+                    isParkingReassign: true,
+                    parkingSnapshot: snapshotParkingFields(item),
+                    oldAssignedTo: oldAssignedToId,
+                    oldAssignedBy: (item.assignedBy?._id || item.assignedBy)?.toString?.() || null,
+                    oldAssignmentType: item.assignmentType || null,
+                    oldAssignedDays: item.assignedDays ?? null,
+                    oldAssignedDate: item.assignedDate || null,
+                    oldTemporaryEndDate: item.temporaryEndDate || null,
+                    oldTemporaryReminderSentAt: item.temporaryReminderSentAt || null,
+                    oldTemporaryExpiredSentAt: item.temporaryExpiredSentAt || null,
+                }
+            };
+        }
+
         const actingEmpObjectId = req.user.employeeObjectId?.toString?.() || null;
-        const actingEmployeeId = req.user.employeeId ? norm(req.user.employeeId) : '';
 
-        const isAdmin = req.user.isAdmin || req.user.role === 'Admin' || req.user.role === 'ROOT';
-
-        const assignedToId =
-            (item.assignedTo?._id ? item.assignedTo._id : item.assignedTo)?.toString?.() || (item.assignedTo?.toString?.() || null);
-        const assignedToEmployeeId = item.assignedTo?.employeeId ? norm(item.assignedTo.employeeId) : '';
-
-        const assignedById =
-            item.assignedBy?._id ? item.assignedBy._id.toString() : item.assignedBy?.toString?.() || item.assignedBy?.toString?.() || null;
-        const assignedByEmployeeId = item.assignedBy?.employeeId ? norm(item.assignedBy.employeeId) : '';
-
-        const isAssignedUser =
-            (!!actingEmpObjectId && !!assignedToId && assignedToId === actingEmpObjectId) ||
-            (!!actingEmployeeId && !!assignedToEmployeeId && assignedToEmployeeId === actingEmployeeId);
-
-        const isAssigner =
-            (!!actingEmpObjectId && !!assignedById && assignedById === actingEmpObjectId) ||
-            (!!actingEmployeeId && !!assignedByEmployeeId && assignedByEmployeeId === actingEmployeeId);
-
-        // Find if this user is a designated Asset Controller for this company
-        const assetController = await getDepartmentHOD('assetcontroller');
-
-        const isAssetController = await isUserInFlowchart(req.user, 'assetcontroller');
-
-        if (!isAdmin && !isAssignedUser && !isAssigner && !isAssetController) {
-            return res.status(403).json({ message: "You are not authorized to assign or reassign this asset." });
+        // Only Asset Controller or Administrator may assign / reassign assets.
+        const assetControllerHod = await getDepartmentHOD('assetcontroller');
+        const assetControllerEmp = assetControllerHod
+            ? await resolveAssetControllerEmployee(assetControllerHod)
+            : null;
+        const canAssign = await userCanAssignAssets(req, assetControllerEmp);
+        if (!canAssign) {
+            return res.status(403).json({ message: 'Only Asset Controller or Administrator can assign assets.' });
         }
 
-        // Unassigned inventory actions are restricted to Admin / Asset Controller only.
-        if (['Unassigned', 'Returned', 'Draft'].includes(item.status) && !isAdmin && !isAssetController) {
-            return res.status(403).json({ message: "Only Asset Controller or Admin can manage unassigned assets." });
-        }
-
-        // New assignments from the pool (not reassignment / parking / service handoff) must start from Unassigned only.
-        if (!isReassignment && !isServiceReassignment && item.status !== 'Unassigned') {
+        // New assignments from the pool must start from Unassigned only.
+        if (!isReassignment && !isServiceReassignment && !isParkingReassignment && item.status !== 'Unassigned') {
             return res.status(400).json({
                 message: 'Assets can only be assigned from Unassigned status.'
             });
@@ -4153,15 +4222,31 @@ export const assignAssetItem = async (req, res) => {
                     });
                 }
                 applyAcceptedAssignmentState(item, employeeToAssign._id, {
-                    preserveServiceStatus: preservedServiceStatus,
+                    preserveService: preserveServiceOnReassign,
+                    preserveParking: isParkingReassignment,
                 });
+                if (isParkingReassignment) {
+                    const snap = item.pendingActionDetails?.parkingReassignContext?.parkingSnapshot;
+                    restoreParkingFields(item, snap);
+                    item.onLeaveActive = true;
+                }
+                if (isServiceReassignment && item.pendingActionDetails?.serviceReassignContext?.preservedOnLeave) {
+                    item.onLeaveActive = true;
+                }
                 actionRequiredBy = null;
             } else {
                 item.acceptanceStatus = 'Pending';
                 item.actionRequiredBy = resolvedActors.pendingActionActorId;
                 actionRequiredBy = resolvedActors.pendingActionActorId;
                 if (isServiceReassignment) {
-                    item.status = preservedServiceStatus;
+                    item.onServiceActive = true;
+                    if (item.pendingActionDetails?.serviceReassignContext?.preservedOnLeave) {
+                        item.onLeaveActive = true;
+                    }
+                    item.status = 'Pending';
+                } else if (isParkingReassignment) {
+                    item.onLeaveActive = true;
+                    item.status = 'Pending';
                 } else {
                     item.status = 'Pending';
                 }
@@ -4174,24 +4259,27 @@ export const assignAssetItem = async (req, res) => {
         }
 
         item.assignedBy = req.user.employeeObjectId;
-        item.assignmentType = assignmentType;
-        if (assignmentType === 'Temporary') {
-            const parsedDays = Number(assignedDays);
-            if (!Number.isInteger(parsedDays) || parsedDays < 1 || parsedDays > 60) {
-                return res.status(400).json({ message: 'Temporary duration must be an integer between 1 and 60 days.' });
+        if (!isParkingReassignment && !isServiceReassignment) {
+            item.assignmentType = assignmentType;
+            if (assignmentType === 'Temporary') {
+                const parsedDays = Number(assignedDays);
+                if (!Number.isInteger(parsedDays) || parsedDays < 1 || parsedDays > 60) {
+                    return res.status(400).json({ message: 'Temporary duration must be an integer between 1 and 60 days.' });
+                }
+                item.assignedDays = parsedDays;
+                item.assignedDate = null;
+                item.temporaryEndDate = null;
+                item.temporaryReminderSentAt = null;
+                item.temporaryExpiredSentAt = null;
+            } else {
+                item.assignedDays = null;
+                item.assignedDate = null;
+                item.temporaryEndDate = null;
+                item.temporaryReminderSentAt = null;
+                item.temporaryExpiredSentAt = null;
             }
-            item.assignedDays = parsedDays;
-            // Start the duration when the assignment is accepted (status becomes "Assigned").
-            item.assignedDate = null;
-            item.temporaryEndDate = null;
-            item.temporaryReminderSentAt = null;
-            item.temporaryExpiredSentAt = null;
-        } else {
-            item.assignedDays = null;
-            item.assignedDate = null;
-            item.temporaryEndDate = null;
-            item.temporaryReminderSentAt = null;
-            item.temporaryExpiredSentAt = null;
+        } else if (isParkingReassignment) {
+            item.onLeaveActive = true;
         }
 
         item.negotiationHistory = [];
@@ -4313,6 +4401,7 @@ export const assignAssetItem = async (req, res) => {
                             : employeeToAssign,
                     recipient: actionRecipient,
                     attachments: assignAttachments,
+                    pendingAssignment: true,
                 });
             }
 
@@ -4383,6 +4472,11 @@ export const assignAssetItem = async (req, res) => {
             assignedTo: item.assignedTo,
             assignedCompany: item.assignedCompany,
             performedBy: req.user.employeeObjectId,
+            comments: isParkingReassignment
+                ? 'Parking transfer: asset reassigned to new holder. On Leave remains active; parking duration unchanged.'
+                : isServiceReassignment
+                    ? 'On-service transfer: asset reassigned; onServiceActive preserved.'
+                    : undefined,
             details: snapshotItem.toObject(),
             ...(assignmentHistoryPdfKey ? { file: assignmentHistoryPdfKey } : {}),
         });
@@ -4431,6 +4525,12 @@ export const bulkAssignAssetItems = async (req, res) => {
             return res.status(403).json({
                 message: "Bulk assignment denied: No Asset Controller has been assigned in the organization flow. Please assign an Asset Controller in Settings > Flowchart before performing this operation."
             });
+        }
+
+        const assetControllerEmp = await resolveAssetControllerEmployee(assetController);
+        const canAssign = await userCanAssignAssets(req, assetControllerEmp);
+        if (!canAssign) {
+            return res.status(403).json({ message: 'Only Asset Controller or Administrator can assign assets.' });
         }
 
         if (!assetIds || !Array.isArray(assetIds) || assetIds.length === 0) {
@@ -4774,6 +4874,7 @@ export const bulkAssignAssetItems = async (req, res) => {
                         assetCount: assetIds.length,
                         attachments: bulkAssignmentAttachments,
                         bulkAssignmentGroupId: bulkAssignmentGroupId.toString(),
+                        pendingAssignment: true,
                     });
                 }
             }
@@ -5020,12 +5121,23 @@ export const respondToAssignment = async (req, res) => {
                             ? await EmployeeBasic.findById(currentUser)
                             : item.assignedBy;
 
-        // Notify all relevant parties
+        // Notify all relevant parties (assigner + Asset Controller always; assignee/manager when applicable)
         const notifyParties = async () => {
             try {
                 const recipients = [];
-                // 1. Always notify the person who assigned the asset
-                if (item.assignedBy) recipients.push(item.assignedBy);
+                const seenRecipientIds = new Set();
+                const pushRecipient = (emp) => {
+                    if (!emp) return;
+                    const id = (emp._id || emp).toString();
+                    if (seenRecipientIds.has(id)) return;
+                    seenRecipientIds.add(id);
+                    recipients.push(emp);
+                };
+
+                if (item.assignedBy) pushRecipient(item.assignedBy);
+
+                const acForNotify = await getResolvedAssetControllerEmployee();
+                if (acForNotify) pushRecipient(acForNotify);
 
                 // 2. Notify the subject (employee or delegated primary reportee) if they were NOT the one who acted
                 if (item.assignedToType === 'Employee' && item.assignedTo && item.assignedTo._id.toString() !== currentUser.toString()) {
@@ -5036,7 +5148,7 @@ export const respondToAssignment = async (req, res) => {
                         : null;
 
                     if (assigneeHasPortalAccess === true) {
-                        recipients.push(item.assignedTo);
+                        pushRecipient(item.assignedTo);
                     } else {
                         const managerId = item.assignedTo.primaryReportee?._id || item.assignedTo.primaryReportee;
                         if (managerId) {
@@ -5044,7 +5156,7 @@ export const respondToAssignment = async (req, res) => {
                                 .select('firstName lastName employeeId companyEmail enablePortalAccess primaryReportee')
                                 .lean()
                                 .catch(() => null);
-                            if (manager) recipients.push(manager);
+                            if (manager) pushRecipient(manager);
                         }
                     }
                 }
@@ -5052,9 +5164,9 @@ export const respondToAssignment = async (req, res) => {
                 // 3. For 'Accept', also notify Manager (Employee Flow only)
                 if (action === 'Accept' && item.assignedToType === 'Employee' && item.assignedTo?.primaryReportee) {
                     const managerId = item.assignedTo.primaryReportee._id || item.assignedTo.primaryReportee;
-                    if (!recipients.some(r => r._id?.toString() === managerId.toString()) && managerId.toString() !== currentUser.toString()) {
+                    if (!seenRecipientIds.has(managerId.toString()) && managerId.toString() !== currentUser.toString()) {
                         const manager = await EmployeeBasic.findById(managerId);
-                        if (manager) recipients.push(manager);
+                        if (manager) pushRecipient(manager);
                     }
                 }
 
@@ -5079,9 +5191,12 @@ export const respondToAssignment = async (req, res) => {
 
         const parkingCtx = item.pendingActionDetails?.parkingReassignContext;
         const serviceCtx = item.pendingActionDetails?.serviceReassignContext;
+        const transferCtx = item.pendingActionDetails?.assigneeTransferContext;
 
         if (action === 'Reject') {
-            await notifyParties();
+            if (!transferCtx?.isAssigneeTransfer) {
+                await notifyParties();
+            }
 
             // Capture snapshot BEFORE clearing
             const snapshotItem = await AssetItem.findById(item._id)
@@ -5114,9 +5229,51 @@ export const respondToAssignment = async (req, res) => {
                 } catch (dashErr) {
                     console.error("[Dashboard Error] Failed to create retention task:", dashErr);
                 }
+            } else if (transferCtx?.isAssigneeTransfer && transferCtx?.oldAssignedTo) {
+                item.status = 'Assigned';
+                item.assignedToType = 'Employee';
+                item.assignedTo = transferCtx.oldAssignedTo;
+                item.assignedCompany = null;
+                item.assignedBy = transferCtx.oldAssignedBy || item.assignedBy;
+                item.assignmentType = transferCtx.oldAssignmentType || item.assignmentType;
+                item.assignedDays = transferCtx.oldAssignedDays ?? item.assignedDays;
+                item.assignedDate = transferCtx.oldAssignedDate ?? item.assignedDate;
+                item.temporaryEndDate = transferCtx.oldTemporaryEndDate ?? item.temporaryEndDate;
+                item.temporaryReminderSentAt = transferCtx.oldTemporaryReminderSentAt ?? item.temporaryReminderSentAt;
+                item.temporaryExpiredSentAt = transferCtx.oldTemporaryExpiredSentAt ?? item.temporaryExpiredSentAt;
+                item.acceptanceStatus = 'Accepted';
+                item.actionRequiredBy = null;
+                item.negotiationHistory = [];
+                if (item.pendingActionDetails?.assigneeTransferContext) {
+                    delete item.pendingActionDetails.assigneeTransferContext;
+                }
+
+                void (async () => {
+                    try {
+                        const oldAssignee = await loadEmployeeWithReportee(transferCtx.oldAssignedTo);
+                        const newAssignee = await EmployeeBasic.findById(currentUser).lean();
+                        const initiator = transferCtx.requestedBy
+                            ? await loadEmployeeWithReportee(transferCtx.requestedBy)
+                            : null;
+                        const approver = await EmployeeBasic.findById(currentUser)
+                            .select('firstName lastName employeeId companyEmail workEmail')
+                            .lean();
+                        await sendAssigneeTransferResultEmails({
+                            asset: item,
+                            oldAssignee,
+                            newAssignee,
+                            initiator,
+                            approver,
+                            approved: false,
+                            comment: comments,
+                        });
+                    } catch (e) {
+                        console.error('[assigneeTransfer reject email]', e?.message || e);
+                    }
+                })();
             } else if (parkingCtx?.isParkingReassign && parkingCtx?.oldAssignedTo) {
-                // Revert parked reassignment: keep old assignee and parking state unchanged.
-                item.status = 'On Leave';
+                item.onLeaveActive = true;
+                item.status = 'Assigned';
                 item.assignedToType = 'Employee';
                 item.assignedTo = parkingCtx.oldAssignedTo;
                 item.assignedCompany = null;
@@ -5136,7 +5293,8 @@ export const respondToAssignment = async (req, res) => {
                     delete item.pendingActionDetails.parkingReassignContext;
                 }
             } else if (serviceCtx?.isServiceReassign && serviceCtx?.oldAssignedTo) {
-                item.status = serviceCtx.preservedStatus || item.status;
+                item.onServiceActive = true;
+                item.status = 'Assigned';
                 item.assignedToType = 'Employee';
                 item.assignedTo = serviceCtx.oldAssignedTo;
                 item.assignedCompany = null;
@@ -5188,10 +5346,15 @@ export const respondToAssignment = async (req, res) => {
             if (action === 'Accept') {
                 // Parking reassignment stays On Leave; service reassignment keeps service status.
                 if (parkingCtx?.isParkingReassign) {
-                    item.status = 'On Leave';
+                    item.onLeaveActive = true;
+                    item.status = 'Assigned';
                     restoreParkingFields(item, parkingCtx.parkingSnapshot);
                 } else if (serviceCtx?.isServiceReassign) {
-                    item.status = serviceCtx.preservedStatus || item.status;
+                    item.onServiceActive = true;
+                    if (serviceCtx.preservedOnLeave) {
+                        item.onLeaveActive = true;
+                    }
+                    item.status = 'Assigned';
                 } else {
                     item.status = 'Assigned';
                 }
@@ -5265,6 +5428,44 @@ export const respondToAssignment = async (req, res) => {
                 }
                 if (item.pendingActionDetails?.serviceReassignContext) {
                     delete item.pendingActionDetails.serviceReassignContext;
+                }
+                if (item.pendingActionDetails?.assigneeTransferContext) {
+                    const ctx = item.pendingActionDetails.assigneeTransferContext;
+                    delete item.pendingActionDetails.assigneeTransferContext;
+                    void (async () => {
+                        try {
+                            const oldAssignee = await loadEmployeeWithReportee(ctx.oldAssignedTo);
+                            const newAssignee = await loadEmployeeWithReportee(item.assignedTo?._id || item.assignedTo);
+                            const initiator = ctx.requestedBy
+                                ? await loadEmployeeWithReportee(ctx.requestedBy)
+                                : null;
+                            const approver = await EmployeeBasic.findById(currentUser)
+                                .select('firstName lastName employeeId companyEmail workEmail')
+                                .lean();
+                            let att = [];
+                            try {
+                                att = await buildAssigneeTransferHandoverAttachments(req, item._id, {
+                                    assigner: initiator,
+                                    oldAssignee,
+                                    newAssignee,
+                                });
+                            } catch (e) {
+                                /* non-fatal */
+                            }
+                            await sendAssigneeTransferResultEmails({
+                                asset: item,
+                                oldAssignee,
+                                newAssignee,
+                                initiator,
+                                approver,
+                                approved: true,
+                                comment: comments,
+                                attachments: att,
+                            });
+                        } catch (e) {
+                            console.error('[assigneeTransfer accept email]', e?.message || e);
+                        }
+                    })();
                 }
             }
 
@@ -5526,6 +5727,9 @@ export const respondToAssignment = async (req, res) => {
                 };
 
                 if (item.assignedBy) pushUniqueRecipient(item.assignedBy);
+
+                const acForAcceptNotify = await getResolvedAssetControllerEmployee();
+                if (acForAcceptNotify) pushUniqueRecipient(acForAcceptNotify);
 
                 if (item.assignedToType === 'Employee' && item.assignedTo) {
                     const assigneeIdStr = (item.assignedTo._id || item.assignedTo).toString();
@@ -6374,27 +6578,23 @@ export const returnAssetItem = async (req, res) => {
         }
         const isAssigneeReturn =
             !!item.assignedTo && !!currentEmpId && item.assignedTo.toString() === currentEmpId;
-        const assignedById =
-            item.assignedBy?._id ? item.assignedBy._id.toString() : item.assignedBy?.toString?.() || item.assignedBy;
-        const isAssignerReturn =
-            !!assignedById && !!currentEmpId && assignedById.toString() === currentEmpId;
 
         if (item.assignedTo) {
-            if (!isElevatedReturn && !isAssigneeReturn && !isAssignerReturn) {
+            if (!isElevatedReturn && !isAssigneeReturn) {
                 return res.status(403).json({
-                    message: 'Only the assigned employee, the assigner, Asset Controller, or an administrator can return this asset.'
+                    message: 'Only the assigned employee, Asset Controller, or an administrator can return this asset.'
                 });
             }
         } else {
-            if (!isElevatedReturn && !isAssignerReturn) {
+            if (!isElevatedReturn) {
                 return res.status(403).json({
-                    message: 'Only Asset Controller/Admin or the assigner can return an asset that is not assigned to an employee.'
+                    message: 'Only Asset Controller or an administrator can return an asset that is not assigned to an employee.'
                 });
             }
         }
 
         const assetController = hodAc;
-        if (!assetController && !isAssigneeReturn && !isAssignerReturn) {
+        if (!assetController && !isAssigneeReturn) {
             return res.status(403).json({
                 message: "Asset return denied: No Asset Controller has been assigned in the organization flow. Please assign an Asset Controller in Settings > Flowchart before performing this operation."
             });
@@ -6694,7 +6894,12 @@ export const returnAssetItem = async (req, res) => {
 
                 item.assignedTo = newAssignee._id;
                 item.assignedBy = req.user.employeeObjectId;
-                item.status = 'Unassigned';
+                if (isLeaveActive(item)) {
+                    item.status = 'Assigned';
+                    item.onLeaveActive = true;
+                } else {
+                    item.status = 'Unassigned';
+                }
                 item.acceptanceStatus = 'Accepted';
                 item.actionRequiredBy = null;
                 item.assignmentType = assignmentType || 'Permanent';
@@ -6817,6 +7022,59 @@ export const updateAssetStatus = async (req, res) => {
         const item = await AssetItem.findById(id);
         if (!item) return res.status(404).json({ message: 'Asset not found' });
 
+        const isAdminUser =
+            req.user?.isAdmin === true || req.user?.role === 'Admin' || req.user?.role === 'ROOT';
+        const isAssetControllerUser = await isUserInFlowchart(req.user, 'assetcontroller');
+        let actingEmpId = req.user?.employeeObjectId?.toString();
+        if (!actingEmpId && req.user?.employeeId) {
+            const me = await EmployeeBasic.findOne({
+                employeeId: {
+                    $regex: new RegExp(
+                        `^${String(req.user.employeeId).replace(/\s+/g, '\\s*')}$`,
+                        'i'
+                    ),
+                },
+            })
+                .select('_id')
+                .lean()
+                .catch(() => null);
+            if (me?._id) actingEmpId = me._id.toString();
+        }
+
+        const isAssignedAsset = !!(item.assignedTo || item.assignedCompany);
+        const isAssignedUser =
+            !!item.assignedTo &&
+            !!actingEmpId &&
+            item.assignedTo.toString() === actingEmpId;
+
+        if (status === 'Service' || status === 'Live') {
+            if (status === 'Service' && !isAssignedAsset) {
+                if (!isAdminUser && !isAssetControllerUser) {
+                    return res.status(403).json({
+                        message:
+                            'Only Asset Controller or Admin can send an unassigned asset to service.',
+                    });
+                }
+            } else if (!isAdminUser && !isAssetControllerUser && !isAssignedUser) {
+                return res.status(403).json({
+                    message:
+                        'Only Asset Controller, Admin, or the assigned user can perform this service action.',
+                });
+            }
+        }
+
+        if (status === 'Service') {
+            if (!serviceDuration) {
+                return res.status(400).json({ message: 'Service duration is required.' });
+            }
+            const serviceDays = parseServiceDurationDays(serviceDuration);
+            if (!serviceDays || serviceDays < 1 || serviceDays > MAX_ASSET_SERVICE_DAYS) {
+                return res.status(400).json({
+                    message: `Service duration must be between 1 and ${MAX_ASSET_SERVICE_DAYS} days.`,
+                });
+            }
+        }
+
         const prevStatus = item.status;
         let serviceRecord = null;
         let completionRecord = null;
@@ -6839,22 +7097,17 @@ export const updateAssetStatus = async (req, res) => {
             item.actionRequiredBy = null;
             item.negotiationHistory = [];
         } else if (status === 'Service') {
-            const statusBeforeService = item.status;
-            item.status = 'Service';
+            const statusBeforeService = item.onLeaveActive ? 'On Leave' : item.status;
+            applyServiceActiveState(item, statusBeforeService);
 
-            // Calculate expiry date if duration is provided
+            const serviceDays = parseServiceDurationDays(serviceDuration);
+            const normalizedDuration = `${serviceDays} days`;
+
+            // Calculate expiry date from normalized day count
             let expiryDate = null;
-            if (serviceDuration) {
-                const durationMatch = serviceDuration.match(/(\d+)\s*(day|week|month|year)s?/i);
-                if (durationMatch) {
-                    const amount = parseInt(durationMatch[1]);
-                    const unit = durationMatch[2].toLowerCase();
-                    expiryDate = new Date();
-                    if (unit.startsWith('day')) expiryDate.setDate(expiryDate.getDate() + amount);
-                    else if (unit.startsWith('week')) expiryDate.setDate(expiryDate.getDate() + (amount * 7));
-                    else if (unit.startsWith('month')) expiryDate.setMonth(expiryDate.getMonth() + amount);
-                    else if (unit.startsWith('year')) expiryDate.setFullYear(expiryDate.getFullYear() + amount);
-                }
+            if (serviceDays) {
+                expiryDate = new Date();
+                expiryDate.setDate(expiryDate.getDate() + serviceDays);
             }
 
             // Build service record
@@ -6862,7 +7115,7 @@ export const updateAssetStatus = async (req, res) => {
                 _id: new mongoose.Types.ObjectId(),
                 date: new Date(),
                 expiryDate: expiryDate,
-                serviceDuration: serviceDuration || null,
+                serviceDuration: normalizedDuration,
                 description: description || note || null,
                 requestedBy: req.user.employeeObjectId,
                 statusBeforeService: statusBeforeService || null,
@@ -6902,7 +7155,7 @@ export const updateAssetStatus = async (req, res) => {
 
         } else if (status === 'Live') {
             const openService = item.services?.length ? item.services[item.services.length - 1] : null;
-            item.status = resolvePostServiceStatus(item, openService);
+            applyPostServiceOperationalState(item, openService);
 
             // Add completion record if data provided
             if (serviceReport || amount) {
@@ -6933,72 +7186,6 @@ export const updateAssetStatus = async (req, res) => {
 
         await item.save();
 
-        // Email Notifications for Service
-        try {
-            // Do NOT notify immediately when entering Service.
-            // Service reminder/completion notifications are handled by scheduled checks.
-            if (status === 'Live') {
-                const assetController = await getDepartmentHOD('assetcontroller');
-                const requestInitiatorId = req.user.employeeObjectId;
-                const initiator = await EmployeeBasic.findById(requestInitiatorId);
-                const senderInfo = {
-                    firstName: initiator?.firstName || req.user.name?.split(' ')[0] || 'User',
-                    lastName: initiator?.lastName || req.user.name?.split(' ').slice(1).join(' ') || ''
-                };
-
-                const recipients = [];
-                if (assetController) recipients.push(assetController);
-                if (initiator && (!assetController || assetController._id.toString() !== initiator._id.toString())) {
-                    recipients.push(initiator);
-                }
-
-                // Also notify the person the asset is assigned to (or their manager if no email)
-                if (item.assignedTo) {
-                    const assignedPerson = await EmployeeBasic.findById(item.assignedTo);
-                    if (assignedPerson) {
-                        const hasEmail = !!(assignedPerson.companyEmail || '').trim();
-
-                        let targetRecipient = assignedPerson;
-                        if (!hasEmail && assignedPerson.primaryReportee) {
-                            const manager = await EmployeeBasic.findById(assignedPerson.primaryReportee);
-                            if (manager) targetRecipient = manager;
-                        }
-
-                        const isDuplicate = recipients.some(r => r._id.toString() === targetRecipient._id.toString());
-                        if (!isDuplicate) recipients.push(targetRecipient);
-                    }
-                }
-
-                for (const recipient of recipients) {
-                    await sendAssetServiceEmail({
-                        asset: item,
-                        recipient,
-                        type: status === 'Service' ? 'Started' : 'Done',
-                        details: {
-                            serviceDuration: serviceDuration || null,
-                            description: status === 'Service' ? (description || note) : (serviceReport || "Service Completed")
-                        },
-                        sender: senderInfo
-                    });
-
-                    // Manage Dashboard Actions
-                    try {
-                        if (status === 'Live') {
-                            // Clear any "Service" or "Overdue" tasks for this asset
-                            await DashboardAction.updateMany(
-                                { requestId: item._id, status: 'Pending', requestType: { $in: ['Asset', 'Asset Overdue'] } },
-                                { status: 'Approved', actionedDate: new Date(), actionedBy: requestInitiatorId }
-                            );
-                        }
-                    } catch (dashErr) {
-                        console.error('[Dashboard Error] Failed to update service action:', dashErr);
-                    }
-                }
-            }
-        } catch (emailErr) {
-            console.error('[Service Email Error] Failed to send service notifications:', emailErr);
-        }
-
         const resolveOpenServiceRecord = (services = []) => {
             for (let i = services.length - 1; i >= 0; i--) {
                 const s = services[i];
@@ -7008,6 +7195,63 @@ export const updateAssetStatus = async (req, res) => {
         };
         const activeServiceOnItem =
             status === 'Live' ? resolveOpenServiceRecord(item.services) : serviceRecord;
+
+        // Email Notifications for Service
+        try {
+            const requestInitiatorId = req.user.employeeObjectId;
+            const initiator = await EmployeeBasic.findById(requestInitiatorId)
+                .select('firstName lastName employeeId companyEmail workEmail primaryReportee')
+                .populate('primaryReportee', 'firstName lastName employeeId companyEmail workEmail')
+                .lean();
+
+            const emailDetails = {
+                serviceDuration:
+                    status === 'Service'
+                        ? serviceRecord?.serviceDuration || serviceDuration || null
+                        : activeServiceOnItem?.serviceDuration || null,
+                description:
+                    status === 'Service'
+                        ? description || note || null
+                        : serviceReport || 'Service Completed',
+            };
+
+            if (status === 'Service') {
+                await notifyAssetServiceStakeholderEmails({
+                    asset: item,
+                    type: 'Started',
+                    details: emailDetails,
+                    initiator,
+                    initiatorIsAssetController: isAssetControllerUser,
+                });
+            } else if (status === 'Live') {
+                await notifyAssetServiceStakeholderEmails({
+                    asset: item,
+                    type: 'Done',
+                    details: emailDetails,
+                    initiator,
+                    initiatorIsAssetController: isAssetControllerUser,
+                });
+
+                try {
+                    await DashboardAction.updateMany(
+                        {
+                            requestId: item._id,
+                            status: 'Pending',
+                            requestType: { $in: ['Asset', 'Asset Overdue'] },
+                        },
+                        {
+                            status: 'Approved',
+                            actionedDate: new Date(),
+                            actionedBy: requestInitiatorId,
+                        }
+                    );
+                } catch (dashErr) {
+                    console.error('[Dashboard Error] Failed to update service action:', dashErr);
+                }
+            }
+        } catch (emailErr) {
+            console.error('[Service Email Error] Failed to send service notifications:', emailErr);
+        }
 
         let historyDetails = null;
         let historyComments = description || note || serviceReport || null;
@@ -7909,6 +8153,160 @@ export const transferAsset = async (req, res) => {
     }
 };
 
+// @desc    Transfer asset assignee to another employee (AC or current assignee initiates; new assignee approves)
+// @route   PUT /api/AssetItem/:id/transfer-assignee
+// @access  Private (Asset Controller or assigned user)
+export const transferAssigneeAsset = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { assignedTo: toEmployeeId } = req.body;
+
+        if (!toEmployeeId) {
+            return res.status(400).json({ message: 'Target employee is required.' });
+        }
+
+        const item = await AssetItem.findById(id)
+            .populate('assignedTo', 'firstName lastName employeeId companyEmail workEmail')
+            .populate('assignedCompany', 'name companyId');
+        if (!item) return res.status(404).json({ message: 'Asset not found' });
+
+        if (item.assignedToType !== 'Employee' || !item.assignedTo) {
+            return res.status(400).json({ message: 'Assignee transfer is only available for employee-assigned assets.' });
+        }
+        if (item.status !== 'Assigned' && item.status !== 'Pending') {
+            return res.status(400).json({ message: 'Asset must be assigned to transfer the assignee.' });
+        }
+        if (isLeaveActive(item)) {
+            return res.status(400).json({ message: 'Use parking reassignment while asset is on leave.' });
+        }
+        if (item.acceptanceStatus === 'Pending' && item.actionRequiredBy) {
+            return res.status(400).json({ message: 'Asset already has a pending assignment. Resolve it before transferring.' });
+        }
+
+        const oldAssigneeId = (item.assignedTo._id || item.assignedTo).toString();
+        if (oldAssigneeId === String(toEmployeeId)) {
+            return res.status(400).json({ message: 'Cannot transfer to the same employee.' });
+        }
+
+        const actingEmpObjectId = req.user.employeeObjectId?.toString?.();
+        if (!actingEmpObjectId) {
+            return res.status(403).json({ message: 'You are not linked to an employee profile.' });
+        }
+
+        const isAdminUser = req.user?.isAdmin === true || req.user?.role === 'Admin' || req.user?.role === 'ROOT';
+        const isAssetController = await isUserInFlowchart(req.user, 'assetcontroller').catch(() => false);
+        const isCurrentAssignee = actingEmpObjectId === oldAssigneeId;
+
+        if (!isAdminUser && !isAssetController && !isCurrentAssignee) {
+            return res.status(403).json({
+                message: 'Only Asset Controller or the current assigned user can transfer the assignee.',
+            });
+        }
+
+        const initiatedBy = isAssetController && !isCurrentAssignee ? 'assetcontroller' : 'assignee';
+
+        const initiator = await EmployeeBasic.findById(actingEmpObjectId);
+        if (!initiator?.signature?.url) {
+            return res.status(403).json({ message: 'Your digital signature is required before initiating assignee transfer.' });
+        }
+
+        const oldAssignee = await loadEmployeeWithReportee(oldAssigneeId);
+        const newAssignee = await loadEmployeeWithReportee(toEmployeeId);
+        if (!newAssignee) return res.status(404).json({ message: 'Target employee not found.' });
+
+        const resolvedActors = resolveEmployeeAssignmentActors(newAssignee, actingEmpObjectId);
+        if (resolvedActors.autoAcceptOnAssign) {
+            return res.status(400).json({
+                message: 'Cannot transfer to an employee who cannot self-acknowledge without a company email delegate.',
+            });
+        }
+
+        item.pendingActionDetails = {
+            ...(item.pendingActionDetails || {}),
+            assigneeTransferContext: {
+                isAssigneeTransfer: true,
+                oldAssignedTo: oldAssigneeId,
+                oldAssignedBy: (item.assignedBy?._id || item.assignedBy)?.toString?.() || null,
+                oldAssignmentType: item.assignmentType || null,
+                oldAssignedDays: item.assignedDays ?? null,
+                oldAssignedDate: item.assignedDate || null,
+                oldTemporaryEndDate: item.temporaryEndDate || null,
+                oldTemporaryReminderSentAt: item.temporaryReminderSentAt || null,
+                oldTemporaryExpiredSentAt: item.temporaryExpiredSentAt || null,
+                initiatedBy,
+                requestedBy: actingEmpObjectId,
+            },
+        };
+
+        item.assignedToType = 'Employee';
+        item.assignedTo = newAssignee._id;
+        item.assignedCompany = null;
+        item.assignedBy = actingEmpObjectId;
+        item.acceptanceStatus = 'Pending';
+        item.actionRequiredBy = resolvedActors.pendingActionActorId;
+        item.status = 'Pending';
+        item.negotiationHistory = [];
+
+        await item.save();
+
+        const itemForEmail = await AssetItem.findById(item._id).populate('categoryId', 'name').lean();
+        let handoverPdf = [];
+        try {
+            handoverPdf = await buildAssigneeTransferHandoverAttachments(req, item._id, {
+                assigner: initiator,
+                oldAssignee,
+                newAssignee,
+            });
+        } catch (e) {
+            /* non-fatal */
+        }
+
+        await sendAssigneeTransferRequestEmails({
+            req,
+            asset: itemForEmail || item,
+            oldAssignee,
+            newAssignee,
+            initiator,
+            attachments: handoverPdf,
+        });
+
+        const subjectName = `${newAssignee.firstName || ''} ${newAssignee.lastName || ''}`.trim();
+        await DashboardAction.findOneAndUpdate(
+            { requestId: item._id, requestType: 'Asset Assignment', status: 'Pending' },
+            {
+                assignedTo: resolvedActors.pendingActionActorId,
+                assignedToEmpId: newAssignee.employeeId,
+                requestId: item._id,
+                requestType: 'Asset Assignment',
+                subjectEmployeeId: newAssignee.employeeId,
+                subjectName,
+                requestedByName: `${initiator.firstName || ''} ${initiator.lastName || ''}`.trim(),
+                extra1: `${item.assetId} — ${item.name}`,
+                extra2: 'Assignee Transfer',
+                status: 'Pending',
+            },
+            { upsert: true, new: true, setDefaultsOnInsert: true },
+        );
+
+        await AssetHistory.create({
+            assetId: item._id,
+            action: 'Comment',
+            performedBy: actingEmpObjectId,
+            comments: `Assignee transfer requested to ${subjectName} (${newAssignee.employeeId}). Awaiting new assignee approval.`,
+            date: new Date(),
+            details: { type: 'AssigneeTransferRequest', initiatedBy, oldAssignedTo: oldAssigneeId, newAssignedTo: String(newAssignee._id) },
+        });
+
+        res.status(200).json({
+            message: `Transfer request sent to ${subjectName} for approval.`,
+            asset: item,
+        });
+    } catch (error) {
+        console.error('[transferAssigneeAsset]', error);
+        res.status(500).json({ message: error?.message || 'Internal server error' });
+    }
+};
+
 // Helper: Remove accessory from all history snapshots of an asset
 const removeAccessoryFromHistorySnapshots = async (assetId, accessoryId) => {
     try {
@@ -8100,8 +8498,8 @@ export const requestAssetAction = async (req, res) => {
         const leaveDaysRaw = duration ?? leaveDuration;
         const leaveDays = leaveDaysRaw != null && leaveDaysRaw !== '' ? Number(leaveDaysRaw) : null;
         if (originalActionType === 'Leave') {
-            if (!Number.isInteger(leaveDays) || leaveDays < 1 || leaveDays > 30) {
-                return res.status(400).json({ message: 'Leave duration must be between 1 and 30 days.' });
+            if (!Number.isInteger(leaveDays) || leaveDays < 1 || leaveDays > MAX_ASSET_LEAVE_DAYS) {
+                return res.status(400).json({ message: `Leave duration must be between 1 and ${MAX_ASSET_LEAVE_DAYS} days.` });
             }
         }
 
@@ -8120,14 +8518,29 @@ export const requestAssetAction = async (req, res) => {
             });
         }
 
-        // Permission: asset controller/admin OR assignee
-        // Also allow assigner + primary reportee delegation
-        const actorFlags = await getActorPermissionFlagsForAsset(req.user, asset);
-        if (!actorFlags.canAct) {
-            return res.status(403).json({
-                message:
-                    'Access denied. Only Asset Controller/Admin, flowchart Assigned User/Admin for company assets, assigner, assigned user, or delegated primary reportee can request this asset action.'
-            });
+        const isTransferAction = originalActionType === 'Leave' || originalActionType === 'End of Services';
+        const isAdminUser = req.user?.isAdmin === true || req.user?.role === 'Admin' || req.user?.role === 'ROOT';
+        const isAssetControllerRequester = await isUserInFlowchart(req.user, 'assetcontroller').catch(() => false);
+        const currentEmpId = req.user.employeeObjectId?.toString();
+        const assigneeId =
+            asset.assignedTo?._id?.toString?.() ||
+            (typeof asset.assignedTo === 'string' ? asset.assignedTo : asset.assignedTo?.toString?.());
+        const isAssigneeRequester = !!(currentEmpId && assigneeId && currentEmpId === assigneeId);
+
+        if (isTransferAction) {
+            if (!isAdminUser && !isAssetControllerRequester && !isAssigneeRequester) {
+                return res.status(403).json({
+                    message: 'Access denied. Only Asset Controller or the assigned user can request asset transfer (Leave / End of Services).',
+                });
+            }
+        } else {
+            const actorFlags = await getActorPermissionFlagsForAsset(req.user, asset);
+            if (!actorFlags.canAct) {
+                return res.status(403).json({
+                    message:
+                        'Access denied. Only Asset Controller/Admin, flowchart Assigned User/Admin for company assets, assigner, assigned user, or delegated primary reportee can request this asset action.',
+                });
+            }
         }
 
         // Upload attachment if present
@@ -8137,176 +8550,65 @@ export const requestAssetAction = async (req, res) => {
             fileUrl = uploadResult.publicId;
         }
 
-        // All actions (Leave, End of Life, Loss and Damage, Transfer) now require Asset Controller approval ONLY
-        // No reportee approval needed - Asset Controller is the first and only approver
         const assetController = await getDepartmentHOD('assetcontroller');
 
         if (!assetController) {
             return res.status(400).json({ message: 'Asset Controller not found. Cannot request approval.' });
         }
 
-        // If the requester IS the Asset Controller, execute directly (no approval step).
-        // This is specifically for controller-raised Leave / End of Services.
-        const isAssetControllerRequester = await isUserInFlowchart(req.user, 'assetcontroller').catch(() => false);
-        if (isAssetControllerRequester && (originalActionType === 'Leave' || originalActionType === 'End of Services')) {
-            // Ensure duration is present for Leave
-            if (originalActionType === 'Leave') {
-                if (!leaveDays) {
-                    return res.status(400).json({ message: 'Leave duration is required.' });
-                }
-                if (isServiceOperationalStatus(asset.status)) {
-                    asset.acceptanceStatus = 'Accepted';
-                    asset.pendingAction = null;
-                    asset.pendingActionDetails = null;
-                    asset.actionRequiredBy = null;
-                    asset.negotiationHistory = [];
-                    await asset.save();
-                    await AssetHistory.create({
-                        assetId: asset._id,
-                        action: 'Comment',
-                        performedBy: req.user.employeeObjectId || req.user._id,
-                        comments: 'Leave/parking skipped: asset remains on service until Mark Live or Return.',
-                        date: new Date(),
-                        details: { status: 'OnServiceUnchanged', originalAction: originalActionType }
-                    });
-                    return res.status(200).json({
-                        message: 'Asset is on service; parking not applied (status unchanged).',
-                        asset
-                    });
-                }
-                if (hasActiveParkingContext(asset)) {
-                    return res.status(400).json({
-                        message: 'Asset is already on leave and cannot be transferred again. Use Return or Loss & Damage only.',
-                    });
-                }
-
-                applyParkingLeaveStatus(asset, leaveDays);
-                asset.acceptanceStatus = 'Accepted';
-
-                // Clear any pending request fields (if present)
-                asset.pendingAction = null;
-                asset.pendingActionDetails = null;
-                asset.actionRequiredBy = null;
-                asset.negotiationHistory = [];
-
-                await asset.save();
-                const empSnapLeave =
-                    asset.assignedToType === 'Employee' && asset.assignedTo
-                        ? [
-                            {
-                                _id: asset._id,
-                                assetId: asset.assetId,
-                                name: asset.name,
-                                assignedTo: asset.assignedTo
-                            }
-                        ]
-                        : [];
-                if (empSnapLeave.length) {
-                    await notifyEmployeesGroupedControllerBulkDirect(req, empSnapLeave, {
-                        pdfBase: 'controller-direct-leave',
-                        bulkName: 'On leave',
-                        actionLabel: 'Leave',
-                        detailsText: 'Asset placed on leave by Asset Controller (direct transfer).',
-                        customIntro:
-                            '<p>The Asset Controller placed your asset(s) on leave (parking). The attached PDF is the same <strong>Asset Handover Form</strong> used for bulk assignments, listing each asset with values and accessories.</p>'
-                    });
-                } else {
-                    await notifyAssignedEmployeeIfController(req, asset, 'Leave', 'Asset placed on leave by Asset Controller (direct transfer).');
-                }
-                await AssetHistory.create({
-                    assetId: asset._id,
-                    action: 'On Leave',
-                    performedBy: req.user.employeeObjectId || req.user._id,
-                    comments: 'Asset Controller executed Leave directly (no approval step).',
-                    date: new Date(),
-                    details: { status: 'ApprovedAndFinalized', originalAction: originalActionType }
-                });
-                return res.status(200).json({ message: 'Leave executed directly by Asset Controller (no approval)', asset });
-            }
-
-            if (originalActionType === 'End of Services') {
-                // Direct transfer to store: mark Unassigned (NOT Lost).
-                const empSnapEos =
-                    asset.assignedToType === 'Employee' && asset.assignedTo
-                        ? [
-                            {
-                                _id: asset._id,
-                                assetId: asset.assetId,
-                                name: asset.name,
-                                assignedTo: asset.assignedTo
-                            }
-                        ]
-                        : [];
-                asset.status = 'Unassigned';
-                asset.acceptanceStatus = 'Accepted';
-                if (empSnapEos.length) {
-                    await notifyEmployeesGroupedControllerBulkDirect(req, empSnapEos, {
-                        pdfBase: 'controller-direct-eos',
-                        bulkName: 'End of services',
-                        actionLabel: 'Return Asset',
-                        detailsText: 'Asset returned to store by Asset Controller (End of Services direct transfer).',
-                        customIntro:
-                            '<p>The Asset Controller returned your asset(s) to store (End of Services). The attached PDF is the <strong>Asset Handover Form</strong> (same layout as bulk assignment).</p>'
-                    });
-                } else {
-                    await notifyAssignedEmployeeIfController(req, asset, 'Return Asset', 'Asset returned to store by Asset Controller (End of Services direct transfer).');
-                }
-
-                asset.assignedTo = null;
-                asset.assignedCompany = null;
-                asset.assignedToType = null;
-                asset.assignmentType = null;
-                asset.assignedDays = null;
-                asset.assignedDate = null;
-                asset.temporaryEndDate = null;
-                asset.temporaryReminderSentAt = null;
-                asset.temporaryExpiredSentAt = null;
-                asset.pendingAction = null;
-                asset.pendingActionDetails = null;
-                asset.actionRequiredBy = null;
-                asset.negotiationHistory = [];
-                asset.onLeaveStartDate = null;
-                asset.onLeaveEndDate = null;
-                asset.onLeaveDuration = null;
-                asset.parkingExtendedDays = 0;
-                asset.parkingReminderSentAt = null;
-
-                await asset.save();
-
-                // Asset history (minimal)
-                await AssetHistory.create({
-                    assetId: asset._id,
-                    action: 'Unassigned',
-                    performedBy: req.user.employeeObjectId || req.user._id,
-                    comments: 'Asset Controller returned asset to store directly (End of Services).',
-                    date: new Date(),
-                    details: { status: 'Unassigned', originalActionType }
-                });
-
-                return res.status(200).json({ message: 'End of Services executed directly by Asset Controller (unassigned)', asset });
+        if (pendingActionType === 'Loss and Damage') {
+            const emailCheck = await assertAssetActionStakeholderEmails({ asset, assetController });
+            if (!emailCheck.ok) {
+                return res.status(400).json({ message: emailCheck.message });
             }
         }
 
         // Store pending request in asset
         asset.pendingAction = pendingActionType;
+        const requestedByRole =
+            isAssetControllerRequester && !isAssigneeRequester
+                ? 'assetcontroller'
+                : isAssigneeRequester
+                    ? 'assignee'
+                    : 'admin';
         asset.pendingActionDetails = {
             reason: reason,
             attachment: fileUrl,
-            fineData: fineData || null, // Store full fine payload
-            duration: leaveDays || null, // Store duration for Leave action
-            leaveDuration: leaveDays || null, // Alias for clarity
-            originalActionType
+            fineData: fineData || null,
+            duration: leaveDays || null,
+            leaveDuration: leaveDays || null,
+            originalActionType,
+            requestedBy: req.user.employeeObjectId || req.user._id,
+            requestedByRole,
         };
 
-        // Always route to Asset Controller - no reportee approval
-        const nextApprover = assetController;
-
+        let nextApprover = assetController;
+        if (isTransferAction) {
+            if (isAssetControllerRequester && !isAssigneeRequester) {
+                let ownerEmp = asset.assignedTo;
+                if (ownerEmp && !ownerEmp._id && typeof ownerEmp !== 'object') {
+                    ownerEmp = await EmployeeBasic.findById(ownerEmp)
+                        .select('_id employeeId firstName lastName companyEmail workEmail')
+                        .lean();
+                } else if (ownerEmp?._id && !ownerEmp.employeeId) {
+                    ownerEmp = await EmployeeBasic.findById(ownerEmp._id)
+                        .select('_id employeeId firstName lastName companyEmail workEmail')
+                        .lean();
+                }
+                if (!ownerEmp?._id) {
+                    return res.status(400).json({ message: 'Asset has no assigned owner to approve this transfer.' });
+                }
+                nextApprover = ownerEmp;
+            } else {
+                nextApprover = await resolveAssetControllerEmployee(assetController);
+            }
+        }
 
         // actionRequiredBy references EmployeeBasic, so use EmployeeBasic._id
         asset.actionRequiredBy = nextApprover._id;
         if (
             originalActionType === 'Leave' &&
-            (isParkingStatus(asset.status) || isServiceOperationalStatus(asset.status))
+            (isLeaveActive(asset) || isServiceActive(asset))
         ) {
             // Parking and on-service assets keep their operational status while leave is pending approval.
         } else {
@@ -8350,16 +8652,46 @@ export const requestAssetAction = async (req, res) => {
             console.error('[requestAssetAction] Handover PDF for approval email (non-fatal):', pdfErr?.message || pdfErr);
         }
 
-        await sendAssetActionApprovalEmail(
-            asset,
-            pendingActionType,
-            nextApprover,
-            { name: requesterName },
-            reason,
-            requestAttachments,
-        );
+        if (pendingActionType === 'Loss and Damage') {
+            await notifyLossDamageRequestStakeholders({
+                asset,
+                actionType: pendingActionType,
+                approver: nextApprover,
+                requesterName,
+                reason,
+                attachments: requestAttachments,
+            });
+        } else {
+            await sendAssetActionApprovalEmail(
+                asset,
+                pendingActionType,
+                nextApprover,
+                { name: requesterName },
+                reason,
+                requestAttachments,
+            );
+        }
 
-        res.status(200).json({ message: `${pendingActionType} request sent to Asset Controller for approval`, asset });
+        if (isTransferAction) {
+            await notifyLeaveEosOwnerHod({
+                asset,
+                actionType: pendingActionType,
+                requesterName,
+                phase: 'requested',
+                reason,
+                attachments: requestAttachments,
+            });
+        }
+
+        const approverLabel =
+            isTransferAction && isAssetControllerRequester && !isAssigneeRequester
+                ? 'asset owner'
+                : 'Asset Controller';
+
+        res.status(200).json({
+            message: `${pendingActionType} request sent to ${approverLabel} for approval`,
+            asset,
+        });
     } catch (error) {
         console.error('Error requesting asset action:', error);
         // Return the real message to help frontend/debug quickly (avoids generic 500).
@@ -8388,8 +8720,8 @@ export const bulkRequestAssetAction = async (req, res) => {
         const leaveDaysRaw = duration ?? leaveDuration;
         const leaveDays = leaveDaysRaw != null && leaveDaysRaw !== '' ? Number(leaveDaysRaw) : null;
         if (originalActionType === 'Leave') {
-            if (!Number.isInteger(leaveDays) || leaveDays < 1 || leaveDays > 30) {
-                return res.status(400).json({ message: 'Leave duration must be between 1 and 30 days.' });
+            if (!Number.isInteger(leaveDays) || leaveDays < 1 || leaveDays > MAX_ASSET_LEAVE_DAYS) {
+                return res.status(400).json({ message: `Leave duration must be between 1 and ${MAX_ASSET_LEAVE_DAYS} days.` });
             }
         }
 
@@ -8410,153 +8742,36 @@ export const bulkRequestAssetAction = async (req, res) => {
             return res.status(400).json({ message: 'Asset Controller is not properly linked to an employee record. Please update Settings > Flowchart.' });
         }
 
-        // If requester is the Asset Controller, execute directly (no approval step) for Leave / End of Services.
+        const isTransferBulk = originalActionType === 'Leave' || originalActionType === 'End of Services';
+        const isAdminUser = req.user?.isAdmin === true || req.user?.role === 'Admin' || req.user?.role === 'ROOT';
         const isAssetControllerRequester = await isUserInFlowchart(req.user, 'assetcontroller').catch(() => false);
-        if (isAssetControllerRequester && (originalActionType === 'Leave' || originalActionType === 'End of Services')) {
-            const employeeSnapsForEmail = assets
-                .filter((a) => a && String(a.assignedToType || 'Employee') === 'Employee' && a.assignedTo)
-                .map((a) => ({
-                    _id: a._id,
-                    assetId: a.assetId,
-                    name: a.name,
-                    assignedTo: a.assignedTo
-                }));
-            const processed = [];
-            for (const currentAsset of assets) {
-                if (!currentAsset) continue;
+        const currentEmpId = req.user.employeeObjectId?.toString();
+        const primaryAssigneeId =
+            assets[0]?.assignedTo?._id?.toString?.() ||
+            (typeof assets[0]?.assignedTo === 'string' ? assets[0].assignedTo : assets[0]?.assignedTo?.toString?.());
+        const isAssigneeRequester = !!(currentEmpId && primaryAssigneeId && currentEmpId === primaryAssigneeId);
 
-                if (originalActionType === 'Leave') {
-                    if (!leaveDays) {
-                        return res.status(400).json({ message: 'Leave duration is required.' });
-                    }
-                    if (isServiceOperationalStatus(currentAsset.status)) {
-                        currentAsset.pendingAction = null;
-                        currentAsset.pendingActionDetails = null;
-                        currentAsset.actionRequiredBy = null;
-                        currentAsset.negotiationHistory = [];
-                        await currentAsset.save();
-                        await AssetHistory.create({
-                            assetId: currentAsset._id,
-                            action: 'Comment',
-                            performedBy: req.user.employeeObjectId || req.user._id,
-                            comments: 'Bulk leave skipped: asset remains on service until Mark Live or Return.',
-                            date: new Date(),
-                            details: { status: 'OnServiceUnchanged', originalAction: originalActionType, isBulk: true }
-                        });
-                        processed.push(currentAsset);
-                        continue;
-                    }
-                    if (hasActiveParkingContext(currentAsset)) {
-                        await AssetHistory.create({
-                            assetId: currentAsset._id,
-                            action: 'Comment',
-                            performedBy: req.user.employeeObjectId || req.user._id,
-                            comments: 'Bulk leave skipped: asset is already on leave and cannot be transferred again.',
-                            date: new Date(),
-                            details: { status: 'OnLeaveUnchanged', originalAction: originalActionType, isBulk: true }
-                        });
-                        processed.push(currentAsset);
-                        continue;
-                    }
-
-                    applyParkingLeaveStatus(currentAsset, leaveDays);
-                    currentAsset.acceptanceStatus = 'Accepted';
-
-                    currentAsset.pendingAction = null;
-                    currentAsset.pendingActionDetails = null;
-                    currentAsset.actionRequiredBy = null;
-                    currentAsset.negotiationHistory = [];
-
-                    if (currentAsset.assignedToType === 'Company' || String(currentAsset.assignedToType || '') === 'Company') {
-                        await notifyAssignedEmployeeIfController(
-                            req,
-                            currentAsset,
-                            'Leave',
-                            'Assets placed on leave by Asset Controller (direct transfer).'
-                        );
-                    }
-                    await currentAsset.save();
-                    await AssetHistory.create({
-                        assetId: currentAsset._id,
-                        action: 'On Leave',
-                        performedBy: req.user.employeeObjectId || req.user._id,
-                        comments: 'Bulk Leave executed directly by Asset Controller.',
-                        date: new Date(),
-                        details: { status: 'ApprovedAndFinalized', originalActionType }
-                    });
-                } else if (originalActionType === 'End of Services') {
-                    // Direct transfer to store: mark Unassigned (NOT Lost)
-                    if (currentAsset.assignedToType === 'Company' || String(currentAsset.assignedToType || '') === 'Company') {
-                        await notifyAssignedEmployeeIfController(
-                            req,
-                            currentAsset,
-                            'Return Asset',
-                            'Assets returned to store by Asset Controller (End of Services direct transfer).'
-                        );
-                    }
-
-                    currentAsset.status = 'Unassigned';
-                    currentAsset.acceptanceStatus = 'Accepted';
-
-                    currentAsset.assignedTo = null;
-                    currentAsset.assignedCompany = null;
-                    currentAsset.assignedToType = null;
-                    currentAsset.assignmentType = null;
-                    currentAsset.assignedDays = null;
-                    currentAsset.assignedDate = null;
-                    currentAsset.temporaryEndDate = null;
-                    currentAsset.temporaryReminderSentAt = null;
-                    currentAsset.temporaryExpiredSentAt = null;
-                    currentAsset.onLeaveStartDate = null;
-                    currentAsset.onLeaveEndDate = null;
-                    currentAsset.onLeaveDuration = null;
-                    currentAsset.parkingExtendedDays = 0;
-                    currentAsset.parkingReminderSentAt = null;
-
-                    currentAsset.pendingAction = null;
-                    currentAsset.pendingActionDetails = null;
-                    currentAsset.actionRequiredBy = null;
-                    currentAsset.negotiationHistory = [];
-
-                    await currentAsset.save();
-                    await AssetHistory.create({
-                        assetId: currentAsset._id,
-                        action: 'Unassigned',
-                        performedBy: req.user.employeeObjectId || req.user._id,
-                        comments: 'Bulk End of Services returned assets to store directly by Asset Controller.',
-                        date: new Date(),
-                        details: { status: 'Unassigned', originalActionType }
-                    });
-                }
-
-                processed.push(currentAsset._id);
-            }
-
-            if (originalActionType === 'Leave' && employeeSnapsForEmail.length > 0) {
-                await notifyEmployeesGroupedControllerBulkDirect(req, employeeSnapsForEmail, {
-                    pdfBase: 'controller-bulk-leave',
-                    bulkName: 'Bulk leave',
-                    actionLabel: 'Leave',
-                    detailsText: 'Assets placed on leave by Asset Controller (direct bulk transfer).',
-                    customIntro:
-                        '<p>The Asset Controller placed your asset(s) on leave. The attached PDF is the <strong>Asset Handover Form</strong> (same layout as bulk assignment), listing every item in this bulk action.</p>'
-                });
-            } else if (originalActionType === 'End of Services' && employeeSnapsForEmail.length > 0) {
-                await notifyEmployeesGroupedControllerBulkDirect(req, employeeSnapsForEmail, {
-                    pdfBase: 'controller-bulk-eos',
-                    bulkName: 'Bulk end of services',
-                    actionLabel: 'Return Asset',
-                    detailsText: 'Assets returned to store by Asset Controller (End of Services bulk transfer).',
-                    customIntro:
-                        '<p>The Asset Controller returned your asset(s) to store (End of Services). The attached PDF is the <strong>Asset Handover Form</strong> (same layout as bulk assignment), listing every item in this bulk action.</p>'
+        if (isTransferBulk) {
+            if (!isAdminUser && !isAssetControllerRequester && !isAssigneeRequester) {
+                return res.status(403).json({
+                    message: 'Access denied. Only Asset Controller or the assigned user can request bulk asset transfer.',
                 });
             }
+        }
 
-            return res.status(200).json({
-                message: `Bulk ${originalActionType} executed directly by Asset Controller (no approval)`,
-                processedCount: processed.length,
-                assetIds: processed
-            });
+        const resolvedAssetController = await resolveAssetControllerEmployee(assetController);
+        let bulkTransferApprover = resolvedAssetController;
+        if (isTransferBulk && isAssetControllerRequester && !isAssigneeRequester) {
+            let ownerEmp = assets[0]?.assignedTo;
+            if (ownerEmp?._id && !ownerEmp.employeeId) {
+                ownerEmp = await EmployeeBasic.findById(ownerEmp._id)
+                    .select('_id employeeId firstName lastName companyEmail workEmail')
+                    .lean();
+            }
+            if (!ownerEmp?._id) {
+                return res.status(400).json({ message: 'Bulk transfer requires an assigned asset owner for approval.' });
+            }
+            bulkTransferApprover = ownerEmp;
         }
 
         let companyCoordinator = null;
@@ -8598,29 +8813,38 @@ export const bulkRequestAssetAction = async (req, res) => {
         const bulkAssetIds = [];
         let primaryApprover = null; // For single dashboard action
 
+        const requestedByRole =
+            isAssetControllerRequester && !isAssigneeRequester
+                ? 'assetcontroller'
+                : isAssigneeRequester
+                    ? 'assignee'
+                    : 'admin';
+
         for (const asset of assets) {
             try {
-                // Determine approver based on asset assignment
                 let nextApprover;
                 if (actionType === 'Loss and Damage' && asset.assignedToType === 'Company' && asset.assignedCompany) {
                     nextApprover = companyCoordinator;
+                } else if (isTransferBulk) {
+                    nextApprover = bulkTransferApprover;
                 } else {
-                    nextApprover = assetController;
+                    nextApprover = resolvedAssetController;
                 }
                 if (!primaryApprover) primaryApprover = nextApprover;
 
-                // Store pending request in asset
                 asset.pendingAction = actionType;
                 const leaveDur = leaveDays;
                 asset.pendingActionDetails = {
                     reason: reason,
                     attachment: fileUrl,
                     isBulk: true,
-                    bulkAssetIds: assetIds, // Store all asset IDs for bulk tracking
+                    bulkAssetIds: assetIds,
                     fineData: null,
                     duration: leaveDur || null,
                     leaveDuration: leaveDur || null,
-                    originalActionType
+                    originalActionType,
+                    requestedBy: req.user.employeeObjectId || req.user._id,
+                    requestedByRole,
                 };
 
                 // actionRequiredBy references EmployeeBasic, so use EmployeeBasic._id
@@ -8683,7 +8907,9 @@ export const bulkRequestAssetAction = async (req, res) => {
                     primaryAsset.assignedCompany &&
                     companyCoordinator?._id
                     ? companyCoordinator
-                    : assetController;
+                    : isTransferBulk
+                        ? bulkTransferApprover
+                        : resolvedAssetController;
 
             try {
                 await sendAssetActionApprovalEmail(
@@ -8694,6 +8920,16 @@ export const bulkRequestAssetAction = async (req, res) => {
                     `Bulk ${actionType} request for ${assets.length} asset(s). Reason: ${reason || 'N/A'}`,
                     bulkActionAttachments
                 );
+                if (isTransferBulk) {
+                    await notifyLeaveEosOwnerHod({
+                        asset: primaryAsset,
+                        actionType,
+                        requesterName,
+                        phase: 'requested',
+                        reason: reason || '',
+                        attachments: bulkActionAttachments,
+                    });
+                }
             } catch (emailErr) {
                 console.error('[bulkRequestAssetAction] Email send failed (non-fatal):', emailErr.message);
             }
@@ -8702,8 +8938,13 @@ export const bulkRequestAssetAction = async (req, res) => {
         const successCount = results.length;
         const errorCount = errors.length;
 
+        const approverLabel =
+            isTransferBulk && isAssetControllerRequester && !isAssigneeRequester
+                ? 'asset owner'
+                : 'Asset Controller';
+
         res.status(200).json({
-            message: `${actionType} request submitted for ${successCount} asset(s)${errorCount > 0 ? `, ${errorCount} failed` : ''}. Awaiting Asset Controller approval.`,
+            message: `${actionType} request submitted for ${successCount} asset(s)${errorCount > 0 ? `, ${errorCount} failed` : ''}. Awaiting ${approverLabel} approval.`,
             results,
             errors: errorCount > 0 ? errors : undefined,
             bulkAssetIds: bulkAssetIds
@@ -8758,12 +8999,101 @@ export const handleAssetActionApproval = async (req, res) => {
         const isActionRequiredByCompanyCoordinator =
             companyCoordEmp?._id && asset.actionRequiredBy?.toString() === companyCoordEmp._id?.toString();
 
-        const isAuthorized =
-            asset.actionRequiredBy?.toString() === currentUserEmpId
-            || isAdmin
-            || isAssetController
-            || (actionType === 'Loss and Damage' && isHR && !isCompanyAsset)
-            || (actionType === 'Loss and Damage' && isCompanyAsset && isCompanyCoordinatorUser);
+        const isTransferLeaveEos =
+            actionType === 'Leave' ||
+            (actionType === 'End of Life' && asset.pendingActionDetails?.originalActionType === 'End of Services');
+        const isDesignatedApprover = asset.actionRequiredBy?.toString() === currentUserEmpId;
+
+        const isAuthorized = isTransferLeaveEos
+            ? isDesignatedApprover || isAdmin
+            : asset.actionRequiredBy?.toString() === currentUserEmpId
+                || isAdmin
+                || isAssetController
+                || (actionType === 'Loss and Damage' && isHR && !isCompanyAsset)
+                || (actionType === 'Loss and Damage' && isCompanyAsset && isCompanyCoordinatorUser);
+
+        const transferRequestMeta = isTransferLeaveEos
+            ? {
+                requestedBy: asset.pendingActionDetails?.requestedBy,
+                requestedByRole: asset.pendingActionDetails?.requestedByRole,
+                originalActionType: asset.pendingActionDetails?.originalActionType,
+            }
+            : null;
+
+        const emailTransferRequester = async (approved, reasonText = '') => {
+            if (!transferRequestMeta?.requestedBy) return;
+            try {
+                const requester = await EmployeeBasic.findById(transferRequestMeta.requestedBy)
+                    .select('firstName lastName employeeId companyEmail workEmail')
+                    .lean();
+                const approver = await EmployeeBasic.findById(req.user.employeeObjectId)
+                    .select('firstName lastName employeeId companyEmail workEmail')
+                    .lean();
+                if (!requester?._id || !approver?._id) return;
+                if (requester._id.toString() !== approver._id.toString()) {
+                    await sendAssetTransferDecisionEmail({
+                        asset: {
+                            _id: asset._id,
+                            assetId: asset.assetId,
+                            name: asset.name,
+                            pendingActionDetails: transferRequestMeta,
+                        },
+                        actionType,
+                        recipient: requester,
+                        approver,
+                        approved,
+                        reason: reasonText,
+                    });
+                }
+                const requesterName =
+                    `${requester.firstName || ''} ${requester.lastName || ''}`.trim() ||
+                    requester.employeeId ||
+                    'User';
+                await notifyLeaveEosOwnerHod({
+                    asset: {
+                        _id: asset._id,
+                        assetId: asset.assetId,
+                        name: asset.name,
+                        assignedTo: asset.assignedTo,
+                        assignedToType: asset.assignedToType,
+                        pendingActionDetails: transferRequestMeta,
+                    },
+                    actionType,
+                    requesterName,
+                    phase: approved ? 'approved' : 'rejected',
+                    approver,
+                    approved,
+                    reason: reasonText,
+                });
+            } catch (mailErr) {
+                console.error('[handleAssetActionApproval] Transfer requester email failed:', mailErr?.message || mailErr);
+            }
+        };
+
+        const emailLossDamageRequester = async (approved, reasonText = '') => {
+            if (actionType !== 'Loss and Damage') return;
+            const requestedBy = asset.pendingActionDetails?.requestedBy;
+            if (!requestedBy) return;
+            try {
+                const requester = await EmployeeBasic.findById(requestedBy)
+                    .select('firstName lastName employeeId companyEmail workEmail primaryReportee')
+                    .populate('primaryReportee', 'firstName lastName companyEmail workEmail')
+                    .lean();
+                const approver = await EmployeeBasic.findById(req.user.employeeObjectId)
+                    .select('firstName lastName employeeId companyEmail workEmail')
+                    .lean();
+                if (!requester?._id || !approver?._id) return;
+                await notifyLossDamageDecisionToRequester({
+                    asset,
+                    requestedBy: requester,
+                    approver,
+                    approved,
+                    reason: reasonText,
+                });
+            } catch (mailErr) {
+                console.error('[handleAssetActionApproval] L&D requester email failed:', mailErr?.message || mailErr);
+            }
+        };
 
         console.log('[Asset Approval Auth] isAuthorized:', isAuthorized, {
             matchesActionRequiredBy: asset.actionRequiredBy?.toString() === currentUserEmpId,
@@ -8783,18 +9113,27 @@ export const handleAssetActionApproval = async (req, res) => {
                         'Access denied. Only the flowchart Assigned User/Admin, Asset Controller, or Admin can approve loss and damage for company-assigned assets.'
                 });
             }
-            return res.status(403).json({ message: 'Access denied. Only Asset Controller, Admin, or the assigned user can perform this operation.' });
+            return res.status(403).json({
+                message: isTransferLeaveEos
+                    ? 'Access denied. Only the designated approver or Admin can approve or reject this transfer request.'
+                    : 'Access denied. Only Asset Controller, Admin, or the assigned user can perform this operation.',
+            });
         }
 
         if (approve) {
             const isAssetControllerApprowing = await isUserInFlowchart(req.user, 'assetcontroller');
 
-            // Handle "Leave" and "End of Life" and "Return Asset" - Asset Controller can approve directly (single step)
-            if ((actionType === 'Leave' || actionType === 'End of Life' || actionType === 'Return Asset') && isAssetControllerApprowing) {
-                // Get Asset Controller employee record for email
-                const assetControllerEmp = await EmployeeBasic.findById(req.user.employeeObjectId).select(
-                    'firstName lastName companyEmail signature employeeId department',
+            // Handle "Leave" and "End of Life" and "Return Asset" — designated approver (AC or asset owner)
+            if (
+                (actionType === 'Leave' || actionType === 'End of Life' || actionType === 'Return Asset') &&
+                (isDesignatedApprover || isAdmin)
+            ) {
+                const approverEmp = await EmployeeBasic.findById(req.user.employeeObjectId).select(
+                    'firstName lastName companyEmail workEmail signature employeeId department',
                 );
+                const assetControllerEmp = isAssetControllerApprowing
+                    ? approverEmp
+                    : await resolveAssetControllerEmployee(await getDepartmentHOD('assetcontroller'));
 
                 // Check if this is a bulk transfer
                 const isBulkTransfer = asset.pendingActionDetails?.isBulk === true;
@@ -8880,6 +9219,7 @@ export const handleAssetActionApproval = async (req, res) => {
                     if (op === 'return') {
                         const prevAssignedTo = currentAsset.assignedTo;
 
+                        clearParkingFlags(currentAsset);
                         currentAsset.status = 'Unassigned';
                         currentAsset.assignedTo = null;
                         currentAsset.assignedCompany = null;
@@ -8889,6 +9229,7 @@ export const handleAssetActionApproval = async (req, res) => {
                         currentAsset.assignedDate = null;
                         currentAsset.acceptanceStatus = 'Accepted';
                         currentAsset.negotiationHistory = [];
+                        currentAsset.onLeaveActive = false;
                         currentAsset.onLeaveStartDate = null;
                         currentAsset.onLeaveEndDate = null;
                         currentAsset.onLeaveDuration = null;
@@ -8941,16 +9282,7 @@ export const handleAssetActionApproval = async (req, res) => {
                     // Process "Leave" action
                     else if (op === 'leave') {
                         const leaveDuration = currentAsset.pendingActionDetails?.duration || currentAsset.pendingActionDetails?.leaveDuration;
-                        if (isServiceOperationalStatus(currentAsset.status)) {
-                            await AssetHistory.create({
-                                assetId: currentAsset._id,
-                                action: 'Comment',
-                                performedBy: req.user._id,
-                                comments: `Asset Controller approved "${actionType}"${isBulkTransfer ? ' (Bulk Transfer)' : ''}. Asset remains on service (parking not applied). ${comment || ''}`,
-                                date: new Date(),
-                                details: { status: 'OnServiceUnchanged', originalAction: actionType, isBulk: isBulkTransfer }
-                            });
-                        } else if (hasActiveParkingContext(currentAsset)) {
+                        if (hasActiveParkingContext(currentAsset)) {
                             await AssetHistory.create({
                                 assetId: currentAsset._id,
                                 action: 'Comment',
@@ -8966,7 +9298,7 @@ export const handleAssetActionApproval = async (req, res) => {
                                 assetId: currentAsset._id,
                                 action: 'On Leave',
                                 performedBy: req.user._id,
-                                comments: `Asset Controller approved "${actionType}"${isBulkTransfer ? ' (Bulk Transfer)' : ''}. Asset placed on leave${leaveDuration ? ` for ${leaveDuration} day(s)` : ''}. ${comment || ''}`,
+                                comments: `Asset Controller approved "${actionType}"${isBulkTransfer ? ' (Bulk Transfer)' : ''}. Asset placed on leave${leaveDuration ? ` for ${leaveDuration} day(s)` : ''}${isServiceActive(currentAsset) ? ' (on service unchanged)' : ''}. ${comment || ''}`,
                                 date: new Date(),
                                 details: { status: 'ApprovedAndFinalized', originalAction: actionType, isBulk: isBulkTransfer, duration: leaveDuration }
                             });
@@ -9097,10 +9429,11 @@ export const handleAssetActionApproval = async (req, res) => {
                         for (const rid of rejectedFromBulk) {
                             const rejAsset = byIdRej.get(String(rid));
                             if (!rejAsset) continue;
-                            if (isServiceOperationalStatus(rejAsset.status)) {
-                                // keep service status
-                            } else if (isParkingStatus(rejAsset.status) || hasActiveParkingContext(rejAsset)) {
-                                rejAsset.status = 'On Leave';
+                            if (isServiceActive(rejAsset)) {
+                                // keep onServiceActive
+                            } else if (isLeaveActive(rejAsset) || hasActiveParkingContext(rejAsset)) {
+                                rejAsset.onLeaveActive = true;
+                                rejAsset.status = rejAsset.assignedTo ? 'Assigned' : 'Unassigned';
                             } else {
                                 rejAsset.status = rejAsset.assignedTo ? 'Assigned' : 'Unassigned';
                             }
@@ -9138,7 +9471,18 @@ export const handleAssetActionApproval = async (req, res) => {
                     }
                 }
 
-                // Send success emails to Asset Controller and assigned users
+                const bulkMessage = isBulkTransfer
+                    ? `Bulk ${actionType} approved and processed successfully for ${processedAssets.length} asset(s).`
+                    : `${actionType} approved and processed successfully.`;
+
+                const refreshedAsset = await AssetItem.findById(asset._id)
+                    .populate('assignedTo', 'firstName lastName employeeId companyEmail primaryReportee')
+                    .populate('assignedCompany', 'name companyId')
+                    .populate('actionRequiredBy', 'firstName lastName employeeId')
+                    .lean();
+
+                void (async () => {
+                // Send success emails to Asset Controller and assigned users (non-blocking)
                 try {
                     const { sendAssetActionApprovedEmail, sendAssetBulkActionApprovedEmail } = await import('../utils/sendAssetActionApprovedEmail.js');
                     const { sendAssetTransferSuccessEmail } = await import('../utils/sendAssetTransferSuccessEmail.js');
@@ -9467,22 +9811,28 @@ export const handleAssetActionApproval = async (req, res) => {
                     console.error('[Asset Approval] Email send failed (non-fatal):', emailErr);
                 }
 
-                const bulkMessage = isBulkTransfer ? `Bulk ${actionType} approved and processed successfully for ${processedAssets.length} asset(s). Success emails sent.` : `${actionType} approved and processed successfully. Success emails sent.`;
                 if (!isBulkTransfer) {
                     for (const processedAsset of processedAssets) {
-                        await notifyAssignedEmployeeIfController(
-                            req,
-                            processedAsset,
-                            actionType,
-                            `${actionType} was approved by Asset Controller.`,
-                            { attachApprovedHandover: true },
-                        );
+                        try {
+                            await notifyAssignedEmployeeIfController(
+                                req,
+                                processedAsset,
+                                actionType,
+                                `${actionType} was approved by Asset Controller.`,
+                                { attachApprovedHandover: true },
+                            );
+                        } catch (notifyErr) {
+                            console.error('[Asset Approval] Notify assignee failed (non-fatal):', notifyErr);
+                        }
                     }
                 }
+                })();
+
+                void emailTransferRequester(true, comment || '');
 
                 return res.status(200).json({
                     message: bulkMessage,
-                    asset,
+                    asset: refreshedAsset,
                     processedCount: processedAssets.length,
                     isBulk: isBulkTransfer
                 });
@@ -9548,6 +9898,8 @@ export const handleAssetActionApproval = async (req, res) => {
                 } catch (emailErr) {
                     console.error('[Asset Approval] Forward to AC email failed (non-fatal):', emailErr?.message || emailErr);
                 }
+
+                void emailLossDamageRequester(true, comment || 'Company coordinator approved; pending Asset Controller fine details.');
 
                 return res.status(200).json({
                     message:
@@ -9680,15 +10032,17 @@ export const handleAssetActionApproval = async (req, res) => {
                             details: { status: 'AssetControllerApproved', originalAction: actionType, fineId: uniqueFineId }
                         });
 
+                        // Delete Dashboard Action for asset
+                        const dashboardRequestType = 'Asset Loss Damage';
+                        await DashboardAction.deleteMany({ requestId: asset._id, requestType: dashboardRequestType });
+
+                        void emailLossDamageRequester(true, comment || '');
+
                         // Clean up asset pending action - fine is now handling the workflow
                         asset.pendingAction = null;
                         asset.pendingActionDetails = null;
                         asset.actionRequiredBy = null;
                         asset.status = 'Lost';
-
-                        // Delete Dashboard Action for asset
-                        const dashboardRequestType = 'Asset Loss Damage';
-                        await DashboardAction.deleteMany({ requestId: asset._id, requestType: dashboardRequestType });
 
                         await asset.save();
                         await notifyAssignedEmployeeIfController(req, asset, actionType, `${actionType} was approved by Asset Controller and moved to Pending HR.`);
@@ -9781,6 +10135,8 @@ export const handleAssetActionApproval = async (req, res) => {
                     // non-fatal
                 }
 
+                void emailTransferRequester(false, comment || '');
+
                 return res.status(200).json({
                     message: `Bulk ${actionType} request rejected`,
                     asset,
@@ -9810,6 +10166,13 @@ export const handleAssetActionApproval = async (req, res) => {
 
             // Delete Dashboard Action
             await DashboardAction.deleteMany({ requestId: asset._id });
+
+            if (isTransferLeaveEos) {
+                void emailTransferRequester(false, comment || '');
+            }
+            if (actionType === 'Loss and Damage') {
+                void emailLossDamageRequester(false, comment || '');
+            }
         }
 
         await asset.save();
@@ -10010,6 +10373,13 @@ export const requestAccessoryAction = async (req, res) => {
 
         const requesterId = (req.user.employeeObjectId || req.user._id).toString();
         const isControllerOrAdmin = requesterId === assetController?._id?.toString() || req.user.role === 'Admin' || req.user.role === 'ROOT';
+        const currentEmpId = req.user.employeeObjectId?.toString();
+        const assigneeId =
+            asset.assignedToType === 'Employee' && asset.assignedTo
+                ? (typeof asset.assignedTo === 'object' ? asset.assignedTo._id?.toString() : String(asset.assignedTo))
+                : null;
+        const isAssigneeRequester = !!(assigneeId && currentEmpId && assigneeId === currentEmpId);
+        const isAssetControllerRequester = await isUserInFlowchart(req.user, 'assetcontroller').catch(() => false);
 
         // Asset Controller/Admin can directly unattach without approval workflow.
         if (actionType === 'Unattach' && isControllerOrAdmin) {
@@ -10075,6 +10445,27 @@ export const requestAccessoryAction = async (req, res) => {
             finalApprover = assetController;
         }
 
+        let targetAssigneeForEmail = null;
+        if (actionType === 'Transfer' && targetAssetId) {
+            const targetAssetRow = await AssetItem.findById(targetAssetId)
+                .populate({ path: 'assignedTo', populate: { path: 'primaryReportee' } })
+                .select('assetId name assignedTo')
+                .lean();
+            targetAssigneeForEmail = targetAssetRow?.assignedTo || null;
+        }
+
+        if (actionType === 'Loss and Damage' || actionType === 'Transfer') {
+            const emailCheck = await assertAssetActionStakeholderEmails({
+                asset,
+                assetController,
+                companyCoordinator,
+                targetAssignee: targetAssigneeForEmail,
+            });
+            if (!emailCheck.ok) {
+                return res.status(400).json({ message: emailCheck.message });
+            }
+        }
+
 
         // Upload attachment if present
         let fileUrl = null;
@@ -10091,6 +10482,12 @@ export const requestAccessoryAction = async (req, res) => {
             fineData: fineData || null,
             targetAssetId: targetAssetId || null,
             requestedBy: req.user.employeeObjectId || req.user._id,
+            requestedByRole:
+                isAssetControllerRequester && !isAssigneeRequester
+                    ? 'assetcontroller'
+                    : isAssigneeRequester
+                        ? 'assignee'
+                        : 'admin',
             requestedAt: new Date(),
             isManagerApproved: false, // For multi-step Transfer
         };
@@ -10099,8 +10496,6 @@ export const requestAccessoryAction = async (req, res) => {
         asset.actionRequiredBy = finalApprover._id;
         asset.markModified('accessories');
         await asset.save();
-        await notifyAssignedEmployeeIfController(req, asset, `${actionType} Accessory`, `Accessory "${accessory.name}" ${actionType} request is pending approval.`);
-
         // Create Dashboard Action
         const accDashType = actionType === 'Transfer' ? 'Asset Transfer' :
             actionType === 'Unattach' ? 'Asset Accessory Unattach' :
@@ -10129,6 +10524,7 @@ export const requestAccessoryAction = async (req, res) => {
 
         // Send email (non-blocking — errors here won't crash the response)
         const emailActionLabel = actionType === 'Unattach' ? 'Unattach Accessory' : actionType;
+        const accessoryLabel = `${accessory.name} (${accessory.accessoryId})`;
         try {
             let accAttachments = [];
             try {
@@ -10163,14 +10559,28 @@ export const requestAccessoryAction = async (req, res) => {
             } catch (pdfErr) {
                 console.error('[requestAccessoryAction] PDF attachment failed (non-fatal):', pdfErr?.message || pdfErr);
             }
-            await sendAssetActionApprovalEmail(
-                { ...asset.toObject(), assetId: asset.assetId, name: `${asset.name} - Accessory: ${accessory.name} (${accessory.accessoryId})` },
-                emailActionLabel,
-                finalApprover,
-                { name: requesterName },
-                reason || 'No reason provided',
-                accAttachments
-            );
+
+            if (actionType === 'Loss and Damage' || actionType === 'Transfer') {
+                await notifyLossDamageRequestStakeholders({
+                    asset,
+                    actionType: emailActionLabel,
+                    approver: finalApprover,
+                    requesterName,
+                    reason: reason || 'No reason provided',
+                    attachments: accAttachments,
+                    accessoryLabel,
+                    targetAssignee: targetAssigneeForEmail,
+                });
+            } else {
+                await sendAssetActionApprovalEmail(
+                    { ...asset.toObject(), assetId: asset.assetId, name: `${asset.name} - Accessory: ${accessoryLabel}` },
+                    emailActionLabel,
+                    finalApprover,
+                    { name: requesterName },
+                    reason || 'No reason provided',
+                    accAttachments
+                );
+            }
         } catch (emailErr) {
             console.error('[requestAccessoryAction] Email send failed (non-fatal):', emailErr.message);
         }
@@ -10224,7 +10634,7 @@ export const respondAccessoryAction = async (req, res) => {
         const isDesignatedApprover = !!(currentUserEmpIdEarly && actionRequiredById && actionRequiredById === currentUserEmpIdEarly);
 
         const addApprovalKind = pendingActionDetails?.addApprovalKind;
-        const canApproveTransfer = pendingAction === 'Transfer' && actorFlags.canAct;
+        const canApproveTransfer = pendingAction === 'Transfer' && (isAdmin || isAssetControllerApproving);
         const canApproveAddPending =
             pendingAction === 'Add' &&
             (isAdmin ||
@@ -10247,6 +10657,46 @@ export const respondAccessoryAction = async (req, res) => {
                         : 'Access denied. Only Asset Controller/Admin or the designated approver can approve or reject this accessory action.'
             });
         }
+
+        const emailAccessoryDecisionToRequester = async (approved, reasonText = '') => {
+            const requestedBy = pendingActionDetails?.requestedBy;
+            if (!requestedBy) return;
+            if (pendingAction !== 'Loss and Damage' && pendingAction !== 'Transfer') return;
+            try {
+                const requester = await EmployeeBasic.findById(requestedBy)
+                    .select('firstName lastName employeeId companyEmail workEmail primaryReportee')
+                    .populate('primaryReportee', 'firstName lastName companyEmail workEmail')
+                    .lean();
+                const approver = await EmployeeBasic.findById(req.user.employeeObjectId)
+                    .select('firstName lastName employeeId companyEmail workEmail')
+                    .lean();
+                if (!requester?._id || !approver?._id) return;
+                const accessoryLabel = `${accessory.name} (${accessory.accessoryId})`;
+                if (pendingAction === 'Loss and Damage') {
+                    await notifyLossDamageDecisionToRequester({
+                        asset,
+                        requestedBy: requester,
+                        approver,
+                        approved,
+                        reason: reasonText,
+                        accessoryLabel,
+                    });
+                } else if (pendingAction === 'Transfer') {
+                    const { sendAssetLossDamageDecisionEmail } = await import('../utils/sendAssetLossDamageDecisionEmail.js');
+                    await sendAssetLossDamageDecisionEmail({
+                        asset,
+                        recipient: requester,
+                        approver,
+                        approved,
+                        reason: reasonText,
+                        accessoryLabel,
+                        displayAction: 'Transfer',
+                    });
+                }
+            } catch (mailErr) {
+                console.error('[respondAccessoryAction] Decision email failed:', mailErr?.message || mailErr);
+            }
+        };
 
         if (approve) {
             // If fineData is provided in request body (from modal submission), update pendingActionDetails
@@ -10350,6 +10800,12 @@ export const respondAccessoryAction = async (req, res) => {
                 }
 
                 try {
+                    await notifyAccessoryTransferApprovedEmails({
+                        asset: sourceSnapshot || asset,
+                        targetAsset: targetSnapshot || targetAsset,
+                        accessoryName: accToMove.name,
+                        performedBy: actorName,
+                    });
                     if (targetAsset.assignedTo) {
                         const targetAssignee = await EmployeeBasic.findById(targetAsset.assignedTo)
                             .select('firstName lastName employeeId companyEmail workEmail email primaryReportee department')
@@ -10368,6 +10824,8 @@ export const respondAccessoryAction = async (req, res) => {
                 } catch (accTransferMailErr) {
                     console.error('[respondAccessoryAction Transfer] Transfer emails failed (non-fatal):', accTransferMailErr?.message || accTransferMailErr);
                 }
+
+                void emailAccessoryDecisionToRequester(true, comment || '');
 
                 return res.status(200).json({ message: `Transfer approved and finalized by Asset Controller. Accessory assigned to ${targetAsset.assetId}.`, asset });
             }
@@ -10595,6 +11053,8 @@ export const respondAccessoryAction = async (req, res) => {
                     console.error('[respondAccessoryAction] forward email (non-fatal):', e?.message || e);
                 }
 
+                void emailAccessoryDecisionToRequester(true, comment || 'Company coordinator approved; pending Asset Controller fine details.');
+
                 return res.status(200).json({
                     message:
                         'Approved by company coordinator. Pending Asset Controller to enter fine details for this accessory loss/damage.',
@@ -10768,6 +11228,8 @@ export const respondAccessoryAction = async (req, res) => {
                             console.error('[Accessory L&D approve catalog sync]', syncErr?.message || syncErr);
                         }
                         await notifyAssignedEmployeeIfController(req, asset, 'Loss and Damage Accessory', `Accessory "${accToDetach.name}" loss and damage was approved by Asset Controller and moved to Pending HR.`);
+
+                        void emailAccessoryDecisionToRequester(true, comment || '');
 
                         // Sync History (remove from previous handover docs/snapshots)
                         await removeAccessoryFromHistorySnapshots(asset._id, accToDetach._id || accToDetach.accessoryId);
@@ -10966,6 +11428,8 @@ export const respondAccessoryAction = async (req, res) => {
                 date: new Date(),
                 details: { status: 'RejectedByAuthority', originalAction: pendingAction, accessoryId: accId }
             });
+
+            void emailAccessoryDecisionToRequester(false, comment || '');
         }
 
         asset.markModified('accessories');
@@ -11338,14 +11802,16 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
 
         const allIdSet = new Set();
         for (const da of unique) {
-            if (da.requestType === 'Asset Owner On Duty') {
+            if (da.requestType === 'Asset Owner On Duty' || da.requestType === 'Asset On Duty Request') {
                 const meta = parseExtra3(da.extra3);
-                if (Array.isArray(meta?.parkingAssetIds)) {
-                    meta.parkingAssetIds.forEach((id) => {
+                const ids = meta?.requestedAssetIds || meta?.parkingAssetIds;
+                if (Array.isArray(ids)) {
+                    ids.forEach((id) => {
                         const s = oidStr(id);
                         if (validOid(s)) allIdSet.add(s);
                     });
                 }
+                if (da.requestId) allIdSet.add(da.requestId.toString());
                 continue;
             }
             if (da.requestId) allIdSet.add(da.requestId.toString());
@@ -11390,9 +11856,17 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
             }
         }
 
+        const isOperationalExpiryDashboardRow = (da) => {
+            const parsed = parseExtra3(da?.extra3);
+            return parsed?.focusCard === 'operationalExpiry';
+        };
+
         /** Canonical bulk list: prefer pendingActionDetails.bulkAssetIds on primary (DB) over extra3 JSON. */
         const resolveBulkForInboxItem = (da) => {
             const parsed = parseExtra3(da.extra3);
+            if (isOperationalExpiryDashboardRow(da)) {
+                return { isBulk: false, bulkKind: null, bulkAssetIds: [] };
+            }
             if (parsed?.isBulkAssignment === true && Array.isArray(parsed.bulkAssetIds) && parsed.bulkAssetIds.length > 1) {
                 const bulkAssetIds = [...new Set(parsed.bulkAssetIds.map((x) => oidStr(x)))].filter(validOid);
                 if (bulkAssetIds.length > 1) {
@@ -11504,6 +11978,63 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
                 asset: formatAsset(asset)
             };
         });
+
+        // Drop stale leave-approval bell rows when assets are already on leave (operational expiry rows replace them).
+        items = items.filter((row) => {
+            if (row.requestType !== 'Asset Leave') return true;
+            if (isOperationalExpiryDashboardRow(row)) return true;
+            if (row.isBulk && Array.isArray(row.bulkAssets) && row.bulkAssets.length) {
+                return row.bulkAssets.some((a) => String(a?.pendingAction || '').trim() === 'Leave');
+            }
+            return String(row.asset?.pendingAction || '').trim() === 'Leave';
+        });
+
+        // One inbox row per leave-expiry event — merge per-asset operational expiry tasks for the same message.
+        const operationalExpiryLeaveGroups = new Map();
+        const inboxAfterExpiryMerge = [];
+        for (const row of items) {
+            if (row.requestType !== 'Asset Leave' || !isOperationalExpiryDashboardRow(row)) {
+                inboxAfterExpiryMerge.push(row);
+                continue;
+            }
+            const groupKey = String(row.extra2 || '').trim();
+            if (!groupKey) {
+                inboxAfterExpiryMerge.push(row);
+                continue;
+            }
+            if (!operationalExpiryLeaveGroups.has(groupKey)) {
+                operationalExpiryLeaveGroups.set(groupKey, []);
+            }
+            operationalExpiryLeaveGroups.get(groupKey).push(row);
+        }
+        for (const group of operationalExpiryLeaveGroups.values()) {
+            if (group.length === 1) {
+                inboxAfterExpiryMerge.push(group[0]);
+                continue;
+            }
+            const bulkAssetIds = [...new Set(group.map((r) => oidStr(r.primaryAssetId)).filter(validOid))];
+            const bulkAssets = bulkAssetIds.map((id) => {
+                const fromGroup = group.find((r) => oidStr(r.primaryAssetId) === id);
+                if (fromGroup?.asset) return fromGroup.asset;
+                const raw = assetById[id];
+                return raw ? formatAsset(raw) : null;
+            }).filter(Boolean);
+            const assetSummary = bulkAssets.map((a) => `${a.assetId} — ${a.name}`).join('; ');
+            const primary = group[0];
+            inboxAfterExpiryMerge.push({
+                ...primary,
+                isBulk: bulkAssetIds.length > 1,
+                bulkKind: bulkAssetIds.length > 1 ? 'action' : primary.bulkKind,
+                bulkAssetIds,
+                bulkAssets,
+                extra1:
+                    bulkAssetIds.length > 1
+                        ? `On Leave expiry (${bulkAssetIds.length} assets): ${assetSummary.substring(0, 240)}${assetSummary.length > 240 ? '...' : ''}`
+                        : primary.extra1,
+            });
+        }
+        items = inboxAfterExpiryMerge;
+        items.sort((a, b) => new Date(b.requestedDate || 0) - new Date(a.requestedDate || 0));
 
         if (scope === 'vehicle') {
             items = items.filter((row) => {

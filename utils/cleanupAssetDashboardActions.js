@@ -16,6 +16,7 @@ export const ASSET_DASHBOARD_INBOX_TYPES = [
     'Asset Return',
     'Asset Leave',
     'Asset Owner On Duty',
+    'Asset On Duty Request',
     'Asset Bulk Action',
     'Asset Overdue',
     'Vehicle Service Request',

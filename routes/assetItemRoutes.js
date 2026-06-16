@@ -1,12 +1,16 @@
 import express from 'express';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import User from '../models/User.js';
-import { createAssetItem, getAssetItems, getVehicleFleetDashboard, getVehicleFleetServiceRequests, getAllAssignedAssets, getMyAssignedAssetsForReturn, getUnassignedAssetsForEmployee, getHRCompanyAssets, getOnLeaveAssetsForEmployee, getOnServiceAssetsForEmployee, runAssetServiceOverdueCheck, handleOnLeaveAction, bulkHandleOnLeaveAction, handleOnServiceAction, bulkHandleOnServiceAction, getAssetItemDetail, assignAssetItem, bulkAssignAssetItems, downloadHandoverPdf, downloadHistoryHandoverPdf, respondToAssignment, bulkRespondToAssignment, getBulkAssignmentPendingGroup, respondBulkAssignmentGroup, getAssetHistory, getHistoryRecord, returnAssetItem, updateAssetStatus, addAssetDocument, updateAssetDocument, deleteAssetDocument, addAssetService, deleteAssetService, submitAssetServiceDraft, addAssetImage, deleteAssetImage, transferAssetAccessory, manageAccessoryStatus, updateAssetItem, deleteAssetItem, endOfLifeAsset, requestAssetAction, bulkRequestAssetAction, handleAssetActionApproval, finalizeAssetAction, uploadAccessoriesAttachment, requestAccessoryAction, respondAccessoryAction, finalizeAccessoryAction, respondToAssetCreation, bulkRespondToAssetCreation, getBulkAssetDetails, getBulkAssetInventoryForPrint, transferAsset, submitDraftForCreationApproval, getPendingAssetDashboardInbox, deletePendingAssetDashboardInboxItem, getEmployeePreviousAssets } from '../controllers/assetItemController.js';
+import { createAssetItem, getAssetItems, getVehicleFleetDashboard, getVehicleFleetServiceRequests, getAllAssignedAssets, getMyAssignedAssetsForReturn, getUnassignedAssetsForEmployee, getHRCompanyAssets, getOnLeaveAssetsForEmployee, getOnServiceAssetsForEmployee, runAssetServiceOverdueCheck, handleOnLeaveAction, bulkHandleOnLeaveAction, handleOnServiceAction, bulkHandleOnServiceAction, getAssetItemDetail, assignAssetItem, bulkAssignAssetItems, downloadHandoverPdf, downloadHistoryHandoverPdf, respondToAssignment, bulkRespondToAssignment, getBulkAssignmentPendingGroup, respondBulkAssignmentGroup, getAssetHistory, getHistoryRecord, returnAssetItem, updateAssetStatus, addAssetDocument, updateAssetDocument, deleteAssetDocument, addAssetService, deleteAssetService, submitAssetServiceDraft, addAssetImage, deleteAssetImage, transferAssetAccessory, manageAccessoryStatus, updateAssetItem, deleteAssetItem, endOfLifeAsset, requestAssetAction, bulkRequestAssetAction, handleAssetActionApproval, finalizeAssetAction, uploadAccessoriesAttachment, requestAccessoryAction, respondAccessoryAction, finalizeAccessoryAction, respondToAssetCreation, bulkRespondToAssetCreation, getBulkAssetDetails, getBulkAssetInventoryForPrint, transferAsset, transferAssigneeAsset, submitDraftForCreationApproval, getPendingAssetDashboardInbox, deletePendingAssetDashboardInboxItem, getEmployeePreviousAssets } from '../controllers/assetItemController.js';
 import { respondVehicleServiceWorkflow, respondVehicleServiceScheduledPeriod } from '../controllers/vehicleServiceWorkflowController.js';
 import {
     requestOwnerOnDuty,
     getOwnerOnDutyReview,
     respondOwnerOnDuty,
+    bulkOnDutyFromLeave,
+    requestOnDutyFromOwner,
+    getPendingOnDutyRequestFromOwner,
+    respondOnDutyAcRequest,
 } from '../controllers/ownerOnDutyController.js';
 import {
     submitVehicleProfileActivation,
@@ -81,6 +85,23 @@ const isDesignatedHr = async (user) => {
     if (hod._id && user.employeeObjectId && hod._id.toString() === user.employeeObjectId.toString()) return true;
     if (hod.employeeId && user.employeeId && normEmp(hod.employeeId) === normEmp(user.employeeId)) return true;
     return false;
+};
+
+/**
+ * Only Asset Controller or Administrator may assign assets (no assignee/assigner bypass).
+ */
+const requireAssetAssignAccess = async (req, res, next) => {
+    try {
+        const isAdminUser = await isAdminForAssetRoutes(req.user);
+        const isAssetControllerUser = await isDesignatedAssetController(req.user);
+        if (isAdminUser || isAssetControllerUser) return next();
+
+        return res.status(403).json({
+            message: 'Access denied. Only Asset Controller or Administrator can assign assets.'
+        });
+    } catch (error) {
+        next(error);
+    }
 };
 
 /**
@@ -596,6 +617,10 @@ router.route('/')
 router.get('/dashboard/pending-inbox', protect, getPendingAssetDashboardInbox);
 router.delete('/dashboard/pending-inbox/:id', protect, deletePendingAssetDashboardInboxItem);
 router.post('/owner-on-duty/request', protect, requestOwnerOnDuty);
+router.post('/owner-on-duty/request-from-owner', protect, requestOnDutyFromOwner);
+router.get('/owner-on-duty/pending-owner-request/:assetId', protect, getPendingOnDutyRequestFromOwner);
+router.put('/owner-on-duty/respond-ac-request', protect, respondOnDutyAcRequest);
+router.put('/bulk/on-duty-from-leave', protect, requireAssetControllerOrAdmin, bulkOnDutyFromLeave);
 router.get('/owner-on-duty/review/:dashboardActionId', protect, getOwnerOnDutyReview);
 router.put('/owner-on-duty/respond', protect, respondOwnerOnDuty);
 router.get('/vehicle-fleet-dashboard', protect, getVehicleFleetDashboard);
@@ -617,7 +642,7 @@ router.get('/:id/history', protect, getAssetHistory);
 router.get('/history-record/:historyId', protect, getHistoryRecord);
 router.get('/handover-pdf/:id', protect, downloadHandoverPdf);
 router.get('/history-handover-pdf/:historyId', protect, downloadHistoryHandoverPdf);
-router.put('/bulk/assign', protect, requireAssetControllerOrAdmin, bulkAssignAssetItems);
+router.put('/bulk/assign', protect, requireAssetAssignAccess, bulkAssignAssetItems);
 router.put('/bulk/on-leave-action', protect, requireAssetControllerOrAdmin, (req, res, next) => {
     console.log('[Route] PUT /bulk/on-leave-action hit. Body:', JSON.stringify(req.body));
     bulkHandleOnLeaveAction(req, res, next);
@@ -626,7 +651,8 @@ router.put('/bulk/on-service-action', protect, requireAssetControllerOrAdmin, (r
     console.log('[Route] PUT /bulk/on-service-action hit. Body:', JSON.stringify(req.body));
     bulkHandleOnServiceAction(req, res, next);
 });
-router.put('/:id/assign', protect, requireAssetControllerOrAdmin, assignAssetItem);
+router.put('/:id/assign', protect, requireAssetAssignAccess, assignAssetItem);
+router.put('/:id/transfer-assignee', protect, requireAssetControllerOrAdmin, transferAssigneeAsset);
 router.put('/:id/respond', protect, respondToAssignment);
 router.put('/bulk/respond', protect, bulkRespondToAssignment);
 router.post('/transfer', protect, requireAssetControllerOrAdmin, transferAsset);

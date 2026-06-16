@@ -65,10 +65,12 @@ export const sendAssetServiceEmail = async ({ asset, recipient, type, details, s
             headerColor = "#f59e0b"; // Amber
             message = `The service duration for this asset is close to expiry.`;
         } else if (type === 'DurationComplete') {
-            subject = `Service Duration Completed: ${asset.assetId} - ${asset.name}`;
-            headerTitle = "Duration Completed";
+            subject = `Service Duration ${details?.expiresToday ? 'Ends Today' : 'Expired'}: ${asset.assetId} - ${asset.name}`;
+            headerTitle = details?.expiresToday ? 'Service Ends Today' : 'Service Duration Expired';
             headerColor = "#ef4444"; // Red
-            message = `The service duration for this asset is completed. Please update the asset status when service is done.`;
+            message = details?.expiresToday
+                ? `The service duration for this asset <strong>ends today</strong>. Please <strong>extend the duration</strong> or <strong>mark the asset Live</strong> when service is complete.`
+                : `The service duration for this asset has <strong>expired</strong>. Please <strong>extend the duration</strong> or <strong>mark the asset Live</strong> when service is complete.`;
         } else if (type === 'Extended') {
             subject = `Service Duration Extended: ${asset.assetId} - ${asset.name}`;
             headerTitle = "Service Extended";

@@ -270,6 +270,13 @@ export const approveFine = async (req, res) => {
                     const asset = await AssetItem.findOne({ assetId: fine.assetId });
 
                     if (asset) {
+                        const ownerBeforeLost = asset.assignedTo
+                            ? await EmployeeBasic.findById(asset.assignedTo)
+                                .select('firstName lastName employeeId companyEmail workEmail primaryReportee')
+                                .populate('primaryReportee', 'firstName lastName companyEmail workEmail')
+                                .lean()
+                            : null;
+
                         const ftRaw = String(fine.fineType || '');
                         const ft = ftRaw.toLowerCase();
                         const isLossDamageFine =
@@ -301,6 +308,19 @@ export const approveFine = async (req, res) => {
                             });
                         } catch (historyErr) {
                             console.error("[ApproveFine] Asset History failed:", historyErr);
+                        }
+
+                        if (isLossDamageFine && ownerBeforeLost) {
+                            try {
+                                const { sendAssetLostFromFineEmail } = await import('../../utils/sendAssetLostFromFineEmail.js');
+                                await sendAssetLostFromFineEmail({
+                                    asset: { _id: asset._id, assetId: asset.assetId, name: asset.name },
+                                    fine,
+                                    owner: ownerBeforeLost,
+                                });
+                            } catch (ownerMailErr) {
+                                console.error('[ApproveFine] Asset owner lost notification failed:', ownerMailErr?.message || ownerMailErr);
+                            }
                         }
                     }
                 }
