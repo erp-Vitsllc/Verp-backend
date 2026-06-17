@@ -1,7 +1,7 @@
 import express from 'express';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import User from '../models/User.js';
-import { createAssetItem, getAssetItems, getVehicleFleetDashboard, getVehicleFleetServiceRequests, getAllAssignedAssets, getMyAssignedAssetsForReturn, getUnassignedAssetsForEmployee, getCompanyAllocationCoordinatorStatus, getHRCompanyAssets, getOnLeaveAssetsForEmployee, getOnServiceAssetsForEmployee, runAssetServiceOverdueCheck, handleOnLeaveAction, bulkHandleOnLeaveAction, handleOnServiceAction, bulkHandleOnServiceAction, getAssetItemDetail, assignAssetItem, bulkAssignAssetItems, downloadHandoverPdf, downloadHistoryHandoverPdf, respondToAssignment, bulkRespondToAssignment, getBulkAssignmentPendingGroup, respondBulkAssignmentGroup, getAssetHistory, getHistoryRecord, returnAssetItem, updateAssetStatus, addAssetDocument, updateAssetDocument, deleteAssetDocument, addAssetService, deleteAssetService, submitAssetServiceDraft, addAssetImage, deleteAssetImage, transferAssetAccessory, manageAccessoryStatus, updateAssetItem, deleteAssetItem, endOfLifeAsset, requestAssetAction, bulkRequestAssetAction, handleAssetActionApproval, finalizeAssetAction, uploadAccessoriesAttachment, requestAccessoryAction, respondAccessoryAction, finalizeAccessoryAction, respondToAssetCreation, bulkRespondToAssetCreation, getBulkAssetDetails, getBulkAssetInventoryForPrint, transferAsset, transferAssigneeAsset, submitDraftForCreationApproval, getPendingAssetDashboardInbox, deletePendingAssetDashboardInboxItem, getEmployeePreviousAssets } from '../controllers/assetItemController.js';
+import { createAssetItem, getAssetItems, getVehicleFleetDashboard, getVehicleFleetServiceRequests, getAllAssignedAssets, getMyAssignedAssetsForReturn, getUnassignedAssetsForEmployee, getCompanyAllocationCoordinatorStatus, getHRCompanyAssets, getOnLeaveAssetsForEmployee, getOnServiceAssetsForEmployee, runAssetServiceOverdueCheck, handleOnLeaveAction, bulkHandleOnLeaveAction, handleOnServiceAction, bulkHandleOnServiceAction, getAssetItemDetail, assignAssetItem, bulkAssignAssetItems, downloadHandoverPdf, downloadHistoryHandoverPdf, respondToAssignment, bulkRespondToAssignment, getBulkAssignmentPendingGroup, respondBulkAssignmentGroup, getAssetHistory, getHistoryRecord, returnAssetItem, updateAssetStatus, addAssetDocument, updateAssetDocument, deleteAssetDocument, addAssetService, deleteAssetService, submitAssetServiceDraft, addAssetImage, deleteAssetImage, transferAssetAccessory, manageAccessoryStatus, updateAssetItem, deleteAssetItem, endOfLifeAsset, requestAssetAction, bulkRequestAssetAction, handleAssetActionApproval, finalizeAssetAction, uploadAccessoriesAttachment, requestAccessoryAction, respondAccessoryAction, finalizeAccessoryAction, respondToAssetCreation, bulkRespondToAssetCreation, getBulkAssetDetails, getBulkAssetInventoryForPrint, transferAsset, transferAssigneeAsset, submitDraftForCreationApproval, saveLossDamageFineDraft, getPendingAssetDashboardInbox, deletePendingAssetDashboardInboxItem, getEmployeePreviousAssets } from '../controllers/assetItemController.js';
 import { respondVehicleServiceWorkflow, respondVehicleServiceScheduledPeriod } from '../controllers/vehicleServiceWorkflowController.js';
 import {
     requestOwnerOnDuty,
@@ -268,7 +268,7 @@ const requireAssetActionApprover = async (req, res, next) => {
         if (!id) return res.status(400).json({ message: 'Asset id is required' });
 
         const AssetItem = (await import('../models/AssetItem.js')).default;
-        const asset = await AssetItem.findById(id).select('actionRequiredBy pendingAction assignedToType assignedCompany').lean();
+        const asset = await AssetItem.findById(id).select('actionRequiredBy pendingAction assignedToType assignedCompany pendingActionDetails').lean();
         if (!asset) return res.status(404).json({ message: 'Asset not found' });
 
         const currentEmpObjId = req.user?.employeeObjectId?.toString?.() || null;
@@ -281,6 +281,18 @@ const requireAssetActionApprover = async (req, res, next) => {
         const isCompanyCoordinator = await isUserCompanyAssetCoordinator(req.user).catch(() => false);
         const isCompanyAsset = asset.assignedToType === 'Company' && !!asset.assignedCompany;
         const actionType = asset.pendingAction;
+
+        if (actionType === 'End of Life') {
+            const stage = asset.pendingActionDetails?.stage;
+            if (stage === 'pending_hr') {
+                if (isHR) return next();
+            } else if (stage === 'pending_management') {
+                const isManagement = await isUserInFlowchart(req.user, 'management').catch(() => false);
+                if (isManagement) return next();
+            } else if (stage === 'pending_assetcontroller') {
+                if (isAssetControllerUser) return next();
+            }
+        }
 
         if (isHR && actionType === 'Loss and Damage' && !isCompanyAsset) return next();
         if (isCompanyCoordinator && actionType === 'Loss and Damage' && isCompanyAsset) return next();
@@ -695,6 +707,7 @@ router.route('/:id')
 router.put('/:id/end-of-life', protect, requireAssetFullAccess, endOfLifeAsset);
 router.put('/bulk/request-action', protect, requireAssetFullAccess, bulkRequestAssetAction);
 router.put('/:id/request-action', protect, requireAssetFullAccess, requestAssetAction);
+router.put('/:id/loss-damage-fine-draft', protect, requireAssetFullAccess, saveLossDamageFineDraft);
 router.put('/:id/approve-action', protect, requireAssetActionApprover, handleAssetActionApproval);
 router.put('/:id/finalize-action', protect, requireAssetControllerOrAdmin, finalizeAssetAction);
 

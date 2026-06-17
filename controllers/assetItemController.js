@@ -29,6 +29,7 @@ import { getManagementHOD } from '../utils/getManagementHOD.js';
 import { sendAssetCreationApprovalEmail } from '../utils/sendAssetCreationApprovalEmail.js';
 import { sendAssetCreationDecisionEmail, sendAssetCreatedByAdminInfoEmail } from '../utils/sendAssetCreationDecisionEmail.js';
 import { notifyAssetCreationRejectedToCreator } from '../utils/notifyAssetCreationRejectedToCreator.js';
+import { notifyLossDamageRejectedToRequester } from '../utils/notifyLossDamageRejectedToRequester.js';
 import { resolveAssetCreatorEmployee } from '../utils/assetApprovalHelpers.js';
 import { hasPermission, isUserAdministrator } from '../services/permissionService.js';
 import { collectAssetDocumentIdsForDeletion } from '../utils/assetDocumentDeletion.js';
@@ -8641,6 +8642,75 @@ export const manageAccessoryStatus = async (req, res) => {
     }
 };
 
+// Helper to send EOL notification emails dynamically using nodemailer
+const sendEolEmail = async ({ toEmployee, ccEmployees = [], subject, bodyHtml, requesterName = "Asset Management" }) => {
+    try {
+        const { resolveEmployeeEmailTargets } = await import('../utils/resolveEmployeeEmail.js');
+        const nodemailer = (await import('nodemailer')).default;
+        const { resolveFrontendBaseUrl } = await import('../utils/resolveFrontendBaseUrl.js');
+
+        const { to: toEmail, cc: toCc } = resolveEmployeeEmailTargets(toEmployee);
+        if (!toEmail) {
+            console.warn('[sendEolEmail] Recipient has no email, skipping.');
+            return;
+        }
+
+        const ccEmails = [...toCc];
+        for (const emp of ccEmployees) {
+            if (emp) {
+                const { to: empEmail } = resolveEmployeeEmailTargets(emp);
+                if (empEmail && !ccEmails.includes(empEmail) && empEmail !== toEmail) {
+                    ccEmails.push(empEmail);
+                }
+            }
+        }
+
+        const emailUser = process.env.EMAIL_USER || process.env.VERP_EMAIL || process.env.GMAIL_USER;
+        const emailPass = process.env.EMAIL_PASS || process.env.VERP_PASS || process.env.GMAIL_PASS;
+
+        if (!emailUser || !emailPass) {
+            console.error('[sendEolEmail] Email credentials missing.');
+            return;
+        }
+
+        let smtpHost = process.env.SMTP_HOST || "smtp.office365.com";
+        if (emailUser.includes('@gmail.com')) smtpHost = "smtp.gmail.com";
+
+        const transporter = nodemailer.createTransport({
+            host: smtpHost,
+            port: parseInt(process.env.SMTP_PORT) || 587,
+            secure: false,
+            auth: { user: emailUser, pass: emailPass }
+        });
+
+        const finalHtml = `
+            <div style="font-family: Arial, sans-serif; color: #333; max-width: 600px; margin: 0 auto; border: 1px solid #eaeaea; border-radius: 8px; overflow: hidden;">
+                <div style="background-color: #f8f9fa; padding: 20px; border-bottom: 1px solid #eaeaea;">
+                    <h2 style="color: #dc3545; margin: 0;">Asset End of Life Workflow</h2>
+                </div>
+                <div style="padding: 20px;">
+                    ${bodyHtml}
+                </div>
+                <div style="background-color: #f8f9fa; padding: 15px; text-align: center; font-size: 12px; color: #999; border-top: 1px solid #eaeaea;">
+                    This is an automated system notification from VeRP.
+                </div>
+            </div>
+        `;
+
+        await transporter.sendMail({
+            fromName: requesterName,
+            to: toEmail,
+            ...(ccEmails.length ? { cc: ccEmails } : {}),
+            subject,
+            html: finalHtml
+        });
+
+        console.log(`[sendEolEmail] Sent email to ${toEmail} with subject: ${subject}`);
+    } catch (error) {
+        console.error('[sendEolEmail] Error sending email:', error);
+    }
+};
+
 // @desc    Request Asset Action (End of Life, Loss & Damage, or Leave)
 // @route   PUT /api/AssetItem/:id/request-action
 // @access  Private
@@ -8767,6 +8837,30 @@ export const requestAssetAction = async (req, res) => {
             }
         }
 
+        if (pendingActionType === 'End of Life') {
+            if (isAssigneeRequester) {
+                // Flow B (Raised by Asset Owner) -> Goes to Asset Controller HOD
+                nextApprover = assetController;
+                asset.pendingActionDetails = {
+                    ...asset.pendingActionDetails,
+                    stage: 'pending_assetcontroller',
+                    raisedBy: 'assetowner'
+                };
+            } else {
+                // Flow A (Raised by Asset Controller / Admin) -> Goes to HR HOD
+                const hrHOD = await getDepartmentHOD('hr');
+                if (!hrHOD?._id) {
+                    return res.status(400).json({ message: 'HR HOD not found. Cannot route End of Life request.' });
+                }
+                nextApprover = hrHOD;
+                asset.pendingActionDetails = {
+                    ...asset.pendingActionDetails,
+                    stage: 'pending_hr',
+                    raisedBy: 'assetcontroller'
+                };
+            }
+        }
+
         // actionRequiredBy references EmployeeBasic, so use EmployeeBasic._id
         asset.actionRequiredBy = nextApprover._id;
         if (
@@ -8779,6 +8873,9 @@ export const requestAssetAction = async (req, res) => {
         }
 
         await asset.save();
+
+        // Delete any old pending/rejected actions for this request first to keep inbox clean
+        await DashboardAction.deleteMany({ requestId: asset._id });
 
         // Create Dashboard Action
         const dashboardRequestType = pendingActionType === 'End of Life' ? 'Asset End of Life' :
@@ -8846,10 +8943,17 @@ export const requestAssetAction = async (req, res) => {
             });
         }
 
-        const approverLabel =
+        let approverLabel =
             isTransferAction && isAssetControllerRequester && !isAssigneeRequester
                 ? 'asset owner'
                 : 'Asset Controller';
+        if (pendingActionType === 'End of Life') {
+            if (isAssigneeRequester) {
+                approverLabel = 'Asset Controller';
+            } else {
+                approverLabel = 'HR';
+            }
+        }
 
         res.status(200).json({
             message: `${pendingActionType} request sent to ${approverLabel} for approval`,
@@ -9166,6 +9270,277 @@ export const handleAssetActionApproval = async (req, res) => {
         if (!asset.pendingAction) return res.status(400).json({ message: 'No pending action' });
 
         const actionType = asset.pendingAction;
+
+        if (actionType === 'End of Life' && asset.pendingActionDetails?.stage) {
+            const stage = asset.pendingActionDetails.stage;
+            const raisedBy = asset.pendingActionDetails.raisedBy;
+            const isAdmin = req.user.isAdmin || req.user.role === 'Admin' || req.user.role === 'ROOT';
+
+            let isUserAuthorizedForStage = false;
+            if (isAdmin) {
+                isUserAuthorizedForStage = true;
+            } else if (stage === 'pending_hr') {
+                isUserAuthorizedForStage = await isUserInFlowchart(req.user, 'hr').catch(() => false);
+            } else if (stage === 'pending_management') {
+                isUserAuthorizedForStage = await isUserInFlowchart(req.user, 'management').catch(() => false);
+            } else if (stage === 'pending_assetcontroller') {
+                isUserAuthorizedForStage = await isUserInFlowchart(req.user, 'assetcontroller').catch(() => false);
+            }
+
+            if (!isUserAuthorizedForStage) {
+                return res.status(403).json({ message: 'Access denied. You are not authorized to act at this stage of the End of Life workflow.' });
+            }
+
+            const hrHOD = await getDepartmentHOD('hr');
+            const managementHOD = await getDepartmentHOD('management');
+            const assetControllerHOD = await getDepartmentHOD('assetcontroller');
+
+            let requestedByEmp = null;
+            if (asset.pendingActionDetails.requestedBy) {
+                requestedByEmp = await EmployeeBasic.findById(asset.pendingActionDetails.requestedBy)
+                    .select('_id employeeId firstName lastName companyEmail workEmail')
+                    .lean();
+            }
+
+            const requesterName = requestedByEmp 
+                ? `${requestedByEmp.firstName} ${requestedByEmp.lastName}` 
+                : 'Asset Owner';
+
+            const assetOwnerEmp = asset.assignedTo;
+
+            if (approve) {
+                if (stage === 'pending_assetcontroller' && raisedBy === 'assetowner') {
+                    if (!hrHOD?._id) {
+                        return res.status(400).json({ message: 'HR HOD not found. Cannot route to next stage.' });
+                    }
+                    asset.actionRequiredBy = hrHOD._id;
+                    asset.pendingActionDetails.stage = 'pending_hr';
+                    asset.markModified('pendingActionDetails');
+                    await asset.save();
+
+                    await DashboardAction.deleteMany({ requestId: asset._id });
+
+                    await DashboardAction.create({
+                        assignedTo: hrHOD._id,
+                        requestId: asset._id,
+                        requestType: 'Asset End of Life',
+                        status: 'Pending',
+                        subjectEmployeeId: assetOwnerEmp?.employeeId || 'UNASSIGNED',
+                        subjectName: assetOwnerEmp ? `${assetOwnerEmp.firstName} ${assetOwnerEmp.lastName}` : 'Unassigned Asset',
+                        requestedByName: requesterName,
+                        extra1: `${asset.assetId} — ${asset.name}`,
+                        extra2: 'End of Life'
+                    });
+
+                    await sendEolEmail({
+                        toEmployee: hrHOD,
+                        ccEmployees: [assetControllerHOD, assetOwnerEmp],
+                        subject: `End of Life Approval Required: ${asset.assetId}`,
+                        bodyHtml: `
+                            <p>Dear ${hrHOD.firstName},</p>
+                            <p>Asset Controller has approved the End of Life request for Asset <strong>${asset.assetId} - ${asset.name}</strong>. Your approval is now required.</p>
+                            <p><strong>Reason:</strong> ${asset.pendingActionDetails.reason || 'N/A'}</p>
+                            <p><strong>Previous Comment:</strong> ${comment || 'N/A'}</p>
+                            <p><a href="${frontendBaseUrl()}/HRM/Asset/details/${asset._id}?authAction=eol" style="background-color: #2563eb; color: #fff; padding: 10px 20px; text-decoration: none; border-radius: 4px; font-weight: bold; display: inline-block; margin-top: 15px;">Review & Approve</a></p>
+                        `
+                    });
+
+                    await AssetHistory.create({
+                        assetId: asset._id,
+                        action: 'Comment',
+                        performedBy: req.user.employeeObjectId || req.user._id,
+                        comments: `Asset Controller approved End of Life. Routed to HR HOD. Comment: ${comment || 'N/A'}`,
+                        date: new Date()
+                    });
+
+                    return res.status(200).json({
+                        message: 'End of Life request approved by Asset Controller. Routed to HR HOD.',
+                        asset
+                    });
+
+                } else if (stage === 'pending_hr') {
+                    if (!managementHOD?._id) {
+                        return res.status(400).json({ message: 'Management HOD not found. Cannot route to next stage.' });
+                    }
+                    asset.actionRequiredBy = managementHOD._id;
+                    asset.pendingActionDetails.stage = 'pending_management';
+                    asset.markModified('pendingActionDetails');
+                    await asset.save();
+
+                    await DashboardAction.deleteMany({ requestId: asset._id });
+
+                    await DashboardAction.create({
+                        assignedTo: managementHOD._id,
+                        requestId: asset._id,
+                        requestType: 'Asset End of Life',
+                        status: 'Pending',
+                        subjectEmployeeId: assetOwnerEmp?.employeeId || 'UNASSIGNED',
+                        subjectName: assetOwnerEmp ? `${assetOwnerEmp.firstName} ${assetOwnerEmp.lastName}` : 'Unassigned Asset',
+                        requestedByName: requesterName,
+                        extra1: `${asset.assetId} — ${asset.name}`,
+                        extra2: 'End of Life'
+                    });
+
+                    await sendEolEmail({
+                        toEmployee: managementHOD,
+                        ccEmployees: [hrHOD, assetControllerHOD, assetOwnerEmp],
+                        subject: `End of Life Approval Required: ${asset.assetId}`,
+                        bodyHtml: `
+                            <p>Dear ${managementHOD.firstName},</p>
+                            <p>HR has approved the End of Life request for Asset <strong>${asset.assetId} - ${asset.name}</strong>. Your final approval is now required.</p>
+                            <p><strong>Reason:</strong> ${asset.pendingActionDetails.reason || 'N/A'}</p>
+                            <p><strong>Previous Comment:</strong> ${comment || 'N/A'}</p>
+                            <p><a href="${frontendBaseUrl()}/HRM/Asset/details/${asset._id}?authAction=eol" style="background-color: #2563eb; color: #fff; padding: 10px 20px; text-decoration: none; border-radius: 4px; font-weight: bold; display: inline-block; margin-top: 15px;">Review & Approve</a></p>
+                        `
+                    });
+
+                    await AssetHistory.create({
+                        assetId: asset._id,
+                        action: 'Comment',
+                        performedBy: req.user.employeeObjectId || req.user._id,
+                        comments: `HR approved End of Life. Routed to Management. Comment: ${comment || 'N/A'}`,
+                        date: new Date()
+                    });
+
+                    return res.status(200).json({
+                        message: 'End of Life request approved by HR. Routed to Management HOD.',
+                        asset
+                    });
+
+                } else if (stage === 'pending_management') {
+                    const finalStatus = 'End of Life';
+                    
+                    asset.status = finalStatus;
+                    asset.assignedTo = null;
+                    asset.assignedCompany = null;
+                    asset.assignedToType = null;
+                    asset.assignmentType = null;
+                    asset.assignedDate = null;
+                    asset.pendingAction = null;
+                    asset.pendingActionDetails = null;
+                    asset.actionRequiredBy = null;
+                    await asset.save();
+
+                    await DashboardAction.deleteMany({ requestId: asset._id });
+
+                    const ccList = [hrHOD, assetControllerHOD];
+                    if (assetOwnerEmp) ccList.push(assetOwnerEmp);
+
+                    await sendEolEmail({
+                        toEmployee: assetControllerHOD,
+                        ccEmployees: ccList.filter(e => e?._id?.toString() !== assetControllerHOD?._id?.toString()),
+                        subject: `End of Life Request Approved: ${asset.assetId}`,
+                        bodyHtml: `
+                            <p>Dear Team,</p>
+                            <p>Management has approved the End of Life request for Asset <strong>${asset.assetId} - ${asset.name}</strong>.</p>
+                            <p>The asset status is now set to: <strong>${finalStatus === 'Lost' ? 'Loss and damage' : 'End of Life'}</strong>.</p>
+                            <p><strong>Approved By Management Comment:</strong> ${comment || 'N/A'}</p>
+                        `
+                    });
+
+                    await AssetHistory.create({
+                        assetId: asset._id,
+                        action: finalStatus === 'Lost' ? 'Lost' : 'End of Life',
+                        performedBy: req.user.employeeObjectId || req.user._id,
+                        comments: `Management approved End of Life. Status changed to ${finalStatus === 'Lost' ? 'Loss and damage' : 'End of Life'}. Comment: ${comment || 'N/A'}`,
+                        date: new Date()
+                    });
+
+                    return res.status(200).json({
+                        message: `End of Life request finalized. Asset status is now ${finalStatus === 'Lost' ? 'Loss and damage' : 'End of Life'}.`,
+                        asset
+                    });
+                }
+            } else {
+                let taskTargetEmployeeId = null;
+                let emailTo = null;
+                let emailCc = [];
+                let rejectionBy = '';
+
+                if (stage === 'pending_assetcontroller') {
+                    rejectionBy = 'Asset Controller';
+                } else if (stage === 'pending_hr') {
+                    rejectionBy = 'HR';
+                } else if (stage === 'pending_management') {
+                    rejectionBy = 'Management';
+                }
+
+                if (raisedBy === 'assetcontroller') {
+                    if (stage === 'pending_hr') {
+                        taskTargetEmployeeId = assetControllerHOD?._id;
+                        emailTo = assetControllerHOD;
+                    } else if (stage === 'pending_management') {
+                        taskTargetEmployeeId = assetControllerHOD?._id;
+                        emailTo = assetControllerHOD;
+                        if (hrHOD) emailCc.push(hrHOD);
+                    }
+                } else {
+                    if (stage === 'pending_assetcontroller') {
+                        taskTargetEmployeeId = assetOwnerEmp?._id;
+                        emailTo = assetOwnerEmp;
+                    } else if (stage === 'pending_hr') {
+                        taskTargetEmployeeId = assetOwnerEmp?._id;
+                        emailTo = assetOwnerEmp;
+                        if (assetControllerHOD) emailCc.push(assetControllerHOD);
+                    } else if (stage === 'pending_management') {
+                        taskTargetEmployeeId = assetOwnerEmp?._id;
+                        emailTo = assetOwnerEmp;
+                        if (hrHOD) emailCc.push(hrHOD);
+                        if (assetControllerHOD) emailCc.push(assetControllerHOD);
+                    }
+                }
+
+                asset.status = asset.assignedTo ? 'Assigned' : 'Unassigned';
+                asset.pendingAction = null;
+                asset.pendingActionDetails = null;
+                asset.actionRequiredBy = null;
+                await asset.save();
+
+                await DashboardAction.deleteMany({ requestId: asset._id });
+
+                if (taskTargetEmployeeId) {
+                    await DashboardAction.create({
+                        assignedTo: taskTargetEmployeeId,
+                        requestId: asset._id,
+                        requestType: 'Asset End of Life',
+                        status: 'Pending',
+                        subjectEmployeeId: assetOwnerEmp?.employeeId || 'UNASSIGNED',
+                        subjectName: assetOwnerEmp ? `${assetOwnerEmp.firstName} ${assetOwnerEmp.lastName}` : 'Unassigned Asset',
+                        requestedByName: requesterName,
+                        extra1: `REJECTED: End of Life request for ${asset.assetId} — ${asset.name}. Reason: ${comment || 'N/A'}`,
+                        extra2: 'End of Life',
+                        extra3: JSON.stringify({ isRejectionNotification: true })
+                    });
+                }
+
+                if (emailTo) {
+                    await sendEolEmail({
+                        toEmployee: emailTo,
+                        ccEmployees: emailCc,
+                        subject: `End of Life Request REJECTED: ${asset.assetId}`,
+                        bodyHtml: `
+                            <p>Dear Team,</p>
+                            <p>The End of Life request for Asset <strong>${asset.assetId} - ${asset.name}</strong> was rejected by <strong>${rejectionBy}</strong>.</p>
+                            <p><strong>Rejection Comment/Reason:</strong> ${comment || 'No reason provided'}</p>
+                            <p>The asset status has reverted to: <strong>${asset.status}</strong>.</p>
+                        `
+                    });
+                }
+
+                await AssetHistory.create({
+                    assetId: asset._id,
+                    action: 'Comment',
+                    performedBy: req.user.employeeObjectId || req.user._id,
+                    comments: `End of Life request rejected by ${rejectionBy}. Status reverted to ${asset.status}. Reason: ${comment || 'N/A'}`,
+                    date: new Date()
+                });
+
+                return res.status(200).json({
+                    message: `End of Life request rejected by ${rejectionBy}. Notifications sent.`,
+                    asset
+                });
+            }
+        }
 
         // AUTH CHECK - actionRequiredBy references EmployeeBasic, so compare with employeeObjectId
         const currentUserEmpId = req.user.employeeObjectId?.toString();
@@ -10255,6 +10630,7 @@ export const handleAssetActionApproval = async (req, res) => {
                         asset.pendingAction = null;
                         asset.pendingActionDetails = null;
                         asset.actionRequiredBy = null;
+                        asset.lossDamageFineDraft = null;
                         asset.status = 'Lost';
 
                         await asset.save();
@@ -10373,6 +10749,9 @@ export const handleAssetActionApproval = async (req, res) => {
                 });
             }
 
+            const lossDamageRejectRequesterId =
+                actionType === 'Loss and Damage' ? asset.pendingActionDetails?.requestedBy : null;
+
             if (actionType === 'Return Asset') {
                 // Return request rejected: restore to Assigned (assignee remains the same).
                 asset.status = asset.assignedTo ? 'Assigned' : 'Unassigned';
@@ -10400,6 +10779,24 @@ export const handleAssetActionApproval = async (req, res) => {
             }
             if (actionType === 'Loss and Damage') {
                 void emailLossDamageRequester(false, comment || '');
+                const rejectorId = req.user.employeeObjectId?.toString();
+                const requesterIdStr = lossDamageRejectRequesterId?.toString?.();
+                if (requesterIdStr && requesterIdStr !== rejectorId) {
+                    const reviewerEmp = await EmployeeBasic.findById(req.user.employeeObjectId)
+                        .select('firstName lastName employeeId')
+                        .lean()
+                        .catch(() => null);
+                    const reviewerDisplayName = reviewerEmp
+                        ? `${reviewerEmp.firstName || ''} ${reviewerEmp.lastName || ''}`.trim() || reviewerEmp.employeeId
+                        : req.user.name || 'Asset Controller';
+                    void notifyLossDamageRejectedToRequester({
+                        asset,
+                        requesterId: lossDamageRejectRequesterId,
+                        reviewerDisplayName,
+                        actionedBy: req.user.employeeObjectId || req.user._id,
+                        rejectReason: comment || '',
+                    });
+                }
             }
         }
 
@@ -11664,6 +12061,13 @@ export const respondAccessoryAction = async (req, res) => {
                 Unattach: 'Asset Accessory Unattach',
                 Add: 'Asset Accessory Approval'
             };
+            const accessoryLossDamageRejectRequesterId =
+                pendingAction === 'Loss and Damage' ? pendingActionDetails?.requestedBy : null;
+            const accessoryRejectLabel =
+                pendingAction === 'Loss and Damage'
+                    ? `${accessory.name} (${accessory.accessoryId})`
+                    : '';
+
             const rt = dashTypeByPending[pendingAction];
             if (rt) {
                 await DashboardAction.deleteMany({ requestId: asset._id, requestType: rt });
@@ -11681,6 +12085,28 @@ export const respondAccessoryAction = async (req, res) => {
             });
 
             void emailAccessoryDecisionToRequester(false, comment || '');
+
+            if (accessoryLossDamageRejectRequesterId) {
+                const rejectorId = req.user.employeeObjectId?.toString();
+                const requesterIdStr = accessoryLossDamageRejectRequesterId?.toString?.();
+                if (requesterIdStr && requesterIdStr !== rejectorId) {
+                const reviewerEmp = await EmployeeBasic.findById(req.user.employeeObjectId)
+                    .select('firstName lastName employeeId')
+                    .lean()
+                    .catch(() => null);
+                const reviewerDisplayName = reviewerEmp
+                    ? `${reviewerEmp.firstName || ''} ${reviewerEmp.lastName || ''}`.trim() || reviewerEmp.employeeId
+                    : req.user.name || 'Asset Controller';
+                void notifyLossDamageRejectedToRequester({
+                    asset,
+                    requesterId: accessoryLossDamageRejectRequesterId,
+                    reviewerDisplayName,
+                    actionedBy: req.user.employeeObjectId || req.user._id,
+                    rejectReason: comment || '',
+                    accessoryLabel: accessoryRejectLabel,
+                });
+                }
+            }
         }
 
         asset.markModified('accessories');
@@ -11701,6 +12127,78 @@ export const respondAccessoryAction = async (req, res) => {
 // @route   PUT /api/AssetItem/:id/accessories/:accId/finalize-action
 // @access  Private (Assigned User)
 export const finalizeAccessoryAction = respondAccessoryAction;
+
+/**
+ * @desc    Save Loss & Damage fine form as draft (asset flow; no workflow started)
+ * @route   PUT /api/AssetItem/:id/loss-damage-fine-draft
+ * @access  Private (same actors as request-action)
+ */
+export const saveLossDamageFineDraft = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { fineData, accessoryObjectId } = req.body;
+
+        if (!fineData || typeof fineData !== 'object') {
+            return res.status(400).json({ message: 'Fine form data is required.' });
+        }
+
+        const asset = await AssetItem.findById(id).populate({
+            path: 'assignedTo',
+            populate: { path: 'primaryReportee' }
+        }).populate('assignedCompany');
+
+        if (!asset) {
+            return res.status(404).json({ message: 'Asset not found' });
+        }
+
+        if (asset.pendingAction) {
+            return res.status(400).json({
+                message: `Cannot save a draft while "${asset.pendingAction}" is pending approval.`
+            });
+        }
+
+        const actorFlags = await getActorPermissionFlagsForAsset(req.user, asset);
+        if (!actorFlags.canAct) {
+            return res.status(403).json({
+                message:
+                    'Access denied. Only Asset Controller/Admin, assigner, assigned user, or delegated primary reportee can save this draft.'
+            });
+        }
+
+        const draftPayload = {
+            ...fineData,
+            savedAt: new Date(),
+            savedBy: req.user.employeeObjectId || req.user._id
+        };
+
+        if (accessoryObjectId) {
+            const accessory = asset.accessories.find(
+                (a) => a._id?.toString() === String(accessoryObjectId) || a.accessoryId === accessoryObjectId
+            );
+            if (!accessory) {
+                return res.status(404).json({ message: 'Accessory not found' });
+            }
+            if (accessory.pendingAction) {
+                return res.status(400).json({
+                    message: `Cannot save a draft while accessory "${accessory.name}" has a pending "${accessory.pendingAction}" request.`
+                });
+            }
+            accessory.lossDamageFineDraft = draftPayload;
+        } else {
+            asset.lossDamageFineDraft = draftPayload;
+        }
+
+        await asset.save();
+
+        return res.json({
+            message: 'Loss & Damage form saved as draft.',
+            asset
+        });
+    } catch (error) {
+        console.error('[saveLossDamageFineDraft] Error:', error);
+        return res.status(500).json({ message: error.message || 'Failed to save Loss & Damage draft.' });
+    }
+};
 
 /**
  * @desc    Submit a saved draft for creation approval (notify Asset Controller)

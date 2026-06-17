@@ -1,3 +1,5 @@
+import { isEmployeeActiveForNotifications } from "./applyEmployeeLeftUserStatus.js";
+
 /**
  * Business email only: assignee companyEmail, then assignee workEmail, else primary reportee company/work.
  * Never uses personalEmail or generic personal email fields.
@@ -19,8 +21,7 @@ function reporteeBusinessEmail(reportee) {
 export const resolveEmployeeEmail = (emp) => {
     if (!emp) return { email: null, isFallbackToReportee: false };
 
-    // Skip Left Users and inactive/rejected profiles
-    if (emp.status === 'Left User' || emp.profileStatus === 'inactive' || emp.profileStatus === 'rejected') {
+    if (!isEmployeeActiveForNotifications(emp)) {
         return { email: null, isFallbackToReportee: false };
     }
 
@@ -67,8 +68,7 @@ export async function resolveEmployeeEmailWithReporteeLoaded(emp) {
         return { email: null, isFallbackToReportee: false, employee: null };
     }
 
-    // Skip Left Users and inactive/rejected profiles
-    if (emp.status === 'Left User' || emp.profileStatus === 'inactive' || emp.profileStatus === 'rejected') {
+    if (!isEmployeeActiveForNotifications(emp)) {
         return { email: null, isFallbackToReportee: false, employee: emp };
     }
 
@@ -100,8 +100,7 @@ export async function resolveEmployeeEmailWithReporteeLoaded(emp) {
         return { email: null, isFallbackToReportee: false, employee: emp };
     }
 
-    // Double check full after DB load
-    if (full.status === 'Left User' || full.profileStatus === 'inactive' || full.profileStatus === 'rejected') {
+    if (!isEmployeeActiveForNotifications(full)) {
         return { email: null, isFallbackToReportee: false, employee: full };
     }
 

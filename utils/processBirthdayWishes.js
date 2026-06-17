@@ -2,6 +2,7 @@ import EmployeeBasic from "../models/EmployeeBasic.js";
 import EmployeePersonal from "../models/EmployeePersonal.js";
 import BirthdayReminderLog from "../models/BirthdayReminderLog.js";
 import { sendBirthdayWishEmail } from "./sendBirthdayWishEmail.js";
+import { isEmployeeActiveForNotifications } from "./applyEmployeeLeftUserStatus.js";
 
 const BIRTHDAY_TZ = (process.env.BIRTHDAY_TZ || "Asia/Dubai").trim();
 
@@ -65,16 +66,18 @@ export const processBirthdayWishes = async () => {
             profileStatus: "active",
             status: { $ne: "Left User" },
         })
-            .select("employeeId firstName lastName email")
+            .select("employeeId firstName lastName email status profileStatus")
             .lean();
 
-        if (!employees.length) {
+        const activeEmployees = employees.filter(isEmployeeActiveForNotifications);
+
+        if (!activeEmployees.length) {
             return { processed: 0, sent: 0 };
         }
 
         const alreadySent = await BirthdayReminderLog.find({
             year,
-            employeeId: { $in: employees.map((e) => e.employeeId) },
+            employeeId: { $in: activeEmployees.map((e) => e.employeeId) },
         })
             .select("employeeId")
             .lean();
@@ -82,7 +85,7 @@ export const processBirthdayWishes = async () => {
 
         let sentCount = 0;
 
-        for (const employee of employees) {
+        for (const employee of activeEmployees) {
             if (sentSet.has(employee.employeeId)) continue;
 
             const name = employeeDisplayName(employee);
@@ -122,7 +125,7 @@ export const processBirthdayWishes = async () => {
             }
         }
 
-        return { processed: employees.length, sent: sentCount };
+        return { processed: activeEmployees.length, sent: sentCount };
     } catch (err) {
         console.error("[BirthdayWish] Job failed:", err?.message || err);
         return { processed: 0, sent: 0, error: err?.message || String(err) };

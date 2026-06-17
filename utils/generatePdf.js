@@ -126,6 +126,21 @@ async function launchPdfBrowser(attempt = 1) {
     }
 }
 
+async function waitForFinePrintReady(page, selector, timeoutMs = 90000) {
+    const isFineContainer =
+        selector === '#fine-form-container' || String(selector).includes('fine-form-container');
+    if (!isFineContainer) return;
+
+    await page.waitForFunction(
+        (sel) => {
+            const el = document.querySelector(sel);
+            return el?.getAttribute('data-fine-print-ready') === 'true';
+        },
+        { timeout: timeoutMs },
+        selector
+    );
+}
+
 export const generatePdf = async (url, token, user, permissions = {}, selector = '#loan-form-container') => {
     let lastError = null;
     for (let attempt = 1; attempt <= 2; attempt += 1) {
@@ -173,7 +188,9 @@ export const generatePdf = async (url, token, user, permissions = {}, selector =
         // Wait for the form container to be visible
             try {
                 await page.waitForSelector(selector, { timeout: 30000 });
-                console.log(`[generatePdf] Selector found. Waiting for layout stability...`);
+                console.log(`[generatePdf] Selector found. Waiting for fine print readiness...`);
+                await waitForFinePrintReady(page, selector);
+                console.log(`[generatePdf] Content ready. Waiting for layout stability...`);
                 // Small delay to ensure any layout shifts or animations settle
                 await new Promise(resolve => setTimeout(resolve, 500));
                 console.log(`[generatePdf] Ready to isolate container.`);

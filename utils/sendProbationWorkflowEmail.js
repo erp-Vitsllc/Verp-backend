@@ -4,6 +4,7 @@ import { getDepartmentHOD } from "./getDepartmentHOD.js";
 import DashboardAction from "../models/DashboardAction.js";
 import EmployeeBasic from "../models/EmployeeBasic.js";
 import { resolveEmployeeEmail, addEmployeeEmailToSet } from "./resolveEmployeeEmail.js";
+import { isEmployeeActiveForNotifications } from "./applyEmployeeLeftUserStatus.js";
 
 const createTransporter = () => {
     const emailUser = process.env.EMAIL_USER?.trim();
@@ -85,7 +86,7 @@ export const sendProbationWorkflowEmail = async ({
 }) => {
     try {
         const transporter = createTransporter();
-        if (!transporter || !employee) return;
+        if (!transporter || !employee || !isEmployeeActiveForNotifications(employee)) return;
 
         const stakeholders = await getStakeholders(employee);
         const stakeholderEmails = stakeholders
@@ -176,7 +177,8 @@ export const sendProbationWorkflowEmail = async ({
 };
 
 export const ensureProbationRequestForEmployee = async (employeeDoc) => {
-    if (!employeeDoc || employeeDoc.status !== "Probation" || !employeeDoc.dateOfJoining) return false;
+    if (!employeeDoc || !isEmployeeActiveForNotifications(employeeDoc)) return false;
+    if (employeeDoc.status !== "Probation" || !employeeDoc.dateOfJoining) return false;
     const today = startOfDay(new Date());
     const joinDate = new Date(employeeDoc.contractJoiningDate || employeeDoc.dateOfJoining);
     const probationMonths = employeeDoc.probationPeriod || 6;

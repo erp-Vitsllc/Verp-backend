@@ -250,6 +250,11 @@ const assetItemSchema = new mongoose.Schema({
         type: mongoose.Schema.Types.Mixed,
         default: null
     },
+    /** Saved Loss & Damage fine form (asset flow only; not yet submitted for approval). */
+    lossDamageFineDraft: {
+        type: mongoose.Schema.Types.Mixed,
+        default: null
+    },
     onLeaveStartDate: {
         type: Date,
         default: null
@@ -354,7 +359,8 @@ const assetItemSchema = new mongoose.Schema({
             fineData: { type: mongoose.Schema.Types.Mixed, default: null },
             requestedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'EmployeeBasic', default: null },
             requestedAt: { type: Date, default: null }
-        }
+        },
+        lossDamageFineDraft: { type: mongoose.Schema.Types.Mixed, default: null }
     }],
     /** Accessories removed from this asset after Loss & Damage was finalized (fine created). Keeps list/history without re-embedding the line. */
     lostDetachedAccessories: [{

@@ -144,9 +144,9 @@ export const login = async (req, res) => {
             // Increment failed attempts for non-admin logins
             if (!isAdminLogin) {
                 user.loginAttempts = (user.loginAttempts || 0) + 1;
-                const maxAttempts = 2;
+                const maxAttempts = 5;
 
-                // Lock account after 2 failed attempts. Admin must reset password/unlock.
+                // Lock account after 5 failed attempts. Admin must reset password/unlock.
                 if (user.loginAttempts >= maxAttempts) {
                     user.status = "Locked";
                     user.lockUntil = null;

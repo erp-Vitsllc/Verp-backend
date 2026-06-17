@@ -73,6 +73,11 @@ const paymentSchema = new mongoose.Schema(
             type: String,
             default: ''
         },
+        paymentSource: {
+            type: String,
+            enum: ['Salary', 'End of Benefits', 'Cash', null],
+            default: null,
+        },
         attachment: {
             url: { type: String },
             publicId: { type: String },

@@ -11,6 +11,7 @@ import { loadCompaniesForExpiryScanByIds } from "../../services/companyPartition
 import { collectCompanyExpiryDocuments, buildEmployeeManualDocumentExpiryLabel, isArchivedEmployeeManualDoc } from "../../utils/companyExpiryScanUtils.js";
 import { getDaysUntil, isExpiryHrTaskDueForDoc } from "../../utils/documentExpiryReminderStages.js";
 import { calculateProfileCompletionBackend } from "../../utils/calculateProfileCompletionBackend.js";
+import { isEmployeeActiveForNotifications } from "../../utils/applyEmployeeLeftUserStatus.js";
 
 /** Matches owner-style company rows — allow ASCII/en/em dashes between name and document type (same intent as frontend). */
 const COMPANY_OWNER_EXPIRY_BODY_RE =
@@ -146,11 +147,17 @@ const filterStaleExpiryDashboardRows = async (items = []) => {
                 : [],
             candidateEmployeeIds.size
                 ? EmployeeBasic.find({ _id: { $in: [...candidateEmployeeIds] } })
-                      .select("_id documents contractExpiryDate")
+                      .select("_id documents contractExpiryDate status profileStatus")
                       .lean()
                       .maxTimeMS(6000)
                 : [],
         ]);
+
+        const inactiveEmployeeIds = new Set(
+            employees
+                .filter((e) => !isEmployeeActiveForNotifications(e))
+                .map((e) => String(e._id)),
+        );
 
         const companyLabelSetById = new Map(
             companies.map((c) => [String(c._id), buildCompanyLiveExpiryExtra1Set(c)]),
@@ -168,6 +175,7 @@ const filterStaleExpiryDashboardRows = async (items = []) => {
                 return set.has(extra1);
             }
             if (it?.requestType === "Employee Document Expiry Reminder") {
+                if (inactiveEmployeeIds.has(String(it.requestId || ""))) return false;
                 // Keep system-card reminders; filter stale manual document reminders against active manual docs.
                 if (EMPLOYEE_SYSTEM_EXPIRY_LABEL_RE.test(extra1)) return true;
                 const set = employeeLabelSetById.get(String(it.requestId || ""));
@@ -1050,6 +1058,7 @@ export const getUserActivityStats = async (req, res) => {
                     .maxTimeMS(10000);
 
                 for (const emp of employeesForScan) {
+                    if (!isEmployeeActiveForNotifications(emp)) continue;
                     const { percentage, pendingFields } = calculateProfileCompletionBackend(emp);
                     if (percentage < 100) {
                         const sections = [...new Set(pendingFields.map(f => f.section))];

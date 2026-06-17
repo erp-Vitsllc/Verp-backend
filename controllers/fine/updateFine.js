@@ -8,6 +8,7 @@ import { sendFineApprovalEmail } from "../../utils/sendFineApprovalEmail.js";
 import { getDepartmentHOD } from "../../utils/getDepartmentHOD.js";
 import { getManagementHOD } from "../../utils/getManagementHOD.js";
 import { isVehicleFinePayload, validateVehicleFinePayload } from "../../utils/validateVehicleFinePayload.js";
+import { canUserActOnFineStageAsync } from "../../utils/fineStageAuth.js";
 
 export const updateFine = async (req, res) => {
     try {
@@ -195,31 +196,62 @@ export const updateFine = async (req, res) => {
 
         // Handle service charge distribution for group fines BEFORE the loop
         let serviceChargePerParty = 0;
-        if (updates.serviceCharge !== undefined && fines.length > 1) {
-            // For group fines, distribute service charge equally among all participating party records
+        if (fines.length > 1) {
             const partiesCount = fines.length;
-            const totalServiceCharge = parseFloat(updates.serviceCharge) || 0;
+            const totalServiceCharge = parseFloat(
+                updates.serviceCharge !== undefined ? updates.serviceCharge : fine.serviceCharge
+            ) || 0;
             serviceChargePerParty = partiesCount > 0 ? (totalServiceCharge / partiesCount) : 0;
         }
 
+        const splitAmountKeys = new Set(['fineAmount', 'employeeAmount', 'companyAmount', 'serviceCharge', 'employees']);
+
         // 3. Apply updates only for allowed fields (Loop all for bulk update)
         for (const f of fines) {
-            // Find specific data for this employee if it's a group update
             const targetEmployeeId = f.assignedEmployees?.[0]?.employeeId;
             const isCompanyRecord = targetEmployeeId === 'VEGA-HR-0000';
             const empUpdate = (updates.employees && Array.isArray(updates.employees))
                 ? updates.employees.find(e => e.employeeId === targetEmployeeId)
                 : null;
 
-            // Calculate base fine amount (before service charge)
-            const baseFineAmount = parseFloat(f.fineAmount) || 0;
-            const currentServiceCharge = parseFloat(f.serviceCharge) || 0;
-            const currentBaseFine = baseFineAmount - currentServiceCharge; // Extract base fine
+            const scParty = fines.length > 1
+                ? serviceChargePerParty
+                : (parseFloat(updates.serviceCharge ?? f.serviceCharge) || 0);
+
+            // Split Employee & Company fines: each DB row gets only its party's amounts from the modal
+            if (empUpdate && fines.length > 1) {
+                const rowBase = parseFloat(empUpdate.employeeAmount);
+                const rowTotal = parseFloat(empUpdate.individualAmount ?? empUpdate.fineAmount);
+                const base = Number.isFinite(rowBase)
+                    ? rowBase
+                    : Math.max(0, (Number.isFinite(rowTotal) ? rowTotal : 0) - scParty);
+                const total = Number.isFinite(rowTotal) ? rowTotal : base + scParty;
+
+                f.employeeAmount = base;
+                f.companyAmount = 0;
+                f.serviceCharge = scParty;
+                f.fineAmount = total;
+                f.totalFineAmount = total;
+
+                if (f.assignedEmployees?.[0]) {
+                    f.assignedEmployees[0].employeeAmount = base;
+                    f.assignedEmployees[0].individualAmount = total;
+                    f.assignedEmployees[0].fineAmount = Number.isFinite(parseFloat(empUpdate.fineAmount))
+                        ? parseFloat(empUpdate.fineAmount)
+                        : total;
+                    if (isCompanyRecord && updates.companyName) {
+                        f.assignedEmployees[0].employeeName = updates.companyName;
+                    }
+                }
+            }
 
             allowedUpdates.forEach(key => {
                 if (updates[key] !== undefined) {
+                    if (empUpdate && fines.length > 1 && splitAmountKeys.has(key)) {
+                        return;
+                    }
                     if (key === 'employees') {
-                        // handled via specificUpdate logic
+                        // handled via empUpdate logic
                     } else if (key === 'attachment') {
                         if (updates.attachment && updates.attachment.url && !isValidStorageUrl(updates.attachment.url)) {
                             console.warn("[UpdateFine] Invalid URL. Skipping.");
@@ -251,7 +283,17 @@ export const updateFine = async (req, res) => {
                             // fineAmount in updates is treated as the BASE fine amount
                             f.fineAmount = parseFloat(updates[key]) || 0;
                         } else if (key === 'employeeAmount' || key === 'companyAmount') {
-                            f[key] = parseFloat(updates[key]) || 0;
+                            if (isCompanyRecord) {
+                                if (key === 'employeeAmount') {
+                                    f.employeeAmount = parseFloat(updates.companyAmount ?? updates.employeeAmount ?? 0);
+                                } else {
+                                    f.companyAmount = 0;
+                                }
+                            } else if (key === 'employeeAmount') {
+                                f.employeeAmount = parseFloat(updates.employeeAmount ?? 0);
+                            } else {
+                                f.companyAmount = parseFloat(updates.companyAmount ?? 0);
+                            }
                         } else {
                             f[key] = updates[key];
                         }
@@ -265,30 +307,30 @@ export const updateFine = async (req, res) => {
                 }
             });
 
+            if (!(empUpdate && fines.length > 1)) {
             // Recalculate totalFineAmount from components (employeeAmount + companyAmount + serviceCharge)
             const empAmt = parseFloat(f.employeeAmount) || 0;
             const compAmt = parseFloat(f.companyAmount) || 0;
             const servCharge = parseFloat(f.serviceCharge) || 0;
-            f.totalFineAmount = empAmt + compAmt + servCharge; // Store total fine amount calculated in backend
-            f.fineAmount = f.totalFineAmount; // Synchronize fineAmount with totalFineAmount
+            f.totalFineAmount = empAmt + compAmt + servCharge;
+            f.fineAmount = f.totalFineAmount;
             
             // Sync individualAmount within the specific record for consistency
             if (f.assignedEmployees && f.assignedEmployees.length > 0) {
-                // employeeAmount at the root of a group record is the individual's portion
-                // Include service charge in individualAmount
-                const serviceChargeForThisEmployee = isCompanyRecord ? 0 : (fines.length > 1 ? serviceChargePerParty : (parseFloat(f.serviceCharge) || 0));
-                f.assignedEmployees[0].individualAmount = (parseFloat(f.employeeAmount) || 0) + serviceChargeForThisEmployee;
+                const serviceChargeForThisEmployee = fines.length > 1
+                    ? serviceChargePerParty
+                    : servCharge;
+                f.assignedEmployees[0].individualAmount = empAmt + compAmt + serviceChargeForThisEmployee;
                 
-                // Sync company name if it's the company record
                 if (f.assignedEmployees[0].employeeId === 'VEGA-HR-0000' && updates.companyName) {
                     f.assignedEmployees[0].employeeName = updates.companyName;
                 }
                 
-                // Extra sync for specific amount fields inside the object if they were provided
                 if (empUpdate) {
                     if (empUpdate.fineAmount !== undefined) f.assignedEmployees[0].fineAmount = parseFloat(empUpdate.fineAmount);
                     if (empUpdate.individualAmount !== undefined) f.assignedEmployees[0].individualAmount = parseFloat(empUpdate.individualAmount);
                 }
+            }
             }
 
             await f.save();
@@ -297,6 +339,23 @@ export const updateFine = async (req, res) => {
         if (oldStatus !== 'Rejected' && updates.fineStatus === 'Rejected') {
             if (!updates.rejectionReason || updates.rejectionReason.trim().length === 0) {
                 return res.status(400).json({ message: "Reason for rejection is mandatory." });
+            }
+
+            let userBasic = null;
+            if (req.user?.employeeId) {
+                userBasic = await EmployeeBasic.findOne({ employeeId: req.user.employeeId });
+            }
+            const isAdmin = req.user?.isAdmin === true;
+            const canReject = await canUserActOnFineStageAsync({
+                user: req.user,
+                fine,
+                isAdmin,
+                employeeObjectId: userBasic?._id,
+            });
+            if (!canReject) {
+                return res.status(403).json({
+                    message: "Only the assigned approver for the current stage can reject this fine.",
+                });
             }
 
             for (const f of fines) {
@@ -379,6 +438,25 @@ export const updateFine = async (req, res) => {
                         ? `Total: AED ${fines.reduce((sum, f) => sum + (f.fineAmount || 0), 0)}`
                         : `AED ${updatedFine.fineAmount}`
                 });
+            } else if (
+                oldStatus !== 'Rejected' &&
+                updatedFine.fineStatus === 'Rejected' &&
+                updatedFine.submittedTo
+            ) {
+                // Route rejection back to the prior approver (HR or Accounts) for review/resubmit.
+                await syncDashboardAction({
+                    requestId: updatedFine._id,
+                    requestType: reqType,
+                    assignedTo: updatedFine.submittedTo,
+                    status: 'Pending',
+                    subjectEmployee: subjectEmp,
+                    subjectName: subjectName,
+                    requestedByName: updatedFine.createdBy?.name || '',
+                    extra1: updatedFine.fineType,
+                    extra2: isGroup
+                        ? `Rejected — review and resubmit (Total: AED ${fines.reduce((sum, f) => sum + (f.fineAmount || 0), 0)})`
+                        : `Rejected — review and resubmit: AED ${updatedFine.fineAmount}`,
+                });
             }
         } catch (syncErr) {
             console.error("[UpdateFine] Dashboard Sync Error:", syncErr);
@@ -417,6 +495,12 @@ export const updateFine = async (req, res) => {
 
                 const allAssigned = fines.flatMap(f => f.assignedEmployees);
                 await sendFineRejectedEmail(safeFineData, allAssigned);
+
+                if (updatedFine.submittedTo) {
+                    sendFineApprovalEmail(updatedFine, allAssigned).catch((err) => {
+                        console.error('[UpdateFine] Routed rejection notify email failed:', err);
+                    });
+                }
             } catch (err) {
                 console.error("Failed to send rejection email:", err);
             }

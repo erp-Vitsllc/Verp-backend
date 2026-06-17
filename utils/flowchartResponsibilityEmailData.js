@@ -19,7 +19,7 @@ export async function buildResponsibilityEmailData(category) {
             assignedToType: 'Company',
             status: { $in: ['Assigned', 'Pending', 'On Leave'] }
         })
-            .select('assetId name status')
+            .select('assetId name status type category plateNumber typeId categoryId')
             .sort({ assetId: 1 })
             .limit(40)
             .lean();
@@ -45,13 +45,13 @@ export async function buildResponsibilityEmailData(category) {
         out.unassignedAssets = await AssetItem.find({
             status: 'Unassigned'
         })
-            .select('_id assetId name status accessories')
+            .select('_id assetId name status accessories type category plateNumber typeId categoryId')
             .sort({ assetId: 1 })
             .limit(80)
             .lean();
 
         out.parkingAssets = await AssetItem.find({ status: 'On Leave' })
-            .select('_id assetId name status accessories')
+            .select('_id assetId name status accessories type category plateNumber typeId categoryId')
             .sort({ assetId: 1 })
             .limit(80)
             .lean();

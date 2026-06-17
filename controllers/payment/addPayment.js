@@ -20,7 +20,8 @@ export const addPayment = async (req, res) => {
             relatedEntityType,
             relatedEntityId,
             remarks,
-            attachment
+            attachment,
+            paymentSource,
         } = req.body;
         
         // CHECK IF CREATOR IS ACCOUNTS PERSON
@@ -39,6 +40,25 @@ export const addPayment = async (req, res) => {
             return res.status(400).json({
                 success: false,
                 message: 'Payment type, paid by, and amount are required'
+            });
+        }
+
+        const normalizedSource = String(paymentSource || '').trim();
+        const allowedSources = ['Salary', 'End of Benefits', 'Cash'];
+        if (!normalizedSource || !allowedSources.includes(normalizedSource)) {
+            return res.status(400).json({
+                success: false,
+                message: 'Payment source is required (Salary, End of Benefits, or Cash)',
+            });
+        }
+
+        const hasAttachment =
+            attachment &&
+            (attachment.url || attachment.data || attachment.publicId || attachment.name);
+        if (normalizedSource === 'Cash' && !hasAttachment) {
+            return res.status(400).json({
+                success: false,
+                message: 'Attachment is required when payment source is Cash',
             });
         }
 
@@ -81,6 +101,7 @@ export const addPayment = async (req, res) => {
             relatedEntityId: relatedEntityId || null,
             createdBy: req.user._id,
             remarks: remarks || '',
+            paymentSource: normalizedSource,
             attachment: attachment || null
         });
 

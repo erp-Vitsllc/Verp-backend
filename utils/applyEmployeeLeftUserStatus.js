@@ -15,6 +15,28 @@ export function isLeftUserStatus(value) {
     return String(value || "").trim() === LEFT_USER_STATUS;
 }
 
+/** Active employees only — Left User and inactive/rejected profiles receive no notifications. */
+export function isEmployeeActiveForNotifications(emp) {
+    if (!emp) return false;
+    if (isLeftUserStatus(emp.status)) return false;
+    const profileStatus = String(emp.profileStatus || "").trim().toLowerCase();
+    if (profileStatus === "inactive" || profileStatus === "rejected") return false;
+    return true;
+}
+
+const LEFT_USER_PENDING_NOTIFICATION_TYPES = [
+    "Employee Document Expiry Reminder",
+    "Document Expiry Reminder",
+    "Probation Change",
+    "Profile Activation",
+    "Notice Request",
+    "Employee Document Not Renew",
+    "Loan",
+    "Reward",
+    "Fine",
+    "Group Fine Request",
+];
+
 /** Apply Left User work status and disable portal access. */
 export async function applyEmployeeLeftUserStatus(employeeDoc) {
     if (!employeeDoc?.employeeId) return;
@@ -33,11 +55,22 @@ export async function applyEmployeeLeftUserStatus(employeeDoc) {
     );
 
     const DashboardAction = (await import("../models/DashboardAction.js")).default;
+    const employeeObjectId = employeeDoc._id;
+    const employeeHumanId = employeeDoc.employeeId;
+
     await DashboardAction.deleteMany({
+        status: "Pending",
         $or: [
-            { requestId: employeeDoc._id },
-            { subjectEmployeeId: employeeDoc.employeeId }
+            { requestId: employeeObjectId },
+            { subjectEmployeeId: employeeHumanId },
+            {
+                assignedTo: employeeObjectId,
+                requestType: { $in: LEFT_USER_PENDING_NOTIFICATION_TYPES },
+            },
+            {
+                assignedToEmpId: employeeHumanId,
+                requestType: { $in: LEFT_USER_PENDING_NOTIFICATION_TYPES },
+            },
         ],
-        status: "Pending"
     });
 }

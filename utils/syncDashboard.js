@@ -36,6 +36,8 @@ export const syncDashboardAction = async (data) => {
             vehicleProfileActivationNotifyAssignee,
             /** Asset creation rejected: outcome row for the creator (resubmit). */
             assetCreationNotifyAssignee,
+            /** Loss & Damage rejected: outcome row for the original requester (resubmit). */
+            lossDamageNotifyAssignee,
             /** When true, do not mark assignee Pending rows as completed (used for Profile hold: HR keeps the task open). */
             skipPendingCompletion = false,
         } = data;
@@ -178,6 +180,46 @@ export const syncDashboardAction = async (data) => {
                             JSON.stringify({
                                 activationSubject: 'vehicle',
                                 activationViewerRole: 'submitter',
+                            }),
+                        actionedDate: new Date(),
+                        actionedBy: actionedBy || null,
+                        comment: comment || '',
+                    },
+                    { upsert: true, new: true, setDefaultsOnInsert: true },
+                );
+            }
+
+            if (
+                requestType === 'Asset Loss Damage' &&
+                status === 'Rejected' &&
+                lossDamageNotifyAssignee?._id
+            ) {
+                const assignee = lossDamageNotifyAssignee;
+                const subj = subjectEmployee || assignee;
+                const subjectNameDisplay =
+                    `${subj.firstName || ''} ${subj.lastName || ''}`.trim() || 'Employee';
+                const outcomeExtra1 =
+                    extra1 ||
+                    '[Loss & Damage] Your request was rejected — you may update and submit again.';
+                await DashboardAction.findOneAndUpdate(
+                    { requestId, assignedTo: assignee._id, requestType: 'Asset Loss Damage' },
+                    {
+                        assignedTo: assignee._id,
+                        assignedToEmpId: assignee.employeeId,
+                        requestId,
+                        requestType: 'Asset Loss Damage',
+                        status: 'Rejected',
+                        subjectEmployeeId: subj.employeeId || '',
+                        subjectName: subjectNameDisplay,
+                        requestedByName: requestedByName || '',
+                        requestedDate: new Date(),
+                        extra1: outcomeExtra1,
+                        extra2: extra2 || '',
+                        extra3:
+                            extra3 ??
+                            JSON.stringify({
+                                lossDamageViewerRole: 'requester',
+                                outcome: 'reject',
                             }),
                         actionedDate: new Date(),
                         actionedBy: actionedBy || null,

@@ -5,6 +5,24 @@ import { getDepartmentHOD } from "../../utils/getDepartmentHOD.js";
 import { getManagementHOD } from "../../utils/getManagementHOD.js";
 import { isUserAdministrator } from "../../services/permissionService.js";
 
+/** Per-party service charge (split rows store half; group view sums full SC on parent). */
+function partyServiceShare(fine, entry = {}) {
+    const perRecord = parseFloat(entry.serviceCharge ?? 0) || 0;
+    if (perRecord > 0) return perRecord;
+
+    const total = parseFloat(fine.serviceCharge || 0) || 0;
+    const rf = (fine.responsibleFor || 'Employee').trim();
+    if (rf !== 'Employee & Company' || total <= 0) return total;
+
+    if (fine.isGroupView) return total / 2;
+
+    const comp = parseFloat(fine.companyAmount || 0) || 0;
+    const hasVega = fine.assignedEmployees?.some((e) => e.employeeId === 'VEGA-HR-0000');
+    if (hasVega || comp > 0) return total / 2;
+
+    return total;
+}
+
 /** Fix legacy L&D saves where base was stored as (wrongGrand − serviceCharge). */
 function normalizeFineBaseAmounts(fine) {
     if (!fine) return fine;
@@ -28,16 +46,16 @@ function normalizeFineBaseAmounts(fine) {
         fine.assignedEmployees = fine.assignedEmployees.map((e) => {
             let rowBase = parseFloat(e.employeeAmount ?? fine.employeeAmount ?? 0);
             if (rowBase < 0 && sc > 0) rowBase = rowBase + sc;
-            const rowSc = parseFloat(e.serviceCharge ?? fine.serviceCharge ?? 0);
-            const individualAmt = Math.max(
-                parseFloat(e.individualAmount || 0) || 0,
-                rowBase + rowSc,
-            );
+            const partySc = partyServiceShare(fine, e);
+            const individualAmt = rowBase > 0
+                ? rowBase + partySc
+                : (parseFloat(e.individualAmount || 0) || 0);
             return {
                 ...e,
                 employeeAmount: rowBase,
                 fineAmount: rowBase,
                 individualAmount: individualAmt,
+                serviceCharge: partySc,
             };
         });
     }
@@ -136,7 +154,9 @@ export const getFineById = async (req, res) => {
                         const baseEmp = parseFloat(rf.employeeAmount) || 0;
                         const baseComp = parseFloat(rf.companyAmount) || 0;
                         const sc = parseFloat(rf.serviceCharge) || 0;
-                        const expectedWithSc = baseEmp + baseComp + sc;
+                        const expectedWithSc = (isCompanyRecord || baseComp <= 0)
+                            ? baseEmp + sc
+                            : baseEmp + baseComp + sc;
                         if (!individualAmt || parseFloat(individualAmt) < expectedWithSc - 0.01) {
                             individualAmt = expectedWithSc;
                         }
@@ -147,8 +167,9 @@ export const getFineById = async (req, res) => {
                             fineId: rf.fineId,
                             fineStatus: rf.fineStatus,
                             individualAmount: individualAmt,
-                            fineAmount: baseAmount, // Base amount for edit form input
-                            employeeAmount: baseAmount, // Explicit base for edit modal
+                            fineAmount: baseAmount,
+                            employeeAmount: baseAmount,
+                            serviceCharge: sc,
                             payableDuration: rf.payableDuration || e.payableDuration
                         };
                     });
@@ -206,7 +227,10 @@ export const getFineById = async (req, res) => {
                     const baseEmp = parseFloat(e.employeeAmount ?? fine.employeeAmount ?? 0);
                     const baseComp = parseFloat(e.companyAmount ?? fine.companyAmount ?? 0);
                     const sc = parseFloat(fine.serviceCharge || 0);
-                    const expectedWithSc = baseEmp + baseComp + sc;
+                    const isSplitShare = (fine.responsibleFor || '') === 'Employee & Company' && baseComp > 0;
+                    const expectedWithSc = isSplitShare
+                        ? baseEmp + (sc / 2)
+                        : baseEmp + baseComp + sc;
                     let individualAmt = e.individualAmount;
                     if (!individualAmt || parseFloat(individualAmt) < expectedWithSc - 0.01) {
                         individualAmt = expectedWithSc;
@@ -276,14 +300,54 @@ export const getFineById = async (req, res) => {
         const accountsHOD = await getDepartmentHOD('finance', targetEmployeeId);
         const ceoHOD = await getManagementHOD(targetEmployeeId);
 
+        // Reassign flowchart HR/Accounts/Management → update pending workflow + task bar to new assignee
+        if (fine?._id) {
+            try {
+                const { syncPendingFineAssigneeFromFlowchart } = await import('../../utils/fineStageAuth.js');
+                const FineModel = (await import('../../models/Fine.js')).default;
+                const freshDoc = await FineModel.findById(fine._id);
+                if (freshDoc) {
+                    await syncPendingFineAssigneeFromFlowchart(freshDoc);
+                    const synced = await FineModel.findById(fine._id)
+                        .populate('workflow.assignedTo', 'firstName lastName employeeId')
+                        .populate('submittedTo', 'firstName lastName email department designation employeeId')
+                        .lean();
+                    if (synced) {
+                        fine.workflow = synced.workflow;
+                        fine.submittedTo = synced.submittedTo;
+                    }
+                }
+            } catch (syncErr) {
+                console.error('[getFineById] Flowchart assignee sync failed:', syncErr?.message || syncErr);
+            }
+        }
+
+        const hrHODName = hrHOD ? `${hrHOD.firstName} ${hrHOD.lastName}` : 'Unknown';
+        const accountsHODName = accountsHOD ? `${accountsHOD.firstName} ${accountsHOD.lastName}` : 'Unknown';
+        const ceoName = ceoHOD ? `${ceoHOD.firstName} ${ceoHOD.lastName}` : 'Unknown';
+
+        let formSummary = null;
+        try {
+            const { buildFineFormSummary } = await import('../../utils/buildFineFormSummary.js');
+            formSummary = await buildFineFormSummary(fine, {
+                employeeId: targetEmployeeId,
+                hrHODName,
+                accountsHODName,
+                ceoName,
+            });
+        } catch (summaryErr) {
+            console.error('[getFineById] formSummary build failed:', summaryErr?.message || summaryErr);
+        }
+
         return res.status(200).json({
             ...fine,
-            hrHODName: hrHOD ? `${hrHOD.firstName} ${hrHOD.lastName}` : 'Unknown',
+            hrHODName,
             hrHODId: hrHOD ? hrHOD.employeeId : null,
-            accountsHODName: accountsHOD ? `${accountsHOD.firstName} ${accountsHOD.lastName}` : 'Unknown',
+            accountsHODName,
             accountsHODId: accountsHOD ? accountsHOD.employeeId : null,
-            ceoName: ceoHOD ? `${ceoHOD.firstName} ${ceoHOD.lastName}` : 'Unknown',
-            ceoEmployeeId: ceoHOD ? ceoHOD.employeeId : null
+            ceoName,
+            ceoEmployeeId: ceoHOD ? ceoHOD.employeeId : null,
+            formSummary,
         });
     } catch (error) {
         console.error('Error fetching fine:', error);

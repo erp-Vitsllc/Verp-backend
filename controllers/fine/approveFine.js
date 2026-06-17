@@ -5,6 +5,7 @@ import { getManagementHOD } from "../../utils/getManagementHOD.js";
 import { sendHODAuthorizationEmail } from "../../utils/sendHODAuthorizationEmail.js";
 import { sendFineStageEmail } from "../../utils/sendFineStageEmail.js";
 import { isValidStorageUrl } from "../../utils/validationHelper.js";
+import { canUserActOnFineStageAsync } from "../../utils/fineStageAuth.js";
 
 /**
  * Approve Fine - Sequential Workflow
@@ -67,20 +68,15 @@ export const approveFine = async (req, res) => {
             return res.status(403).json({ message: "User not recognized as an employee." });
         }
 
-        // 3. Determine User Roles
-        const dept = (userBasic?.department || '').toLowerCase();
-        const desig = (userBasic?.designation || '').toLowerCase();
-
-        const isManagement = dept.includes('management') && [
-            'ceo', 'c.e.o', 'c.e.o.', 'chief executive officer', 'director',
-            'managing director', 'general manager', 'gm', 'g.m'
-        ].includes(desig);
-        const isHR = dept.includes('hr') || dept.includes('human resource') || dept.includes('hrm') ||
-            dept.includes('human resources') || desig.includes('hr');
-        const isAccounts = dept.includes('account') || dept.includes('finance') ||
-            dept.includes('payroll') || desig.includes('account');
-
+        // 3. Stage-based authorization uses workflow assignee (see fineStageAuth.js)
         const currentStatus = fine.fineStatus;
+        const canActOnFine = async () =>
+            canUserActOnFineStageAsync({
+                user: req.user,
+                fine,
+                isAdmin,
+                employeeObjectId: userBasic?._id,
+            });
         let modified = false;
 
         console.log("ApproveFine:", { fineId: fine.fineId, status: currentStatus, userId: req.user._id });
@@ -91,14 +87,7 @@ export const approveFine = async (req, res) => {
             (currentStatus === 'Pending' && (!fine.workflow || fine.workflow.length === 0 || fine.workflow.some(w => w.status === 'Pending' && w.role === 'HR')));
 
         if (isHRStage) {
-            const isAssignedToMe =
-                fine.submittedTo?.toString() === req.user._id.toString() ||
-                fine.workflow?.some(w =>
-                    w.status === 'Pending' && w.role === 'HR' &&
-                    w.assignedTo?.toString() === req.user._id.toString()
-                );
-
-            if (isHR || isAdmin || isAssignedToMe) {
+            if (await canActOnFine()) {
                 fine.fineStatus = 'Pending Accounts';
                 fine.hrApprovedBy = req.user._id;
                 modified = true;
@@ -154,20 +143,13 @@ export const approveFine = async (req, res) => {
                 const allAssignedEmployees = fines.flatMap(f => f.assignedEmployees);
                 await sendFineStageEmail(fine, accEmails, 'Accounts', allAssignedEmployees);
             } else {
-                return res.status(403).json({ message: "Only HR can approve at this stage." });
+                return res.status(403).json({ message: "Only the assigned HR approver can approve at this stage." });
             }
         }
         // --- STAGE 2: Accounts (Pending Accounts -> Pending Authorization) ---
         else if (currentStatus === 'Pending Accounts' || currentStatus === 'Pending Finance' ||
             (currentStatus === 'Pending' && fine.workflow?.some(w => w.status === 'Pending' && w.role === 'Accounts'))) {
-            const isAssignedToMe =
-                fine.submittedTo?.toString() === req.user._id.toString() ||
-                fine.workflow?.some(w =>
-                    w.status === 'Pending' && w.role === 'Accounts' &&
-                    w.assignedTo?.toString() === req.user._id.toString()
-                );
-
-            if (isAccounts || isAdmin || isAssignedToMe) {
+            if (await canActOnFine()) {
                 const realEmp = fine.assignedEmployees?.find(e => e.employeeId && e.employeeId !== 'VEGA-HR-0000');
                 const applicantId = realEmp?.employeeId || fine.assignedEmployees?.[0]?.employeeId;
 
@@ -217,20 +199,13 @@ export const approveFine = async (req, res) => {
                 console.log(`[Fine ${fine.fineId}] Finance Approved. Management:`, managementHOD ? `${managementHOD.firstName} ${managementHOD.lastName}` : 'NOT FOUND');
                 await sendHODAuthorizationEmail('Fine', fine, managementHOD, { name: 'Accounts Department', designation: 'Finance' });
             } else {
-                return res.status(403).json({ message: "Only Accounts can approve at this stage." });
+                return res.status(403).json({ message: "Only the assigned Accounts approver can approve at this stage." });
             }
         }
         // --- STAGE 3: Management (Pending Authorization -> Approved) ---
         else if (currentStatus === 'Pending Authorization' || currentStatus === 'Pending Management' ||
             (currentStatus === 'Pending' && fine.workflow?.some(w => w.status === 'Pending' && (w.role === 'Management' || w.role === 'CEO')))) {
-            const isAssignedToMe =
-                fine.submittedTo?.toString() === req.user._id.toString() ||
-                fine.workflow?.some(w =>
-                    w.status === 'Pending' && w.role === 'Management' &&
-                    w.assignedTo?.toString() === req.user._id.toString()
-                );
-
-            if (isManagement || isAdmin || isAssignedToMe) {
+            if (await canActOnFine()) {
                 // Update ALL siblings
                 for (const f of fines) {
                     f.fineStatus = 'Approved';
@@ -329,7 +304,7 @@ export const approveFine = async (req, res) => {
                 const allAssignedEmployees = fines.flatMap(f => f.assignedEmployees);
                 await sendFineConfirmedEmail(fine, allAssignedEmployees, req);
             } else {
-                return res.status(403).json({ message: "Only Management can approve at this stage." });
+                return res.status(403).json({ message: "Only the assigned Management approver can approve at this stage." });
             }
         } else {
             return res.status(400).json({ message: `No actionable status found for fine (status: ${currentStatus}).` });

@@ -201,6 +201,9 @@ export async function syncStaleAssetCreationApprover(asset) {
     // Assignment acknowledgments also use status Pending — never replace assignee/reportee routing.
     if (isAssetAssignmentAcknowledgmentPending(asset)) return null;
 
+    // Assets with active pending actions (like EOL or Loss & Damage) should not sync creation approvers.
+    if (asset.pendingAction) return null;
+
     const awaiting =
         asset.status === 'Submitted for Approval' ||
         asset.status === 'Pending' ||

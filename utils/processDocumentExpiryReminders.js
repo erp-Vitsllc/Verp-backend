@@ -22,6 +22,7 @@ import ExpiryReminderLog from "../models/ExpiryReminderLog.js";
 import User from "../models/User.js";
 import { getDepartmentHOD } from "./getDepartmentHOD.js";
 import { resolveEmployeeEmail } from "./resolveEmployeeEmail.js";
+import { isEmployeeActiveForNotifications } from "./applyEmployeeLeftUserStatus.js";
 import {
     getDaysUntil,
     getEmailReminderStageMarker,
@@ -193,10 +194,7 @@ const markReminderSent = async ({ targetType, targetId, docKey, daysBefore, expi
 };
 
 const pickCompanyAddress = (emp = {}) => {
-    if (!emp) return null;
-    if (emp.status === "Left User" || emp.profileStatus === "inactive" || emp.profileStatus === "rejected") {
-        return null;
-    }
+    if (!isEmployeeActiveForNotifications(emp)) return null;
     return (emp?.companyEmail || "").trim() ||
         resolveEmployeeEmail(emp || {}).email ||
         null;
@@ -591,6 +589,7 @@ const processEmployeeReminders = async () => {
     const map = await buildEmployeeDocumentMap(employeeIds);
 
     for (const employee of employees) {
+        if (!isEmployeeActiveForNotifications(employee)) continue;
         const docs = [...(map.get(employee.employeeId) || [])];
         (employee.documents || []).forEach((d, idx) => {
             if (!d?.expiryDate || isArchivedOrStaleCompanyExpiryRow(d)) return;

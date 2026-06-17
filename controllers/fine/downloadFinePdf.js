@@ -50,9 +50,7 @@ export const downloadFinePdf = async (req, res) => {
             hrm_fine: { isView: true, isActive: true }
         };
 
-        // Use the main app container selector (or body, since we want full page but CSS handles print view)
-        // Loan PDF typically waits for network idle.
-        const selector = 'body';
+        const selector = '#fine-form-container';
 
         const pdfBuffer = await generatePdf(printUrl, token, userPayload, permissions, selector);
 

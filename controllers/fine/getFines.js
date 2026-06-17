@@ -21,7 +21,6 @@ export const getFines = async (req, res) => {
 
         const query = {};
 
-        // Search by employee name or fine ID
         const searchConditions = [];
         if (search) {
             searchConditions.push(
@@ -31,31 +30,32 @@ export const getFines = async (req, res) => {
             );
         }
 
-        // Filter by Company ID: Show ONLY approved/paid company-responsible fines (not employee fines)
-        // Company fines are identified by:
-        // 1. assignedEmployees contains VEGA-HR-0000 (company record)
-        // 2. OR responsibleFor === 'Company' AND company matches
-        // 3. AND status must be Approved, Active, Completed, or Paid
+        // Company profile Fine tab: fines where this company has liability
         const companyConditions = [];
         if (companyId) {
-            const approvedStatuses = ['Approved', 'Active', 'Completed', 'Paid'];
+            const companyOid = mongoose.Types.ObjectId.isValid(companyId)
+                ? new mongoose.Types.ObjectId(companyId)
+                : companyId;
+
             companyConditions.push(
-                // Company record (VEGA-HR-0000) - this is the company's fine record
-                { 
-                    'assignedEmployees.employeeId': 'VEGA-HR-0000', 
-                    company: companyId,
-                    fineStatus: { $in: approvedStatuses }
+                {
+                    company: companyOid,
+                    'assignedEmployees.employeeId': 'VEGA-HR-0000',
                 },
-                // Direct company responsibility
-                { 
-                    responsibleFor: 'Company', 
-                    company: companyId,
-                    fineStatus: { $in: approvedStatuses }
+                {
+                    company: companyOid,
+                    responsibleFor: 'Company',
+                },
+                {
+                    company: companyOid,
+                    responsibleFor: 'Employee & Company',
+                    companyAmount: { $gt: 0 },
+                    'assignedEmployees.employeeId': { $ne: 'VEGA-HR-0000' },
+                    fineId: { $not: /VEGA-FINE-\d+-[A-Z]$/i },
                 }
             );
         }
 
-        // Combine search and company conditions
         if (searchConditions.length > 0 && companyConditions.length > 0) {
             query.$and = [
                 { $or: searchConditions },
@@ -70,7 +70,6 @@ export const getFines = async (req, res) => {
         if (status) query.fineStatus = status;
         if (type) query.fineType = type;
 
-        // Filter by Employee ID: Check only assigned list
         if (employeeId) {
             query['assignedEmployees.employeeId'] = employeeId;
         }
@@ -83,7 +82,6 @@ export const getFines = async (req, res) => {
             if (endDate) query.awardedDate.$lte = new Date(endDate);
         }
 
-        // Visibility: Draft - only creator sees; Pending+ - everyone. Admin sees all.
         const isAdmin = await isUserAdministrator(req.user?.id);
         if (!isAdmin && req.user?.id) {
             query.$and = query.$and || [];
@@ -98,13 +96,12 @@ export const getFines = async (req, res) => {
         const skip = (parseInt(page) - 1) * parseInt(limit);
 
         const fines = await Fine.find(query)
-            .populate('company', 'companyId _id name') // Populate company to get companyId string
+            .populate('company', 'companyId _id name')
             .sort({ createdAt: -1 })
             .skip(skip)
             .limit(parseInt(limit))
             .lean();
 
-        // Sign Attachment URLs & Auto-fill missing company names
         const EmployeeBasic = (await import('../../models/EmployeeBasic.js')).default;
 
         const signedFines = await Promise.all(fines.map(async (fine) => {
@@ -113,15 +110,13 @@ export const getFines = async (req, res) => {
                 fine.attachment.url = signedUrl;
             }
 
-            // Auto-heal missing company details from employee profile
             if ((!fine.companyName || fine.companyName === 'N/A') && fine.assignedEmployees?.length > 0) {
                 const empId = fine.assignedEmployees[0].employeeId;
-                if (empId) {
+                if (empId && empId !== 'VEGA-HR-0000') {
                     const emp = await EmployeeBasic.findOne({ employeeId: empId }).populate('company').lean();
                     if (emp?.company && emp.company.name) {
                         fine.companyName = emp.company.name;
                         fine.company = emp.company._id;
-                        // Update the database record to permanently fix it
                         await Fine.updateOne({ _id: fine._id }, { companyName: fine.companyName, company: fine.company });
                     }
                 }

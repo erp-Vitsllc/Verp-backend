@@ -46,12 +46,13 @@ export const sendFineConfirmedEmail = async (fine, assignedEmployees, req = null
             if (creatorMail) ccEmails.add(creatorMail);
         }
 
-        // 4. Add HR, Accounts, Management
+        // 4. Add HR, Accounts, Management (and Asset Controller for asset Loss & Damage fines)
         if (employeeIds.length > 0) {
         // Get HR, Accounts, Management HODs for CC
         try {
             const { getDepartmentHOD } = await import("./getDepartmentHOD.js");
             const { getManagementHOD } = await import("./getManagementHOD.js");
+            const { resolveAssetControllerEmployee } = await import("./assetApprovalHelpers.js");
 
             const hrHOD = await getDepartmentHOD('hr', employeeIds[0]);
             addEmployeeEmailToSet(ccEmails, hrHOD);
@@ -61,6 +62,20 @@ export const sendFineConfirmedEmail = async (fine, assignedEmployees, req = null
 
             const managementHOD = await getManagementHOD(employeeIds[0]);
             addEmployeeEmailToSet(ccEmails, managementHOD);
+
+            const ftRaw = String(fine.fineType || '');
+            const ft = ftRaw.toLowerCase();
+            const isLossDamageAssetFine =
+                !!(fine.assetId && String(fine.assetId).trim()) &&
+                (fine.category === 'Loss' ||
+                    fine.category === 'Damage' ||
+                    ft.includes('loss & damage') ||
+                    ft.includes('loss and damage'));
+            if (isLossDamageAssetFine) {
+                const acRaw = await getDepartmentHOD('assetcontroller', employeeIds[0]);
+                const acEmp = acRaw ? await resolveAssetControllerEmployee(acRaw) : null;
+                addEmployeeEmailToSet(ccEmails, acEmp || acRaw);
+            }
         } catch (err) {
             console.warn("[FineConfirmedEmail] Could not fetch HOD emails for CC", err.message);
         }

@@ -64,6 +64,38 @@ export const getEmployeeById = async (req, res) => {
                 fineStatus: { $in: ["Approved", "Paid"] }
             }).sort({ createdAt: -1 }).lean();
 
+            const finesWithSignedAttachments = await Promise.all(
+                (fines || []).map(async (fine) => {
+                    if (!fine?.attachment) return fine;
+                    try {
+                        const attachment = { ...fine.attachment };
+                        if (attachment.data || (attachment.url && String(attachment.url).startsWith('data:'))) {
+                            return { ...fine, attachment };
+                        }
+                        if (attachment.url && /^https?:\/\//i.test(String(attachment.url))) {
+                            return { ...fine, attachment };
+                        }
+                        if (attachment.publicId) {
+                            const signedUrl = await getSignedFileUrl(attachment.publicId);
+                            if (signedUrl) {
+                                attachment.url = signedUrl;
+                            }
+                            return { ...fine, attachment };
+                        }
+                        if (attachment.url) {
+                            const signedUrl = await getSignedFileUrl(attachment.url);
+                            if (signedUrl) {
+                                attachment.url = signedUrl;
+                            }
+                        }
+                        return { ...fine, attachment };
+                    } catch (signErr) {
+                        console.error(`[getEmployeeById] Failed to sign fine attachment for ${fine.fineId}:`, signErr);
+                    }
+                    return fine;
+                })
+            );
+
             const rewards = await Reward.find({
                 employeeId: employee.employeeId,
                 rewardStatus: 'Approved'
@@ -107,7 +139,7 @@ export const getEmployeeById = async (req, res) => {
                 return asset;
             }));
 
-            employee.fines = fines || [];
+            employee.fines = finesWithSignedAttachments || [];
             employee.rewards = rewards || [];
             employee.loans = loans || [];
             employee.loanAmount = 0; // Placeholder for future Loan module logic if needed
