@@ -132,7 +132,7 @@ const employeeBasicSchema = new mongoose.Schema(
 
         // EMPLOYMENT INFO
         dateOfJoining: { type: Date, required: true },
-        contractJoiningDate: { type: Date }, // Mandatory field tracked by frontend
+        contractJoiningDate: { type: Date }, // Set automatically from first visa issue date
         contractExpiryDate: { type: Date }, // Optional field for contract end date
 
         // PROFILE PICTURE

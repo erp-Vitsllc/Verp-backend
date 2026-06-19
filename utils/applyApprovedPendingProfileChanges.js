@@ -17,6 +17,7 @@ import {
     employeeDocumentWasSuperseded,
 } from "./archiveEmployeeDocument.js";
 import { shouldArchiveEmployeeDocumentOnRenewal } from "./employeeDocumentRenewal.js";
+import { setContractJoiningDateFromFirstVisa } from "./contractJoiningDateHelper.js";
 import {
     documentStorageFingerprint,
     purgeEmployeeOldDocuments,
@@ -219,36 +220,43 @@ export async function applyApprovedPendingProfileChanges(employeeId, basicDoc, c
                 if (replacedVisaType && replacedVisaType !== visaType) {
                     await EmployeeVisa.updateOne({ employeeId }, { $unset: { [replacedVisaType]: "" } });
                 }
+                await setContractJoiningDateFromFirstVisa(employeeId, proposedData?.issueDate, {
+                    isRenewal: change?.isRenewal === true,
+                });
             }
             continue;
         }
         if (section === "basicdetails" || section === "workdetails") {
+            const safeProposedData = { ...proposedData };
+            if (section === "workdetails") {
+                delete safeProposedData.contractJoiningDate;
+            }
             let salaryIncrementResult = { isIncrement: false };
             if (
                 section === "basicdetails" &&
-                Object.prototype.hasOwnProperty.call(proposedData, "salaryHistory")
+                Object.prototype.hasOwnProperty.call(safeProposedData, "salaryHistory")
             ) {
-                salaryIncrementResult = await archiveSalaryIncrementIfNeeded(employeeId, proposedData);
+                salaryIncrementResult = await archiveSalaryIncrementIfNeeded(employeeId, safeProposedData);
             }
-            if (section === "basicdetails" && bankUpdateTouchesFields(proposedData)) {
+            if (section === "basicdetails" && bankUpdateTouchesFields(safeProposedData)) {
                 await archiveSupersededBankIfNeeded(
                     employeeId,
-                    proposedData,
+                    safeProposedData,
                     change?.previousData || null,
                 );
             }
-            await saveEmployeeData(employeeId, proposedData);
+            await saveEmployeeData(employeeId, safeProposedData);
             if (
                 section === "basicdetails" &&
-                (Object.prototype.hasOwnProperty.call(proposedData, "salaryHistory") ||
-                    Object.prototype.hasOwnProperty.call(proposedData, "basic") ||
-                    Object.prototype.hasOwnProperty.call(proposedData, "offerLetter"))
+                (Object.prototype.hasOwnProperty.call(safeProposedData, "salaryHistory") ||
+                    Object.prototype.hasOwnProperty.call(safeProposedData, "basic") ||
+                    Object.prototype.hasOwnProperty.call(safeProposedData, "offerLetter"))
             ) {
                 await purgeSalaryOldDocumentsUnlessIncrement(employeeId, {
                     isIncrement: salaryIncrementResult.isIncrement,
                 });
             }
-            if (section === "workdetails" && isLeftUserStatus(proposedData?.status)) {
+            if (section === "workdetails" && isLeftUserStatus(safeProposedData?.status)) {
                 const basicDoc = await EmployeeBasic.findOne({ employeeId });
                 if (basicDoc) await applyEmployeeLeftUserStatus(basicDoc);
                 try {
@@ -259,10 +267,10 @@ export async function applyApprovedPendingProfileChanges(employeeId, basicDoc, c
                 } catch (syncErr) {
                     console.error("[applyApprovedPendingProfileChanges] Left User dashboard sync:", syncErr);
                 }
-            } else if (section === "workdetails" && Object.prototype.hasOwnProperty.call(proposedData, "companyEmail")) {
+            } else if (section === "workdetails" && Object.prototype.hasOwnProperty.call(safeProposedData, "companyEmail")) {
                 await User.findOneAndUpdate(
                     { employeeId },
-                    { $set: { companyEmail: proposedData.companyEmail } },
+                    { $set: { companyEmail: safeProposedData.companyEmail } },
                 );
             }
             continue;

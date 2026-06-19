@@ -219,6 +219,22 @@ async function streamToBuffer(body) {
     return Buffer.concat(chunks);
 }
 
+/** Download object bytes directly from S3 (preferred for server-side PDF/email). */
+export async function downloadS3ObjectBytes(keyOrUrl) {
+    const key = normalizeS3Key(keyOrUrl);
+    if (!key) return null;
+    try {
+        const response = await s3Client.send(
+            new GetObjectCommand({ Bucket: bucketName, Key: key }),
+        );
+        const buffer = await streamToBuffer(response.Body);
+        return buffer?.length ? buffer : null;
+    } catch (error) {
+        console.warn('[downloadS3ObjectBytes]', key, error?.message || error);
+        return null;
+    }
+}
+
 /** Copy object into archive folder; falls back to download+upload if server-side copy fails. */
 export async function replicateS3ObjectToKey(sourceKey, destKey) {
     const source = normalizeS3Key(sourceKey);

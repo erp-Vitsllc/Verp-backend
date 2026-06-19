@@ -341,12 +341,6 @@ export const updateLabourCardDetails = async (req, res) => {
                 },
                 { upsert: true, new: true }
             );
-            if (parsedIssueDate) {
-                await EmployeeBasic.updateOne(
-                    { employeeId },
-                    { $set: { contractJoiningDate: parsedIssueDate } },
-                );
-            }
         }
 
         const labourChangeEntry = {

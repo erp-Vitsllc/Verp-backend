@@ -128,6 +128,17 @@ const fineSchema = new mongoose.Schema(
             type: String,
             default: ''
         },
+        /** Frozen at approval — used for Current Deduction Schedule on Fine Form */
+        originalMonthStart: {
+            type: String,
+            default: ''
+        },
+        originalPayableDuration: {
+            type: Number,
+            min: 1,
+            max: 6,
+            default: null
+        },
         fineStatus: {
             type: String,
             required: true,
@@ -145,6 +156,19 @@ const fineSchema = new mongoose.Schema(
         serviceCharge: {
             type: Number,
             default: 0
+        },
+        sourceOfIncome: {
+            type: String,
+            enum: ['Salary', 'End of Service', null],
+            default: 'Salary',
+        },
+        assetDepreciationAmount: {
+            type: Number,
+            default: 0,
+        },
+        assetPurchaseDate: {
+            type: String,
+            default: '',
         },
         paidAmount: {
             type: Number,

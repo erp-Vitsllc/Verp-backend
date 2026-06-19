@@ -9,6 +9,16 @@ import { getDepartmentHOD } from "../../utils/getDepartmentHOD.js";
 import { getManagementHOD } from "../../utils/getManagementHOD.js";
 import { isVehicleFinePayload, validateVehicleFinePayload } from "../../utils/validateVehicleFinePayload.js";
 import { canUserActOnFineStageAsync } from "../../utils/fineStageAuth.js";
+import {
+    isApprovedFineStatus,
+    isUserHrForApprovedFineEdit,
+    restrictApprovedFineUpdates,
+} from "../../utils/fineApprovedEditAuth.js";
+import {
+    preserveOriginalDeductionScheduleBeforeEdit,
+    scheduleFieldsAreChanging,
+    snapshotDeductionScheduleOnApproval,
+} from "../../utils/fineDeductionScheduleSnapshot.js";
 
 export const updateFine = async (req, res) => {
     try {
@@ -56,6 +66,25 @@ export const updateFine = async (req, res) => {
         }
 
         const fine = fines[0]; // Primary reference for logic
+
+        if (
+            isApprovedFineStatus(fine.fineStatus) &&
+            !updates.resubmit &&
+            updates.fineStatus !== 'Rejected'
+        ) {
+            const hrOk = await isUserHrForApprovedFineEdit(req, fine);
+            if (!hrOk) {
+                return res.status(403).json({ message: 'Only HR can edit approved fines.' });
+            }
+            const { error, allowed } = restrictApprovedFineUpdates(updates, fine);
+            if (error) {
+                return res.status(400).json({ message: error });
+            }
+            for (const key of Object.keys(updates)) {
+                delete updates[key];
+            }
+            Object.assign(updates, allowed);
+        }
 
         const oldStatus = fine.fineStatus;
         let shouldSendApprovalEmail = false;
@@ -208,6 +237,10 @@ export const updateFine = async (req, res) => {
 
         // 3. Apply updates only for allowed fields (Loop all for bulk update)
         for (const f of fines) {
+            if (scheduleFieldsAreChanging(f, updates)) {
+                preserveOriginalDeductionScheduleBeforeEdit(f);
+            }
+
             const targetEmployeeId = f.assignedEmployees?.[0]?.employeeId;
             const isCompanyRecord = targetEmployeeId === 'VEGA-HR-0000';
             const empUpdate = (updates.employees && Array.isArray(updates.employees))
@@ -331,6 +364,10 @@ export const updateFine = async (req, res) => {
                     if (empUpdate.individualAmount !== undefined) f.assignedEmployees[0].individualAmount = parseFloat(empUpdate.individualAmount);
                 }
             }
+            }
+
+            if (['Approved', 'Active', 'Paid', 'Completed'].includes(f.fineStatus)) {
+                snapshotDeductionScheduleOnApproval(f);
             }
 
             await f.save();
@@ -470,9 +507,9 @@ export const updateFine = async (req, res) => {
         // If newly approved, send confirmation email with attachments
         if (oldStatus !== 'Approved' && updates.fineStatus === 'Approved') {
             try {
-                const { sendFineConfirmedEmail } = await import("../../utils/sendFineConfirmedEmail.js");
+                const { dispatchFineApprovedNotification } = await import("../../utils/dispatchFineApprovedNotification.js");
                 const allAssigned = fines.flatMap(f => f.assignedEmployees);
-                await sendFineConfirmedEmail(updatedFine, allAssigned, req);
+                await dispatchFineApprovedNotification(updatedFine, allAssigned, req);
                 console.log(`[UpdateFine] Confirmed email sent for fine ${updatedFine.fineId}`);
             } catch (err) {
                 console.error("[UpdateFine] Failed to send confirmed email:", err);

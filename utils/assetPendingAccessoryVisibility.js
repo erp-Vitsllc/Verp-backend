@@ -20,9 +20,14 @@ export function isAccessoryExcludedFromLiveAssetView(acc) {
     return n === 'lost' || n === 'endoflife' || n === 'eol';
 }
 
-export function filterAccessoriesHidingPendingAdds(accessories, canSeePendingAdds) {
+export function filterAccessoriesHidingPendingAdds(accessories, canSeePendingAdds, assetStatus = '') {
     if (!Array.isArray(accessories) || accessories.length === 0) return accessories || [];
-    const withoutTerminal = accessories.filter((a) => !isAccessoryExcludedFromLiveAssetView(a));
+    const assetLost = String(assetStatus || '').trim().toLowerCase() === 'lost';
+    const withoutTerminal = accessories.filter((a) => {
+        const accLost = String(a?.status || '').trim().toLowerCase() === 'lost';
+        if (accLost && assetLost) return true;
+        return !isAccessoryExcludedFromLiveAssetView(a);
+    });
     if (canSeePendingAdds) return withoutTerminal;
     return withoutTerminal.filter((a) => !isEmbeddedAccessoryPendingAddApproval(a));
 }

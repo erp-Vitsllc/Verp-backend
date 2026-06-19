@@ -4,6 +4,7 @@ import { getSignedFileUrl } from "../../utils/s3Upload.js";
 import { getDepartmentHOD } from "../../utils/getDepartmentHOD.js";
 import { getManagementHOD } from "../../utils/getManagementHOD.js";
 import { isUserAdministrator } from "../../services/permissionService.js";
+import { synthesizeSingleRecordGroupFineView } from "../../utils/fineGroupClassification.js";
 
 /** Per-party service charge (split rows store half; group view sums full SC on parent). */
 function partyServiceShare(fine, entry = {}) {
@@ -259,6 +260,10 @@ export const getFineById = async (req, res) => {
 
         // Ensure totalFineAmount is always set (fallback for any edge cases)
         normalizeFineBaseAmounts(fine);
+
+        if (!fine.isGroupView) {
+            synthesizeSingleRecordGroupFineView(fine);
+        }
 
         // Generate signed URL if attachment exists
         if (fine.attachment?.publicId) {

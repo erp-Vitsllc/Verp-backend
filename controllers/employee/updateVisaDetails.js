@@ -12,6 +12,7 @@ import {
     validateEmployeeVisaPayload,
 } from "../../utils/employeeVisaValidation.js";
 import { scheduleEmployeeProfileFileChangeHrEmailForRequest } from "../../utils/employeeInformativeHrNotify.js";
+import { setContractJoiningDateFromFirstVisa } from "../../utils/contractJoiningDateHelper.js";
 
 const ALLOWED_VISA_TYPES = ["visit", "employment", "spouse"];
 
@@ -216,6 +217,10 @@ export const updateVisaDetails = async (req, res) => {
                 await EmployeeVisa.updateOne({ employeeId }, { $unset: { [replacedVisaType]: "" } });
                 updatedVisa = await EmployeeVisa.findOne({ employeeId });
             }
+
+            await setContractJoiningDateFromFirstVisa(employeeId, parsedIssueDate, {
+                isRenewal,
+            });
         }
 
         const visaChangeEntry = {

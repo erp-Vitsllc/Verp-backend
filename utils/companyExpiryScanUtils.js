@@ -77,6 +77,77 @@ const hasUsableExpiryDate = (expiryDate) => {
 export const isCertificateDocumentRow = (row = {}) =>
     String(row?.context || "").toLowerCase() === "certificate";
 
+/** Matches company profile certificate section pagination (no type filter). */
+export const COMPANY_CERTIFICATE_SECTION_PAGE_SIZE = 5;
+
+const parseCertificateStoredDescription = (raw) => {
+    const text = String(raw ?? "");
+    const m = text.match(/^\s*Issued By:\s*(.+?)\s*\|\s*Issued To:\s*(.+?)\s*\|\s*([\s\S]*)$/i);
+    if (m) {
+        return {
+            issuedBy: m[1].trim(),
+            issuedTo: m[2].trim(),
+            userDescription: m[3].trim(),
+        };
+    }
+    return { issuedBy: "", issuedTo: "", userDescription: text.trim() };
+};
+
+export const certificateTypeSectionId = (typeName) => {
+    const t = String(typeName || "").trim().toLowerCase();
+    if (t === "installer") return "Installer";
+    if (t === "safety") return "Safety";
+    if (t === "administration") return "Administration";
+    return "Others";
+};
+
+const certificateExpiryDescriptionLabel = (row = {}) => {
+    const parsed = parseCertificateStoredDescription(row.description);
+    const desc = String(parsed.userDescription || "").trim();
+    const typeLabel = String(row?.type || "").trim() || "Certificate";
+    if (desc && desc !== "—" && desc.toLowerCase() !== typeLabel.toLowerCase()) {
+        return desc;
+    }
+    return typeLabel;
+};
+
+/**
+ * Page + section for certificate expiry deep links (mirrors company profile certificate tables).
+ */
+export const resolveCompanyCertificateExpiryNavigationMeta = (company = {}, targetDoc = {}) => {
+    const targetId = targetDoc?._id != null ? String(targetDoc._id) : "";
+    if (!targetId) return null;
+
+    const sections = {
+        Installer: [],
+        Safety: [],
+        Administration: [],
+        Others: [],
+    };
+
+    (company?.documents || []).forEach((d) => {
+        if (!isCertificateDocumentRow(d)) return;
+        if (!hasUsableExpiryDate(d?.expiryDate)) return;
+        if (shouldSkipDocumentsArrayExpiryRow(d)) return;
+        const sectionId = certificateTypeSectionId(d.type);
+        sections[sectionId].push({ docId: String(d._id) });
+    });
+
+    for (const [sectionId, rows] of Object.entries(sections)) {
+        const rowIndex = rows.findIndex((r) => r.docId === targetId);
+        if (rowIndex < 0) continue;
+        const sectionPage =
+            Math.floor(rowIndex / COMPANY_CERTIFICATE_SECTION_PAGE_SIZE) + 1;
+        return {
+            certificateDocumentId: targetId,
+            certificateSectionId: sectionId,
+            certificateSectionPage: sectionPage,
+        };
+    }
+
+    return { certificateDocumentId: targetId };
+};
+
 /** Employee `documents[]` rows — align certificate labels with company expiry scan. */
 /** Employee live `documents[]` rows that must not drive expiry dashboard labels. */
 export const isArchivedEmployeeManualDoc = (row = {}) => {
@@ -103,7 +174,7 @@ export const buildDocumentsArrayExpiryLabel = (row = {}) => {
     const typeLabel = String(row?.type || "").trim() || "Company Document";
     const tl = typeLabel.toLowerCase();
 
-    if (ctx === "certificate") return `Certificate — ${typeLabel}`;
+    if (ctx === "certificate") return `Certificate — ${certificateExpiryDescriptionLabel(row)}`;
     if (ctx === "moa" || tl.includes("moa") || tl.includes("memorandum")) {
         return tl.includes("moa") || tl.includes("memorandum") ? typeLabel : `MOA — ${typeLabel}`;
     }
@@ -148,6 +219,7 @@ export const collectCompanyExpiryDocuments = (company = {}) => {
             label: buildDocumentsArrayExpiryLabel(d),
             expiryDate: d.expiryDate,
             isCertificate: isCertificateDocumentRow(d),
+            documentRow: d,
         });
     });
 

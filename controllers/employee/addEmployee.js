@@ -135,8 +135,8 @@ export const addEmployee = async (req, res) => {
         const allowedStatuses = ['Probation', 'Permanent', 'Temporary', 'Notice'];
         let normalizedStatus = allowedStatuses.includes(status) ? status : 'Probation';
 
-        // Rule 1: Tenure >= probation period
-        const refJoiningDate = contractJoiningDate || dateOfJoining;
+        // Rule 1: Tenure >= probation period (contract joining date is set later from first visa)
+        const refJoiningDate = dateOfJoining;
         const refExpiryDate = contractExpiryDate;
         let criteriaMetForPermanent = false;
         const today = new Date();
@@ -239,7 +239,7 @@ export const addEmployee = async (req, res) => {
                 enablePortalAccess: enablePortalAccess || false,
                 dateOfJoining,
                 company: company || null,
-                contractJoiningDate: contractJoiningDate || null,
+                contractJoiningDate: null,
                 contractExpiryDate: contractExpiryDate || null,
             }),
 

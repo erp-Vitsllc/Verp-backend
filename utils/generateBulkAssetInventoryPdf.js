@@ -533,20 +533,6 @@ export function resolveSignatureUrlForPdf(sig, frontendBase) {
 
 /** @typedef {{ assigneeName?: string, employeeCode?: string, department?: string, hodName?: string, assignerName?: string, handoverDate?: Date, assignerSignatureUrl?: string, showAssigneeSignature?: boolean, assigneeSignatureUrl?: string, assigneeAcknowledgeName?: string }} BulkAssignmentHandoverMeta */
 
-function formatAccessoriesPlainSummary(accList) {
-    if (!accList?.length) return '—';
-    return accList
-        .map((acc) => {
-            const nm = escapeHtml(acc?.name || '—');
-            const id =
-                acc?.accessoryId != null && String(acc.accessoryId).trim() !== ''
-                    ? escapeHtml(String(acc.accessoryId).trim())
-                    : '';
-            return id ? `${nm} (${id})` : nm;
-        })
-        .join('; ');
-}
-
 async function loadBulkAssignmentHandoverRows(assetIds) {
     const ids = [...new Set((assetIds || []).map(String).filter(Boolean))];
     const assets = await AssetItem.find({ _id: { $in: ids } })
@@ -589,6 +575,112 @@ function filterAttachedAccessoriesForHandover(accList) {
     });
 }
 
+function collectAttachedAccessoriesForHandover(rows) {
+    const list = [];
+    for (const row of rows || []) {
+        const attached = filterAttachedAccessoriesForHandover(row.accessories);
+        attached.forEach((acc, localIdx) => {
+            list.push({
+                name: acc?.name || '—',
+                accessoryId:
+                    acc?.accessoryId != null && String(acc.accessoryId).trim() !== ''
+                        ? String(acc.accessoryId).trim()
+                        : `${row.assetId || '—'}${String.fromCharCode(65 + localIdx)}`,
+                amount: Number(acc?.amount) || 0,
+            });
+        });
+    }
+    return list;
+}
+
+function buildHandoverMainItemsTableHtml(rows, thStyle, tdStyle) {
+    const body = (rows || [])
+        .map(
+            (row, idx) => `<tr>
+          <td style="${tdStyle}text-align:center;font-weight:600;">${idx + 1}</td>
+          <td style="${tdStyle}font-weight:600;">${escapeHtml(row.name)}</td>
+          <td style="${tdStyle}font-family:ui-monospace,monospace;font-size:10px;font-weight:700;color:#1e40af;">${escapeHtml(row.assetId)}</td>
+          <td style="${tdStyle}text-align:center;">${row.quantity || 1}</td>
+          <td style="${tdStyle}text-align:right;white-space:nowrap;font-weight:600;">${escapeHtml(formatMoneyAed(row.assetValue))}</td>
+          <td style="${tdStyle}color:#9ca3af;font-style:italic;">Core Asset</td>
+        </tr>`,
+        )
+        .join('');
+
+    return `<div style="margin-bottom:22px;page-break-inside:avoid;">
+    <h3 style="font-size:11px;font-weight:700;text-transform:uppercase;margin:0 0 8px 0;color:#374151;">Main Item(s)</h3>
+    <table style="width:100%;border-collapse:collapse;border:1px solid #9ca3af;font-size:10px;">
+      <thead><tr>
+        <th style="${thStyle}width:44px;text-align:center;">S. No.</th>
+        <th style="${thStyle}text-align:left;">Item Name</th>
+        <th style="${thStyle}text-align:left;">Asset ID</th>
+        <th style="${thStyle}width:44px;text-align:center;">Qty</th>
+        <th style="${thStyle}width:88px;text-align:right;">Price</th>
+        <th style="${thStyle}text-align:left;">Remarks</th>
+      </tr></thead>
+      <tbody>${body}</tbody>
+    </table>
+  </div>`;
+}
+
+function computeHandoverGrandTotal(rows) {
+    let total = 0;
+    for (const row of rows || []) {
+        total += Number(row.assetValue) || 0;
+        for (const acc of filterAttachedAccessoriesForHandover(row.accessories)) {
+            total += Number(acc?.amount) || 0;
+        }
+    }
+    return total;
+}
+
+function buildHandoverTotalHtml(rows) {
+    const total = computeHandoverGrandTotal(rows);
+    return `<div style="margin-bottom:28px;text-align:right;border-top:1px solid #9ca3af;padding-top:10px;">
+    <p style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.04em;color:#111827;margin:0;">
+      Total: <span style="margin-left:8px;">${escapeHtml(formatMoneyAed(total))}</span>
+    </p>
+  </div>`;
+}
+
+function buildHandoverAccessoriesSectionHtml(rows, thStyle, tdStyle) {
+    const accessories = collectAttachedAccessoriesForHandover(rows);
+    if (!accessories.length) {
+        return `<div style="margin-bottom:28px;page-break-inside:avoid;">
+    <h3 style="font-size:11px;font-weight:700;text-transform:uppercase;margin:0 0 8px 0;color:#374151;">Attached Accessories</h3>
+    <p style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.04em;color:#374151;margin:0;">NO ACCESSORIES ATTACHED</p>
+  </div>`;
+    }
+
+    const body = accessories
+        .map(
+            (acc, idx) => `<tr>
+          <td style="${tdStyle}text-align:center;font-weight:600;">${idx + 1}</td>
+          <td style="${tdStyle}font-style:italic;">${escapeHtml(acc.name)}</td>
+          <td style="${tdStyle}font-family:ui-monospace,monospace;font-size:10px;font-weight:700;color:#1e40af;">${escapeHtml(acc.accessoryId)}</td>
+          <td style="${tdStyle}text-align:center;">1</td>
+          <td style="${tdStyle}text-align:right;white-space:nowrap;font-weight:600;">${escapeHtml(formatMoneyAed(acc.amount))}</td>
+          <td style="${tdStyle}color:#9ca3af;font-style:italic;">Included</td>
+        </tr>`,
+        )
+        .join('');
+
+    return `<div style="margin-bottom:28px;page-break-inside:avoid;">
+    <h3 style="font-size:11px;font-weight:700;text-transform:uppercase;margin:0 0 8px 0;color:#374151;">Attached Accessories</h3>
+    <table style="width:100%;border-collapse:collapse;border:1px solid #9ca3af;font-size:10px;">
+      <thead><tr>
+        <th style="${thStyle}width:44px;text-align:center;">S. No.</th>
+        <th style="${thStyle}text-align:left;">Accessory Name</th>
+        <th style="${thStyle}text-align:left;">Accessory ID</th>
+        <th style="${thStyle}width:44px;text-align:center;">Qty</th>
+        <th style="${thStyle}width:88px;text-align:right;">Price</th>
+        <th style="${thStyle}text-align:left;">Remarks</th>
+      </tr></thead>
+      <tbody>${body}</tbody>
+    </table>
+  </div>`;
+}
+
 function buildBulkAssignmentHandoverHtmlDoc(rows, ctx) {
     const TD_LABEL =
         "border:1px solid #9ca3af;padding:8px;width:25%;background:rgba(249,250,251,0.65);font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.04em;color:#4b5563;font-family:Georgia,'Times New Roman',serif;";
@@ -617,13 +709,6 @@ function buildBulkAssignmentHandoverHtmlDoc(rows, ctx) {
 <body style="margin:0;background:#fff;"><div id="bulk-assignment-handover-pdf" data-bulk-handover-ready="true" style="padding:24px;font-family:Georgia,serif;"><p>No assets in this assignment.</p></div></body></html>`;
     }
 
-    let sumQty = 0;
-    let sumValue = 0;
-    for (const r of rowList) {
-        sumQty += r.quantity || 1;
-        sumValue += Number(r.assetValue) || 0;
-    }
-
     const frontendBase = String(resolveFrontendBaseUrl()).replace(/\/+$/, '');
     const handoverBgUrl = `${frontendBase}/assets/loan_bg_clean.jpg`;
     const handoverBgCssUrl = JSON.stringify(handoverBgUrl);
@@ -644,23 +729,11 @@ function buildBulkAssignmentHandoverHtmlDoc(rows, ctx) {
           </div>`
         : `<div style="margin-top:10px;min-height:48px;border-bottom:1px solid #374151;max-width:280px;"></div>`;
 
-    const assignmentRowsHtml = rowList
-        .map((row, idx) => {
-            const receivedLabel = row.assignedDate
-                ? formatDateEnGb(row.assignedDate)
-                : '<span style="color:#6b7280;font-size:10px;">Pending acceptance</span>';
-            const accListHtml = formatAccessoriesPlainSummary(filterAttachedAccessoriesForHandover(row.accessories));
-            return `<tr>
-          <td style="border:1px solid #9ca3af;padding:8px;text-align:center;font-weight:600;">${idx + 1}</td>
-          <td style="border:1px solid #9ca3af;padding:8px;font-family:ui-monospace,monospace;font-size:10px;font-weight:700;color:#1e40af;">${escapeHtml(row.assetId)}</td>
-          <td style="border:1px solid #9ca3af;padding:8px;">${escapeHtml(row.name)}</td>
-          <td style="border:1px solid #9ca3af;padding:8px;text-align:center;">${row.quantity || 1}</td>
-          <td style="border:1px solid #9ca3af;padding:8px;font-size:9px;line-height:1.45;">${accListHtml}</td>
-          <td style="border:1px solid #9ca3af;padding:8px;font-size:10px;">${receivedLabel}</td>
-          <td style="border:1px solid #9ca3af;padding:8px;text-align:right;white-space:nowrap;font-weight:600;">${escapeHtml(formatMoneyAed(row.assetValue))}</td>
-        </tr>`;
-        })
-        .join('');
+    const TD =
+        'border:1px solid #9ca3af;padding:8px;font-size:10px;color:#111827;font-family:Georgia,\'Times New Roman\',serif;';
+    const mainItemsHtml = buildHandoverMainItemsTableHtml(rowList, TH, TD);
+    const accessoriesHtml = buildHandoverAccessoriesSectionHtml(rowList, TH, TD);
+    const totalHtml = buildHandoverTotalHtml(rowList);
 
     return `<!DOCTYPE html>
 <html lang="en">
@@ -700,28 +773,11 @@ function buildBulkAssignmentHandoverHtmlDoc(rows, ctx) {
 
   <p style="font-size:13px;font-style:italic;margin:0 0 16px 0;color:#4b5563;">Please find the below assets handed over to you to carry out your assignment:</p>
 
-  <div style="margin-bottom:24px;page-break-inside:avoid;">
-    <table style="width:100%;border-collapse:collapse;border:1px solid #9ca3af;font-size:10px;">
-      <thead><tr>
-        <th style="${TH}width:36px;text-align:center;">SI</th>
-        <th style="${TH}text-align:left;">Asset ID</th>
-        <th style="${TH}text-align:left;">Asset name</th>
-        <th style="${TH}width:44px;text-align:center;">Qty</th>
-        <th style="${TH}text-align:left;">Accessory list</th>
-        <th style="${TH}text-align:left;">Asset received date</th>
-        <th style="${TH}text-align:right;">Asset value</th>
-      </tr></thead>
-      <tbody>
-        ${assignmentRowsHtml}
-        <tr style="background:rgba(243,244,246,0.95);font-weight:700;">
-          <td colspan="3" style="border:1px solid #9ca3af;padding:10px;text-align:right;">Total Qty</td>
-          <td style="border:1px solid #9ca3af;padding:10px;text-align:center;">${sumQty}</td>
-          <td colspan="2" style="border:1px solid #9ca3af;padding:10px;text-align:right;">Total value</td>
-          <td style="border:1px solid #9ca3af;padding:10px;text-align:right;">${escapeHtml(formatMoneyAed(sumValue))}</td>
-        </tr>
-      </tbody>
-    </table>
-  </div>
+  ${mainItemsHtml}
+
+  ${accessoriesHtml}
+
+  ${totalHtml}
 
   <div style="margin-bottom:20px;font-size:13px;font-weight:700;color:#000;">
     <span style="display:block;font-size:11px;color:#6b7280;font-weight:600;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:6px;">Handover By</span>

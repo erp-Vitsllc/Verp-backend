@@ -143,7 +143,6 @@ async function persistHandoverPdfBufferToHistory(pdfBuffer, filename) {
         const { publicId } = await uploadDocumentToS3(payload, 'asset-history', safe);
         return publicId;
     } catch (e) {
-        console.error('[persistHandoverPdfBufferToHistory]', e?.message || e);
         return null;
     }
 }
@@ -244,7 +243,6 @@ const generateFineIdInternal = async () => {
         const nextNum = maxNum + 1;
         return `VEGA-FINE-${nextNum.toString().padStart(4, '0')}`;
     } catch (error) {
-        console.error('Error generating internal fine ID:', error);
         return `fine${Date.now().toString().slice(-4)}`;
     }
 };
@@ -328,7 +326,6 @@ const notifyAssignedEmployeeIfController = async (
                 try {
                     companyAtt = await buildApprovedActionHandoverAttachments(req, assetDoc);
                 } catch (e) {
-                    console.error('[notifyAssignedEmployeeIfController] Company handover PDF:', e?.message || e);
                 }
             }
             await sendAssignedEmployeeActionEmail({
@@ -372,7 +369,6 @@ const notifyAssignedEmployeeIfController = async (
             try {
                 handoverAtt = await buildApprovedActionHandoverAttachments(req, assetDoc);
             } catch (e) {
-                console.error('[notifyAssignedEmployeeIfController] Handover PDF:', e?.message || e);
             }
         }
 
@@ -392,7 +388,6 @@ const notifyAssignedEmployeeIfController = async (
             attachments: handoverAtt || [],
         });
     } catch (e) {
-        console.error('[notifyAssignedEmployeeIfController] Non-fatal:', e?.message || e);
     }
 };
 
@@ -441,7 +436,6 @@ const notifyEmployeesGroupedControllerBulkDirect = async (req, employeeSnapshots
                     filenameBase: handoverFilenameBase,
                 });
             } catch (e) {
-                console.error('[notifyEmployeesGroupedControllerBulkDirect] Handover PDF:', e?.message || e);
             }
             const firstSnap = employeeSnapshots.find((x) => x._id.toString() === ids[0]);
             await sendAssignedEmployeeActionEmail({
@@ -458,7 +452,6 @@ const notifyEmployeesGroupedControllerBulkDirect = async (req, employeeSnapshots
             });
         }
     } catch (e) {
-        console.error('[notifyEmployeesGroupedControllerBulkDirect] Non-fatal:', e?.message || e);
     }
 };
 
@@ -529,6 +522,113 @@ const assigneeHasCompanyEmailOnRecord = (emp) =>
 
 const assigneeCanSelfAcknowledgeAssignment = (emp) =>
     assigneeHasCompanyEmailOnRecord(emp) || emp?.enablePortalAccess === true;
+
+/** After L&D is finalized: mark Lost and clear live assignment (history retains prior assignees). */
+const applyAssetLostFinalState = (asset) => {
+    if (!asset) return;
+    asset.pendingAction = null;
+    asset.pendingActionDetails = null;
+    asset.actionRequiredBy = null;
+    asset.lossDamageFineDraft = null;
+    asset.status = 'Lost';
+    asset.assignedTo = null;
+    asset.assignedCompany = null;
+    asset.assignedToType = null;
+    asset.assignmentType = null;
+    asset.assignedDate = null;
+    asset.assignedDays = null;
+    asset.temporaryEndDate = null;
+    asset.temporaryReminderSentAt = null;
+    asset.temporaryExpiredSentAt = null;
+    asset.acceptanceStatus = null;
+    asset.onLeaveActive = false;
+    asset.onServiceActive = false;
+};
+
+/** Detach one accessory row from an asset into the unattached catalog. */
+const detachAccessoryFromAssetToCatalog = async (asset, accIndex, req, { comment = '', catalogStatus = 'Unattached' } = {}) => {
+    if (!asset?.accessories?.[accIndex]) return null;
+    const accToMove = asset.accessories[accIndex].toObject?.() || asset.accessories[accIndex];
+    asset.accessories.splice(accIndex, 1);
+
+    const catalogId = await generateAccessoryCatalogId();
+    await AssetAccessoryCatalog.create({
+        recordType: 'catalog',
+        accessoryCatalogId: catalogId,
+        name: accToMove.name,
+        price: accToMove.amount || 0,
+        description: accToMove.description || '',
+        status: catalogStatus,
+        isActive: catalogStatus === 'Unattached',
+        history: [{
+            at: new Date(),
+            action: 'unattached',
+            message: comment || `Returned to catalog from asset ${asset.assetId} — ${asset.name}`,
+            assetId: asset.assetId,
+            assetName: asset.name,
+            assetObjectId: asset._id,
+        }],
+    });
+
+    await AssetHistory.create({
+        assetId: asset._id,
+        action: 'Accepted',
+        performedBy: req.user.employeeObjectId || req.user._id,
+        comments: `Accessory "${accToMove.name}" (${accToMove.accessoryId}) detached to catalog (${catalogId}). ${comment || ''}`.trim(),
+        date: new Date(),
+        details: { status: 'UnattachedToCatalog', accessoryId: accToMove.accessoryId, catalogId },
+    });
+
+    await removeAccessoryFromHistorySnapshots(asset._id, accToMove._id || accToMove.accessoryId);
+    try {
+        await markCatalogInstancesDetachedFromAsset(asset._id, [accToMove.accessoryId]);
+    } catch {
+        /* non-fatal */
+    }
+
+    return { accToMove, catalogId };
+};
+
+/**
+ * On main-asset L&D finalize: excluded accessories → catalog (Unattached);
+ * accessories kept in the fine → stay on asset with status Lost.
+ */
+const applyMainAssetLossDamageAccessoryDisposition = async (asset, fineData, req, fineId = null) => {
+    if (!asset?.accessories?.length) return;
+
+    const excluded = new Set((fineData?.excludedAccessoryIds || []).map(String));
+
+    for (let i = asset.accessories.length - 1; i >= 0; i--) {
+        const acc = asset.accessories[i];
+        const oid = String(acc._id);
+        const code = String(acc.accessoryId || '');
+        const isExcluded = excluded.has(oid) || excluded.has(code);
+
+        if (isExcluded) {
+            await detachAccessoryFromAssetToCatalog(asset, i, req, {
+                comment: 'Excluded from Loss & Damage fine — returned to accessories catalog.',
+                catalogStatus: 'Unattached',
+            });
+            continue;
+        }
+
+        // Accessories still on the asset and not removed from the fine are treated as lost.
+        acc.status = 'Lost';
+        acc.pendingAction = null;
+        acc.pendingActionDetails = null;
+
+        try {
+            await AssetAccessoryCatalog.updateMany(
+                { recordType: 'instance', assetItemId: asset._id, assetAccessoryId: acc.accessoryId },
+                { $set: { status: 'Lost' } },
+            );
+        } catch {
+            /* non-fatal */
+        }
+    }
+
+    asset.markModified('accessories');
+};
 
 /**
  * Employee assignment: assignee keeps `assignedTo`; accept task goes to assignee or primary reportee.
@@ -603,7 +703,6 @@ const notifyLeaveEosOwnerHod = async ({
             attachments,
         });
     } catch (err) {
-        console.error('[notifyLeaveEosOwnerHod] Non-fatal:', err?.message || err);
     }
 };
 
@@ -742,7 +841,7 @@ export const getAssetItems = async (req, res) => {
             const itemObj = item.toObject();
             const canSeePending = computeCanSeePendingAddsForAsset(pendingAccessoryCtx, item);
             if (itemObj.accessories?.length) {
-                itemObj.accessories = filterAccessoriesHidingPendingAdds(itemObj.accessories, canSeePending);
+                itemObj.accessories = filterAccessoriesHidingPendingAdds(itemObj.accessories, canSeePending, itemObj.status);
             }
             if (itemObj.photo) {
                 itemObj.photo = await getSignedFileUrl(itemObj.photo);
@@ -755,7 +854,6 @@ export const getAssetItems = async (req, res) => {
 
         res.status(200).json(signedItems);
     } catch (error) {
-        console.error('Error fetching asset items:', error);
         res.status(500).json({ message: 'Server Error' });
     }
 
@@ -1021,7 +1119,6 @@ export const getVehicleFleetDashboard = async (req, res) => {
             generatedAt: new Date().toISOString()
         });
     } catch (error) {
-        console.error('getVehicleFleetDashboard:', error);
         res.status(500).json({ message: 'Failed to load vehicle fleet dashboard' });
     }
 };
@@ -1382,7 +1479,6 @@ export const getVehicleFleetServiceRequests = async (req, res) => {
 
         res.json({ items: rows, total: rows.length });
     } catch (error) {
-        console.error('getVehicleFleetServiceRequests:', error);
         res.status(500).json({ message: 'Failed to load vehicle service records' });
     }
 };
@@ -1428,7 +1524,7 @@ export const getAllAssignedAssets = async (req, res) => {
         const pendingAccessoryCtx = await buildPendingAccessoryVisibilityCtx(req);
 
         const items = await AssetItem.find(query)
-            .select('assetId name ownership assignedTo assignedToType assignedCompany accessories assetValue status updatedAt typeId categoryId invoiceFile documents actionRequiredBy pendingAction')
+            .select('assetId name ownership assignedTo assignedToType assignedCompany accessories assetValue purchaseDate status updatedAt typeId categoryId invoiceFile documents actionRequiredBy pendingAction')
             .populate({
                 path: 'assignedTo',
                 select: 'firstName lastName employeeId company'
@@ -1443,7 +1539,7 @@ export const getAllAssignedAssets = async (req, res) => {
             const itemObj = item.toObject();
             const canSeePending = computeCanSeePendingAddsForAsset(pendingAccessoryCtx, item);
             if (itemObj.accessories?.length) {
-                itemObj.accessories = filterAccessoriesHidingPendingAdds(itemObj.accessories, canSeePending);
+                itemObj.accessories = filterAccessoriesHidingPendingAdds(itemObj.accessories, canSeePending, itemObj.status);
             }
             if (itemObj.invoiceFile) {
                 itemObj.invoiceFile = await getSignedFileUrl(itemObj.invoiceFile);
@@ -1460,7 +1556,6 @@ export const getAllAssignedAssets = async (req, res) => {
 
         res.status(200).json(signedItems);
     } catch (error) {
-        console.error('Error fetching assigned assets:', error);
         res.status(500).json({ message: 'Server Error' });
     }
 };
@@ -1496,7 +1591,6 @@ export const getMyAssignedAssetsForReturn = async (req, res) => {
 
         res.status(200).json({ items });
     } catch (error) {
-        console.error('Error in getMyAssignedAssetsForReturn:', error);
         res.status(500).json({ message: 'Server Error' });
     }
 };
@@ -1505,22 +1599,18 @@ export const getMyAssignedAssetsForReturn = async (req, res) => {
 export const getUnassignedAssetsForEmployee = async (req, res) => {
     try {
         const { employeeId } = req.params;
-        console.log(`[getUnassignedAssetsForEmployee] Processing request for employeeId: ${employeeId}`);
 
         const assetController = await getDepartmentHOD('assetcontroller');
-        console.log(`[getUnassignedAssetsForEmployee] Asset controller found:`, assetController);
 
         const employee = await EmployeeBasic.findOne({
             employeeId: { $regex: new RegExp(`^${employeeId}$`, 'i') }
         }).select('_id employeeId');
 
         if (!employee) {
-            console.log(`[getUnassignedAssetsForEmployee] Employee not found: ${employeeId}`);
             return res.status(404).json({ message: 'Employee not found' });
         }
 
         const employeeObjectId = employee._id;
-        console.log(`[getUnassignedAssetsForEmployee] Employee ObjectId: ${employeeObjectId}`);
 
         // IMPORTANT:
         // This endpoint is used to show tabs when someone opens the PROFILE of employeeId.
@@ -1547,9 +1637,7 @@ export const getUnassignedAssetsForEmployee = async (req, res) => {
                     employeeId: employee.employeeId
                 };
                 isAuthorized = await isUserInFlowchart(profileUserForCheck, 'assetcontroller');
-                console.log(`[getUnassignedAssetsForEmployee] Flowchart authorization result for profile: ${isAuthorized}`);
             } catch (flowchartError) {
-                console.error('[getUnassignedAssetsForEmployee] Flowchart error:', flowchartError);
                 return res.status(403).json({
                     message: 'Access denied. Only Asset Controllers can view unassigned assets.',
                     code: 'ASSET_CONTROLLER_REQUIRED',
@@ -1559,7 +1647,6 @@ export const getUnassignedAssetsForEmployee = async (req, res) => {
         }
 
         if (!isAuthorized) {
-            console.log(`[getUnassignedAssetsForEmployee] ACCESS DENIED for profile employee: ${employeeId}`);
             return res.status(403).json({
                 message: 'Access denied. Only Asset Controllers can view unassigned assets.',
                 code: 'ASSET_CONTROLLER_REQUIRED',
@@ -1567,7 +1654,6 @@ export const getUnassignedAssetsForEmployee = async (req, res) => {
             });
         }
 
-        console.log(`[getUnassignedAssetsForEmployee] ACCESS GRANTED, fetching assets...`);
         const items = await AssetItem.find({
             status: { $in: ['Unassigned', 'Returned', 'Pending'] }
         })
@@ -1587,10 +1673,6 @@ export const getUnassignedAssetsForEmployee = async (req, res) => {
             controllerStatus: 'Active'
         });
     } catch (error) {
-        console.error('Error fetching unassigned assets for controller:', error);
-        console.error('Error stack:', error.stack);
-        console.error('Error name:', error.name);
-        console.error('Error message:', error.message);
 
         res.status(500).json({
             message: 'Server Error',
@@ -1605,22 +1687,18 @@ export const getOnLeaveAssetsForEmployee = async (req, res) => {
     try {
         await processParkingAssets();
         const { employeeId } = req.params;
-        console.log(`[getOnLeaveAssetsForEmployee] Processing request for employeeId: ${employeeId}`);
 
         const assetController = await getDepartmentHOD('assetcontroller');
-        console.log(`[getOnLeaveAssetsForEmployee] Asset controller found:`, assetController);
 
         const employee = await EmployeeBasic.findOne({
             employeeId: { $regex: new RegExp(`^${employeeId}$`, 'i') }
         }).select('_id employeeId');
 
         if (!employee) {
-            console.log(`[getOnLeaveAssetsForEmployee] Employee not found: ${employeeId}`);
             return res.status(404).json({ message: 'Employee not found' });
         }
 
         const employeeObjectId = employee._id;
-        console.log(`[getOnLeaveAssetsForEmployee] Employee ObjectId: ${employeeObjectId}`);
 
         // IMPORTANT:
         // This endpoint is used to show Parking tabs when someone opens the PROFILE of :employeeId.
@@ -1645,9 +1723,7 @@ export const getOnLeaveAssetsForEmployee = async (req, res) => {
                     { employeeObjectId, employeeId: employee.employeeId },
                     'assetcontroller'
                 );
-                console.log(`[getOnLeaveAssetsForEmployee] Flowchart authorization result for profile: ${isAuthorized}`);
             } catch (flowchartError) {
-                console.error('[getOnLeaveAssetsForEmployee] Flowchart error:', flowchartError);
                 return res.status(403).json({
                     message: 'Access denied. Only Asset Controllers can view on-leave assets.',
                     code: 'ASSET_CONTROLLER_REQUIRED',
@@ -1664,7 +1740,6 @@ export const getOnLeaveAssetsForEmployee = async (req, res) => {
             });
         }
 
-        console.log(`[getOnLeaveAssetsForEmployee] ACCESS GRANTED, fetching assets...`);
         const items = await AssetItem.find(onLeaveActiveOnlyQueryFilter())
             .select('assetId name assetValue status onLeaveActive onServiceActive purchaseDate invoiceFile typeId categoryId assignedTo assignedToType assignedCompany assignedDate onLeaveStartDate onLeaveEndDate onLeaveDuration')
             .populate('typeId', 'name type')
@@ -1677,7 +1752,6 @@ export const getOnLeaveAssetsForEmployee = async (req, res) => {
             controllerStatus: 'Active'
         });
     } catch (error) {
-        console.error('Error fetching on-leave assets for controller:', error);
         res.status(500).json({
             message: 'Server Error',
             error: error.message
@@ -1703,7 +1777,6 @@ export const runAssetServiceOverdueCheck = async (req, res) => {
             ...result,
         });
     } catch (error) {
-        console.error('runAssetServiceOverdueCheck:', error);
         return res.status(500).json({ message: 'Server Error', error: error.message });
     }
 };
@@ -1816,7 +1889,6 @@ export const getOnServiceAssetsForEmployee = async (req, res) => {
             controllerStatus: 'Active'
         });
     } catch (error) {
-        console.error('Error fetching on-service assets for controller:', error);
         res.status(500).json({
             message: 'Server Error',
             error: error.message
@@ -1985,7 +2057,6 @@ export const handleOnServiceAction = async (req, res) => {
                     initiatorIsAssetController: isAssetController,
                 });
             } catch (emailErr) {
-                console.error('[Service Extend Email Error]', emailErr?.message || emailErr);
             }
         } else if (action === 'Return' || action === 'Live') {
             if (action === 'Live') {
@@ -2036,7 +2107,6 @@ export const handleOnServiceAction = async (req, res) => {
                     initiatorIsAssetController: isAssetController,
                 });
             } catch (emailErr) {
-                console.error('[Service Live Email Error]', emailErr?.message || emailErr);
             }
         }
 
@@ -2053,7 +2123,6 @@ export const handleOnServiceAction = async (req, res) => {
             asset: item
         });
     } catch (error) {
-        console.error('Error handling on-service action:', error);
         res.status(500).json({
             message: 'Server Error',
             error: error.message
@@ -2160,7 +2229,6 @@ export const bulkHandleOnServiceAction = async (req, res) => {
                             initiatorIsAssetController: isAssetController,
                         });
                     } catch (emailErr) {
-                        console.error('[Bulk Service Extend Email Error]', emailErr?.message || emailErr);
                     }
                 } else if (action === 'Return' || action === 'Live') {
                     const prevServiceStatus = item.status;
@@ -2206,7 +2274,6 @@ export const bulkHandleOnServiceAction = async (req, res) => {
             results
         });
     } catch (error) {
-        console.error('Error handling bulk on-service action:', error);
         res.status(500).json({ message: 'Internal server error', error: error.message });
     }
 };
@@ -2383,8 +2450,6 @@ export const handleOnLeaveAction = async (req, res) => {
             asset: item
         });
     } catch (error) {
-        console.error('Error handling on-leave action stack:', error.stack);
-        console.error('Error handling on-leave action message:', error.message);
         res.status(500).json({
             message: 'Server Error',
             error: error.message,
@@ -2539,7 +2604,6 @@ export const bulkHandleOnLeaveAction = async (req, res) => {
                     results.success.push(item._id);
                 }
             } catch (err) {
-                console.error(`Error processing asset ${item._id} in bulk:`, err);
                 results.failed.push({ id: item._id, message: err.message });
             }
         }
@@ -2555,7 +2619,6 @@ export const bulkHandleOnLeaveAction = async (req, res) => {
             results
         });
     } catch (error) {
-        console.error('Error handling bulk on-leave action stack:', error.stack);
         res.status(500).json({
             message: 'Internal server error',
             error: error.message,
@@ -2590,7 +2653,6 @@ export const getCompanyAllocationCoordinatorStatus = async (req, res) => {
             },
         });
     } catch (error) {
-        console.error('getCompanyAllocationCoordinatorStatus:', error);
         return res.status(500).json({ message: 'Server Error' });
     }
 };
@@ -2617,14 +2679,11 @@ export const getHRCompanyAssets = async (req, res) => {
         // (Assigned User/Admin Controller active entries), not legacy company.responsibilities.
         const isCompanyCoordinatorFlow = await isUserActiveCompanyAssetCoordinator(employeeObjectId, employeeId);
         const isHRFlow = await isUserActiveInFlowchart({ employeeObjectId, employeeId }, 'hr');
-        console.log(`[getHRCompanyAssets] Employee ${employeeId} - isCompanyCoordinatorFlow (Active): ${isCompanyCoordinatorFlow}, isHRFlow: ${isHRFlow}`);
 
         if (!isCompanyCoordinatorFlow && !isHRFlow) {
-            console.log(`[getHRCompanyAssets] Employee ${employeeId} - Not company-asset coordinator or HR, returning empty`);
             return res.status(200).json({ isHR: false, items: [], designatedCompanies: [] });
         }
 
-        console.log(`[getHRCompanyAssets] Employee ${employeeId} - Querying all company-assigned assets (flowchart coordinator)`);
 
         // Accepted company allocations only — pending items appear on asset detail / dashboard for coordinator accept.
         const query = {
@@ -2649,7 +2708,6 @@ export const getHRCompanyAssets = async (req, res) => {
             .select('assetId name assetValue status purchaseDate assignedToType assignedCompany actionRequiredBy acceptanceStatus')
             .sort({ updatedAt: -1 });
 
-        console.log(`[getHRCompanyAssets] Employee ${employeeId} - Found ${items.length} assets`);
 
         res.status(200).json({
             isHR: true,
@@ -2657,7 +2715,6 @@ export const getHRCompanyAssets = async (req, res) => {
             designatedCompanies: []
         });
     } catch (error) {
-        console.error('Error fetching company assets for HR:', error);
         res.status(500).json({ message: 'Server Error' });
     }
 };
@@ -2685,9 +2742,6 @@ export const createAssetItem = async (req, res) => {
             return res.status(creationResolved.status || 400).json({ message: creationResolved.error });
         }
         const { initialStatus, actionRequiredBy } = creationResolved;
-        console.log(
-            `[Asset creation] ${initialStatus} by ${req.user.employeeId || req.user?.id || 'user'} (intent=${creationIntent || 'default'})`
-        );
 
         const requesterDisplayName = await getAssetRequesterDisplayName(req);
 
@@ -2698,7 +2752,6 @@ export const createAssetItem = async (req, res) => {
                 const uploadResult = await uploadDocumentToS3(photo, 'asset-photos');
                 photoS3Key = uploadResult.publicId;
             } catch (error) {
-                console.error('Error uploading asset photo to S3:', error);
             }
         }
 
@@ -2752,7 +2805,6 @@ export const createAssetItem = async (req, res) => {
         try {
             await syncAllAccessoryInstancesForAsset(newItem);
         } catch (syncErr) {
-            console.error('[createAssetItem accessory catalog sync]', syncErr?.message || syncErr);
         }
 
         // Record Initial History (append-only; full sentence for the activity timeline)
@@ -2766,9 +2818,7 @@ export const createAssetItem = async (req, res) => {
                 comments: userStory,
                 details: { userStory, status: initialStatus, assetCode: newItemId }
             });
-            console.log(`[History] Created entry for asset ${newItemId}`);
         } catch (histErr) {
-            console.error(`[History Error] Failed to create creation history for ${newItemId}:`, histErr.message);
         }
 
         // Create Dashboard Action for Asset Controller when a submission requires approval (save-only Draft has no actionRequiredBy)
@@ -2790,9 +2840,7 @@ export const createAssetItem = async (req, res) => {
                     },
                     { upsert: true, new: true, setDefaultsOnInsert: true }
                 );
-                console.log(`[Dashboard] Synced asset creation approval for ${assetController.employeeId}`);
             } catch (err) {
-                console.error(`[Dashboard Error] Failed to create asset approval action:`, err);
             }
         }
 
@@ -2814,7 +2862,6 @@ export const createAssetItem = async (req, res) => {
                     { assigner: requester, assignerName: requesterDisplayName },
                 );
             } catch (pdfErr) {
-                console.error('Asset creation PDF attachment failed (non-fatal):', pdfErr?.message || pdfErr);
             }
             await sendAssetCreationApprovalEmail({
                 asset: newItem,
@@ -2834,13 +2881,11 @@ export const createAssetItem = async (req, res) => {
                     creatorName: requesterDisplayName,
                 });
             } catch (adminInfoErr) {
-                console.error('[createAssetItem] Admin-created asset info email failed (non-fatal):', adminInfoErr?.message || adminInfoErr);
             }
         }
 
         res.status(201).json(newItem);
     } catch (error) {
-        console.error('Error creating asset item:', error);
         res.status(500).json({ message: 'Server Error' });
     }
 };
@@ -2882,7 +2927,6 @@ async function runPostAssetCreationApprovalWork(req, work) {
             },
         });
     } catch (histErr) {
-        console.error(`[History Error] Failed to record creation response history for ${work.assetId}:`, histErr.message);
     }
 
     if (work.actionNorm === 'Reject' && work.createdBy) {
@@ -2908,7 +2952,6 @@ async function runPostAssetCreationApprovalWork(req, work) {
                 });
             }
         } catch (emailErr) {
-            console.error('[respondToAssetCreation] approval email failed:', emailErr?.message || emailErr);
         }
     }
 }
@@ -3038,7 +3081,6 @@ export const respondToAssetCreation = async (req, res) => {
                 }
             );
         } catch (err) {
-            console.error('[Dashboard Error] Failed to update asset approval action:', err);
         }
 
         const postWork = {
@@ -3057,13 +3099,10 @@ export const respondToAssetCreation = async (req, res) => {
             try {
                 await runPostAssetCreationApprovalWork(req, postWork);
             } catch (err) {
-                console.error('[respondToAssetCreation] post-work failed:', err?.message || err);
             }
         } else {
             setImmediate(() => {
-                runPostAssetCreationApprovalWork(req, postWork).catch((err) => {
-                    console.error('[respondToAssetCreation] post-work failed:', err?.message || err);
-                });
+                runPostAssetCreationApprovalWork(req, postWork).catch(() => null);
             });
         }
 
@@ -3074,7 +3113,6 @@ export const respondToAssetCreation = async (req, res) => {
             .populate('createdBy', '_id id employeeId firstName lastName');
         res.status(200).json(refreshed || item);
     } catch (error) {
-        console.error('Error responding to asset creation:', error);
         res.status(500).json({ message: 'Server Error' });
     }
 };
@@ -3260,7 +3298,6 @@ export const bulkRespondToAssetCreation = async (req, res) => {
             skipped
         });
     } catch (error) {
-        console.error('Error in bulkRespondToAssetCreation:', error);
         res.status(500).json({ message: 'Server Error' });
     }
 };
@@ -3323,12 +3360,11 @@ export const getBulkAssetDetails = async (req, res) => {
             const canSeePending = computeCanSeePendingAddsForAsset(pendingAccessoryCtx, a);
             return {
                 ...a,
-                accessories: filterAccessoriesHidingPendingAdds(a.accessories || [], canSeePending)
+                accessories: filterAccessoriesHidingPendingAdds(a.accessories || [], canSeePending, a.status)
             };
         });
         res.status(200).json({ items });
     } catch (error) {
-        console.error('Error in getBulkAssetDetails:', error);
         res.status(500).json({ message: 'Server Error' });
     }
 };
@@ -3376,7 +3412,7 @@ export const getBulkAssetInventoryForPrint = async (req, res) => {
                 }
             }
             const canSeePending = computeCanSeePendingAddsForAsset(pendingAccessoryCtx, a);
-            const accList = filterAccessoriesHidingPendingAdds(a.accessories || [], canSeePending);
+            const accList = filterAccessoriesHidingPendingAdds(a.accessories || [], canSeePending, a.status);
             return {
                 _id: a._id,
                 assetId: a.assetId,
@@ -3393,7 +3429,6 @@ export const getBulkAssetInventoryForPrint = async (req, res) => {
 
         res.status(200).json({ items });
     } catch (error) {
-        console.error('Error in getBulkAssetInventoryForPrint:', error);
         res.status(500).json({ message: 'Server Error' });
     }
 };
@@ -3482,7 +3517,6 @@ export const updateAssetItem = async (req, res) => {
                 item.photo = uploadResult.publicId;
                 item.imagePreview = uploadResult.publicId;
             } catch (error) {
-                console.error('Error uploading asset photo to S3:', error);
             }
         } else if (photo === null) {
             // they removed the photo? maybe not support deleting this way.
@@ -3502,12 +3536,10 @@ export const updateAssetItem = async (req, res) => {
                 details: item.toObject()
             });
         } catch (historyErr) {
-            console.error('History log failed during updateAssetItem (AssetItem):', historyErr);
         }
 
         res.status(200).json(item);
     } catch (error) {
-        console.error('Error updating asset item:', error);
         res.status(500).json({ message: 'Server Error' });
     }
 };
@@ -3574,7 +3606,6 @@ export const getAssetItemDetail = async (req, res) => {
         try {
             currentCreationApprover = await syncStaleAssetCreationApprover(item);
         } catch (syncErr) {
-            console.error('[getAssetItemDetail] creation approver sync failed:', syncErr?.message || syncErr);
         }
 
         // Heal assignment rows where creation-approver sync previously overwrote assignee routing.
@@ -3630,7 +3661,6 @@ export const getAssetItemDetail = async (req, res) => {
                     }
                 }
             } catch (healErr) {
-                console.error('[getAssetItemDetail] assignment actionRequiredBy heal failed:', healErr?.message || healErr);
             }
         }
 
@@ -3744,6 +3774,30 @@ export const getAssetItemDetail = async (req, res) => {
             await item.save();
         }
 
+        // Repair accessories left as Attached after L&D was finalized before disposition logic shipped.
+        if (String(item.status || '').trim().toLowerCase() === 'lost' && item.accessories?.length) {
+            let repairNeeded = false;
+            for (const acc of item.accessories) {
+                const accSt = String(acc.status || '').trim().toLowerCase();
+                if (!accSt || accSt === 'attached') {
+                    acc.status = 'Lost';
+                    repairNeeded = true;
+                    try {
+                        await AssetAccessoryCatalog.updateMany(
+                            { recordType: 'instance', assetItemId: item._id, assetAccessoryId: acc.accessoryId },
+                            { $set: { status: 'Lost' } },
+                        );
+                    } catch {
+                        /* non-fatal */
+                    }
+                }
+            }
+            if (repairNeeded) {
+                item.markModified('accessories');
+                await item.save();
+            }
+        }
+
         const itemObj = item.toObject();
 
         const canSeePendingAccessoryAdds =
@@ -3757,7 +3811,8 @@ export const getAssetItemDetail = async (req, res) => {
         if (itemObj.accessories?.length) {
             itemObj.accessories = filterAccessoriesHidingPendingAdds(
                 itemObj.accessories,
-                canSeePendingAccessoryAdds
+                canSeePendingAccessoryAdds,
+                itemObj.status
             );
         }
 
@@ -3968,7 +4023,6 @@ export const getAssetItemDetail = async (req, res) => {
                 typeName: item?.typeId?.name || '',
             });
         } catch (apprErr) {
-            console.error('[getAssetItemDetail] creation approver resolve failed:', apprErr?.message || apprErr);
             itemObj.creationApprover = null;
             itemObj.creationApproverRole = null;
         }
@@ -3976,7 +4030,6 @@ export const getAssetItemDetail = async (req, res) => {
         // Special handling for Abbas Raza case:
         // If assetController exists in Flowchart but no EmployeeBasic record, still show the info
         if (assetController && !assetController._id) {
-            console.log(`[Asset Detail] Asset Controller found in Flowchart but not EmployeeBasic: ${assetController.employeeName}`);
             itemObj.assetController = {
                 _id: `flowchart_${assetController.category}`, // Use special ID for frontend matching
                 firstName: assetController.employeeName?.split(' ')[0] || 'Unknown',
@@ -4048,7 +4101,6 @@ export const getAssetItemDetail = async (req, res) => {
 
         res.status(200).json(itemObj);
     } catch (error) {
-        console.error('Error fetching asset item detail:', error);
         res.status(500).json({ message: 'Server Error' });
     }
 };
@@ -4328,7 +4380,6 @@ export const assignAssetItem = async (req, res) => {
                     attachments: reassignPdf
                 });
             } catch (err) {
-                console.error(`[Email Error] Failed to send reassignment email to previous assignee: `, err);
             }
         }
 
@@ -4385,7 +4436,6 @@ export const assignAssetItem = async (req, res) => {
                     );
                 }
             } catch (pdfErr) {
-                console.error('Assignment handover PDF attachment failed (non-fatal):', pdfErr?.message || pdfErr);
             }
             const isDirectEmployeeAssign =
                 assignedToType === 'Employee' && item.acceptanceStatus === 'Accepted';
@@ -4396,7 +4446,7 @@ export const assignAssetItem = async (req, res) => {
                     employee: employeeToAssign,
                     recipient: employeeToAssign,
                     attachments: assignAttachments,
-                }).catch((e) => console.error('[assignAssetItem] Assignee direct-assign email:', e?.message || e));
+                }).catch(() => null);
 
                 const assetController = await getDepartmentHOD('assetcontroller').catch(() => null);
                 if (assetController) {
@@ -4408,9 +4458,7 @@ export const assignAssetItem = async (req, res) => {
                         assetSummaryLines: [
                             `${itemForEmail?.assetId || item.assetId} — ${itemForEmail?.name || item.name}`,
                         ],
-                    }).catch((e) =>
-                        console.error('[assignAssetItem] AC direct-assign record email:', e?.message || e),
-                    );
+                    }).catch(() => null);
                 }
             } else {
                 await sendAssetAssignmentEmail({
@@ -4423,6 +4471,18 @@ export const assignAssetItem = async (req, res) => {
                     attachments: assignAttachments,
                     pendingAssignment: true,
                 });
+
+                const assigneeId = employeeToAssign?._id?.toString?.();
+                const recipientId = actionRecipient?._id?.toString?.();
+                if (assignedToType === 'Employee' && assigneeId && recipientId && assigneeId !== recipientId) {
+                    await sendAssetAssignmentEmail({
+                        asset: itemForEmail || item,
+                        employee: employeeToAssign,
+                        recipient: employeeToAssign,
+                        attachments: assignAttachments,
+                        pendingAssignment: true,
+                    }).catch(() => null);
+                }
             }
 
             if (isReassignment && newAssignee) {
@@ -4439,15 +4499,9 @@ export const assignAssetItem = async (req, res) => {
                     senderEmployeeId: req.user.employeeObjectId,
                     companyCoordinator: coordinatorForTransfer,
                     skipRecipientIds: skipIds,
-                }).catch((transferMailErr) => {
-                    console.error(
-                        '[assignAssetItem] Transfer notify AC/sender failed (non-fatal):',
-                        transferMailErr?.message || transferMailErr,
-                    );
-                });
+                }).catch(() => null);
             }
         } catch (err) {
-            console.error(`[Email Error] Failed to send assignment email: `, err);
         }
 
         // Dashboard inbox for assignee (employee) or company coordinator — skip when auto-accepted on assign
@@ -4469,9 +4523,7 @@ export const assignAssetItem = async (req, res) => {
                     },
                     { upsert: true, new: true, setDefaultsOnInsert: true }
                 );
-                console.log(`[Dashboard] Synced asset assignment action for ${actionRecipient?.employeeId}`);
             } catch (err) {
-                console.error(`[Dashboard Error] Failed to create action for asset ${item.assetId}: `, err);
             }
         }
 
@@ -4528,7 +4580,6 @@ export const assignAssetItem = async (req, res) => {
 
         res.status(200).json(updatedItem);
     } catch (error) {
-        console.error('Error assigning asset item:', error);
         res.status(500).json({ message: 'Server Error' });
     }
 };
@@ -4710,11 +4761,7 @@ export const bulkAssignAssetItems = async (req, res) => {
                     `bulk-assignment-${bulkAssignmentGroupId}.pdf`,
                 );
             }
-            console.log(
-                `[bulkAssignAssetItems] PDF attachments prepared: ${Array.isArray(bulkAssignmentAttachments) ? bulkAssignmentAttachments.length : 0}`,
-            );
         } catch (pdfErr) {
-            console.error('[bulkAssignAssetItems] PDF required for email:', pdfErr?.message || pdfErr);
             return res.status(503).json({
                 message:
                     pdfErr?.message ||
@@ -4794,9 +4841,6 @@ export const bulkAssignAssetItems = async (req, res) => {
                         }),
                         status: 'Pending',
                     });
-                    console.log(
-                        `[Dashboard] Created 1 bulk assignment action (${assetIds.length} assets) for ${dashboardActor?.employeeId}`,
-                    );
                 } else if (assets.length === 1) {
                     const one = assets[0];
                     await DashboardAction.create({
@@ -4813,7 +4857,6 @@ export const bulkAssignAssetItems = async (req, res) => {
                     });
                 }
             } catch (err) {
-                console.error(`[Dashboard Error] Failed to create bulk asset actions: `, err);
             }
         }
 
@@ -4900,10 +4943,25 @@ export const bulkAssignAssetItems = async (req, res) => {
                         bulkAssignmentGroupId: bulkAssignmentGroupId.toString(),
                         pendingAssignment: true,
                     });
+
+                    const assigneeId = employeeToAssign?._id?.toString?.();
+                    const recipientId = emailRecipient?._id?.toString?.();
+                    if (assigneeId && recipientId && assigneeId !== recipientId) {
+                        await sendAssetAssignmentEmail({
+                            asset: firstAsset,
+                            assets: assetsForEmail,
+                            employee: employeeToAssign,
+                            recipient: employeeToAssign,
+                            isBulk: true,
+                            assetCount: assetIds.length,
+                            attachments: bulkAssignmentAttachments,
+                            bulkAssignmentGroupId: bulkAssignmentGroupId.toString(),
+                            pendingAssignment: true,
+                        }).catch(() => null);
+                    }
                 }
             }
         } catch (emailErr) {
-            console.error('Error in bulk asset assignment email trigger:', emailErr);
         }
 
         res.status(200).json({
@@ -4911,7 +4969,6 @@ export const bulkAssignAssetItems = async (req, res) => {
             bulkAssignmentGroupId: bulkAssignmentGroupId.toString()
         });
     } catch (error) {
-        console.error('Error bulk assigning assets:', error);
         res.status(500).json({ message: 'Server Error' });
     }
 };
@@ -4937,7 +4994,6 @@ export const downloadHistoryHandoverPdf = async (req, res) => {
         // We pass the historyId to the print page so it knows to fetch data from history instead of current asset
         const printUrl = `${baseUrl}/print/asset-handover/${assetSnapshot._id}?historyId=${historyId}`;
 
-        console.log(`Generating Historical Asset Handover PDF from: ${printUrl}`);
 
         const token = req.headers.authorization?.split(' ')[1] || '';
         const requestingUserId = req.user?.id;
@@ -4957,7 +5013,6 @@ export const downloadHistoryHandoverPdf = async (req, res) => {
         res.send(pdfBuffer);
 
     } catch (error) {
-        console.error('Error generating Historical Asset Handover PDF:', error);
         res.status(500).json({ message: 'Failed to generate historical PDF', error: error.message });
     }
 };
@@ -4979,7 +5034,6 @@ export const downloadHandoverPdf = async (req, res) => {
         const baseUrl = resolveFrontendBaseUrl(req);
         const printUrl = `${baseUrl}/print/asset-handover/${id}`;
 
-        console.log(`Generating Asset Handover PDF from: ${printUrl}`);
 
         const token = req.headers.authorization?.split(' ')[1] || '';
 
@@ -5003,7 +5057,6 @@ export const downloadHandoverPdf = async (req, res) => {
         res.send(pdfBuffer);
 
     } catch (error) {
-        console.error('Error generating Asset Handover PDF:', error);
         res.status(500).json({ message: 'Failed to generate PDF', error: error.message });
     }
 };
@@ -5210,7 +5263,6 @@ export const respondToAssignment = async (req, res) => {
                     });
                 }
             } catch (err) {
-                console.error("[Email Error] Failed to notify parties after asset response:", err);
             }
         };
 
@@ -5252,7 +5304,6 @@ export const respondToAssignment = async (req, res) => {
                         status: 'Pending'
                     });
                 } catch (dashErr) {
-                    console.error("[Dashboard Error] Failed to create retention task:", dashErr);
                 }
             } else if (transferCtx?.isAssigneeTransfer && transferCtx?.oldAssignedTo) {
                 item.status = 'Assigned';
@@ -5293,7 +5344,6 @@ export const respondToAssignment = async (req, res) => {
                             comment: comments,
                         });
                     } catch (e) {
-                        console.error('[assigneeTransfer reject email]', e?.message || e);
                     }
                 })();
             } else if (parkingCtx?.isParkingReassign && parkingCtx?.oldAssignedTo) {
@@ -5357,12 +5407,10 @@ export const respondToAssignment = async (req, res) => {
         } else if (action === 'Accept' || action === 'AcceptWithComments') {
             // Handle HR Handover / Asset Transfer: Reassign 'assignedTo' to the person who accepted
             if (item.pendingAction === 'Asset Transfer' && item.actionRequiredBy?.toString() === currentUser.toString()) {
-                console.log(`[Asset Handover] Completing handover for asset ${item.assetId} from ${item.assignedTo?._id || item.assignedTo} to ${currentUser}`);
                 item.assignedTo = currentUser;
                 item.pendingAction = null;
                 item.pendingActionDetails = null;
             } else if (item.pendingAction === 'Retention Confirmation' && item.actionRequiredBy?.toString() === currentUser.toString()) {
-                console.log(`[Asset Retention] Old HR confirmed retention for asset ${item.assetId}`);
                 item.assignedBy = currentUser; // User is re-assigning to themselves essentially
                 item.pendingAction = null;
                 item.pendingActionDetails = null;
@@ -5444,7 +5492,6 @@ export const respondToAssignment = async (req, res) => {
                             });
                         }
                     } catch (mailErr) {
-                        console.error('[Parking Reassign Email] Non-fatal:', mailErr?.message || mailErr);
                     }
                 }
 
@@ -5488,7 +5535,6 @@ export const respondToAssignment = async (req, res) => {
                                 attachments: att,
                             });
                         } catch (e) {
-                            console.error('[assigneeTransfer accept email]', e?.message || e);
                         }
                     })();
                 }
@@ -5501,7 +5547,6 @@ export const respondToAssignment = async (req, res) => {
                         const uploadResult = await uploadDocumentToS3(req.body.file, 'asset-negotiation');
                         fileUrl = uploadResult.publicId;
                     } catch (err) {
-                        console.error('File upload failed during negotiation:', err);
                     }
                 }
 
@@ -5605,14 +5650,12 @@ export const respondToAssignment = async (req, res) => {
                 });
             }
         } catch (err) {
-            console.error(`[Dashboard Error] Failed to update action for asset ${item.assetId}: `, err);
         }
 
         if (assignmentBulkGroupId) {
             try {
                 await refreshBulkAssignmentDashboardIfGroupFullyResolved(assignmentBulkGroupId, currentUser);
             } catch (dash2) {
-                console.error('[Dashboard] Bulk assignment inbox refresh:', dash2?.message || dash2);
             }
         }
 
@@ -5798,7 +5841,6 @@ export const respondToAssignment = async (req, res) => {
                     });
                 }
             } catch (acceptNotifyErr) {
-                console.error('[respondToAssignment] Accept notification failed (non-fatal):', acceptNotifyErr?.message || acceptNotifyErr);
             }
 
             if (priorAcceptedCountForReassign >= 1) {
@@ -5809,7 +5851,6 @@ export const respondToAssignment = async (req, res) => {
 
         res.status(200).json(item);
     } catch (error) {
-        console.error('Error responding to assignment:', error);
         res.status(500).json({ message: 'Server Error' });
     }
 };
@@ -5947,7 +5988,6 @@ export const bulkRespondToAssignment = async (req, res) => {
                                 status: 'Pending'
                             });
                         } catch (dashErr) {
-                            console.error("[Bulk Dashboard Error] Failed to create retention task:", dashErr);
                         }
                     } else {
                         item.status = 'Unassigned';
@@ -5985,7 +6025,6 @@ export const bulkRespondToAssignment = async (req, res) => {
                     try {
                         await refreshBulkAssignmentDashboardIfGroupFullyResolved(bulkAssignGroupId, currentUser);
                     } catch (bdash) {
-                        console.error('[Bulk respond] assignment inbox refresh:', bdash?.message || bdash);
                     }
                 }
 
@@ -6020,7 +6059,6 @@ export const bulkRespondToAssignment = async (req, res) => {
             results
         });
     } catch (error) {
-        console.error('Error in bulk asset response:', error);
         res.status(500).json({ message: 'Server Error' });
     }
 };
@@ -6103,11 +6141,59 @@ const supersedeOverlappingPendingBulkAssignmentRows = async (assetIdStrings, act
     }
 };
 
-/** One inbox row per bulk-assignment batch — keep newest when duplicates share group id or asset set. */
-const dedupePendingBulkAssignmentInboxItems = (items) => {
+/** Close stale pending bulk-action bell rows (leave / return / EOL / L&D) that overlap a new batch. */
+const supersedeOverlappingPendingBulkActionRows = async (assetIdStrings, requestType, actionedBy) => {
+    const assetSet = new Set(assetIdStrings.map(String));
+    if (!assetSet.size || !requestType) return;
+
+    const rows = await DashboardAction.find({
+        status: 'Pending',
+        requestType,
+        extra3: { $exists: true, $nin: [null, ''] },
+    })
+        .select('_id extra3')
+        .lean();
+
+    for (const da of rows) {
+        const p = parseDashboardExtra3(da.extra3);
+        if (!p?.isBulk) continue;
+        const ids = p.assetIds || p.bulkAssetIds || [];
+        if (!Array.isArray(ids) || ids.length < 2) continue;
+        const overlap = ids.some((id) => assetSet.has(String(id)));
+        if (!overlap) continue;
+        await DashboardAction.findByIdAndUpdate(da._id, {
+            $set: {
+                status: 'Approved',
+                actionedDate: new Date(),
+                actionedBy: actionedBy || null,
+                comment: 'Superseded by a newer bulk action request.',
+            },
+        });
+    }
+};
+
+const BULK_ACTION_INBOX_TYPES = new Set([
+    'Asset Leave',
+    'Asset Return',
+    'Asset End of Life',
+    'Asset Loss Damage',
+]);
+
+const resolveBulkInboxAssetIds = (row) => {
+    const meta = parseDashboardExtra3(row.extra3);
+    if (Array.isArray(row.bulkAssetIds) && row.bulkAssetIds.length > 1) {
+        return row.bulkAssetIds;
+    }
+    const ids = meta?.assetIds || meta?.bulkAssetIds;
+    return Array.isArray(ids) ? ids : [];
+};
+
+/** One inbox row per bulk batch — keep newest when duplicates share group id or asset set. */
+const dedupePendingBulkInboxItems = (items) => {
     const kept = [];
     const seenGroupIds = new Set();
-    const seenAssetSets = new Set();
+    const seenBulkAssignAssetSets = new Set();
+    const seenBulkActionKeys = new Set();
 
     const sorted = [...items].sort(
         (a, b) => new Date(b.requestedDate || 0) - new Date(a.requestedDate || 0),
@@ -6117,19 +6203,31 @@ const dedupePendingBulkAssignmentInboxItems = (items) => {
         const meta = parseDashboardExtra3(row.extra3);
         const isBulkAssign =
             row.bulkKind === 'assignment' && row.isBulk && meta?.isBulkAssignment === true;
-        if (!isBulkAssign) {
+
+        if (isBulkAssign) {
+            const gid = meta.bulkAssignmentGroupId ? String(meta.bulkAssignmentGroupId) : '';
+            if (gid && seenGroupIds.has(gid)) continue;
+
+            const assetKey = bulkAssignmentAssetSetKey(row.bulkAssetIds || meta.bulkAssetIds);
+            if (assetKey && seenBulkAssignAssetSets.has(assetKey)) continue;
+
+            if (gid) seenGroupIds.add(gid);
+            if (assetKey) seenBulkAssignAssetSets.add(assetKey);
             kept.push(row);
             continue;
         }
 
-        const gid = meta.bulkAssignmentGroupId ? String(meta.bulkAssignmentGroupId) : '';
-        if (gid && seenGroupIds.has(gid)) continue;
+        const requestType = String(row.requestType || '').trim();
+        const isBulkAction = row.isBulk && BULK_ACTION_INBOX_TYPES.has(requestType);
+        if (isBulkAction) {
+            const assetKey = bulkAssignmentAssetSetKey(resolveBulkInboxAssetIds(row));
+            if (assetKey) {
+                const dedupeKey = `${requestType}:${assetKey}`;
+                if (seenBulkActionKeys.has(dedupeKey)) continue;
+                seenBulkActionKeys.add(dedupeKey);
+            }
+        }
 
-        const assetKey = bulkAssignmentAssetSetKey(row.bulkAssetIds || meta.bulkAssetIds);
-        if (assetKey && seenAssetSets.has(assetKey)) continue;
-
-        if (gid) seenGroupIds.add(gid);
-        if (assetKey) seenAssetSets.add(assetKey);
         kept.push(row);
     }
 
@@ -6209,6 +6307,84 @@ const closeStaleAssignmentDashboardAction = async (
             },
         },
     );
+};
+
+/** Recreate or reopen inbox rows when an asset still awaits acknowledgment but the bell row is missing or was wrongly auto-closed. */
+const syncPendingAssignmentDashboardRowsForUser = async (relevantIds, targetEmployeeId) => {
+    const actorIds = [
+        ...new Set(
+            (relevantIds || [])
+                .map((id) => {
+                    const s = String(id ?? '').trim();
+                    return mongoose.Types.ObjectId.isValid(s) ? new mongoose.Types.ObjectId(s) : null;
+                })
+                .filter(Boolean)
+                .map((oid) => oid.toString()),
+        ),
+    ].map((s) => new mongoose.Types.ObjectId(s));
+    if (!actorIds.length) return;
+
+    const pendingAssets = await AssetItem.find({
+        acceptanceStatus: 'Pending',
+        status: { $in: ['Pending', 'Assigned'] },
+        $or: [{ pendingAction: null }, { pendingAction: '' }, { pendingAction: { $exists: false } }],
+        actionRequiredBy: { $in: actorIds },
+    })
+        .select(
+            'assetId name assignmentType actionRequiredBy assignedTo assignedToType assignedCompany assignedBy pendingActionDetails',
+        )
+        .populate('assignedTo', 'employeeId firstName lastName')
+        .populate('assignedCompany', 'name companyId')
+        .populate('actionRequiredBy', 'employeeId')
+        .populate('assignedBy', 'firstName lastName')
+        .lean();
+
+    for (const item of pendingAssets) {
+        if (item.pendingActionDetails?.bulkAssignment?.groupId) continue;
+
+        let subjectName = '';
+        let subjectEmpId = '';
+        if (item.assignedToType === 'Company') {
+            subjectName = item.assignedCompany?.name || 'Company';
+            subjectEmpId = item.assignedCompany?.companyId || '';
+        } else if (item.assignedTo) {
+            subjectName = `${item.assignedTo.firstName || ''} ${item.assignedTo.lastName || ''}`.trim();
+            subjectEmpId = item.assignedTo.employeeId || '';
+        }
+
+        const actorRef = item.actionRequiredBy;
+        const actorId = actorRef?._id || actorRef;
+        if (!actorId) continue;
+
+        const actorEmpId = actorRef?.employeeId || targetEmployeeId || '';
+        const assigner = item.assignedBy;
+        const requestedByName = assigner
+            ? `${assigner.firstName || 'System'} ${assigner.lastName || ''}`.trim()
+            : 'System';
+
+        await DashboardAction.findOneAndUpdate(
+            { requestId: item._id, requestType: 'Asset Assignment' },
+            {
+                $set: {
+                    assignedTo: actorId,
+                    assignedToEmpId: actorEmpId,
+                    requestId: item._id,
+                    requestType: 'Asset Assignment',
+                    subjectEmployeeId: subjectEmpId,
+                    subjectName,
+                    requestedByName,
+                    extra1: `${item.assetId} — ${item.name}`,
+                    extra2: item.assignmentType || '',
+                    status: 'Pending',
+                    actionedDate: null,
+                    actionedBy: null,
+                    comment: null,
+                },
+                $setOnInsert: { requestedDate: new Date() },
+            },
+            { upsert: true, setDefaultsOnInsert: true },
+        );
+    }
 };
 
 /** If no assets in this bulk-assignment batch are still pending, complete the single inbox row. */
@@ -6297,7 +6473,6 @@ export const getBulkAssignmentPendingGroup = async (req, res) => {
             }))
         });
     } catch (e) {
-        console.error('getBulkAssignmentPendingGroup:', e);
         res.status(500).json({ message: 'Server Error' });
     }
 };
@@ -6330,10 +6505,6 @@ async function runBulkAssignmentRespondSideEffects(
                 }
             }
         } catch (bulkAcceptPdfErr) {
-            console.error(
-                '[respondBulkAssignmentGroup] Acceptance PDF/history file failed (non-fatal):',
-                bulkAcceptPdfErr?.message || bulkAcceptPdfErr,
-            );
         }
         if (job.priorAcceptedCount >= 1) {
             void notifyAssetControllerReassignmentAcceptedWithHandover(req, {
@@ -6376,10 +6547,6 @@ async function runBulkAssignmentRespondSideEffects(
             isDelegate: isPrimaryReporteeDelegate,
         });
     } catch (summaryMailErr) {
-        console.error(
-            '[respondBulkAssignmentGroup] Assigner/AC summary email failed (non-fatal):',
-            summaryMailErr?.message || summaryMailErr,
-        );
     }
 }
 
@@ -6662,12 +6829,7 @@ export const respondBulkAssignmentGroup = async (req, res) => {
                     rejected,
                     currentUser,
                 },
-            }).catch((bgErr) => {
-                console.error(
-                    '[respondBulkAssignmentGroup] Background side-effects failed:',
-                    bgErr?.message || bgErr,
-                );
-            });
+            }).catch(() => null);
         });
 
         return res.status(200).json({
@@ -6675,7 +6837,6 @@ export const respondBulkAssignmentGroup = async (req, res) => {
             results
         });
     } catch (e) {
-        console.error('respondBulkAssignmentGroup:', e?.stack || e);
         const detail = e?.message || 'Server Error';
         res.status(500).json({
             message: process.env.NODE_ENV === 'production' ? 'Server Error' : detail,
@@ -6845,7 +7006,6 @@ export const returnAssetItem = async (req, res) => {
                     'bulk-return-inventory'
                 );
             } catch (pdfErr) {
-                console.error('[returnAssetItem bulk] PDF required for email:', pdfErr?.message || pdfErr);
                 return res.status(503).json({
                     message:
                         pdfErr?.message ||
@@ -6882,6 +7042,14 @@ export const returnAssetItem = async (req, res) => {
                 bulkAssets.length > 1
                     ? `Bulk Return (${bulkAssets.length} assets): ${assetSummary.substring(0, 200)}${assetSummary.length > 200 ? '...' : ''}`
                     : `${primaryAsset.assetId} — ${primaryAsset.name || ''}`;
+
+            if (bulkAssets.length > 1) {
+                await supersedeOverlappingPendingBulkActionRows(
+                    bulkAssetIdsOrdered,
+                    'Asset Return',
+                    req.user.employeeObjectId,
+                );
+            }
 
             await DashboardAction.create({
                 assignedTo: assetController._id,
@@ -7039,11 +7207,7 @@ export const returnAssetItem = async (req, res) => {
                         companyCoordinator: approver,
                     });
 
-                    console.log(
-                        `[Dashboard] Created asset transfer action for company coordinator/admin (${approver.employeeId}) for company asset ${item.assetId}`
-                    );
                 } catch (err) {
-                    console.error(`[Dashboard/Email Error] Failed to create action/email for company asset transfer ${item.assetId}: `, err);
                 }
             } else {
                 // Regular employee-to-employee transfer
@@ -7084,7 +7248,6 @@ export const returnAssetItem = async (req, res) => {
                         assignedToType: 'Employee',
                     });
                 } catch (empTransferMailErr) {
-                    console.error('[returnAssetItem] Employee transfer email failed (non-fatal):', empTransferMailErr?.message || empTransferMailErr);
                 }
             }
         } else {
@@ -7145,7 +7308,6 @@ export const returnAssetItem = async (req, res) => {
         res.status(200).json(item);
 
     } catch (error) {
-        console.error('Error returning asset item:', error);
         res.status(500).json({ message: 'Server Error' });
     }
 };
@@ -7177,7 +7339,9 @@ export const updateAssetStatus = async (req, res) => {
 
         const isAdminUser =
             req.user?.isAdmin === true || req.user?.role === 'Admin' || req.user?.role === 'ROOT';
-        const isAssetControllerUser = await isUserInFlowchart(req.user, 'assetcontroller');
+        const isAssetControllerUser =
+            (await isUserInFlowchart(req.user, 'assetcontroller')) ||
+            (req.user?.id ? await hasPermission(req.user.id, 'hrm_asset', 'edit') : false);
         let actingEmpId = req.user?.employeeObjectId?.toString();
         if (!actingEmpId && req.user?.employeeId) {
             const me = await EmployeeBasic.findOne({
@@ -7285,7 +7449,6 @@ export const updateAssetStatus = async (req, res) => {
                     );
                     serviceRecord.invoice = invoiceResult.publicId;
                 } catch (uploadErr) {
-                    console.error('Invoice upload failed:', uploadErr);
                 }
             }
 
@@ -7300,7 +7463,6 @@ export const updateAssetStatus = async (req, res) => {
                     );
                     serviceRecord.attachment = attachResult.publicId;
                 } catch (uploadErr) {
-                    console.error('Attachment upload failed:', uploadErr);
                 }
             }
 
@@ -7330,7 +7492,6 @@ export const updateAssetStatus = async (req, res) => {
                         );
                         completionRecord.attachment = attachResult.publicId;
                     } catch (uploadErr) {
-                        console.error('Completion attachment upload failed:', uploadErr);
                     }
                 }
                 item.services.push(completionRecord);
@@ -7399,11 +7560,9 @@ export const updateAssetStatus = async (req, res) => {
                         }
                     );
                 } catch (dashErr) {
-                    console.error('[Dashboard Error] Failed to update service action:', dashErr);
                 }
             }
         } catch (emailErr) {
-            console.error('[Service Email Error] Failed to send service notifications:', emailErr);
         }
 
         let historyDetails = null;
@@ -7452,7 +7611,6 @@ export const updateAssetStatus = async (req, res) => {
 
         res.status(200).json(item);
     } catch (error) {
-        console.error('Error updating asset status:', error);
         res.status(500).json({ message: 'Server Error', error: error.message, stack: error.stack });
     }
 };
@@ -7477,7 +7635,6 @@ export const addAssetImage = async (req, res) => {
 
         res.status(200).json(item.images[item.images.length - 1]);
     } catch (error) {
-        console.error('Error adding asset image:', error);
         res.status(500).json({ message: 'Server Error' });
     }
 };
@@ -7497,7 +7654,6 @@ export const deleteAssetImage = async (req, res) => {
 
         res.status(200).json({ message: 'Image deleted' });
     } catch (error) {
-        console.error('Error deleting asset image:', error);
         res.status(500).json({ message: 'Server Error' });
     }
 };
@@ -7547,7 +7703,6 @@ export const getAssetHistory = async (req, res) => {
 
         res.status(200).json(historyWithUrls);
     } catch (error) {
-        console.error('Error fetching asset history:', error);
         res.status(500).json({ message: 'Server Error' });
     }
 };
@@ -7578,7 +7733,6 @@ export const getHistoryRecord = async (req, res) => {
 
         res.status(200).json(recordObj);
     } catch (error) {
-        console.error('Error fetching single history record:', error);
         res.status(500).json({ message: 'Server Error' });
     }
 };
@@ -7607,7 +7761,6 @@ export const addAssetDocument = async (req, res) => {
                 );
                 documentUrl = uploadResult.publicId;
             } catch (error) {
-                console.error('Error uploading document to S3:', error);
                 return res.status(500).json({
                     message: error?.message || 'Failed to upload document',
                 });
@@ -7647,7 +7800,6 @@ export const addAssetDocument = async (req, res) => {
                 details: { type: 'DocumentAdd', docType: type }
             });
         } catch (historyErr) {
-            console.error('History log failed during addAssetDocument:', historyErr);
         }
 
         // Return signed URL for immediate UI update if needed
@@ -7658,7 +7810,6 @@ export const addAssetDocument = async (req, res) => {
 
         res.status(200).json({ message: 'Document added successfully', document: newDoc });
     } catch (error) {
-        console.error('Error adding asset document:', error);
         res.status(500).json({ message: 'Internal server error' });
     }
 };
@@ -7699,7 +7850,6 @@ export const updateAssetDocument = async (req, res) => {
                 );
                 doc.attachment = uploadResult.publicId;
             } catch (error) {
-                console.error('Error uploading document to S3:', error);
                 return res.status(500).json({
                     message: error?.message || 'Failed to upload document',
                 });
@@ -7719,7 +7869,6 @@ export const updateAssetDocument = async (req, res) => {
                 details: { type: 'DocumentUpdate', docType: doc.type }
             });
         } catch (historyErr) {
-            console.error('History log failed during updateAssetDocument:', historyErr);
         }
 
         const updatedDoc = doc.toObject();
@@ -7729,7 +7878,6 @@ export const updateAssetDocument = async (req, res) => {
 
         res.status(200).json({ message: 'Document updated successfully', document: updatedDoc });
     } catch (error) {
-        console.error('Error updating asset document:', error);
         res.status(500).json({ message: 'Internal server error' });
     }
 };
@@ -7798,7 +7946,6 @@ export const deleteAssetDocument = async (req, res) => {
                 details: { type: 'DocumentDelete', docName }
             });
         } catch (historyErr) {
-            console.error('History log failed during deleteAssetDocument:', historyErr);
         }
 
         res.status(200).json({
@@ -7807,7 +7954,6 @@ export const deleteAssetDocument = async (req, res) => {
             deletedIds: idsToDelete,
         });
     } catch (error) {
-        console.error('Error deleting asset document:', error);
         res.status(500).json({ message: 'Internal server error' });
     }
 };
@@ -7882,7 +8028,6 @@ export const addAssetService = async (req, res) => {
                 const uploadResult = await uploadDocumentToS3(invoice.data, 'asset-service-invoices', invoice.name);
                 invoiceUrl = uploadResult.publicId;
             } catch (error) {
-                console.error('Error uploading invoice to S3:', error);
                 return res.status(500).json({ message: 'Failed to upload invoice' });
             }
         }
@@ -7897,7 +8042,6 @@ export const addAssetService = async (req, res) => {
                 );
                 attachmentUrl = uploadResult.publicId;
             } catch (error) {
-                console.error('Error uploading attachment to S3:', error);
                 return res.status(500).json({ message: 'Failed to upload attachment' });
             }
         }
@@ -7912,7 +8056,6 @@ export const addAssetService = async (req, res) => {
                 );
                 quotation2Url = uploadResult.publicId;
             } catch (error) {
-                console.error('Error uploading quotation2 to S3:', error);
                 return res.status(500).json({ message: 'Failed to upload quotation 2' });
             }
         }
@@ -7927,7 +8070,6 @@ export const addAssetService = async (req, res) => {
                 );
                 quotation3Url = uploadResult.publicId;
             } catch (error) {
-                console.error('Error uploading quotation3 to S3:', error);
                 return res.status(500).json({ message: 'Failed to upload quotation 3' });
             }
         }
@@ -7946,7 +8088,6 @@ export const addAssetService = async (req, res) => {
                         name: img.name || 'Body work image',
                     });
                 } catch (error) {
-                    console.error('Error uploading body work image to S3:', error);
                     return res.status(500).json({ message: 'Failed to upload body work images' });
                 }
             }
@@ -7966,7 +8107,6 @@ export const addAssetService = async (req, res) => {
                         name: img.name || 'Accident image',
                     });
                 } catch (error) {
-                    console.error('Error uploading accident image to S3:', error);
                     return res.status(500).json({ message: 'Failed to upload accident images' });
                 }
             }
@@ -7990,7 +8130,6 @@ export const addAssetService = async (req, res) => {
                 );
                 tireConditionUrl = uploadResult.publicId;
             } catch (error) {
-                console.error('Error uploading tire condition to S3:', error);
                 return res.status(500).json({ message: 'Failed to upload tire condition file' });
             }
         }
@@ -8065,7 +8204,6 @@ export const addAssetService = async (req, res) => {
                     req
                 });
             } catch (wfErr) {
-                console.error('[addAssetService] Vehicle service workflow:', wfErr);
             }
         }
 
@@ -8080,7 +8218,6 @@ export const addAssetService = async (req, res) => {
                 details: { type: 'ServiceAdd', serviceType, value, description, isDraft: !!isDraft }
             });
         } catch (historyErr) {
-            console.error('History log failed during addAssetService:', historyErr);
         }
 
         // Return signed URL for the new invoice
@@ -8100,7 +8237,6 @@ export const addAssetService = async (req, res) => {
 
         res.status(200).json({ message: isDraft ? 'Service draft saved successfully' : 'Service record added successfully', service: addedService });
     } catch (error) {
-        console.error('Error adding asset service:', error);
         res.status(500).json({ message: 'Internal server error' });
     }
 };
@@ -8168,12 +8304,10 @@ export const deleteAssetService = async (req, res) => {
                 details: { type: 'ServiceDelete', serviceId, serviceType: removedServiceType },
             });
         } catch (historyErr) {
-            console.error('History log failed during deleteAssetService:', historyErr);
         }
 
         return res.status(200).json({ message: 'Service record deleted successfully' });
     } catch (error) {
-        console.error('Error deleting asset service:', error);
         return res.status(500).json({ message: 'Internal server error' });
     }
 };
@@ -8231,14 +8365,12 @@ export const submitAssetServiceDraft = async (req, res) => {
                 req,
             });
         } catch (wfErr) {
-            console.error('[submitAssetServiceDraft] Vehicle service workflow:', wfErr);
         }
 
         const fresh = await AssetItem.findById(asset._id).lean();
         const out = fresh?.services?.find((s) => String(s._id) === String(service._id)) || service.toObject();
         return res.json({ message: 'Draft submitted successfully', service: out });
     } catch (error) {
-        console.error('submitAssetServiceDraft:', error);
         return res.status(500).json({ message: error.message || 'Internal server error' });
     }
 };
@@ -8306,7 +8438,6 @@ export const transferAsset = async (req, res) => {
             transferRequest
         });
     } catch (error) {
-        console.error('Transfer error:', error);
         res.status(500).json({ message: 'Server Error', error: error.message });
     }
 };
@@ -8460,7 +8591,6 @@ export const transferAssigneeAsset = async (req, res) => {
             asset: item,
         });
     } catch (error) {
-        console.error('[transferAssigneeAsset]', error);
         res.status(500).json({ message: error?.message || 'Internal server error' });
     }
 };
@@ -8488,7 +8618,6 @@ const removeAccessoryFromHistorySnapshots = async (assetId, accessoryId) => {
             }
         }
     } catch (err) {
-        console.error('Error removing accessory from history snapshots:', err);
     }
 };
 
@@ -8578,7 +8707,6 @@ export const transferAssetAccessory = async (req, res) => {
 
         res.status(200).json({ message: 'Accessory transfered successfully', sourceAsset, targetAsset });
     } catch (error) {
-        console.error('Error transferring accessory:', error);
         res.status(500).json({ message: 'Internal server error' });
     }
 };
@@ -8613,7 +8741,6 @@ export const manageAccessoryStatus = async (req, res) => {
         try {
             await syncAllAccessoryInstancesForAsset(asset);
         } catch (syncErr) {
-            console.error('[manageAccessoryStatus accessory catalog sync]', syncErr?.message || syncErr);
         }
         await notifyAssignedEmployeeIfController(
             req,
@@ -8637,7 +8764,6 @@ export const manageAccessoryStatus = async (req, res) => {
 
         res.status(200).json({ message: `Accessory marked as ${status} `, asset });
     } catch (error) {
-        console.error('Error updating accessory status:', error);
         res.status(500).json({ message: 'Internal server error' });
     }
 };
@@ -8651,7 +8777,6 @@ const sendEolEmail = async ({ toEmployee, ccEmployees = [], subject, bodyHtml, r
 
         const { to: toEmail, cc: toCc } = resolveEmployeeEmailTargets(toEmployee);
         if (!toEmail) {
-            console.warn('[sendEolEmail] Recipient has no email, skipping.');
             return;
         }
 
@@ -8669,7 +8794,6 @@ const sendEolEmail = async ({ toEmployee, ccEmployees = [], subject, bodyHtml, r
         const emailPass = process.env.EMAIL_PASS || process.env.VERP_PASS || process.env.GMAIL_PASS;
 
         if (!emailUser || !emailPass) {
-            console.error('[sendEolEmail] Email credentials missing.');
             return;
         }
 
@@ -8705,9 +8829,7 @@ const sendEolEmail = async ({ toEmployee, ccEmployees = [], subject, bodyHtml, r
             html: finalHtml
         });
 
-        console.log(`[sendEolEmail] Sent email to ${toEmail} with subject: ${subject}`);
     } catch (error) {
-        console.error('[sendEolEmail] Error sending email:', error);
     }
 };
 
@@ -8793,6 +8915,15 @@ export const requestAssetAction = async (req, res) => {
             const emailCheck = await assertAssetActionStakeholderEmails({ asset, assetController });
             if (!emailCheck.ok) {
                 return res.status(400).json({ message: emailCheck.message });
+            }
+            if (fineData) {
+                const isAssetControllerRequester = await isUserInFlowchart(req.user, 'assetcontroller').catch(() => false);
+                if (!isAssetControllerRequester) {
+                    return res.status(403).json({
+                        message:
+                            'Only Asset Controller can submit Loss & Damage with fine details. Assigned users may submit a request without fine data.',
+                    });
+                }
             }
         }
 
@@ -8909,7 +9040,6 @@ export const requestAssetAction = async (req, res) => {
         try {
             requestAttachments = await buildAssetActionApprovalHandoverAttachments(req, asset);
         } catch (pdfErr) {
-            console.error('[requestAssetAction] Handover PDF for approval email (non-fatal):', pdfErr?.message || pdfErr);
         }
 
         if (pendingActionType === 'Loss and Damage') {
@@ -8960,7 +9090,6 @@ export const requestAssetAction = async (req, res) => {
             asset,
         });
     } catch (error) {
-        console.error('Error requesting asset action:', error);
         // Return the real message to help frontend/debug quickly (avoids generic 500).
         // (In production you can later hide details behind NODE_ENV if you prefer.)
         const msg = error?.message || 'Internal server error';
@@ -9065,7 +9194,6 @@ export const bulkRequestAssetAction = async (req, res) => {
         try {
             bulkActionAttachments = await buildAssetActionApprovalHandoverAttachments(req, assets);
         } catch (pdfErr) {
-            console.error('[bulkRequestAssetAction] Handover PDF for approval email:', pdfErr?.message || pdfErr);
             if (requireHandoverPdf) {
                 return res.status(503).json({
                     message:
@@ -9141,7 +9269,6 @@ export const bulkRequestAssetAction = async (req, res) => {
                 bulkAssetIds.push(asset._id.toString());
                 results.push({ assetId: asset._id, assetIdDisplay: asset.assetId, status: 'success', message: `${actionType} request submitted for approval` });
             } catch (error) {
-                console.error(`Error processing asset ${asset.assetId}:`, error);
                 errors.push({ assetId: asset.assetId, message: error.message || 'Failed to process' });
             }
         }
@@ -9155,8 +9282,16 @@ export const bulkRequestAssetAction = async (req, res) => {
             const extra1 = assets.length > 1
                 ? `Bulk ${actionType} (${assets.length} assets): ${assetSummary.substring(0, 200)}${assetSummary.length > 200 ? '...' : ''}`
                 : `${primaryAsset.assetId} — ${primaryAsset.name}`;
+            if (assets.length > 1) {
+                await supersedeOverlappingPendingBulkActionRows(
+                    assetIds.map((id) => id.toString()),
+                    dashboardRequestType,
+                    req.user.employeeObjectId,
+                );
+            }
             await DashboardAction.create({
                 assignedTo: primaryApprover._id,
+                assignedToEmpId: primaryApprover.employeeId || null,
                 requestId: primaryAsset._id, // Link to primary asset for approval flow
                 requestType: dashboardRequestType,
                 status: 'Pending',
@@ -9203,7 +9338,6 @@ export const bulkRequestAssetAction = async (req, res) => {
                     });
                 }
             } catch (emailErr) {
-                console.error('[bulkRequestAssetAction] Email send failed (non-fatal):', emailErr.message);
             }
         }
 
@@ -9230,7 +9364,6 @@ export const bulkRequestAssetAction = async (req, res) => {
             bulkAssetIds: bulkAssetIds
         });
     } catch (error) {
-        console.error('Error in bulk request asset action:', error);
         const msg = process.env.NODE_ENV === 'development' ? (error.message || 'Internal server error') : 'Internal server error';
         res.status(500).json({ message: msg });
     }
@@ -9551,20 +9684,6 @@ export const handleAssetActionApproval = async (req, res) => {
         const isCompanyCoordinatorUser = await isUserCompanyAssetCoordinator(req.user);
         const isCompanyAsset = asset.assignedToType === 'Company' && (asset.assignedCompany?._id || asset.assignedCompany);
 
-        console.log('[Asset Approval Auth]', {
-            currentUserEmpId,
-            actionRequiredBy: asset.actionRequiredBy?.toString(),
-            isAdmin,
-            isAssetController,
-            isHR,
-            isCompanyCoordinatorUser,
-            isCompanyAsset,
-            actionType,
-            assignedToType: asset.assignedToType,
-            hasAssignedCompany: !!(asset.assignedCompany?._id || asset.assignedCompany),
-            assignedCompanyId: asset.assignedCompany?._id?.toString() || asset.assignedCompany?.toString() || 'none',
-            assignedTo: asset.assignedTo?._id?.toString() || asset.assignedTo?.toString() || 'none'
-        });
 
         const companyCoordEmp = await getCompanyAssetCoordinator();
         const isActionRequiredByCompanyCoordinator =
@@ -9637,7 +9756,6 @@ export const handleAssetActionApproval = async (req, res) => {
                     reason: reasonText,
                 });
             } catch (mailErr) {
-                console.error('[handleAssetActionApproval] Transfer requester email failed:', mailErr?.message || mailErr);
             }
         };
 
@@ -9662,20 +9780,9 @@ export const handleAssetActionApproval = async (req, res) => {
                     reason: reasonText,
                 });
             } catch (mailErr) {
-                console.error('[handleAssetActionApproval] L&D requester email failed:', mailErr?.message || mailErr);
             }
         };
 
-        console.log('[Asset Approval Auth] isAuthorized:', isAuthorized, {
-            matchesActionRequiredBy: asset.actionRequiredBy?.toString() === currentUserEmpId,
-            isAdmin,
-            isAssetController,
-            hrAndLossAndDamageNonCompany: actionType === 'Loss and Damage' && isHR && !isCompanyAsset,
-            companyCoordinatorAndLd: actionType === 'Loss and Damage' && isCompanyAsset && isCompanyCoordinatorUser,
-            companyCoordinatorId: companyCoordEmp?._id?.toString(),
-            actionRequiredBy: asset.actionRequiredBy?.toString(),
-            isActionRequiredByCompanyCoordinator
-        });
 
         if (!isAuthorized) {
             if (isCompanyAsset && actionType === 'Loss and Damage') {
@@ -9944,7 +10051,6 @@ export const handleAssetActionApproval = async (req, res) => {
                             try {
                                 const companyCoordinatorNotify = await getCompanyAssetCoordinator();
                                 if (!companyCoordinatorNotify?._id) {
-                                    console.warn('[EndOfLife Company Notification] No Assigned User/Admin in flowchart; skipping coordinator email.');
                                 } else {
                                     let eolHrPdf = [];
                                     try {
@@ -9983,7 +10089,6 @@ export const handleAssetActionApproval = async (req, res) => {
                                     });
                                 }
                             } catch (mailErr) {
-                                console.error('[EndOfLife Company Notification] Non-fatal:', mailErr?.message || mailErr);
                             }
                         }
                     }
@@ -10199,10 +10304,6 @@ export const handleAssetActionApproval = async (req, res) => {
                                                 },
                                             );
                                         } catch (pdfErr) {
-                                            console.error(
-                                                '[Asset Approval] Leave handover PDF failed (non-fatal):',
-                                                pdfErr?.message || pdfErr,
-                                            );
                                         }
                                         await sendAssetBulkActionApprovedEmail(
                                             processedAssets,
@@ -10230,7 +10331,6 @@ export const handleAssetActionApproval = async (req, res) => {
                                                     `approved-${String(actionType).replace(/\s+/g, '-')}-handover`,
                                                 );
                                             } catch (e) {
-                                                console.error('[Leave approval] Handover PDF:', e?.message || e);
                                             }
                                             await sendAssetActionApprovedEmail(
                                                 processedAsset,
@@ -10396,7 +10496,6 @@ export const handleAssetActionApproval = async (req, res) => {
                         }
                     }
                 } catch (emailErr) {
-                    console.error('[Asset Approval] Email send failed (non-fatal):', emailErr);
                 }
 
                 if (!isBulkTransfer) {
@@ -10410,7 +10509,6 @@ export const handleAssetActionApproval = async (req, res) => {
                                 { attachApprovedHandover: true },
                             );
                         } catch (notifyErr) {
-                            console.error('[Asset Approval] Notify assignee failed (non-fatal):', notifyErr);
                         }
                     }
                 }
@@ -10484,7 +10582,6 @@ export const handleAssetActionApproval = async (req, res) => {
                         ldPdf
                     );
                 } catch (emailErr) {
-                    console.error('[Asset Approval] Forward to AC email failed (non-fatal):', emailErr?.message || emailErr);
                 }
 
                 void emailLossDamageRequester(true, comment || 'Company coordinator approved; pending Asset Controller fine details.');
@@ -10497,8 +10594,8 @@ export const handleAssetActionApproval = async (req, res) => {
                 });
             }
 
-            // For "Loss and Damage", Asset Controller approval creates a Fine with status "Pending HR"
-            if (isAssetControllerApprowing && actionType === 'Loss and Damage') {
+            // For "Loss and Damage", Asset Controller / Admin approval creates a Fine with status "Pending HR"
+            if ((isAssetControllerApprowing || isAdmin) && actionType === 'Loss and Damage') {
                 // If fineData is provided in request body (from modal submission), update pendingActionDetails
                 if (fineData) {
                     asset.pendingActionDetails = asset.pendingActionDetails || {};
@@ -10542,7 +10639,7 @@ export const handleAssetActionApproval = async (req, res) => {
                         const User = (await import('../models/User.js')).default;
                         const { syncDashboardAction } = await import('../utils/syncDashboard.js');
 
-                        const fd = asset.pendingActionDetails.fineData;
+                        const finePayload = fd || asset.pendingActionDetails?.fineData;
                         const uniqueFineId = await generateFineIdInternal();
 
                         // Validate full fine tracker flow before creating L&D fine
@@ -10555,12 +10652,12 @@ export const handleAssetActionApproval = async (req, res) => {
                         const hrUser = await User.findOne({ employeeId: hrHOD.employeeId });
                         const hrAssignmentId = hrUser ? hrUser._id : hrHOD._id;
 
-                        const { employees, ...cleanFd } = fd;
+                        const { employees, ...cleanFd } = finePayload;
                         const fineModel = new Fine({
                             ...cleanFd,
-                            assignedEmployees: employees || fd.assignedEmployees || [],
-                            company: asset.assignedTo?.company?._id || fd.company,
-                            companyName: asset.assignedTo?.company?.name || fd.companyName || '',
+                            assignedEmployees: employees || finePayload.assignedEmployees || [],
+                            company: asset.assignedTo?.company?._id || finePayload.company,
+                            companyName: asset.assignedTo?.company?.name || finePayload.companyName || '',
                             fineId: uniqueFineId,
                             fineStatus: 'Pending HR', // Direct to Pending HR, not Draft
                             approvalStatus: 'Pending HR',
@@ -10579,7 +10676,7 @@ export const handleAssetActionApproval = async (req, res) => {
                                 url: asset.pendingActionDetails.attachment,
                                 name: 'Loss and Damage.pdf',
                                 mimeType: 'application/pdf'
-                            } : fd.attachment
+                            } : finePayload.attachment
                         });
                         await fineModel.save();
 
@@ -10605,10 +10702,8 @@ export const handleAssetActionApproval = async (req, res) => {
                             const { sendFineApprovalEmail } = await import('../utils/sendFineApprovalEmail.js');
                             await sendFineApprovalEmail(fineModel, fineModel.assignedEmployees || []);
                         } catch (emailErr) {
-                            console.error('[Asset] Fine approval email failed (non-fatal):', emailErr);
                         }
 
-                        console.log(`[Asset] Fine created from Asset Controller approval: ${uniqueFineId} with status Pending HR`);
 
                         // Create history log
                         await AssetHistory.create({
@@ -10626,26 +10721,45 @@ export const handleAssetActionApproval = async (req, res) => {
 
                         void emailLossDamageRequester(true, comment || '');
 
-                        // Clean up asset pending action - fine is now handling the workflow
-                        asset.pendingAction = null;
-                        asset.pendingActionDetails = null;
-                        asset.actionRequiredBy = null;
-                        asset.lossDamageFineDraft = null;
-                        asset.status = 'Lost';
+                        const lostAssignee =
+                            asset.assignedTo && typeof asset.assignedTo === 'object'
+                                ? asset.assignedTo
+                                : asset.assignedTo
+                                  ? await EmployeeBasic.findById(asset.assignedTo)
+                                        .select('firstName lastName employeeId companyEmail workEmail')
+                                        .lean()
+                                        .catch(() => null)
+                                  : null;
+
+                        await applyMainAssetLossDamageAccessoryDisposition(asset, finePayload, req, uniqueFineId);
+                        applyAssetLostFinalState(asset);
+
+                        await AssetHistory.create({
+                            assetId: asset._id,
+                            action: 'Lost',
+                            performedBy: req.user.employeeObjectId || req.user._id,
+                            comments: `Loss and Damage finalized. Fine ${uniqueFineId} created (Pending HR). ${comment || ''}`,
+                            date: new Date(),
+                            details: { status: 'Lost', fineId: uniqueFineId, lastAssignee: lostAssignee?._id || null },
+                        });
 
                         await asset.save();
-                        
-                        if (asset.assignedTo) {
+                        try {
+                            await syncAllAccessoryInstancesForAsset(asset);
+                        } catch {
+                            /* non-fatal */
+                        }
+
+                        if (lostAssignee) {
                             try {
                                 const { sendAssetLostOwnerEmail } = await import('../utils/sendAssetLostOwnerEmail.js');
                                 await sendAssetLostOwnerEmail({
-                                    asset,
-                                    employee: asset.assignedTo,
+                                    asset: { ...asset.toObject?.() || asset, assignedTo: lostAssignee },
+                                    employee: lostAssignee,
                                     lossValue: fineModel.fineAmount,
                                     fineId: uniqueFineId,
                                 });
                             } catch (mailErr) {
-                                console.error('[Asset L&D Approval] Owner notification email failed (non-fatal):', mailErr);
                             }
                         }
 
@@ -10656,7 +10770,6 @@ export const handleAssetActionApproval = async (req, res) => {
                             fineId: uniqueFineId
                         });
                     } catch (fineErr) {
-                        console.error('[Asset] Fine creation failed during Asset Controller approval:', fineErr);
                         return res.status(500).json({ message: 'Failed to create fine. Please try again.', error: fineErr.message });
                     }
                 } else {
@@ -10813,7 +10926,6 @@ export const handleAssetActionApproval = async (req, res) => {
             asset
         });
     } catch (error) {
-        console.error('Error handling asset action approval:', error);
         res.status(500).json({ message: 'Internal server error' });
     }
 };
@@ -10845,9 +10957,7 @@ export const finalizeAssetAction = async (req, res) => {
 
         if (approve) {
             const isLossDamage = actionType === 'Loss and Damage';
-            asset.status = isLossDamage ? 'Lost' : 'Out of Service';
 
-            // Log history
             await AssetHistory.create({
                 assetId: asset._id,
                 action: isLossDamage ? 'Lost' : 'Out of Service',
@@ -10855,15 +10965,23 @@ export const finalizeAssetAction = async (req, res) => {
                 comments: `Finalized ${actionType} by Reportee. ${comment || ''}`,
                 file: asset.pendingActionDetails?.attachment,
                 date: new Date(),
-                details: { status: 'Finalized', originalAction: actionType }
+                details: { status: 'Finalized', originalAction: actionType },
             });
 
-            // UNASSIGN Asset upon EOL/L&D completion
-            asset.assignedTo = null;
-            asset.assignmentType = null;
-            asset.pendingAction = null;
-            asset.pendingActionDetails = null;
-            asset.actionRequiredBy = null;
+            if (isLossDamage) {
+                const lossFineData = asset.pendingActionDetails?.fineData;
+                if (lossFineData) {
+                    await applyMainAssetLossDamageAccessoryDisposition(asset, lossFineData, req);
+                }
+                applyAssetLostFinalState(asset);
+            } else {
+                asset.status = 'Out of Service';
+                asset.assignedTo = null;
+                asset.assignmentType = null;
+                asset.pendingAction = null;
+                asset.pendingActionDetails = null;
+                asset.actionRequiredBy = null;
+            }
 
         } else {
             // Declined — return to manager or restore?
@@ -10892,7 +11010,6 @@ export const finalizeAssetAction = async (req, res) => {
             asset
         });
     } catch (error) {
-        console.error('Error finalizing asset action:', error);
         res.status(500).json({ message: 'Internal server error' });
     }
 };
@@ -10919,7 +11036,6 @@ export const uploadAccessoriesAttachment = async (req, res) => {
         await asset.save();
         res.status(200).json({ message: 'Attachment uploaded', asset });
     } catch (error) {
-        console.error('Error uploading accessories attachment:', error);
         res.status(500).json({ message: 'Server error' });
     }
 };
@@ -11004,14 +11120,19 @@ export const requestAccessoryAction = async (req, res) => {
         }
 
         const requesterId = (req.user.employeeObjectId || req.user._id).toString();
-        const isControllerOrAdmin = requesterId === assetController?._id?.toString() || req.user.role === 'Admin' || req.user.role === 'ROOT';
+        const isAssetControllerRequester = await isUserInFlowchart(req.user, 'assetcontroller').catch(() => false);
+        const isControllerOrAdmin =
+            requesterId === assetController?._id?.toString() ||
+            isAssetControllerRequester ||
+            req.user.isAdmin === true ||
+            req.user.role === 'Admin' ||
+            req.user.role === 'ROOT';
         const currentEmpId = req.user.employeeObjectId?.toString();
         const assigneeId =
             asset.assignedToType === 'Employee' && asset.assignedTo
                 ? (typeof asset.assignedTo === 'object' ? asset.assignedTo._id?.toString() : String(asset.assignedTo))
                 : null;
         const isAssigneeRequester = !!(assigneeId && currentEmpId && assigneeId === currentEmpId);
-        const isAssetControllerRequester = await isUserInFlowchart(req.user, 'assetcontroller').catch(() => false);
 
         // Asset Controller/Admin can directly unattach without approval workflow.
         if (actionType === 'Unattach' && isControllerOrAdmin) {
@@ -11048,7 +11169,6 @@ export const requestAccessoryAction = async (req, res) => {
                 await markCatalogInstancesDetachedFromAsset(asset._id, [accToMove.accessoryId]);
                 await syncAllAccessoryInstancesForAsset(asset);
             } catch (syncErr) {
-                console.error('[requestAccessoryAction direct Unattach catalog sync]', syncErr?.message || syncErr);
             }
 
             await AssetHistory.create({
@@ -11189,7 +11309,6 @@ export const requestAccessoryAction = async (req, res) => {
                     );
                 }
             } catch (pdfErr) {
-                console.error('[requestAccessoryAction] PDF attachment failed (non-fatal):', pdfErr?.message || pdfErr);
             }
 
             if (actionType === 'Loss and Damage' || actionType === 'Transfer') {
@@ -11214,7 +11333,6 @@ export const requestAccessoryAction = async (req, res) => {
                 );
             }
         } catch (emailErr) {
-            console.error('[requestAccessoryAction] Email send failed (non-fatal):', emailErr.message);
         }
 
         res.status(200).json({
@@ -11222,7 +11340,6 @@ export const requestAccessoryAction = async (req, res) => {
             asset
         });
     } catch (error) {
-        console.error('Error requesting accessory action:', error.message, error.stack);
         res.status(500).json({ message: 'Internal server error', detail: error.message });
     }
 };
@@ -11265,18 +11382,32 @@ export const respondAccessoryAction = async (req, res) => {
             asset.actionRequiredBy?._id?.toString?.() || asset.actionRequiredBy?.toString?.() || null;
         const isDesignatedApprover = !!(currentUserEmpIdEarly && actionRequiredById && actionRequiredById === currentUserEmpIdEarly);
 
-        const addApprovalKind = pendingActionDetails?.addApprovalKind;
-        const canApproveTransfer = pendingAction === 'Transfer' && (isAdmin || isAssetControllerApproving);
-        const canApproveAddPending =
+        const addApprovalKind = pendingActionDetails?.addApprovalKind || 'AssetController';
+        const flowchartAssetController = await getDepartmentHOD('assetcontroller').catch(() => null);
+        const normEmpId = (v) => String(v || '').trim().toLowerCase();
+        const isDeptAssetController = !!(
+            flowchartAssetController?._id &&
+            currentUserEmpIdEarly &&
+            flowchartAssetController._id.toString() === currentUserEmpIdEarly
+        ) || !!(
+            flowchartAssetController?.employeeId &&
+            req.user?.employeeId &&
+            normEmpId(flowchartAssetController.employeeId) === normEmpId(req.user.employeeId)
+        );
+        const canApproveTransfer = pendingAction === 'Transfer' && (isAdmin || isAssetControllerApproving || isDeptAssetController);
+        const canApproveAddForAssignee =
             pendingAction === 'Add' &&
-            (isAdmin ||
-                (isDesignatedApprover &&
-                    (addApprovalKind === 'Assignee'
-                        ? actorFlags.isAssignee || actorFlags.isPrimaryReporteeDelegate
-                        : isAssetControllerApproving || actorFlags.canAct)));
+            addApprovalKind === 'Assignee' &&
+            isDesignatedApprover &&
+            (actorFlags.isAssignee || actorFlags.isPrimaryReporteeDelegate);
+        const canApproveAddForAssetController =
+            pendingAction === 'Add' &&
+            addApprovalKind !== 'Assignee' &&
+            (isAdmin || isAssetControllerApproving || isDeptAssetController);
+        const canApproveAddPending = canApproveAddForAssignee || canApproveAddForAssetController;
         const canApproveByAuthority =
             (pendingAction === 'Loss and Damage' || pendingAction === 'End of Life' || pendingAction === 'Unattach') &&
-            (isAdmin || isAssetControllerApproving);
+            (isAdmin || isAssetControllerApproving || isDeptAssetController);
 
         const canApproveDesignatedLossDamage =
             pendingAction === 'Loss and Damage' && isDesignatedApprover;
@@ -11326,7 +11457,6 @@ export const respondAccessoryAction = async (req, res) => {
                     });
                 }
             } catch (mailErr) {
-                console.error('[respondAccessoryAction] Decision email failed:', mailErr?.message || mailErr);
             }
         };
 
@@ -11428,7 +11558,6 @@ export const respondAccessoryAction = async (req, res) => {
                     await syncAllAccessoryInstancesForAsset(asset);
                     await syncAllAccessoryInstancesForAsset(targetAsset);
                 } catch (syncErr) {
-                    console.error('[respondAccessoryAction Transfer catalog sync]', syncErr?.message || syncErr);
                 }
 
                 try {
@@ -11454,7 +11583,6 @@ export const respondAccessoryAction = async (req, res) => {
                         });
                     }
                 } catch (accTransferMailErr) {
-                    console.error('[respondAccessoryAction Transfer] Transfer emails failed (non-fatal):', accTransferMailErr?.message || accTransferMailErr);
                 }
 
                 void emailAccessoryDecisionToRequester(true, comment || '');
@@ -11505,7 +11633,6 @@ export const respondAccessoryAction = async (req, res) => {
                     await markCatalogInstancesDetachedFromAsset(asset._id, [accToMove.accessoryId]);
                     await syncAllAccessoryInstancesForAsset(asset);
                 } catch (syncErr) {
-                    console.error('[respondAccessory Unattach catalog sync]', syncErr?.message || syncErr);
                 }
                 await notifyAssignedEmployeeIfController(req, asset, 'Unattach Accessory', `Accessory "${accToMove.name}" was detached and added to the accessories catalog.`);
 
@@ -11575,7 +11702,6 @@ export const respondAccessoryAction = async (req, res) => {
                 try {
                     await syncAllAccessoryInstancesForAsset(asset);
                 } catch (syncErr) {
-                    console.error('[respondAccessoryAction Add catalog sync]', syncErr?.message || syncErr);
                 }
 
                 try {
@@ -11611,7 +11737,6 @@ export const respondAccessoryAction = async (req, res) => {
                         }
                     }
                 } catch (e) {
-                    console.error('[respondAccessoryAction Add] Success email (non-fatal):', e?.message || e);
                 }
 
                 return res.status(200).json({
@@ -11667,7 +11792,6 @@ export const respondAccessoryAction = async (req, res) => {
                             'accessory-ld-company-approved-handover',
                         );
                     } catch (pdfErr) {
-                        console.error('[respondAccessoryAction] PDF (non-fatal):', pdfErr?.message || pdfErr);
                     }
                     await sendAssetActionApprovalEmail(
                         {
@@ -11682,7 +11806,6 @@ export const respondAccessoryAction = async (req, res) => {
                         accFwdPdf
                     );
                 } catch (e) {
-                    console.error('[respondAccessoryAction] forward email (non-fatal):', e?.message || e);
                 }
 
                 void emailAccessoryDecisionToRequester(true, comment || 'Company coordinator approved; pending Asset Controller fine details.');
@@ -11789,10 +11912,8 @@ export const respondAccessoryAction = async (req, res) => {
                             const { sendFineApprovalEmail } = await import('../utils/sendFineApprovalEmail.js');
                             await sendFineApprovalEmail(fineModel, fineModel.assignedEmployees || []);
                         } catch (emailErr) {
-                            console.error('[Asset Accessory] Fine approval email failed (non-fatal):', emailErr);
                         }
 
-                        console.log(`[Asset Accessory] Fine created from Asset Controller approval: ${uniqueFineId} with status Pending HR`);
 
                         // Create history log
                         await AssetHistory.create({
@@ -11824,7 +11945,6 @@ export const respondAccessoryAction = async (req, res) => {
                                     fineId: uniqueFineId,
                                 });
                             } catch (mailErr) {
-                                console.error('[Accessory L&D Approval] Owner notification email failed (non-fatal):', mailErr);
                             }
                         }
 
@@ -11873,7 +11993,6 @@ export const respondAccessoryAction = async (req, res) => {
                         try {
                             await syncAllAccessoryInstancesForAsset(asset);
                         } catch (syncErr) {
-                            console.error('[Accessory L&D approve catalog sync]', syncErr?.message || syncErr);
                         }
                         await notifyAssignedEmployeeIfController(req, asset, 'Loss and Damage Accessory', `Accessory "${accToDetach.name}" loss and damage was approved by Asset Controller and moved to Pending HR.`);
 
@@ -11888,7 +12007,6 @@ export const respondAccessoryAction = async (req, res) => {
                             fineId: uniqueFineId
                         });
                     } catch (fineErr) {
-                        console.error('[Asset Accessory] Fine creation failed during Asset Controller approval:', fineErr);
                         return res.status(500).json({ message: 'Failed to create fine. Please try again.', error: fineErr.message });
                     }
                 } else {
@@ -12042,7 +12160,6 @@ export const respondAccessoryAction = async (req, res) => {
                         }
                     }
                 } catch (e) {
-                    console.error('[respondAccessoryAction Add reject] Email (non-fatal):', e?.message || e);
                 }
 
                 return res.status(200).json({
@@ -12118,7 +12235,6 @@ export const respondAccessoryAction = async (req, res) => {
             asset
         });
     } catch (error) {
-        console.error('Error responding to accessory action:', error);
         res.status(500).json({ message: 'Internal server error' });
     }
 };
@@ -12158,10 +12274,9 @@ export const saveLossDamageFineDraft = async (req, res) => {
         }
 
         const actorFlags = await getActorPermissionFlagsForAsset(req.user, asset);
-        if (!actorFlags.canAct) {
+        if (!actorFlags.isAssetController) {
             return res.status(403).json({
-                message:
-                    'Access denied. Only Asset Controller/Admin, assigner, assigned user, or delegated primary reportee can save this draft.'
+                message: 'Only Asset Controller can save Loss & Damage fine drafts.',
             });
         }
 
@@ -12195,7 +12310,6 @@ export const saveLossDamageFineDraft = async (req, res) => {
             asset
         });
     } catch (error) {
-        console.error('[saveLossDamageFineDraft] Error:', error);
         return res.status(500).json({ message: error.message || 'Failed to save Loss & Damage draft.' });
     }
 };
@@ -12299,7 +12413,6 @@ export const submitDraftForCreationApproval = async (req, res) => {
                 assignerName: requesterDisplayName,
             });
         } catch (pdfErr) {
-            console.error('submitDraftForCreationApproval PDF attachment failed (non-fatal):', pdfErr?.message || pdfErr);
         }
         await sendAssetCreationApprovalEmail({
             asset: item,
@@ -12322,7 +12435,6 @@ export const submitDraftForCreationApproval = async (req, res) => {
 
         res.status(200).json(item);
     } catch (error) {
-        console.error('submitDraftForCreationApproval:', error);
         res.status(500).json({ message: 'Server Error' });
     }
 };
@@ -12394,7 +12506,6 @@ export const deleteAssetItem = async (req, res) => {
             ...(adminNotificationEmail ? { assetControllerEmail: adminNotificationEmail } : {})
         });
     } catch (error) {
-        console.error('Error deleting asset item:', error);
         res.status(500).json({ message: 'Server Error' });
     }
 };
@@ -12473,6 +12584,8 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
             return res.json({ count: 0, items: [] });
         }
         match.$or = assigneeClauses;
+
+        await syncPendingAssignmentDashboardRowsForUser(relevantIds, targetEmployeeId);
 
         const parseExtra3 = (raw) => {
             if (raw == null || raw === '') return null;
@@ -12666,6 +12779,8 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
                 name: asset.name,
                 plateNumber: asset.plateNumber || '',
                 status: asset.status,
+                acceptanceStatus: asset.acceptanceStatus,
+                actionRequiredBy: asset.actionRequiredBy,
                 pendingAction: asset.pendingAction,
                 assignedTo: asset.assignedTo,
                 bulkAssignmentGroupId: asset.pendingActionDetails?.bulkAssignment?.groupId || null,
@@ -12783,7 +12898,7 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
             });
         }
         items = inboxAfterExpiryMerge;
-        items = dedupePendingBulkAssignmentInboxItems(items);
+        items = dedupePendingBulkInboxItems(items);
 
         // Hide stale owner on-duty review bells when no parked assets remain for the request.
         const ownerOnDutyStaleIds = [];
@@ -12962,7 +13077,6 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
 
         res.json({ count: items.length, items });
     } catch (error) {
-        console.error('getPendingAssetDashboardInbox:', error);
         res.status(500).json({ message: 'Failed to load pending asset requests' });
     }
 };
@@ -13030,7 +13144,6 @@ export const deletePendingAssetDashboardInboxItem = async (req, res) => {
         await DashboardAction.findByIdAndDelete(id);
         res.status(200).json({ message: 'Notification removed' });
     } catch (error) {
-        console.error('deletePendingAssetDashboardInboxItem:', error);
         res.status(500).json({ message: 'Failed to remove notification' });
     }
 };
@@ -13082,7 +13195,6 @@ export const getEmployeePreviousAssets = async (req, res) => {
 
         res.status(200).json({ items: previousAssets });
     } catch (error) {
-        console.error('getEmployeePreviousAssets:', error);
         res.status(500).json({ message: 'Server Error' });
     }
 };

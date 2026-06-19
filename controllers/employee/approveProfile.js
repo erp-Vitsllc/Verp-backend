@@ -18,6 +18,7 @@ import {
     employeeDocumentWasSuperseded,
 } from "../../utils/archiveEmployeeDocument.js";
 import { shouldArchiveEmployeeDocumentOnRenewal } from "../../utils/employeeDocumentRenewal.js";
+import { setContractJoiningDateFromFirstVisa } from "../../utils/contractJoiningDateHelper.js";
 import {
     documentStorageFingerprint,
     purgeEmployeeOldDocuments,
@@ -330,15 +331,6 @@ export const approveProfile = async (req, res) => {
                     { $set: { labourCard: proposedData } },
                     { upsert: true, new: true }
                 );
-                if (proposedData?.issueDate) {
-                    const contractDate = new Date(proposedData.issueDate);
-                    if (!Number.isNaN(contractDate.getTime())) {
-                        await EmployeeBasic.updateOne(
-                            { employeeId },
-                            { $set: { contractJoiningDate: contractDate } },
-                        );
-                    }
-                }
                 continue;
             }
             if (section === "passport") {
@@ -379,6 +371,9 @@ export const approveProfile = async (req, res) => {
                     if (replacedVisaType && replacedVisaType !== visaType) {
                         await EmployeeVisa.updateOne({ employeeId }, { $unset: { [replacedVisaType]: "" } });
                     }
+                    await setContractJoiningDateFromFirstVisa(employeeId, proposedData?.issueDate, {
+                        isRenewal: change?.isRenewal === true,
+                    });
                 }
                 continue;
             }

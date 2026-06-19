@@ -30,7 +30,9 @@
     "mongoose": "^8.20.0",
     "multer": "^2.0.2",
     "nodemailer": "^8.0.4",
+    "pdf-lib": "^1.17.1",
     "pdf-parse": "^2.4.5",
+    "pdfjs-dist": "^4.10.38",
     "puppeteer": "^24.37.1"
   },
   "devDependencies": {

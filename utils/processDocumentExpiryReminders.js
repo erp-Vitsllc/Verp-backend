@@ -9,6 +9,7 @@ import {
     buildEmployeeManualDocumentExpiryLabel,
     isArchivedOrStaleCompanyExpiryRow,
     COMPANY_OWNER_EXPIRY_FIELDS,
+    resolveCompanyCertificateExpiryNavigationMeta,
 } from "./companyExpiryScanUtils.js";
 import EmployeeBasic from "../models/EmployeeBasic.js";
 import EmployeePassport from "../models/EmployeePassport.js";
@@ -422,7 +423,11 @@ const syncCompanyDocumentExpiryDashboard = async (company, canonicalOwnerTargets
                       ownerTabIndex: ownerTabMeta.idx,
                       ownerDocField: ownerTabMeta.fieldKey,
                   })
-                : undefined;
+                : doc.isCertificate && doc.documentRow
+                  ? JSON.stringify(
+                        resolveCompanyCertificateExpiryNavigationMeta(company, doc.documentRow) || {},
+                    )
+                  : undefined;
         await ensureDashboardAction({
             assignedTo: recipients.hr._id,
             assignedToEmpId: recipients.hr.employeeId,

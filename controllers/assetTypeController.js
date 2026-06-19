@@ -78,7 +78,6 @@ export const getAssetTypeRoleMeta = async (req, res) => {
         const canDirectAddAsset = isAssetController;
         res.status(200).json({ isAdmin, isAssetController, canDirectAddAsset });
     } catch (error) {
-        console.error('getAssetTypeRoleMeta:', error);
         res.status(500).json({ message: 'Server Error' });
     }
 };
@@ -103,7 +102,6 @@ const generateGenericId = async (model, prefix, fieldName) => {
         const nextNum = isNaN(numericPart) ? 1 : numericPart + 1;
         return `${prefix}${String(nextNum).padStart(3, '0')}`;
     } catch (error) {
-        console.error(`Error generating ID for ${fieldName}:`, error);
         return `${prefix}001`;
     }
 };
@@ -152,7 +150,6 @@ const generateAccessoryId = (assetId, index) => {
 
 export const createAssetType = async (req, res) => {
     try {
-        console.log('DEBUG: createAssetType body:', req.body);
         let {
             mode, category, type, name, assetValue, purchaseDate, quantity, warranty, warrantyYears, warrantyAttachment, invoiceNumber, imagePreview, description, invoiceFile, accessories,
             vehicleCode, plateNumber, plateEmirate, modelYear, currentKilometer, registrationExpiryDate,
@@ -195,7 +192,6 @@ export const createAssetType = async (req, res) => {
                     const uploadResult = await uploadDocumentToS3(imagePreview, 'asset-photos');
                     imageS3Key = uploadResult.publicId;
                 } catch (error) {
-                    console.error('Error uploading category image to S3:', error);
                 }
             }
 
@@ -224,7 +220,6 @@ export const createAssetType = async (req, res) => {
                     const uploadResult = await uploadDocumentToS3(imagePreview, 'asset-photos');
                     imageS3Key = uploadResult.publicId;
                 } catch (error) {
-                    console.error('Error uploading type image to S3:', error);
                 }
             }
 
@@ -289,9 +284,6 @@ export const createAssetType = async (req, res) => {
             const { initialStatus, actionRequiredBy } = creationResolved;
             const isJwtAdmin = req.user.isAdmin === true || req.user.role === 'Admin' || req.user.role === 'ROOT';
             const isSysAdmin = await isUserAdministrator(req.user?.id);
-            console.log(
-                `[Asset creation] ${initialStatus} by ${req.user.employeeId || req.user?.id || 'user'} (intent=${creationIntent || 'default'})`
-            );
 
             const qty = Math.max(1, Number(quantity) || 1);
             const createdAssets = [];
@@ -318,7 +310,6 @@ export const createAssetType = async (req, res) => {
                     const uploadResult = await uploadDocumentToS3(imagePreview, 'asset-photos');
                     imageS3Key = uploadResult.publicId;
                 } catch (error) {
-                    console.error('Error uploading asset image to S3:', error);
                 }
             }
 
@@ -377,7 +368,6 @@ export const createAssetType = async (req, res) => {
                 try {
                     await syncAllAccessoryInstancesForAsset(newAsset);
                 } catch (syncErr) {
-                    console.error('[createAssetType accessory catalog sync]', syncErr?.message || syncErr);
                 }
 
                 // Create asset creation history entry
@@ -465,7 +455,6 @@ export const createAssetType = async (req, res) => {
                         });
                     }
                 } catch (pdfErr) {
-                    console.error('[createAssetType] Handover PDF failed:', pdfErr?.message || pdfErr);
                     if (isBulkCreation) {
                         return res.status(503).json({
                             message:
@@ -509,7 +498,6 @@ export const createAssetType = async (req, res) => {
         }
 
     } catch (error) {
-        console.error('CRITICAL: createAssetType Failed:', error);
         res.status(500).json({
             message: `Server Error: ${error.message}`,
             error: error.message
@@ -717,11 +705,9 @@ export const getAssetTypes = async (req, res) => {
     } catch (error) {
         const canRetry = attempt < 2 && isTransientMongoError(error);
         if (canRetry) {
-            console.warn(`[getAssetTypes] transient Mongo error, retry ${attempt + 1}/3:`, error.message);
             await new Promise((r) => setTimeout(r, 450 * (attempt + 1)));
             continue;
         }
-        console.error('Error fetching asset entities:', error);
         const transient = isTransientMongoError(error);
         return res.status(transient ? 503 : 500).json({
             message: transient ? 'Database temporarily unavailable. Please try again.' : 'Server Error',
@@ -751,7 +737,6 @@ export const getAssetTypeById = async (req, res) => {
         }
         return res.status(404).json({ message: 'Asset type or category not found' });
     } catch (error) {
-        console.error('Error fetching asset type:', error);
         res.status(500).json({ message: 'Server Error' });
     }
 };
@@ -790,8 +775,8 @@ export const deleteAssetType = async (req, res) => {
             void notifyAdminDeletedAssetTypeOrCategory({
                 kind: 'Category',
                 name: categoryName,
-                performedBy
-            }).catch((e) => console.error('[notify category delete]', e?.message || e));
+                performedBy,
+            });
             await AssetCategory.findByIdAndDelete(id);
             return res.status(200).json({ message: 'Category deleted successfully' });
         }
@@ -819,8 +804,8 @@ export const deleteAssetType = async (req, res) => {
             void notifyAdminDeletedAssetTypeOrCategory({
                 kind: 'Type',
                 name: typeName,
-                performedBy
-            }).catch((e) => console.error('[notify type delete]', e?.message || e));
+                performedBy,
+            });
             await AssetType.findByIdAndDelete(id);
             return res.status(200).json({ message: 'Type deleted successfully' });
         }
@@ -897,7 +882,6 @@ export const deleteAssetType = async (req, res) => {
 
         res.status(404).json({ message: 'Item not found' });
     } catch (error) {
-        console.error('Error deleting asset entity:', error);
         res.status(500).json({ message: 'Server Error', error: error.message, stack: error.stack });
     }
 };
@@ -914,7 +898,6 @@ export const uploadInvoice = async (req, res) => {
         const result = await uploadDocumentToS3(file, 'asset-invoices', fileName);
         res.status(200).json({ url: result.url, publicId: result.publicId });
     } catch (error) {
-        console.error('Invoice Upload Error:', error);
         res.status(500).json({ message: 'Upload failed', error: error.message });
     }
 };
@@ -961,7 +944,6 @@ export const updateAssetItem = async (req, res) => {
                     const uploadResult = await uploadDocumentToS3(img, 'asset-photos');
                     categoryDoc.imagePreview = uploadResult.publicId;
                 } catch (e) {
-                    console.error('Category image upload failed:', e);
                 }
             }
             if (updates.type && typeof updates.type === 'string') {
@@ -990,7 +972,6 @@ export const updateAssetItem = async (req, res) => {
                     const uploadResult = await uploadDocumentToS3(img, 'asset-photos');
                     typeDoc.imagePreview = uploadResult.publicId;
                 } catch (e) {
-                    console.error('Type image upload failed:', e);
                 }
             }
             await typeDoc.save();
@@ -1156,7 +1137,6 @@ export const updateAssetItem = async (req, res) => {
                 );
                 asset.accidentReportAttachment = uploadResult.publicId;
             } catch (uploadErr) {
-                console.error('[updateAssetItem] accident report upload failed:', uploadErr);
                 return res.status(500).json({ message: 'Failed to upload accident report' });
             }
         }
@@ -1333,15 +1313,8 @@ export const updateAssetItem = async (req, res) => {
                                 };
                                 hasNewPending = true;
                             } else if (isAssigned) {
-                                // Admin/AC on assigned asset: holder must approve before Attached.
-                                newAcc.status = 'Pending';
-                                newAcc.pendingAction = 'Add';
-                                newAcc.pendingActionDetails = {
-                                    requestedBy: req.user.employeeObjectId || req.user._id,
-                                    requestedAt: new Date(),
-                                    addApprovalKind: 'Assignee'
-                                };
-                                hasAssigneeAccessoryApproval = true;
+                                // Admin/AC on assigned asset: attach immediately (no assignee approval step).
+                                newAcc.status = 'Attached';
                             } else {
                                 // Unassigned (or no assignee): attach immediately.
                                 newAcc.status = 'Attached';
@@ -1428,7 +1401,6 @@ export const updateAssetItem = async (req, res) => {
                                 });
                             }
                         } catch (err) {
-                            console.error('[AddAccessory Notification] Error:', err);
                         }
                     } else if (hasAssigneeAccessoryApproval && isAssigned) {
                         // Admin/AC added pending lines: assignee must approve (same inbox type as other accessory approvals).
@@ -1507,7 +1479,6 @@ export const updateAssetItem = async (req, res) => {
                                 }).catch(() => { });
                             }
                         } catch (err) {
-                            console.error('[AddAccessory Assignee Approval Flow] Error:', err);
                         }
                     }
                 } else if ((key === 'photo' || key === 'imagePreview') && updates[key] && updates[key].startsWith('data:image')) {
@@ -1516,7 +1487,6 @@ export const updateAssetItem = async (req, res) => {
                         const uploadResult = await uploadDocumentToS3(updates[key], 'asset-photos');
                         asset[key] = uploadResult.publicId;
                     } catch (error) {
-                        console.error(`Error uploading updated ${key} to S3:`, error);
                         asset[key] = updates[key];
                     }
                 } else {
@@ -1562,7 +1532,6 @@ export const updateAssetItem = async (req, res) => {
             }
             await syncAllAccessoryInstancesForAsset(asset);
         } catch (syncErr) {
-            console.error('[updateAssetItem accessory catalog sync]', syncErr?.message || syncErr);
         }
 
         if (adminRemovedAccessoriesForNotify?.length) {
@@ -1579,7 +1548,6 @@ export const updateAssetItem = async (req, res) => {
                 .lean();
             if (assetForEmail) {
                 void notifyAdminRemovedAccessoriesFromAssignedAsset(req, assetForEmail, adminRemovedAccessoriesForNotify).catch(
-                    (e) => console.error('[notify accessory removal]', e?.message || e)
                 );
             }
         }
@@ -1594,7 +1562,6 @@ export const updateAssetItem = async (req, res) => {
                 details: asset.toObject()
             });
         } catch (historyErr) {
-            console.error('History log failed during updateAssetItem:', historyErr);
         }
 
         // Convert to object and sign the invoice URL before returning
@@ -1667,7 +1634,6 @@ export const updateAssetItem = async (req, res) => {
         res.status(200).json(assetObj);
 
     } catch (error) {
-        console.error('Update Asset Error:', error);
         res.status(500).json({ message: 'Update failed', error: error.message });
     }
 };
@@ -1724,7 +1690,6 @@ export const submitAssetForApproval = async (req, res) => {
                     creatorName: requesterDisplayName,
                 });
             } catch (infoErr) {
-                console.error('[submitAssetForApproval] Admin info email failed (non-fatal):', infoErr?.message || infoErr);
             }
         }
 
@@ -1760,7 +1725,6 @@ export const submitAssetForApproval = async (req, res) => {
                         { assigner: requester, assignerName: requesterDisplayName },
                     );
                 } catch (pdfErr) {
-                    console.error('[submitAssetForApproval] PDF attachment failed (non-fatal):', pdfErr?.message || pdfErr);
                 }
                 await sendAssetCreationApprovalEmail({
                     asset,
@@ -1769,13 +1733,11 @@ export const submitAssetForApproval = async (req, res) => {
                     attachments: submitAttachments
                 });
             } catch (err) {
-                console.error('[submitAssetForApproval] Notification error:', err);
             }
         }
 
         return res.status(200).json(asset);
     } catch (error) {
-        console.error('submitAssetForApproval error:', error);
         return res.status(500).json({ message: 'Server Error', error: error.message });
     }
 };

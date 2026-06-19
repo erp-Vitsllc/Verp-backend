@@ -18,3 +18,6 @@ export const BULK_ASSIGNEE_DISPOSITION_PDF_SELECTOR = '#bulk-assignee-dispositio
 
 /** Bulk employee assignment — handover PDF for emails (see generateBulkAssetInventoryPdf.js, buildBulkAssignmentHandoverHtmlDoc). */
 export const BULK_ASSIGNMENT_HANDOVER_PDF_SELECTOR = '#bulk-assignment-handover-pdf[data-bulk-handover-ready="true"]';
+
+/** Employee profile asset list — print/employee-asset-list (same bg as HandoverFormView). */
+export const EMPLOYEE_ASSET_LIST_PDF_SELECTOR = '#employee-asset-list-container[data-asset-list-ready="true"]';

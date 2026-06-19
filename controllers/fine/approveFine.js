@@ -1,6 +1,6 @@
 import Fine from "../../models/Fine.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
-import { sendFineConfirmedEmail } from "../../utils/sendFineConfirmedEmail.js";
+import { dispatchFineApprovedNotification } from "../../utils/dispatchFineApprovedNotification.js";
 import { getManagementHOD } from "../../utils/getManagementHOD.js";
 import { sendHODAuthorizationEmail } from "../../utils/sendHODAuthorizationEmail.js";
 import { sendFineStageEmail } from "../../utils/sendFineStageEmail.js";
@@ -208,6 +208,9 @@ export const approveFine = async (req, res) => {
             if (await canActOnFine()) {
                 // Update ALL siblings
                 for (const f of fines) {
+                    const { snapshotDeductionScheduleOnApproval } = await import('../../utils/fineDeductionScheduleSnapshot.js');
+                    snapshotDeductionScheduleOnApproval(f);
+
                     f.fineStatus = 'Approved';
                     f.approvedBy = req.user._id;
                     f.approvedDate = new Date();
@@ -302,7 +305,7 @@ export const approveFine = async (req, res) => {
 
                 // Combine all employees from all siblings for the email
                 const allAssignedEmployees = fines.flatMap(f => f.assignedEmployees);
-                await sendFineConfirmedEmail(fine, allAssignedEmployees, req);
+                await dispatchFineApprovedNotification(fine, allAssignedEmployees, req);
             } else {
                 return res.status(403).json({ message: "Only the assigned Management approver can approve at this stage." });
             }

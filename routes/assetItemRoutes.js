@@ -30,7 +30,7 @@ import {
     isUserActiveCompanyAssetCoordinator,
     isUserCompanyAssetCoordinator
 } from '../utils/getDepartmentHOD.js';
-import { isUserAdministrator } from '../services/permissionService.js';
+import { isUserAdministrator, hasPermission } from '../services/permissionService.js';
 
 const normEmp = (s) => (s || '').toString().toLowerCase().replace(/\s+/g, '');
 
@@ -71,9 +71,12 @@ const isDesignatedAssetController = async (user) => {
     if (!user) return false;
     if (await isUserInFlowchart(user, 'assetcontroller')) return true;
     const hod = await getDepartmentHOD('assetcontroller');
-    if (!hod) return false;
-    if (hod._id && user.employeeObjectId && hod._id.toString() === user.employeeObjectId.toString()) return true;
-    if (hod.employeeId && user.employeeId && normEmp(hod.employeeId) === normEmp(user.employeeId)) return true;
+    if (hod) {
+        if (hod._id && user.employeeObjectId && hod._id.toString() === user.employeeObjectId.toString()) return true;
+        if (hod.employeeId && user.employeeId && normEmp(hod.employeeId) === normEmp(user.employeeId)) return true;
+    }
+    const uid = user.id || user._id;
+    if (uid && await hasPermission(uid, 'hrm_asset', 'edit')) return true;
     return false;
 };
 
@@ -657,11 +660,9 @@ router.get('/handover-pdf/:id', protect, downloadHandoverPdf);
 router.get('/history-handover-pdf/:historyId', protect, downloadHistoryHandoverPdf);
 router.put('/bulk/assign', protect, requireAssetAssignAccess, bulkAssignAssetItems);
 router.put('/bulk/on-leave-action', protect, requireAssetControllerOrAdmin, (req, res, next) => {
-    console.log('[Route] PUT /bulk/on-leave-action hit. Body:', JSON.stringify(req.body));
     bulkHandleOnLeaveAction(req, res, next);
 });
 router.put('/bulk/on-service-action', protect, requireAssetControllerOrAdmin, (req, res, next) => {
-    console.log('[Route] PUT /bulk/on-service-action hit. Body:', JSON.stringify(req.body));
     bulkHandleOnServiceAction(req, res, next);
 });
 router.put('/:id/assign', protect, requireAssetAssignAccess, assignAssetItem);
@@ -681,11 +682,9 @@ router.post('/:id/respond-vehicle-disposition-hr', protect, respondVehicleDispos
 router.post('/:id/submit-vehicle-disposition-finance', protect, submitVehicleDispositionFinance);
 router.put('/:id/return', protect, requireReturnAssetAccess, returnAssetItem);
 router.put('/:id/on-leave-action', protect, requireParkingAssetAccess, (req, res, next) => {
-    console.log(`[Route] PUT /${req.params.id}/on-leave-action hit`);
     handleOnLeaveAction(req, res, next);
 });
 router.put('/:id/on-service-action', protect, requireAssetControllerOrAdmin, (req, res, next) => {
-    console.log(`[Route] PUT /${req.params.id}/on-service-action hit`);
     handleOnServiceAction(req, res, next);
 });
 router.put('/:id/status', protect, requireAssetFullAccess, updateAssetStatus);

@@ -73,6 +73,7 @@ import { getLoanById } from "../controllers/employee/getLoanById.js";
 import { approveLoan } from "../controllers/employee/approveLoan.js";
 import { updateLoanDetails } from "../controllers/employee/updateLoanDetails.js";
 import { getLoanPdf } from "../controllers/employee/getLoanPdf.js";
+import { downloadEmployeeAssetListPdf } from "../controllers/employee/downloadEmployeeAssetListPdf.js";
 import { deleteLoan } from "../controllers/employee/deleteLoan.js";
 import {
     requestProbationChange,
@@ -297,6 +298,9 @@ router.delete("/loans/:id", deleteLoan); // temporarily open; handler checks rol
 
 // Get specific document - requires view permission
 router.get("/:id/document", checkPermission('hrm_employees_view', 'view'), getEmployeeDocument);
+
+// Employee asset list PDF (Salary tab → Assets)
+router.get("/:id/asset-list/pdf", checkPermission('hrm_employees_view', 'view'), downloadEmployeeAssetListPdf);
 
 // Generic :id routes must come last
 // Get employee by ID - requires view permission

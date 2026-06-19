@@ -6,11 +6,12 @@ import EmployeeBasic from "../models/EmployeeBasic.js";
  * @returns {Promise<Object>} The updated (or original) employee object
  */
 export const checkAndUpdateProbationStatus = async (employee) => {
-    if (!employee || employee.status !== "Probation" || !employee.dateOfJoining) {
+    const probationStart = employee?.contractJoiningDate || employee?.dateOfJoining;
+    if (!employee || employee.status !== "Probation" || !probationStart) {
         return employee;
     }
 
-    const joinDate = new Date(employee.dateOfJoining);
+    const joinDate = new Date(probationStart);
     const probationPeriod = (employee.probationPeriod !== undefined && employee.probationPeriod !== null) ? employee.probationPeriod : 6;
 
     const probationEndDate = new Date(joinDate);

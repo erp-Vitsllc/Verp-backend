@@ -26,7 +26,6 @@ export const updateWorkDetails = async (req, res) => {
             "designation",
             "department",
             "company",
-            "contractJoiningDate",
             "contractExpiryDate",
             "dateOfJoining",
             "companyEmail",
@@ -91,7 +90,6 @@ export const updateWorkDetails = async (req, res) => {
             if (currentStatus === "Left User" && nextStatus === "Probation") {
                 const todayStr = new Date().toISOString().split('T')[0];
                 updatePayload.dateOfJoining = todayStr;
-                updatePayload.contractJoiningDate = todayStr;
                 const reqProbation = updatePayload.probationPeriod !== undefined && updatePayload.probationPeriod !== null
                     ? Number(updatePayload.probationPeriod)
                     : 6;
@@ -123,14 +121,7 @@ export const updateWorkDetails = async (req, res) => {
                 .toLowerCase();
         }
 
-        // Auto-fill contractJoiningDate with dateOfJoining if not provided
-        // This ensures contract joining date always has a value when DOJ is available
-        if (!updatePayload.contractJoiningDate && !employee.contractJoiningDate) {
-            const doj = updatePayload.dateOfJoining || employee.dateOfJoining;
-            if (doj) {
-                updatePayload.contractJoiningDate = doj;
-            }
-        }
+        // Contract joining date is set from the first visa issue date only — not editable here.
 
         // 4. Probation workflow policy:
         // Do NOT auto-promote/revert status in this endpoint.
