@@ -15,7 +15,7 @@ const PAGE_HEIGHT = 934.56;
 const BLACK = rgb(0, 0, 0);
 const LINE = rgb(0, 0, 0);
 
-/** Measured from asset-list-template.pdf */
+/** Measured from asset-list-template.pdf — 6 columns: SL | Asset Name | Accessories | Asset ID | QTY | Value */
 const LAYOUT = {
     infoTable: {
         x: 56,
@@ -27,13 +27,11 @@ const LAYOUT = {
         x: 56,
         width: 483,
         headerTop: 703,
-        headerRowHeight: 11,
         headerHeight: 22,
         firstRowTop: 681,
         defaultRowHeight: 22,
-        accLineHeight: 11,
         bottomLimit: 155,
-        colX: [56, 108, 188, 258, 332, 392, 468, 539],
+        colX: [56, 88, 193, 338, 423, 458, 539],
     },
 };
 
@@ -59,15 +57,136 @@ function formatMoney(value) {
     return n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
-function truncate(text, max = 28) {
-    const s = String(text ?? '—');
-    return s.length > max ? `${s.slice(0, max - 1)}…` : s;
+const CELL_PAD_X = 4;
+const CELL_PAD_Y = 4;
+const LINE_GAP = 2;
+
+function lineHeightForSize(size) {
+    return size + LINE_GAP;
 }
 
-function rowHeightForAsset(row) {
-    const accCount = row.accessories?.length || 0;
-    if (accCount <= 1) return LAYOUT.table.defaultRowHeight;
-    return Math.max(LAYOUT.table.defaultRowHeight, 10 + accCount * LAYOUT.table.accLineHeight);
+function wrapTextToLines(font, text, size, maxWidth) {
+    const raw = String(text ?? '—').trim() || '—';
+    if (maxWidth <= 0) return [raw];
+
+    const lines = [];
+    const words = raw.split(/\s+/).filter(Boolean);
+
+    const pushLongWord = (word) => {
+        let chunk = '';
+        for (const ch of word) {
+            const candidate = chunk + ch;
+            if (font.widthOfTextAtSize(candidate, size) <= maxWidth) {
+                chunk = candidate;
+            } else {
+                if (chunk) lines.push(chunk);
+                chunk = ch;
+            }
+        }
+        if (chunk) lines.push(chunk);
+    };
+
+    let current = '';
+    for (const word of words) {
+        const candidate = current ? `${current} ${word}` : word;
+        if (font.widthOfTextAtSize(candidate, size) <= maxWidth) {
+            current = candidate;
+            continue;
+        }
+        if (current) lines.push(current);
+        if (font.widthOfTextAtSize(word, size) > maxWidth) {
+            pushLongWord(word);
+            current = '';
+        } else {
+            current = word;
+        }
+    }
+    if (current) lines.push(current);
+    return lines.length ? lines : ['—'];
+}
+
+function countWrappedLines(font, text, size, colStart, colEnd) {
+    const maxWidth = colEnd - colStart - CELL_PAD_X * 2;
+    return wrapTextToLines(font, text, size, maxWidth).length;
+}
+
+function cellHeightForLines(lineCount, size, minHeight) {
+    const contentHeight = lineCount * lineHeightForSize(size) + CELL_PAD_Y * 2;
+    return Math.max(minHeight, contentHeight);
+}
+
+function drawWrappedTextInCell(page, font, text, colStart, colEnd, rowTop, rowHeight, { align = 'center', size = 8 } = {}) {
+    const maxWidth = colEnd - colStart - CELL_PAD_X * 2;
+    const lines = wrapTextToLines(font, text, size, maxWidth);
+    const lh = lineHeightForSize(size);
+    const blockHeight = lines.length * lh;
+    let y = rowTop - (rowHeight - blockHeight) / 2 - size;
+
+    for (const line of lines) {
+        const textWidth = font.widthOfTextAtSize(line, size);
+        let x = colStart + CELL_PAD_X;
+        if (align === 'center') x = colStart + (colEnd - colStart - textWidth) / 2;
+        if (align === 'right') x = colEnd - textWidth - CELL_PAD_X;
+        page.drawText(line, { x, y, size, font, color: BLACK });
+        y -= lh;
+    }
+
+    return lines.length;
+}
+
+function countAccessoryListLines(font, accessories, colStart, colEnd) {
+    if (!accessories?.length) {
+        return countWrappedLines(font, 'NO ACC', 7, colStart, colEnd);
+    }
+
+    return accessories.reduce(
+        (total, acc, idx) =>
+            total + countWrappedLines(font, `${idx + 1}. ${acc.name}`, 7, colStart, colEnd),
+        0,
+    );
+}
+
+function drawAccessoryListInCell(page, font, accessories, colStart, colEnd, rowTop, rowHeight) {
+    const size = 7;
+    const maxWidth = colEnd - colStart - CELL_PAD_X * 2;
+    const lh = lineHeightForSize(size);
+
+    if (!accessories?.length) {
+        drawWrappedTextInCell(page, font, 'NO ACC', colStart, colEnd, rowTop, rowHeight, { align: 'left', size });
+        return;
+    }
+
+    const lines = accessories.flatMap((acc, idx) =>
+        wrapTextToLines(font, `${idx + 1}. ${acc.name}`, size, maxWidth),
+    );
+    const blockHeight = lines.length * lh;
+    let y = rowTop - (rowHeight - blockHeight) / 2 - size;
+
+    for (const line of lines) {
+        page.drawText(line, { x: colStart + CELL_PAD_X, y, size, font, color: BLACK });
+        y -= lh;
+    }
+}
+
+function rowHeightForAsset(row, font) {
+    const { colX, defaultRowHeight } = LAYOUT.table;
+
+    const slLines = 1;
+    const nameLines = countWrappedLines(font, row.name, 8, colX[1], colX[2]);
+    const accLines = countAccessoryListLines(font, row.accessories, colX[2], colX[3]);
+    const assetIdLines = countWrappedLines(font, row.assetId, 8, colX[3], colX[4]);
+    const qtyLines = countWrappedLines(font, String(row.quantity ?? 1), 8, colX[4], colX[5]);
+    const valueLines = countWrappedLines(font, formatMoney(row.totalValue), 8, colX[5], colX[6]);
+
+    return Math.max(
+        defaultRowHeight,
+        cellHeightForLines(slLines, 8, defaultRowHeight),
+        cellHeightForLines(nameLines, 8, defaultRowHeight),
+        cellHeightForLines(accLines, 7, defaultRowHeight),
+        cellHeightForLines(assetIdLines, 8, defaultRowHeight),
+        cellHeightForLines(qtyLines, 8, defaultRowHeight),
+        cellHeightForLines(valueLines, 8, defaultRowHeight),
+    );
 }
 
 function drawLine(page, x1, y1, x2, y2, thickness = 0.75) {
@@ -84,17 +203,6 @@ function drawRectBorder(page, x, y, width, height) {
     drawLine(page, x, y - height, x + width, y - height);
     drawLine(page, x, y, x, y - height);
     drawLine(page, x + width, y, x + width, y - height);
-}
-
-function drawTextInCell(page, font, text, colStart, colEnd, rowTop, rowHeight, { align = 'center', size = 8, dy = 7 } = {}) {
-    const value = truncate(text, align === 'left' ? 34 : 22);
-    const textWidth = font.widthOfTextAtSize(value, size);
-    const cellWidth = colEnd - colStart;
-    let x = colStart + 4;
-    if (align === 'center') x = colStart + (cellWidth - textWidth) / 2;
-    if (align === 'right') x = colEnd - textWidth - 4;
-    const y = rowTop - rowHeight + dy;
-    page.drawText(value, { x, y, size, font, color: BLACK });
 }
 
 async function embedBackground(outputDoc) {
@@ -116,54 +224,65 @@ function drawPageBackground(page, image) {
 }
 
 function drawInfoTable(page, font, fontBold, header) {
-    const { x, yTop, width, rowHeight } = LAYOUT.infoTable;
-    const row1Top = yTop;
-    const row2Top = yTop - rowHeight;
+    const { x, yTop, width } = LAYOUT.infoTable;
+    const minRowHeight = LAYOUT.infoTable.rowHeight;
     const colW = width / 3;
     const colX = [x, x + colW, x + colW * 2, x + width];
-
-    drawRectBorder(page, x, row1Top, width, rowHeight * 2);
-    drawLine(page, x, row2Top, x + width, row2Top);
-    drawLine(page, colX[1], row1Top, colX[1], row1Top - rowHeight * 2);
-    drawLine(page, colX[2], row1Top, colX[2], row1Top - rowHeight * 2);
 
     const headers = ['Employee Name', 'HOD Name', 'Date'];
     const values = [header.employeeName, header.hodName, header.date];
 
+    const row1Height = Math.max(
+        minRowHeight,
+        ...headers.map((label, i) =>
+            cellHeightForLines(countWrappedLines(fontBold, label, 8, colX[i], colX[i + 1]), 8, minRowHeight),
+        ),
+    );
+    const row2Height = Math.max(
+        minRowHeight,
+        ...values.map((value, i) =>
+            cellHeightForLines(countWrappedLines(font, value, 9, colX[i], colX[i + 1]), 9, minRowHeight),
+        ),
+    );
+
+    const row1Top = yTop;
+    const row2Top = yTop - row1Height;
+    const totalHeight = row1Height + row2Height;
+
+    drawRectBorder(page, x, row1Top, width, totalHeight);
+    drawLine(page, x, row2Top, x + width, row2Top);
+    drawLine(page, colX[1], row1Top, colX[1], row1Top - totalHeight);
+    drawLine(page, colX[2], row1Top, colX[2], row1Top - totalHeight);
+
     headers.forEach((label, i) => {
-        drawTextInCell(page, fontBold, label, colX[i], colX[i + 1], row1Top, rowHeight, { size: 8 });
+        drawWrappedTextInCell(page, fontBold, label, colX[i], colX[i + 1], row1Top, row1Height, { size: 8 });
     });
     values.forEach((value, i) => {
-        drawTextInCell(page, font, value, colX[i], colX[i + 1], row2Top, rowHeight, { size: 9 });
+        drawWrappedTextInCell(page, font, value, colX[i], colX[i + 1], row2Top, row2Height, { size: 9 });
     });
 }
 
 function drawTableHeader(page, fontBold) {
-    const { x, width, headerTop, headerRowHeight, headerHeight, colX } = LAYOUT.table;
+    const { x, width, headerTop, headerHeight, colX } = LAYOUT.table;
     const headerBottom = headerTop - headerHeight;
-    const subRowY = headerTop - headerRowHeight;
 
     drawRectBorder(page, x, headerTop, width, headerHeight);
 
-    // Vertical dividers for Sl.no → Status span full header height (rowspan 2).
     for (let i = 1; i <= 5; i += 1) {
         drawLine(page, colX[i], headerTop, colX[i], headerBottom);
     }
 
-    // Accessories area: horizontal split + Name | Price divider on sub-row only.
-    drawLine(page, colX[5], subRowY, colX[7], subRowY);
-    drawLine(page, colX[6], subRowY, colX[6], headerBottom);
-
-    const mainLabels = [
-        { text: 'Sl.no', col: 0 },
+    const labels = [
+        { text: 'SL', col: 0 },
         { text: 'Asset Name', col: 1 },
-        { text: 'Value (AED)', col: 2 },
-        { text: 'Assigned Date', col: 3 },
-        { text: 'Status', col: 4 },
+        { text: 'Accessories', col: 2 },
+        { text: 'Asset ID', col: 3 },
+        { text: 'QTY', col: 4 },
+        { text: 'Value (AED)', col: 5 },
     ];
 
-    for (const label of mainLabels) {
-        drawTextInCell(
+    for (const label of labels) {
+        drawWrappedTextInCell(
             page,
             fontBold,
             label.text,
@@ -171,62 +290,26 @@ function drawTableHeader(page, fontBold) {
             colX[label.col + 1],
             headerTop,
             headerHeight,
-            { size: 7, dy: 8 },
+            { size: 7 },
         );
     }
-
-    drawTextInCell(page, fontBold, 'Accessories', colX[5], colX[7], headerTop, headerRowHeight, { size: 7, dy: 3 });
-    drawTextInCell(page, fontBold, 'Name', colX[5], colX[6], subRowY, headerRowHeight, { size: 7, dy: 3 });
-    drawTextInCell(page, fontBold, 'Price (AED)', colX[6], colX[7], subRowY, headerRowHeight, { size: 7, dy: 3 });
 }
 
 function drawAssetRow(page, font, row, rowTop, rowHeight) {
     const { colX } = LAYOUT.table;
-    const hasAcc = (row.accessories?.length || 0) > 0;
 
     drawRectBorder(page, colX[0], rowTop, colX[colX.length - 1] - colX[0], rowHeight);
 
-    // Main columns + accessories outer border; split Name/Price only when accessories exist.
     for (let i = 1; i <= 5; i += 1) {
         drawLine(page, colX[i], rowTop, colX[i], rowTop - rowHeight);
     }
-    if (hasAcc) {
-        drawLine(page, colX[6], rowTop, colX[6], rowTop - rowHeight);
-    }
 
-    drawTextInCell(page, font, String(row.index + 1), colX[0], colX[1], rowTop, rowHeight);
-    drawTextInCell(page, font, row.name, colX[1], colX[2], rowTop, rowHeight, { align: 'left' });
-    drawTextInCell(page, font, formatMoney(row.value), colX[2], colX[3], rowTop, rowHeight);
-    drawTextInCell(page, font, formatAssetListDate(row.assignedDate), colX[3], colX[4], rowTop, rowHeight);
-    drawTextInCell(page, font, row.status, colX[4], colX[5], rowTop, rowHeight);
-
-    if (!hasAcc) {
-        drawTextInCell(page, font, 'NO ACC', colX[5], colX[7], rowTop, rowHeight, { size: 8 });
-    } else {
-        row.accessories.forEach((acc, idx) => {
-            const lineTop = rowTop - idx * LAYOUT.table.accLineHeight;
-            drawTextInCell(
-                page,
-                font,
-                `${idx + 1}. ${acc.name}`,
-                colX[5],
-                colX[6],
-                lineTop,
-                LAYOUT.table.accLineHeight + 2,
-                { align: 'left', size: 7, dy: 3 },
-            );
-            drawTextInCell(
-                page,
-                font,
-                formatMoney(acc.price),
-                colX[6],
-                colX[7],
-                lineTop,
-                LAYOUT.table.accLineHeight + 2,
-                { size: 7, dy: 3 },
-            );
-        });
-    }
+    drawWrappedTextInCell(page, font, String(row.index + 1), colX[0], colX[1], rowTop, rowHeight);
+    drawWrappedTextInCell(page, font, row.name, colX[1], colX[2], rowTop, rowHeight, { align: 'left' });
+    drawAccessoryListInCell(page, font, row.accessories, colX[2], colX[3], rowTop, rowHeight);
+    drawWrappedTextInCell(page, font, row.assetId, colX[3], colX[4], rowTop, rowHeight);
+    drawWrappedTextInCell(page, font, String(row.quantity ?? 1), colX[4], colX[5], rowTop, rowHeight);
+    drawWrappedTextInCell(page, font, formatMoney(row.totalValue), colX[5], colX[6], rowTop, rowHeight);
 }
 
 function drawTotalRow(page, fontBold, rowTop, total) {
@@ -235,30 +318,28 @@ function drawTotalRow(page, fontBold, rowTop, total) {
     const tableWidth = colX[colX.length - 1] - colX[0];
 
     drawRectBorder(page, colX[0], rowTop, tableWidth, rowHeight);
-    // Sl.no + Asset Name merged | Value | remaining columns merged
-    drawLine(page, colX[2], rowTop, colX[2], rowTop - rowHeight);
-    drawLine(page, colX[3], rowTop, colX[3], rowTop - rowHeight);
+    drawLine(page, colX[5], rowTop, colX[5], rowTop - rowHeight);
 
     const totalLabel = 'Total';
     const labelWidth = fontBold.widthOfTextAtSize(totalLabel, 8);
     page.drawText(totalLabel, {
-        x: colX[2] - labelWidth - 8,
+        x: colX[5] - labelWidth - 8,
         y: rowTop - rowHeight + 6,
         size: 8,
         font: fontBold,
         color: BLACK,
     });
-    drawTextInCell(page, fontBold, formatMoney(total), colX[2], colX[3], rowTop, rowHeight);
+    drawWrappedTextInCell(page, fontBold, formatMoney(total), colX[5], colX[6], rowTop, rowHeight);
 }
 
-function paginateRows(listRows) {
+function paginateRows(listRows, font) {
     const pages = [];
     let current = [];
     let y = LAYOUT.table.firstRowTop;
 
     for (let i = 0; i < listRows.length; i += 1) {
         const row = { ...listRows[i], index: i };
-        const h = rowHeightForAsset(row);
+        const h = rowHeightForAsset(row, font);
         const needsTotal = i === listRows.length - 1;
         const totalSpace = needsTotal ? 18 : 0;
         if (y - h - totalSpace < LAYOUT.table.bottomLimit) {
@@ -291,12 +372,9 @@ export async function generateEmployeeAssetListFromTemplatePdf({ employee, asset
             hodName: resolveHodName(employee),
         };
 
-        const total = listRows.reduce((sum, row) => {
-            const accTotal = (row.accessories || []).reduce((s, acc) => s + (Number(acc.price) || 0), 0);
-            return sum + (Number(row.value) || 0) + accTotal;
-        }, 0);
+        const total = listRows.reduce((sum, row) => sum + (Number(row.totalValue) || 0), 0);
 
-        const pages = paginateRows(listRows);
+        const pages = paginateRows(listRows, font);
 
         pages.forEach((pageRows, pageIndex) => {
             const page = outputDoc.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
@@ -319,7 +397,14 @@ export async function generateEmployeeAssetListFromTemplatePdf({ employee, asset
                 drawAssetRow(
                     page,
                     font,
-                    { index: 0, name: 'No assets assigned', value: 0, assignedDate: null, status: '—', accessories: [] },
+                    {
+                        index: 0,
+                        name: 'No assets assigned',
+                        assetId: '—',
+                        quantity: 0,
+                        totalValue: 0,
+                        accessories: [],
+                    },
                     rowTop,
                     rowHeight,
                 );

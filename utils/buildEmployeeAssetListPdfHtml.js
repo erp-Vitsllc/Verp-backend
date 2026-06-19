@@ -80,9 +80,17 @@ export function buildEmployeeAssetListRows(assets) {
             price: Number(acc.amount) || 0,
         }));
 
+        const assetValue = Number(asset.assetValue) || 0;
+        const accessoryTotal = accessories.reduce((sum, acc) => sum + (Number(acc.price) || 0), 0);
+        const quantity = Number(asset.quantity);
+        const qty = Number.isFinite(quantity) && quantity > 0 ? quantity : 1;
+
         rows.push({
             name: asset.name || '—',
-            value: Number(asset.assetValue) || 0,
+            assetId: asset.assetId || '—',
+            quantity: qty,
+            value: assetValue,
+            totalValue: assetValue + accessoryTotal,
             assignedDate,
             status: asset.status || 'Assigned',
             accessories,

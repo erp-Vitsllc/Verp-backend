@@ -6362,6 +6362,14 @@ const syncPendingAssignmentDashboardRowsForUser = async (relevantIds, targetEmpl
             ? `${assigner.firstName || 'System'} ${assigner.lastName || ''}`.trim()
             : 'System';
 
+        const existingRow = await DashboardAction.findOne({
+            requestId: item._id,
+            requestType: 'Asset Assignment',
+        })
+            .select('status')
+            .lean();
+        if (existingRow?.status === 'Dismissed') continue;
+
         await DashboardAction.findOneAndUpdate(
             { requestId: item._id, requestType: 'Asset Assignment' },
             {
@@ -13096,6 +13104,11 @@ export const deletePendingAssetDashboardInboxItem = async (req, res) => {
             return res.status(400).json({ message: 'Invalid notification id' });
         }
 
+        const isAdminUser =
+            currentUser?.isAdmin === true ||
+            currentUser?.role === 'Admin' ||
+            currentUser?.role === 'ROOT';
+
         const manager = await EmployeeBasic.findOne({
             $or: [
                 ...(currentUser.employeeObjectId ? [{ _id: currentUser.employeeObjectId }] : []),
@@ -13108,6 +13121,9 @@ export const deletePendingAssetDashboardInboxItem = async (req, res) => {
 
         const da = await DashboardAction.findById(id);
         if (!da) return res.status(404).json({ message: 'Notification not found' });
+        if (da.status === 'Dismissed') {
+            return res.status(200).json({ message: 'Notification removed' });
+        }
         if (da.status !== 'Pending') {
             let meta = null;
             try {
@@ -13137,11 +13153,22 @@ export const deletePendingAssetDashboardInboxItem = async (req, res) => {
             assigneeOk =
                 String(da.assignedToEmpId).trim().toLowerCase() === String(targetEmployeeId).trim().toLowerCase();
         }
-        if (!assigneeOk) {
+        if (!assigneeOk && !isAdminUser) {
             return res.status(403).json({ message: 'You can only remove notifications assigned to you' });
         }
 
-        await DashboardAction.findByIdAndDelete(id);
+        const actionedBy = manager?._id || currentUser.employeeObjectId || currentUser._id || null;
+        await DashboardAction.findByIdAndUpdate(id, {
+            $set: {
+                status: 'Dismissed',
+                actionedDate: new Date(),
+                actionedBy,
+                comment:
+                    isAdminUser && !assigneeOk
+                        ? 'Dismissed by administrator'
+                        : 'Dismissed from inbox',
+            },
+        });
         res.status(200).json({ message: 'Notification removed' });
     } catch (error) {
         res.status(500).json({ message: 'Failed to remove notification' });

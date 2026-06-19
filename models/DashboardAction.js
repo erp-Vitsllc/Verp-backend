@@ -11,7 +11,7 @@ const dashboardActionSchema = new mongoose.Schema({
     },
     status: {
         type: String,
-        enum: ['Pending', 'Approved', 'Rejected', 'On Hold'],
+        enum: ['Pending', 'Approved', 'Rejected', 'On Hold', 'Dismissed'],
         default: 'Pending'
     },
     subjectEmployeeId: { type: String }, // The employee the request is ABOUT (e.g. VITS002)

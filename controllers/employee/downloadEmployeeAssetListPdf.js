@@ -16,7 +16,7 @@ async function loadEmployeeHeldAssets(employeeObjectId) {
             { assignedBy: employeeObjectId, status: 'Returned' },
         ],
     })
-        .select('name assetId assetValue status assignedDate updatedAt accessories acceptanceStatus')
+        .select('name assetId assetValue quantity status assignedDate updatedAt accessories acceptanceStatus')
         .sort({ assignedDate: -1, updatedAt: -1 })
         .lean();
 }
