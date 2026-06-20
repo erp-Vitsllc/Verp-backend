@@ -376,8 +376,8 @@ const notifyAssignedEmployeeIfController = async (
             req.user?.employeeId && !String(req.user.employeeId).match(/^\d+$/)
                 ? req.user.employeeId
                 : `${req.user?.firstName || ''} ${req.user?.lastName || ''}`.trim() ||
-                  req.user?.name ||
-                  'Asset Controller';
+                req.user?.name ||
+                'Asset Controller';
 
         await sendAssignedEmployeeActionEmail({
             asset: assetDoc,
@@ -464,9 +464,9 @@ const buildAssetActionApprovalHandoverAttachments = async (req, assets) => {
     const primary = list[0];
     const requester = req.user?.employeeObjectId
         ? await EmployeeBasic.findById(req.user.employeeObjectId)
-              .select('firstName lastName employeeId signature department')
-              .lean()
-              .catch(() => null)
+            .select('firstName lastName employeeId signature department')
+            .lean()
+            .catch(() => null)
         : null;
     const assignerDisplay =
         `${requester?.firstName || ''} ${requester?.lastName || ''}`.trim() ||
@@ -475,16 +475,16 @@ const buildAssetActionApprovalHandoverAttachments = async (req, assets) => {
 
     if (primary.assignedToType === 'Company' && primary.assignedCompany) {
         const comp = await Company.findById(primary.assignedCompany).select('name companyId').lean();
-    return buildAssignmentHandoverEmailAttachments(req, ids, {
-        ...buildPendingRequestHandoverCtx({
+        return buildAssignmentHandoverEmailAttachments(req, ids, {
+            ...buildPendingRequestHandoverCtx({
+                assigner: requester,
+                assignerName: assignerDisplay,
+                assigneeName: comp?.name || 'Company',
+                employeeCode: comp?.companyId || '—',
+            }),
             assigner: requester,
-            assignerName: assignerDisplay,
-            assigneeName: comp?.name || 'Company',
-            employeeCode: comp?.companyId || '—',
-        }),
-        assigner: requester,
-        filenameBase: `asset-action-request-${ids.length}-handover`,
-    });
+            filenameBase: `asset-action-request-${ids.length}-handover`,
+        });
     }
 
     let assignee = primary.assignedTo;
@@ -551,24 +551,49 @@ const detachAccessoryFromAssetToCatalog = async (asset, accIndex, req, { comment
     const accToMove = asset.accessories[accIndex].toObject?.() || asset.accessories[accIndex];
     asset.accessories.splice(accIndex, 1);
 
-    const catalogId = await generateAccessoryCatalogId();
-    await AssetAccessoryCatalog.create({
-        recordType: 'catalog',
-        accessoryCatalogId: catalogId,
-        name: accToMove.name,
-        price: accToMove.amount || 0,
-        description: accToMove.description || '',
-        status: catalogStatus,
-        isActive: catalogStatus === 'Unattached',
-        history: [{
+    let catalogId = accToMove.accessoryId;
+    let catalogRow = null;
+    if (catalogId) {
+        catalogRow = await AssetAccessoryCatalog.findOne({
+            recordType: 'catalog',
+            accessoryCatalogId: catalogId
+        });
+    }
+
+    if (catalogRow) {
+        catalogRow.status = catalogStatus;
+        catalogRow.isActive = catalogStatus === 'Unattached';
+        catalogRow.assetItemId = null;
+        catalogRow.assetIdRef = '';
+        catalogRow.history.push({
             at: new Date(),
             action: 'unattached',
             message: comment || `Returned to catalog from asset ${asset.assetId} — ${asset.name}`,
             assetId: asset.assetId,
             assetName: asset.name,
             assetObjectId: asset._id,
-        }],
-    });
+        });
+        await catalogRow.save();
+    } else {
+        catalogId = catalogId || (await generateAccessoryCatalogId());
+        await AssetAccessoryCatalog.create({
+            recordType: 'catalog',
+            accessoryCatalogId: catalogId,
+            name: accToMove.name,
+            price: accToMove.amount || 0,
+            description: accToMove.description || '',
+            status: catalogStatus,
+            isActive: catalogStatus === 'Unattached',
+            history: [{
+                at: new Date(),
+                action: 'unattached',
+                message: comment || `Returned to catalog from asset ${asset.assetId} — ${asset.name}`,
+                assetId: asset.assetId,
+                assetName: asset.name,
+                assetObjectId: asset._id,
+            }],
+        });
+    }
 
     await AssetHistory.create({
         assetId: asset._id,
@@ -2864,8 +2889,8 @@ export const createAssetItem = async (req, res) => {
             try {
                 const requester = req.user.employeeObjectId
                     ? await EmployeeBasic.findById(req.user.employeeObjectId)
-                          .select('firstName lastName signature employeeId department')
-                          .lean()
+                        .select('firstName lastName signature employeeId department')
+                        .lean()
                     : null;
                 creationAttachments = await buildCreationRequestHandoverAttachments(
                     req,
@@ -3631,14 +3656,14 @@ export const getAssetItemDetail = async (req, res) => {
                     typeof item.assignedTo === 'object' && item.assignedTo.employeeId
                         ? item.assignedTo
                         : await EmployeeBasic.findById(item.assignedTo._id || item.assignedTo)
-                              .select(
-                                  'employeeId firstName lastName companyEmail primaryReportee enablePortalAccess',
-                              )
-                              .populate({
-                                  path: 'primaryReportee',
-                                  select: '_id firstName lastName employeeId companyEmail',
-                              })
-                              .lean();
+                            .select(
+                                'employeeId firstName lastName companyEmail primaryReportee enablePortalAccess',
+                            )
+                            .populate({
+                                path: 'primaryReportee',
+                                select: '_id firstName lastName employeeId companyEmail',
+                            })
+                            .lean();
                 const assignerRef = item.assignedBy?._id || item.assignedBy;
                 const resolved = resolveEmployeeAssignmentActors(assigneeDoc, assignerRef);
                 if (!resolved.autoAcceptOnAssign && resolved.pendingActionActorId) {
@@ -4288,7 +4313,7 @@ export const assignAssetItem = async (req, res) => {
                 employeeToAssign.primaryReportee &&
                 (!actionRecipientDoc?.employeeId ||
                     String(actionRecipientDoc._id || actionRecipientDoc) !==
-                        String(resolvedActors.pendingActionActorId))
+                    String(resolvedActors.pendingActionActorId))
             ) {
                 actionRecipientDoc = await EmployeeBasic.findById(resolvedActors.pendingActionActorId)
                     .select(
@@ -4422,20 +4447,20 @@ export const assignAssetItem = async (req, res) => {
                 const handoverPdfCtx =
                     item.acceptanceStatus === 'Accepted'
                         ? buildFullySignedHandoverCtx({
-                              assigner,
-                              assignee: employeeToAssign,
-                              assigneeName: subjectName,
-                              employeeCode: codeDisplay,
-                              department: deptDisplay,
-                              hodName: hodDisplay,
-                          })
+                            assigner,
+                            assignee: employeeToAssign,
+                            assigneeName: subjectName,
+                            employeeCode: codeDisplay,
+                            department: deptDisplay,
+                            hodName: hodDisplay,
+                        })
                         : buildPendingRequestHandoverCtx({
-                              assigner,
-                              assigneeName: subjectName,
-                              employeeCode: codeDisplay,
-                              department: deptDisplay,
-                              hodName: hodDisplay,
-                          });
+                            assigner,
+                            assigneeName: subjectName,
+                            employeeCode: codeDisplay,
+                            department: deptDisplay,
+                            hodName: hodDisplay,
+                        });
                 assignAttachments = await buildAssignmentHandoverEmailAttachments(req, [item._id.toString()], {
                     ...handoverPdfCtx,
                     assigner,
@@ -4734,20 +4759,20 @@ export const bulkAssignAssetItems = async (req, res) => {
                     : '—';
             const bulkHandoverPdfCtx = autoAcceptOnAssign
                 ? buildFullySignedHandoverCtx({
-                      assigner,
-                      assignee: employeeToAssign,
-                      assigneeName: empName,
-                      employeeCode: employeeToAssign.employeeId || '—',
-                      department: (employeeToAssign.department && String(employeeToAssign.department).trim()) || '—',
-                      hodName: hodDisplay,
-                  })
+                    assigner,
+                    assignee: employeeToAssign,
+                    assigneeName: empName,
+                    employeeCode: employeeToAssign.employeeId || '—',
+                    department: (employeeToAssign.department && String(employeeToAssign.department).trim()) || '—',
+                    hodName: hodDisplay,
+                })
                 : buildPendingRequestHandoverCtx({
-                      assigner,
-                      assigneeName: empName,
-                      employeeCode: employeeToAssign.employeeId || '—',
-                      department: (employeeToAssign.department && String(employeeToAssign.department).trim()) || '—',
-                      hodName: hodDisplay,
-                  });
+                    assigner,
+                    assigneeName: empName,
+                    employeeCode: employeeToAssign.employeeId || '—',
+                    department: (employeeToAssign.department && String(employeeToAssign.department).trim()) || '—',
+                    hodName: hodDisplay,
+                });
             bulkAssignmentAttachments = await buildAssignmentHandoverEmailAttachments(
                 req,
                 assetIdStrings,
@@ -9470,8 +9495,8 @@ export const handleAssetActionApproval = async (req, res) => {
                     .lean();
             }
 
-            const requesterName = requestedByEmp 
-                ? `${requestedByEmp.firstName} ${requestedByEmp.lastName}` 
+            const requesterName = requestedByEmp
+                ? `${requestedByEmp.firstName} ${requestedByEmp.lastName}`
                 : 'Asset Owner';
 
             const assetOwnerEmp = asset.assignedTo;
@@ -9577,7 +9602,7 @@ export const handleAssetActionApproval = async (req, res) => {
 
                 } else if (stage === 'pending_management') {
                     const finalStatus = 'End of Life';
-                    
+
                     asset.status = finalStatus;
                     asset.assignedTo = null;
                     asset.assignedCompany = null;
@@ -9732,10 +9757,10 @@ export const handleAssetActionApproval = async (req, res) => {
         const isAuthorized = isTransferLeaveEos
             ? isDesignatedApprover || isAdmin
             : asset.actionRequiredBy?.toString() === currentUserEmpId
-                || isAdmin
-                || isAssetController
-                || (actionType === 'Loss and Damage' && isHR && !isCompanyAsset)
-                || (actionType === 'Loss and Damage' && isCompanyAsset && isCompanyCoordinatorUser);
+            || isAdmin
+            || isAssetController
+            || (actionType === 'Loss and Damage' && isHR && !isCompanyAsset)
+            || (actionType === 'Loss and Damage' && isCompanyAsset && isCompanyCoordinatorUser);
 
         const transferRequestMeta = isTransferLeaveEos
             ? {
@@ -10210,220 +10235,246 @@ export const handleAssetActionApproval = async (req, res) => {
                     .lean();
 
                 void (async () => {
-                // Send success emails to Asset Controller and assigned users (non-blocking)
-                try {
-                    const { sendAssetActionApprovedEmail, sendAssetBulkActionApprovedEmail } = await import('../utils/sendAssetActionApprovedEmail.js');
-                    const { sendAssetTransferSuccessEmail } = await import('../utils/sendAssetTransferSuccessEmail.js');
+                    // Send success emails to Asset Controller and assigned users (non-blocking)
+                    try {
+                        const { sendAssetActionApprovedEmail, sendAssetBulkActionApprovedEmail } = await import('../utils/sendAssetActionApprovedEmail.js');
+                        const { sendAssetTransferSuccessEmail } = await import('../utils/sendAssetTransferSuccessEmail.js');
 
-                    if (isBulkTransfer && approve && allBulkIdStrs.length > 0) {
-                        const processedIdSet = new Set(processedAssets.map((a) => a._id.toString()));
-                        const rejectedSet = new Set(rejectedFromBulk.map(String));
-                        const fullRows = bulkEmailSnapshots.length
-                            ? bulkEmailSnapshots
-                            : await AssetItem.find({ _id: { $in: allBulkIdStrs } })
-                                .populate('assignedTo')
-                                .populate('assignedCompany')
-                                .lean();
-                        const byAssignee = new Map();
-                        for (const row of fullRows) {
-                            if (row.assignedToType === 'Company') continue;
-                            const aid = row.assignedTo?._id?.toString() || row.assignedTo?.toString();
-                            if (!aid) continue;
-                            if (!byAssignee.has(aid)) byAssignee.set(aid, []);
-                            byAssignee.get(aid).push(row);
-                        }
-                        const approverName = assetControllerEmp
-                            ? `${assetControllerEmp.firstName || ''} ${assetControllerEmp.lastName || ''}`.trim()
-                            : 'Asset Controller';
-                        const actLabel =
-                            actionType === 'Return Asset'
-                                ? 'return to store'
-                                : actionType === 'Leave'
-                                    ? 'leave / parking transfer'
-                                    : 'end of life / services';
+                        if (isBulkTransfer && approve && allBulkIdStrs.length > 0) {
+                            const processedIdSet = new Set(processedAssets.map((a) => a._id.toString()));
+                            const rejectedSet = new Set(rejectedFromBulk.map(String));
+                            const fullRows = bulkEmailSnapshots.length
+                                ? bulkEmailSnapshots
+                                : await AssetItem.find({ _id: { $in: allBulkIdStrs } })
+                                    .populate('assignedTo')
+                                    .populate('assignedCompany')
+                                    .lean();
+                            const byAssignee = new Map();
+                            for (const row of fullRows) {
+                                if (row.assignedToType === 'Company') continue;
+                                const aid = row.assignedTo?._id?.toString() || row.assignedTo?.toString();
+                                if (!aid) continue;
+                                if (!byAssignee.has(aid)) byAssignee.set(aid, []);
+                                byAssignee.get(aid).push(row);
+                            }
+                            const approverName = assetControllerEmp
+                                ? `${assetControllerEmp.firstName || ''} ${assetControllerEmp.lastName || ''}`.trim()
+                                : 'Asset Controller';
+                            const actLabel =
+                                actionType === 'Return Asset'
+                                    ? 'return to store'
+                                    : actionType === 'Leave'
+                                        ? 'leave / parking transfer'
+                                        : 'end of life / services';
 
-                        for (const [assigneeId, rows] of byAssignee) {
-                            const allIdsForEmp = rows.map((r) => r._id.toString());
-                            const processedForEmp = allIdsForEmp.filter((id) => processedIdSet.has(id));
-                            const rejectedForEmp = allIdsForEmp.filter((id) => rejectedSet.has(id));
-                            if (!processedForEmp.length && !rejectedForEmp.length) continue;
-                            const employee = await EmployeeBasic.findById(assigneeId)
-                                .select(
-                                    'firstName lastName employeeId companyEmail workEmail department signature primaryReportee',
-                                )
-                                .populate('primaryReportee', 'firstName lastName companyEmail workEmail')
-                                .lean();
-                            if (!employee) continue;
-                            let att = [];
-                            if (processedForEmp.length) {
+                            for (const [assigneeId, rows] of byAssignee) {
+                                const allIdsForEmp = rows.map((r) => r._id.toString());
+                                const processedForEmp = allIdsForEmp.filter((id) => processedIdSet.has(id));
+                                const rejectedForEmp = allIdsForEmp.filter((id) => rejectedSet.has(id));
+                                if (!processedForEmp.length && !rejectedForEmp.length) continue;
+                                const employee = await EmployeeBasic.findById(assigneeId)
+                                    .select(
+                                        'firstName lastName employeeId companyEmail workEmail department signature primaryReportee',
+                                    )
+                                    .populate('primaryReportee', 'firstName lastName companyEmail workEmail')
+                                    .lean();
+                                if (!employee) continue;
+                                let att = [];
+                                if (processedForEmp.length) {
+                                    try {
+                                        att = await buildBulkActionHandoverEmailAttachments(req, processedForEmp, {
+                                            assigner: assetControllerEmp,
+                                            assignee: employee,
+                                            filenameBase: 'bulk-ac-approved-handover',
+                                        });
+                                    } catch (e) {
+                                        /* non-fatal */
+                                    }
+                                }
+                                await sendAssetBulkDispositionResultEmail({
+                                    employee,
+                                    reportee: employee.primaryReportee,
+                                    approverName,
+                                    subjectLine: `Bulk ${actionType} — ${processedForEmp.length} processed, ${rejectedForEmp.length} unchanged`,
+                                    introHtml: `<p>Your bulk <strong>${actLabel}</strong> request was reviewed by the Asset Controller.</p>
+                                    <p><strong>${processedForEmp.length}</strong> asset(s) were updated. <strong>${rejectedForEmp.length}</strong> asset(s) were not changed and remain assigned to you.</p>`,
+                                    attachments: att
+                                });
+                            }
+
+                            if (assetControllerEmp) {
+                                let acPdf = [];
                                 try {
-                                    att = await buildBulkActionHandoverEmailAttachments(req, processedForEmp, {
-                                        assigner: assetControllerEmp,
-                                        assignee: employee,
-                                        filenameBase: 'bulk-ac-approved-handover',
-                                    });
+                                    const pIds = processedAssets.map((a) => a._id.toString());
+                                    const acAssignee = asset.assignedTo
+                                        ? await EmployeeBasic.findById(asset.assignedTo._id || asset.assignedTo)
+                                            .select(
+                                                'firstName lastName employeeId department signature primaryReportee',
+                                            )
+                                            .populate('primaryReportee', 'firstName lastName employeeId')
+                                            .lean()
+                                        : null;
+                                    if (pIds.length && acAssignee) {
+                                        acPdf = await buildBulkActionHandoverEmailAttachments(req, pIds, {
+                                            assigner: assetControllerEmp,
+                                            assignee: acAssignee,
+                                            filenameBase: `ac-approved-${String(actionType).replace(/\s+/g, '-')}-handover`,
+                                        });
+                                    }
                                 } catch (e) {
                                     /* non-fatal */
                                 }
+                                await sendAssetTransferSuccessEmail(
+                                    {
+                                        ...asset.toObject(),
+                                        assetId: asset.assetId,
+                                        name: `Bulk ${actionType} (${processedAssets.length} assets)`
+                                    },
+                                    actionType,
+                                    assetControllerEmp,
+                                    await EmployeeBasic.findById(asset.assignedTo?._id || asset.assignedTo).select('firstName lastName'),
+                                    acPdf
+                                );
                             }
-                            await sendAssetBulkDispositionResultEmail({
-                                employee,
-                                reportee: employee.primaryReportee,
-                                approverName,
-                                subjectLine: `Bulk ${actionType} — ${processedForEmp.length} processed, ${rejectedForEmp.length} unchanged`,
-                                introHtml: `<p>Your bulk <strong>${actLabel}</strong> request was reviewed by the Asset Controller.</p>
-                                    <p><strong>${processedForEmp.length}</strong> asset(s) were updated. <strong>${rejectedForEmp.length}</strong> asset(s) were not changed and remain assigned to you.</p>`,
-                                attachments: att
-                            });
-                        }
+                        } else {
+                            let approvedHandoverPdf = [];
 
-                        if (assetControllerEmp) {
-                            let acPdf = [];
-                            try {
-                                const pIds = processedAssets.map((a) => a._id.toString());
-                                const acAssignee = asset.assignedTo
-                                    ? await EmployeeBasic.findById(asset.assignedTo._id || asset.assignedTo)
-                                          .select(
-                                              'firstName lastName employeeId department signature primaryReportee',
-                                          )
-                                          .populate('primaryReportee', 'firstName lastName employeeId')
-                                          .lean()
-                                    : null;
-                                if (pIds.length && acAssignee) {
-                                    acPdf = await buildBulkActionHandoverEmailAttachments(req, pIds, {
-                                        assigner: assetControllerEmp,
-                                        assignee: acAssignee,
-                                        filenameBase: `ac-approved-${String(actionType).replace(/\s+/g, '-')}-handover`,
-                                    });
-                                }
-                            } catch (e) {
-                                /* non-fatal */
-                            }
-                            await sendAssetTransferSuccessEmail(
-                                {
-                                    ...asset.toObject(),
-                                    assetId: asset.assetId,
-                                    name: `Bulk ${actionType} (${processedAssets.length} assets)`
-                                },
-                                actionType,
-                                assetControllerEmp,
-                                await EmployeeBasic.findById(asset.assignedTo?._id || asset.assignedTo).select('firstName lastName'),
-                                acPdf
-                            );
-                        }
-                    } else {
-                        let approvedHandoverPdf = [];
-
-                        // Leave: processedAssets still have assignee. End of Life: use bulkEmailSnapshots (assignee cleared on save).
-                        if (actionType === 'Leave') {
-                            if (isBulkTransfer && processedAssets.length > 1) {
-                                const primaryAsset = processedAssets[0];
-                                if (primaryAsset.assignedTo) {
-                                    const assignedUser = await EmployeeBasic.findById(
-                                        primaryAsset.assignedTo._id || primaryAsset.assignedTo,
-                                    )
-                                        .select(
-                                            'firstName lastName employeeId companyEmail workEmail email primaryReportee signature department',
+                            // Leave: processedAssets still have assignee. End of Life: use bulkEmailSnapshots (assignee cleared on save).
+                            if (actionType === 'Leave') {
+                                if (isBulkTransfer && processedAssets.length > 1) {
+                                    const primaryAsset = processedAssets[0];
+                                    if (primaryAsset.assignedTo) {
+                                        const assignedUser = await EmployeeBasic.findById(
+                                            primaryAsset.assignedTo._id || primaryAsset.assignedTo,
                                         )
-                                        .populate('primaryReportee', 'firstName lastName companyEmail workEmail')
-                                        .lean();
-                                    if (assignedUser) {
-                                        try {
-                                            approvedHandoverPdf = await buildBulkActionHandoverEmailAttachments(
-                                                req,
-                                                processedAssets.map((a) => a._id.toString()),
-                                                {
-                                                    assigner: assetControllerEmp,
-                                                    assignee: assignedUser,
-                                                    filenameBase: 'approved-leave-handover',
-                                                },
-                                            );
-                                        } catch (pdfErr) {
-                                        }
-                                        await sendAssetBulkActionApprovedEmail(
-                                            processedAssets,
-                                            actionType,
-                                            assignedUser,
-                                            assignedUser.primaryReportee || null,
-                                            assetControllerEmp || { firstName: 'Asset', lastName: 'Controller' },
-                                            approvedHandoverPdf,
-                                        );
-                                    }
-                                }
-                            } else {
-                                for (const processedAsset of processedAssets) {
-                                    if (processedAsset.assignedTo) {
-                                        const assignedUser = await EmployeeBasic.findById(processedAsset.assignedTo._id || processedAsset.assignedTo)
-                                            .select('firstName lastName employeeId companyEmail workEmail email primaryReportee signature department')
-                                            .populate('primaryReportee', 'firstName lastName companyEmail workEmail')
-                                            .lean();
-                                        if (assignedUser) {
-                                            let handoverApprovedPdf = [];
-                                            try {
-                                                handoverApprovedPdf = await buildApprovedActionHandoverAttachments(
-                                                    req,
-                                                    processedAsset,
-                                                    `approved-${String(actionType).replace(/\s+/g, '-')}-handover`,
-                                                );
-                                            } catch (e) {
-                                            }
-                                            await sendAssetActionApprovedEmail(
-                                                processedAsset,
-                                                actionType,
-                                                assignedUser,
-                                                assignedUser.primaryReportee || null,
-                                                assetControllerEmp || { firstName: 'Asset', lastName: 'Controller' },
-                                                handoverApprovedPdf,
-                                            );
-                                        }
-                                    }
-                                }
-                            }
-                        } else if (actionType === 'End of Life') {
-                            const employeeRows = (bulkEmailSnapshots.length ? bulkEmailSnapshots : []).filter(
-                                (r) => r.assignedTo && r.assignedToType !== 'Company'
-                            );
-                            if (employeeRows.length > 0) {
-                                if (isBulkTransfer && employeeRows.length > 1) {
-                                    const firstRef = employeeRows[0].assignedTo;
-                                    const firstId = firstRef?._id?.toString() || firstRef?.toString?.();
-                                    const sameEmp =
-                                        firstId &&
-                                        employeeRows.every((r) => {
-                                            const rid = r.assignedTo?._id?.toString() || r.assignedTo?.toString?.();
-                                            return rid === firstId;
-                                        });
-                                    if (sameEmp) {
-                                        const assignedUser = await EmployeeBasic.findById(firstId)
                                             .select(
                                                 'firstName lastName employeeId companyEmail workEmail email primaryReportee signature department',
                                             )
                                             .populate('primaryReportee', 'firstName lastName companyEmail workEmail')
                                             .lean();
                                         if (assignedUser) {
-                                            let eolBulkHandoverPdf = [];
                                             try {
-                                                eolBulkHandoverPdf = await buildBulkActionHandoverEmailAttachments(
+                                                approvedHandoverPdf = await buildBulkActionHandoverEmailAttachments(
                                                     req,
-                                                    employeeRows.map((r) => r._id.toString()),
+                                                    processedAssets.map((a) => a._id.toString()),
                                                     {
                                                         assigner: assetControllerEmp,
                                                         assignee: assignedUser,
-                                                        filenameBase: 'approved-eol-handover',
+                                                        filenameBase: 'approved-leave-handover',
                                                     },
                                                 );
-                                            } catch (e) {
-                                                /* non-fatal */
+                                            } catch (pdfErr) {
                                             }
-                                            approvedHandoverPdf = eolBulkHandoverPdf;
                                             await sendAssetBulkActionApprovedEmail(
-                                                employeeRows,
+                                                processedAssets,
                                                 actionType,
                                                 assignedUser,
                                                 assignedUser.primaryReportee || null,
                                                 assetControllerEmp || { firstName: 'Asset', lastName: 'Controller' },
-                                                eolBulkHandoverPdf,
+                                                approvedHandoverPdf,
                                             );
+                                        }
+                                    }
+                                } else {
+                                    for (const processedAsset of processedAssets) {
+                                        if (processedAsset.assignedTo) {
+                                            const assignedUser = await EmployeeBasic.findById(processedAsset.assignedTo._id || processedAsset.assignedTo)
+                                                .select('firstName lastName employeeId companyEmail workEmail email primaryReportee signature department')
+                                                .populate('primaryReportee', 'firstName lastName companyEmail workEmail')
+                                                .lean();
+                                            if (assignedUser) {
+                                                let handoverApprovedPdf = [];
+                                                try {
+                                                    handoverApprovedPdf = await buildApprovedActionHandoverAttachments(
+                                                        req,
+                                                        processedAsset,
+                                                        `approved-${String(actionType).replace(/\s+/g, '-')}-handover`,
+                                                    );
+                                                } catch (e) {
+                                                }
+                                                await sendAssetActionApprovedEmail(
+                                                    processedAsset,
+                                                    actionType,
+                                                    assignedUser,
+                                                    assignedUser.primaryReportee || null,
+                                                    assetControllerEmp || { firstName: 'Asset', lastName: 'Controller' },
+                                                    handoverApprovedPdf,
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            } else if (actionType === 'End of Life') {
+                                const employeeRows = (bulkEmailSnapshots.length ? bulkEmailSnapshots : []).filter(
+                                    (r) => r.assignedTo && r.assignedToType !== 'Company'
+                                );
+                                if (employeeRows.length > 0) {
+                                    if (isBulkTransfer && employeeRows.length > 1) {
+                                        const firstRef = employeeRows[0].assignedTo;
+                                        const firstId = firstRef?._id?.toString() || firstRef?.toString?.();
+                                        const sameEmp =
+                                            firstId &&
+                                            employeeRows.every((r) => {
+                                                const rid = r.assignedTo?._id?.toString() || r.assignedTo?.toString?.();
+                                                return rid === firstId;
+                                            });
+                                        if (sameEmp) {
+                                            const assignedUser = await EmployeeBasic.findById(firstId)
+                                                .select(
+                                                    'firstName lastName employeeId companyEmail workEmail email primaryReportee signature department',
+                                                )
+                                                .populate('primaryReportee', 'firstName lastName companyEmail workEmail')
+                                                .lean();
+                                            if (assignedUser) {
+                                                let eolBulkHandoverPdf = [];
+                                                try {
+                                                    eolBulkHandoverPdf = await buildBulkActionHandoverEmailAttachments(
+                                                        req,
+                                                        employeeRows.map((r) => r._id.toString()),
+                                                        {
+                                                            assigner: assetControllerEmp,
+                                                            assignee: assignedUser,
+                                                            filenameBase: 'approved-eol-handover',
+                                                        },
+                                                    );
+                                                } catch (e) {
+                                                    /* non-fatal */
+                                                }
+                                                approvedHandoverPdf = eolBulkHandoverPdf;
+                                                await sendAssetBulkActionApprovedEmail(
+                                                    employeeRows,
+                                                    actionType,
+                                                    assignedUser,
+                                                    assignedUser.primaryReportee || null,
+                                                    assetControllerEmp || { firstName: 'Asset', lastName: 'Controller' },
+                                                    eolBulkHandoverPdf,
+                                                );
+                                            }
+                                        } else {
+                                            for (const row of employeeRows) {
+                                                const rid = row.assignedTo?._id || row.assignedTo;
+                                                const assignedUser = await EmployeeBasic.findById(rid).populate('primaryReportee');
+                                                if (assignedUser) {
+                                                    let onePdf = [];
+                                                    try {
+                                                        onePdf = await buildApprovedActionHandoverAttachments(
+                                                            req,
+                                                            row,
+                                                            'approved-eol-handover',
+                                                        );
+                                                    } catch (e) {
+                                                        /* non-fatal */
+                                                    }
+                                                    await sendAssetActionApprovedEmail(
+                                                        row,
+                                                        actionType,
+                                                        assignedUser,
+                                                        assignedUser.primaryReportee || null,
+                                                        assetControllerEmp || { firstName: 'Asset', lastName: 'Controller' },
+                                                        onePdf
+                                                    );
+                                                }
+                                            }
                                         }
                                     } else {
                                         for (const row of employeeRows) {
@@ -10451,102 +10502,76 @@ export const handleAssetActionApproval = async (req, res) => {
                                             }
                                         }
                                     }
-                                } else {
-                                    for (const row of employeeRows) {
-                                        const rid = row.assignedTo?._id || row.assignedTo;
-                                        const assignedUser = await EmployeeBasic.findById(rid).populate('primaryReportee');
-                                        if (assignedUser) {
-                                            let onePdf = [];
-                                            try {
-                                                onePdf = await buildApprovedActionHandoverAttachments(
-                                                    req,
-                                                    row,
-                                                    'approved-eol-handover',
-                                                );
-                                            } catch (e) {
-                                                /* non-fatal */
-                                            }
-                                            await sendAssetActionApprovedEmail(
-                                                row,
-                                                actionType,
-                                                assignedUser,
-                                                assignedUser.primaryReportee || null,
-                                                assetControllerEmp || { firstName: 'Asset', lastName: 'Controller' },
-                                                onePdf
+                                }
+                            }
+
+                            // Send success email to Asset Controller (once for the bulk transfer)
+                            if (assetControllerEmp) {
+                                const primaryAsset = asset;
+                                const approvalIds = processedAssets.map((a) => a._id.toString()).filter(Boolean);
+                                let acSuccessHandoverPdf = approvedHandoverPdf;
+                                if (!acSuccessHandoverPdf?.length && approvalIds.length) {
+                                    const acAssignee = primaryAsset.assignedTo
+                                        ? await EmployeeBasic.findById(primaryAsset.assignedTo._id || primaryAsset.assignedTo)
+                                            .select(
+                                                'firstName lastName employeeId department signature primaryReportee',
+                                            )
+                                            .populate('primaryReportee', 'firstName lastName employeeId')
+                                            .lean()
+                                        : null;
+                                    if (acAssignee) {
+                                        try {
+                                            acSuccessHandoverPdf = await buildBulkActionHandoverEmailAttachments(
+                                                req,
+                                                approvalIds,
+                                                {
+                                                    assigner: assetControllerEmp,
+                                                    assignee: acAssignee,
+                                                    filenameBase: `ac-approved-${String(actionType).replace(/\s+/g, '-')}-handover`,
+                                                },
                                             );
+                                        } catch (e) {
+                                            /* non-fatal */
                                         }
                                     }
                                 }
-                            }
-                        }
-
-                        // Send success email to Asset Controller (once for the bulk transfer)
-                        if (assetControllerEmp) {
-                            const primaryAsset = asset;
-                            const approvalIds = processedAssets.map((a) => a._id.toString()).filter(Boolean);
-                            let acSuccessHandoverPdf = approvedHandoverPdf;
-                            if (!acSuccessHandoverPdf?.length && approvalIds.length) {
-                                const acAssignee = primaryAsset.assignedTo
-                                    ? await EmployeeBasic.findById(primaryAsset.assignedTo._id || primaryAsset.assignedTo)
-                                          .select(
-                                              'firstName lastName employeeId department signature primaryReportee',
-                                          )
-                                          .populate('primaryReportee', 'firstName lastName employeeId')
-                                          .lean()
+                                const assignedUserObj = primaryAsset.assignedTo
+                                    ? await EmployeeBasic.findById(primaryAsset.assignedTo._id || primaryAsset.assignedTo).select(
+                                        'firstName lastName',
+                                    )
                                     : null;
-                                if (acAssignee) {
-                                    try {
-                                        acSuccessHandoverPdf = await buildBulkActionHandoverEmailAttachments(
-                                            req,
-                                            approvalIds,
-                                            {
-                                                assigner: assetControllerEmp,
-                                                assignee: acAssignee,
-                                                filenameBase: `ac-approved-${String(actionType).replace(/\s+/g, '-')}-handover`,
-                                            },
-                                        );
-                                    } catch (e) {
-                                        /* non-fatal */
-                                    }
-                                }
+                                await sendAssetTransferSuccessEmail(
+                                    {
+                                        ...primaryAsset.toObject(),
+                                        assetId: primaryAsset.assetId,
+                                        name: isBulkTransfer
+                                            ? `Bulk ${actionType} (${processedAssets.length} assets)`
+                                            : primaryAsset.name,
+                                    },
+                                    actionType,
+                                    assetControllerEmp,
+                                    assignedUserObj,
+                                    acSuccessHandoverPdf,
+                                );
                             }
-                            const assignedUserObj = primaryAsset.assignedTo
-                                ? await EmployeeBasic.findById(primaryAsset.assignedTo._id || primaryAsset.assignedTo).select(
-                                      'firstName lastName',
-                                  )
-                                : null;
-                            await sendAssetTransferSuccessEmail(
-                                {
-                                    ...primaryAsset.toObject(),
-                                    assetId: primaryAsset.assetId,
-                                    name: isBulkTransfer
-                                        ? `Bulk ${actionType} (${processedAssets.length} assets)`
-                                        : primaryAsset.name,
-                                },
-                                actionType,
-                                assetControllerEmp,
-                                assignedUserObj,
-                                acSuccessHandoverPdf,
-                            );
                         }
+                    } catch (emailErr) {
                     }
-                } catch (emailErr) {
-                }
 
-                if (!isBulkTransfer) {
-                    for (const processedAsset of processedAssets) {
-                        try {
-                            await notifyAssignedEmployeeIfController(
-                                req,
-                                processedAsset,
-                                actionType,
-                                `${actionType} was approved by Asset Controller.`,
-                                { attachApprovedHandover: true },
-                            );
-                        } catch (notifyErr) {
+                    if (!isBulkTransfer) {
+                        for (const processedAsset of processedAssets) {
+                            try {
+                                await notifyAssignedEmployeeIfController(
+                                    req,
+                                    processedAsset,
+                                    actionType,
+                                    `${actionType} was approved by Asset Controller.`,
+                                    { attachApprovedHandover: true },
+                                );
+                            } catch (notifyErr) {
+                            }
                         }
                     }
-                }
                 })();
 
                 void emailTransferRequester(true, comment || '');
@@ -10760,11 +10785,11 @@ export const handleAssetActionApproval = async (req, res) => {
                             asset.assignedTo && typeof asset.assignedTo === 'object'
                                 ? asset.assignedTo
                                 : asset.assignedTo
-                                  ? await EmployeeBasic.findById(asset.assignedTo)
+                                    ? await EmployeeBasic.findById(asset.assignedTo)
                                         .select('firstName lastName employeeId companyEmail workEmail')
                                         .lean()
                                         .catch(() => null)
-                                  : null;
+                                    : null;
 
                         await applyMainAssetLossDamageAccessoryDisposition(asset, finePayload, req, uniqueFineId);
                         applyAssetLostFinalState(asset);
@@ -11177,24 +11202,49 @@ export const requestAccessoryAction = async (req, res) => {
             const accToMove = asset.accessories[accIndex].toObject();
             asset.accessories.splice(accIndex, 1);
 
-            const catalogId = await generateAccessoryCatalogId();
-            await AssetAccessoryCatalog.create({
-                recordType: 'catalog',
-                accessoryCatalogId: catalogId,
-                name: accToMove.name,
-                price: accToMove.amount || 0,
-                description: accToMove.description || '',
-                status: 'Unattached',
-                isActive: true,
-                history: [{
+            let catalogId = accToMove.accessoryId;
+            let catalogRow = null;
+            if (catalogId) {
+                catalogRow = await AssetAccessoryCatalog.findOne({
+                    recordType: 'catalog',
+                    accessoryCatalogId: catalogId
+                });
+            }
+
+            if (catalogRow) {
+                catalogRow.status = 'Unattached';
+                catalogRow.isActive = true;
+                catalogRow.assetItemId = null;
+                catalogRow.assetIdRef = '';
+                catalogRow.history.push({
                     at: new Date(),
                     action: 'unattached',
                     message: `Returned to catalog from asset ${asset.assetId} — ${asset.name}`,
                     assetId: asset.assetId,
                     assetName: asset.name,
                     assetObjectId: asset._id
-                }]
-            });
+                });
+                await catalogRow.save();
+            } else {
+                catalogId = catalogId || (await generateAccessoryCatalogId());
+                await AssetAccessoryCatalog.create({
+                    recordType: 'catalog',
+                    accessoryCatalogId: catalogId,
+                    name: accToMove.name,
+                    price: accToMove.amount || 0,
+                    description: accToMove.description || '',
+                    status: 'Unattached',
+                    isActive: true,
+                    history: [{
+                        at: new Date(),
+                        action: 'unattached',
+                        message: `Returned to catalog from asset ${asset.assetId} — ${asset.name}`,
+                        assetId: asset.assetId,
+                        assetName: asset.name,
+                        assetObjectId: asset._id
+                    }]
+                });
+            }
 
             asset.actionRequiredBy = null;
             asset.markModified('accessories');
@@ -11631,24 +11681,49 @@ export const respondAccessoryAction = async (req, res) => {
                 const accToMove = asset.accessories[accIndex].toObject();
                 asset.accessories.splice(accIndex, 1);
 
-                const catalogId = await generateAccessoryCatalogId();
-                await AssetAccessoryCatalog.create({
-                    recordType: 'catalog',
-                    accessoryCatalogId: catalogId,
-                    name: accToMove.name,
-                    price: accToMove.amount || 0,
-                    description: accToMove.description || '',
-                    status: 'Unattached',
-                    isActive: true,
-                    history: [{
+                let catalogId = accToMove.accessoryId;
+                let catalogRow = null;
+                if (catalogId) {
+                    catalogRow = await AssetAccessoryCatalog.findOne({
+                        recordType: 'catalog',
+                        accessoryCatalogId: catalogId
+                    });
+                }
+
+                if (catalogRow) {
+                    catalogRow.status = 'Unattached';
+                    catalogRow.isActive = true;
+                    catalogRow.assetItemId = null;
+                    catalogRow.assetIdRef = '';
+                    catalogRow.history.push({
                         at: new Date(),
                         action: 'unattached',
                         message: `Returned to catalog from asset ${asset.assetId} — ${asset.name}`,
                         assetId: asset.assetId,
                         assetName: asset.name,
                         assetObjectId: asset._id
-                    }]
-                });
+                    });
+                    await catalogRow.save();
+                } else {
+                    catalogId = catalogId || (await generateAccessoryCatalogId());
+                    await AssetAccessoryCatalog.create({
+                        recordType: 'catalog',
+                        accessoryCatalogId: catalogId,
+                        name: accToMove.name,
+                        price: accToMove.amount || 0,
+                        description: accToMove.description || '',
+                        status: 'Unattached',
+                        isActive: true,
+                        history: [{
+                            at: new Date(),
+                            action: 'unattached',
+                            message: `Returned to catalog from asset ${asset.assetId} — ${asset.name}`,
+                            assetId: asset.assetId,
+                            assetName: asset.name,
+                            assetObjectId: asset._id
+                        }]
+                    });
+                }
 
                 await AssetHistory.create({
                     assetId: asset._id,
@@ -11669,6 +11744,79 @@ export const respondAccessoryAction = async (req, res) => {
                     await syncAllAccessoryInstancesForAsset(asset);
                 } catch (syncErr) {
                 }
+
+                // Exclude accessory from any active pending/draft fines associated with this asset
+                try {
+                    const Fine = (await import("../../models/Fine.js")).default;
+                    const finesToUpdate = await Fine.find({
+                        assetObjectId: asset._id,
+                        fineStatus: { $in: ['Pending', 'Pending HR', 'Pending Review', 'Pending Accounts', 'Pending Finance', 'Pending Authorization', 'Draft'] }
+                    });
+
+                    for (const f of finesToUpdate) {
+                        let fineModified = false;
+                        let accAmtToRemove = 0;
+
+                        // Check breakdownItems
+                        if (f.breakdownItems && f.breakdownItems.length > 0) {
+                            f.breakdownItems = f.breakdownItems.filter(item => {
+                                const match = item.accessoryObjectId?.toString() === accToMove._id?.toString() ||
+                                    item.accessoryId === accToMove.accessoryId;
+                                if (match) {
+                                    accAmtToRemove += parseFloat(item.amount || 0) || 0;
+                                    fineModified = true;
+                                }
+                                return !match;
+                            });
+                        }
+
+                        // Add to excludedAccessoryIds
+                        if (fineModified) {
+                            f.excludedAccessoryIds = Array.from(new Set([
+                                ...(f.excludedAccessoryIds || []),
+                                String(accToMove._id || accToMove.accessoryId)
+                            ]));
+
+                            // Recalculate fine amounts
+                            if (accAmtToRemove > 0) {
+                                const totalBase = (f.employeeAmount || 0) + (f.companyAmount || 0);
+                                if (totalBase > 0) {
+                                    const empRatio = (f.employeeAmount || 0) / totalBase;
+                                    const compRatio = (f.companyAmount || 0) / totalBase;
+
+                                    f.employeeAmount = Math.max(0, f.employeeAmount - (accAmtToRemove * empRatio));
+                                    f.companyAmount = Math.max(0, f.companyAmount - (accAmtToRemove * compRatio));
+                                } else {
+                                    f.employeeAmount = 0;
+                                    f.companyAmount = 0;
+                                }
+
+                                f.fineAmount = (f.employeeAmount || 0) + (f.companyAmount || 0) + (f.serviceCharge || 0);
+                                f.totalFineAmount = f.fineAmount;
+
+                                if (f.assignedEmployees && f.assignedEmployees.length > 0) {
+                                    for (const emp of f.assignedEmployees) {
+                                        if (emp.employeeId === 'VEGA-HR-0000') {
+                                            emp.employeeAmount = f.companyAmount;
+                                            emp.individualAmount = f.companyAmount;
+                                            emp.fineAmount = f.companyAmount;
+                                        } else {
+                                            emp.employeeAmount = f.employeeAmount;
+                                            emp.individualAmount = f.employeeAmount + (f.serviceCharge || 0);
+                                            emp.fineAmount = f.employeeAmount + (f.serviceCharge || 0);
+                                        }
+                                    }
+                                }
+                            }
+
+                            await f.save();
+                            console.log(`[Unattach Accessory] Excluded accessory ${accToMove.accessoryId} from fine ${f.fineId}`);
+                        }
+                    }
+                } catch (fineErr) {
+                    console.error("Error updating associated fines on accessory unattach:", fineErr);
+                }
+
                 await notifyAssignedEmployeeIfController(req, asset, 'Unattach Accessory', `Accessory "${accToMove.name}" was detached and added to the accessories catalog.`);
 
                 return res.status(200).json({
@@ -11968,7 +12116,7 @@ export const respondAccessoryAction = async (req, res) => {
                             return res.status(404).json({ message: 'Accessory not found' });
                         }
                         const accToDetach = asset.accessories[accIdx].toObject();
-                        
+
                         if (asset.assignedTo) {
                             try {
                                 const { sendAssetLostOwnerEmail } = await import('../utils/sendAssetLostOwnerEmail.js');
@@ -12000,24 +12148,49 @@ export const respondAccessoryAction = async (req, res) => {
                             { $set: { status: 'Lost', assetItemId: null, assetIdRef: '' } }
                         ).catch(() => null);
 
-                        const catalogId = await generateAccessoryCatalogId();
-                        await AssetAccessoryCatalog.create({
-                            recordType: 'catalog',
-                            accessoryCatalogId: catalogId,
-                            name: accToDetach.name,
-                            price: accToDetach.amount || 0,
-                            description: accToDetach.description || '',
-                            status: 'Lost',
-                            isActive: false,
-                            history: [{
+                        let catalogId = accToDetach.accessoryId;
+                        let catalogRow = null;
+                        if (catalogId) {
+                            catalogRow = await AssetAccessoryCatalog.findOne({
+                                recordType: 'catalog',
+                                accessoryCatalogId: catalogId
+                            });
+                        }
+
+                        if (catalogRow) {
+                            catalogRow.status = 'Lost';
+                            catalogRow.isActive = false;
+                            catalogRow.assetItemId = null;
+                            catalogRow.assetIdRef = '';
+                            catalogRow.history.push({
                                 at: new Date(),
                                 action: 'removed',
                                 message: `Loss and damage — detached from asset ${asset.assetId} — ${asset.name} (fine ${uniqueFineId})`,
                                 assetId: asset.assetId,
                                 assetName: asset.name,
                                 assetObjectId: asset._id
-                            }]
-                        });
+                            });
+                            await catalogRow.save();
+                        } else {
+                            catalogId = catalogId || (await generateAccessoryCatalogId());
+                            await AssetAccessoryCatalog.create({
+                                recordType: 'catalog',
+                                accessoryCatalogId: catalogId,
+                                name: accToDetach.name,
+                                price: accToDetach.amount || 0,
+                                description: accToDetach.description || '',
+                                status: 'Lost',
+                                isActive: false,
+                                history: [{
+                                    at: new Date(),
+                                    action: 'removed',
+                                    message: `Loss and damage — detached from asset ${asset.assetId} — ${asset.name} (fine ${uniqueFineId})`,
+                                    assetId: asset.assetId,
+                                    assetName: asset.name,
+                                    assetObjectId: asset._id
+                                }]
+                            });
+                        }
 
                         // Delete Dashboard Action for accessory
                         await DashboardAction.deleteMany({ requestId: asset._id, requestType: 'Asset Loss Damage' });
@@ -12242,21 +12415,21 @@ export const respondAccessoryAction = async (req, res) => {
                 const rejectorId = req.user.employeeObjectId?.toString();
                 const requesterIdStr = accessoryLossDamageRejectRequesterId?.toString?.();
                 if (requesterIdStr && requesterIdStr !== rejectorId) {
-                const reviewerEmp = await EmployeeBasic.findById(req.user.employeeObjectId)
-                    .select('firstName lastName employeeId')
-                    .lean()
-                    .catch(() => null);
-                const reviewerDisplayName = reviewerEmp
-                    ? `${reviewerEmp.firstName || ''} ${reviewerEmp.lastName || ''}`.trim() || reviewerEmp.employeeId
-                    : req.user.name || 'Asset Controller';
-                void notifyLossDamageRejectedToRequester({
-                    asset,
-                    requesterId: accessoryLossDamageRejectRequesterId,
-                    reviewerDisplayName,
-                    actionedBy: req.user.employeeObjectId || req.user._id,
-                    rejectReason: comment || '',
-                    accessoryLabel: accessoryRejectLabel,
-                });
+                    const reviewerEmp = await EmployeeBasic.findById(req.user.employeeObjectId)
+                        .select('firstName lastName employeeId')
+                        .lean()
+                        .catch(() => null);
+                    const reviewerDisplayName = reviewerEmp
+                        ? `${reviewerEmp.firstName || ''} ${reviewerEmp.lastName || ''}`.trim() || reviewerEmp.employeeId
+                        : req.user.name || 'Asset Controller';
+                    void notifyLossDamageRejectedToRequester({
+                        asset,
+                        requesterId: accessoryLossDamageRejectRequesterId,
+                        reviewerDisplayName,
+                        actionedBy: req.user.employeeObjectId || req.user._id,
+                        rejectReason: comment || '',
+                        accessoryLabel: accessoryRejectLabel,
+                    });
                 }
             }
         }
@@ -12440,8 +12613,8 @@ export const submitDraftForCreationApproval = async (req, res) => {
         try {
             const requester = req.user.employeeObjectId
                 ? await EmployeeBasic.findById(req.user.employeeObjectId)
-                      .select('firstName lastName signature employeeId department')
-                      .lean()
+                    .select('firstName lastName signature employeeId department')
+                    .lean()
                 : null;
             creationAttachments = await buildCreationRequestHandoverAttachments(req, [item._id.toString()], {
                 assigner: requester,

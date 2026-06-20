@@ -460,24 +460,49 @@ export const updateFine = async (req, res) => {
                             const AssetAccessoryCatalog = (await import("../../models/AssetAccessoryCatalog.js")).default;
                             const AssetHistory = (await import("../../models/AssetHistory.js")).default;
 
-                            const catalogId = await generateVegaAccessoryCatalogId();
-                            await AssetAccessoryCatalog.create({
-                                recordType: 'catalog',
-                                accessoryCatalogId: catalogId,
-                                name: accToMove.name,
-                                price: accToMove.amount || 0,
-                                description: accToMove.description || '',
-                                status: catalogStatus,
-                                isActive: catalogStatus === 'Unattached',
-                                history: [{
+                            let catalogId = accToMove.accessoryId;
+                            let catalogRow = null;
+                            if (catalogId) {
+                                catalogRow = await AssetAccessoryCatalog.findOne({
+                                    recordType: 'catalog',
+                                    accessoryCatalogId: catalogId
+                                });
+                            }
+
+                            if (catalogRow) {
+                                catalogRow.status = catalogStatus;
+                                catalogRow.isActive = catalogStatus === 'Unattached';
+                                catalogRow.assetItemId = null;
+                                catalogRow.assetIdRef = '';
+                                catalogRow.history.push({
                                     at: new Date(),
                                     action: 'unattached',
                                     message: comment || `Returned to catalog from asset ${assetDoc.assetId} — ${assetDoc.name}`,
                                     assetId: assetDoc.assetId,
                                     assetName: assetDoc.name,
                                     assetObjectId: assetDoc._id,
-                                }],
-                            });
+                                });
+                                await catalogRow.save();
+                            } else {
+                                catalogId = catalogId || (await generateVegaAccessoryCatalogId());
+                                await AssetAccessoryCatalog.create({
+                                    recordType: 'catalog',
+                                    accessoryCatalogId: catalogId,
+                                    name: accToMove.name,
+                                    price: accToMove.amount || 0,
+                                    description: accToMove.description || '',
+                                    status: catalogStatus,
+                                    isActive: catalogStatus === 'Unattached',
+                                    history: [{
+                                        at: new Date(),
+                                        action: 'unattached',
+                                        message: comment || `Returned to catalog from asset ${assetDoc.assetId} — ${assetDoc.name}`,
+                                        assetId: assetDoc.assetId,
+                                        assetName: assetDoc.name,
+                                        assetObjectId: assetDoc._id,
+                                    }],
+                                });
+                            }
 
                             await AssetHistory.create({
                                 assetId: assetDoc._id,
@@ -516,8 +541,78 @@ export const updateFine = async (req, res) => {
                             }
                         }
 
+                        // Also check lostDetachedAccessories
+                        if (asset.lostDetachedAccessories && asset.lostDetachedAccessories.length > 0) {
+                            for (let i = asset.lostDetachedAccessories.length - 1; i >= 0; i--) {
+                                const acc = asset.lostDetachedAccessories[i];
+                                const code = String(acc.accessoryId || '');
+                                const isExcluded = excluded.has(code);
+
+                                if (isExcluded) {
+                                    asset.lostDetachedAccessories.splice(i, 1);
+                                    modified = true;
+                                    totalAccAmtRemoved += parseFloat(acc.amount || 0) || 0;
+
+                                    // Update catalog status to Unattached
+                                    try {
+                                        const AssetAccessoryCatalog = (await import("../../models/AssetAccessoryCatalog.js")).default;
+                                        const catalogRow = await AssetAccessoryCatalog.findOne({
+                                            recordType: 'catalog',
+                                            name: acc.name,
+                                            status: 'Lost',
+                                            $or: [
+                                                { 'history.message': { $regex: new RegExp(f.fineId, 'i') } },
+                                                { 'history.assetObjectId': asset._id }
+                                            ]
+                                        });
+
+                                        if (catalogRow) {
+                                            catalogRow.status = 'Unattached';
+                                            catalogRow.isActive = true;
+                                            catalogRow.history.push({
+                                                at: new Date(),
+                                                action: 'unattached',
+                                                message: `Restored to Unattached status after exclusion from fine ${f.fineId}`,
+                                                assetId: asset.assetId,
+                                                assetName: asset.name,
+                                                assetObjectId: asset._id
+                                            });
+                                            await catalogRow.save();
+                                        } else {
+                                            const { generateVegaAccessoryCatalogId } = await import("../../utils/syncAssetAccessoryCatalog.js");
+                                            const catalogId = await generateVegaAccessoryCatalogId();
+                                            await AssetAccessoryCatalog.create({
+                                                recordType: 'catalog',
+                                                accessoryCatalogId: catalogId,
+                                                name: acc.name,
+                                                price: acc.amount || 0,
+                                                status: 'Unattached',
+                                                isActive: true,
+                                                history: [{
+                                                    at: new Date(),
+                                                    action: 'unattached',
+                                                    message: `Created as Unattached after exclusion from fine ${f.fineId}`,
+                                                    assetId: asset.assetId,
+                                                    assetName: asset.name,
+                                                    assetObjectId: asset._id
+                                                }]
+                                            });
+                                        }
+
+                                        await AssetAccessoryCatalog.updateMany(
+                                            { recordType: 'instance', assetAccessoryId: code },
+                                            { $set: { status: 'Unattached', assetItemId: null, assetIdRef: '' } }
+                                        ).catch(() => null);
+                                    } catch (e) {
+                                        console.error("Error updating catalog for excluded accessory:", e);
+                                    }
+                                }
+                            }
+                        }
+
                         if (modified) {
                             asset.markModified('accessories');
+                            asset.markModified('lostDetachedAccessories');
                             await asset.save();
                             try {
                                 const { syncAllAccessoryInstancesForAsset } = await import("../../utils/syncAssetAccessoryCatalog.js");
@@ -727,6 +822,19 @@ export const updateFine = async (req, res) => {
                 console.log(`[UpdateFine] Confirmed email sent for fine ${updatedFine.fineId}`);
             } catch (err) {
                 console.error("[UpdateFine] Failed to send confirmed email:", err);
+            }
+        } else if (isApprovedFineStatus(oldStatus)) {
+            try {
+                const { persistFineApprovalAttachments } = await import('../../utils/persistFineApprovalAttachments.js');
+                for (const f of fines) {
+                    await persistFineApprovalAttachments(f, { req, forceRegenerate: true });
+                }
+                const { dispatchFineApprovedNotification } = await import("../../utils/dispatchFineApprovedNotification.js");
+                const allAssigned = fines.flatMap(f => f.assignedEmployees);
+                await dispatchFineApprovedNotification(updatedFine, allAssigned, req);
+                console.log(`[UpdateFine] Updated confirmed email sent for fine ${updatedFine.fineId}`);
+            } catch (err) {
+                console.error("[UpdateFine] Failed to update and send confirmed email:", err);
             }
         }
 

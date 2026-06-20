@@ -250,6 +250,10 @@ const assetItemSchema = new mongoose.Schema({
         type: mongoose.Schema.Types.Mixed,
         default: null
     },
+    lostAt: {
+        type: Date,
+        default: null
+    },
     /** Saved Loss & Damage fine form (asset flow only; not yet submitted for approval). */
     lossDamageFineDraft: {
         type: mongoose.Schema.Types.Mixed,

@@ -617,6 +617,13 @@ export const getAssetTypes = async (req, res) => {
                 }
             });
 
+            // Fetch all fines related to the returned assets
+            const assetIds = assets.map(a => a._id);
+            const Fine = (await import('../models/Fine.js')).default;
+            const fines = await Fine.find({ assetObjectId: { $in: assetIds } })
+                .select('fineId fineStatus assetObjectId accessoryId accessoryObjectId')
+                .lean();
+
             // Transform into the flat structure the frontend expects
             const unifiedList = [
                 ...await Promise.all(categories.map(async (c) => ({
@@ -637,8 +644,33 @@ export const getAssetTypes = async (req, res) => {
                 }))),
                 ...await Promise.all(
                     assets.map(async (a) => {
-                        const accList = (a.accessories || []).map((acc) => ({ ...acc }));
-                        const lostList = (a.lostDetachedAccessories || []).map((x) => ({ ...x }));
+                        const assetFines = fines.filter(f => f.assetObjectId?.toString() === a._id.toString());
+                        const mainFine = assetFines.find(f => !f.accessoryId);
+
+                        const accList = (a.accessories || []).map((acc) => {
+                            const accFine = assetFines.find(f => 
+                                (acc.accessoryId && f.accessoryId === acc.accessoryId) || 
+                                (acc._id && f.accessoryObjectId?.toString() === acc._id.toString())
+                            );
+                            return {
+                                ...acc,
+                                fineId: accFine ? accFine.fineId : (acc.fineId || null),
+                                fineStatus: accFine ? accFine.fineStatus : null
+                            };
+                        });
+                        const lostList = (a.lostDetachedAccessories || []).map((x) => {
+                            const accFine = assetFines.find(f => 
+                                (x.accessoryId && f.accessoryId === x.accessoryId) || 
+                                (x._id && f.accessoryObjectId?.toString() === x._id.toString()) ||
+                                (x.fineId && f.fineId === x.fineId)
+                            );
+                            return {
+                                ...x,
+                                fineId: accFine ? accFine.fineId : (x.fineId || null),
+                                fineStatus: accFine ? accFine.fineStatus : null
+                            };
+                        });
+
                         const signIf = async (key) => (key ? getSignedFileUrl(key) : null);
                         const imagePreview = await signIf(a.imagePreview);
                         const photo = await signIf(a.photo);
@@ -669,6 +701,10 @@ export const getAssetTypes = async (req, res) => {
                             assignedCompany: a.assignedCompany,
                             designatedAssetController,
                             pendingAction: a.pendingAction,
+                            pendingActionDetails: a.pendingActionDetails || null,
+                            lossDamageFineId: mainFine ? mainFine.fineId : (a.pendingActionDetails?.fineId || null),
+                            lossDamageFineStatus: mainFine ? mainFine.fineStatus : null,
+                            lostAt: a.lostAt || null,
                             createdBy: a.createdBy,
                             accessories: toolsOnly
                                 ? accList

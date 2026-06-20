@@ -6,17 +6,20 @@ import { isAssetLossFineReportApplicable } from './sendAssetLossFineReportEmail.
  * Stores approval-email attachments on the fine record when management approves.
  * Idempotent — skips if approvalAttachments already exist.
  */
-export async function persistFineApprovalAttachments(fineDoc, { req } = {}) {
+export async function persistFineApprovalAttachments(fineDoc, { req, forceRegenerate = false } = {}) {
     if (!fineDoc) return fineDoc;
-    if (Array.isArray(fineDoc.approvalAttachments) && fineDoc.approvalAttachments.length > 0) {
+    if (!forceRegenerate && Array.isArray(fineDoc.approvalAttachments) && fineDoc.approvalAttachments.length > 0) {
         return fineDoc;
     }
 
-    const entries = [];
+    const entries = forceRegenerate && Array.isArray(fineDoc.approvalAttachments)
+        ? fineDoc.approvalAttachments.filter(e => e.source === 'supporting')
+        : [];
     const addedAt = new Date();
     const att = fineDoc.attachment;
 
-    if (att && (att.url || att.publicId || att.data || att.name)) {
+    const hasSupporting = entries.some(e => e.source === 'supporting');
+    if (!hasSupporting && att && (att.url || att.publicId || att.data || att.name)) {
         entries.push({
             label: 'Supporting Document',
             name: att.name || `Supporting-${fineDoc.fineId || fineDoc._id}`,
