@@ -439,8 +439,8 @@ export const createAssetType = async (req, res) => {
 
                 const requester = req.user.employeeObjectId
                     ? await EmployeeBasic.findById(req.user.employeeObjectId)
-                          .select('firstName lastName signature employeeId department')
-                          .lean()
+                        .select('firstName lastName signature employeeId department')
+                        .lean()
                     : null;
                 let creationBulkAttachments = [];
                 try {
@@ -518,206 +518,206 @@ export const getAssetTypes = async (req, res) => {
 
     for (let attempt = 0; attempt < 3; attempt++) {
         try {
-        if (!catalogOnly && !toolsOnly) {
-            // Fix: Drop the index causing 500 errors if it was created accidentally
-            try { await AssetType.collection.dropIndex('assetId_1'); } catch (e) { /* ignore */ }
-        }
+            if (!catalogOnly && !toolsOnly) {
+                // Fix: Drop the index causing 500 errors if it was created accidentally
+                try { await AssetType.collection.dropIndex('assetId_1'); } catch (e) { /* ignore */ }
+            }
 
-        // We aggregate all 3 collections into a unified list for the frontend
-        const categories = await AssetCategory.find({ isActive: true }).populate('typeId');
-        const types = await AssetType.find({ isActive: true });
+            // We aggregate all 3 collections into a unified list for the frontend
+            const categories = await AssetCategory.find({ isActive: true }).populate('typeId');
+            const types = await AssetType.find({ isActive: true });
 
-        if (catalogOnly) {
+            if (catalogOnly) {
+                const typeCategoryCounts = {};
+                categories.forEach((c) => {
+                    if (c.typeId) {
+                        const typeIdStr = c.typeId._id.toString();
+                        typeCategoryCounts[typeIdStr] = (typeCategoryCounts[typeIdStr] || 0) + 1;
+                    }
+                });
+                const unifiedList = [
+                    ...categories.map((c) => ({
+                        _id: c._id,
+                        assetId: c.categoryId,
+                        category: c.name,
+                        imagePreview: c.imagePreview || null,
+                        type: c.typeId?.name || null,
+                    })),
+                    ...types.map((t) => ({
+                        _id: t._id,
+                        assetId: t.typeId,
+                        type: t.name,
+                        category: null,
+                        categoryCount: typeCategoryCounts[t._id.toString()] || 0,
+                        imagePreview: t.imagePreview || null,
+                        description: t.description,
+                    })),
+                ];
+                return res.status(200).json(unifiedList);
+            }
+
+            // Draft assets are visible only to the creating user (User id), for every role.
+            const uid = req.user?._id || req.user?.id;
+            const assetQuery = {};
+            if (uid && mongoose.Types.ObjectId.isValid(String(uid))) {
+                assetQuery.$or = [
+                    { status: { $ne: 'Draft' } },
+                    { createdBy: new mongoose.Types.ObjectId(String(uid)) }
+                ];
+            } else {
+                assetQuery.status = { $ne: 'Draft' };
+            }
+
+            if (toolsOnly) {
+                assetQuery.$and = assetQuery.$and || [];
+                assetQuery.$and.push({
+                    $or: [
+                        { plateNumber: { $exists: false } },
+                        { plateNumber: null },
+                        { plateNumber: '' },
+                    ],
+                });
+            }
+
+            const assets = await AssetItem.find(assetQuery)
+                .populate('typeId')
+                .populate('categoryId')
+                .populate('actionRequiredBy', 'firstName lastName employeeId')
+                .populate('assignedCompany', 'name nickName companyId companyEmail')
+                .populate({
+                    path: 'assignedTo',
+                    select: 'firstName lastName employeeId department primaryReportee reportingAuthority',
+                    populate: [
+                        { path: 'primaryReportee', select: 'firstName lastName' },
+                        { path: 'reportingAuthority', select: 'firstName lastName' }
+                    ]
+                })
+                .lean();
+
+            const flowAc = await getDepartmentHOD('assetcontroller');
+            let designatedAssetController = null;
+            if (flowAc) {
+                const fn = flowAc.firstName ?? flowAc.employeeName?.split(/\s+/)[0];
+                const ln = flowAc.lastName ?? flowAc.employeeName?.split(/\s+/).slice(1).join(' ');
+                if (fn || ln || flowAc.employeeId) {
+                    designatedAssetController = {
+                        firstName: fn || 'Unknown',
+                        lastName: ln || '',
+                        employeeId: flowAc.employeeId
+                    };
+                }
+            }
+
+            // Aggregate category counts per type
             const typeCategoryCounts = {};
-            categories.forEach((c) => {
+            categories.forEach(c => {
                 if (c.typeId) {
                     const typeIdStr = c.typeId._id.toString();
                     typeCategoryCounts[typeIdStr] = (typeCategoryCounts[typeIdStr] || 0) + 1;
                 }
             });
+
+            // Transform into the flat structure the frontend expects
             const unifiedList = [
-                ...categories.map((c) => ({
+                ...await Promise.all(categories.map(async (c) => ({
                     _id: c._id,
                     assetId: c.categoryId,
                     category: c.name,
-                    imagePreview: c.imagePreview || null,
-                    type: c.typeId?.name || null,
-                })),
-                ...types.map((t) => ({
+                    imagePreview: await getSignedFileUrl(c.imagePreview),
+                    type: c.typeId?.name || null
+                }))),
+                ...await Promise.all(types.map(async (t) => ({
                     _id: t._id,
                     assetId: t.typeId,
                     type: t.name,
                     category: null,
                     categoryCount: typeCategoryCounts[t._id.toString()] || 0,
-                    imagePreview: t.imagePreview || null,
-                    description: t.description,
-                })),
+                    imagePreview: await getSignedFileUrl(t.imagePreview),
+                    description: t.description
+                }))),
+                ...await Promise.all(
+                    assets.map(async (a) => {
+                        const accList = (a.accessories || []).map((acc) => ({ ...acc }));
+                        const lostList = (a.lostDetachedAccessories || []).map((x) => ({ ...x }));
+                        const signIf = async (key) => (key ? getSignedFileUrl(key) : null);
+                        const imagePreview = await signIf(a.imagePreview);
+                        const photo = await signIf(a.photo);
+                        return {
+                            _id: a._id,
+                            assetId: a.assetId,
+                            name: a.name,
+                            type: a.typeId?.name || '-',
+                            category: a.categoryId?.name || '-',
+                            typeId: a.typeId ? { _id: a.typeId._id, name: a.typeId.name } : null,
+                            categoryId: a.categoryId ? { _id: a.categoryId._id, name: a.categoryId.name } : null,
+                            assetValue: a.assetValue,
+                            purchaseDate: a.purchaseDate,
+                            quantity: a.quantity || 1,
+                            warranty: a.warranty,
+                            warrantyYears: a.warrantyYears,
+                            warrantyAttachment: toolsOnly ? a.warrantyAttachment : await signIf(a.warrantyAttachment),
+                            invoiceNumber: a.invoiceNumber,
+                            imagePreview,
+                            photo,
+                            status: a.status,
+                            acceptanceStatus: a.acceptanceStatus,
+                            assignedToType: a.assignedToType,
+                            assigned: a.status === 'Assigned' ? 1 : 0,
+                            unassigned: a.status === 'Unassigned' ? 1 : 0,
+                            invoiceFile: toolsOnly ? a.invoiceFile : await signIf(a.invoiceFile),
+                            actionRequiredBy: a.actionRequiredBy,
+                            assignedCompany: a.assignedCompany,
+                            designatedAssetController,
+                            pendingAction: a.pendingAction,
+                            createdBy: a.createdBy,
+                            accessories: toolsOnly
+                                ? accList
+                                : await Promise.all(
+                                    accList.map(async (accObj) => ({
+                                        ...accObj,
+                                        attachment: accObj.attachment
+                                            ? await getSignedFileUrl(accObj.attachment)
+                                            : null,
+                                    })),
+                                ),
+                            lostDetachedAccessories: lostList,
+                            assignedTo: a.assignedTo,
+                            vehicleCode: a.vehicleCode,
+                            plateEmirate: a.plateEmirate,
+                            plateNumber: a.plateNumber,
+                            modelYear: a.modelYear,
+                            currentKilometer: a.currentKilometer,
+                            registrationExpiryDate: a.registrationExpiryDate,
+                            insuranceExpiryDate: a.insuranceExpiryDate,
+                            oilChangeDate: a.oilChangeDate,
+                            gearOilDueDate: a.gearOilDueDate,
+                            lastServiceDate: a.lastServiceDate,
+                            nextServiceDate: a.nextServiceDate,
+                            onLeaveActive: a.onLeaveActive === true,
+                            onServiceActive: a.onServiceActive === true,
+                            onLeaveStartDate: a.onLeaveStartDate,
+                            onLeaveEndDate: a.onLeaveEndDate,
+                            onLeaveDuration: a.onLeaveDuration,
+                            services: Array.isArray(a.services) ? a.services : [],
+                        };
+                    }),
+                ),
             ];
+
             return res.status(200).json(unifiedList);
-        }
-
-        // Draft assets are visible only to the creating user (User id), for every role.
-        const uid = req.user?._id || req.user?.id;
-        const assetQuery = {};
-        if (uid && mongoose.Types.ObjectId.isValid(String(uid))) {
-            assetQuery.$or = [
-                { status: { $ne: 'Draft' } },
-                { createdBy: new mongoose.Types.ObjectId(String(uid)) }
-            ];
-        } else {
-            assetQuery.status = { $ne: 'Draft' };
-        }
-
-        if (toolsOnly) {
-            assetQuery.$and = assetQuery.$and || [];
-            assetQuery.$and.push({
-                $or: [
-                    { plateNumber: { $exists: false } },
-                    { plateNumber: null },
-                    { plateNumber: '' },
-                ],
+        } catch (error) {
+            const canRetry = attempt < 2 && isTransientMongoError(error);
+            if (canRetry) {
+                await new Promise((r) => setTimeout(r, 450 * (attempt + 1)));
+                continue;
+            }
+            const transient = isTransientMongoError(error);
+            return res.status(transient ? 503 : 500).json({
+                message: transient ? 'Database temporarily unavailable. Please try again.' : 'Server Error',
+                error: error.message,
+                retryable: transient,
             });
         }
-
-        const assets = await AssetItem.find(assetQuery)
-            .populate('typeId')
-            .populate('categoryId')
-            .populate('actionRequiredBy', 'firstName lastName employeeId')
-            .populate('assignedCompany', 'name nickName companyId companyEmail')
-            .populate({
-                path: 'assignedTo',
-                select: 'firstName lastName employeeId department primaryReportee reportingAuthority',
-                populate: [
-                    { path: 'primaryReportee', select: 'firstName lastName' },
-                    { path: 'reportingAuthority', select: 'firstName lastName' }
-                ]
-            })
-            .lean();
-
-        const flowAc = await getDepartmentHOD('assetcontroller');
-        let designatedAssetController = null;
-        if (flowAc) {
-            const fn = flowAc.firstName ?? flowAc.employeeName?.split(/\s+/)[0];
-            const ln = flowAc.lastName ?? flowAc.employeeName?.split(/\s+/).slice(1).join(' ');
-            if (fn || ln || flowAc.employeeId) {
-                designatedAssetController = {
-                    firstName: fn || 'Unknown',
-                    lastName: ln || '',
-                    employeeId: flowAc.employeeId
-                };
-            }
-        }
-
-        // Aggregate category counts per type
-        const typeCategoryCounts = {};
-        categories.forEach(c => {
-            if (c.typeId) {
-                const typeIdStr = c.typeId._id.toString();
-                typeCategoryCounts[typeIdStr] = (typeCategoryCounts[typeIdStr] || 0) + 1;
-            }
-        });
-
-        // Transform into the flat structure the frontend expects
-        const unifiedList = [
-            ...await Promise.all(categories.map(async (c) => ({
-                _id: c._id,
-                assetId: c.categoryId,
-                category: c.name,
-                imagePreview: await getSignedFileUrl(c.imagePreview),
-                type: c.typeId?.name || null
-            }))),
-            ...await Promise.all(types.map(async (t) => ({
-                _id: t._id,
-                assetId: t.typeId,
-                type: t.name,
-                category: null,
-                categoryCount: typeCategoryCounts[t._id.toString()] || 0,
-                imagePreview: await getSignedFileUrl(t.imagePreview),
-                description: t.description
-            }))),
-            ...await Promise.all(
-                assets.map(async (a) => {
-                    const accList = (a.accessories || []).map((acc) => ({ ...acc }));
-                    const lostList = (a.lostDetachedAccessories || []).map((x) => ({ ...x }));
-                    const signIf = async (key) => (key ? getSignedFileUrl(key) : null);
-                    const imagePreview = await signIf(a.imagePreview);
-                    const photo = await signIf(a.photo);
-                    return {
-                        _id: a._id,
-                        assetId: a.assetId,
-                        name: a.name,
-                        type: a.typeId?.name || '-',
-                        category: a.categoryId?.name || '-',
-                        typeId: a.typeId ? { _id: a.typeId._id, name: a.typeId.name } : null,
-                        categoryId: a.categoryId ? { _id: a.categoryId._id, name: a.categoryId.name } : null,
-                        assetValue: a.assetValue,
-                        purchaseDate: a.purchaseDate,
-                        quantity: a.quantity || 1,
-                        warranty: a.warranty,
-                        warrantyYears: a.warrantyYears,
-                        warrantyAttachment: toolsOnly ? a.warrantyAttachment : await signIf(a.warrantyAttachment),
-                        invoiceNumber: a.invoiceNumber,
-                        imagePreview,
-                        photo,
-                        status: a.status,
-                        acceptanceStatus: a.acceptanceStatus,
-                        assignedToType: a.assignedToType,
-                        assigned: a.status === 'Assigned' ? 1 : 0,
-                        unassigned: a.status === 'Unassigned' ? 1 : 0,
-                        invoiceFile: toolsOnly ? a.invoiceFile : await signIf(a.invoiceFile),
-                        actionRequiredBy: a.actionRequiredBy,
-                        assignedCompany: a.assignedCompany,
-                        designatedAssetController,
-                        pendingAction: a.pendingAction,
-                        createdBy: a.createdBy,
-                        accessories: toolsOnly
-                            ? accList
-                            : await Promise.all(
-                                  accList.map(async (accObj) => ({
-                                      ...accObj,
-                                      attachment: accObj.attachment
-                                          ? await getSignedFileUrl(accObj.attachment)
-                                          : null,
-                                  })),
-                              ),
-                        lostDetachedAccessories: lostList,
-                        assignedTo: a.assignedTo,
-                        vehicleCode: a.vehicleCode,
-                        plateEmirate: a.plateEmirate,
-                        plateNumber: a.plateNumber,
-                        modelYear: a.modelYear,
-                        currentKilometer: a.currentKilometer,
-                        registrationExpiryDate: a.registrationExpiryDate,
-                        insuranceExpiryDate: a.insuranceExpiryDate,
-                        oilChangeDate: a.oilChangeDate,
-                        gearOilDueDate: a.gearOilDueDate,
-                        lastServiceDate: a.lastServiceDate,
-                        nextServiceDate: a.nextServiceDate,
-                        onLeaveActive: a.onLeaveActive === true,
-                        onServiceActive: a.onServiceActive === true,
-                        onLeaveStartDate: a.onLeaveStartDate,
-                        onLeaveEndDate: a.onLeaveEndDate,
-                        onLeaveDuration: a.onLeaveDuration,
-                        services: Array.isArray(a.services) ? a.services : [],
-                    };
-                }),
-            ),
-        ];
-
-        return res.status(200).json(unifiedList);
-    } catch (error) {
-        const canRetry = attempt < 2 && isTransientMongoError(error);
-        if (canRetry) {
-            await new Promise((r) => setTimeout(r, 450 * (attempt + 1)));
-            continue;
-        }
-        const transient = isTransientMongoError(error);
-        return res.status(transient ? 503 : 500).json({
-            message: transient ? 'Database temporarily unavailable. Please try again.' : 'Server Error',
-            error: error.message,
-            retryable: transient,
-        });
-    }
     }
 };
 
@@ -1376,8 +1376,8 @@ export const updateAssetItem = async (req, res) => {
                                 try {
                                     const requester = req.user.employeeObjectId
                                         ? await EmployeeBasic.findById(req.user.employeeObjectId)
-                                              .select('firstName lastName signature employeeId department')
-                                              .lean()
+                                            .select('firstName lastName signature employeeId department')
+                                            .lean()
                                         : null;
                                     addAccPdf = await buildCreationRequestHandoverAttachments(
                                         req,
@@ -1423,8 +1423,8 @@ export const updateAssetItem = async (req, res) => {
                                 try {
                                     const actor = req.user.employeeObjectId
                                         ? await EmployeeBasic.findById(req.user.employeeObjectId)
-                                              .select('firstName lastName signature employeeId department')
-                                              .lean()
+                                            .select('firstName lastName signature employeeId department')
+                                            .lean()
                                         : null;
                                     assigneeApprovalPdf = await buildAssignmentHandoverEmailAttachments(
                                         req,
@@ -1721,8 +1721,8 @@ export const submitAssetForApproval = async (req, res) => {
                 try {
                     const requester = req.user.employeeObjectId
                         ? await EmployeeBasic.findById(req.user.employeeObjectId)
-                              .select('firstName lastName signature employeeId department')
-                              .lean()
+                            .select('firstName lastName signature employeeId department')
+                            .lean()
                         : null;
                     submitAttachments = await buildCreationRequestHandoverAttachments(
                         req,

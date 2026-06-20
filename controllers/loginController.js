@@ -180,11 +180,11 @@ export const login = async (req, res) => {
         user.lastLogin = new Date();
         await user.save();
 
-        // Generate JWT token with 2 hours expiry (for inactive/offline users)
+        // Long-lived JWT; session end is enforced by frontend idle logout (1 hour of inactivity).
         const token = jwt.sign(
             { id: user._id },
             process.env.JWT_SECRET,
-            { expiresIn: "2h" }
+            { expiresIn: "7d" }
         );
 
         // Find associated EmployeeBasic record to get its ObjectId
@@ -210,7 +210,6 @@ export const login = async (req, res) => {
             permissions: permissions,
             isAdmin: isSystemAdmin || permissionData?.isAdmin || false,
             isAdministrator: isSystemAdmin || permissionData?.isAdministrator || false,
-            expiresIn: "2h"
         });
     } catch (error) {
         console.error('Login error:', error);

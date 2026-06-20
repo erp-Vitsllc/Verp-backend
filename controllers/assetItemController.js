@@ -1599,6 +1599,7 @@ export const getMyAssignedAssetsForReturn = async (req, res) => {
 export const getUnassignedAssetsForEmployee = async (req, res) => {
     try {
         const { employeeId } = req.params;
+        const checkOnly = req.query.checkOnly === 'true';
 
         const assetController = await getDepartmentHOD('assetcontroller');
 
@@ -1638,6 +1639,9 @@ export const getUnassignedAssetsForEmployee = async (req, res) => {
                 };
                 isAuthorized = await isUserInFlowchart(profileUserForCheck, 'assetcontroller');
             } catch (flowchartError) {
+                if (checkOnly) {
+                    return res.status(200).json({ isAuthorized: false });
+                }
                 return res.status(403).json({
                     message: 'Access denied. Only Asset Controllers can view unassigned assets.',
                     code: 'ASSET_CONTROLLER_REQUIRED',
@@ -1647,11 +1651,18 @@ export const getUnassignedAssetsForEmployee = async (req, res) => {
         }
 
         if (!isAuthorized) {
+            if (checkOnly) {
+                return res.status(200).json({ isAuthorized: false });
+            }
             return res.status(403).json({
                 message: 'Access denied. Only Asset Controllers can view unassigned assets.',
                 code: 'ASSET_CONTROLLER_REQUIRED',
                 employeeId: employeeId
             });
+        }
+
+        if (checkOnly) {
+            return res.status(200).json({ isAuthorized: true });
         }
 
         const items = await AssetItem.find({
@@ -3937,6 +3948,9 @@ export const getAssetItemDetail = async (req, res) => {
             ),
             ...(itemObj.documents || []).map((doc) =>
                 doc.attachment ? signKey(doc.attachment).then((u) => { doc.attachment = u; }) : null,
+            ),
+            ...(itemObj.images || []).map((img) =>
+                img.url ? signKey(img.url).then((u) => { img.url = u; }) : null,
             ),
             itemObj.mortgageSecurityCheckAttachment
                 ? signMortgageAttachment(itemObj.mortgageSecurityCheckAttachment).then((u) => {
@@ -7636,14 +7650,27 @@ export const addAssetImage = async (req, res) => {
         const item = await AssetItem.findById(id);
         if (!item) return res.status(404).json({ message: 'Asset not found' });
 
-        const url = await uploadDocumentToS3(imageData, imageName || `asset - image - ${Date.now()}.jpg`, imageMime || 'image/jpeg');
+        const uploadResult = await uploadDocumentToS3(
+            imageData,
+            'asset-photos',
+            imageName || `asset-image-${Date.now()}.jpg`,
+            'image'
+        );
 
-        item.images.push({ url, caption: caption || '', date: date ? new Date(date) : new Date() });
+        item.images.push({
+            url: uploadResult.publicId,
+            caption: caption || '',
+            date: date ? new Date(date) : new Date()
+        });
         await item.save();
 
-        res.status(200).json(item.images[item.images.length - 1]);
+        const savedImage = item.images[item.images.length - 1].toObject();
+        savedImage.url = await getSignedFileUrl(savedImage.url);
+
+        res.status(200).json(savedImage);
     } catch (error) {
-        res.status(500).json({ message: 'Server Error' });
+        console.error('Error in addAssetImage:', error);
+        res.status(500).json({ message: 'Server Error', error: error.message });
     }
 };
 
