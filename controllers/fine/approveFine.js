@@ -305,6 +305,8 @@ export const approveFine = async (req, res) => {
 
                 // Combine all employees from all siblings for the email
                 const allAssignedEmployees = fines.flatMap(f => f.assignedEmployees);
+                const { persistFineApprovalAttachments } = await import('../../utils/persistFineApprovalAttachments.js');
+                await persistFineApprovalAttachments(fine, { req });
                 await dispatchFineApprovedNotification(fine, allAssignedEmployees, req);
             } else {
                 return res.status(403).json({ message: "Only the assigned Management approver can approve at this stage." });

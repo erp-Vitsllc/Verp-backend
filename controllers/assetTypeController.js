@@ -238,6 +238,9 @@ export const createAssetType = async (req, res) => {
             if (!type || !name) {
                 return res.status(400).json({ message: 'Name and Type are required' });
             }
+            if (!purchaseDate) {
+                return res.status(400).json({ message: 'Purchase Date is required' });
+            }
 
             // Find type or auto-create if missing
             let t = await AssetType.findOne({ name: type, isActive: true });
@@ -1186,10 +1189,12 @@ export const updateAssetItem = async (req, res) => {
             }
         }
 
-        // Apply updates
         for (const key of Object.keys(updates)) {
             // Prevent updating immutable fields
             if (key !== '_id' && key !== 'assetId') {
+                if (key === 'purchaseDate' && !updates[key]) {
+                    return res.status(400).json({ message: 'Purchase Date is required' });
+                }
                 if (key === 'status' && creatorDraftOrRejected) {
                     continue;
                 }

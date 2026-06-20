@@ -67,23 +67,67 @@ export const updateFine = async (req, res) => {
 
         const fine = fines[0]; // Primary reference for logic
 
+        const isApproved = isApprovedFineStatus(fine.fineStatus);
+        let isAssetController = false;
+        if (isApproved && req.user) {
+            try {
+                const { isUserInFlowchart } = await import("../../utils/getDepartmentHOD.js");
+                isAssetController = await isUserInFlowchart(req.user, 'assetcontroller').catch(() => false);
+            } catch (e) {
+                console.error("Error checking asset controller:", e);
+            }
+            if (!isAssetController) {
+                const empId = req.user.employeeId;
+                if (empId) {
+                    const emp = await EmployeeBasic.findOne({ employeeId: empId }).select('department designation').lean();
+                    const dept = (emp?.department || '').toLowerCase();
+                    const des = (emp?.designation || '').toLowerCase();
+                    if (des === 'asset controller' || des.includes('asset controller') || dept.includes('asset controller')) {
+                        isAssetController = true;
+                    }
+                }
+            }
+        }
+
         if (
-            isApprovedFineStatus(fine.fineStatus) &&
+            isApproved &&
             !updates.resubmit &&
             updates.fineStatus !== 'Rejected'
         ) {
             const hrOk = await isUserHrForApprovedFineEdit(req, fine);
-            if (!hrOk) {
-                return res.status(403).json({ message: 'Only HR can edit approved fines.' });
+            if (!hrOk && !isAssetController) {
+                return res.status(403).json({ message: 'Only HR and Asset Controller can edit approved fines.' });
             }
-            const { error, allowed } = restrictApprovedFineUpdates(updates, fine);
-            if (error) {
-                return res.status(400).json({ message: error });
+
+            if (!hrOk && isAssetController) {
+                // Asset Controller can only remove accessories
+                const keys = Object.keys(updates);
+                const hasNonAccessoryUpdates = keys.some(k => k !== 'excludedAccessoryIds' && k !== 'resubmit');
+                if (hasNonAccessoryUpdates) {
+                    return res.status(400).json({ message: 'Asset Controller can only edit accessories removal on approved fines.' });
+                }
+            } else if (hrOk && !isAssetController) {
+                // HR can only update schedule fields
+                const { error, allowed } = restrictApprovedFineUpdates(updates, fine);
+                if (error) {
+                    return res.status(400).json({ message: error });
+                }
+                for (const key of Object.keys(updates)) {
+                    delete updates[key];
+                }
+                Object.assign(updates, allowed);
+            } else {
+                // Both roles: allow both schedule and accessories removal
+                const { allowed } = restrictApprovedFineUpdates(updates, fine);
+                const finalUpdates = { ...allowed };
+                if (updates.excludedAccessoryIds !== undefined) {
+                    finalUpdates.excludedAccessoryIds = updates.excludedAccessoryIds;
+                }
+                for (const key of Object.keys(updates)) {
+                    delete updates[key];
+                }
+                Object.assign(updates, finalUpdates);
             }
-            for (const key of Object.keys(updates)) {
-                delete updates[key];
-            }
-            Object.assign(updates, allowed);
         }
 
         const oldStatus = fine.fineStatus;
@@ -97,6 +141,7 @@ export const updateFine = async (req, res) => {
             'projectId', 'projectName', 'engineerName', 'responsibleFor',
             'fineAmount', 'employeeAmount', 'companyAmount', 'serviceCharge', 'payableDuration', 'monthStart',
             'employees', 'totalEmployeeFineAmount', 'company', 'companyName', 'companyDescription',
+            'excludedAccessoryIds', 'breakdownItems',
         ];
 
         const mergedVehicleFine = {
@@ -370,6 +415,173 @@ export const updateFine = async (req, res) => {
                 snapshotDeductionScheduleOnApproval(f);
             }
 
+            // If excludedAccessoryIds are provided, detach them from the asset and update the fine totals
+            if (updates.excludedAccessoryIds && Array.isArray(updates.excludedAccessoryIds) && updates.excludedAccessoryIds.length > 0) {
+                try {
+                    const AssetItem = (await import("../../models/AssetItem.js")).default;
+                    const asset = await AssetItem.findById(f.assetObjectId || f.assetId);
+                    if (asset && asset.accessories && asset.accessories.length > 0) {
+                        const excluded = new Set(updates.excludedAccessoryIds.map(String));
+                        let modified = false;
+                        let totalAccAmtRemoved = 0;
+
+                        // Detach helper inline
+                        const removeAccessoryFromHistorySnapshots = async (assetId, accessoryId) => {
+                            try {
+                                const AssetHistory = (await import("../../models/AssetHistory.js")).default;
+                                const histories = await AssetHistory.find({
+                                    assetId: assetId,
+                                    'details.accessories': { $exists: true }
+                                });
+                                for (let history of histories) {
+                                    if (history.details && Array.isArray(history.details.accessories)) {
+                                        const initialLen = history.details.accessories.length;
+                                        history.details.accessories = history.details.accessories.filter(
+                                            acc => (acc._id?.toString() !== accessoryId?.toString()) &&
+                                                (acc.accessoryId !== accessoryId)
+                                        );
+                                        if (history.details.accessories.length !== initialLen) {
+                                            history.markModified('details');
+                                            await history.save();
+                                        }
+                                    }
+                                }
+                            } catch (e) {
+                                console.error("Error in removeAccessoryFromHistorySnapshots:", e);
+                            }
+                        };
+
+                        const detachAccessoryFromAssetToCatalog = async (assetDoc, accIndex, requestObj, { comment = '', catalogStatus = 'Unattached' } = {}) => {
+                            if (!assetDoc?.accessories?.[accIndex]) return null;
+                            const accToMove = assetDoc.accessories[accIndex].toObject?.() || assetDoc.accessories[accIndex];
+                            assetDoc.accessories.splice(accIndex, 1);
+
+                            const { generateVegaAccessoryCatalogId, markCatalogInstancesDetachedFromAsset } = await import("../../utils/syncAssetAccessoryCatalog.js");
+                            const AssetAccessoryCatalog = (await import("../../models/AssetAccessoryCatalog.js")).default;
+                            const AssetHistory = (await import("../../models/AssetHistory.js")).default;
+
+                            const catalogId = await generateVegaAccessoryCatalogId();
+                            await AssetAccessoryCatalog.create({
+                                recordType: 'catalog',
+                                accessoryCatalogId: catalogId,
+                                name: accToMove.name,
+                                price: accToMove.amount || 0,
+                                description: accToMove.description || '',
+                                status: catalogStatus,
+                                isActive: catalogStatus === 'Unattached',
+                                history: [{
+                                    at: new Date(),
+                                    action: 'unattached',
+                                    message: comment || `Returned to catalog from asset ${assetDoc.assetId} — ${assetDoc.name}`,
+                                    assetId: assetDoc.assetId,
+                                    assetName: assetDoc.name,
+                                    assetObjectId: assetDoc._id,
+                                }],
+                            });
+
+                            await AssetHistory.create({
+                                assetId: assetDoc._id,
+                                action: 'Accepted',
+                                performedBy: requestObj.user?.employeeObjectId || requestObj.user?._id,
+                                comments: `Accessory "${accToMove.name}" (${accToMove.accessoryId}) detached to catalog (${catalogId}). ${comment || ''}`.trim(),
+                                date: new Date(),
+                                details: { status: 'UnattachedToCatalog', accessoryId: accToMove.accessoryId, catalogId },
+                            });
+
+                            await removeAccessoryFromHistorySnapshots(assetDoc._id, accToMove._id || accToMove.accessoryId);
+                            try {
+                                await markCatalogInstancesDetachedFromAsset(assetDoc._id, [accToMove.accessoryId]);
+                            } catch {
+                                /* non-fatal */
+                            }
+
+                            return accToMove;
+                        };
+
+                        for (let i = asset.accessories.length - 1; i >= 0; i--) {
+                            const acc = asset.accessories[i];
+                            const oid = String(acc._id);
+                            const code = String(acc.accessoryId || '');
+                            const isExcluded = excluded.has(oid) || excluded.has(code);
+
+                            if (isExcluded) {
+                                const accToMove = await detachAccessoryFromAssetToCatalog(asset, i, req, {
+                                    comment: `Excluded from Loss & Damage fine ${f.fineId} — returned to accessories catalog.`,
+                                    catalogStatus: 'Unattached',
+                                });
+                                if (accToMove) {
+                                    totalAccAmtRemoved += parseFloat(accToMove.amount || 0) || 0;
+                                    modified = true;
+                                }
+                            }
+                        }
+
+                        if (modified) {
+                            asset.markModified('accessories');
+                            await asset.save();
+                            try {
+                                const { syncAllAccessoryInstancesForAsset } = await import("../../utils/syncAssetAccessoryCatalog.js");
+                                await syncAllAccessoryInstancesForAsset(asset);
+                            } catch (e) {
+                                console.error("Error syncing accessories:", e);
+                            }
+
+                            // Update fine totals by subtracting removed accessory amounts
+                            if (totalAccAmtRemoved > 0) {
+                                const totalBase = (f.employeeAmount || 0) + (f.companyAmount || 0);
+                                if (totalBase > 0) {
+                                    const empRatio = (f.employeeAmount || 0) / totalBase;
+                                    const compRatio = (f.companyAmount || 0) / totalBase;
+                                    
+                                    f.employeeAmount = Math.max(0, f.employeeAmount - (totalAccAmtRemoved * empRatio));
+                                    f.companyAmount = Math.max(0, f.companyAmount - (totalAccAmtRemoved * compRatio));
+                                } else {
+                                    f.employeeAmount = 0;
+                                    f.companyAmount = 0;
+                                }
+                                
+                                f.fineAmount = (f.employeeAmount || 0) + (f.companyAmount || 0) + (f.serviceCharge || 0);
+                                f.totalFineAmount = f.fineAmount;
+
+                                if (f.assignedEmployees && f.assignedEmployees.length > 0) {
+                                    for (const emp of f.assignedEmployees) {
+                                        if (emp.employeeId === 'VEGA-HR-0000') {
+                                            emp.employeeAmount = f.companyAmount;
+                                            emp.individualAmount = f.companyAmount;
+                                            emp.fineAmount = f.companyAmount;
+                                        } else {
+                                            emp.employeeAmount = f.employeeAmount;
+                                            emp.individualAmount = f.employeeAmount + (f.serviceCharge || 0);
+                                            emp.fineAmount = f.employeeAmount + (f.serviceCharge || 0);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } catch (err) {
+                    console.error("Failed to process accessory exclusion in updateFine:", err);
+                }
+
+                // Sync excludedAccessoryIds list on the fine
+                f.excludedAccessoryIds = Array.from(new Set([
+                    ...(f.excludedAccessoryIds || []),
+                    ...updates.excludedAccessoryIds
+                ]));
+
+                // Sync breakdownItems list on the fine
+                if (f.breakdownItems && f.breakdownItems.length > 0) {
+                    f.breakdownItems = f.breakdownItems.filter(item => {
+                        if (item.kind === 'accessory') {
+                            const oid = String(item.accessoryObjectId || '');
+                            const code = String(item.accessoryId || '');
+                            return !updates.excludedAccessoryIds.includes(oid) && !updates.excludedAccessoryIds.includes(code);
+                        }
+                        return true;
+                    });
+                }
+            }
+
             await f.save();
         }
 
@@ -507,6 +719,8 @@ export const updateFine = async (req, res) => {
         // If newly approved, send confirmation email with attachments
         if (oldStatus !== 'Approved' && updates.fineStatus === 'Approved') {
             try {
+                const { persistFineApprovalAttachments } = await import('../../utils/persistFineApprovalAttachments.js');
+                await persistFineApprovalAttachments(updatedFine, { req });
                 const { dispatchFineApprovedNotification } = await import("../../utils/dispatchFineApprovedNotification.js");
                 const allAssigned = fines.flatMap(f => f.assignedEmployees);
                 await dispatchFineApprovedNotification(updatedFine, allAssigned, req);

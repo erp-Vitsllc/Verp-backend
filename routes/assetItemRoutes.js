@@ -24,6 +24,7 @@ import {
     submitVehicleDispositionFinance,
 } from '../controllers/vehicleDispositionWorkflowController.js';
 import { protect } from '../middleware/authMiddleware.js';
+import { downloadAssetListPdf } from '../controllers/asset/downloadAssetListPdf.js';
 import {
     isUserInFlowchart,
     getDepartmentHOD,
@@ -649,6 +650,7 @@ router.get('/on-service/controller/:employeeId', protect, getOnServiceAssetsForE
 router.get('/company-allocation/coordinator', protect, getCompanyAllocationCoordinatorStatus);
 router.get('/company-assets/hr/:employeeId', protect, getHRCompanyAssets);
 router.get('/previous/:employeeId', protect, getEmployeePreviousAssets);
+router.get('/asset-list/pdf', protect, downloadAssetListPdf);
 router.get('/detail/:id', protect, getAssetItemDetail);
 router.get('/bulk/details', protect, getBulkAssetDetails);
 router.get('/bulk/print-inventory', protect, getBulkAssetInventoryForPrint);

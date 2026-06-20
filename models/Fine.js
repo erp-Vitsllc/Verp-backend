@@ -249,7 +249,33 @@ const fineSchema = new mongoose.Schema(
             assignedAt: { type: Date, default: Date.now },
             actionedAt: { type: Date },
             comment: { type: String }
-        }]
+        }],
+        excludedAccessoryIds: {
+            type: [String],
+            default: []
+        },
+        breakdownItems: [{
+            kind: { type: String, enum: ['main', 'accessory'] },
+            assetId: { type: String },
+            accessoryObjectId: { type: mongoose.Schema.Types.ObjectId },
+            accessoryId: { type: String },
+            name: { type: String },
+            amount: { type: Number }
+        }],
+        /** Files included in the management approval email (supporting doc + approved form PDF). */
+        approvalAttachments: [{
+            label: { type: String, default: '' },
+            name: { type: String, default: '' },
+            url: { type: String, default: '' },
+            publicId: { type: String, default: '' },
+            mimeType: { type: String, default: 'application/pdf' },
+            source: {
+                type: String,
+                enum: ['supporting', 'approved-form', 'asset-loss-report'],
+                default: 'approved-form',
+            },
+            addedAt: { type: Date, default: Date.now },
+        }],
     },
     { timestamps: true }
 );

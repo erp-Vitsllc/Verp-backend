@@ -276,6 +276,18 @@ export const getFineById = async (req, res) => {
             }
         }
 
+        if (Array.isArray(fine.approvalAttachments) && fine.approvalAttachments.length > 0) {
+            for (const item of fine.approvalAttachments) {
+                if (item?.publicId && !item.url) {
+                    try {
+                        item.url = await getSignedFileUrl(item.publicId);
+                    } catch (err) {
+                        console.error('Error signing approval attachment URL:', err);
+                    }
+                }
+            }
+        }
+
         // Populate Manager Info for Frontend Permission Check
         if (fine.assignedEmployees && fine.assignedEmployees.length > 0) {
             const empIds = fine.assignedEmployees.map(e => e.employeeId);

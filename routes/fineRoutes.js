@@ -9,6 +9,7 @@ import { protect } from "../middleware/authMiddleware.js";
 import { checkPermission } from "../middleware/permissionMiddleware.js";
 
 import { downloadFinePdf } from "../controllers/fine/downloadFinePdf.js";
+import { downloadFineApprovedReportPdf } from "../controllers/fine/downloadFineApprovedReportPdf.js";
 import { getPendingFineDashboardInbox } from "../controllers/fine/getPendingFineDashboardInbox.js";
 
 const router = express.Router();
@@ -25,6 +26,7 @@ router.get("/", getFines);
 router.get("/:id", getFineById);
 
 // Download Fine PDF - temporarily open for all authenticated users
+router.get("/:id/approved-report-pdf", downloadFineApprovedReportPdf);
 router.get("/:id/pdf", downloadFinePdf);
 
 // Add fine - temporarily open for testing

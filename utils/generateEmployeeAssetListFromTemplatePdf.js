@@ -358,7 +358,7 @@ function paginateRows(listRows, font) {
 /**
  * Build ASSET LIST PDF: template background image + transparent overlay table (dynamic rows).
  */
-export async function generateEmployeeAssetListFromTemplatePdf({ employee, assets }) {
+export async function generateEmployeeAssetListFromTemplatePdf({ employee, assets, headerOverride }) {
     try {
         const outputDoc = await PDFDocument.create();
         const font = await outputDoc.embedFont(StandardFonts.Helvetica);
@@ -366,7 +366,7 @@ export async function generateEmployeeAssetListFromTemplatePdf({ employee, asset
         const bgImage = await embedBackground(outputDoc);
 
         const listRows = buildEmployeeAssetListRows(assets);
-        const header = {
+        const header = headerOverride ?? {
             date: formatAssetListDate(new Date()),
             employeeName: employeeDisplayName(employee),
             hodName: resolveHodName(employee),
