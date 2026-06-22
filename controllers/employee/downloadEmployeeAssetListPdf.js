@@ -22,7 +22,7 @@ async function loadEmployeeHeldAssets(employeeObjectId) {
 }
 
 const ASSET_LIST_SELECT =
-    'name assetId assetValue quantity status assignedDate updatedAt accessories acceptanceStatus';
+    'name assetId assetValue quantity status assignedDate updatedAt accessories acceptanceStatus assignedTo assignedCompany assignedToType';
 
 export async function loadAssetsByIds(assetIds) {
     const validIds = [...new Set((assetIds || []).map((id) => String(id).trim()))].filter((id) =>
@@ -32,6 +32,12 @@ export async function loadAssetsByIds(assetIds) {
 
     return AssetItem.find({ _id: { $in: validIds } })
         .select(ASSET_LIST_SELECT)
+        .populate({
+            path: 'assignedTo',
+            select: 'firstName lastName employeeId primaryReportee',
+            populate: { path: 'primaryReportee', select: 'firstName lastName employeeId' },
+        })
+        .populate('assignedCompany', 'name companyId nickName companyShortName')
         .sort({ assignedDate: -1, updatedAt: -1 })
         .lean();
 }

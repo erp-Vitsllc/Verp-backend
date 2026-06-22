@@ -59,8 +59,8 @@ async function resolveAssetOwnerEmployee(fine, assignedEmployees) {
             .select('assignedTo')
             .populate({
                 path: 'assignedTo',
-                select: 'firstName lastName employeeId companyEmail workEmail primaryReportee',
-                populate: { path: 'primaryReportee', select: 'firstName lastName companyEmail workEmail' },
+                select: 'firstName lastName employeeId companyEmail workEmail primaryReportee status profileStatus',
+                populate: { path: 'primaryReportee', select: 'firstName lastName companyEmail workEmail status profileStatus' },
             })
             .lean();
         if (asset?.assignedTo) return asset.assignedTo;
@@ -71,8 +71,8 @@ async function resolveAssetOwnerEmployee(fine, assignedEmployees) {
             .select('assignedTo')
             .populate({
                 path: 'assignedTo',
-                select: 'firstName lastName employeeId companyEmail workEmail primaryReportee',
-                populate: { path: 'primaryReportee', select: 'firstName lastName companyEmail workEmail' },
+                select: 'firstName lastName employeeId companyEmail workEmail primaryReportee status profileStatus',
+                populate: { path: 'primaryReportee', select: 'firstName lastName companyEmail workEmail status profileStatus' },
             })
             .lean();
         if (asset?.assignedTo) return asset.assignedTo;
@@ -84,8 +84,8 @@ async function resolveAssetOwnerEmployee(fine, assignedEmployees) {
     if (!firstAssignedId) return null;
 
     return EmployeeBasic.findOne({ employeeId: firstAssignedId })
-        .select('firstName lastName employeeId companyEmail workEmail primaryReportee')
-        .populate('primaryReportee', 'firstName lastName companyEmail workEmail')
+        .select('firstName lastName employeeId companyEmail workEmail primaryReportee status profileStatus')
+        .populate('primaryReportee', 'firstName lastName companyEmail workEmail status profileStatus')
         .lean();
 }
 
@@ -122,8 +122,8 @@ export async function sendAssetLossFineReportEmail(fine, assignedEmployees, req 
             .filter((id) => id && !['VEGA-HR-0000', 'VEGA_INTERNAL'].includes(id));
 
         const fullEmployees = await EmployeeBasic.find({ employeeId: { $in: employeeIds } })
-            .select('employeeId firstName lastName companyEmail workEmail primaryReportee')
-            .populate('primaryReportee', 'companyEmail workEmail firstName lastName employeeId');
+            .select('employeeId firstName lastName companyEmail workEmail primaryReportee status profileStatus')
+            .populate('primaryReportee', 'companyEmail workEmail firstName lastName employeeId status profileStatus');
 
         const stakeholders = await loadStakeholders(fine, employeeIds);
         const assetOwner = await resolveAssetOwnerEmployee(fine, assignedEmployees);

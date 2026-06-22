@@ -617,12 +617,77 @@ export const getAssetTypes = async (req, res) => {
                 }
             });
 
-            // Fetch all fines related to the returned assets
+            // Fetch all fines related to the returned assets (object id + human asset id for legacy rows)
             const assetIds = assets.map(a => a._id);
+            const assetHumanIds = [...new Set(assets.map((a) => a.assetId).filter(Boolean))];
             const Fine = (await import('../models/Fine.js')).default;
-            const fines = await Fine.find({ assetObjectId: { $in: assetIds } })
-                .select('fineId fineStatus assetObjectId accessoryId accessoryObjectId')
+            const fineQuery = [{ assetObjectId: { $in: assetIds } }];
+            if (assetHumanIds.length) {
+                fineQuery.push({ assetId: { $in: assetHumanIds } });
+            }
+            let fines = await Fine.find({ $or: fineQuery })
+                .select('fineId fineStatus assetId assetObjectId accessoryId accessoryObjectId createdAt')
                 .lean();
+
+            const lostHistoryRows = await AssetHistory.find({
+                assetId: { $in: assetIds },
+                $or: [
+                    { action: { $in: ['Lost', 'End of Life'] } },
+                    { 'details.fineId': { $exists: true, $ne: null } },
+                ],
+            })
+                .select('assetId action date details comments')
+                .sort({ date: -1 })
+                .lean();
+
+            const lostAtByAssetId = new Map();
+            const fineIdByAssetId = new Map();
+            for (const row of lostHistoryRows) {
+                const key = row.assetId?.toString();
+                if (!key) continue;
+                if ((row.action === 'Lost' || row.action === 'End of Life') && !lostAtByAssetId.has(key)) {
+                    lostAtByAssetId.set(key, row.date);
+                }
+                const detailFineId = row.details?.fineId;
+                if (detailFineId && !fineIdByAssetId.has(key)) {
+                    fineIdByAssetId.set(key, String(detailFineId).trim());
+                }
+                if (!fineIdByAssetId.has(key) && row.comments) {
+                    const match = String(row.comments).match(/VEGA-(?:FINE|FNE)-\d+/i);
+                    if (match) fineIdByAssetId.set(key, match[0].toUpperCase());
+                }
+            }
+
+            const knownFineIds = new Set(fines.map((f) => f.fineId).filter(Boolean));
+            const historyFineIds = [...fineIdByAssetId.values()].filter((id) => id && !knownFineIds.has(id));
+            if (historyFineIds.length) {
+                const extraFines = await Fine.find({ fineId: { $in: historyFineIds } })
+                    .select('fineId fineStatus assetId assetObjectId accessoryId accessoryObjectId createdAt')
+                    .lean();
+                fines = [...fines, ...extraFines];
+            }
+            fines = [...new Map(fines.map((f) => [f.fineId, f])).values()];
+
+            const fineByFineId = new Map(fines.map((f) => [f.fineId, f]));
+
+            const pickMainAssetFine = (assetFines) => {
+                const mains = assetFines.filter((f) => {
+                    const accId = f.accessoryId;
+                    return !(accId && String(accId).trim()) && !f.accessoryObjectId;
+                });
+                const pool = mains.length ? mains : assetFines;
+                if (!pool.length) return null;
+                return pool.sort(
+                    (x, y) => new Date(y.createdAt || 0).getTime() - new Date(x.createdAt || 0).getTime(),
+                )[0];
+            };
+
+            const matchFinesToAsset = (a) =>
+                fines.filter(
+                    (f) =>
+                        f.assetObjectId?.toString() === a._id.toString() ||
+                        (f.assetId && a.assetId && f.assetId === a.assetId),
+                );
 
             // Transform into the flat structure the frontend expects
             const unifiedList = [
@@ -644,8 +709,25 @@ export const getAssetTypes = async (req, res) => {
                 }))),
                 ...await Promise.all(
                     assets.map(async (a) => {
-                        const assetFines = fines.filter(f => f.assetObjectId?.toString() === a._id.toString());
-                        const mainFine = assetFines.find(f => !f.accessoryId);
+                        const assetFines = matchFinesToAsset(a);
+                        const mainFine = pickMainAssetFine(assetFines);
+                        const assetKey = a._id.toString();
+                        const historyFineId = fineIdByAssetId.get(assetKey) || null;
+                        const resolvedFineId =
+                            mainFine?.fineId || a.pendingActionDetails?.fineId || historyFineId || null;
+                        const resolvedFine =
+                            mainFine ||
+                            (resolvedFineId ? fineByFineId.get(resolvedFineId) : null) ||
+                            null;
+                        const resolvedLostAt =
+                            a.lostAt ||
+                            mainFine?.createdAt ||
+                            resolvedFine?.createdAt ||
+                            lostAtByAssetId.get(assetKey) ||
+                            (['lost', 'end of life'].includes(String(a.status || '').trim().toLowerCase())
+                                ? a.updatedAt
+                                : null) ||
+                            null;
 
                         const accList = (a.accessories || []).map((acc) => {
                             const accFine = assetFines.find(f => 
@@ -655,7 +737,8 @@ export const getAssetTypes = async (req, res) => {
                             return {
                                 ...acc,
                                 fineId: accFine ? accFine.fineId : (acc.fineId || null),
-                                fineStatus: accFine ? accFine.fineStatus : null
+                                fineStatus: accFine ? accFine.fineStatus : null,
+                                lostAt: acc.lostAt || accFine?.createdAt || null,
                             };
                         });
                         const lostList = (a.lostDetachedAccessories || []).map((x) => {
@@ -667,7 +750,8 @@ export const getAssetTypes = async (req, res) => {
                             return {
                                 ...x,
                                 fineId: accFine ? accFine.fineId : (x.fineId || null),
-                                fineStatus: accFine ? accFine.fineStatus : null
+                                fineStatus: accFine ? accFine.fineStatus : null,
+                                lostAt: x.detachedAt || accFine?.createdAt || null,
                             };
                         });
 
@@ -702,9 +786,9 @@ export const getAssetTypes = async (req, res) => {
                             designatedAssetController,
                             pendingAction: a.pendingAction,
                             pendingActionDetails: a.pendingActionDetails || null,
-                            lossDamageFineId: mainFine ? mainFine.fineId : (a.pendingActionDetails?.fineId || null),
-                            lossDamageFineStatus: mainFine ? mainFine.fineStatus : null,
-                            lostAt: a.lostAt || null,
+                            lossDamageFineId: resolvedFineId,
+                            lossDamageFineStatus: resolvedFine?.fineStatus || mainFine?.fineStatus || null,
+                            lostAt: resolvedLostAt,
                             createdBy: a.createdBy,
                             accessories: toolsOnly
                                 ? accList

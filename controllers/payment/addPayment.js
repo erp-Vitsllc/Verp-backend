@@ -6,6 +6,10 @@ import { getDepartmentHOD, isUserInFlowchart } from "../../utils/getDepartmentHO
 import { syncDashboardAction } from "../../utils/syncDashboard.js";
 import { sendPaymentApprovalEmail } from "../../utils/sendPaymentApprovalEmail.js";
 import { sendPaymentNotificationEmail } from "../../utils/sendCombinedPaymentEmail.js";
+import {
+    resolveEmployeeFinePayableAmount,
+    resolvePrimaryEmployeeId,
+} from "../../utils/finePayableAmount.js";
 
 export const addPayment = async (req, res) => {
     try {
@@ -107,53 +111,6 @@ export const addPayment = async (req, res) => {
 
         await payment.save();
 
-        // Helper function to calculate employee share (similar to frontend getEmpShare)
-        const calculateEmployeeShare = (fine) => {
-            if (!fine) return 0;
-            const isCompany = (fine.responsibleFor || '').toLowerCase() === 'company';
-            if (isCompany) return 0;
-
-            // Filter out company employees (VEGA-HR-0000) from assignedEmployees
-            const realEmployees = (fine.assignedEmployees || []).filter(emp => 
-                emp.employeeId !== 'VEGA-HR-0000' && 
-                emp.employeeId !== 'VEGA_INTERNAL' &&
-                emp.employeeName !== 'Vega Digital IT Solutions'
-            );
-
-            // PRIORITY: Check for individual amount first
-            if (realEmployees.length === 1 && realEmployees[0].individualAmount > 0) {
-                return realEmployees[0].individualAmount;
-            }
-            
-            const companyAmount = parseFloat(fine.companyAmount || 0);
-            const fineAmount = parseFloat(fine.fineAmount || 0);
-            const employeeAmount = parseFloat(fine.employeeAmount || 0);
-            
-            // PRIORITY: If there's only one real employee and no company share, 
-            // employee should pay the full fineAmount
-            if (realEmployees.length === 1 && companyAmount === 0) {
-                return fineAmount;
-            }
-            
-            // If employeeAmount is explicitly set and seems correct, use it (for multiple employees)
-            if (employeeAmount > 0 && employeeAmount <= fineAmount && realEmployees.length > 1) {
-                return employeeAmount / realEmployees.length;
-            }
-            
-            // For single employee with employeeAmount set (but companyAmount > 0), use employeeAmount
-            if (realEmployees.length === 1 && employeeAmount > 0 && employeeAmount <= fineAmount) {
-                return employeeAmount;
-            }
-            
-            // Fallback: calculate from fineAmount - companyAmount
-            const calculatedEmpAmount = fineAmount - companyAmount;
-            if (realEmployees.length > 1) {
-                return calculatedEmpAmount / realEmployees.length;
-            }
-            
-            return calculatedEmpAmount;
-        };
-
         // Update fine/loan status after payment is created (but don't reduce the total amount)
         // Total amount should remain constant - only track payments separately
         if (relatedEntityType && relatedEntityId && status === 'Completed') {
@@ -191,7 +148,10 @@ export const addPayment = async (req, res) => {
                         fine.paidAmount = totalPaid;
                         
                         // Calculate employee's share (what they actually owe)
-                        const employeeShare = calculateEmployeeShare(fine);
+                        const employeeShare = resolveEmployeeFinePayableAmount(
+                            fine,
+                            employee.employeeId || resolvePrimaryEmployeeId(fine),
+                        );
                         
                         // If fully paid (remaining amount is 0 or less), update fine status to 'Paid'
                         const remainingAmount = employeeShare - totalPaid;

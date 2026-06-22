@@ -2,6 +2,11 @@ import Fine from '../models/Fine.js';
 import Payment from '../models/Payment.js';
 import Loan from '../models/Loan.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
+import {
+    dedupeEmployeeFinesByParty,
+    resolveCompanyFinePayableAmount,
+    resolveEmployeeFinePayableAmount,
+} from './finePayableAmount.js';
 
 const PAID_PAYMENT_STATUSES = ['Completed', 'Paid'];
 const ACTIVE_FINE_STATUSES = ['Approved', 'Active', 'Paid', 'Completed'];
@@ -29,47 +34,6 @@ function addMonthsToYM(ym, months) {
     return date.getFullYear() * 100 + (date.getMonth() + 1);
 }
 
-function getTargetIndexFromFineId(recordId) {
-    if (!recordId || typeof recordId !== 'string') return 0;
-    const match = recordId.match(/-([A-Z])$/);
-    if (match) return match[1].charCodeAt(0) - 65;
-    return 0;
-}
-
-function getEmpShare(f, empId, contextFineId) {
-    if (!f) return 0;
-    const isCompany = (f.responsibleFor || '').toLowerCase() === 'company';
-    if (isCompany) return 0;
-
-    const targetIdx = getTargetIndexFromFineId(contextFineId);
-    if (f.assignedEmployees?.length > 0) {
-        const entry = empId
-            ? f.assignedEmployees.find((ae) => ae.employeeId === empId)
-            : (f.assignedEmployees[targetIdx] || f.assignedEmployees[0]);
-
-        if (entry) {
-            if (entry.individualAmount !== undefined && entry.individualAmount !== null) {
-                return parseFloat(entry.individualAmount) || 0;
-            }
-            if (entry.fineAmount) return parseFloat(entry.fineAmount) || 0;
-            if (entry.employeeAmount) return parseFloat(entry.employeeAmount) || 0;
-            return 0;
-        }
-    }
-
-    const companyAmount = parseFloat(f.companyAmount || 0);
-    const fineAmount = parseFloat(f.fineAmount || 0);
-    const employeeAmount = parseFloat(f.employeeAmount || 0);
-    const sCharge = parseFloat(f.serviceCharge || 0);
-
-    if (!(f.assignedEmployees?.length > 1) && companyAmount === 0) {
-        return fineAmount;
-    }
-
-    const totalEmpPortion = employeeAmount > 0 ? (employeeAmount + sCharge) : Math.max(0, fineAmount - companyAmount);
-    const count = f.assignedEmployees?.length || 1;
-    return totalEmpPortion / count;
-}
 
 function categorizeFine(f) {
     const fType = (f.fineType || f.category || f.subCategory || '').toLowerCase();
@@ -213,10 +177,7 @@ function isCompanyFineContext(fine, targetEmpId) {
 }
 
 function getCompanyShare(f) {
-    if (!f) return 0;
-    const hasCompanyPlaceholder = f.assignedEmployees?.some((e) => e.employeeId === 'VEGA-HR-0000');
-    if (hasCompanyPlaceholder) return parseFloat(f.employeeAmount || f.fineAmount || 0);
-    return parseFloat(f.companyAmount || f.fineAmount || 0);
+    return resolveCompanyFinePayableAmount(f);
 }
 
 /**
@@ -318,13 +279,15 @@ export async function buildFineFormSummary(fine, options = {}) {
           }).lean()
         : [];
 
+    const dedupedFines = dedupeEmployeeFinesByParty(allFines, targetEmpId);
+
     const aggregates = emptyAggregates();
     let totalAmount = 0;
     let paidAmount = 0;
 
-    allFines.forEach((f) => {
-        const share = getEmpShare(f, targetEmpId, contextFineId);
-        const paid = getPaidFromPayments(payments, f);
+    dedupedFines.forEach((f) => {
+        const share = resolveEmployeeFinePayableAmount(f, targetEmpId);
+        const paid = Math.min(getPaidFromPayments(payments, f), share);
         const cat = categorizeFine(f);
         aggregates[cat].amount += share;
         aggregates[cat].paid += paid;
@@ -334,9 +297,9 @@ export async function buildFineFormSummary(fine, options = {}) {
         paidAmount += paid;
     });
 
-    const paidFines = allFines.filter((f) => {
-        const share = getEmpShare(f, targetEmpId, contextFineId);
-        const paid = getPaidFromPayments(payments, f);
+    const paidFines = dedupedFines.filter((f) => {
+        const share = resolveEmployeeFinePayableAmount(f, targetEmpId);
+        const paid = Math.min(getPaidFromPayments(payments, f), share);
         return f.fineStatus === 'Paid' || (share > 0 && paid >= share);
     });
 
@@ -369,13 +332,13 @@ export async function buildFineFormSummary(fine, options = {}) {
     const now = new Date();
     const targetYM = addMonthsToYM(now.getFullYear() * 100 + (now.getMonth() + 1), 1);
 
-    const nextSalaryDeduction = allFines.reduce((sum, f) => {
+    const nextSalaryDeduction = dedupedFines.reduce((sum, f) => {
         const isCurrent = f._id?.toString() === fine._id?.toString() || f.fineId === fine.fineId;
         const record = isCurrent ? fine : f;
-        const share = getEmpShare(record, targetEmpId, contextFineId);
+        const share = resolveEmployeeFinePayableAmount(record, targetEmpId);
         if (share <= 0) return sum;
 
-        const paid = getPaidFromPayments(payments, record);
+        const paid = Math.min(getPaidFromPayments(payments, record), share);
         const outstanding = share - paid;
         if (outstanding <= 0) return sum;
 
@@ -414,7 +377,7 @@ export async function buildFineFormSummary(fine, options = {}) {
         endMonthYear,
         nextSalaryDeduction: Math.round(nextSalaryDeduction + loanInstallments),
         aggregates,
-        totalFineCount: allFines.length,
+        totalFineCount: dedupedFines.length,
         totalAmount,
         paidFineCount: paidFines.length,
         paidFineAmount: paidAmount,

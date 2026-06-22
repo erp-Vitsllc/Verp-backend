@@ -18,7 +18,8 @@ const result = await sendBirthdayWishEmail({
 });
 
 if (result.sent) {
-    console.log(`[BirthdayWish Test] Sent to ${result.recipients.join(", ")} for ${name}`);
+    const ccLine = result.cc?.length ? ` (cc: ${result.cc.join(", ")})` : "";
+    console.log(`[BirthdayWish Test] Sent to ${result.recipients.join(", ")}${ccLine} for ${name}`);
 } else {
     console.error("[BirthdayWish Test] Failed to send — check EMAIL_USER / EMAIL_PASS in .env");
     process.exit(1);

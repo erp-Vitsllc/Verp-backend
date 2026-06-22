@@ -5,6 +5,7 @@ import Fine from '../models/Fine.js';
 import Loan from '../models/Loan.js';
 import Payment from '../models/Payment.js';
 import { resolveEmployeeEmail } from './resolveEmployeeEmail.js';
+import { resolveEmployeeFinePayableAmount } from './finePayableAmount.js';
 
 const isUsableEmail = (value) => {
     const v = String(value || '').trim().toLowerCase();
@@ -21,38 +22,14 @@ const resolvePaymentRecipientEmail = (employee) => {
 };
 
 /**
- * Calculates the share for a specific employee in a fine.
+ * Calculates the share for a specific employee in a fine (base + service charge once).
  */
 const calculateEmployeeShare = (fine, targetEmployeeId) => {
     if (!fine) return 0;
-
-    // 1. SPECIFIC EMPLOYEE RECORD PRIORITY
-    if (targetEmployeeId && fine.assignedEmployees?.length > 0) {
-        const record = fine.assignedEmployees.find(e => e.employeeId === targetEmployeeId);
-        if (record && record.individualAmount > 0) {
-            return parseFloat(record.individualAmount);
-        }
-    }
-
-    const isCompany = (fine.responsibleFor || '').toLowerCase() === 'company';
-    if (isCompany) return 0;
-
-    const realEmployees = (fine.assignedEmployees || []).filter(emp => 
-        emp.employeeId !== 'VEGA-HR-0000' && 
-        emp.employeeId !== 'VEGA_INTERNAL' &&
-        emp.employeeName !== 'Vega Digital IT Solutions'
-    );
-    
-    const companyAmount = parseFloat(fine.companyAmount || 0);
-    const fineAmount = parseFloat(fine.fineAmount || 0);
-    const employeeAmount = parseFloat(fine.employeeAmount || 0);
-    
-    if (realEmployees.length === 1 && companyAmount === 0) return fineAmount;
-    if (employeeAmount > 0 && employeeAmount <= fineAmount && realEmployees.length > 1) return employeeAmount / realEmployees.length;
-    if (realEmployees.length === 1 && employeeAmount > 0 && employeeAmount <= fineAmount) return employeeAmount;
-    
-    const calculatedEmpAmount = fineAmount - companyAmount;
-    return realEmployees.length > 0 ? calculatedEmpAmount / realEmployees.length : calculatedEmpAmount;
+    const empId = targetEmployeeId || fine.assignedEmployees?.find(
+        (e) => e.employeeId && e.employeeId !== 'VEGA-HR-0000' && e.employeeId !== 'VEGA_INTERNAL',
+    )?.employeeId;
+    return resolveEmployeeFinePayableAmount(fine, empId);
 };
 
 const SUCCESS_STATUSES = ['Completed', 'Paid', 'Success', 'Approved', 'Active'];

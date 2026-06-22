@@ -16,6 +16,7 @@ import { isRequestUserDesignatedFlowchartHr } from "../../utils/isDesignatedFlow
 import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeService.js";
 import { cleanupEmployeeExpiryNotificationsByLabels } from "../../utils/cleanupEmployeeExpiryNotifications.js";
 import { isActiveEmployeeProfile } from "../../utils/profileFileChangeHrNotify.js";
+import { isLeftUserStatus } from "../../utils/applyEmployeeLeftUserStatus.js";
 import { stripPendingReactivationForNotRenew } from "../../utils/employeeDocumentRenewal.js";
 import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
 import { scheduleAdminEmployeeCardNotRenewHrEmail } from "../../utils/employeeInformativeHrNotify.js";
@@ -366,6 +367,12 @@ export const submitEmployeeDocumentNotRenewRequest = async (req, res) => {
 
         const employee = await EmployeeBasic.findById(resolved._id);
         if (!employee) return res.status(404).json({ message: "Employee not found" });
+
+        if (isLeftUserStatus(employee.status)) {
+            return res.status(403).json({
+                message: "Not-renew requests are not allowed for Left User employees.",
+            });
+        }
 
         if (!isActiveEmployeeProfile(employee)) {
             return res.status(403).json({ message: "Renew and not-renew are only available on active employee profiles." });

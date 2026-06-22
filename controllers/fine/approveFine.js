@@ -209,7 +209,9 @@ export const approveFine = async (req, res) => {
                 // Update ALL siblings
                 for (const f of fines) {
                     const { snapshotDeductionScheduleOnApproval } = await import('../../utils/fineDeductionScheduleSnapshot.js');
+                    const { syncFinePartyPayableAmounts } = await import('../../utils/finePayableAmount.js');
                     snapshotDeductionScheduleOnApproval(f);
+                    syncFinePartyPayableAmounts(f);
 
                     f.fineStatus = 'Approved';
                     f.approvedBy = req.user._id;

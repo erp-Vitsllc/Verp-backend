@@ -2,7 +2,12 @@ import Payment from "../../models/Payment.js";
 import DashboardAction from "../../models/DashboardAction.js";
 import Fine from "../../models/Fine.js";
 import Loan from "../../models/Loan.js";
+import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { sendPaymentNotificationEmail } from "../../utils/sendCombinedPaymentEmail.js";
+import {
+    resolveEmployeeFinePayableAmount,
+    resolvePrimaryEmployeeId,
+} from "../../utils/finePayableAmount.js";
 
 export const respondToPayment = async (req, res) => {
     try {
@@ -67,32 +72,13 @@ export const respondToPayment = async (req, res) => {
                             const totalPaid = allPayments.reduce((sum, p) => sum + parseFloat(p.amount || 0), 0);
                             fine.paidAmount = totalPaid;
 
-                            // Check if fully paid
-                            const calculateEmployeeShare = (f) => {
-                                if (!f) return 0;
-                                const isCo = (f.responsibleFor || '').toLowerCase() === 'company';
-                                if (isCo) return 0;
-                                const realEmps = (f.assignedEmployees || []).filter(e => 
-                                    e.employeeId !== 'VEGA-HR-0000' && 
-                                    e.employeeId !== 'VEGA_INTERNAL' &&
-                                    e.employeeName !== 'Vega Digital IT Solutions'
-                                );
-
-                                // PRIORITY: Individual Amount
-                                if (realEmps.length === 1 && realEmps[0].individualAmount > 0) {
-                                    return realEmps[0].individualAmount;
-                                }
-
-                                const coAmt = parseFloat(f.companyAmount || 0);
-                                const fAmt = parseFloat(f.fineAmount || 0);
-                                const eAmt = parseFloat(f.employeeAmount || 0);
-                                if (realEmps.length === 1 && coAmt === 0) return fAmt;
-                                if (eAmt > 0 && eAmt <= fAmt && realEmps.length > 1) return eAmt / realEmps.length;
-                                if (realEmps.length === 1 && eAmt > 0 && eAmt <= fAmt) return eAmt;
-                                return (fAmt - coAmt) / (realEmps.length || 1);
-                            };
-
-                            const empShare = calculateEmployeeShare(fine);
+                            const payer = payment.paidBy
+                                ? await EmployeeBasic.findById(payment.paidBy).select('employeeId').lean()
+                                : null;
+                            const empShare = resolveEmployeeFinePayableAmount(
+                                fine,
+                                payer?.employeeId || resolvePrimaryEmployeeId(fine),
+                            );
                             const remainingAmount = empShare - totalPaid;
                             
                             console.log('[RespondToPayment] Fine payment check:', {

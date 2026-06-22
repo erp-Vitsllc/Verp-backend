@@ -1280,16 +1280,17 @@ export const resolveEmployeeId = async (id) => {
         let employee;
 
         if (mongoose.Types.ObjectId.isValid(id) && id.toString().length === 24) {
-            employee = await EmployeeBasic.findById(id, null, { maxTimeMS: 5000 }).select('employeeId').lean();
+            employee = await EmployeeBasic.findById(id, null, { maxTimeMS: 5000 }).select('employeeId status').lean();
         } else {
-            employee = await EmployeeBasic.findOne({ employeeId: id }, null, { maxTimeMS: 5000 }).select('employeeId').lean();
+            employee = await EmployeeBasic.findOne({ employeeId: id }, null, { maxTimeMS: 5000 }).select('employeeId status').lean();
         }
 
         if (!employee) return null;
 
         return {
             _id: employee._id,
-            employeeId: employee.employeeId
+            employeeId: employee.employeeId,
+            status: employee.status,
         };
     } catch (error) {
         console.error('Error resolving employee ID:', error);

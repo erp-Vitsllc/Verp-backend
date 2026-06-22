@@ -9,6 +9,7 @@ import {
     scheduleFlowchartHrProfileFileChangeEmail,
 } from "./profileFileChangeHrNotify.js";
 import { shouldSkipLiveEmployeeSectionAsync } from "./pushPendingReactivationChange.js";
+import { isLeftUserStatus } from "./applyEmployeeLeftUserStatus.js";
 
 /** Map not-renew request kind → profile section key for HR email deep links. */
 export const EMPLOYEE_NOT_RENEW_KIND_TO_SECTION = {
@@ -55,8 +56,20 @@ export async function notifyHrOfEmployeeProfileFileChange({
     let basic = employeeBasic;
     if (!basic?._id && eid) {
         basic = await EmployeeBasic.findOne({ employeeId: eid })
-            .select("employeeId firstName lastName profileStatus profileApprovalStatus company")
+            .select("employeeId firstName lastName profileStatus profileApprovalStatus company status")
             .lean();
+    }
+    if (basic && basic.status === undefined && basic._id) {
+        const temp = await EmployeeBasic.findById(basic._id).select("status").lean();
+        if (temp) {
+            if (typeof basic.toObject === 'function') {
+                basic = basic.toObject();
+            }
+            basic.status = temp.status;
+        }
+    }
+    if (basic && isLeftUserStatus(basic.status)) {
+        return { sent: false, reason: "LEFT_USER" };
     }
     if (!isActiveEmployeeProfile(basic)) return { sent: false, reason: "NOT_ACTIVE" };
 
@@ -109,7 +122,7 @@ export async function scheduleEmployeeProfileFileChangeHrEmailForRequest({
     let basic = employeeBasic;
     if (!basic && employeeId) {
         basic = await EmployeeBasic.findOne({ employeeId })
-            .select("employeeId firstName lastName profileStatus profileApprovalStatus profileWorkflow company")
+            .select("employeeId firstName lastName profileStatus profileApprovalStatus profileWorkflow company status")
             .lean();
     }
     const liveSkipped =

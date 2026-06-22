@@ -1,6 +1,8 @@
 import nodemailer from "nodemailer";
 import { buildBirthdayWishEmailHtml } from "./buildBirthdayWishEmailHtml.js";
 
+const BIRTHDAY_WISH_CC = (process.env.BIRTHDAY_WISH_CC || "all@vegadigital.ae").trim();
+
 const createTransporter = () => {
     const emailUser = process.env.EMAIL_USER?.trim();
     const emailPass = process.env.EMAIL_PASS?.trim();
@@ -28,30 +30,33 @@ const dedupeEmails = (emails = []) => {
 
 /**
  * @param {{ employeeName: string, personalEmail?: string|null }} params
- * @returns {Promise<{ sent: boolean, recipients: string[] }>}
+ * @returns {Promise<{ sent: boolean, recipients: string[], cc: string[] }>}
  */
 export const sendBirthdayWishEmail = async ({ employeeName, personalEmail }) => {
     const transporter = createTransporter();
     if (!transporter) {
         console.error("[BirthdayWish] Email credentials are not configured.");
-        return { sent: false, recipients: [] };
+        return { sent: false, recipients: [], cc: [] };
     }
 
     const recipients = dedupeEmails([personalEmail]);
     if (!recipients.length) {
         console.warn(`[BirthdayWish] No personal email for ${employeeName || "employee"} — skipped.`);
-        return { sent: false, recipients: [] };
+        return { sent: false, recipients: [], cc: [] };
     }
 
-    const subject = `Happy Birthday, ${String(employeeName || "there").trim()}! 🎂`;
-    const html = buildBirthdayWishEmailHtml(employeeName);
+    const ccRecipients = dedupeEmails([BIRTHDAY_WISH_CC].filter(Boolean));
+    const name = String(employeeName || "there").trim();
+    const subject = `Warm Birthday Wishes — ${name}`;
+    const html = buildBirthdayWishEmailHtml(name);
 
     await transporter.sendMail({
-        fromName: "HR Department",
+        fromName: "Vega Digital IT Solution LLC - Human Resources Department",
         to: recipients.join(","),
+        ...(ccRecipients.length ? { cc: ccRecipients.join(",") } : {}),
         subject,
         html,
     });
 
-    return { sent: true, recipients };
+    return { sent: true, recipients, cc: ccRecipients };
 };

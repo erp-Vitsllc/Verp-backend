@@ -1,6 +1,6 @@
 import fs from 'fs';
 import {
-    amountToWords,
+    buildAssetLossFineAcknowledgementHtml,
     buildAssetLossFineEmailFields,
     formatMoney,
 } from './buildAssetLossFineEmailFields.js';
@@ -12,6 +12,9 @@ import {
 
 const BORDER = '1px solid #000000';
 const VALUE_COLOR = ASSET_LOSS_FINE_REPORT_VALUE_COLOR;
+const ACK_CELL_STYLE =
+    `padding:12px 14px;border:${BORDER};font-size:11px;line-height:1.65;color:#000;background:rgba(255,255,255,0.25);` +
+    'word-wrap:break-word;overflow-wrap:break-word;white-space:normal;text-align:justify;hyphens:auto;';
 const TD_LABEL =
     `padding:8px 10px;border:${BORDER};font-weight:bold;font-size:12px;color:#000;background:rgba(255,255,255,0.25);`;
 const TD_VAL =
@@ -44,9 +47,10 @@ function sigBox(label, sig) {
     </td>`;
 }
 
-function buildFormTable(fields, signatureUrls) {
-    const amountWords = amountToWords(fields.yourFinePayment);
-    const employeeLabel = fields.employeeName;
+function buildFormTable(fields, signatureUrls, rawPayableAmount) {
+    const ackHtml = buildAssetLossFineAcknowledgementHtml(fields.employeeName, rawPayableAmount, {
+        valueColor: VALUE_COLOR,
+    });
 
     return `
     <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;background:transparent;border:2px solid #000000;">
@@ -114,11 +118,8 @@ function buildFormTable(fields, signatureUrls) {
             <td style="${TD_VAL}">${esc(fields.deductionEnd)}</td>
         </tr>
         <tr>
-            <td colspan="4" style="padding:12px 14px;border:${BORDER};font-size:12px;line-height:1.6;color:#000;background:rgba(255,255,255,0.25);">
-                I <strong>${esc(employeeLabel)}</strong> acknowledge that the fine mentioned above has been committed due to my responsibility.
-                I understand and accept that I am accountable for the amount of
-                <strong>(${esc(amountWords)} DIRHAMS)</strong>.
-                I hereby authorize the deduction of the specified amount as mentioned from the source of income.
+            <td colspan="4" style="${ACK_CELL_STYLE}">
+                ${ackHtml}
             </td>
         </tr>
         <tr>
@@ -178,7 +179,7 @@ export function buildAssetLossFineReportPdfHtml({
 </head>
 <body style="margin:0;background:#fff;">
 <div id="${selectorId}" data-asset-loss-fine-report-ready="true" style="box-sizing:border-box;max-width:210mm;margin:0 auto;padding:138px 44px 128px 44px;font-family:Georgia,'Times New Roman',serif;color:#333;line-height:1.45;min-height:297mm;${bgStyle}-webkit-print-color-adjust:exact;print-color-adjust:exact;">
-  ${buildFormTable(fields, signatureUrls)}
+  ${buildFormTable(fields, signatureUrls, rawFields.yourFinePayment)}
 </div>
 </body>
 </html>`;

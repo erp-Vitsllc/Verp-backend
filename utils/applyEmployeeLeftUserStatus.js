@@ -71,6 +71,10 @@ export async function applyEmployeeLeftUserStatus(employeeDoc) {
                 assignedToEmpId: employeeHumanId,
                 requestType: { $in: LEFT_USER_PENDING_NOTIFICATION_TYPES },
             },
+            {
+                requestId: employeeObjectId,
+                requestType: { $in: ["Employee Document Expiry Reminder", "Document Expiry Reminder"] },
+            },
         ],
     });
 }

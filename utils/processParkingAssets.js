@@ -30,8 +30,8 @@ const daysUntilLeaveEnd = (endDate, today = new Date()) => {
 const loadEmployeeLean = async (id) => {
     if (!id) return null;
     return EmployeeBasic.findById(id)
-        .select('firstName lastName employeeId companyEmail workEmail primaryReportee')
-        .populate('primaryReportee', 'firstName lastName employeeId companyEmail workEmail')
+        .select('firstName lastName employeeId companyEmail workEmail primaryReportee status profileStatus')
+        .populate('primaryReportee', 'firstName lastName employeeId companyEmail workEmail status profileStatus')
         .lean();
 };
 

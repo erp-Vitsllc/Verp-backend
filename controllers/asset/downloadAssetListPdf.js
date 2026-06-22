@@ -24,9 +24,20 @@ export const downloadAssetListPdf = async (req, res) => {
 
         const employeeId = String(req.query?.employeeId || '').trim();
         const listTitle = String(req.query?.listTitle || req.query?.scope || 'Asset List').trim() || 'Asset List';
+        const groupByOwner =
+            String(req.query?.groupByOwner || '')
+                .trim()
+                .toLowerCase() === 'true';
         let pdfBuffer;
 
-        if (employeeId) {
+        if (groupByOwner) {
+            pdfBuffer = await generateEmployeeAssetListFromTemplatePdf({
+                employee: null,
+                assets,
+                groupByOwner: true,
+                listTitle,
+            });
+        } else if (employeeId) {
             const employee = await getCompleteEmployee(employeeId);
             if (employee) {
                 pdfBuffer = await generateEmployeeAssetListFromTemplatePdf({ employee, assets });

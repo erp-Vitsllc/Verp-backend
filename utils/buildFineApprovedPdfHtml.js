@@ -2,7 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import {
-    amountToWords,
+    buildAssetLossFineAcknowledgementHtml,
     buildAssetLossFineEmailFields,
     formatMoney,
     isLossDamageFineType,
@@ -15,6 +15,9 @@ export const FINE_APPROVED_PDF_SELECTOR = '#fine-approved-pdf[data-fine-approved
 
 const VALUE_COLOR = '#cc0000';
 const BORDER = '1px solid #000000';
+const ACK_CELL_STYLE =
+    `padding:12px 14px;border:${BORDER};font-size:11px;line-height:1.65;color:#000;background:rgba(255,255,255,0.25);` +
+    'word-wrap:break-word;overflow-wrap:break-word;white-space:normal;text-align:justify;hyphens:auto;';
 const TD_LABEL =
     `padding:8px 10px;border:${BORDER};font-weight:bold;font-size:12px;color:#000;background:rgba(255,255,255,0.25);`;
 const TD_VAL =
@@ -47,9 +50,10 @@ function sigBox(label, sig) {
     </td>`;
 }
 
-function buildAssetLossFormTable(fields, signatureUrls) {
-    const amountWords = amountToWords(fields.yourFinePayment);
-    const employeeLabel = fields.employeeName;
+function buildAssetLossFormTable(fields, signatureUrls, rawPayableAmount) {
+    const ackHtml = buildAssetLossFineAcknowledgementHtml(fields.employeeName, rawPayableAmount, {
+        valueColor: VALUE_COLOR,
+    });
 
     return `
     <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;background:transparent;border:2px solid #000000;">
@@ -117,11 +121,8 @@ function buildAssetLossFormTable(fields, signatureUrls) {
             <td style="${TD_VAL}">${esc(fields.deductionEnd)}</td>
         </tr>
         <tr>
-            <td colspan="4" style="padding:12px 14px;border:${BORDER};font-size:12px;line-height:1.6;color:#000;background:rgba(255,255,255,0.25);">
-                I <strong>${esc(employeeLabel)}</strong> acknowledge that the fine mentioned above has been committed due to my responsibility.
-                I understand and accept that I am accountable for the amount of
-                <strong style="color:${VALUE_COLOR};">(${esc(amountWords)} DIRHAMS)</strong>.
-                I hereby authorize the deduction of the specified amount as mentioned from the source of income.
+            <td colspan="4" style="${ACK_CELL_STYLE}">
+                ${ackHtml}
             </td>
         </tr>
         <tr>
@@ -151,13 +152,13 @@ export function buildFineApprovedPdfHtml({
 
     let formHtml;
     if (isLossDamageFineType(fine)) {
-        const fields = buildAssetLossFineEmailFields(fine, {
+        const rawFields = buildAssetLossFineEmailFields(fine, {
             employeeName: employeeName || assigned.employeeName,
             hodName: hodName || formSummary?.employeeStats?.hodName,
             assignedEmployeeId: assigned.employeeId,
             fineSummaries: formSummary || {},
         });
-        formHtml = buildAssetLossFormTable(fields, signatureUrls);
+        formHtml = buildAssetLossFormTable(rawFields, signatureUrls, rawFields.yourFinePayment);
     } else {
         formHtml = `<p style="font-family:Georgia,serif;padding:20px;">Fine #${esc(fine.fineId)} — ${esc(fine.fineType)}</p>`;
     }

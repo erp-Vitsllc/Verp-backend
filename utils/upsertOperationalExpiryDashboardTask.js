@@ -1,6 +1,7 @@
 import DashboardAction from '../models/DashboardAction.js';
 import { emailFrontendUrl } from './resolveFrontendBaseUrl.js';
 import { ON_LEAVE_ADVANCE_NOTICE_DAYS } from './assetOperationalFlags.js';
+import { isEmployeeActiveForNotifications } from './applyEmployeeLeftUserStatus.js';
 
 const buildExpiryMessage = ({ kind, daysLeft, expiryDate }) => {
     const dateLabel = expiryDate.toLocaleDateString('en-GB');
@@ -45,6 +46,7 @@ export async function upsertOperationalExpiryDashboardTask({
 }) {
     const assigneeId = recipient?._id;
     if (!assigneeId || !asset?._id) return false;
+    if (!isEmployeeActiveForNotifications(recipient)) return false;
 
     const extra2 = buildExpiryMessage({ kind, daysLeft, expiryDate });
     if (!extra2) return false;

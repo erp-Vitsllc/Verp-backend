@@ -1,4 +1,5 @@
 import { isMultiPartyFine } from './fineGroupClassification.js';
+import { resolveEmployeeFinePayableAmount } from './finePayableAmount.js';
 
 function formatMoney(value) {
     return Number(value || 0).toLocaleString(undefined, {
@@ -34,6 +35,10 @@ function mapPayableType(responsibleFor) {
 
 function defaultGetEmpShare(fine, assignedEmployeeId) {
     if (!fine) return 0;
+    if (assignedEmployeeId) {
+        const resolved = resolveEmployeeFinePayableAmount(fine, assignedEmployeeId);
+        if (resolved > 0) return resolved;
+    }
     if ((fine.responsibleFor || '').toLowerCase() === 'company') return 0;
 
     const realEmployees = (fine.assignedEmployees || []).filter(
@@ -132,8 +137,21 @@ export function buildAssetLossFineEmailFields(
     };
 }
 
+export function parseAmountForWords(value) {
+    if (value == null || value === '') return 0;
+    if (typeof value === 'number') {
+        return Math.floor(Math.abs(value));
+    }
+    const cleaned = String(value)
+        .replace(/,/g, '')
+        .replace(/\s*AED\s*/gi, '')
+        .trim();
+    const parsed = parseFloat(cleaned);
+    return Number.isFinite(parsed) ? Math.floor(Math.abs(parsed)) : 0;
+}
+
 export function amountToWords(n) {
-    const num = Math.floor(Math.abs(parseFloat(n) || 0));
+    const num = parseAmountForWords(n);
     if (num === 0) return 'ZERO';
     const ones = [
         '', 'ONE', 'TWO', 'THREE', 'FOUR', 'FIVE', 'SIX', 'SEVEN', 'EIGHT', 'NINE',
@@ -154,13 +172,53 @@ export function amountToWords(n) {
         return `${h} HUNDRED${rem ? ` ${under1000(rem)}` : ''}`;
     };
 
-    if (num < 1000) return under1000(num);
-    if (num < 1000000) {
-        const th = Math.floor(num / 1000);
-        const rem = num % 1000;
-        return `${under1000(th)} THOUSAND${rem ? ` ${under1000(rem)}` : ''}`;
-    }
-    return num.toLocaleString();
+    const underMillion = (x) => {
+        if (x < 1000) return under1000(x);
+        const th = Math.floor(x / 1000);
+        const rem = x % 1000;
+        return `${under1000(th)} THOUSAND${rem ? ` ${under1000(rem)}` : ''}`.trim();
+    };
+
+    if (num < 1000000) return underMillion(num);
+
+    const millions = Math.floor(num / 1000000);
+    const rem = num % 1000000;
+    return `${underMillion(millions)} MILLION${rem ? ` ${underMillion(rem)}` : ''}`.trim();
+}
+
+/**
+ * Plain-text acknowledgement paragraph (employee name + payable amount in words).
+ */
+export function buildAssetLossFineAcknowledgementText(employeeName, payableAmount) {
+    const name = String(employeeName || '—').trim() || '—';
+    const amountWords = amountToWords(payableAmount);
+    return (
+        `I, Mr./Ms. ${name}, acknowledge that the fine mentioned above has been committed due to my responsibility. ` +
+        `I understand and accept that I am accountable for the amount of (${amountWords} DIRHAMS). ` +
+        `I hereby authorize the deduction of the specified amount as mentioned from the source of income.`
+    );
+}
+
+/**
+ * HTML acknowledgement paragraph with wrapping spans for name and amount.
+ */
+export function buildAssetLossFineAcknowledgementHtml(employeeName, payableAmount, { valueColor = '#cc0000' } = {}) {
+    const name = String(employeeName || '—').trim() || '—';
+    const amountWords = amountToWords(payableAmount);
+    return (
+        `I, Mr./Ms. <strong>${escapeHtml(name)}</strong> acknowledge that the fine mentioned above has been committed due to my responsibility. ` +
+        `I understand and accept that I am accountable for the amount of ` +
+        `<strong style="color:${valueColor};">(${escapeHtml(amountWords)} DIRHAMS)</strong>. ` +
+        `I hereby authorize the deduction of the specified amount as mentioned from the source of income.`
+    );
+}
+
+function escapeHtml(text) {
+    return String(text ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
 }
 
 export { formatMoney };

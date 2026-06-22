@@ -526,6 +526,7 @@ const assigneeCanSelfAcknowledgeAssignment = (emp) =>
 /** After L&D is finalized: mark Lost and clear live assignment (history retains prior assignees). */
 const applyAssetLostFinalState = (asset) => {
     if (!asset) return;
+    if (!asset.lostAt) asset.lostAt = new Date();
     asset.pendingAction = null;
     asset.pendingActionDetails = null;
     asset.actionRequiredBy = null;
@@ -639,6 +640,7 @@ const applyMainAssetLossDamageAccessoryDisposition = async (asset, fineData, req
 
         // Accessories still on the asset and not removed from the fine are treated as lost.
         acc.status = 'Lost';
+        if (!acc.lostAt) acc.lostAt = new Date();
         acc.pendingAction = null;
         acc.pendingActionDetails = null;
 
@@ -9604,6 +9606,7 @@ export const handleAssetActionApproval = async (req, res) => {
                     const finalStatus = 'End of Life';
 
                     asset.status = finalStatus;
+                    if (!asset.lostAt) asset.lostAt = new Date();
                     asset.assignedTo = null;
                     asset.assignedCompany = null;
                     asset.assignedToType = null;
@@ -11143,17 +11146,15 @@ export const requestAccessoryAction = async (req, res) => {
 
         const actorFlags = await getActorPermissionFlagsForAsset(req.user, asset);
 
-        // Unattach: only assigned employee, Asset Controller, or Admin (not assigner / delegated reportee).
+        // Unattach: Asset Controller or Admin only (not assignee / assigner / delegated reportee).
         if (actionType === 'Unattach') {
-            const currentEmpId = req.user.employeeObjectId?.toString();
-            const assigneeId = asset.assignedToType === 'Employee' && asset.assignedTo
-                ? (typeof asset.assignedTo === 'object' ? asset.assignedTo._id?.toString() : String(asset.assignedTo))
-                : null;
-            const isAssignee = !!(assigneeId && currentEmpId && assigneeId === currentEmpId);
             const isAdm = req.user.isAdmin === true || req.user.role === 'Admin' || req.user.role === 'ROOT';
             const isAC = await isUserInFlowchart(req.user, 'assetcontroller').catch(() => false);
-            if (!isAssignee && !isAC && !isAdm) {
-                return res.status(403).json({ message: 'Access denied. Only assigned user, Asset Controller, or Admin can request unattach.' });
+            const currentEmpId = req.user.employeeObjectId?.toString();
+            const acId = asset?.assetControllerId?.toString?.();
+            const isAssetLinkedAC = !!(currentEmpId && acId && currentEmpId === acId);
+            if (!isAdm && !isAC && !isAssetLinkedAC) {
+                return res.status(403).json({ message: 'Access denied. Only Asset Controller or Admin can unattach accessories.' });
             }
         } else if (!actorFlags.canAct) {
             return res.status(403).json({ message: 'Access denied. Only Asset Controller/Admin, assigner, assigned user, or delegated primary reportee can request accessory actions.' });
@@ -12227,6 +12228,7 @@ export const respondAccessoryAction = async (req, res) => {
                 const accName = accessory.name;
                 const accCode = accessory.accessoryId;
                 accessory.status = 'End of Life';
+                if (!accessory.lostAt) accessory.lostAt = new Date();
                 accessory.pendingAction = null;
                 accessory.pendingActionDetails = null;
                 asset.actionRequiredBy = null;
@@ -12260,6 +12262,7 @@ export const respondAccessoryAction = async (req, res) => {
 
                 if (pendingAction === 'End of Life') {
                     accessory.status = 'End of Life';
+                    if (!accessory.lostAt) accessory.lostAt = new Date();
                     accessory.pendingAction = null;
                     accessory.pendingActionDetails = null;
                     asset.actionRequiredBy = null;

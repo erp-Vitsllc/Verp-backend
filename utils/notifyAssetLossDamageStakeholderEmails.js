@@ -9,8 +9,8 @@ async function loadEmployeeWithReportee(id) {
     if (!id) return null;
     const EmployeeBasic = (await import('../models/EmployeeBasic.js')).default;
     return EmployeeBasic.findById(id)
-        .select('firstName lastName employeeId companyEmail workEmail primaryReportee')
-        .populate('primaryReportee', 'firstName lastName employeeId companyEmail workEmail')
+        .select('firstName lastName employeeId companyEmail workEmail primaryReportee status profileStatus')
+        .populate('primaryReportee', 'firstName lastName employeeId companyEmail workEmail status profileStatus')
         .lean();
 }
 

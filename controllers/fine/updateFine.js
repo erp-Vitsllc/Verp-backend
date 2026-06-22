@@ -412,6 +412,8 @@ export const updateFine = async (req, res) => {
             }
 
             if (['Approved', 'Active', 'Paid', 'Completed'].includes(f.fineStatus)) {
+                const { syncFinePartyPayableAmounts } = await import('../../utils/finePayableAmount.js');
+                syncFinePartyPayableAmounts(f);
                 snapshotDeductionScheduleOnApproval(f);
             }
 

@@ -10,6 +10,7 @@ import {
 } from "../../utils/employeeWorkDetailsValidation.js";
 import { isUserAdministrator } from "../../services/permissionService.js";
 import { resolveEmployeeProfileStatusWrite } from "../../utils/employeeProfileStatusLock.js";
+import { isLeftUserStatus } from "../../utils/applyEmployeeLeftUserStatus.js";
 
 export const updateWorkDetails = async (req, res) => {
     try {
@@ -59,6 +60,22 @@ export const updateWorkDetails = async (req, res) => {
             req.user?.role === "ROOT" ||
             req.user?.isAdmin === true ||
             isSystemAdmin;
+
+        if (isLeftUserStatus(employee.status)) {
+            const nextStatus = updatePayload.status ?? employee.status;
+            const isProbationReactivation =
+                isPortalAdmin &&
+                nextStatus === "Probation" &&
+                Object.keys(updatePayload).every((key) =>
+                    ["status", "probationPeriod", "dateOfJoining"].includes(key),
+                );
+
+            if (!isProbationReactivation) {
+                return res.status(403).json({
+                    message: "Left User profiles are read-only. Only admin reactivation to Probation is allowed.",
+                });
+            }
+        }
 
         if (updatePayload.status !== undefined) {
             const currentStatus = employee.status;

@@ -3,7 +3,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
 import {
-    amountToWords,
+    buildAssetLossFineAcknowledgementText,
     buildAssetLossFineEmailFields,
     formatMoney,
 } from './buildAssetLossFineEmailFields.js';
@@ -40,8 +40,6 @@ const FIELD_LAYOUT = {
     sourceOfDeduction: { cx: 485, y: 499, size: 9, maxWidth: 100 },
     deductionStart: { cx: 225, y: 467, size: 9, maxWidth: 128 },
     deductionEnd: { cx: 485, y: 467, size: 9, maxWidth: 100 },
-    ackEmployeeName: { x: 119, y: 432, size: 9, maxWidth: 74, align: 'left' },
-    ackAmountWords: { x: 432, y: 414, size: 8, maxWidth: 102, align: 'left' },
 };
 
 /** Signature image area below each header cell (no white mask). */
@@ -81,6 +79,53 @@ function drawField(page, font, layout, text) {
         font,
         color: rgb(0, 0, 0),
     });
+}
+
+function wrapTextToLines(text, font, size, maxWidth) {
+    const words = String(text || '').trim().split(/\s+/).filter(Boolean);
+    if (!words.length) return [];
+    const lines = [];
+    let current = '';
+    for (const word of words) {
+        const candidate = current ? `${current} ${word}` : word;
+        if (font.widthOfTextAtSize(candidate, size) <= maxWidth) {
+            current = candidate;
+        } else {
+            if (current) lines.push(current);
+            current = word;
+        }
+    }
+    if (current) lines.push(current);
+    return lines;
+}
+
+/** Cover template underscores and draw the full acknowledgement paragraph with wrapping. */
+function drawAcknowledgementParagraph(page, font, employeeName, payableAmount) {
+    page.drawRectangle({
+        x: 48,
+        y: 388,
+        width: 504,
+        height: 58,
+        color: rgb(1, 1, 1),
+        borderWidth: 0,
+    });
+
+    const paragraph = buildAssetLossFineAcknowledgementText(employeeName, payableAmount);
+    const size = 8;
+    const lineHeight = 10.5;
+    const maxWidth = 494;
+    const lines = wrapTextToLines(paragraph, font, size, maxWidth);
+    let y = 436;
+    for (const line of lines) {
+        page.drawText(line, {
+            x: 52,
+            y,
+            size,
+            font,
+            color: rgb(0, 0, 0),
+        });
+        y -= lineHeight;
+    }
 }
 
 /** Cover only the template underscore placeholders in the acknowledgement line. */
@@ -181,12 +226,9 @@ export async function fillAssetLossFineReportPdfTemplate({
         sourceOfDeduction: raw.sourceOfDeduction,
         deductionStart: raw.deductionStart,
         deductionEnd: raw.deductionEnd,
-        ackEmployeeName: raw.employeeName,
-        ackAmountWords: `${amountToWords(raw.yourFinePayment)} DIRHAMS`,
     };
 
-    coverAckPlaceholder(page, 116, 432, 78);
-    coverAckPlaceholder(page, 429, 414, 104);
+    drawAcknowledgementParagraph(page, font, raw.employeeName, raw.yourFinePayment);
 
     for (const [key, value] of Object.entries(fields)) {
         const layout = FIELD_LAYOUT[key];

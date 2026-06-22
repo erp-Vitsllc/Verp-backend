@@ -5,7 +5,7 @@ import axios from 'axios';
 import { resolveEmployeeEmail, addEmployeeEmailToSet, getFallbackEmailNote } from './resolveEmployeeEmail.js';
 import { buildFineFormSummary } from './buildFineFormSummary.js';
 import { buildFineConfirmedEmailHtml } from './buildFineConfirmedEmailHtml.js';
-import { generateFineApprovedPdf } from './generateFineApprovedPdf.js';
+import { generateFineApprovedReportPdfBuffer } from './generateFineApprovedReportPdfBuffer.js';
 import { isLossDamageFineType } from './buildAssetLossFineEmailFields.js';
 import { isCompanyFineParty } from './fineGroupClassification.js';
 import { resolveCompanyFineAdminRecipient } from './resolveCompanyFineAdminRecipient.js';
@@ -176,18 +176,8 @@ export const sendFineConfirmedEmail = async (fine, assignedEmployees, req = null
                 const emailAttachments = [...sharedAttachments];
                 let pdfBuffer = null;
                 if (isLossDamageFineType(fine)) {
-                    pdfBuffer = await generateFineApprovedPdf({
-                        fine,
-                        assigned: {
-                            ...assigned,
-                            employeeId: 'VEGA-HR-0000',
-                            employeeName: companyName,
-                        },
-                        formSummary,
-                        employeeName: companyName,
-                        hodName: hrHODName || 'HR',
-                        hrEmployee: hrHOD,
-                        accountsEmployee: accountsHOD,
+                    pdfBuffer = await generateFineApprovedReportPdfBuffer(fine, {
+                        employeeId: 'VEGA-HR-0000',
                     });
                 }
                 if (!pdfBuffer) {
@@ -250,14 +240,8 @@ export const sendFineConfirmedEmail = async (fine, assignedEmployees, req = null
 
             let pdfBuffer = null;
             if (isLossDamageFineType(fine)) {
-                pdfBuffer = await generateFineApprovedPdf({
-                    fine,
-                    assigned,
-                    formSummary,
-                    employeeName: displayEmployeeName,
-                    hodName,
-                    hrEmployee: hrHOD,
-                    accountsEmployee: accountsHOD,
+                pdfBuffer = await generateFineApprovedReportPdfBuffer(fine, {
+                    employeeId: assigned.employeeId,
                 });
             }
             if (!pdfBuffer) {

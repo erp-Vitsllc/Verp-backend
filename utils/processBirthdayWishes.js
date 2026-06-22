@@ -99,7 +99,7 @@ export const processBirthdayWishes = async () => {
             }
 
             try {
-                const { sent, recipients } = await sendBirthdayWishEmail({
+                const { sent, recipients, cc = [] } = await sendBirthdayWishEmail({
                     employeeName: name,
                     personalEmail,
                 });
@@ -109,13 +109,15 @@ export const processBirthdayWishes = async () => {
                 await BirthdayReminderLog.create({
                     employeeId: employee.employeeId,
                     year,
-                    sentTo: recipients,
+                    sentTo: [...recipients, ...cc.map((addr) => `cc:${addr}`)],
                 });
 
                 sentSet.add(employee.employeeId);
                 sentCount += 1;
                 console.log(
-                    `[BirthdayWish] Sent to ${recipients.join(", ")} for ${name} (${employee.employeeId})`,
+                    `[BirthdayWish] Sent to ${recipients.join(", ")}` +
+                        (cc?.length ? ` (cc: ${cc.join(", ")})` : "") +
+                        ` for ${name} (${employee.employeeId})`,
                 );
             } catch (err) {
                 console.error(

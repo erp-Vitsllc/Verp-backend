@@ -364,6 +364,8 @@ const assetItemSchema = new mongoose.Schema({
             requestedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'EmployeeBasic', default: null },
             requestedAt: { type: Date, default: null }
         },
+        /** When AC finalizes L&D or End of Life for this accessory line. */
+        lostAt: { type: Date, default: null },
         lossDamageFineDraft: { type: mongoose.Schema.Types.Mixed, default: null }
     }],
     /** Accessories removed from this asset after Loss & Damage was finalized (fine created). Keeps list/history without re-embedding the line. */

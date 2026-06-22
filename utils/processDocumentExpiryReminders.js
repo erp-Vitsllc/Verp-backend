@@ -23,7 +23,7 @@ import ExpiryReminderLog from "../models/ExpiryReminderLog.js";
 import User from "../models/User.js";
 import { getDepartmentHOD } from "./getDepartmentHOD.js";
 import { resolveEmployeeEmail } from "./resolveEmployeeEmail.js";
-import { isEmployeeActiveForNotifications } from "./applyEmployeeLeftUserStatus.js";
+import { isEmployeeActiveForNotifications, isLeftUserStatus } from "./applyEmployeeLeftUserStatus.js";
 import {
     getDaysUntil,
     getEmailReminderStageMarker,
@@ -721,8 +721,12 @@ const migrateLegacyEmployeeDocExpiryActions = async () => {
 
         for (const row of pending) {
             if (!row.requestId) continue;
-            const emp = await EmployeeBasic.findById(row.requestId).select("_id").lean();
+            const emp = await EmployeeBasic.findById(row.requestId).select("_id status").lean();
             if (!emp) continue;
+            if (isLeftUserStatus(emp.status)) {
+                await DashboardAction.deleteOne({ _id: row._id });
+                continue;
+            }
             await DashboardAction.updateOne(
                 { _id: row._id },
                 {

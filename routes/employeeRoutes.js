@@ -50,6 +50,7 @@ import {
 import { addDocument } from "../controllers/employee/addDocument.js";
 import { updateDocument } from "../controllers/employee/updateDocument.js";
 import { protect } from "../middleware/authMiddleware.js";
+import { rejectLeftUserProfileWrite } from "../middleware/employeeLeftUserMiddleware.js";
 import {
     checkPermission,
     checkPermissionAny,
@@ -63,6 +64,7 @@ import { getEmployeeDocument } from "../controllers/employee/getEmployeeDocument
 import { getReporteeOptions } from "../controllers/employee/getReporteeOptions.js";
 
 const router = express.Router();
+const blockLeftUserWrites = rejectLeftUserProfileWrite();
 
 import { getLoanEligibleEmployees } from "../controllers/employee/getLoanEligibleEmployees.js";
 import { requestNotice, updateNoticeStatus } from "../controllers/employee/noticeController.js";
@@ -171,82 +173,83 @@ router.post("/", checkPermission('hrm_employees_add', 'create'), addEmployee);
 
 // Specific routes MUST come before generic :id routes
 // Update basic details - requires edit permission
-router.patch("/basic-details/:id", checkBasicDetailsPatchPermission(), updateBasicDetails);
+router.patch("/basic-details/:id", checkBasicDetailsPatchPermission(), blockLeftUserWrites, updateBasicDetails);
 
 // Salary history row delete — salary delete permission (not basic-details patch)
 router.delete(
     "/:id/salary-history/:historyId",
     checkPermission("hrm_employees_view_salary", "delete"),
+    blockLeftUserWrites,
     deleteSalaryHistoryEntry,
 );
 
 // Update work details - requires edit permission
 router.patch("/work-details/:id", checkPermission('hrm_employees_view_work', 'edit'), updateWorkDetails);
-router.delete("/work-details/:id", checkPermission('hrm_employees_view_work', 'delete'), deleteWorkDetailsCard);
+router.delete("/work-details/:id", checkPermission('hrm_employees_view_work', 'delete'), blockLeftUserWrites, deleteWorkDetailsCard);
 
 // Update passport - requires edit permission
-router.patch("/passport/:id", checkPermission('hrm_employees_view_passport', 'edit'), updatePassportDetails);
-router.delete("/passport/:id", checkPermission('hrm_employees_view_passport', 'delete'), deletePassportDetails);
+router.patch("/passport/:id", checkPermission('hrm_employees_view_passport', 'edit'), blockLeftUserWrites, updatePassportDetails);
+router.delete("/passport/:id", checkPermission('hrm_employees_view_passport', 'delete'), blockLeftUserWrites, deletePassportDetails);
 
 // Update visa - requires edit permission
-router.patch("/visa/:id", checkPermission('hrm_employees_view_visa', 'edit'), updateVisaDetails);
-router.delete("/visa/:id/:type", checkPermission('hrm_employees_view_visa', 'edit'), deleteVisaDetails);
+router.patch("/visa/:id", checkPermission('hrm_employees_view_visa', 'edit'), blockLeftUserWrites, updateVisaDetails);
+router.delete("/visa/:id/:type", checkPermission('hrm_employees_view_visa', 'edit'), blockLeftUserWrites, deleteVisaDetails);
 
 // Update Emirates ID - requires edit permission
-router.patch("/emirates-id/:id", checkPermission('hrm_employees_view_passport', 'edit'), updateEmiratesIdDetails);
-router.delete("/emirates-id/:id", checkPermission('hrm_employees_view_passport', 'delete'), deleteEmiratesIdDetails);
+router.patch("/emirates-id/:id", checkPermission('hrm_employees_view_passport', 'edit'), blockLeftUserWrites, updateEmiratesIdDetails);
+router.delete("/emirates-id/:id", checkPermission('hrm_employees_view_passport', 'delete'), blockLeftUserWrites, deleteEmiratesIdDetails);
 
 // Update Labour Card - requires edit permission
-router.patch("/labour-card/:id", checkPermission('hrm_employees_view_passport', 'edit'), updateLabourCardDetails);
-router.delete("/labour-card/:id", checkPermission('hrm_employees_view_passport', 'delete'), deleteLabourCardDetails);
+router.patch("/labour-card/:id", checkPermission('hrm_employees_view_passport', 'edit'), blockLeftUserWrites, updateLabourCardDetails);
+router.delete("/labour-card/:id", checkPermission('hrm_employees_view_passport', 'delete'), blockLeftUserWrites, deleteLabourCardDetails);
 
 // Update Medical Insurance - requires edit permission
-router.patch("/medical-insurance/:id", checkPermission('hrm_employees_view_passport', 'edit'), updateMedicalInsuranceDetails);
-router.delete("/medical-insurance/:id", checkPermission('hrm_employees_view_passport', 'delete'), deleteMedicalInsuranceDetails);
+router.patch("/medical-insurance/:id", checkPermission('hrm_employees_view_passport', 'edit'), blockLeftUserWrites, updateMedicalInsuranceDetails);
+router.delete("/medical-insurance/:id", checkPermission('hrm_employees_view_passport', 'delete'), blockLeftUserWrites, deleteMedicalInsuranceDetails);
 
 // Update Driving License - requires edit permission
-router.patch("/driving-license/:id", checkPermission('hrm_employees_view_passport', 'edit'), updateDrivingLicenseDetails);
-router.delete("/driving-license/:id", checkPermission('hrm_employees_view_passport', 'delete'), deleteDrivingLicenseDetails);
+router.patch("/driving-license/:id", checkPermission('hrm_employees_view_passport', 'edit'), blockLeftUserWrites, updateDrivingLicenseDetails);
+router.delete("/driving-license/:id", checkPermission('hrm_employees_view_passport', 'delete'), blockLeftUserWrites, deleteDrivingLicenseDetails);
 
 // Upload profile picture - requires edit permission
-router.post("/upload-profile-picture/:id", checkPermission('hrm_employees_view_basic', 'edit'), uploadProfilePicture);
+router.post("/upload-profile-picture/:id", checkPermission('hrm_employees_view_basic', 'edit'), blockLeftUserWrites, uploadProfilePicture);
 
 // Upload e-signature - requires work details edit permission
-router.post("/:id/upload-signature", checkPermission('hrm_employees_view_work', 'edit'), uploadSignature);
-router.delete("/:id/signature", checkPermission('hrm_employees_view_work', 'delete'), deleteSignatureCard);
+router.post("/:id/upload-signature", checkPermission('hrm_employees_view_work', 'edit'), blockLeftUserWrites, uploadSignature);
+router.delete("/:id/signature", checkPermission('hrm_employees_view_work', 'delete'), blockLeftUserWrites, deleteSignatureCard);
 
 // Upload document to Cloudinary - requires edit permission
-router.post("/upload-document/:id", checkEmployeeManualDocumentEdit(), uploadDocument);
-router.post("/:id/document", checkEmployeeManualDocumentEdit(), addDocument);
-router.patch("/:id/document/:index", checkEmployeeManualDocumentEdit(), updateDocument);
-router.delete("/:id/document/:index", checkEmployeeManualDocumentEdit(), deleteDocument);
-router.delete("/:id/old-document/:target", checkEmployeeOldDocumentDelete(), deleteOldDocument);
-router.post("/:id/document-not-renew-requests", submitEmployeeDocumentNotRenewRequest);
+router.post("/upload-document/:id", checkEmployeeManualDocumentEdit(), blockLeftUserWrites, uploadDocument);
+router.post("/:id/document", checkEmployeeManualDocumentEdit(), blockLeftUserWrites, addDocument);
+router.patch("/:id/document/:index", checkEmployeeManualDocumentEdit(), blockLeftUserWrites, updateDocument);
+router.delete("/:id/document/:index", checkEmployeeManualDocumentEdit(), blockLeftUserWrites, deleteDocument);
+router.delete("/:id/old-document/:target", checkEmployeeOldDocumentDelete(), blockLeftUserWrites, deleteOldDocument);
+router.post("/:id/document-not-renew-requests", blockLeftUserWrites, submitEmployeeDocumentNotRenewRequest);
 router.post("/:id/document-not-renew-requests/:requestId/respond", respondEmployeeDocumentNotRenewRequest);
 
 // All :id specific routes must come before the generic :id route
 // Emergency contacts - requires edit permission
-router.post("/:id/emergency-contact", checkPermission('hrm_employees_view_emergency', 'create'), addEmergencyContact);
-router.patch("/:id/emergency-contact/:contactId", checkPermission('hrm_employees_view_emergency', 'edit'), updateEmergencyContact);
-router.delete("/:id/emergency-contact/:contactId", checkPermission('hrm_employees_view_emergency', 'delete'), deleteEmergencyContact);
+router.post("/:id/emergency-contact", checkPermission('hrm_employees_view_emergency', 'create'), blockLeftUserWrites, addEmergencyContact);
+router.patch("/:id/emergency-contact/:contactId", checkPermission('hrm_employees_view_emergency', 'edit'), blockLeftUserWrites, updateEmergencyContact);
+router.delete("/:id/emergency-contact/:contactId", checkPermission('hrm_employees_view_emergency', 'delete'), blockLeftUserWrites, deleteEmergencyContact);
 
 // Education - requires edit permission
-router.post("/:id/education", checkPermission('hrm_employees_view_education', 'create'), addEducation);
-router.patch("/:id/education/:educationId", checkPermission('hrm_employees_view_education', 'edit'), updateEducation);
-router.delete("/:id/education/:educationId", checkPermission('hrm_employees_view_education', 'delete'), deleteEducation);
+router.post("/:id/education", checkPermission('hrm_employees_view_education', 'create'), blockLeftUserWrites, addEducation);
+router.patch("/:id/education/:educationId", checkPermission('hrm_employees_view_education', 'edit'), blockLeftUserWrites, updateEducation);
+router.delete("/:id/education/:educationId", checkPermission('hrm_employees_view_education', 'delete'), blockLeftUserWrites, deleteEducation);
 
 // Experience - requires edit permission
-router.post("/:id/experience", checkPermission('hrm_employees_view_experience', 'create'), addExperience);
-router.patch("/:id/experience/:experienceId", checkPermission('hrm_employees_view_experience', 'edit'), updateExperience);
-router.delete("/:id/experience/:experienceId", checkPermission('hrm_employees_view_experience', 'delete'), deleteExperience);
+router.post("/:id/experience", checkPermission('hrm_employees_view_experience', 'create'), blockLeftUserWrites, addExperience);
+router.patch("/:id/experience/:experienceId", checkPermission('hrm_employees_view_experience', 'edit'), blockLeftUserWrites, updateExperience);
+router.delete("/:id/experience/:experienceId", checkPermission('hrm_employees_view_experience', 'delete'), blockLeftUserWrites, deleteExperience);
 
 // Training - requires edit permission
-router.post("/:id/training", checkPermission('hrm_employees_list', 'edit'), addTraining);
-router.patch("/:id/training/:trainingId", checkPermission('hrm_employees_list', 'edit'), updateTraining);
-router.delete("/:id/training/:trainingId", checkPermission('hrm_employees_list', 'edit'), deleteTraining);
+router.post("/:id/training", checkPermission('hrm_employees_list', 'edit'), blockLeftUserWrites, addTraining);
+router.patch("/:id/training/:trainingId", checkPermission('hrm_employees_list', 'edit'), blockLeftUserWrites, updateTraining);
+router.delete("/:id/training/:trainingId", checkPermission('hrm_employees_list', 'edit'), blockLeftUserWrites, deleteTraining);
 
 // Send for activation (notify HR) — view + create on Employees or Profile Activation (see middleware)
-router.post("/:id/send-approval-email", checkEmployeeProfileActivationAction(), sendApprovalEmail);
+router.post("/:id/send-approval-email", checkEmployeeProfileActivationAction(), blockLeftUserWrites, sendApprovalEmail);
 
 // Approve / hold / reject — designated HR or admin enforced in controllers
 router.post("/:id/approve-profile", checkEmployeeProfileActivationAction(), approveProfile);
@@ -261,23 +264,23 @@ router.delete(
     discardEmployeePendingActivationEntry,
 );
 
-router.patch("/:id/profile-status", checkEmployeeProfileActivationAction(), updateProfileStatus);
+router.patch("/:id/profile-status", checkEmployeeProfileActivationAction(), blockLeftUserWrites, updateProfileStatus);
 
 // Notice Request - requires work details edit permission
-router.post("/:id/request-notice", checkPermission('hrm_employees_view_work', 'edit'), requestNotice);
+router.post("/:id/request-notice", checkPermission('hrm_employees_view_work', 'edit'), blockLeftUserWrites, requestNotice);
 
 // Update Notice Status (Approve/Reject) - requires work details edit permission
-router.patch("/:id/update-notice-status", checkPermission('hrm_employees_view_work', 'edit'), updateNoticeStatus);
+router.patch("/:id/update-notice-status", checkPermission('hrm_employees_view_work', 'edit'), blockLeftUserWrites, updateNoticeStatus);
 
 // Left User eligibility and mark-as-left — work details edit permission
 router.get("/:id/left-user-eligibility", checkPermission('hrm_employees_view_work', 'edit'), getLeftUserEligibility);
 router.post("/:id/mark-left-user", checkPermission('hrm_employees_view_work', 'edit'), markEmployeeLeftUser);
 
 // Probation change workflow
-router.post("/:id/probation/request", checkPermission('hrm_employees_view_work', 'edit'), requestProbationChange);
-router.post("/:id/probation/hod-confirm", checkPermission('hrm_employees_view_work', 'edit'), confirmProbationByHOD);
+router.post("/:id/probation/request", checkPermission('hrm_employees_view_work', 'edit'), blockLeftUserWrites, requestProbationChange);
+router.post("/:id/probation/hod-confirm", checkPermission('hrm_employees_view_work', 'edit'), blockLeftUserWrites, confirmProbationByHOD);
 router.post("/:id/probation/employee-respond", employeeRespondProbationChange);
-router.post("/:id/probation/hr-finalize", checkPermission('hrm_employees_view_work', 'edit'), finalizeProbationByHR);
+router.post("/:id/probation/hr-finalize", checkPermission('hrm_employees_view_work', 'edit'), blockLeftUserWrites, finalizeProbationByHR);
 
 // Request Loan/Advance - requires view permission (anyone can apply usually, or restricted?)
 // Using 'view' permission on 'hrm_loan' for now as basic access check
@@ -307,7 +310,7 @@ router.get("/:id/asset-list/pdf", checkPermission('hrm_employees_view', 'view'),
 router.get("/:id", checkPermission('hrm_employees_view', 'view'), getEmployeeById);
 
 // Update employee - requires edit permission
-router.put("/:id", checkPermission('hrm_employees_list', 'edit'), updateEmployee);
+router.put("/:id", checkPermission('hrm_employees_list', 'edit'), blockLeftUserWrites, updateEmployee);
 
 // Delete employee - requires delete permission
 router.delete("/:id", checkPermission('hrm_employees_list', 'delete'), deleteEmployee);
