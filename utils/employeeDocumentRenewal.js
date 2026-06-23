@@ -14,13 +14,14 @@ export function employeeRenewalHasExistingCard(entry) {
     return Boolean(String(entry.number || entry.provider || "").trim());
 }
 
-/** Archive superseded file on explicit renew — any renewal with an existing stored document. */
+/** Archive superseded file on explicit renew or when replacing an existing stored card. */
 export function shouldArchiveEmployeeDocumentOnRenewal({
     isRenewal,
     hasExistingDocument,
+    replaceExistingCard = false,
 }) {
-    if (isRenewal !== true) return false;
-    return Boolean(hasExistingDocument);
+    if (!hasExistingDocument) return false;
+    return isRenewal === true || replaceExistingCard === true;
 }
 
 export async function clearLiveEmployeeDocumentSection({ employeeId, section, visaType }) {
@@ -62,10 +63,12 @@ export async function archiveAndClearLiveEmployeeRenewal({
     section,
     visaType,
     archiveParams,
+    replaceExistingCard = false,
 }) {
     const shouldArchive = shouldArchiveEmployeeDocumentOnRenewal({
         isRenewal,
         hasExistingDocument,
+        replaceExistingCard,
     });
     if (shouldArchive && archiveParams) {
         await archiveEmployeeDocument({ employeeId, ...archiveParams });

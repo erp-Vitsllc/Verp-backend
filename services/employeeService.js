@@ -17,7 +17,7 @@ import EmployeeTraining from "../models/EmployeeTraining.js";
 import User from "../models/User.js";
 import { getSignedFileUrl, normalizeS3Key, isPresignedUrlStillFresh } from "../utils/s3Upload.js";
 import { getS3BucketName, looksLikeObjectStorageUrl } from "../config/storageConfig.js";
-import { checkAndUpdateProbationStatus } from "../utils/employeeStatusHelper.js";
+import { syncProbationStatusFromEmploymentVisa } from "../utils/employeeStatusHelper.js";
 import { normalizeEmployeeProfileStatusForApi } from "../utils/employeeProfileStatusLock.js";
 
 const ROUTE_ID_QUERY_OPTIONS = { maxTimeMS: 10000 };
@@ -113,9 +113,6 @@ export const getCompleteEmployee = async (id) => {
             return null;
         }
 
-        // AUTO-UPDATE: Check if probation has ended
-        employeeBasic = await checkAndUpdateProbationStatus(employeeBasic);
-
         const employeeId = employeeBasic.employeeId;
 
         const selectFields = '-__v -offerLetter.data -salaryHistory.attachment.data -salaryHistory.offerLetter.data';
@@ -205,6 +202,10 @@ export const getCompleteEmployee = async (id) => {
         const personal = personalResult.status === 'fulfilled' ? personalResult.value : null;
         const passport = passportResult.status === 'fulfilled' ? passportResult.value : null;
         const visa = visaResult.status === 'fulfilled' ? visaResult.value : null;
+
+        // AUTO-UPDATE: Sync Probation ↔ Permanent from first employment visa start date
+        employeeBasic = await syncProbationStatusFromEmploymentVisa(employeeBasic, visa);
+
         const emiratesId = emiratesIdResult.status === 'fulfilled' ? emiratesIdResult.value : null;
         const labourCard = labourCardResult.status === 'fulfilled' ? labourCardResult.value : null;
         const medicalInsurance = medicalInsuranceResult.status === 'fulfilled' ? medicalInsuranceResult.value : null;

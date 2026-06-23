@@ -110,6 +110,11 @@ export const updateVisaDetails = async (req, res) => {
         const previousVisaEntry = existingVisa?.[archiveVisaType];
         const hasExistingDocument = employeeRenewalHasExistingCard(previousVisaEntry);
         const hasNewDocumentUpload = Boolean(visaCopy && typeof visaCopy === "string" && visaCopy.trim() !== "");
+        const replaceExistingCard =
+            !isRenewal &&
+            !replacedVisaType &&
+            visaType === "employment" &&
+            hasExistingDocument;
         const shouldArchivePrevious = await archiveAndClearLiveEmployeeRenewal({
             employeeId,
             skipLive,
@@ -118,6 +123,7 @@ export const updateVisaDetails = async (req, res) => {
             hasNewDocumentUpload,
             section: "visa",
             visaType: archiveVisaType,
+            replaceExistingCard,
             archiveParams: {
                 type: VISA_LABELS[archiveVisaType] || `${archiveVisaType} Visa`,
                 description: previousVisaEntry?.number ? `Visa No: ${previousVisaEntry.number}` : "",

@@ -1,47 +1,76 @@
 import EmployeeBasic from "../models/EmployeeBasic.js";
+import {
+    isProbationPeriodComplete,
+    resolveProbationStartDate,
+} from "./probationStartDate.js";
+
+const SYNCABLE_STATUSES = new Set(["Probation", "Permanent"]);
 
 /**
- * Checks if an employee has passed their probation period and updates their status if necessary.
- * @param {Object} employee - Employee object (should include status, contractJoiningDate, probationPeriod)
- * @returns {Promise<Object>} The updated (or original) employee object
+ * Sync Probation ↔ Permanent from employment-visa start date + probation months.
+ * Runs on every employee profile load (refresh / login / get by id).
  */
-export const checkAndUpdateProbationStatus = async (employee) => {
-    const probationStart = employee?.contractJoiningDate;
-    if (!employee || employee.status !== "Probation" || !probationStart) {
-        return employee;
-    }
+export const syncProbationStatusFromEmploymentVisa = async (employeeBasic, visaRecord = null) => {
+    if (!employeeBasic?._id) return employeeBasic;
 
-    const joinDate = new Date(probationStart);
-    joinDate.setHours(0, 0, 0, 0);
-    const probationPeriod = (employee.probationPeriod !== undefined && employee.probationPeriod !== null) ? employee.probationPeriod : 6;
+    const currentStatus = String(employeeBasic.status || "").trim();
+    if (!SYNCABLE_STATUSES.has(currentStatus)) return employeeBasic;
 
-    const probationEndDate = new Date(joinDate);
-    probationEndDate.setMonth(joinDate.getMonth() + probationPeriod);
+    const startDate = resolveProbationStartDate(employeeBasic, visaRecord);
+    if (!startDate) return employeeBasic;
 
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    probationEndDate.setHours(0, 0, 0, 0);
+    const probationPeriod =
+        employeeBasic.probationPeriod !== undefined && employeeBasic.probationPeriod !== null
+            ? employeeBasic.probationPeriod
+            : 6;
 
-    if (today >= probationEndDate) {
-        try {
-            // Update in database
-            const updatedEmployee = await EmployeeBasic.findByIdAndUpdate(
-                employee._id,
-                {
-                    $set: {
-                        status: "Permanent",
-                        probationPeriod: null
-                    }
-                },
-                { new: true }
-            );
+    const complete = isProbationPeriodComplete(startDate, probationPeriod);
+    if (complete === null) return employeeBasic;
 
-            console.log(`[Auto-Update] Employee ${employee.employeeId} status changed from Probation to Permanent.`);
-            return updatedEmployee ? updatedEmployee.toObject() : employee;
-        } catch (error) {
-            console.error(`[Auto-Update] Failed to update probation status for ${employee.employeeId}:`, error);
+    let nextStatus = currentStatus;
+    let nextProbationPeriod = employeeBasic.probationPeriod;
+
+    if (complete && currentStatus === "Probation") {
+        nextStatus = "Permanent";
+        nextProbationPeriod = null;
+    } else if (!complete && currentStatus === "Permanent") {
+        nextStatus = "Probation";
+        if (nextProbationPeriod === undefined || nextProbationPeriod === null) {
+            nextProbationPeriod = 6;
         }
     }
 
-    return employee;
+    if (nextStatus === currentStatus) return employeeBasic;
+
+    const update = {
+        $set: {
+            status: nextStatus,
+            probationPeriod: nextProbationPeriod,
+        },
+    };
+    if (nextStatus === "Permanent") {
+        update.$unset = { probationChangeRequest: "" };
+    }
+
+    try {
+        const updatedEmployee = await EmployeeBasic.findByIdAndUpdate(
+            employeeBasic._id,
+            update,
+            { new: true },
+        )
+            .select("-documents.document.data -trainingDetails.certificate.data")
+            .lean();
+
+        console.log(
+            `[ProbationSync] Employee ${employeeBasic.employeeId}: ${currentStatus} → ${nextStatus} (visa start ${startDate.toISOString().slice(0, 10)}, ${probationPeriod}mo)`,
+        );
+
+        return updatedEmployee || { ...employeeBasic, status: nextStatus, probationPeriod: nextProbationPeriod };
+    } catch (error) {
+        console.error(`[ProbationSync] Failed for ${employeeBasic.employeeId}:`, error);
+        return employeeBasic;
+    }
 };
+
+/** @deprecated Use syncProbationStatusFromEmploymentVisa */
+export const checkAndUpdateProbationStatus = syncProbationStatusFromEmploymentVisa;

@@ -178,9 +178,18 @@ export const sendProbationWorkflowEmail = async ({
 
 export const ensureProbationRequestForEmployee = async (employeeDoc) => {
     if (!employeeDoc || !isEmployeeActiveForNotifications(employeeDoc)) return false;
-    if (employeeDoc.status !== "Probation" || !employeeDoc.contractJoiningDate) return false;
+    if (employeeDoc.status !== "Probation") return false;
+
+    const EmployeeVisa = (await import("../models/EmployeeVisa.js")).default;
+    const visa = await EmployeeVisa.findOne({ employeeId: employeeDoc.employeeId })
+        .select("employment")
+        .lean();
+    const { resolveProbationStartDate } = await import("./probationStartDate.js");
+    const startDate = resolveProbationStartDate(employeeDoc.toObject?.() || employeeDoc, visa);
+    if (!startDate) return false;
+
     const today = startOfDay(new Date());
-    const joinDate = new Date(employeeDoc.contractJoiningDate);
+    const joinDate = new Date(startDate);
     const probationMonths = employeeDoc.probationPeriod || 6;
     const probationEndDate = new Date(joinDate);
     probationEndDate.setMonth(probationEndDate.getMonth() + probationMonths);
