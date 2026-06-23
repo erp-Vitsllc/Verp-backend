@@ -6,6 +6,7 @@ import { disposeEmployeeProfileAttachment } from "../../utils/profileAttachmentD
 import { cleanupEmployeeExpiryNotificationsByLabels } from "../../utils/cleanupEmployeeExpiryNotifications.js";
 import { PURGE_TYPES, purgeEmployeeOldDocuments } from "../../utils/purgeEmployeeOldDocuments.js";
 import { scheduleEmployeeProfileFileChangeHrEmailForRequest } from "../../utils/employeeInformativeHrNotify.js";
+import { scheduleEmployeeCardDeletedNotification } from "../../utils/cardDeleteNotificationHelper.js";
 
 const ALLOWED_VISA_TYPES = ["visit", "employment", "spouse"];
 
@@ -82,6 +83,11 @@ export const deleteVisaDetails = async (req, res) => {
             action: "deleted",
             attachments: existingVisa?.[type]?.document,
             actor: req.user,
+        });
+
+        scheduleEmployeeCardDeletedNotification(req, employee, {
+            cardLabel: visaLabelByType[type] || "Visa",
+            cardKey: "visa",
         });
 
         return res.json({

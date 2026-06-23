@@ -1,7 +1,7 @@
-import EmployeeBasic from "../../models/EmployeeBasic.js";
-import { getCompleteEmployee } from "../../services/employeeService.js";
+import { getCompleteEmployee, findEmployeeBasicByRouteId } from "../../services/employeeService.js";
 import { checkLeftUserEligibility } from "../../utils/employeeLeftUserEligibility.js";
-import { applyEmployeeLeftUserStatus, LEFT_USER_STATUS } from "../../utils/applyEmployeeLeftUserStatus.js";
+import { applyEmployeeLeftUserStatus, LEFT_USER_STATUS, applyEmployeeReturnFromLeftUser } from "../../utils/applyEmployeeLeftUserStatus.js";
+import { isUserAdministrator } from "../../services/permissionService.js";
 import { isRequestUserDesignatedFlowchartHr } from "../../utils/isDesignatedFlowchartHr.js";
 import { queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
 import { notifyLeftUserPendingHr } from "../../utils/employeeLeftUserWorkflow.js";
@@ -23,9 +23,7 @@ export const getLeftUserEligibility = async (req, res) => {
 
 export const markEmployeeLeftUser = async (req, res) => {
     try {
-        const employee = await EmployeeBasic.findOne({
-            $or: [{ employeeId: req.params.id }, { _id: req.params.id }],
-        });
+        const employee = await findEmployeeBasicByRouteId(req.params.id);
 
         if (!employee) {
             return res.status(404).json({ message: "Employee not found" });
@@ -98,6 +96,47 @@ export const markEmployeeLeftUser = async (req, res) => {
         return res.status(200).json({
             message: "Employee marked as Left User.",
             queuedForHrApproval: false,
+            employee: completeEmployee,
+        });
+    } catch (err) {
+        console.error(err);
+        return res.status(500).json({ message: err.message });
+    }
+};
+
+export const returnEmployeeFromLeftUser = async (req, res) => {
+    try {
+        const isSystemAdmin = req.user?.id ? await isUserAdministrator(req.user.id) : false;
+        const isPortalAdmin =
+            req.user?.role === "Admin" ||
+            req.user?.role === "ROOT" ||
+            req.user?.isAdmin === true ||
+            isSystemAdmin;
+
+        if (!isPortalAdmin) {
+            return res.status(403).json({
+                message: "Only admin can return a Left User to Probation.",
+            });
+        }
+
+        const employee = await findEmployeeBasicByRouteId(req.params.id);
+
+        if (!employee) {
+            return res.status(404).json({ message: "Employee not found" });
+        }
+
+        if (employee.status !== LEFT_USER_STATUS) {
+            return res.status(400).json({ message: "Employee is not marked as Left User." });
+        }
+
+        await applyEmployeeReturnFromLeftUser(employee);
+
+        const completeEmployee = await getCompleteEmployee(employee.employeeId);
+        delete completeEmployee.password;
+
+        return res.status(200).json({
+            message:
+                "Employee returned to Probation with inactive profile. Previous documents are archived; complete the profile like a new joiner.",
             employee: completeEmployee,
         });
     } catch (err) {

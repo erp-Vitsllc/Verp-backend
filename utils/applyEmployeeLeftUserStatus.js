@@ -1,5 +1,6 @@
 import User from "../models/User.js";
 import { resolveEmployeeProfileStatusWrite } from "./employeeProfileStatusLock.js";
+import { archiveEmployeeProfileForLeftUserReturn } from "./archiveEmployeeProfileForLeftUserReturn.js";
 
 export const LEFT_USER_STATUS = "Left User";
 
@@ -77,4 +78,43 @@ export async function applyEmployeeLeftUserStatus(employeeDoc) {
             },
         ],
     });
+}
+
+const PROBATION_RETURN_MONTHS = 6;
+
+/** Reset activation state so returned Left User profiles rebuild like a new joiner. */
+function resetEmployeeProfileForLeftUserReturn(employeeDoc) {
+    employeeDoc.profileStatus = "inactive";
+    employeeDoc.profileApprovalStatus = "draft";
+    employeeDoc.profileSubmittedTo = null;
+    employeeDoc.profileActivationSubmittedBy = null;
+    employeeDoc.profileActivationDraftEditor = null;
+    employeeDoc.profileWorkflow = [];
+    employeeDoc.profileActivationHold = undefined;
+    employeeDoc.noticeRequest = undefined;
+    employeeDoc.contractJoiningDate = null;
+    employeeDoc.enablePortalAccess = false;
+    employeeDoc.markModified("profileWorkflow");
+}
+
+/** Admin-only: return Left User to Probation — archive prior data, inactive profile, fresh live cards. */
+export async function applyEmployeeReturnFromLeftUser(employeeDoc) {
+    if (!employeeDoc?.employeeId) return;
+    if (!isLeftUserStatus(employeeDoc.status)) return;
+
+    await archiveEmployeeProfileForLeftUserReturn(employeeDoc);
+
+    const todayStr = new Date().toISOString().split("T")[0];
+    employeeDoc.status = "Probation";
+    employeeDoc.probationPeriod = PROBATION_RETURN_MONTHS;
+    employeeDoc.dateOfJoining = todayStr;
+
+    resetEmployeeProfileForLeftUserReturn(employeeDoc);
+
+    await employeeDoc.save();
+
+    await User.findOneAndUpdate(
+        { employeeId: employeeDoc.employeeId },
+        { $set: { enablePortalAccess: false } },
+    );
 }

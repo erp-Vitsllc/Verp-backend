@@ -222,6 +222,7 @@ export async function applyApprovedPendingProfileChanges(employeeId, basicDoc, c
                 }
                 await setContractJoiningDateFromFirstVisa(employeeId, proposedData?.issueDate, {
                     isRenewal: change?.isRenewal === true,
+                    visaType,
                 });
             }
             continue;

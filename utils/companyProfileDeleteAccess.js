@@ -459,21 +459,27 @@ export const userMayDeleteCompanyProfileContent = async (user, beforeCompany = {
     return true;
 };
 
-/** Inactive company: user may clear one owner doc card when their group has delete on that module. */
-export const userMayClearOwnerDocumentCard = async (
-    user,
-    beforeCompany = {},
-    docKey,
-) => {
+/** Inactive company: any authenticated user may clear an owner doc card. */
+export const userMayClearOwnerDocumentCard = async (user, beforeCompany = {}) => {
     if (isCompanyProfileActivated(beforeCompany)) {
         return false;
     }
-    const userId = user?.id || user?._id?.toString?.() || user?._id;
-    if (!userId) return false;
-    const moduleId = OWNER_DOC_KEY_PERM[String(docKey || "")];
-    if (!moduleId) return false;
-    return hasPermission(userId, moduleId, "delete");
+    return Boolean(user?.id || user?._id);
 };
+
+/** Active company profiles: admin only. Inactive: any authenticated user. */
+export async function denyCompanyCardDeleteUnlessAllowed(req, company = {}) {
+    if (!isCompanyProfileActivated(company)) return null;
+    const { isReqUserAdmin } = await import("./sendAdminDeletionNotificationEmails.js");
+    const isAdmin = await isReqUserAdmin(req.user);
+    if (!isAdmin) {
+        return {
+            status: 403,
+            body: { message: "Only administrator can delete cards on an active company profile." },
+        };
+    }
+    return null;
+}
 
 export const userMayCompactDeleteCompanyContent = async (
     user,

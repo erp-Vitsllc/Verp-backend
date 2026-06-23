@@ -16,6 +16,8 @@ const isExpired = (expiryDate) => {
     return exp < today;
 };
 
+const renewFieldLabel = (baseLabel) => `Renew ${String(baseLabel || '').replace(/\s*\(Expired\)\s*$/i, '').trim()}`;
+
 export const calculateProfileCompletionBackend = (employee = {}) => {
     let totalFields = 0;
     let completedFields = 0;
@@ -72,7 +74,7 @@ export const calculateProfileCompletionBackend = (employee = {}) => {
             totalFields++;
             if (checkField(value)) {
                 if (name === 'Passport Expiry Date' && isExpired(value)) {
-                    pendingFields.push({ section, field: `${name} (Expired)` });
+                    pendingFields.push({ section, field: renewFieldLabel('Passport') });
                 } else {
                     completedFields++;
                 }
@@ -115,7 +117,10 @@ export const calculateProfileCompletionBackend = (employee = {}) => {
                 totalFields++;
                 if (checkField(value)) {
                     if (name === 'Visa Expiry Date' && isExpired(value)) {
-                        pendingFields.push({ section, field: `${name} (Expired)` });
+                        const visaLabel = activeVisaType
+                            ? `${activeVisaType.charAt(0).toUpperCase()}${activeVisaType.slice(1)} Visa`
+                            : 'Visa';
+                        pendingFields.push({ section, field: renewFieldLabel(visaLabel) });
                     } else {
                         completedFields++;
                     }
@@ -144,7 +149,7 @@ export const calculateProfileCompletionBackend = (employee = {}) => {
                 totalFields++;
                 if (checkField(value)) {
                     if (name === 'Emirates ID Expiry Date' && isExpired(value)) {
-                        pendingFields.push({ section, field: `${name} (Expired)` });
+                        pendingFields.push({ section, field: renewFieldLabel('Emirates ID') });
                     } else {
                         completedFields++;
                     }
@@ -184,7 +189,7 @@ export const calculateProfileCompletionBackend = (employee = {}) => {
                 totalFields++;
                 if (checkField(value)) {
                     if (name === 'Labour Card Expiry Date' && isExpired(value)) {
-                        pendingFields.push({ section, field: `${name} (Expired)` });
+                        pendingFields.push({ section, field: renewFieldLabel('Labour Card') });
                     } else {
                         completedFields++;
                     }

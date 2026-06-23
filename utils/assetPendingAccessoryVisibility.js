@@ -20,6 +20,12 @@ export function isAccessoryExcludedFromLiveAssetView(acc) {
     return n === 'lost' || n === 'endoflife' || n === 'eol';
 }
 
+/** Adding accessories is blocked when the parent asset is Lost or End of Life. */
+export function isAssetStatusBlockingAccessoryAdd(assetStatus = '') {
+    const norm = String(assetStatus || '').trim().toLowerCase().replace(/\s+/g, '');
+    return norm === 'lost' || norm === 'endoflife' || norm === 'eol';
+}
+
 export function filterAccessoriesHidingPendingAdds(accessories, canSeePendingAdds, assetStatus = '') {
     if (!Array.isArray(accessories) || accessories.length === 0) return accessories || [];
     const withoutTerminal = accessories.filter((a) => !isAccessoryExcludedFromLiveAssetView(a));

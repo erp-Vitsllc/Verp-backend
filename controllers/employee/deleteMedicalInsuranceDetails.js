@@ -6,6 +6,7 @@ import { disposeEmployeeProfileAttachment } from "../../utils/profileAttachmentD
 import { cleanupEmployeeExpiryNotificationsByLabels } from "../../utils/cleanupEmployeeExpiryNotifications.js";
 import { PURGE_TYPES, purgeEmployeeOldDocuments } from "../../utils/purgeEmployeeOldDocuments.js";
 import { scheduleEmployeeProfileFileChangeHrEmailForRequest } from "../../utils/employeeInformativeHrNotify.js";
+import { scheduleEmployeeCardDeletedNotification } from "../../utils/cardDeleteNotificationHelper.js";
 
 export const deleteMedicalInsuranceDetails = async (req, res) => {
     const { id } = req.params;
@@ -52,6 +53,11 @@ export const deleteMedicalInsuranceDetails = async (req, res) => {
             action: "deleted",
             attachments: card?.medicalInsurance?.document,
             actor: req.user,
+        });
+
+        scheduleEmployeeCardDeletedNotification(req, employee, {
+            cardLabel: "Medical Insurance",
+            cardKey: "medicalInsurance",
         });
 
         return res.status(200).json({ message: "Medical Insurance details deleted successfully." });

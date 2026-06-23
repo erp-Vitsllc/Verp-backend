@@ -11,7 +11,7 @@ import {
     clearOwnerDocInPartition,
     findOwnerRow,
 } from "../../services/companyPartitionService.js";
-import { archiveSupersededCompanyDocuments } from "../../utils/archiveCompanyDocument.js";
+import { scheduleCompanyCardDeletedNotification } from "../../utils/cardDeleteNotificationHelper.js";
 import { archiveSupersededCompanyOwners } from "../../utils/archiveCompanyOwners.js";
 import { syncDashboardAction } from "../../utils/syncDashboard.js";
 import { sendResponsibilityApprovalEmail } from "../../utils/sendResponsibilityApprovalEmail.js";
@@ -142,7 +142,6 @@ import {
     isDocumentRemovalAttempt,
     isExplicitDestructiveCompanyPatch,
     userMayDeleteCompanyProfileContent,
-    userMayClearOwnerDocumentCard,
     userMayCompactDeleteCompanyContent,
     isCompanyProfileActivated,
 } from "../../utils/companyProfileDeleteAccess.js";
@@ -339,13 +338,9 @@ export const updateCompany = async (req, res) => {
                     : { ...company });
 
             const profileActive = isCompanyProfileActivated(beforeCompany);
-            let mayClearOwnerDoc = requesterIsAdmin || requesterIsDesignatedHr;
+            let mayClearOwnerDoc = requesterIsAdmin;
             if (!mayClearOwnerDoc && !profileActive) {
-                mayClearOwnerDoc = await userMayClearOwnerDocumentCard(
-                    req.user,
-                    beforeCompany,
-                    docKey,
-                );
+                mayClearOwnerDoc = true;
             }
             if (!mayClearOwnerDoc) {
                 return res.status(403).json({
@@ -411,10 +406,17 @@ export const updateCompany = async (req, res) => {
                 });
             }
 
+            const activationProgress = calculateCompanyActivationProgress(fullProfile || {});
+            scheduleCompanyCardDeletedNotification(req, fullProfile || {}, {
+                cardLabel: `Owner ${docKey}`,
+                cardKey: docKey,
+                progressPercentage: activationProgress?.percentage ?? null,
+            });
+
             return res.status(200).json({
                 message: "Owner document card removed successfully.",
                 company: signed,
-                activationProgress: calculateCompanyActivationProgress(fullProfile || {}),
+                activationProgress,
             });
         }
 

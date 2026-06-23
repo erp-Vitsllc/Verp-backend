@@ -9,18 +9,13 @@ import {
 } from "../../services/companyPartitionService.js";
 import { signCompanyProfileForResponse } from "../../utils/signCompanyProfileForResponse.js";
 import { calculateCompanyActivationProgress } from "../../utils/companyActivation.js";
-import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
-import { isRequestUserDesignatedFlowchartHr } from "../../utils/isDesignatedFlowchartHr.js";
-import { hasPermission } from "../../services/permissionService.js";
+import { denyCompanyCardDeleteUnlessAllowed } from "../../utils/companyProfileDeleteAccess.js";
 import { disposeCompanyProfileAttachment } from "../../utils/profileAttachmentDisposition.js";
 import { scheduleCompanyProfileFileDeleteHrEmail } from "../../utils/companyInformativeHrNotify.js";
+import { scheduleCompanyCardDeletedNotification } from "../../utils/cardDeleteNotificationHelper.js";
+import { closeCreatorNotRenewFollowUpTasks } from "../../utils/companyNotRenewFollowUp.js";
 
 const ALLOWED_FIELDS = new Set(["ejari", "insurance"]);
-
-const FIELD_PERMISSION_MAP = {
-    ejari: "hrm_company_view_basic_ejari",
-    insurance: "hrm_company_view_documents_live_with_expiry",
-};
 
 const buildCompanyFilter = (id) => ({
     $or: [
@@ -28,12 +23,6 @@ const buildCompanyFilter = (id) => ({
         { companyId: id },
     ],
 });
-
-function isCompanyProfileActivated(company) {
-    const status = String(company?.status || "").toLowerCase();
-    const activationStatus = String(company?.activationStatus || "").toLowerCase();
-    return status === "active" && activationStatus === "active";
-}
 
 function resolveArrayItem(list, target) {
     const row = findBundleArrayRow(list, target);
@@ -71,30 +60,8 @@ export const deleteCompanyArrayItem = async (req, res) => {
             ? await loadAuthoritativeBundleArray(company._id, fieldName)
             : fullProfile[fieldName];
 
-        const isAdmin = await isReqUserAdmin(req.user);
-        const isDesignatedHr = await isRequestUserDesignatedFlowchartHr(req);
-        const canBypassActivatedDelete = isAdmin || isDesignatedHr;
-        const activated = isCompanyProfileActivated(company);
-        const permModule = FIELD_PERMISSION_MAP[fieldName];
-
-        if (!isAdmin) {
-            if (activated) {
-                if (!canBypassActivatedDelete) {
-                    return res.status(403).json({
-                        message: `Only administrator can delete ${fieldName} records on an activated company profile.`,
-                    });
-                }
-            } else {
-                const userId = req.user?.id || req.user?._id;
-                const hasDeletePerm =
-                    userId && permModule && (await hasPermission(userId, permModule, "delete"));
-                if (!canBypassActivatedDelete && !hasDeletePerm) {
-                    return res.status(403).json({
-                        message: `You do not have permission to delete this ${fieldName} record.`,
-                    });
-                }
-            }
-        }
+        const denied = await denyCompanyCardDeleteUnlessAllowed(req, fullProfile);
+        if (denied) return res.status(denied.status).json(denied.body);
 
         const resolved = resolveArrayItem(bundleList, target);
         if (!resolved?.row) {
@@ -148,10 +115,17 @@ export const deleteCompanyArrayItem = async (req, res) => {
             req,
         });
 
+        const activationProgress = calculateCompanyActivationProgress(fullAfter);
+        scheduleCompanyCardDeletedNotification(req, fullAfter, {
+            cardLabel: label,
+            cardKey: fieldName,
+            progressPercentage: activationProgress?.percentage ?? null,
+        });
+
         return res.status(200).json({
             message: `${label} entry deleted successfully.`,
             company: await signCompanyProfileForResponse(fullAfter),
-            activationProgress: calculateCompanyActivationProgress(fullAfter),
+            activationProgress,
         });
     } catch (error) {
         console.error("deleteCompanyArrayItem error:", error);

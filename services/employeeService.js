@@ -20,6 +20,32 @@ import { getS3BucketName, looksLikeObjectStorageUrl } from "../config/storageCon
 import { checkAndUpdateProbationStatus } from "../utils/employeeStatusHelper.js";
 import { normalizeEmployeeProfileStatusForApi } from "../utils/employeeProfileStatusLock.js";
 
+const ROUTE_ID_QUERY_OPTIONS = { maxTimeMS: 10000 };
+
+/**
+ * Resolve EmployeeBasic by route param (human employeeId or Mongo _id).
+ * Avoids casting non-ObjectId strings (e.g. VEGA-HR-00005) against _id.
+ */
+export const findEmployeeBasicByRouteId = async (id) => {
+    const routeId = String(id || "").trim();
+    if (!routeId) return null;
+
+    if (mongoose.Types.ObjectId.isValid(routeId) && routeId.length === 24) {
+        return EmployeeBasic.findById(routeId, null, ROUTE_ID_QUERY_OPTIONS);
+    }
+
+    let employee = await EmployeeBasic.findOne({ employeeId: routeId }, null, ROUTE_ID_QUERY_OPTIONS);
+    if (!employee) {
+        const escaped = routeId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        employee = await EmployeeBasic.findOne(
+            { employeeId: { $regex: new RegExp(`^${escaped}$`, "i") } },
+            null,
+            ROUTE_ID_QUERY_OPTIONS,
+        );
+    }
+
+    return employee;
+};
 
 /**
  * Get complete employee data by ID (can be _id or employeeId)

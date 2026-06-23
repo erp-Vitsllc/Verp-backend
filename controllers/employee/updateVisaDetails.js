@@ -220,6 +220,7 @@ export const updateVisaDetails = async (req, res) => {
 
             await setContractJoiningDateFromFirstVisa(employeeId, parsedIssueDate, {
                 isRenewal,
+                visaType,
             });
         }
 

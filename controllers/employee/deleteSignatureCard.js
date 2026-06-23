@@ -5,6 +5,7 @@ import { disposeEmployeeProfileAttachment } from "../../utils/profileAttachmentD
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
 import { PURGE_TYPES, purgeEmployeeOldDocuments } from "../../utils/purgeEmployeeOldDocuments.js";
 import { scheduleEmployeeProfileFileChangeHrEmailForRequest } from "../../utils/employeeInformativeHrNotify.js";
+import { scheduleEmployeeCardDeletedNotification } from "../../utils/cardDeleteNotificationHelper.js";
 
 export const deleteSignatureCard = async (req, res) => {
     const { id } = req.params;
@@ -56,6 +57,11 @@ export const deleteSignatureCard = async (req, res) => {
             action: "deleted",
             attachments: sigEmployee?.signature,
             actor: req.user,
+        });
+
+        scheduleEmployeeCardDeletedNotification(req, employee, {
+            cardLabel: "Digital Signature",
+            cardKey: "signature",
         });
 
         return res.status(200).json({

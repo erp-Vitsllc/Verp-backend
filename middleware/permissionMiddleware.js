@@ -236,6 +236,59 @@ export const checkBasicDetailsPatchPermission = () => {
 };
 
 /**
+ * Employee card DELETE — inactive profiles: any authenticated user; live-active: flowchart delete permission.
+ */
+export const checkEmployeeCardDeletePermission = (moduleId) => {
+    return async (req, res, next) => {
+        try {
+            const userId = req.user?.id;
+            if (!userId) {
+                return res.status(401).json({ message: "Not authorized, no user found" });
+            }
+
+            const { hasPermission, isUserAdministrator } = await import("../services/permissionService.js");
+            const isAdmin = await isUserAdministrator(userId);
+            const isJwtAdmin =
+                req.user?.isAdmin === true ||
+                req.user?.role === "Admin" ||
+                req.user?.role === "ROOT";
+            if (isAdmin || isJwtAdmin) {
+                return next();
+            }
+
+            const { resolveEmployeeId } = await import("../services/employeeService.js");
+            const EmployeeBasic = (await import("../models/EmployeeBasic.js")).default;
+            const { isEmployeeProfileLiveActive } = await import("../utils/employeeDocumentRenewal.js");
+
+            const employee = await resolveEmployeeId(req.params.id);
+            if (!employee) {
+                return res.status(404).json({ message: "Employee not found." });
+            }
+
+            const basic = await EmployeeBasic.findOne({ employeeId: employee.employeeId })
+                .select("profileStatus profileApprovalStatus")
+                .lean();
+
+            if (!isEmployeeProfileLiveActive(basic || {})) {
+                return next();
+            }
+
+            const hasAccess = await hasPermission(userId, moduleId, "delete");
+            if (!hasAccess) {
+                return res.status(403).json({
+                    message: `Access denied. You don't have delete permission for ${moduleId}`,
+                });
+            }
+
+            next();
+        } catch (error) {
+            console.error("Error checking employee card delete permission:", error);
+            return res.status(500).json({ message: "Error checking permissions" });
+        }
+    };
+};
+
+/**
  * Manual employee documents (live list + S3 upload helper).
  * Matches frontend Documents tab: `DocumentsTab` gates add/edit with
  * `hrm_employees_view_documents_live` or `hrm_employees_view_documents_old` edit,

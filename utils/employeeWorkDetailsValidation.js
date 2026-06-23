@@ -92,11 +92,6 @@ export async function validateEmployeeWorkDetailsPayload(payload = {}, { employe
         if (startOfDay(contract) > startOfDay(new Date())) {
             return { ok: false, message: "Contract Joining Date cannot be in the future" };
         }
-        const dojRaw = p.dateOfJoining || employee?.dateOfJoining;
-        const doj = parseIsoDate(dojRaw);
-        if (doj && startOfDay(contract) < startOfDay(doj)) {
-            return { ok: false, message: "Contract Joining Date cannot be earlier than Date of Joining" };
-        }
     }
 
     if (p.company !== undefined) {

@@ -178,9 +178,9 @@ export const sendProbationWorkflowEmail = async ({
 
 export const ensureProbationRequestForEmployee = async (employeeDoc) => {
     if (!employeeDoc || !isEmployeeActiveForNotifications(employeeDoc)) return false;
-    if (employeeDoc.status !== "Probation" || !employeeDoc.dateOfJoining) return false;
+    if (employeeDoc.status !== "Probation" || !employeeDoc.contractJoiningDate) return false;
     const today = startOfDay(new Date());
-    const joinDate = new Date(employeeDoc.contractJoiningDate || employeeDoc.dateOfJoining);
+    const joinDate = new Date(employeeDoc.contractJoiningDate);
     const probationMonths = employeeDoc.probationPeriod || 6;
     const probationEndDate = new Date(joinDate);
     probationEndDate.setMonth(probationEndDate.getMonth() + probationMonths);

@@ -7,6 +7,7 @@ import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileRe
 import { cleanupEmployeeExpiryNotificationsByLabels } from "../../utils/cleanupEmployeeExpiryNotifications.js";
 import { PURGE_TYPES, purgeEmployeeOldDocuments } from "../../utils/purgeEmployeeOldDocuments.js";
 import { scheduleEmployeeProfileFileChangeHrEmailForRequest } from "../../utils/employeeInformativeHrNotify.js";
+import { scheduleEmployeeCardDeletedNotification } from "../../utils/cardDeleteNotificationHelper.js";
 
 export const deletePassportDetails = async (req, res) => {
     const { id } = req.params;
@@ -59,6 +60,11 @@ export const deletePassportDetails = async (req, res) => {
             action: "deleted",
             attachments: passport?.document,
             actor: req.user,
+        });
+
+        scheduleEmployeeCardDeletedNotification(req, employee, {
+            cardLabel: "Passport",
+            cardKey: "passport",
         });
 
         return res.status(200).json({ message: "Passport details deleted successfully." });

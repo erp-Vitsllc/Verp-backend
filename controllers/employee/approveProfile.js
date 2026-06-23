@@ -373,6 +373,7 @@ export const approveProfile = async (req, res) => {
                     }
                     await setContractJoiningDateFromFirstVisa(employeeId, proposedData?.issueDate, {
                         isRenewal: change?.isRenewal === true,
+                        visaType,
                     });
                 }
                 continue;

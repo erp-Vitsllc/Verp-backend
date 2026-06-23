@@ -4,6 +4,7 @@ import { denyEmployeeCardDeleteUnlessAllowed } from "../../utils/employeeCardDel
 import { disposeEmployeeProfileAttachment } from "../../utils/profileAttachmentDisposition.js";
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
 import { scheduleEmployeeProfileFileChangeHrEmailForRequest } from "../../utils/employeeInformativeHrNotify.js";
+import { scheduleEmployeeCardDeletedNotification } from "../../utils/cardDeleteNotificationHelper.js";
 
 export const deleteWorkDetailsCard = async (req, res) => {
     const { id } = req.params;
@@ -65,6 +66,11 @@ export const deleteWorkDetailsCard = async (req, res) => {
             sectionLabel: "Work Details",
             action: "deleted",
             actor: req.user,
+        });
+
+        scheduleEmployeeCardDeletedNotification(req, employee, {
+            cardLabel: "Work Details",
+            cardKey: "workDetails",
         });
 
         return res.status(200).json({ message: "Work details deleted successfully." });

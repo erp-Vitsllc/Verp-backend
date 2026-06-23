@@ -7,14 +7,16 @@ function parseDate(value) {
 }
 
 /**
- * Set contract joining date from the first visa issue date only.
- * Skips renewals and never overwrites an existing value.
+ * Set contract joining date from the first employment or spouse visa issue date only.
+ * Skips visit visa, renewals, and never overwrites an existing value.
  */
 export async function setContractJoiningDateFromFirstVisa(
     employeeId,
     issueDate,
-    { isRenewal = false } = {},
+    { isRenewal = false, visaType = '' } = {},
 ) {
+    const normalizedType = String(visaType || '').trim().toLowerCase();
+    if (normalizedType === 'visit') return false;
     if (!employeeId || !issueDate || isRenewal) return false;
 
     const parsed = parseDate(issueDate);

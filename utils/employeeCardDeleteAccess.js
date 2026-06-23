@@ -1,5 +1,5 @@
 import { isReqUserAdmin } from "./sendAdminDeletionNotificationEmails.js";
-import { isActiveEmployeeProfile } from "./profileFileChangeHrNotify.js";
+import { isEmployeeProfileLiveActive } from "./employeeDocumentRenewal.js";
 
 const NON_DELETABLE_PROFILE_SECTIONS = new Set([
     "workDetails",
@@ -21,14 +21,15 @@ export function denyCoreEmployeeProfileDelete(sectionKey, label = "this section"
 }
 
 /**
- * Live-active profiles: admin only. Inactive/draft: route permission middleware applies.
+ * Live-active profiles: admin only. Inactive/draft: any authenticated user may delete.
  * @returns {Promise<object|null>} 403 response body to return, or null when allowed.
  */
 export async function denyEmployeeCardDeleteUnlessAllowed(req, employeeBasic, label = "this card", sectionKey = null) {
     const coreDenied = denyCoreEmployeeProfileDelete(sectionKey, label);
     if (coreDenied) return coreDenied;
 
-    if (!isActiveEmployeeProfile(employeeBasic || {})) return null;
+    if (!isEmployeeProfileLiveActive(employeeBasic || {})) return null;
+
     const isAdmin = await isReqUserAdmin(req.user);
     if (!isAdmin) {
         return {

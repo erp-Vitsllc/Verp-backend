@@ -126,11 +126,15 @@ export const getCompany = async (req, res) => {
         const companyAssets = await AssetItem.find({
             assignedCompany: company._id,
             assignedToType: 'Company',
-            status: { $ne: 'Draft' } // Don't show drafts in company profile
-        }).populate({
-            path: 'assignedTo',
-            select: 'firstName lastName employeeId designation'
-        }).populate('typeId', 'name').populate('categoryId', 'name');
+            status: { $ne: 'Draft' },
+        })
+            .populate('assignedCompany', 'name companyId nickName')
+            .populate({
+                path: 'assignedTo',
+                select: 'firstName lastName employeeId designation',
+            })
+            .populate('typeId', 'name')
+            .populate('categoryId', 'name');
 
 
         // 3. Sign URLs for asset artifacts

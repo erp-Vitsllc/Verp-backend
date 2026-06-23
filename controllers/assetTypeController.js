@@ -41,6 +41,7 @@ import {
 import { cleanupDashboardActionsForDeletedAsset } from '../utils/cleanupAssetDashboardActions.js';
 import { isTransientMongoError } from '../utils/mongoTransientRetry.js';
 import { migrateLegacyOperationalFlags } from '../utils/assetOperationalFlags.js';
+import { isAssetStatusBlockingAccessoryAdd } from '../utils/assetPendingAccessoryVisibility.js';
 
 /** Collapse duplicate accessory rows in a PUT payload (match by Mongo subdoc _id or accessoryId, not name). */
 function dedupeAccessoryPayloadById(arr) {
@@ -1346,6 +1347,23 @@ export const updateAssetItem = async (req, res) => {
                                     oa.accessoryId === acc.accessoryId)
                         );
                     const removedAccessories = oldAccessories.filter((oa) => !accessoryStillInPayload(oa));
+                    const hasNewAccessory = incomingAccessoryPayload.some(
+                        (acc) =>
+                            !oldAccessories.find(
+                                (oa) =>
+                                    (oa._id &&
+                                        acc._id &&
+                                        oa._id.toString() === acc._id.toString()) ||
+                                    (oa.accessoryId &&
+                                        acc.accessoryId &&
+                                        oa.accessoryId === acc.accessoryId),
+                            ),
+                    );
+                    if (isAssetStatusBlockingAccessoryAdd(asset.status) && hasNewAccessory) {
+                        return res.status(400).json({
+                            message: 'Accessories cannot be added when the asset is Lost or End of Life.',
+                        });
+                    }
                     const creatorMayTrimAccessories =
                         removedAccessories.length > 0 &&
                         isCreator &&
