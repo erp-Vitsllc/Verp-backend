@@ -11,6 +11,7 @@ import { loadCompaniesForExpiryScanByIds } from "../../services/companyPartition
 import { collectCompanyExpiryDocuments, buildEmployeeManualDocumentExpiryLabel, isArchivedEmployeeManualDoc } from "../../utils/companyExpiryScanUtils.js";
 import { getDaysUntil, isExpiryHrTaskDueForDoc } from "../../utils/documentExpiryReminderStages.js";
 import { calculateProfileCompletionBackend } from "../../utils/calculateProfileCompletionBackend.js";
+import { getCompleteEmployee } from "../../services/employeeService.js";
 import { isEmployeeActiveForNotifications } from "../../utils/applyEmployeeLeftUserStatus.js";
 import { isEmployeeProfileLiveActive } from "../../utils/employeeDocumentRenewal.js";
 
@@ -1040,60 +1041,62 @@ export const getUserActivityStats = async (req, res) => {
             }
         });
 
-        // 5.1.5 Incomplete Profile Notifications for HR/Admin (live-active profiles only)
-        if (isHR || isAdmin) {
+        // 5.1.5 Mandatory card notifications — designated Flowchart HR only (live-active profiles below 100%).
+        if (isCurrentHrHolder) {
             try {
                 const employeesForScan = await EmployeeBasic.find({})
                     .select({
-                        employeeId: 1, firstName: 1, lastName: 1, status: 1, profileStatus: 1, profileApprovalStatus: 1,
-                        nationality: 1, country: 1,
-                        email: 1, workEmail: 1, companyEmail: 1, contactNumber: 1, dateOfBirth: 1,
-                        maritalStatus: 1, fathersName: 1, gender: 1, profilePicture: 1, profilePic: 1, avatar: 1,
-                        numberOfDependents: 1, probationPeriod: 1, passportDetails: 1, visaDetails: 1,
-                        emiratesIdDetails: 1, labourCardDetails: 1, salaryHistory: 1, salaryMonth: 1, basic: 1,
-                        bankName: 1, bank: 1, accountName: 1, bankAccountName: 1, accountNumber: 1, bankAccountNumber: 1,
-                        ibanNumber: 1, emergencyContacts: 1, emergencyContactName: 1, emergencyContactNumber: 1,
-                        company: 1, dateOfJoining: 1, contractJoiningDate: 1, department: 1, designation: 1,
-                        primaryReportee: 1, signature: 1, updatedAt: 1, createdAt: 1
+                        _id: 1,
+                        employeeId: 1,
+                        firstName: 1,
+                        lastName: 1,
+                        status: 1,
+                        profileStatus: 1,
+                        profileApprovalStatus: 1,
+                        updatedAt: 1,
+                        createdAt: 1,
                     })
                     .lean()
                     .maxTimeMS(10000);
 
-                for (const emp of employeesForScan) {
-                    if (!isEmployeeProfileLiveActive(emp)) continue;
-                    const { percentage, pendingFields } = calculateProfileCompletionBackend(emp);
-                    if (percentage >= 100 || !Array.isArray(pendingFields) || !pendingFields.length) continue;
+                const liveActiveEmployees = employeesForScan.filter((emp) => isEmployeeProfileLiveActive(emp));
+                const batchSize = 5;
 
-                    const displayName =
-                        `${emp.firstName || ''} ${emp.lastName || ''}`.trim() ||
-                        emp.employeeId ||
-                        'Unknown Employee';
-                    const empKey = emp.employeeId || String(emp._id);
+                for (let i = 0; i < liveActiveEmployees.length; i += batchSize) {
+                    const batch = liveActiveEmployees.slice(i, i + batchSize);
+                    await Promise.all(
+                        batch.map(async (emp) => {
+                            const complete = await getCompleteEmployee(emp.employeeId || emp._id);
+                            if (!complete || !isEmployeeProfileLiveActive(complete)) return;
 
-                    for (const row of pendingFields) {
-                        const section = String(row?.section || '').trim();
-                        const field = String(row?.field || '').trim();
-                        if (!section || !field) continue;
+                            const { percentage } = calculateProfileCompletionBackend(complete);
+                            if (!Number.isFinite(percentage) || percentage >= 100) return;
 
-                        const fieldSlug = field.toLowerCase().replace(/[^a-z0-9]+/g, '-');
-                        const notifId = `${emp._id}_incomplete_${section.toLowerCase().replace(/\s+/g, '-')}_${fieldSlug}`;
-                        if (seenRequests.has(notifId)) continue;
+                            const displayName =
+                                `${complete.firstName || emp.firstName || ''} ${complete.lastName || emp.lastName || ''}`.trim() ||
+                                complete.employeeId ||
+                                emp.employeeId ||
+                                'Unknown Employee';
+                            const empKey = complete.employeeId || emp.employeeId || String(emp._id);
+                            const notifId = `${emp._id}_mandatory_cards_incomplete`;
+                            if (seenRequests.has(notifId)) return;
 
-                        activityList.push({
-                            id: emp._id,
-                            type: 'Profile Incomplete',
-                            requestedBy: 'System',
-                            requestedDate: emp.updatedAt || emp.createdAt || new Date(),
-                            actionedDate: null,
-                            status: 'Pending',
-                            extra1: `Complete: ${field}`,
-                            extra2: `${displayName} (${empKey})`.trim(),
-                            extra3: JSON.stringify({ section, field }),
-                            targetEmployeeId: empKey,
-                            scope: 'inbox',
-                        });
-                        seenRequests.set(notifId, 'Pending');
-                    }
+                            activityList.push({
+                                id: emp._id,
+                                type: 'Profile Incomplete',
+                                requestedBy: 'System',
+                                requestedDate: complete.updatedAt || emp.updatedAt || emp.createdAt || new Date(),
+                                actionedDate: null,
+                                status: 'Pending',
+                                extra1: `${displayName} is missing mandatory cards. Please complete them.`,
+                                extra2: `${displayName} (${empKey})`.trim(),
+                                extra3: JSON.stringify({ kind: 'mandatory-cards' }),
+                                targetEmployeeId: empKey,
+                                scope: 'inbox',
+                            });
+                            seenRequests.set(notifId, 'Pending');
+                        }),
+                    );
                 }
             } catch (err) {
                 console.error('[getUserActivityStats] Incomplete profile scan error:', err);

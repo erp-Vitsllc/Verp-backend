@@ -781,7 +781,7 @@ export const getAssetTypes = async (req, res) => {
                             assignedToType: a.assignedToType,
                             assigned: a.status === 'Assigned' ? 1 : 0,
                             unassigned: a.status === 'Unassigned' ? 1 : 0,
-                            invoiceFile: toolsOnly ? a.invoiceFile : await signIf(a.invoiceFile),
+                            invoiceFile: await signIf(a.invoiceFile),
                             actionRequiredBy: a.actionRequiredBy,
                             assignedCompany: a.assignedCompany,
                             designatedAssetController,

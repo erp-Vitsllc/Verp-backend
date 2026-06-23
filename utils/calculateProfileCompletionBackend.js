@@ -7,16 +7,6 @@ const checkField = (val) => {
     return true;
 };
 
-const isExpired = (expiryDate) => {
-    if (!expiryDate) return false;
-    const exp = new Date(expiryDate);
-    if (isNaN(exp.getTime())) return false;
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    return exp < today;
-};
-
-const renewFieldLabel = (baseLabel) => `Renew ${String(baseLabel || '').replace(/\s*\(Expired\)\s*$/i, '').trim()}`;
 
 export const calculateProfileCompletionBackend = (employee = {}) => {
     let totalFields = 0;
@@ -73,11 +63,7 @@ export const calculateProfileCompletionBackend = (employee = {}) => {
         passportFields.forEach(({ value, name, section }) => {
             totalFields++;
             if (checkField(value)) {
-                if (name === 'Passport Expiry Date' && isExpired(value)) {
-                    pendingFields.push({ section, field: renewFieldLabel('Passport') });
-                } else {
-                    completedFields++;
-                }
+                completedFields++;
             } else {
                 pendingFields.push({ section, field: name });
             }
@@ -116,14 +102,7 @@ export const calculateProfileCompletionBackend = (employee = {}) => {
             visaFields.forEach(({ value, name, section }) => {
                 totalFields++;
                 if (checkField(value)) {
-                    if (name === 'Visa Expiry Date' && isExpired(value)) {
-                        const visaLabel = activeVisaType
-                            ? `${activeVisaType.charAt(0).toUpperCase()}${activeVisaType.slice(1)} Visa`
-                            : 'Visa';
-                        pendingFields.push({ section, field: renewFieldLabel(visaLabel) });
-                    } else {
-                        completedFields++;
-                    }
+                    completedFields++;
                 } else {
                     pendingFields.push({ section, field: name });
                 }
@@ -148,11 +127,7 @@ export const calculateProfileCompletionBackend = (employee = {}) => {
             eidFields.forEach(({ value, name, section }) => {
                 totalFields++;
                 if (checkField(value)) {
-                    if (name === 'Emirates ID Expiry Date' && isExpired(value)) {
-                        pendingFields.push({ section, field: renewFieldLabel('Emirates ID') });
-                    } else {
-                        completedFields++;
-                    }
+                    completedFields++;
                 } else {
                     pendingFields.push({ section, field: name });
                 }
@@ -188,11 +163,7 @@ export const calculateProfileCompletionBackend = (employee = {}) => {
             lcFields.forEach(({ value, name, section }) => {
                 totalFields++;
                 if (checkField(value)) {
-                    if (name === 'Labour Card Expiry Date' && isExpired(value)) {
-                        pendingFields.push({ section, field: renewFieldLabel('Labour Card') });
-                    } else {
-                        completedFields++;
-                    }
+                    completedFields++;
                 } else {
                     pendingFields.push({ section, field: name });
                 }
