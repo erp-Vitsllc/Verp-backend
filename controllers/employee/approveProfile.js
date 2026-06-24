@@ -384,7 +384,9 @@ export const approveProfile = async (req, res) => {
                     section === "basicdetails" &&
                     Object.prototype.hasOwnProperty.call(proposedData, "salaryHistory")
                 ) {
-                    salaryIncrementResult = await archiveSalaryIncrementIfNeeded(employeeId, proposedData);
+                    salaryIncrementResult = await archiveSalaryIncrementIfNeeded(employeeId, proposedData, null, {
+                        forceIncrement: proposedData?.isSalaryIncrement === true,
+                    });
                 }
                 if (section === "basicdetails" && bankUpdateTouchesFields(proposedData)) {
                     await archiveSupersededBankIfNeeded(

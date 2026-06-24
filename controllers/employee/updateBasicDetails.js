@@ -610,6 +610,10 @@ export const updateBasicDetails = async (req, res) => {
 
         let updated = null;
         const basicChangeEntry = buildBasicDetailsReactivationEntry();
+        const forceSalaryIncrement = req.body?.isSalaryIncrement === true;
+        if (forceSalaryIncrement && basicChangeEntry?.proposedData) {
+            basicChangeEntry.proposedData.isSalaryIncrement = true;
+        }
         const salaryTouchedEarly = [...SALARY_PREVIOUS_KEYS].some((k) =>
             Object.prototype.hasOwnProperty.call(updatePayload, k),
         );
@@ -619,7 +623,9 @@ export const updateBasicDetails = async (req, res) => {
         const applyLiveNow = !skipLive;
 
         if (salaryTouchedEarly && Object.prototype.hasOwnProperty.call(updatePayload, "salaryHistory")) {
-            salaryIncrementResult = await archiveSalaryIncrementIfNeeded(employeeId, updatePayload);
+            salaryIncrementResult = await archiveSalaryIncrementIfNeeded(employeeId, updatePayload, existingSalary, {
+                forceIncrement: forceSalaryIncrement,
+            });
         }
 
         if (bankTouchedEarly && applyLiveNow) {

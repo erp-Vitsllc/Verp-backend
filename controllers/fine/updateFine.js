@@ -284,6 +284,10 @@ export const updateFine = async (req, res) => {
         for (const f of fines) {
             if (scheduleFieldsAreChanging(f, updates)) {
                 preserveOriginalDeductionScheduleBeforeEdit(f);
+                f.scheduleChangeForHistory = {
+                    fromMonth: f.monthStart || '',
+                    fromDuration: f.payableDuration != null ? parseInt(f.payableDuration, 10) : null,
+                };
             }
 
             const targetEmployeeId = f.assignedEmployees?.[0]?.employeeId;
@@ -417,247 +421,71 @@ export const updateFine = async (req, res) => {
                 snapshotDeductionScheduleOnApproval(f);
             }
 
-            // If excludedAccessoryIds are provided, detach them from the asset and update the fine totals
+            // If excludedAccessoryIds are provided, update fine totals only — accessories stay on the asset until manual Unattach
             if (updates.excludedAccessoryIds && Array.isArray(updates.excludedAccessoryIds) && updates.excludedAccessoryIds.length > 0) {
-                try {
-                    const AssetItem = (await import("../../models/AssetItem.js")).default;
-                    const asset = await AssetItem.findById(f.assetObjectId || f.assetId);
-                    if (asset && asset.accessories && asset.accessories.length > 0) {
-                        const excluded = new Set(updates.excludedAccessoryIds.map(String));
-                        let modified = false;
-                        let totalAccAmtRemoved = 0;
+                const excluded = new Set(updates.excludedAccessoryIds.map(String));
+                let totalAccAmtRemoved = 0;
 
-                        // Detach helper inline
-                        const removeAccessoryFromHistorySnapshots = async (assetId, accessoryId) => {
-                            try {
-                                const AssetHistory = (await import("../../models/AssetHistory.js")).default;
-                                const histories = await AssetHistory.find({
-                                    assetId: assetId,
-                                    'details.accessories': { $exists: true }
-                                });
-                                for (let history of histories) {
-                                    if (history.details && Array.isArray(history.details.accessories)) {
-                                        const initialLen = history.details.accessories.length;
-                                        history.details.accessories = history.details.accessories.filter(
-                                            acc => (acc._id?.toString() !== accessoryId?.toString()) &&
-                                                (acc.accessoryId !== accessoryId)
-                                        );
-                                        if (history.details.accessories.length !== initialLen) {
-                                            history.markModified('details');
-                                            await history.save();
-                                        }
-                                    }
-                                }
-                            } catch (e) {
-                                console.error("Error in removeAccessoryFromHistorySnapshots:", e);
-                            }
-                        };
-
-                        const detachAccessoryFromAssetToCatalog = async (assetDoc, accIndex, requestObj, { comment = '', catalogStatus = 'Unattached' } = {}) => {
-                            if (!assetDoc?.accessories?.[accIndex]) return null;
-                            const accToMove = assetDoc.accessories[accIndex].toObject?.() || assetDoc.accessories[accIndex];
-                            assetDoc.accessories.splice(accIndex, 1);
-
-                            const { generateVegaAccessoryCatalogId, markCatalogInstancesDetachedFromAsset } = await import("../../utils/syncAssetAccessoryCatalog.js");
-                            const AssetAccessoryCatalog = (await import("../../models/AssetAccessoryCatalog.js")).default;
-                            const AssetHistory = (await import("../../models/AssetHistory.js")).default;
-
-                            let catalogId = accToMove.accessoryId;
-                            let catalogRow = null;
-                            if (catalogId) {
-                                catalogRow = await AssetAccessoryCatalog.findOne({
-                                    recordType: 'catalog',
-                                    accessoryCatalogId: catalogId
-                                });
-                            }
-
-                            if (catalogRow) {
-                                catalogRow.status = catalogStatus;
-                                catalogRow.isActive = catalogStatus === 'Unattached';
-                                catalogRow.assetItemId = null;
-                                catalogRow.assetIdRef = '';
-                                catalogRow.history.push({
-                                    at: new Date(),
-                                    action: 'unattached',
-                                    message: comment || `Returned to catalog from asset ${assetDoc.assetId} — ${assetDoc.name}`,
-                                    assetId: assetDoc.assetId,
-                                    assetName: assetDoc.name,
-                                    assetObjectId: assetDoc._id,
-                                });
-                                await catalogRow.save();
-                            } else {
-                                catalogId = catalogId || (await generateVegaAccessoryCatalogId());
-                                await AssetAccessoryCatalog.create({
-                                    recordType: 'catalog',
-                                    accessoryCatalogId: catalogId,
-                                    name: accToMove.name,
-                                    price: accToMove.amount || 0,
-                                    description: accToMove.description || '',
-                                    status: catalogStatus,
-                                    isActive: catalogStatus === 'Unattached',
-                                    history: [{
-                                        at: new Date(),
-                                        action: 'unattached',
-                                        message: comment || `Returned to catalog from asset ${assetDoc.assetId} — ${assetDoc.name}`,
-                                        assetId: assetDoc.assetId,
-                                        assetName: assetDoc.name,
-                                        assetObjectId: assetDoc._id,
-                                    }],
-                                });
-                            }
-
-                            await AssetHistory.create({
-                                assetId: assetDoc._id,
-                                action: 'Accepted',
-                                performedBy: requestObj.user?.employeeObjectId || requestObj.user?._id,
-                                comments: `Accessory "${accToMove.name}" (${accToMove.accessoryId}) detached to catalog (${catalogId}). ${comment || ''}`.trim(),
-                                date: new Date(),
-                                details: { status: 'UnattachedToCatalog', accessoryId: accToMove.accessoryId, catalogId },
-                            });
-
-                            await removeAccessoryFromHistorySnapshots(assetDoc._id, accToMove._id || accToMove.accessoryId);
-                            try {
-                                await markCatalogInstancesDetachedFromAsset(assetDoc._id, [accToMove.accessoryId]);
-                            } catch {
-                                /* non-fatal */
-                            }
-
-                            return accToMove;
-                        };
-
-                        for (let i = asset.accessories.length - 1; i >= 0; i--) {
-                            const acc = asset.accessories[i];
-                            const oid = String(acc._id);
+                if (f.breakdownItems?.length) {
+                    for (const item of f.breakdownItems) {
+                        if (item.kind !== 'accessory') continue;
+                        const oid = String(item.accessoryObjectId || '');
+                        const code = String(item.accessoryId || '');
+                        if (excluded.has(oid) || excluded.has(code)) {
+                            totalAccAmtRemoved += parseFloat(item.amount || 0) || 0;
+                        }
+                    }
+                } else if (f.assetObjectId || f.assetId) {
+                    try {
+                        const AssetItem = (await import("../../models/AssetItem.js")).default;
+                        const asset = await AssetItem.findById(f.assetObjectId || f.assetId)
+                            .select('accessories lostDetachedAccessories')
+                            .lean();
+                        const allAcc = [
+                            ...(asset?.accessories || []),
+                            ...(asset?.lostDetachedAccessories || []),
+                        ];
+                        for (const acc of allAcc) {
+                            const oid = String(acc._id || '');
                             const code = String(acc.accessoryId || '');
-                            const isExcluded = excluded.has(oid) || excluded.has(code);
-
-                            if (isExcluded) {
-                                const accToMove = await detachAccessoryFromAssetToCatalog(asset, i, req, {
-                                    comment: `Excluded from Loss & Damage fine ${f.fineId} — returned to accessories catalog.`,
-                                    catalogStatus: 'Unattached',
-                                });
-                                if (accToMove) {
-                                    totalAccAmtRemoved += parseFloat(accToMove.amount || 0) || 0;
-                                    modified = true;
-                                }
+                            if (excluded.has(oid) || excluded.has(code)) {
+                                totalAccAmtRemoved += parseFloat(acc.amount || 0) || 0;
                             }
                         }
+                    } catch (err) {
+                        console.error("Failed to load asset for accessory exclusion amounts:", err);
+                    }
+                }
 
-                        // Also check lostDetachedAccessories
-                        if (asset.lostDetachedAccessories && asset.lostDetachedAccessories.length > 0) {
-                            for (let i = asset.lostDetachedAccessories.length - 1; i >= 0; i--) {
-                                const acc = asset.lostDetachedAccessories[i];
-                                const code = String(acc.accessoryId || '');
-                                const isExcluded = excluded.has(code);
+                if (totalAccAmtRemoved > 0) {
+                    const totalBase = (f.employeeAmount || 0) + (f.companyAmount || 0);
+                    if (totalBase > 0) {
+                        const empRatio = (f.employeeAmount || 0) / totalBase;
+                        const compRatio = (f.companyAmount || 0) / totalBase;
 
-                                if (isExcluded) {
-                                    asset.lostDetachedAccessories.splice(i, 1);
-                                    modified = true;
-                                    totalAccAmtRemoved += parseFloat(acc.amount || 0) || 0;
+                        f.employeeAmount = Math.max(0, f.employeeAmount - (totalAccAmtRemoved * empRatio));
+                        f.companyAmount = Math.max(0, f.companyAmount - (totalAccAmtRemoved * compRatio));
+                    } else {
+                        f.employeeAmount = 0;
+                        f.companyAmount = 0;
+                    }
 
-                                    // Update catalog status to Unattached
-                                    try {
-                                        const AssetAccessoryCatalog = (await import("../../models/AssetAccessoryCatalog.js")).default;
-                                        const catalogRow = await AssetAccessoryCatalog.findOne({
-                                            recordType: 'catalog',
-                                            name: acc.name,
-                                            status: 'Lost',
-                                            $or: [
-                                                { 'history.message': { $regex: new RegExp(f.fineId, 'i') } },
-                                                { 'history.assetObjectId': asset._id }
-                                            ]
-                                        });
+                    f.fineAmount = (f.employeeAmount || 0) + (f.companyAmount || 0) + (f.serviceCharge || 0);
+                    f.totalFineAmount = f.fineAmount;
 
-                                        if (catalogRow) {
-                                            catalogRow.status = 'Unattached';
-                                            catalogRow.isActive = true;
-                                            catalogRow.history.push({
-                                                at: new Date(),
-                                                action: 'unattached',
-                                                message: `Restored to Unattached status after exclusion from fine ${f.fineId}`,
-                                                assetId: asset.assetId,
-                                                assetName: asset.name,
-                                                assetObjectId: asset._id
-                                            });
-                                            await catalogRow.save();
-                                        } else {
-                                            const { generateVegaAccessoryCatalogId } = await import("../../utils/syncAssetAccessoryCatalog.js");
-                                            const catalogId = await generateVegaAccessoryCatalogId();
-                                            await AssetAccessoryCatalog.create({
-                                                recordType: 'catalog',
-                                                accessoryCatalogId: catalogId,
-                                                name: acc.name,
-                                                price: acc.amount || 0,
-                                                status: 'Unattached',
-                                                isActive: true,
-                                                history: [{
-                                                    at: new Date(),
-                                                    action: 'unattached',
-                                                    message: `Created as Unattached after exclusion from fine ${f.fineId}`,
-                                                    assetId: asset.assetId,
-                                                    assetName: asset.name,
-                                                    assetObjectId: asset._id
-                                                }]
-                                            });
-                                        }
-
-                                        await AssetAccessoryCatalog.updateMany(
-                                            { recordType: 'instance', assetAccessoryId: code },
-                                            { $set: { status: 'Unattached', assetItemId: null, assetIdRef: '' } }
-                                        ).catch(() => null);
-                                    } catch (e) {
-                                        console.error("Error updating catalog for excluded accessory:", e);
-                                    }
-                                }
-                            }
-                        }
-
-                        if (modified) {
-                            asset.markModified('accessories');
-                            asset.markModified('lostDetachedAccessories');
-                            await asset.save();
-                            try {
-                                const { syncAllAccessoryInstancesForAsset } = await import("../../utils/syncAssetAccessoryCatalog.js");
-                                await syncAllAccessoryInstancesForAsset(asset);
-                            } catch (e) {
-                                console.error("Error syncing accessories:", e);
-                            }
-
-                            // Update fine totals by subtracting removed accessory amounts
-                            if (totalAccAmtRemoved > 0) {
-                                const totalBase = (f.employeeAmount || 0) + (f.companyAmount || 0);
-                                if (totalBase > 0) {
-                                    const empRatio = (f.employeeAmount || 0) / totalBase;
-                                    const compRatio = (f.companyAmount || 0) / totalBase;
-                                    
-                                    f.employeeAmount = Math.max(0, f.employeeAmount - (totalAccAmtRemoved * empRatio));
-                                    f.companyAmount = Math.max(0, f.companyAmount - (totalAccAmtRemoved * compRatio));
-                                } else {
-                                    f.employeeAmount = 0;
-                                    f.companyAmount = 0;
-                                }
-                                
-                                f.fineAmount = (f.employeeAmount || 0) + (f.companyAmount || 0) + (f.serviceCharge || 0);
-                                f.totalFineAmount = f.fineAmount;
-
-                                if (f.assignedEmployees && f.assignedEmployees.length > 0) {
-                                    for (const emp of f.assignedEmployees) {
-                                        if (emp.employeeId === 'VEGA-HR-0000') {
-                                            emp.employeeAmount = f.companyAmount;
-                                            emp.individualAmount = f.companyAmount;
-                                            emp.fineAmount = f.companyAmount;
-                                        } else {
-                                            emp.employeeAmount = f.employeeAmount;
-                                            emp.individualAmount = f.employeeAmount + (f.serviceCharge || 0);
-                                            emp.fineAmount = f.employeeAmount + (f.serviceCharge || 0);
-                                        }
-                                    }
-                                }
+                    if (f.assignedEmployees && f.assignedEmployees.length > 0) {
+                        for (const emp of f.assignedEmployees) {
+                            if (emp.employeeId === 'VEGA-HR-0000') {
+                                emp.employeeAmount = f.companyAmount;
+                                emp.individualAmount = f.companyAmount;
+                                emp.fineAmount = f.companyAmount;
+                            } else {
+                                emp.employeeAmount = f.employeeAmount;
+                                emp.individualAmount = f.employeeAmount + (f.serviceCharge || 0);
+                                emp.fineAmount = f.employeeAmount + (f.serviceCharge || 0);
                             }
                         }
                     }
-                } catch (err) {
-                    console.error("Failed to process accessory exclusion in updateFine:", err);
                 }
 
                 // Sync excludedAccessoryIds list on the fine
@@ -665,6 +493,7 @@ export const updateFine = async (req, res) => {
                     ...(f.excludedAccessoryIds || []),
                     ...updates.excludedAccessoryIds
                 ]));
+                f.accessoryExcludedAt = new Date();
 
                 // Sync breakdownItems list on the fine
                 if (f.breakdownItems && f.breakdownItems.length > 0) {
@@ -680,6 +509,14 @@ export const updateFine = async (req, res) => {
             }
 
             await f.save();
+        }
+
+        for (const f of fines) {
+            if (f.scheduleChangeForHistory) {
+                f.scheduleChangeForHistory.toMonth = f.monthStart || '';
+                f.scheduleChangeForHistory.toDuration =
+                    f.payableDuration != null ? parseInt(f.payableDuration, 10) : null;
+            }
         }
 
         if (oldStatus !== 'Rejected' && updates.fineStatus === 'Rejected') {
@@ -828,8 +665,16 @@ export const updateFine = async (req, res) => {
         } else if (isApprovedFineStatus(oldStatus)) {
             try {
                 const { persistFineApprovalAttachments } = await import('../../utils/persistFineApprovalAttachments.js');
+                const regenTrigger = updates.excludedAccessoryIds !== undefined ? 'accessory-edit' : 'schedule-edit';
                 for (const f of fines) {
-                    await persistFineApprovalAttachments(f, { req, forceRegenerate: true });
+                    await persistFineApprovalAttachments(f, {
+                        req,
+                        forceRegenerate: true,
+                        trigger: regenTrigger,
+                        scheduleChange:
+                            regenTrigger === 'schedule-edit' ? f.scheduleChangeForHistory || null : null,
+                    });
+                    delete f.scheduleChangeForHistory;
                 }
                 const { dispatchFineApprovedNotification } = await import("../../utils/dispatchFineApprovedNotification.js");
                 const allAssigned = fines.flatMap(f => f.assignedEmployees);

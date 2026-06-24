@@ -53,15 +53,37 @@ export function detectSupersededSalaryHistoryEntries(previousHistory = [], newHi
         }
     }
 
-    const prevActive = prevList.filter((e) => !e.toDate).length;
-    const nextActive = nextList.filter((e) => !e.toDate).length;
-    const isIncrement =
-        superseded.length > 0 &&
-        prevActive >= 1 &&
-        nextActive === 1 &&
-        nextList.length >= prevList.length;
+    const isIncrement = superseded.length > 0 && nextList.length >= prevList.length;
 
     return { superseded, isIncrement };
+}
+
+/** Fallback when client marks an increment but salaryEntryKey matching failed (e.g. missing _id). */
+function findNewlyClosedActiveSalaryEntries(previousHistory = [], newHistory = []) {
+    const prevList = Array.isArray(previousHistory) ? previousHistory : [];
+    const nextList = Array.isArray(newHistory) ? newHistory : [];
+    const nextByKey = new Map(nextList.map((entry) => [salaryEntryKey(entry), entry]));
+    const nextById = new Map(
+        nextList.filter((entry) => entry?._id).map((entry) => [String(entry._id), entry]),
+    );
+
+    const superseded = [];
+    const seen = new Set();
+
+    for (const previous of prevList) {
+        if (previous?.toDate) continue;
+        let match = nextByKey.get(salaryEntryKey(previous));
+        if (!match && previous?._id) {
+            match = nextById.get(String(previous._id));
+        }
+        if (!match?.toDate) continue;
+        const key = salaryEntryKey(match);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        superseded.push(match);
+    }
+
+    return superseded;
 }
 
 const resolveSupersededSalaryDocument = (entry, fallbackOfferLetter = null) => {
@@ -125,7 +147,12 @@ async function archiveTopLevelOfferLetterIfReplaced(employeeId, previousOfferLet
 /**
  * When salary is incremented, archive superseded offer letters to oldDocuments and keep salaryHistory rows closed.
  */
-export async function archiveSalaryIncrementIfNeeded(employeeId, proposedData = {}, previousSalary = null) {
+export async function archiveSalaryIncrementIfNeeded(
+    employeeId,
+    proposedData = {},
+    previousSalary = null,
+    { forceIncrement = false } = {},
+) {
     if (!employeeId || !proposedData || !Array.isArray(proposedData.salaryHistory)) {
         return { isIncrement: false, archived: false };
     }
@@ -137,12 +164,19 @@ export async function archiveSalaryIncrementIfNeeded(employeeId, proposedData = 
             .lean();
     }
 
-    const { superseded, isIncrement } = detectSupersededSalaryHistoryEntries(
+    let { superseded } = detectSupersededSalaryHistoryEntries(
         prior?.salaryHistory || [],
         proposedData.salaryHistory,
     );
 
-    if (!isIncrement) {
+    if (superseded.length === 0 && forceIncrement) {
+        superseded = findNewlyClosedActiveSalaryEntries(
+            prior?.salaryHistory || [],
+            proposedData.salaryHistory,
+        );
+    }
+
+    if (superseded.length === 0) {
         return { isIncrement: false, archived: false };
     }
 

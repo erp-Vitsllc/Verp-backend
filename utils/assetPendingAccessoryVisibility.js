@@ -15,8 +15,11 @@ export function isEmbeddedAccessoryPendingAddApproval(acc) {
 }
 
 /** Lost / End of Life stay in DB for catalog & history but must not appear as "attached" on the live asset (API + UI). */
-export function isAccessoryExcludedFromLiveAssetView(acc) {
+export function isAccessoryExcludedFromLiveAssetView(acc, assetStatus = '') {
     const n = String(acc?.status || '').trim().toLowerCase().replace(/\s+/g, '');
+    const assetNorm = String(assetStatus || '').trim().toLowerCase().replace(/\s+/g, '');
+    // On a Lost parent asset, keep Lost accessories visible until manually detached.
+    if (n === 'lost' && assetNorm === 'lost') return false;
     return n === 'lost' || n === 'endoflife' || n === 'eol';
 }
 
@@ -28,7 +31,7 @@ export function isAssetStatusBlockingAccessoryAdd(assetStatus = '') {
 
 export function filterAccessoriesHidingPendingAdds(accessories, canSeePendingAdds, assetStatus = '') {
     if (!Array.isArray(accessories) || accessories.length === 0) return accessories || [];
-    const withoutTerminal = accessories.filter((a) => !isAccessoryExcludedFromLiveAssetView(a));
+    const withoutTerminal = accessories.filter((a) => !isAccessoryExcludedFromLiveAssetView(a, assetStatus));
     if (canSeePendingAdds) return withoutTerminal;
     return withoutTerminal.filter((a) => !isEmbeddedAccessoryPendingAddApproval(a));
 }

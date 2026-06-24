@@ -2,6 +2,7 @@ import Loan from "../../models/Loan.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { getDepartmentHOD } from "../../utils/getDepartmentHOD.js";
 import { getManagementHOD } from "../../utils/getManagementHOD.js";
+import { refreshStoredAttachmentUrls } from "../../utils/s3Upload.js";
 
 export const getLoanById = async (req, res) => {
     try {
@@ -71,7 +72,17 @@ export const getLoanById = async (req, res) => {
         const hrHOD = await getDepartmentHOD('hr', employee._id);
         const accountsHOD = await getDepartmentHOD('finance', employee._id);
 
+        const ceoHOD = await getManagementHOD(employee._id);
+
+        if (Array.isArray(loan.approvalAttachments) && loan.approvalAttachments.length > 0) {
+            await refreshStoredAttachmentUrls(loan.approvalAttachments);
+        }
+        if (Array.isArray(loan.approvalAttachmentHistory) && loan.approvalAttachmentHistory.length > 0) {
+            await refreshStoredAttachmentUrls(loan.approvalAttachmentHistory);
+        }
+
         const data = {
+            _id: loan._id,
             id: loan._id,
             loanId: loan.loanId || `LOAN-${loan._id.toString().slice(-6).toUpperCase()}`,
             applicantName: `${employee.firstName || ''} ${employee.lastName || ''}`.trim(),
@@ -102,9 +113,15 @@ export const getLoanById = async (req, res) => {
             hrHODId: hrHOD ? hrHOD.employeeId : null,
             accountsHODName: accountsHOD ? `${accountsHOD.firstName} ${accountsHOD.lastName}` : 'Unknown',
             accountsHODId: accountsHOD ? accountsHOD.employeeId : null,
-            ceoName: await getManagementHOD(employee._id).then(ceo => ceo ? `${ceo.firstName} ${ceo.lastName}` : 'Unknown'),
-            ceoEmployeeId: await getManagementHOD(employee._id).then(ceo => ceo ? ceo.employeeId : null),
-            createdBy: loan.createdBy
+            ceoName: ceoHOD ? `${ceoHOD.firstName} ${ceoHOD.lastName}` : 'Unknown',
+            ceoEmployeeId: ceoHOD ? ceoHOD.employeeId : null,
+            createdBy: loan.createdBy,
+            workflow: loan.workflow || [],
+            approvalAttachments: loan.approvalAttachments || [],
+            approvalAttachmentHistory: loan.approvalAttachmentHistory || [],
+            originalMonthStart: loan.originalMonthStart,
+            originalDuration: loan.originalDuration,
+            rejectionReason: loan.rejectionReason,
         };
 
         res.status(200).json(data);

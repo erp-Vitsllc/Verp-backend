@@ -633,25 +633,21 @@ const detachAccessoryFromAssetToCatalog = async (asset, accIndex, req, { comment
 };
 
 /**
- * On main-asset L&D finalize: excluded accessories → catalog (Unattached);
- * accessories kept in the fine → stay on asset with status Lost.
+ * On main-asset L&D finalize: accessories kept in the fine → stay on asset with status Lost.
+ * Excluded accessories stay on the asset until manually detached via Unattach.
  */
 const applyMainAssetLossDamageAccessoryDisposition = async (asset, fineData, req, fineId = null) => {
     if (!asset?.accessories?.length) return;
 
     const excluded = new Set((fineData?.excludedAccessoryIds || []).map(String));
 
-    for (let i = asset.accessories.length - 1; i >= 0; i--) {
+    for (let i = 0; i < asset.accessories.length; i++) {
         const acc = asset.accessories[i];
         const oid = String(acc._id);
         const code = String(acc.accessoryId || '');
         const isExcluded = excluded.has(oid) || excluded.has(code);
 
         if (isExcluded) {
-            await detachAccessoryFromAssetToCatalog(asset, i, req, {
-                comment: 'Excluded from Loss & Damage fine — returned to accessories catalog.',
-                catalogStatus: 'Unattached',
-            });
             continue;
         }
 
@@ -12155,6 +12151,7 @@ export const respondAccessoryAction = async (req, res) => {
                                 ...(f.excludedAccessoryIds || []),
                                 String(accToMove._id || accToMove.accessoryId)
                             ]));
+                            f.accessoryExcludedAt = new Date();
 
                             // Recalculate fine amounts
                             if (accAmtToRemove > 0) {

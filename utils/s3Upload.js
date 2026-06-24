@@ -357,6 +357,36 @@ export function isPresignedUrlStillFresh(url, minRemainingSeconds = 3600) {
 }
 
 /**
+ * Refresh expiring presigned URLs on attachment objects (mutates items in place).
+ */
+export async function refreshStoredAttachmentUrls(items) {
+    if (!Array.isArray(items) || items.length === 0) return items;
+
+    await Promise.all(
+        items.map(async (item) => {
+            if (!item || typeof item !== 'object') return;
+
+            if (item.url && isPresignedUrlStillFresh(item.url)) return;
+
+            let key = item.publicId;
+            if (!key && item.url) {
+                key = normalizeS3Key(item.url);
+            }
+            if (!key) return;
+
+            try {
+                const signed = await getSignedFileUrl(key);
+                if (signed) item.url = signed;
+            } catch (err) {
+                console.error('[refreshStoredAttachmentUrls]', err?.message || err);
+            }
+        }),
+    );
+
+    return items;
+}
+
+/**
  * Generate a signed URL for a private file
  * @param {string} key - The S3 key (file path) or an existing URL
  * @param {number} expiresIn - Expiration time in seconds (default 86400 = 24 hours)

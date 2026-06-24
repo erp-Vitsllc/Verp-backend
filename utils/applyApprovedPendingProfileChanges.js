@@ -237,7 +237,9 @@ export async function applyApprovedPendingProfileChanges(employeeId, basicDoc, c
                 section === "basicdetails" &&
                 Object.prototype.hasOwnProperty.call(safeProposedData, "salaryHistory")
             ) {
-                salaryIncrementResult = await archiveSalaryIncrementIfNeeded(employeeId, safeProposedData);
+                salaryIncrementResult = await archiveSalaryIncrementIfNeeded(employeeId, safeProposedData, null, {
+                    forceIncrement: safeProposedData?.isSalaryIncrement === true,
+                });
             }
             if (section === "basicdetails" && bankUpdateTouchesFields(safeProposedData)) {
                 await archiveSupersededBankIfNeeded(

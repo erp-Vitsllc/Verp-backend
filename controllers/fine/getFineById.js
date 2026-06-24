@@ -1,6 +1,6 @@
 import Fine from "../../models/Fine.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
-import { getSignedFileUrl } from "../../utils/s3Upload.js";
+import { getSignedFileUrl, refreshStoredAttachmentUrls } from "../../utils/s3Upload.js";
 import { getDepartmentHOD } from "../../utils/getDepartmentHOD.js";
 import { getManagementHOD } from "../../utils/getManagementHOD.js";
 import { isUserAdministrator } from "../../services/permissionService.js";
@@ -272,19 +272,29 @@ export const getFineById = async (req, res) => {
                 fine.attachment.url = signedUrl;
             } catch (err) {
                 console.error("Error signing attachment URL:", err);
-                // Keep original URL or handle error as needed
             }
+        } else if (fine.attachment?.url) {
+            await refreshStoredAttachmentUrls([fine.attachment]);
         }
 
         if (Array.isArray(fine.approvalAttachments) && fine.approvalAttachments.length > 0) {
-            for (const item of fine.approvalAttachments) {
-                if (item?.publicId && !item.url) {
-                    try {
-                        item.url = await getSignedFileUrl(item.publicId);
-                    } catch (err) {
-                        console.error('Error signing approval attachment URL:', err);
-                    }
-                }
+            await refreshStoredAttachmentUrls(fine.approvalAttachments);
+        }
+
+        if (Array.isArray(fine.approvalAttachmentHistory) && fine.approvalAttachmentHistory.length > 0) {
+            await refreshStoredAttachmentUrls(fine.approvalAttachmentHistory);
+        }
+
+        if (
+            !fine.accessoryExcludedAt &&
+            Array.isArray(fine.excludedAccessoryIds) &&
+            fine.excludedAccessoryIds.length > 0
+        ) {
+            const accessoryHistory = (fine.approvalAttachmentHistory || [])
+                .filter((a) => a.trigger === 'accessory-edit' && a.addedAt)
+                .sort((a, b) => new Date(a.addedAt).getTime() - new Date(b.addedAt).getTime());
+            if (accessoryHistory.length > 0) {
+                fine.accessoryExcludedAt = accessoryHistory[accessoryHistory.length - 1].addedAt;
             }
         }
 

@@ -76,6 +76,7 @@ import { getLoanById } from "../controllers/employee/getLoanById.js";
 import { approveLoan } from "../controllers/employee/approveLoan.js";
 import { updateLoanDetails } from "../controllers/employee/updateLoanDetails.js";
 import { getLoanPdf } from "../controllers/employee/getLoanPdf.js";
+import { downloadLoanAcknowledgmentPdf } from "../controllers/employee/downloadLoanAcknowledgmentPdf.js";
 import { downloadEmployeeAssetListPdf } from "../controllers/employee/downloadEmployeeAssetListPdf.js";
 import { deleteLoan } from "../controllers/employee/deleteLoan.js";
 import {
@@ -296,6 +297,7 @@ router.post("/request-loan", requestLoan);
 router.put("/loans/:id/status", checkPermission('hrm_loan', 'edit'), approveLoan);
 router.put("/loans/:id", updateLoanDetails); // temporarily open; handler still validates ownership/flow
 router.get("/loans/:id/pdf", getLoanPdf); // temporarily open for all authenticated users
+router.get("/loans/:id/acknowledgment-pdf", downloadLoanAcknowledgmentPdf);
 router.get("/loans", getLoans); // temporarily open for all authenticated users
 router.get("/loans/:id", getLoanById); // temporarily open for all authenticated users
 router.delete("/loans/:id", deleteLoan); // temporarily open; handler checks role/ownership

@@ -254,6 +254,11 @@ const fineSchema = new mongoose.Schema(
             type: [String],
             default: []
         },
+        /** When accessories were last excluded — used for workflow timeline ordering (not fine.updatedAt). */
+        accessoryExcludedAt: {
+            type: Date,
+            default: null,
+        },
         breakdownItems: [{
             kind: { type: String, enum: ['main', 'accessory'] },
             assetId: { type: String },
@@ -275,6 +280,25 @@ const fineSchema = new mongoose.Schema(
                 default: 'approved-form',
             },
             addedAt: { type: Date, default: Date.now },
+        }],
+        /** Full log of every approval PDF generation (initial + each HR / edit regeneration). */
+        approvalAttachmentHistory: [{
+            label: { type: String, default: '' },
+            name: { type: String, default: '' },
+            url: { type: String, default: '' },
+            publicId: { type: String, default: '' },
+            mimeType: { type: String, default: 'application/pdf' },
+            source: { type: String, default: '' },
+            addedAt: { type: Date, default: Date.now },
+            trigger: {
+                type: String,
+                enum: ['management-approval', 'schedule-edit', 'accessory-edit', 'regenerated'],
+                default: 'management-approval',
+            },
+            scheduleFromMonth: { type: String, default: '' },
+            scheduleToMonth: { type: String, default: '' },
+            durationFrom: { type: Number, default: null },
+            durationTo: { type: Number, default: null },
         }],
     },
     { timestamps: true }

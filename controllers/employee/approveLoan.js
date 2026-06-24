@@ -310,6 +310,8 @@ export const approveLoan = async (req, res) => {
 
         // Final Approval (Management) Update
         if (nextStage === 'Approved') {
+            const { snapshotLoanScheduleOnApproval } = await import('../../utils/loanDeductionScheduleSnapshot.js');
+            snapshotLoanScheduleOnApproval(loan);
             if (loan.workflow) {
                 const managementEntry = loan.workflow.find(w => w.role === 'Management' && w.status === 'Pending');
                 if (managementEntry) {
@@ -537,41 +539,28 @@ export const approveLoan = async (req, res) => {
                         const ccRecipients = Array.from(ccEmails);
 
                         if (toRecipients.length > 0 || ccRecipients.length > 0) {
-                            const permissions = { hrm_loan: { isView: true, isActive: true } };
+                            const { persistLoanApprovalAttachments, getLoanAcknowledgmentPdfBuffer } =
+                                await import('../../utils/persistLoanApprovalAttachments.js');
 
-                            // IMPORTANT: Save state BEFORE generating PDF so Puppeteer sees updated status
-                            await loan.save();
-
-                            let pdfBuffer = null;
-                            if (req.body.loanPdf) {
-                                console.log(`[ApproveLoan] Received frontend-generated Base64 Loan PDF. Length: ${req.body.loanPdf.length}`);
-                                let base64Data = req.body.loanPdf;
-                                if (base64Data.includes(',')) {
-                                    console.log("[ApproveLoan] Stripping Data URI prefix from loanPdf");
-                                    base64Data = base64Data.split(',')[1];
-                                }
-                                pdfBuffer = Buffer.from(base64Data, 'base64');
-                                console.log(`[ApproveLoan] Converted to Buffer. Size: ${pdfBuffer.length} bytes`);
-                            } else {
-                                const { generatePdf } = await import("../../utils/generatePdf.js");
-                                pdfBuffer = await generatePdf(actionUrl, req.headers.authorization?.split(' ')[1], { id: requestingUserId, isAdmin: isAdmin, role: userObj.role, employeeId: userObj.employeeId }, permissions);
-                                console.log(`[ApproveLoan] Puppeteer Loan PDF generated. Size: ${pdfBuffer ? pdfBuffer.length : 0} bytes`);
-                            }
+                            await persistLoanApprovalAttachments(loan);
+                            const pdfBuffer = await getLoanAcknowledgmentPdfBuffer(loan);
+                            const typeSlug = loan.type === 'Advance' ? 'Advance' : 'Loan';
+                            const ackFilename = `${typeSlug}_Acknowledgment_${loan.loanId || loan._id}.pdf`;
 
                             const mailOptions = {
                                 from: `"VeRP Notification" <${emailUser}>`,
                                 to: toRecipients,
                                 cc: ccRecipients,
-                                subject: "Loan Application Approved",
+                                subject: `${typeSlug} Acknowledgment — Approved`,
                                 html: `
                                      <div style="font-family: Arial, sans-serif; color: #333; max-width: 600px; margin: 0 auto; border: 1px solid #eee; border-radius: 10px; overflow: hidden;">
                                          <div style="background-color: #22c55e; color: white; padding: 20px; text-align: center;">
-                                             <h2 style="margin: 0;">Congratulations!</h2>
+                                             <h2 style="margin: 0;">${typeSlug} Approved</h2>
                                          </div>
                                          <div style="padding: 30px; background-color: #ffffff;">
                                              ${isFallbackToReportee ? getFallbackEmailNote(employeeName, reporteeName) : ''}
                                              <p>Dear All,</p>
-                                             <p>We are pleased to inform you that the loan application for <strong>${applicant.firstName} ${applicant.lastName}</strong> has been <strong>fully approved</strong>.</p>
+                                             <p>Please find attached the <strong>${typeSlug} Acknowledgment &amp; Salary Deduction Authorization</strong> for <strong>${applicant.firstName} ${applicant.lastName}</strong>, which has been <strong>fully approved</strong> by Management.</p>
                                              
                                              <div style="background-color: #f0fdfa; padding: 25px; border-radius: 10px; border-left: 4px solid #22c55e; margin: 25px 0;">
                                                  <table style="width: 100%; border-collapse: collapse;">
@@ -580,31 +569,24 @@ export const approveLoan = async (req, res) => {
                                                          <td style="padding: 6px 0; color: #14532d; font-size: 16px; font-weight: 800;">AED ${Number(loan.amount).toLocaleString()}</td>
                                                      </tr>
                                                      <tr>
-                                                         <td style="padding: 6px 0; color: #166534; font-size: 13px;"><strong>Final Status:</strong></td>
-                                                         <td style="padding: 6px 0;"><span style="background-color: #dcfce7; color: #166534; padding: 4px 10px; border-radius: 9999px; font-size: 11px; font-weight: 800; text-transform: uppercase;">${finalStatus}</span></td>
+                                                         <td style="padding: 6px 0; color: #166534; font-size: 13px;"><strong>Monthly Deduction:</strong></td>
+                                                         <td style="padding: 6px 0; color: #14532d; font-size: 14px;">AED ${(Number(loan.amount) / Math.max(1, loan.duration)).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
                                                      </tr>
                                                      <tr>
                                                          <td style="padding: 6px 0; color: #166534; font-size: 13px;"><strong>Approval Date:</strong></td>
-                                                         <td style="padding: 6px 0; color: #14532d; font-size: 14px;">${new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })}</td>
+                                                         <td style="padding: 6px 0; color: #14532d; font-size: 14px;">${new Date(loan.approvedDate || Date.now()).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })}</td>
                                                      </tr>
                                                  </table>
                                              </div>
 
-                                             <div style="margin-top: 25px; border: 1px solid #f0fdf4; padding: 20px; border-radius: 8px;">
-                                                 <h4 style="margin: 0 0 15px 0; font-size: 13px; color: #166534; text-transform: uppercase;">Approval History:</h4>
-                                                 ${(loan.workflow || []).map(w => `
-                                                     <div style="margin-bottom: 8px; font-size: 13px;">
-                                                         <span style="color: #22c55e;">✓</span> <strong>${w.role}:</strong> Approved
-                                                     </div>
-                                                 `).join('')}
-                                             </div>
-
-                                              <p style="margin-top: 25px; color: #4b5563;">Please find the official approved document${loan.attachment?.url ? ' and original documentation' : ''} attached to this email.</p>
-                                              <p>Best Regards,<br><strong>VeRP System</strong></p>
+                                             <p style="margin-top: 25px; color: #4b5563;">This acknowledgment has been shared with the Employee, HR, Accounts, and Management teams${loan.attachment?.url ? '. The original supporting documentation is also attached.' : '.'}</p>
+                                             <p>Best Regards,<br><strong>VeRP System</strong></p>
                                           </div>
                                       </div>
                                   `,
-                                attachments: [{ filename: `Approved_Loan_${loan.loanId || loan._id}.pdf`, content: pdfBuffer, contentType: 'application/pdf' }]
+                                attachments: pdfBuffer?.length > 500
+                                    ? [{ filename: ackFilename, content: pdfBuffer, contentType: 'application/pdf' }]
+                                    : [],
                             };
 
                             // Add original loan attachment if it exists

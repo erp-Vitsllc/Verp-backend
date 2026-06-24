@@ -1,12 +1,16 @@
 import { uploadDocumentToS3 } from './s3Upload.js';
 import { generateFineApprovedReportPdfBuffer } from './generateFineApprovedReportPdfBuffer.js';
 import { isAssetLossFineReportApplicable } from './sendAssetLossFineReportEmail.js';
+import { appendApprovalAttachmentHistory } from './approvalAttachmentHistory.js';
 
 /**
  * Stores approval-email attachments on the fine record when management approves.
- * Idempotent — skips if approvalAttachments already exist.
+ * Appends each generation to approvalAttachmentHistory for workflow timeline.
  */
-export async function persistFineApprovalAttachments(fineDoc, { req, forceRegenerate = false } = {}) {
+export async function persistFineApprovalAttachments(
+    fineDoc,
+    { req, forceRegenerate = false, trigger = forceRegenerate ? 'schedule-edit' : 'management-approval', scheduleChange = null } = {},
+) {
     if (!fineDoc) return fineDoc;
     if (!forceRegenerate && Array.isArray(fineDoc.approvalAttachments) && fineDoc.approvalAttachments.length > 0) {
         return fineDoc;
@@ -70,6 +74,7 @@ export async function persistFineApprovalAttachments(fineDoc, { req, forceRegene
 
     if (entries.length > 0) {
         fineDoc.approvalAttachments = entries;
+        appendApprovalAttachmentHistory(fineDoc, entries, { trigger, scheduleChange });
         await fineDoc.save();
     }
 

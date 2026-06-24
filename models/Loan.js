@@ -37,6 +37,15 @@ const loanSchema = new mongoose.Schema({
         required: false, // Optional for legacy records
         default: ''
     },
+    /** Frozen at approval — used for Current Deduction Schedule / history */
+    originalMonthStart: {
+        type: String,
+        default: ''
+    },
+    originalDuration: {
+        type: Number,
+        default: null
+    },
     reason: {
         type: String,
         required: true
@@ -108,7 +117,35 @@ const loanSchema = new mongoose.Schema({
         publicId: { type: String },
         name: { type: String },
         mimeType: { type: String }
-    }
+    },
+    /** Management-approved acknowledgment PDF (email + Attachment tab). */
+    approvalAttachments: [{
+        label: { type: String, default: '' },
+        name: { type: String, default: '' },
+        url: { type: String, default: '' },
+        publicId: { type: String, default: '' },
+        mimeType: { type: String, default: 'application/pdf' },
+        source: {
+            type: String,
+            enum: ['acknowledgment', 'supporting'],
+            default: 'acknowledgment',
+        },
+        addedAt: { type: Date, default: Date.now },
+    }],
+    approvalAttachmentHistory: [{
+        label: { type: String, default: '' },
+        name: { type: String, default: '' },
+        url: { type: String, default: '' },
+        publicId: { type: String, default: '' },
+        mimeType: { type: String, default: 'application/pdf' },
+        source: { type: String, default: '' },
+        addedAt: { type: Date, default: Date.now },
+        trigger: {
+            type: String,
+            enum: ['management-approval', 'schedule-edit', 'accessory-edit', 'regenerated'],
+            default: 'management-approval',
+        },
+    }],
 }, { timestamps: true });
 
 const Loan = mongoose.model("Loan", loanSchema);

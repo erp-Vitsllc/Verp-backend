@@ -2,15 +2,65 @@ import nodemailer from "nodemailer";
 import { resolveFrontendBaseUrl, emailFrontendUrl } from '../../utils/resolveFrontendBaseUrl.js';
 import Loan from "../../models/Loan.js";
 import { getCompleteEmployee } from "../../services/employeeService.js";
+import {
+    isApprovedLoanStatus,
+    isUserHrForApprovedLoanEdit,
+    restrictApprovedLoanUpdates,
+} from "../../utils/loanApprovedEditAuth.js";
 
 export const updateLoanDetails = async (req, res) => {
     const { id } = req.params;
-    const { type, amount, duration, reason, monthStart, status } = req.body;
+    const { type, amount, duration, reason, monthStart, status, scheduleOnlyEdit } = req.body;
 
     try {
         const loan = await Loan.findById(id);
         if (!loan) {
             return res.status(404).json({ message: "Loan request not found" });
+        }
+
+        const loanStatus = loan.approvalStatus || loan.status;
+        const isApproved = isApprovedLoanStatus(loanStatus);
+
+        if (isApproved) {
+            if (!scheduleOnlyEdit) {
+                return res.status(403).json({
+                    message: 'Approved loans can only have repayment schedule updated by HR.',
+                });
+            }
+
+            const hrOk = await isUserHrForApprovedLoanEdit(req, loan);
+            if (!hrOk) {
+                return res.status(403).json({ message: 'Only HR can edit approved loan schedules.' });
+            }
+
+            const { error, allowed } = restrictApprovedLoanUpdates(req.body, loan);
+            if (error) {
+                return res.status(400).json({ message: error });
+            }
+
+            const { preserveOriginalLoanScheduleBeforeEdit } = await import('../../utils/loanDeductionScheduleSnapshot.js');
+            preserveOriginalLoanScheduleBeforeEdit(loan);
+
+            if (allowed.duration !== undefined) {
+                loan.duration = loan.type === 'Advance' ? 1 : allowed.duration;
+            }
+            if (allowed.monthStart !== undefined) {
+                loan.monthStart = allowed.monthStart;
+            }
+
+            const savedLoan = await loan.save();
+
+            try {
+                const { persistLoanApprovalAttachments } = await import('../../utils/persistLoanApprovalAttachments.js');
+                await persistLoanApprovalAttachments(savedLoan, { forceRegenerate: true });
+            } catch (pdfErr) {
+                console.error('[UpdateLoan] Failed to regenerate acknowledgment PDF:', pdfErr?.message || pdfErr);
+            }
+
+            return res.status(200).json({
+                message: 'Repayment schedule updated successfully',
+                loan: savedLoan,
+            });
         }
 
         // Prevent editing if not Draft or rejected? For now, allow edit if user is authorized.
