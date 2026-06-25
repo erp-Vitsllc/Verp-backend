@@ -1,6 +1,6 @@
 import Fine from "../../models/Fine.js";
 import { resolveFrontendBaseUrl, emailFrontendUrl } from '../../utils/resolveFrontendBaseUrl.js';
-import { generatePdf } from "../../utils/generatePdf.js";
+import { isUsernameSystemSuperUser } from "../../utils/systemSuperUser.js";
 
 /**
  * Download Fine Form PDF
@@ -41,7 +41,7 @@ export const downloadFinePdf = async (req, res) => {
 
         const userPayload = {
             id: requestingUserId,
-            isAdmin: userObj?.isAdmin || userObj?.role === 'Admin',
+            isAdmin: isUsernameSystemSuperUser(userObj?.username),
             role: userObj?.role,
             employeeId: userObj?.employeeId
         };

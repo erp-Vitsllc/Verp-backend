@@ -3,6 +3,7 @@ import { getPayments } from "../controllers/payment/getPayments.js";
 import { addPayment } from "../controllers/payment/addPayment.js";
 import { deletePayment } from "../controllers/payment/deletePayment.js";
 import { respondToPayment } from "../controllers/payment/respondToPayment.js";
+import { getPendingPaymentDashboardInbox } from "../controllers/payment/getPendingPaymentDashboardInbox.js";
 import { protect } from "../middleware/authMiddleware.js";
 import { checkPermission } from "../middleware/permissionMiddleware.js";
 
@@ -13,6 +14,9 @@ router.use(protect);
 
 // Get all payments - requires view permission
 router.get("/", checkPermission('accounts', 'view'), getPayments);
+
+// Pending payment approval inbox for Accounts bell / sidebar
+router.get("/dashboard/pending-inbox", checkPermission('accounts', 'view'), getPendingPaymentDashboardInbox);
 
 // Add payment - requires create permission
 router.post("/", checkPermission('accounts', 'create'), addPayment);

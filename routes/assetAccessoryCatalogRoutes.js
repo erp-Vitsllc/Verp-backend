@@ -2,6 +2,7 @@ import express from 'express';
 import { protect } from '../middleware/authMiddleware.js';
 import { isUserInFlowchart } from '../utils/getDepartmentHOD.js';
 import { isUserAdministrator } from '../services/permissionService.js';
+import { isJwtSystemSuperUser } from '../utils/systemSuperUser.js';
 import {
     getAccessoryCatalog,
     getAccessoryCatalogHistory,
@@ -14,9 +15,7 @@ import {
 const requireAssetControllerOrAdmin = async (req, res, next) => {
     try {
         const isAdmin =
-            req.user.isAdmin === true ||
-            req.user.role === 'Admin' ||
-            req.user.role === 'ROOT' ||
+            isJwtSystemSuperUser(req.user) ||
             await isUserAdministrator(req.user?.id);
         if (isAdmin) return next();
         if (await isUserInFlowchart(req.user, 'assetcontroller')) return next();

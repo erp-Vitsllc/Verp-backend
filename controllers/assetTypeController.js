@@ -5,6 +5,7 @@ import AssetHistory from '../models/AssetHistory.js';
 import DashboardAction from '../models/DashboardAction.js';
 import { getDepartmentHOD, isUserInFlowchart } from '../utils/getDepartmentHOD.js';
 import { isUserAdministrator } from '../services/permissionService.js';
+import { isJwtSystemSuperUser } from '../utils/systemSuperUser.js';
 import mongoose from 'mongoose';
 import { uploadDocumentToS3, getSignedFileUrl, persistStoredAttachmentValue } from '../utils/s3Upload.js';
 import { sendAssetCreationApprovalEmail } from '../utils/sendAssetCreationApprovalEmail.js';
@@ -62,7 +63,7 @@ function dedupeAccessoryPayloadById(arr) {
 
 const isAdminUser = async (reqUser) => {
     if (!reqUser) return false;
-    if (reqUser.isAdmin === true || reqUser.role === 'Admin' || reqUser.role === 'ROOT') return true;
+    if (isJwtSystemSuperUser(reqUser)) return true;
     const uid = reqUser.id || reqUser._id?.toString?.();
     return uid ? !!(await isUserAdministrator(uid)) : false;
 };
@@ -79,6 +80,7 @@ export const getAssetTypeRoleMeta = async (req, res) => {
         const canDirectAddAsset = isAssetController;
         res.status(200).json({ isAdmin, isAssetController, canDirectAddAsset });
     } catch (error) {
+        console.error('getAssetTypeRoleMeta:', error?.message || error);
         res.status(500).json({ message: 'Server Error' });
     }
 };
@@ -286,7 +288,7 @@ export const createAssetType = async (req, res) => {
                 return res.status(creationResolved.status || 400).json({ message: creationResolved.error });
             }
             const { initialStatus, actionRequiredBy } = creationResolved;
-            const isJwtAdmin = req.user.isAdmin === true || req.user.role === 'Admin' || req.user.role === 'ROOT';
+            const isJwtAdmin = isJwtSystemSuperUser(req.user);
             const isSysAdmin = await isUserAdministrator(req.user?.id);
 
             const qty = Math.max(1, Number(quantity) || 1);
@@ -1035,9 +1037,7 @@ export const updateAssetItem = async (req, res) => {
         const updates = req.body;
 
         const isAdmin =
-            req.user.isAdmin === true ||
-            req.user.role === 'Admin' ||
-            req.user.role === 'ROOT' ||
+            isJwtSystemSuperUser(req.user) ||
             await isUserAdministrator(req.user?.id);
         const isAssetController = await isUserInFlowchart(req.user, 'assetcontroller');
 
@@ -1792,7 +1792,7 @@ export const submitAssetForApproval = async (req, res) => {
 
         const currentUserId = req.user?._id?.toString() || req.user?.id?.toString();
         const isCreator = asset.createdBy?.toString() === currentUserId;
-        const isAdmin = req.user?.isAdmin === true || req.user?.role === 'Admin' || req.user?.role === 'ROOT';
+        const isAdmin = isJwtSystemSuperUser(req.user);
         const isAssetController = await isUserInFlowchart(req.user, 'assetcontroller');
 
         if (!isAdmin && !isCreator && !isAssetController) {

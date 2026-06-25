@@ -1,6 +1,8 @@
 import mongoose from "mongoose";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { isReqUserAdmin, scheduleManagementAdminDeletionEmail } from "../../utils/sendAdminDeletionNotificationEmails.js";
+import { isEmployeeProfileLiveActive } from "../../utils/employeeDocumentRenewal.js";
+import { hasPermission } from "../../services/permissionService.js";
 
 function buildEmployeeLookupFilter(id) {
     if (mongoose.Types.ObjectId.isValid(id) && String(id).length === 24) {
@@ -20,13 +22,37 @@ function scheduleOldDocumentDeletionEmail(req, opts) {
 // @access  Private (Admin Only)
 export const deleteOldDocument = async (req, res) => {
     try {
-        const isAdmin = await isReqUserAdmin(req.user);
-        if (!isAdmin) {
-            return res.status(403).json({ message: "Only administrator can delete archived employee documents." });
-        }
-
         const { id, target } = req.params;
         const employeeFilter = buildEmployeeLookupFilter(id);
+        const employeeBasic = await EmployeeBasic.findOne(employeeFilter)
+            .select("employeeId profileStatus profileApprovalStatus")
+            .lean();
+
+        if (!employeeBasic) {
+            return res.status(404).json({ message: "Employee not found" });
+        }
+
+        const isAdmin = await isReqUserAdmin(req.user);
+        const isLive = isEmployeeProfileLiveActive(employeeBasic);
+
+        if (isLive) {
+            if (!isAdmin) {
+                return res.status(403).json({
+                    message: "Only Super User can delete archived employee documents on an active profile.",
+                });
+            }
+        } else if (!isAdmin) {
+            const userId = req.user?.id || req.user?._id;
+            const canDelete =
+                userId &&
+                (await hasPermission(userId, "hrm_employees_view_documents_old", "delete"));
+            if (!canDelete) {
+                return res.status(403).json({
+                    message: "You do not have permission to delete archived employee documents.",
+                });
+            }
+        }
+
         const targetStr = String(target || "").trim();
         const isMongoIdTarget = /^[0-9a-fA-F]{24}$/.test(targetStr);
 

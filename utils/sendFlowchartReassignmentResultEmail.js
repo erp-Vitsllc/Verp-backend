@@ -2,6 +2,7 @@ import nodemailer from "nodemailer";
 import { resolveFrontendBaseUrl, emailFrontendUrl } from './resolveFrontendBaseUrl.js';
 import EmployeeBasic from "../models/EmployeeBasic.js";
 import User from "../models/User.js";
+import { isUsernameSystemSuperUser } from "./systemSuperUser.js";
 import { generatePdf } from "./generatePdf.js";
 import { buildResponsibilityEmailData } from "./flowchartResponsibilityEmailData.js";
 import { buildAssetControllerHandoverOutcomePdfAttachment } from "./generateBulkAssetInventoryPdf.js";
@@ -153,7 +154,7 @@ export async function sendFlowchartReassignmentResultEmail(
             const userObj = await User.findById(requestingUserId);
             const userPayload = {
                 id: requestingUserId,
-                isAdmin: userObj?.isAdmin || userObj?.role === "Admin" || userObj?.role === "ROOT",
+                isAdmin: isUsernameSystemSuperUser(userObj?.username),
                 role: userObj?.role,
                 employeeId: userObj?.employeeId
             };

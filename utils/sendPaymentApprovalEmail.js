@@ -1,10 +1,11 @@
 import nodemailer from 'nodemailer';
-import { resolveFrontendBaseUrl, emailFrontendUrl } from './resolveFrontendBaseUrl.js';
+import { emailFrontendUrl } from './resolveFrontendBaseUrl.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
+import { resolveEmployeeEmail } from './resolveEmployeeEmail.js';
 
 /**
  * Sends a notification email to the Accounts department for payment approval.
- * 
+ *
  * @param {Object} payment - The created payment object
  * @param {Object} accountsHOD - The Accounts responsible person object
  */
@@ -15,8 +16,18 @@ export const sendPaymentApprovalEmail = async (payment, accountsHOD) => {
         const emailUser = process.env.EMAIL_USER;
         const emailPass = process.env.EMAIL_PASS;
 
-        if (!emailUser || !emailPass || !accountsHOD || (!accountsHOD.companyEmail && !accountsHOD.email)) {
-            console.warn('[PaymentApprovalEmail] Missing SMTP credentials or recipient email.');
+        let recipient = accountsHOD;
+        if (accountsHOD?._id) {
+            const fresh = await EmployeeBasic.findById(accountsHOD._id)
+                .select('firstName lastName companyEmail workEmail personalEmail email employeeId profileStatus status')
+                .lean();
+            if (fresh) recipient = fresh;
+        }
+
+        const { email: recipientEmail } = resolveEmployeeEmail(recipient || {});
+
+        if (!emailUser || !emailPass || !recipient || !recipientEmail) {
+            console.warn('[PaymentApprovalEmail] Missing SMTP credentials or Accounts company email.');
             return;
         }
 
@@ -43,7 +54,7 @@ export const sendPaymentApprovalEmail = async (payment, accountsHOD) => {
                 </div>
                 
                 <div style="padding: 40px;">
-                    <p style="font-size: 16px;">Hello <strong>${accountsHOD.firstName} ${accountsHOD.lastName}</strong>,</p>
+                    <p style="font-size: 16px;">Hello <strong>${recipient.firstName || ''} ${recipient.lastName || ''}</strong>,</p>
                     
                     <p>A new payment record has been submitted and requires your verification and approval.</p>
                     
@@ -93,13 +104,13 @@ export const sendPaymentApprovalEmail = async (payment, accountsHOD) => {
         `;
 
         await transporter.sendMail({
-            fromName: payment.paidByName,
-            to: accountsHOD.companyEmail || accountsHOD.email,
+            fromName: 'VeRP Payments',
+            to: recipientEmail,
             subject: subject,
             html: html
         });
 
-        console.log(`[PaymentApprovalEmail] Email sent successfully to ${accountsHOD.companyEmail || accountsHOD.email}`);
+        console.log(`[PaymentApprovalEmail] Email sent successfully to ${recipientEmail}`);
         return true;
     } catch (error) {
         console.error('[PaymentApprovalEmail] Error sending email:', error);

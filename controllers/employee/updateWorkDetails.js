@@ -9,6 +9,7 @@ import {
     WORK_STATUS_DIRECT_EDIT_BLOCKED,
 } from "../../utils/employeeWorkDetailsValidation.js";
 import { isUserAdministrator } from "../../services/permissionService.js";
+import { isJwtSystemSuperUser } from "../../utils/systemSuperUser.js";
 import { resolveEmployeeProfileStatusWrite } from "../../utils/employeeProfileStatusLock.js";
 import { isLeftUserStatus } from "../../utils/applyEmployeeLeftUserStatus.js";
 
@@ -56,9 +57,7 @@ export const updateWorkDetails = async (req, res) => {
 
         const isSystemAdmin = req.user?.id ? await isUserAdministrator(req.user.id) : false;
         const isPortalAdmin =
-            req.user?.role === "Admin" ||
-            req.user?.role === "ROOT" ||
-            req.user?.isAdmin === true ||
+            isJwtSystemSuperUser(req.user) ||
             isSystemAdmin;
 
         if (isLeftUserStatus(employee.status)) {

@@ -11,6 +11,7 @@ import { hodDisplayFromEmployee } from "../utils/buildAssignmentHandoverEmailAtt
 import { notifyAssetHandoverTransferEmails } from "../utils/notifyAssetHandoverTransferEmails.js";
 import { sendFlowchartReassignmentResultEmail } from "../utils/sendFlowchartReassignmentResultEmail.js";
 import { isUserAdministrator } from "../services/permissionService.js";
+import { isJwtSystemSuperUser } from "../utils/systemSuperUser.js";
 import { resolveFlowchartHrEmployee } from "../utils/resolveFlowchartHrEmployee.js";
 import { rerouteAllPendingAssetCreationApprovals } from "../utils/assetApprovalHelpers.js";
 import { reroutePendingHrResponsibilities } from "../utils/reroutePendingHrResponsibilities.js";
@@ -397,7 +398,7 @@ export const addFlowchartResponsibility = async (req, res) => {
                                 'accounts': 'Financial Controller',
                                 'assetcontroller': 'Asset Controller',
                                 'management': 'General Management',
-                                'admincontroller': 'System Admin'
+                                'admincontroller': 'Admin Officer'
                             };
 
                             const emailPayload = await buildResponsibilityEmailData(category);
@@ -703,8 +704,7 @@ export const respondToResponsibility = async (req, res) => {
 // @access  Private
 export const deleteFlowchartResponsibility = async (req, res) => {
     try {
-        const isJwtAdmin =
-            req.user?.isAdmin === true || req.user?.role === 'Admin' || req.user?.role === 'ROOT';
+        const isJwtAdmin = isJwtSystemSuperUser(req.user);
         let isSysAdmin = false;
         try {
             isSysAdmin = await isUserAdministrator(req.user?.id);
@@ -766,8 +766,7 @@ export const getFlowchartPositionSummary = async (req, res) => {
         const previewAs = req.query?.previewAs ? String(req.query.previewAs) : null;
 
         const empId = previewAs || req.user?.employeeObjectId?.toString?.() || null;
-        const isJwtAdmin =
-            req.user?.isAdmin === true || req.user?.role === 'Admin' || req.user?.role === 'ROOT';
+        const isJwtAdmin = isJwtSystemSuperUser(req.user);
         let isSysAdmin = false;
         try {
             isSysAdmin = await isUserAdministrator(req.user?.id);

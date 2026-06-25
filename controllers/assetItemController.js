@@ -155,6 +155,7 @@ import {
     isReqUserAdmin,
     getAssetControllerNotificationEmail,
 } from '../utils/sendAdminDeletionNotificationEmails.js';
+import { isJwtSystemSuperUser } from '../utils/systemSuperUser.js';
 import { awaitAdminDeletionArchive } from '../utils/adminDeletionArchiveRun.js';
 import {
     cleanupDashboardActionsForDeletedAsset,
@@ -180,8 +181,7 @@ const generateAccessoryCatalogId = generateVegaAccessoryCatalogId;
 
 async function buildPendingAccessoryVisibilityCtx(req) {
     const isSysAdmin = await isUserAdministrator(req.user?.id);
-    const isPortalAdmin =
-        req.user?.isAdmin === true || req.user?.role === 'Admin' || req.user?.role === 'ROOT';
+    const isPortalAdmin = isJwtSystemSuperUser(req.user);
     const isAssetController = await isUserInFlowchart(req.user, 'assetcontroller').catch(() => false);
     const assetController = await getDepartmentHOD('assetcontroller');
 
@@ -756,7 +756,7 @@ const notifyLeaveEosOwnerHod = async ({
 // ─────────────────────────────────────────────────────────────────────────────
 const getActorPermissionFlagsForAsset = async (reqUser, asset) => {
     const currentEmpObjectId = reqUser?.employeeObjectId?.toString?.() || null;
-    const isAdmin = reqUser?.isAdmin === true || reqUser?.role === 'Admin' || reqUser?.role === 'ROOT';
+    const isAdmin = isJwtSystemSuperUser(reqUser);
     const isAssetController = await isUserInFlowchart(reqUser, 'assetcontroller').catch(() => false);
     const isCompanyAsset = asset?.assignedToType === 'Company' && !!asset?.assignedCompany;
     const isCompanyCoordinator =
@@ -1816,7 +1816,7 @@ export const getOnLeaveAssetsForEmployee = async (req, res) => {
  */
 export const runAssetServiceOverdueCheck = async (req, res) => {
     try {
-        const isAdmin = req.user?.isAdmin === true || req.user?.role === 'Admin' || req.user?.role === 'ROOT';
+        const isAdmin = isJwtSystemSuperUser(req.user);
         const isAssetController = await isUserInFlowchart(req.user, 'assetcontroller');
         if (!isAdmin && !isAssetController) {
             return res.status(403).json({ message: 'Access denied.' });
@@ -1862,7 +1862,7 @@ export const getOnServiceAssetsForEmployee = async (req, res) => {
         } else if (currentUserEmpId && currentUserEmpId.toLowerCase() === employeeId.toLowerCase()) {
             isAuthorized = true;
         } else {
-            const isAdmin = req.user?.isAdmin === true || req.user?.role === 'Admin' || req.user?.role === 'ROOT';
+            const isAdmin = isJwtSystemSuperUser(req.user);
             if (isAdmin) {
                 isAuthorized = true;
             } else {
@@ -1978,7 +1978,7 @@ export const handleOnServiceAction = async (req, res) => {
             return res.status(400).json({ message: 'Invalid action. Must be "Return", "Live", or "Extend"' });
         }
 
-        const isAdmin = req.user?.isAdmin === true || req.user?.role === 'Admin' || req.user?.role === 'ROOT';
+        const isAdmin = isJwtSystemSuperUser(req.user);
         const isAssetController = await isUserInFlowchart(req.user, 'assetcontroller');
         let actingEmpId = req.user?.employeeObjectId?.toString();
         if (!actingEmpId && req.user?.employeeId) {
@@ -2195,7 +2195,7 @@ export const bulkHandleOnServiceAction = async (req, res) => {
             return res.status(400).json({ message: 'Invalid action. Must be "Return", "Live", or "Extend"' });
         }
 
-        const isAdmin = req.user?.isAdmin === true || req.user?.role === 'Admin' || req.user?.role === 'ROOT';
+        const isAdmin = isJwtSystemSuperUser(req.user);
         const isAssetController = await isUserInFlowchart(req.user, 'assetcontroller');
         if (!isAdmin && !isAssetController) {
             return res.status(403).json({ message: 'Access denied. Only Asset Controller or Admin can perform this action.' });
@@ -2344,7 +2344,7 @@ export const handleOnLeaveAction = async (req, res) => {
 
         // Check authorization - only Asset Controllers can perform this action
         const assetController = await getDepartmentHOD('assetcontroller');
-        const isAdmin = req.user?.isAdmin === true || req.user?.role === 'Admin' || req.user?.role === 'ROOT';
+        const isAdmin = isJwtSystemSuperUser(req.user);
         const isAssetController = await isUserInFlowchart(req.user, 'assetcontroller');
 
         if (!isAdmin && !isAssetController) {
@@ -2529,7 +2529,7 @@ export const bulkHandleOnLeaveAction = async (req, res) => {
             return res.status(400).json({ message: 'Extension reason is required.' });
         }
 
-        const isAdmin = req.user?.isAdmin === true || req.user?.role === 'Admin' || req.user?.role === 'ROOT';
+        const isAdmin = isJwtSystemSuperUser(req.user);
         const isAssetController = await isUserInFlowchart(req.user, 'assetcontroller');
 
         if (!isAdmin && !isAssetController) {
@@ -2921,7 +2921,7 @@ export const createAssetItem = async (req, res) => {
             });
         }
 
-        const isJwtAdmin = req.user.isAdmin === true || req.user.role === 'Admin' || req.user.role === 'ROOT';
+        const isJwtAdmin = isJwtSystemSuperUser(req.user);
         const isSysAdmin = await isUserAdministrator(req.user?.id);
         if (initialStatus === 'Unassigned' && (isJwtAdmin || isSysAdmin) && assetController?._id) {
             try {
@@ -3034,7 +3034,7 @@ export const respondToAssetCreation = async (req, res) => {
             return res.status(400).json({ message: 'Asset is not awaiting creation approval.' });
         }
 
-        const isJwtAdmin = req.user.isAdmin || req.user.role === 'Admin' || req.user.role === 'ROOT';
+        const isJwtAdmin = isJwtSystemSuperUser(req.user);
         const isSysAdmin = await isUserAdministrator(req.user?.id);
 
         const normEmp = (s) => (s || '').toString().toLowerCase().replace(/\s+/g, '');
@@ -3191,7 +3191,7 @@ export const bulkRespondToAssetCreation = async (req, res) => {
             return res.status(400).json({ message: 'Invalid action. Use Approve, Reject, or Draft.' });
         }
 
-        const isJwtAdmin = req.user.isAdmin || req.user.role === 'Admin' || req.user.role === 'ROOT';
+        const isJwtAdmin = isJwtSystemSuperUser(req.user);
         const isSysAdmin = await isUserAdministrator(req.user?.id);
         const isAdmin = isJwtAdmin || isSysAdmin;
 
@@ -3373,7 +3373,7 @@ export const getBulkAssetDetails = async (req, res) => {
             getDepartmentHOD('assetcontroller'),
         ]);
         const isPortalAdminBd =
-            req.user?.isAdmin === true || req.user?.role === 'Admin' || req.user?.role === 'ROOT';
+            isJwtSystemSuperUser(req.user);
         const currentEmpBd = req.user?.employeeObjectId?.toString?.() || null;
         const isDeptAcBd = !!(deptAcBd?._id && currentEmpBd && deptAcBd._id.toString() === currentEmpBd);
         const normIdBulk = (ref) => {
@@ -3491,7 +3491,7 @@ export const updateAssetItem = async (req, res) => {
         const { id } = req.params;
         let { name, photo, status, categoryId, assetValue, purchaseDate, warrantyYears, lastServiceDate, onServiceActive, onLeaveActive } = req.body;
 
-        const isJwtAdmin = req.user.isAdmin || req.user.role === 'Admin' || req.user.role === 'ROOT';
+        const isJwtAdmin = isJwtSystemSuperUser(req.user);
         const isSysAdmin = await isUserAdministrator(req.user?.id);
         const isAdmin = isJwtAdmin || isSysAdmin;
         const isAssetController = await isUserInFlowchart(req.user, 'assetcontroller');
@@ -3735,7 +3735,7 @@ export const getAssetItemDetail = async (req, res) => {
             getDepartmentHOD('assetcontroller'),
         ]);
         const isPortalAdmin =
-            req.user?.isAdmin === true || req.user?.role === 'Admin' || req.user?.role === 'ROOT';
+            isJwtSystemSuperUser(req.user);
         const normUserRefId = (ref) => {
             if (ref == null) return '';
             if (typeof ref === 'object' && ref._id != null) return String(ref._id);
@@ -5316,7 +5316,7 @@ export const downloadHistoryHandoverPdf = async (req, res) => {
 
         const userPayload = {
             id: requestingUserId,
-            isAdmin: userObj?.isAdmin || userObj?.role === 'Admin' || userObj?.role === 'ROOT',
+            isAdmin: isJwtSystemSuperUser(userObj),
             role: userObj?.role,
             employeeId: userObj?.employeeId
         };
@@ -5358,7 +5358,7 @@ export const downloadHandoverPdf = async (req, res) => {
 
         const userPayload = {
             id: requestingUserId,
-            isAdmin: userObj?.isAdmin || userObj?.role === 'Admin' || userObj?.role === 'ROOT',
+            isAdmin: isJwtSystemSuperUser(userObj),
             role: userObj?.role,
             employeeId: userObj?.employeeId
         };
@@ -7248,7 +7248,7 @@ export const returnAssetItem = async (req, res) => {
             return res.status(404).json({ message: 'Asset not found' });
         }
 
-        const isJwtAdmin = req.user.isAdmin === true || req.user.role === 'Admin' || req.user.role === 'ROOT';
+        const isJwtAdmin = isJwtSystemSuperUser(req.user);
         const isSysAdmin = await isUserAdministrator(req.user?.id);
         const isAcFlow = await isUserInFlowchart(req.user, 'assetcontroller');
         const isCompanyCoordinatorFlow = await isUserActiveCompanyAssetCoordinator(
@@ -7735,7 +7735,7 @@ export const updateAssetStatus = async (req, res) => {
         if (!item) return res.status(404).json({ message: 'Asset not found' });
 
         const isAdminUser =
-            req.user?.isAdmin === true || req.user?.role === 'Admin' || req.user?.role === 'ROOT';
+            isJwtSystemSuperUser(req.user);
         const isAssetControllerUser =
             (await isUserInFlowchart(req.user, 'assetcontroller')) ||
             (req.user?.id ? await hasPermission(req.user.id, 'hrm_asset', 'edit') : false);
@@ -8656,7 +8656,7 @@ export const addAssetService = async (req, res) => {
 // @access  Private (Admin only)
 export const deleteAssetService = async (req, res) => {
     try {
-        const isJwtAdmin = req.user?.isAdmin === true || req.user?.role === 'Admin' || req.user?.role === 'ROOT';
+        const isJwtAdmin = isJwtSystemSuperUser(req.user);
         const isSysAdmin = await isUserAdministrator(req.user?.id);
         if (!isJwtAdmin && !isSysAdmin) {
             return res.status(403).json({ message: 'Access denied. Only admin can delete service records.' });
@@ -8748,7 +8748,7 @@ export const submitAssetServiceDraft = async (req, res) => {
         const actorEmployeeId = String(req.user?.employeeObjectId || '');
         const requestedById = String(service.requestedBy || '');
         if (requestedById && actorEmployeeId && requestedById !== actorEmployeeId) {
-            const isJwtAdmin = req.user?.isAdmin === true || req.user?.role === 'Admin' || req.user?.role === 'ROOT';
+            const isJwtAdmin = isJwtSystemSuperUser(req.user);
             const isSysAdmin = await isUserAdministrator(req.user?.id);
             if (!isJwtAdmin && !isSysAdmin) {
                 return res.status(403).json({ message: 'Only the draft creator or admin can submit this request.' });
@@ -8892,7 +8892,7 @@ export const transferAssigneeAsset = async (req, res) => {
             return res.status(403).json({ message: 'You are not linked to an employee profile.' });
         }
 
-        const isAdminUser = req.user?.isAdmin === true || req.user?.role === 'Admin' || req.user?.role === 'ROOT';
+        const isAdminUser = isJwtSystemSuperUser(req.user);
         const isAssetController = await isUserInFlowchart(req.user, 'assetcontroller').catch(() => false);
         const isCurrentAssignee = actingEmpObjectId === oldAssigneeId;
 
@@ -9284,7 +9284,7 @@ export const requestAssetAction = async (req, res) => {
         }
 
         const isTransferAction = originalActionType === 'Leave' || originalActionType === 'End of Services';
-        const isAdminUser = req.user?.isAdmin === true || req.user?.role === 'Admin' || req.user?.role === 'ROOT';
+        const isAdminUser = isJwtSystemSuperUser(req.user);
         const isAssetControllerRequester = await isUserInFlowchart(req.user, 'assetcontroller').catch(() => false);
         const currentEmpId = req.user.employeeObjectId?.toString();
         const assigneeId =
@@ -9549,7 +9549,7 @@ export const bulkRequestAssetAction = async (req, res) => {
         }
 
         const isTransferBulk = originalActionType === 'Leave' || originalActionType === 'End of Services';
-        const isAdminUser = req.user?.isAdmin === true || req.user?.role === 'Admin' || req.user?.role === 'ROOT';
+        const isAdminUser = isJwtSystemSuperUser(req.user);
         const isAssetControllerRequester = await isUserInFlowchart(req.user, 'assetcontroller').catch(() => false);
         const currentEmpId = req.user.employeeObjectId?.toString();
         const allCompanyAssigned = assets.every(
@@ -9843,7 +9843,7 @@ export const handleAssetActionApproval = async (req, res) => {
         if (actionType === 'End of Life' && asset.pendingActionDetails?.stage) {
             const stage = asset.pendingActionDetails.stage;
             const raisedBy = asset.pendingActionDetails.raisedBy;
-            const isAdmin = req.user.isAdmin || req.user.role === 'Admin' || req.user.role === 'ROOT';
+            const isAdmin = isJwtSystemSuperUser(req.user);
 
             let isUserAuthorizedForStage = false;
             if (isAdmin) {
@@ -10114,7 +10114,7 @@ export const handleAssetActionApproval = async (req, res) => {
 
         // AUTH CHECK - actionRequiredBy references EmployeeBasic, so compare with employeeObjectId
         const currentUserEmpId = req.user.employeeObjectId?.toString();
-        const isAdmin = req.user.isAdmin || req.user.role === 'Admin' || req.user.role === 'ROOT';
+        const isAdmin = isJwtSystemSuperUser(req.user);
         const isAssetController = await isUserInFlowchart(req.user, 'assetcontroller');
 
         const isHR = await isUserInFlowchart(req.user, 'hr');
@@ -11522,7 +11522,7 @@ export const requestAccessoryAction = async (req, res) => {
 
         // Unattach: Asset Controller or Admin only (not assignee / assigner / delegated reportee).
         if (actionType === 'Unattach') {
-            const isAdm = req.user.isAdmin === true || req.user.role === 'Admin' || req.user.role === 'ROOT';
+            const isAdm = isJwtSystemSuperUser(req.user);
             const isAC = await isUserInFlowchart(req.user, 'assetcontroller').catch(() => false);
             const currentEmpId = req.user.employeeObjectId?.toString();
             const acId = asset?.assetControllerId?.toString?.();
@@ -11559,9 +11559,7 @@ export const requestAccessoryAction = async (req, res) => {
         const isControllerOrAdmin =
             requesterId === assetController?._id?.toString() ||
             isAssetControllerRequester ||
-            req.user.isAdmin === true ||
-            req.user.role === 'Admin' ||
-            req.user.role === 'ROOT';
+            isJwtSystemSuperUser(req.user);
         const currentEmpId = req.user.employeeObjectId?.toString();
         const assigneeId =
             asset.assignedToType === 'Employee' && asset.assignedTo
@@ -11835,7 +11833,7 @@ export const respondAccessoryAction = async (req, res) => {
         // - Add (catalog): only the designated asset.actionRequiredBy (assignee or AC) or Admin
         // - Loss and Damage + End of Life + Unattach: only Asset Controller/Admin (workflow needs Fine creation)
         const actorFlags = await getActorPermissionFlagsForAsset(req.user, asset);
-        const isAdmin = req.user.isAdmin === true || req.user.role === 'Admin' || req.user.role === 'ROOT';
+        const isAdmin = isJwtSystemSuperUser(req.user);
         const isAssetControllerApproving = await isUserInFlowchart(req.user, 'assetcontroller').catch(() => false);
         const currentUserEmpIdEarly = req.user.employeeObjectId?.toString();
         const actionRequiredById =
@@ -12924,7 +12922,7 @@ export const submitDraftForCreationApproval = async (req, res) => {
 
         const currentUserId = req.user._id?.toString() || req.user.id?.toString();
         const isCreator = item.createdBy?.toString() === currentUserId;
-        const isJwtAdmin = req.user.isAdmin || req.user.role === 'Admin' || req.user.role === 'ROOT';
+        const isJwtAdmin = isJwtSystemSuperUser(req.user);
         const isSysAdmin = await isUserAdministrator(req.user?.id);
         if (!isCreator && !isJwtAdmin && !isSysAdmin) {
             return res.status(403).json({ message: 'Only the asset creator or an administrator can submit this draft.' });
@@ -13682,10 +13680,7 @@ export const deletePendingAssetDashboardInboxItem = async (req, res) => {
             return res.status(400).json({ message: 'Invalid notification id' });
         }
 
-        const isAdminUser =
-            currentUser?.isAdmin === true ||
-            currentUser?.role === 'Admin' ||
-            currentUser?.role === 'ROOT';
+        const isAdminUser = isJwtSystemSuperUser(currentUser);
 
         const manager = await EmployeeBasic.findOne({
             $or: [

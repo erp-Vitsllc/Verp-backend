@@ -1,4 +1,5 @@
 import { hasPermission, isUserAdministrator } from "../services/permissionService.js";
+import { isJwtSystemSuperUser } from "./systemSuperUser.js";
 import {
     COMPANY_DELETE_PERM,
     OWNER_DOC_KEY_PERM,
@@ -59,7 +60,7 @@ const patchTouchesFields = (updateData, fields) =>
 const isAdminUser = async (user) => {
     const userId = resolveUserId(user);
     if (!userId) return false;
-    if (user?.isAdmin === true || user?.role === "Admin" || user?.role === "ROOT") return true;
+    if (isJwtSystemSuperUser(user)) return true;
     return isUserAdministrator(userId);
 };
 

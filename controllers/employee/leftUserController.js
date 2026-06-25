@@ -2,6 +2,7 @@ import { getCompleteEmployee, findEmployeeBasicByRouteId } from "../../services/
 import { checkLeftUserEligibility } from "../../utils/employeeLeftUserEligibility.js";
 import { applyEmployeeLeftUserStatus, LEFT_USER_STATUS, applyEmployeeReturnFromLeftUser } from "../../utils/applyEmployeeLeftUserStatus.js";
 import { isUserAdministrator } from "../../services/permissionService.js";
+import { isJwtSystemSuperUser } from "../../utils/systemSuperUser.js";
 import { isRequestUserDesignatedFlowchartHr } from "../../utils/isDesignatedFlowchartHr.js";
 import { queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
 import { notifyLeftUserPendingHr } from "../../utils/employeeLeftUserWorkflow.js";
@@ -108,9 +109,7 @@ export const returnEmployeeFromLeftUser = async (req, res) => {
     try {
         const isSystemAdmin = req.user?.id ? await isUserAdministrator(req.user.id) : false;
         const isPortalAdmin =
-            req.user?.role === "Admin" ||
-            req.user?.role === "ROOT" ||
-            req.user?.isAdmin === true ||
+            isJwtSystemSuperUser(req.user) ||
             isSystemAdmin;
 
         if (!isPortalAdmin) {

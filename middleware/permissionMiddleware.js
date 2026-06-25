@@ -4,6 +4,15 @@
  * @param {string} permissionType - The permission type to check ('create', 'view', 'edit', 'delete', 'full')
  * @returns {Function} Express middleware function
  */
+import { isJwtSystemSuperUser } from "../utils/systemSuperUser.js";
+
+async function isPortalSuperUser(req) {
+    const userId = req.user?.id;
+    if (!userId) return isJwtSystemSuperUser(req.user);
+    const { isUserAdministrator } = await import("../services/permissionService.js");
+    return (await isUserAdministrator(userId)) || isJwtSystemSuperUser(req.user);
+}
+
 /** Pass if the user has any of the listed permission types on the module. */
 export const checkPermissionAny = (moduleId, permissionTypes = ['view']) => {
     return async (req, res, next) => {
@@ -12,13 +21,8 @@ export const checkPermissionAny = (moduleId, permissionTypes = ['view']) => {
             if (!userId) {
                 return res.status(401).json({ message: "Not authorized, no user found" });
             }
-            const { hasPermission, isUserAdministrator } = await import("../services/permissionService.js");
-            const isAdmin = await isUserAdministrator(userId);
-            const isJwtAdmin =
-                req.user?.isAdmin === true ||
-                req.user?.role === "Admin" ||
-                req.user?.role === "ROOT";
-            if (isAdmin || isJwtAdmin) {
+            const { hasPermission } = await import("../services/permissionService.js");
+            if (await isPortalSuperUser(req)) {
                 return next();
             }
             const types = Array.isArray(permissionTypes) ? permissionTypes : [permissionTypes];
@@ -48,15 +52,9 @@ export const checkPermission = (moduleId, permissionType = 'view') => {
             }
 
             // Import here to avoid circular dependency
-            const { hasPermission, isUserAdministrator } = await import("../services/permissionService.js");
+            const { hasPermission } = await import("../services/permissionService.js");
 
-            // System admin, JWT Admin/ROOT — bypass permission checks
-            const isAdmin = await isUserAdministrator(userId);
-            const isJwtAdmin =
-                req.user?.isAdmin === true ||
-                req.user?.role === "Admin" ||
-                req.user?.role === "ROOT";
-            if (isAdmin || isJwtAdmin) {
+            if (await isPortalSuperUser(req)) {
                 return next();
             }
 
@@ -198,14 +196,9 @@ export const checkBasicDetailsPatchPermission = () => {
                 return res.status(401).json({ message: "Not authorized, no user found" });
             }
 
-            const { hasPermission, isUserAdministrator } = await import("../services/permissionService.js");
+            const { hasPermission } = await import("../services/permissionService.js");
 
-            const isAdmin = await isUserAdministrator(userId);
-            const isJwtAdmin =
-                req.user?.isAdmin === true ||
-                req.user?.role === "Admin" ||
-                req.user?.role === "ROOT";
-            if (isAdmin || isJwtAdmin) {
+            if (await isPortalSuperUser(req)) {
                 return next();
             }
 
@@ -246,13 +239,8 @@ export const checkEmployeeCardDeletePermission = (moduleId) => {
                 return res.status(401).json({ message: "Not authorized, no user found" });
             }
 
-            const { hasPermission, isUserAdministrator } = await import("../services/permissionService.js");
-            const isAdmin = await isUserAdministrator(userId);
-            const isJwtAdmin =
-                req.user?.isAdmin === true ||
-                req.user?.role === "Admin" ||
-                req.user?.role === "ROOT";
-            if (isAdmin || isJwtAdmin) {
+            const { hasPermission } = await import("../services/permissionService.js");
+            if (await isPortalSuperUser(req)) {
                 return next();
             }
 
@@ -303,14 +291,9 @@ export const checkEmployeeManualDocumentEdit = () => {
                 return res.status(401).json({ message: "Not authorized, no user found" });
             }
 
-            const { hasPermission, isUserAdministrator } = await import("../services/permissionService.js");
+            const { hasPermission } = await import("../services/permissionService.js");
 
-            const isAdmin = await isUserAdministrator(userId);
-            const isJwtAdmin =
-                req.user?.isAdmin === true ||
-                req.user?.role === "Admin" ||
-                req.user?.role === "ROOT";
-            if (isAdmin || isJwtAdmin) {
+            if (await isPortalSuperUser(req)) {
                 return next();
             }
 
@@ -374,14 +357,9 @@ export const checkEmployeeOldDocumentDelete = () => {
                 return res.status(401).json({ message: "Not authorized, no user found" });
             }
 
-            const { hasPermission, isUserAdministrator } = await import("../services/permissionService.js");
+            const { hasPermission } = await import("../services/permissionService.js");
 
-            const isAdmin = await isUserAdministrator(userId);
-            const isJwtAdmin =
-                req.user?.isAdmin === true ||
-                req.user?.role === "Admin" ||
-                req.user?.role === "ROOT";
-            if (isAdmin || isJwtAdmin) {
+            if (await isPortalSuperUser(req)) {
                 return next();
             }
 
@@ -421,19 +399,9 @@ export const checkEmployeeProfileActivationAction = () => {
                 return res.status(401).json({ message: "Not authorized, no user found" });
             }
 
-            const { hasPermission, isUserAdministrator } = await import("../services/permissionService.js");
-            const { isReqUserAdmin } = await import("../utils/sendAdminDeletionNotificationEmails.js");
+            const { hasPermission } = await import("../services/permissionService.js");
 
-            if (await isReqUserAdmin(req.user)) {
-                return next();
-            }
-
-            const isAdmin = await isUserAdministrator(userId);
-            const isJwtAdmin =
-                req.user?.isAdmin === true ||
-                req.user?.role === "Admin" ||
-                req.user?.role === "ROOT";
-            if (isAdmin || isJwtAdmin) {
+            if (await isPortalSuperUser(req)) {
                 return next();
             }
 

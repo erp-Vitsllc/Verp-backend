@@ -1,4 +1,5 @@
 import EmployeeBasic from '../models/EmployeeBasic.js';
+import { isJwtSystemSuperUser } from './systemSuperUser.js';
 import { isRequestUserDesignatedFlowchartHr } from './isDesignatedFlowchartHr.js';
 
 export const APPROVED_LOAN_STATUSES = ['Approved', 'Paid'];
@@ -25,7 +26,7 @@ function identityMatches(user, target) {
 export async function isUserHrForApprovedLoanEdit(req, loan) {
     if (!req?.user) return false;
 
-    if (req.user.isAdmin || req.user.role === 'Admin') {
+    if (isJwtSystemSuperUser(req.user)) {
         return true;
     }
 

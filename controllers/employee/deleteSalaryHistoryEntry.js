@@ -8,6 +8,7 @@ import { hasPermission } from "../../services/permissionService.js";
 import { PURGE_TYPES, purgeEmployeeOldDocuments } from "../../utils/purgeEmployeeOldDocuments.js";
 import { isOldestSalaryHistoryEntry } from "../../utils/employeeSalaryValidation.js";
 import { scheduleEmployeeProfileFileChangeHrEmailForRequest } from "../../utils/employeeInformativeHrNotify.js";
+import { isEmployeeProfileLiveActive } from "../../utils/employeeDocumentRenewal.js";
 
 const monthKeyFromDate = (value) => {
     if (!value) return null;
@@ -24,16 +25,28 @@ export const deleteSalaryHistoryEntry = async (req, res) => {
         const isAdminUser = await isReqUserAdmin(req.user);
         const hasSalaryDelete =
             userId && (await hasPermission(userId, "hrm_employees_view_salary", "delete"));
-        if (!isAdminUser && !hasSalaryDelete) {
-            return res.status(403).json({
-                message: "You do not have permission to delete salary history records.",
-            });
-        }
 
         const { id, historyId } = req.params;
         const employee = await resolveEmployeeId(id);
         if (!employee) {
             return res.status(404).json({ message: "Employee not found" });
+        }
+
+        const employeeBasic = await EmployeeBasic.findOne({ employeeId: employee.employeeId })
+            .select("profileStatus profileApprovalStatus")
+            .lean();
+        const isLive = isEmployeeProfileLiveActive(employeeBasic || {});
+
+        if (isLive && !isAdminUser) {
+            return res.status(403).json({
+                message: "Only Super User can delete salary history on an active profile.",
+            });
+        }
+
+        if (!isLive && !isAdminUser && !hasSalaryDelete) {
+            return res.status(403).json({
+                message: "You do not have permission to delete salary history records.",
+            });
         }
 
         const salaryDoc = await EmployeeSalary.findOne({ employeeId: employee.employeeId });

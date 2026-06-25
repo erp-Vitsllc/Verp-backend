@@ -4,7 +4,7 @@ import { resolveEmployeeEmail } from './resolveEmployeeEmail.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import Company from '../models/Company.js';
 import { sendAssignedEmployeeActionEmail } from './sendAssignedEmployeeActionEmail.js';
-import { isUserAdministrator } from '../services/permissionService.js';
+import { isReqUserSystemSuperUser } from './systemSuperUser.js';
 import { buildAdminDeletionEmailAttachments } from './buildAdminDeletionEmailAttachments.js';
 import {
     buildAdminDeletionFieldsHtmlTable,
@@ -14,18 +14,9 @@ import { createAdminDeletionArchiveFromDeletion } from '../services/adminDeletio
 import { awaitAdminDeletionArchive } from './adminDeletionArchiveRun.js';
 import { resolveFrontendHostLabel, withFrontendPath } from './resolveFrontendBaseUrl.js';
 
+/** Super User (portal root) — not Flowchart Admin Officer. */
 export async function isReqUserAdmin(reqUser) {
-    if (!reqUser) return false;
-    if (reqUser.isAdmin === true || reqUser.isAdministrator === true) return true;
-    const role = String(reqUser.role || "").trim();
-    const userType = String(reqUser.userType || "").trim();
-    const groupName = String(reqUser.groupName || "").trim();
-    if (/^(admin|administrator|root)$/i.test(role)) return true;
-    if (/^(admin|administrator)$/i.test(userType)) return true;
-    if (/^(admin|administrator)$/i.test(groupName)) return true;
-    if (role === "Admin" || role === "ROOT") return true;
-    const uid = reqUser.id || reqUser._id?.toString?.();
-    return uid ? !!(await isUserAdministrator(uid)) : false;
+    return isReqUserSystemSuperUser(reqUser);
 }
 
 function getTransport() {

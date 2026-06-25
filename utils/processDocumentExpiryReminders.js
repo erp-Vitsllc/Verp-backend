@@ -206,7 +206,7 @@ const getFlowchartRecipientBundle = async () => {
         getDepartmentHOD("admincontroller"),
         getDepartmentHOD("hr"),
     ]);
-    /** Company document expiry emails: Admin Controller + HR (Flowchart) only. */
+    /** Company document expiry emails: Admin Officer + HR (Flowchart) only. */
     const emails = dedupeEmails([
         pickCompanyAddress(admin || {}),
         pickCompanyAddress(hr || {}),
@@ -523,7 +523,7 @@ const processCompanyReminders = async () => {
                     <p><strong>Document:</strong> ${doc.label}</p>
                     <p><strong>Expiry Date:</strong> ${new Date(doc.expiryDate).toLocaleDateString("en-GB")}</p>
                     <p><strong>Current lead time:</strong> ${days} day(s) before expiry.</p>
-                    <p style="margin-top:12px;color:#555;font-size:13px;"><em>This email is sent to the designated <strong>Admin Controller</strong> and <strong>HR</strong> on the organizational flowchart. Follow-up tasks are assigned only to designated HR.</em></p>
+                    <p style="margin-top:12px;color:#555;font-size:13px;"><em>This email is sent to the designated <strong>Admin Officer</strong> and <strong>HR</strong> on the organizational flowchart. Follow-up tasks are assigned only to designated HR.</em></p>
                 </div>
             `;
 

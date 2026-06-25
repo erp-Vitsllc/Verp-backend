@@ -12,6 +12,7 @@ import { resolveAssetControllerEmployee } from '../utils/assetApprovalHelpers.js
 import { resolveFrontendBaseUrl } from '../utils/resolveFrontendBaseUrl.js';
 import { applyOnDutyFromLeaveState, healStaleParkingFields, isLeaveActive, onLeaveQueryFilter, requiresOwnerOnDutyApproval } from '../utils/assetOperationalFlags.js';
 import { completeOperationalExpiryDashboardTasks } from '../utils/upsertOperationalExpiryDashboardTask.js';
+import { isJwtSystemSuperUser } from '../utils/systemSuperUser.js';
 
 const OWNER_ON_DUTY_REQUEST_TYPE = 'Asset Owner On Duty';
 const OWNER_ON_DUTY_AC_REQUEST_TYPE = 'Asset On Duty Request';
@@ -267,7 +268,7 @@ const assertOwnerAssignee = async (req, ownerId) => {
     const reporteeId = owner?.primaryReportee?.toString?.() || owner?.primaryReportee?.toString?.();
     if (actingId && reporteeId && actingId === reporteeId) return true;
 
-    const isAdmin = req.user?.isAdmin === true || req.user?.role === 'Admin' || req.user?.role === 'ROOT';
+    const isAdmin = isJwtSystemSuperUser(req.user);
     if (isAdmin) return true;
 
     const err = new Error('Only the assigned asset owner (or their delegate) can request on duty.');
@@ -362,7 +363,7 @@ const createOwnerInitiatedOnDutyAcRequest = async ({ req, owner, requestedAssetI
 };
 
 const assertAssetController = async (req) => {
-    const isAdmin = req.user?.isAdmin === true || req.user?.role === 'Admin' || req.user?.role === 'ROOT';
+    const isAdmin = isJwtSystemSuperUser(req.user);
     const isAssetController = await isUserInFlowchart(req.user, 'assetcontroller').catch(() => false);
     if (!isAdmin && !isAssetController) {
         const err = new Error('Only Asset Controller or Admin can request owner on duty confirmation.');
@@ -380,7 +381,7 @@ const assertOwnerOrDelegate = async (req, ownerId) => {
     const reporteeId = owner?.primaryReportee?.toString?.() || owner?.primaryReportee?.toString?.();
     if (actingId && reporteeId && actingId === reporteeId) return true;
 
-    const isAdmin = req.user?.isAdmin === true || req.user?.role === 'Admin' || req.user?.role === 'ROOT';
+    const isAdmin = isJwtSystemSuperUser(req.user);
     if (isAdmin) return true;
 
     const err = new Error('Only the asset owner (or their delegate) can respond to this request.');

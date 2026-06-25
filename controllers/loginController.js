@@ -204,10 +204,12 @@ export const login = async (req, res) => {
                 username: user.username,
                 employeeId: user.employeeId,
                 employeeObjectId: employeeObjectId, // Added for frontend logic
+                isSystemSuperUser: isSystemAdmin,
                 isAdmin: isSystemAdmin,
                 isAdministrator: isSystemAdmin
             },
             permissions: permissions,
+            isSystemSuperUser: isSystemAdmin || permissionData?.isAdministrator || false,
             isAdmin: isSystemAdmin || permissionData?.isAdmin || false,
             isAdministrator: isSystemAdmin || permissionData?.isAdministrator || false,
         });

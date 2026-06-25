@@ -1,6 +1,7 @@
 import jwt from "jsonwebtoken";
 import User from "../models/User.js";
 import EmployeeBasic from "../models/EmployeeBasic.js";
+import { isUsernameSystemSuperUser } from "../utils/systemSuperUser.js";
 
 /**
  * Authentication middleware - verifies JWT token and attaches user to request
@@ -17,7 +18,7 @@ export const protect = async (req, res, next) => {
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
         // Check if user still exists and is active
-        const user = await User.findById(decoded.id).select('_id name status enablePortalAccess email isAdmin companyEmail employeeId groupName');
+        const user = await User.findById(decoded.id).select('_id name username status enablePortalAccess email isAdmin companyEmail employeeId groupName');
 
         if (!user) {
             return res.status(401).json({ message: "User not found" });
@@ -58,13 +59,18 @@ export const protect = async (req, res, next) => {
             if (emp) employeeObjectId = emp._id;
         }
 
+        const isSystemSuperUser = isUsernameSystemSuperUser(user.username);
+
         // Attach user info to request
         req.user = {
             id: user._id.toString(),
             _id: user._id,
             name: user.name,
+            username: user.username,
             email: user.email,
-            isAdmin: user.isAdmin,
+            isSystemSuperUser,
+            isAdmin: isSystemSuperUser,
+            isAdministrator: isSystemSuperUser,
             companyEmail: user.companyEmail,
             employeeId: user.employeeId,
             employeeObjectId: employeeObjectId, // Linked EmployeeBasic ObjectId

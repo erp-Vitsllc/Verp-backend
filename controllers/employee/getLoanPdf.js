@@ -2,7 +2,7 @@ import Loan from "../../models/Loan.js";
 import User from "../../models/User.js";
 import { getLoanAcknowledgmentPdfBuffer } from "../../utils/persistLoanApprovalAttachments.js";
 import { generatePdf } from "../../utils/generatePdf.js";
-import { resolveFrontendBaseUrl } from '../../utils/resolveFrontendBaseUrl.js';
+import { isUsernameSystemSuperUser } from "../../utils/systemSuperUser.js";
 
 export const getLoanPdf = async (req, res) => {
     try {
@@ -42,7 +42,7 @@ export const getLoanPdf = async (req, res) => {
             const userObj = await User.findById(requestingUserId);
             const userPayload = {
                 id: requestingUserId,
-                isAdmin: userObj?.isAdmin || userObj?.role === 'Admin',
+                isAdmin: isUsernameSystemSuperUser(userObj?.username),
                 role: userObj?.role,
                 employeeId: userObj?.employeeId
             };

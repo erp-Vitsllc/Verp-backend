@@ -10,6 +10,7 @@ import { sendHODAuthorizationEmail } from "../../utils/sendHODAuthorizationEmail
 import { generatePdf } from "../../utils/generatePdf.js";
 import { uploadDocumentToS3 } from "../../utils/s3Upload.js";
 import { resolveEmployeeEmail, getFallbackEmailNote, addEmployeeEmailToSet } from "../../utils/resolveEmployeeEmail.js";
+import { isUsernameSystemSuperUser } from "../../utils/systemSuperUser.js";
 
 export const updateReward = async (req, res) => {
     try {
@@ -419,7 +420,7 @@ export const updateReward = async (req, res) => {
                 if (approverUserId) {
                     // Check if Admin
                     const userObj = await User.findById(approverUserId);
-                    const isAdmin = userObj?.isAdmin || userObj?.role === 'Admin' || userObj?.role === 'SuperAdmin';
+                    const isAdmin = isUsernameSystemSuperUser(userObj?.username);
 
                     if (isAdmin) {
                         approverDetails = { name: 'Admin', designation: 'Administrator', isAdmin: true };
@@ -804,7 +805,7 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
                                         if (userObj) {
                                             userPayload = {
                                                 id: userObj._id,
-                                                isAdmin: userObj.isAdmin || userObj.role === 'Admin',
+                                                isAdmin: isUsernameSystemSuperUser(userObj?.username),
                                                 role: userObj.role,
                                                 employeeId: userObj.employeeId
                                             };

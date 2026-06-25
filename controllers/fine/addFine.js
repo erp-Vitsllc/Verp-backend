@@ -5,6 +5,7 @@ import Company from "../../models/Company.js";
 import { uploadDocumentToS3 } from "../../utils/s3Upload.js";
 import { sendFineApprovalEmail } from "../../utils/sendFineApprovalEmail.js";
 import { isVehicleFinePayload, validateVehicleFinePayload } from "../../utils/validateVehicleFinePayload.js";
+import { normalizeFineSourceSchedule } from "../../utils/normalizeFineSourceSchedule.js";
 
 /**
  * Generate unique random fine ID (4 digits)
@@ -349,6 +350,9 @@ export const addFine = async (req, res) => {
                     responsibleFor: commonData.responsibleFor || null,
                     payableDuration: parseInt(empData.payableDuration || commonData.payableDuration) || null,
                     monthStart: commonData.monthStart || '',
+                    sourceOfIncome: commonData.sourceOfIncome || 'Salary',
+                    assetDepreciationAmount: parseFloat(commonData.assetDepreciationAmount) || 0,
+                    assetPurchaseDate: commonData.assetPurchaseDate || '',
                     createdBy: req.user._id
                 };
 
@@ -372,6 +376,7 @@ export const addFine = async (req, res) => {
                 }
 
                 try {
+                    normalizeFineSourceSchedule(finePayload);
                     const fineModel = new Fine(finePayload);
                     const savedFineRecord = await fineModel.save();
                     createdFines.push(savedFineRecord);
@@ -444,7 +449,10 @@ export const addFine = async (req, res) => {
             companyAmount,
             serviceCharge,
             payableDuration,
-            monthStart
+            monthStart,
+            sourceOfIncome,
+            assetDepreciationAmount,
+            assetPurchaseDate,
         } = req.body;
 
         if (!employeeId) {
@@ -567,8 +575,13 @@ export const addFine = async (req, res) => {
             serviceCharge: serviceChargeAmount, // Store exact service charge
             payableDuration: parseInt(payableDuration) || null,
             monthStart: monthStart || '',
+            sourceOfIncome: sourceOfIncome || 'Salary',
+            assetDepreciationAmount: parseFloat(assetDepreciationAmount) || 0,
+            assetPurchaseDate: assetPurchaseDate || '',
             createdBy: req.user._id // Add Creator
         };
+
+        normalizeFineSourceSchedule(fineData);
 
         // SINGLE: Route directly to HR (no reportee step)
         if (fineData.fineStatus !== 'Draft') {

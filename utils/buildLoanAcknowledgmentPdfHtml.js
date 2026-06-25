@@ -81,12 +81,13 @@ export function resolveRepaymentPeriod(loan) {
     };
 }
 
-function sigImg(sig, minHeight = 56) {
+function sigImg(sig, minHeight = 56, align = 'center') {
     const url = sig?.url ? esc(sig.url) : '';
+    const margin = align === 'left' ? 'margin:0;' : 'margin:0 auto;';
     if (url) {
-        return `<img src="${url}" alt="" style="max-height:${minHeight}px;max-width:200px;object-fit:contain;display:block;margin:0 auto;" />`;
+        return `<img src="${url}" alt="" style="max-height:${minHeight}px;max-width:200px;object-fit:contain;display:block;${margin}" />`;
     }
-    return `<div style="min-height:${minHeight}px;border-bottom:1px solid #333;width:180px;margin:0 auto;"></div>`;
+    return `<div style="min-height:${minHeight}px;border-bottom:1px solid #333;width:180px;${margin}"></div>`;
 }
 
 function workflowApprovedDate(loan, role) {
@@ -120,30 +121,26 @@ function buildApproverSignaturesTable(signatureUrls, dates) {
         )
         .join('');
 
-    return `<p style="margin:24px 0 8px 0;font-size:13px;font-weight:bold;">Office Staff's</p>
-    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;border:1px solid #000;">
+    return `<div style="margin-top:20px;">
+    <p style="margin:0 0 2px 0;font-size:13px;font-weight:bold;">office use only :</p>
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;border:1px solid #000;margin-top:0;">
         <tr>${labelRow}</tr>
         <tr>${dateRow}</tr>
         <tr>${sigRow}</tr>
-    </table>`;
+    </table>
+    </div>`;
 }
 
 function buildEmployeeClosingSection(employeeName, department, employeeSig, employeeDate) {
-    const signatureCell = sigImg(employeeSig, 72);
+    const signatureCell = sigImg(employeeSig, 72, 'left');
     return `
     <div style="margin-top:32px;">
         <p style="margin:0 0 18px 0;">Sincerely,</p>
         <p style="margin:0 0 4px 0;font-weight:bold;font-size:13px;">${esc(employeeName)}</p>
-        <p style="margin:0 0 14px 0;font-size:13px;">${esc(department || '—')}</p>
-    </div>
-    <table role="presentation" width="34%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;border:1px solid #000;margin-bottom:8px;">
-        <tr>
-            <td style="padding:12px 10px;border:1px solid #000;text-align:center;vertical-align:middle;min-height:88px;">
-                <div style="font-size:10px;color:#444;margin-bottom:8px;">${esc(employeeDate)}</div>
-                ${signatureCell}
-            </td>
-        </tr>
-    </table>`;
+        <p style="margin:0 0 6px 0;font-size:13px;">${esc(department || '—')}</p>
+        <div style="font-size:10px;color:#444;margin-bottom:4px;">${esc(employeeDate)}</div>
+        ${signatureCell}
+    </div>`;
 }
 
 export const LOAN_ACKNOWLEDGMENT_PDF_SELECTOR = '#loan-acknowledgment-pdf[data-loan-ack-ready="true"]';

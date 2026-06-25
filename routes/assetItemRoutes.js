@@ -32,6 +32,7 @@ import {
     isUserCompanyAssetCoordinator
 } from '../utils/getDepartmentHOD.js';
 import { isUserAdministrator, hasPermission } from '../services/permissionService.js';
+import { isJwtSystemSuperUser } from '../utils/systemSuperUser.js';
 
 const normEmp = (s) => (s || '').toString().toLowerCase().replace(/\s+/g, '');
 
@@ -59,7 +60,7 @@ const isVehicleAssetLean = (assetQuick) => {
 /** JWT / env system admin — aligned with asset controllers (not only isAdmin boolean). */
 const isAdminForAssetRoutes = async (user) => {
     if (!user) return false;
-    if (user.isAdmin === true || user.role === 'Admin' || user.role === 'ROOT') return true;
+    if (isJwtSystemSuperUser(user)) return true;
     if (user.id || user._id) {
         const uid = user.id || user._id;
         return await isUserAdministrator(uid);

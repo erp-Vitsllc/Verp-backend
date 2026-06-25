@@ -3,6 +3,7 @@ import AssetItem from '../models/AssetItem.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import DashboardAction from '../models/DashboardAction.js';
 import { getDepartmentHOD, isUserInFlowchart } from '../utils/getDepartmentHOD.js';
+import { isJwtSystemSuperUser } from '../utils/systemSuperUser.js';
 import { sendAssetActionApprovalEmail } from '../utils/sendAssetActionApprovalEmail.js';
 import { buildCreationRequestHandoverAttachments } from '../utils/buildAssignmentHandoverEmailAttachments.js';
 import {
@@ -285,8 +286,7 @@ export const requestAttachAccessoryCatalog = async (req, res) => {
         const requesterEmpId = req.user?.employeeObjectId?.toString?.() || null;
         const assigneeOid = targetAsset.assignedTo?._id?.toString?.() || null;
         const isAssigneeRequester = !!(requesterEmpId && assigneeOid && requesterEmpId === assigneeOid);
-        const isAdminRequester =
-            req.user?.isAdmin === true || req.user?.role === 'Admin' || req.user?.role === 'ROOT';
+        const isAdminRequester = isJwtSystemSuperUser(req.user);
         const isAcRequester = await isUserInFlowchart(req.user, 'assetcontroller').catch(() => false);
 
         let approver = null;

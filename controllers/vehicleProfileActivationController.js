@@ -11,15 +11,24 @@ import {
     sendVehicleProfileActivationHoldEmail,
     sendVehicleProfileActivationOutcomeEmail,
 } from '../utils/sendVehicleProfileActivationEmails.js';
+import {
+    assertVehicleProfileActivationReady,
+    VEHICLE_PROFILE_ACTIVATION_SECTION_IDS,
+} from '../utils/vehicleProfileCompletion.js';
 
 const normType = (t) => String(t || '').toLowerCase().trim();
 
-const ALLOWED_SECTIONS = new Set(['basic', 'registration', 'insurance', 'warranty', 'documents']);
+const ALLOWED_SECTIONS = new Set([
+    ...VEHICLE_PROFILE_ACTIVATION_SECTION_IDS,
+    'warranty',
+    'documents',
+]);
 
 const SECTION_LABEL = {
     basic: 'Basic details',
-    registration: 'Registration (card)',
-    insurance: 'Insurance',
+    registration: 'Registration card',
+    insurance: 'Insurance card',
+    profile_picture: 'Profile picture',
     warranty: 'Warranty',
     documents: 'Documents summary',
 };
@@ -55,26 +64,7 @@ const sanitizeRowNotesBySectionId = (raw, allowedSectionIds) => {
     return Object.keys(out).length ? out : null;
 };
 
-const assertSubmitPrerequisites = (asset) => {
-    const docs = asset.documents || [];
-    const registrationDoc = docs.find((d) => normType(d.type) === 'registration');
-    const insuranceDoc = docs.find((d) => normType(d.type) === 'insurance');
-    const warrantyDoc = docs.find((d) => normType(d.type) === 'warranty');
-
-    if (!registrationDoc?.expiryDate) {
-        return 'Registration with an expiry date must be on file before submitting.';
-    }
-    if (!insuranceDoc?.expiryDate) {
-        return 'Insurance with an expiry date must be on file before submitting.';
-    }
-    if (asset.warrantyEnabled) {
-        const hasWarrantyExpiry = !!(warrantyDoc?.expiryDate || asset.warrantyExpiryDate);
-        if (!hasWarrantyExpiry) {
-            return 'Warranty is enabled for this vehicle — add warranty coverage with an end date before submitting.';
-        }
-    }
-    return null;
-};
+const assertSubmitPrerequisites = (asset) => assertVehicleProfileActivationReady(asset);
 
 const vehicleSubjectForDashboard = (asset) => ({
     firstName: asset.name || 'Vehicle',

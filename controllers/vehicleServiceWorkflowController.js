@@ -9,6 +9,7 @@ import { getManagementHOD } from '../utils/getManagementHOD.js';
 import { sendVehicleServiceWorkflowEmail } from '../utils/sendVehicleServiceWorkflowEmail.js';
 import { resolveEmployeeEmail } from '../utils/resolveEmployeeEmail.js';
 import { isUserAdministrator } from '../services/permissionService.js';
+import { isJwtSystemSuperUser } from '../utils/systemSuperUser.js';
 import {
     applyServiceActiveState,
     applyPostServiceOperationalState,
@@ -125,7 +126,7 @@ async function getRequesterName(reqUser) {
 }
 
 function isPortalAdmin(reqUser) {
-    return reqUser?.isAdmin === true || reqUser?.role === 'Admin' || reqUser?.role === 'ROOT';
+    return isJwtSystemSuperUser(reqUser);
 }
 
 async function resolveActorEmployee(reqUser) {

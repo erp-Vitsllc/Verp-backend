@@ -3,6 +3,7 @@ import User from '../models/User.js';
 import AssetItem from '../models/AssetItem.js';
 import DashboardAction from '../models/DashboardAction.js';
 import { getDepartmentHOD, isUserActiveInFlowchart } from './getDepartmentHOD.js';
+import { isJwtSystemSuperUser } from '../utils/systemSuperUser.js';
 import { isUserAdministrator } from '../services/permissionService.js';
 
 const normEmpId = (s) => (s || '').toString().toLowerCase().replace(/\s+/g, '');
@@ -105,9 +106,10 @@ export async function resolveAssetCreatorEmployee(createdByUserId) {
 
 /** JWT/system admin or active flowchart Asset Controller (incl. department HOD row). */
 export async function userCanDirectAddAssetToPool(req, assetControllerEmp = null) {
-    const isJwtAdmin = req.user?.isAdmin === true || req.user?.role === 'Admin' || req.user?.role === 'ROOT';
+    if (isJwtSystemSuperUser(req.user)) return true;
+
     const isSysAdmin = await isUserAdministrator(req.user?.id);
-    if (isJwtAdmin || isSysAdmin) return true;
+    if (isSysAdmin) return true;
 
     let isAssetController = false;
     try {

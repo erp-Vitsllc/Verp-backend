@@ -19,6 +19,7 @@ import {
     scheduleFieldsAreChanging,
     snapshotDeductionScheduleOnApproval,
 } from "../../utils/fineDeductionScheduleSnapshot.js";
+import { normalizeFineSourceSchedule } from "../../utils/normalizeFineSourceSchedule.js";
 
 export const updateFine = async (req, res) => {
     try {
@@ -134,12 +135,26 @@ export const updateFine = async (req, res) => {
         let shouldSendApprovalEmail = false;
         let statusHandled = false;
 
+        if (updates.sourceOfIncome !== undefined || updates.payableDuration !== undefined) {
+            const src = updates.sourceOfIncome ?? fine.sourceOfIncome ?? 'Salary';
+            if (src === 'End of Service') {
+                updates.sourceOfIncome = 'End of Service';
+                updates.payableDuration = null;
+                updates.monthStart = updates.monthStart ?? '';
+            } else if (updates.payableDuration !== undefined) {
+                const duration = parseInt(updates.payableDuration, 10);
+                updates.payableDuration =
+                    Number.isFinite(duration) && duration >= 1 ? duration : null;
+            }
+        }
+
         // 1. Explicitly Define Allowed Fields (Fix Mass Assignment)
         const allowedUpdates = [
             'fineStatus', 'description', 'awardedDate', 'remarks',
             'attachment', 'category', 'subCategory', 'vehicleId', 'assetId', 'assetName',
             'projectId', 'projectName', 'engineerName', 'responsibleFor',
             'fineAmount', 'employeeAmount', 'companyAmount', 'serviceCharge', 'payableDuration', 'monthStart',
+            'sourceOfIncome', 'assetDepreciationAmount', 'assetPurchaseDate',
             'employees', 'totalEmployeeFineAmount', 'company', 'companyName', 'companyDescription',
             'excludedAccessoryIds', 'breakdownItems',
         ];
@@ -222,6 +237,7 @@ export const updateFine = async (req, res) => {
                                 f.workflow = [
                                     { role: 'HR', assignedTo: hrUser._id, status: 'Pending', assignedAt: new Date() }
                                 ];
+                                normalizeFineSourceSchedule(f);
                                 await f.save();
                             }
                             shouldSendApprovalEmail = true;
@@ -250,6 +266,7 @@ export const updateFine = async (req, res) => {
                     else f.fineStatus = 'Pending Review';
 
                     f.submittedTo = rejectedStep.assignedTo;
+                    normalizeFineSourceSchedule(f);
                     await f.save();
                 }
             }
@@ -508,6 +525,7 @@ export const updateFine = async (req, res) => {
                 }
             }
 
+            normalizeFineSourceSchedule(f);
             await f.save();
         }
 
@@ -574,11 +592,12 @@ export const updateFine = async (req, res) => {
                 }
                 f.submittedTo = routeBackTo;
 
-
+                normalizeFineSourceSchedule(f);
                 await f.save();
             }
         }
 
+        normalizeFineSourceSchedule(fine);
         const updatedFine = await fine.save();
 
         // === SYNC DASHBOARD ACTION ===
