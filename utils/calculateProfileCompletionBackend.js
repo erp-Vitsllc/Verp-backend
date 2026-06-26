@@ -1,4 +1,8 @@
-import { employeeRequiresEmiratesId, employeeRequiresLabourCard } from "./employeeRequiresEmiratesId.js";
+import {
+    employeeRequiresEmiratesId,
+    employeeRequiresLabourCard,
+    employeeRequiresBankDetails,
+} from "./employeeRequiresEmiratesId.js";
 
 const checkField = (val) => {
     if (val === null || val === undefined) return false;
@@ -223,31 +227,33 @@ export const calculateProfileCompletionBackend = (employee = {}) => {
         }
     }
 
-    // 7. Bank Details
-    const bankName = employee.bankName || employee.bank;
-    const accountName = employee.accountName || employee.bankAccountName;
-    const accountNumber = employee.accountNumber || employee.bankAccountNumber;
-    const ibanNumber = employee.ibanNumber;
+    // 7. Bank Details — not required for visit-visa-only employees
+    if (employeeRequiresBankDetails(employee)) {
+        const bankName = employee.bankName || employee.bank;
+        const accountName = employee.accountName || employee.bankAccountName;
+        const accountNumber = employee.accountNumber || employee.bankAccountNumber;
+        const ibanNumber = employee.ibanNumber;
 
-    totalFields++;
-    if (checkField(bankName)) {
-        completedFields++;
-    } else {
-        pendingFields.push({ section: 'Bank Details', field: 'Bank Name' });
-    }
+        totalFields++;
+        if (checkField(bankName)) {
+            completedFields++;
+        } else {
+            pendingFields.push({ section: 'Bank Details', field: 'Bank Name' });
+        }
 
-    totalFields++;
-    if (checkField(accountName)) {
-        completedFields++;
-    } else {
-        pendingFields.push({ section: 'Bank Details', field: 'Account Name' });
-    }
+        totalFields++;
+        if (checkField(accountName)) {
+            completedFields++;
+        } else {
+            pendingFields.push({ section: 'Bank Details', field: 'Account Name' });
+        }
 
-    totalFields++;
-    if (checkField(accountNumber) || checkField(ibanNumber)) {
-        completedFields++;
-    } else {
-        pendingFields.push({ section: 'Bank Details', field: 'Account Number / IBAN' });
+        totalFields++;
+        if (checkField(accountNumber) || checkField(ibanNumber)) {
+            completedFields++;
+        } else {
+            pendingFields.push({ section: 'Bank Details', field: 'Account Number / IBAN' });
+        }
     }
 
     // 8. Emergency Contact
