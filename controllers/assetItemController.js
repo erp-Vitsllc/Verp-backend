@@ -923,9 +923,10 @@ export const getVehicleFleetDashboard = async (req, res) => {
         const items = await AssetItem.find({ $and: [draftVis, fleetScope] })
             .populate('typeId', 'name')
             .populate('assignedTo', 'firstName lastName employeeId')
+            .populate('assignedCompany', 'name nickName companyShortName companyName')
             .populate('actionRequiredBy', 'firstName lastName employeeId')
             .select(
-                'assetId name plateEmirate plateNumber modelYear assetValue status registrationExpiryDate insuranceExpiryDate nextServiceDate oilChangeDate gearOilDueDate lastServiceDate currentKilometer assignedTo acceptanceStatus pendingAction services documents actionRequiredBy createdBy vehicleProfileActivationStatus vehicleDispositionStatus assignedCompany assignmentType temporaryEndDate warrantyEnabled warrantyExpiryDate warrantyYears accessories parkingExtendedDays parkingReminderSentAt parkingDurationCompleteSentAt'
+                'assetId name plateEmirate plateNumber modelYear assetValue status registrationExpiryDate insuranceExpiryDate nextServiceDate oilChangeDate gearOilDueDate lastServiceDate currentKilometer assignedTo assignedCompany acceptanceStatus pendingAction services documents actionRequiredBy createdBy vehicleProfileActivationStatus vehicleDispositionStatus assignmentType temporaryEndDate warrantyEnabled warrantyExpiryDate warrantyYears accessories parkingExtendedDays parkingReminderSentAt parkingDurationCompleteSentAt onServiceActive onLeaveActive'
             )
             .lean();
 
@@ -1033,6 +1034,7 @@ export const getVehicleFleetDashboard = async (req, res) => {
                     employeeId: resolvedController.employeeId || '',
                 }
                 : null;
+            const regExpResolved = registrationExpiry(v);
             return {
                 _id: v._id,
                 assetId: v.assetId,
@@ -1046,9 +1048,15 @@ export const getVehicleFleetDashboard = async (req, res) => {
                 vehicleDispositionStatus: v.vehicleDispositionStatus || 'active',
                 vehicleProfileActivationStatus: v.vehicleProfileActivationStatus || '',
                 assignedTo: v.assignedTo,
+                assignedCompany: v.assignedCompany,
+                acceptanceStatus: v.acceptanceStatus || '',
+                pendingAction: v.pendingAction || '',
+                actionRequiredBy: v.actionRequiredBy,
+                onServiceActive: v.onServiceActive === true,
+                onLeaveActive: v.onLeaveActive === true,
                 assetController: controllerPayload,
                 assetControllerId: controllerPayload?._id || null,
-                registrationExpiryDate: v.registrationExpiryDate,
+                registrationExpiryDate: regExpResolved,
                 currentKilometer: v.currentKilometer
             };
         });
@@ -12928,14 +12936,36 @@ export const submitDraftForCreationApproval = async (req, res) => {
             return res.status(403).json({ message: 'Only the asset creator or an administrator can submit this draft.' });
         }
 
+        const fleetVehicle = isFleetVehicleAssetFields({ plateNumber: item.plateNumber });
+        const previousStatusForHistory = item.status;
+
+        if (fleetVehicle) {
+            item.status = 'Unassigned';
+            item.actionRequiredBy = null;
+            item.creationReturnedToDraftAt = null;
+            if (!item.vehicleProfileActivationStatus) {
+                item.vehicleProfileActivationStatus = 'inactive';
+            }
+            await item.save();
+
+            await AssetHistory.create({
+                assetId: item._id,
+                action: 'Comment',
+                performedBy: req.user.employeeObjectId || req.user._id,
+                comments: 'Vehicle draft published to fleet list (no creation approval required).',
+                details: { previousStatus: previousStatusForHistory, newStatus: 'Unassigned' },
+                date: new Date(),
+            });
+
+            return res.status(200).json(item);
+        }
+
         const approverLabel = creationApproverRoleLabel({ plateNumber: item.plateNumber });
         const creationApprover = await resolveAssetCreationApproverEmployee({ plateNumber: item.plateNumber });
         if (!creationApprover?._id) {
             return res.status(400).json({ message: `${approverLabel} is not configured in Flowchart.` });
         }
 
-        const fleetVehicle = isFleetVehicleAssetFields({ plateNumber: item.plateNumber });
-        const previousStatusForHistory = item.status;
         item.status = 'Submitted for Approval';
         item.actionRequiredBy = creationApprover._id;
         item.creationReturnedToDraftAt = null;
@@ -13169,7 +13199,12 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
         }
         match.$or = assigneeClauses;
 
-        await syncPendingAssignmentDashboardRowsForUser(relevantIds, targetEmployeeId);
+        const skipSync = ['1', 'true', 'yes'].includes(
+            String(req.query.skipSync || '').trim().toLowerCase(),
+        );
+        if (!skipSync) {
+            await syncPendingAssignmentDashboardRowsForUser(relevantIds, targetEmployeeId);
+        }
 
         const parseExtra3 = (raw) => {
             if (raw == null || raw === '') return null;

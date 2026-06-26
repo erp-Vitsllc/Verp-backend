@@ -466,6 +466,7 @@ export const getUserActivityStats = async (req, res) => {
             'Company Document Not Renew',
             'Employee Document Not Renew',
             'Vehicle Profile Activation',
+            'Vehicle Profile Edit',
             'Vehicle Disposition Request',
         ]);
         const normEmpForAssignee = (s) => (s || '').toString().trim().toLowerCase();
@@ -525,7 +526,7 @@ export const getUserActivityStats = async (req, res) => {
                 .lean()
                 .maxTimeMS(6000),
             DashboardAction.find({
-                requestType: 'Vehicle Profile Activation',
+                requestType: { $in: ['Vehicle Profile Activation', 'Vehicle Profile Edit'] },
                 status: { $in: ['Approved', 'Rejected', 'On Hold'] },
                 $or: profileActivationOutcomeOr,
             })
@@ -745,7 +746,11 @@ export const getUserActivityStats = async (req, res) => {
                 }
             }
             let vehicleActivationViewerRole = null;
-            if (item.requestType === 'Vehicle Profile Activation' && item.extra3) {
+            if (
+                (item.requestType === 'Vehicle Profile Activation' ||
+                    item.requestType === 'Vehicle Profile Edit') &&
+                item.extra3
+            ) {
                 try {
                     vehicleActivationViewerRole = JSON.parse(item.extra3).activationViewerRole || null;
                 } catch {
@@ -765,8 +770,10 @@ export const getUserActivityStats = async (req, res) => {
             }
 
             const isVehicleActivationRequesterCopy =
-                item.requestType === 'Vehicle Profile Activation' &&
-                vehicleActivationViewerRole === 'requester';
+                (item.requestType === 'Vehicle Profile Activation' ||
+                    item.requestType === 'Vehicle Profile Edit') &&
+                (vehicleActivationViewerRole === 'submitter' ||
+                    vehicleActivationViewerRole === 'requester');
 
             let assetCreationViewerRole = null;
             if (item.requestType === 'Asset Approval' && item.extra3) {
@@ -1406,7 +1413,7 @@ export const getUserActivityStats = async (req, res) => {
             const activityItem = {
                 id: reqIdStr,
                 actionId: item._id.toString(),
-                type: 'Vehicle Profile Activation',
+                type: item.requestType || 'Vehicle Profile Activation',
                 requestedBy: isVehicleActSelf ? 'Me' : item.subjectName || item.requestedByName || 'Vehicle',
                 requestedDate: item.requestedDate,
                 actionedDate: item.actionedDate || item.updatedAt,
@@ -1420,7 +1427,7 @@ export const getUserActivityStats = async (req, res) => {
             };
 
             const idx = activityList.findIndex((i) => {
-                if (i.id?.toString() !== reqIdStr || i.type !== 'Vehicle Profile Activation') return false;
+                if (i.id?.toString() !== reqIdStr || i.type !== activityItem.type) return false;
                 if (
                     activityItem.actionId &&
                     i.actionId &&

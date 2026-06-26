@@ -109,6 +109,30 @@ const generateGenericId = async (model, prefix, fieldName) => {
     }
 };
 
+/** Match create-asset behaviour: resolve brand/type name to an AssetType, auto-creating when missing. */
+const resolveAssetTypeDocByName = async (typeName) => {
+    const trimmed = String(typeName || '').trim();
+    if (!trimmed) return null;
+
+    let tDoc = await AssetType.findOne({ name: trimmed, isActive: true });
+    if (!tDoc) {
+        const escaped = trimmed.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        tDoc = await AssetType.findOne({
+            name: { $regex: new RegExp(`^${escaped}$`, 'i') },
+            isActive: true,
+        });
+    }
+    if (!tDoc) {
+        const typeId = await generateGenericId(AssetType, 'asset-type-', 'typeId');
+        tDoc = await AssetType.create({
+            typeId,
+            name: trimmed,
+            description: `Auto-created type: ${trimmed}`,
+        });
+    }
+    return tDoc;
+};
+
 const UAE_PLATE_REGEX = /^([A-Z]{1,3})?\s?(\d{1,6})$/;
 
 const normalizePlate = (val) => {
@@ -268,12 +292,15 @@ export const createAssetType = async (req, res) => {
                 return res.status(400).json({ message: 'Valid Category is required for individual assets.' });
             }
 
-            const approverLabel = creationApproverRoleLabel({ plateNumber, typeName: type });
-            const creationApprover = await resolveAssetCreationApproverEmployee({ plateNumber, typeName: type });
+            const fleetVehicle = isFleetVehicleAssetFields({ plateNumber, typeName: type });
+            const approverLabel = fleetVehicle ? 'HR' : creationApproverRoleLabel({ plateNumber, typeName: type });
+            const creationApprover = fleetVehicle
+                ? null
+                : await resolveAssetCreationApproverEmployee({ plateNumber, typeName: type });
             const assetControllerRaw = await getDepartmentHOD('assetcontroller');
             const assetController = assetControllerRaw ? await resolveAssetControllerEmployee(assetControllerRaw) : null;
 
-            if (!creationApprover) {
+            if (!fleetVehicle && !creationApprover) {
                 return res.status(403).json({
                     message: `${approverLabel} is not assigned in the ERP flowchart. Cannot create this asset until ${approverLabel} is configured.`,
                 });
@@ -283,6 +310,7 @@ export const createAssetType = async (req, res) => {
                 creationIntent,
                 approverEmp: creationApprover,
                 approverLabel,
+                isFleetVehicle: fleetVehicle,
             });
             if (creationResolved.error) {
                 return res.status(creationResolved.status || 400).json({ message: creationResolved.error });
@@ -364,7 +392,11 @@ export const createAssetType = async (req, res) => {
                     lastServiceDate,
                     nextServiceDate,
                     ...(plateNumber && String(plateNumber).trim()
-                        ? { vehicleProfileActivationStatus: 'inactive', vehicleDispositionStatus: 'active' }
+                        ? {
+                            vehicleProfileActivationStatus: 'inactive',
+                            vehicleDispositionStatus: 'active',
+                            vehicleBrand: String(type || '').trim(),
+                        }
                         : {}),
                 };
 
@@ -1310,9 +1342,25 @@ export const updateAssetItem = async (req, res) => {
             }
         }
 
+        const isFleetVehicleAsset = Boolean(
+            String(asset.plateNumber || vehicleTypeCheck?.plateNumber || updates.plateNumber || '').trim(),
+        );
+
+        if (isFleetVehicleAsset) {
+            const brandInput = String(updates.brand ?? updates.type ?? '').trim();
+            if (brandInput) {
+                asset.vehicleBrand = brandInput;
+                const brandTypeDoc = await resolveAssetTypeDocByName(brandInput);
+                if (brandTypeDoc) asset.typeId = brandTypeDoc._id;
+            }
+        }
+
         for (const key of Object.keys(updates)) {
             // Prevent updating immutable fields
             if (key !== '_id' && key !== 'assetId') {
+                if (isFleetVehicleAsset && (key === 'brand' || key === 'type')) {
+                    continue;
+                }
                 if (key === 'purchaseDate' && !updates[key]) {
                     return res.status(400).json({ message: 'Purchase Date is required' });
                 }
@@ -1323,7 +1371,8 @@ export const updateAssetItem = async (req, res) => {
                 if (key === 'assetValue' && !isAdmin) {
                     const creatorMaySetValue =
                         isCreator && (initialAssetStatus === 'Draft' || initialAssetStatus === 'Rejected');
-                    if (!creatorMaySetValue) continue;
+                    const fleetCollaboratorMaySetValue = isFleetVehicleAssetForCollaborativeEdit;
+                    if (!creatorMaySetValue && !fleetCollaboratorMaySetValue) continue;
                 }
                 if (key === 'onServiceActive' || key === 'onLeaveActive') {
                     if (!isAdmin && !isAssetControllerEffective) continue;
@@ -1634,7 +1683,7 @@ export const updateAssetItem = async (req, res) => {
                     }
                 } else {
                     if (key === 'type' && typeof updates[key] === 'string' && updates[key].trim()) {
-                        const tDoc = await AssetType.findOne({ name: updates[key].trim(), isActive: true });
+                        const tDoc = await resolveAssetTypeDocByName(updates[key]);
                         if (tDoc) asset.typeId = tDoc._id;
                     } else if (key === 'plateNumber' && updates[key]) {
                         asset[key] = normalizePlate(updates[key]);
@@ -1665,6 +1714,8 @@ export const updateAssetItem = async (req, res) => {
         }
 
         await asset.save();
+
+        await asset.populate('typeId', 'name imagePreview');
 
         try {
             if (detachedAccessoryRefsForCatalog?.length) {
@@ -1806,6 +1857,19 @@ export const submitAssetForApproval = async (req, res) => {
             return res.status(400).json({ message: 'Asset is already submitted for approval.' });
         }
 
+        const fleetVehicle = isFleetVehicleAssetFields({ plateNumber: asset.plateNumber });
+        const requesterDisplayName = await getAssetRequesterDisplayName(req);
+
+        if (fleetVehicle) {
+            asset.status = 'Unassigned';
+            asset.actionRequiredBy = null;
+            if (!asset.vehicleProfileActivationStatus) {
+                asset.vehicleProfileActivationStatus = 'inactive';
+            }
+            await asset.save();
+            return res.status(200).json(asset);
+        }
+
         const assetControllerRaw = await getDepartmentHOD('assetcontroller');
         const assetController = assetControllerRaw ? await resolveAssetControllerEmployee(assetControllerRaw) : null;
         if (!assetController?._id && !isAdmin) {
@@ -1813,8 +1877,6 @@ export const submitAssetForApproval = async (req, res) => {
                 message: 'No Asset Controller assigned in Flowchart, or controller is not linked to an employee record.'
             });
         }
-
-        const requesterDisplayName = await getAssetRequesterDisplayName(req);
 
         if (isAdmin || isAssetController) {
             asset.status = 'Unassigned';

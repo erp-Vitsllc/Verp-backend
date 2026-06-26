@@ -378,6 +378,8 @@ const assetItemSchema = new mongoose.Schema({
     }],
     accessoriesAttachment: { type: String, default: null },
     vehicleCode: { type: String, trim: true },
+    /** Fleet make/manufacturer (e.g. Toyota). Editable per vehicle; typeId may be shared. */
+    vehicleBrand: { type: String, trim: true, default: '' },
     /** UAE emirate selected in Add Vehicle (drives license plate artwork). */
     plateEmirate: { type: String, trim: true, default: '' },
     plateNumber: { type: String, trim: true },
@@ -480,6 +482,25 @@ const assetItemSchema = new mongoose.Schema({
         comment: { type: String, default: '', trim: true },
         rowNotesBySectionId: { type: mongoose.Schema.Types.Mixed, default: undefined },
     },
+    /** Post-activation edits to mandatory profile sections (basic, registration, insurance, photo). */
+    vehicleProfileEditReviewStatus: {
+        type: String,
+        enum: ['none', 'pending_hr', 'rejected'],
+        default: 'none',
+    },
+    vehicleProfileEditSubmittedAt: { type: Date, default: null },
+    vehicleProfileEditSubmittedBy: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'EmployeeBasic',
+        default: null,
+    },
+    vehiclePendingProfileEdits: [{
+        sectionId: { type: String, trim: true },
+        action: { type: String, enum: ['edit', 'renew', 'not_renew'], default: 'edit' },
+        steps: { type: mongoose.Schema.Types.Mixed, default: [] },
+        documentId: { type: mongoose.Schema.Types.ObjectId, default: null },
+        createdAt: { type: Date, default: Date.now },
+    }],
     /** Sold / Total loss: requester → HR → Accounts + Management (parallel) → company email → disposition applied. */
     vehicleDispositionWorkflow: {
         targetStatus: { type: String, enum: ['sold', 'total loss'], default: null },

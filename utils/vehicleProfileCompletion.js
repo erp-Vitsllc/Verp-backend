@@ -11,7 +11,7 @@ function parseDocDescription(doc) {
 
 export function isVehicleBasicDetailsComplete(asset) {
     if (!asset) return false;
-    const brand = String(asset.typeId?.name || asset.type || '').trim();
+    const brand = String(asset.vehicleBrand || asset.typeId?.name || asset.type || '').trim();
     const model = String(asset.name || '').trim();
     const hasModelYear = asset.modelYear != null && String(asset.modelYear).trim() !== '';
     const plateDigits = String(asset.plateNumber || '').replace(/\D/g, '');

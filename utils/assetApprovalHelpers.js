@@ -151,7 +151,7 @@ export function isFleetVehicleAssetFields({ plateNumber, typeName } = {}) {
     );
 }
 
-/** Fleet vehicles: creation approval goes to HR; other assets use Asset Controller. */
+/** Fleet vehicles: profile activation goes to HR; tool assets use Asset Controller for creation approval. */
 export async function resolveAssetCreationApproverEmployee({ plateNumber, typeName } = {}) {
     const fleet = isFleetVehicleAssetFields({ plateNumber, typeName });
     if (fleet) {
@@ -332,11 +332,22 @@ export async function rerouteAllPendingAssetCreationApprovals({ category } = {})
 
 /**
  * New asset creation: regular users → Draft or Submitted for Approval only.
+ * Fleet vehicles skip creation approval — created directly as Unassigned (or Draft).
  * Asset Controller / Admin → Unassigned pool on createUnassigned (or omit intent), optional draft / submit paths.
  */
-export async function resolveNewAssetCreationStatus(req, { creationIntent, approverEmp, approverLabel = 'Asset Controller' }) {
+export async function resolveNewAssetCreationStatus(
+    req,
+    { creationIntent, approverEmp, approverLabel = 'Asset Controller', isFleetVehicle = false } = {},
+) {
     const canDirect = await userCanDirectAddAssetToPool(req, approverEmp);
     const intent = String(creationIntent ?? '').trim();
+
+    if (isFleetVehicle) {
+        if (intent === 'saveDraft') {
+            return { initialStatus: 'Draft', actionRequiredBy: null, canDirectAddAsset: true };
+        }
+        return { initialStatus: 'Unassigned', actionRequiredBy: null, canDirectAddAsset: true };
+    }
 
     if (!canDirect) {
         if (intent === 'createUnassigned') {

@@ -19,6 +19,11 @@ import {
     rejectVehicleProfileActivation,
 } from '../controllers/vehicleProfileActivationController.js';
 import {
+    submitVehicleProfileEdit,
+    approveVehicleProfileEdit,
+    rejectVehicleProfileEdit,
+} from '../controllers/vehicleProfileEditController.js';
+import {
     submitVehicleDispositionRequest,
     respondVehicleDispositionHr,
     submitVehicleDispositionFinance,
@@ -681,6 +686,9 @@ router.post('/:id/submit-vehicle-profile-activation', protect, submitVehicleProf
 router.post('/:id/approve-vehicle-profile-activation', protect, approveVehicleProfileActivation);
 router.post('/:id/hold-vehicle-profile-activation', protect, holdVehicleProfileActivation);
 router.post('/:id/reject-vehicle-profile-activation', protect, rejectVehicleProfileActivation);
+router.post('/:id/submit-vehicle-profile-edit', protect, submitVehicleProfileEdit);
+router.post('/:id/approve-vehicle-profile-edit', protect, approveVehicleProfileEdit);
+router.post('/:id/reject-vehicle-profile-edit', protect, rejectVehicleProfileEdit);
 router.post('/:id/submit-vehicle-disposition-request', protect, submitVehicleDispositionRequest);
 router.post('/:id/respond-vehicle-disposition-hr', protect, respondVehicleDispositionHr);
 router.post('/:id/submit-vehicle-disposition-finance', protect, submitVehicleDispositionFinance);
