@@ -139,6 +139,37 @@ export async function getResolvedAssetControllerEmployee() {
     return acRaw ? resolveAssetControllerEmployee(acRaw) : null;
 }
 
+/** Current flowchart HR as EmployeeBasic (fleet vehicle assignment / return approvals). */
+export async function getResolvedFleetHrEmployee() {
+    const hrRaw = await getDepartmentHOD('hr');
+    return hrRaw ? resolveAssetControllerEmployee(hrRaw) : null;
+}
+
+/** HR flowchart holder or administrator — may assign / reassign fleet vehicles. */
+export async function userCanAssignFleetVehicleAssets(req) {
+    if (isJwtSystemSuperUser(req.user)) return true;
+
+    const isSysAdmin = await isUserAdministrator(req.user?.id);
+    if (isSysAdmin) return true;
+
+    let isHr = false;
+    try {
+        isHr = await isUserActiveInFlowchart(req.user, 'hr');
+    } catch {
+        isHr = false;
+    }
+    if (isHr) return true;
+
+    const hrRaw = await getDepartmentHOD('hr');
+    if (hrRaw?._id && req.user?.employeeObjectId) {
+        if (hrRaw._id.toString() === req.user.employeeObjectId.toString()) return true;
+    }
+    if (hrRaw?.employeeId && req.user?.employeeId) {
+        if (normEmpId(hrRaw.employeeId) === normEmpId(req.user.employeeId)) return true;
+    }
+    return false;
+}
+
 export function isFleetVehicleAssetFields({ plateNumber, typeName } = {}) {
     const plate = String(plateNumber || '').trim();
     if (plate) return true;
@@ -149,6 +180,18 @@ export function isFleetVehicleAssetFields({ plateNumber, typeName } = {}) {
         tn.includes('fleet') ||
         tn.includes('truck')
     );
+}
+
+export const FLEET_PROFILE_INACTIVE_ASSIGNMENT_MSG =
+    'Vehicle profile must be active before assign, reassign, or return actions can be performed. Complete profile activation first.';
+
+/** Fleet vehicles require `vehicleProfileActivationStatus === active` for assignment workflows. */
+export function isFleetVehicleProfileActive(asset) {
+    if (!asset) return false;
+    if (!isFleetVehicleAssetFields({ plateNumber: asset.plateNumber, typeName: asset.typeId?.name || asset.type })) {
+        return true;
+    }
+    return String(asset.vehicleProfileActivationStatus || '').toLowerCase().trim() === 'active';
 }
 
 /** Fleet vehicles: profile activation goes to HR; tool assets use Asset Controller for creation approval. */

@@ -501,6 +501,40 @@ const assetItemSchema = new mongoose.Schema({
         documentId: { type: mongoose.Schema.Types.ObjectId, default: null },
         createdAt: { type: Date, default: Date.now },
     }],
+    /** Formal vehicle inspection record (HR-approved create request). */
+    vehicleInspectionStatus: {
+        type: String,
+        enum: ['none', 'pending_hr', 'active'],
+        default: 'none',
+    },
+    vehicleInspectionSubmittedAt: { type: Date, default: null },
+    vehicleInspectionSubmittedBy: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'EmployeeBasic',
+        default: null,
+    },
+    vehicleInspectionApprovedAt: { type: Date, default: null },
+    vehicleInspectionApprovedBy: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'EmployeeBasic',
+        default: null,
+    },
+    /** Mortgage closure: requester → HR approve → archive to old documents & clear live mortgage. */
+    vehicleMortgageCloseStatus: {
+        type: String,
+        enum: ['none', 'pending_hr', 'closed'],
+        default: 'none',
+    },
+    vehicleMortgageCloseSubmittedAt: { type: Date, default: null },
+    vehicleMortgageCloseSubmittedBy: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'EmployeeBasic',
+        default: null,
+    },
+    vehicleMortgageCloseClearanceAttachment: {
+        type: mongoose.Schema.Types.Mixed,
+        default: null,
+    },
     /** Sold / Total loss: requester → HR → Accounts + Management (parallel) → company email → disposition applied. */
     vehicleDispositionWorkflow: {
         targetStatus: { type: String, enum: ['sold', 'total loss'], default: null },

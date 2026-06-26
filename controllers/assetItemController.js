@@ -46,6 +46,10 @@ import {
     rerouteAllPendingAssetCreationApprovals,
     userCanAssignAssets,
     getResolvedAssetControllerEmployee,
+    getResolvedFleetHrEmployee,
+    userCanAssignFleetVehicleAssets,
+    isFleetVehicleProfileActive,
+    FLEET_PROFILE_INACTIVE_ASSIGNMENT_MSG,
 } from '../utils/assetApprovalHelpers.js';
 import AssetAccessoryCatalog from '../models/AssetAccessoryCatalog.js';
 import { sendAssignedEmployeeActionEmail } from '../utils/sendAssignedEmployeeActionEmail.js';
@@ -4180,9 +4184,19 @@ export const assignAssetItem = async (req, res) => {
 
         const item = await AssetItem.findById(id)
             .populate('assignedTo', 'firstName lastName employeeId companyEmail workEmail')
-            .populate('assignedCompany', 'name email companyId');
+            .populate('assignedCompany', 'name email companyId')
+            .populate('typeId', 'name');
         if (!item) {
             return res.status(404).json({ message: 'Asset not found' });
+        }
+
+        const fleetVehicle = isFleetVehicleAssetFields({
+            plateNumber: item.plateNumber,
+            typeName: item.typeId?.name,
+        });
+
+        if (fleetVehicle && !isFleetVehicleProfileActive(item)) {
+            return res.status(400).json({ message: FLEET_PROFILE_INACTIVE_ASSIGNMENT_MSG });
         }
 
         // Check if this is a reassignment (asset was previously assigned)
@@ -4254,14 +4268,125 @@ export const assignAssetItem = async (req, res) => {
 
         const actingEmpObjectId = req.user.employeeObjectId?.toString?.() || null;
 
-        // Only Asset Controller or Administrator may assign / reassign assets.
         const assetControllerHod = await getDepartmentHOD('assetcontroller');
         const assetControllerEmp = assetControllerHod
             ? await resolveAssetControllerEmployee(assetControllerHod)
             : null;
-        const canAssign = await userCanAssignAssets(req, assetControllerEmp);
+
+        let canAssign = false;
+        let assigneeReassignRequest = false;
+        if (fleetVehicle) {
+            canAssign = await userCanAssignFleetVehicleAssets(req);
+            const assigneeId = (item.assignedTo?._id || item.assignedTo)?.toString?.() || null;
+            const isAssigneeActor =
+                !!actingEmpObjectId && !!assigneeId && actingEmpObjectId === assigneeId;
+            if (!canAssign && isReassignment && isAssigneeActor) {
+                assigneeReassignRequest = true;
+                canAssign = true;
+            }
+        } else {
+            canAssign = await userCanAssignAssets(req, assetControllerEmp);
+        }
         if (!canAssign) {
-            return res.status(403).json({ message: 'Only Asset Controller or Administrator can assign assets.' });
+            return res.status(403).json({
+                message: fleetVehicle
+                    ? 'Only HR or Administrator can assign fleet vehicles.'
+                    : 'Only Asset Controller or Administrator can assign assets.',
+            });
+        }
+
+        if (assigneeReassignRequest) {
+            const hrEmp = await getResolvedFleetHrEmployee();
+            if (!hrEmp?._id) {
+                return res.status(400).json({ message: 'No HR assignee configured in the flowchart.' });
+            }
+            if (item.pendingAction) {
+                return res.status(400).json({
+                    message: `This vehicle already has a pending "${item.pendingAction}" request.`,
+                });
+            }
+            if (!actingEmpObjectId) {
+                return res.status(403).json({ message: 'You are not linked to an employee profile.' });
+            }
+            const assigner = await EmployeeBasic.findById(actingEmpObjectId);
+            if (!assigner?.signature?.url) {
+                return res.status(403).json({
+                    message: "Can't request reassign: Your signature has not been added to your profile.",
+                });
+            }
+            if (assignedToType !== 'Employee' || !assignedTo) {
+                return res.status(400).json({ message: 'Fleet reassign requests must target an employee.' });
+            }
+
+            item.pendingAction = 'Reassign Asset';
+            item.pendingActionDetails = {
+                reassignmentPayload: {
+                    assignedTo,
+                    assignedToType: 'Employee',
+                    assignmentType,
+                    assignedDays: assignedDays ?? null,
+                },
+                requestedBy: actingEmpObjectId,
+                requestedAt: new Date(),
+            };
+            item.actionRequiredBy = hrEmp._id;
+            item.status = 'Pending';
+            await item.save();
+
+            const requesterName =
+                `${assigner.firstName || ''} ${assigner.lastName || ''}`.trim() || 'Employee';
+            await DashboardAction.create({
+                assignedTo: hrEmp._id,
+                assignedToEmpId: hrEmp.employeeId,
+                requestId: item._id,
+                requestType: 'Asset Reassign',
+                status: 'Pending',
+                subjectEmployeeId: item.assignedTo?.employeeId || 'UNASSIGNED',
+                subjectName: requesterName,
+                requestedByName: requesterName,
+                extra1: `${item.assetId} — ${item.name || ''}`,
+                extra2: 'Reassign Asset',
+            });
+
+            try {
+                await sendAssetActionApprovalEmail(
+                    item,
+                    'Reassign Asset',
+                    hrEmp,
+                    { name: requesterName },
+                    '',
+                    [],
+                );
+            } catch (e) {
+                /* non-fatal */
+            }
+
+            await AssetHistory.create({
+                assetId: item._id,
+                action: 'Comment',
+                performedBy: actingEmpObjectId,
+                comments: 'Fleet vehicle reassign request submitted for HR approval.',
+                date: new Date(),
+            });
+
+            const updatedItem = await AssetItem.findById(id)
+                .populate('assignedCompany')
+                .populate({
+                    path: 'assignedTo',
+                    select: 'firstName lastName employeeId profilePicture companyEmail workEmail department dateOfJoining reportingAuthority primaryReportee enablePortalAccess',
+                    populate: [
+                        { path: 'reportingAuthority', select: 'firstName lastName' },
+                        { path: 'primaryReportee', select: 'firstName lastName' },
+                    ],
+                })
+                .populate({ path: 'assignedBy', select: 'firstName lastName employeeId signature' })
+                .populate('typeId', 'name imagePreview')
+                .populate('categoryId', 'name imagePreview');
+
+            return res.status(200).json({
+                message: 'Reassign request sent to HR for approval',
+                asset: updatedItem,
+            });
         }
 
         // New assignments from the pool must start from Unassigned or Returned.
@@ -4520,7 +4645,9 @@ export const assignAssetItem = async (req, res) => {
                     attachments: assignAttachments,
                 }).catch(() => null);
 
-                const assetController = await getDepartmentHOD('assetcontroller').catch(() => null);
+                const assetController = fleetVehicle
+                    ? await getResolvedFleetHrEmployee()
+                    : await getDepartmentHOD('assetcontroller').catch(() => null);
                 if (assetController) {
                     await sendAssetControllerDirectAssignmentRecordEmail({
                         assetControllerEmployee: assetController,
@@ -5402,7 +5529,8 @@ export const respondToAssignment = async (req, res) => {
                 select: 'employeeId firstName lastName companyEmail enablePortalAccess primaryReportee',
                 populate: { path: 'primaryReportee', select: '_id firstName lastName employeeId companyEmail workEmail' },
             })
-            .populate('assignedBy assignedCompany');
+            .populate('assignedBy assignedCompany')
+            .populate('typeId', 'name');
         if (!item) {
             return res.status(404).json({ message: 'Asset not found' });
         }
@@ -5537,8 +5665,17 @@ export const respondToAssignment = async (req, res) => {
 
                 if (item.assignedBy) pushRecipient(item.assignedBy);
 
-                const acForNotify = await getResolvedAssetControllerEmployee();
-                if (acForNotify) pushRecipient(acForNotify);
+                const fleetVehicle = isFleetVehicleAssetFields({
+                    plateNumber: item.plateNumber,
+                    typeName: item.typeId?.name,
+                });
+                if (fleetVehicle) {
+                    const hrForNotify = await getResolvedFleetHrEmployee();
+                    if (hrForNotify) pushRecipient(hrForNotify);
+                } else {
+                    const acForNotify = await getResolvedAssetControllerEmployee();
+                    if (acForNotify) pushRecipient(acForNotify);
+                }
 
                 // 2. Notify the subject (employee or delegated primary reportee) if they were NOT the one who acted
                 if (item.assignedToType === 'Employee' && item.assignedTo && item.assignedTo._id.toString() !== currentUser.toString()) {
@@ -7250,15 +7387,31 @@ export const returnAssetItem = async (req, res) => {
     try {
         const { id } = req.params;
 
-        const item = await AssetItem.findById(id);
+        const item = await AssetItem.findById(id).populate('typeId', 'name');
 
         if (!item) {
             return res.status(404).json({ message: 'Asset not found' });
         }
 
+        const fleetVehicle = isFleetVehicleAssetFields({
+            plateNumber: item.plateNumber,
+            typeName: item.typeId?.name,
+        });
+
+        if (fleetVehicle && !isFleetVehicleProfileActive(item)) {
+            return res.status(400).json({ message: FLEET_PROFILE_INACTIVE_ASSIGNMENT_MSG });
+        }
+
         const isJwtAdmin = isJwtSystemSuperUser(req.user);
         const isSysAdmin = await isUserAdministrator(req.user?.id);
         const isAcFlow = await isUserInFlowchart(req.user, 'assetcontroller');
+        const isHrFlow = fleetVehicle ? await isUserInFlowchart(req.user, 'hr').catch(() => false) : false;
+        const hrHod = fleetVehicle ? await getDepartmentHOD('hr').catch(() => null) : null;
+        const matchesDeptHr =
+            fleetVehicle &&
+            !!hrHod?._id &&
+            req.user?.employeeObjectId &&
+            hrHod._id.toString() === req.user.employeeObjectId.toString();
         const isCompanyCoordinatorFlow = await isUserActiveCompanyAssetCoordinator(
             req.user?.employeeObjectId,
             req.user?.employeeId
@@ -7274,6 +7427,7 @@ export const returnAssetItem = async (req, res) => {
             isSysAdmin ||
             isAcFlow ||
             matchesDeptAc ||
+            (fleetVehicle && (isHrFlow || matchesDeptHr)) ||
             (isCompanyCoordinatorFlow && isCompanyAssignedAsset);
 
         let currentEmpId = req.user?.employeeObjectId?.toString();
@@ -7291,29 +7445,44 @@ export const returnAssetItem = async (req, res) => {
         if (item.assignedTo) {
             if (!isElevatedReturn && !isAssigneeReturn) {
                 return res.status(403).json({
-                    message: 'Only the assigned employee, Asset Controller, or an administrator can return this asset.'
+                    message: fleetVehicle
+                        ? 'Only the assigned employee, HR, or an administrator can return this vehicle.'
+                        : 'Only the assigned employee, Asset Controller, or an administrator can return this asset.'
                 });
             }
         } else {
             if (!isElevatedReturn) {
                 return res.status(403).json({
-                    message: 'Only Asset Controller or an administrator can return an asset that is not assigned to an employee.'
+                    message: fleetVehicle
+                        ? 'Only HR or an administrator can return a vehicle that is not assigned to an employee.'
+                        : 'Only Asset Controller or an administrator can return an asset that is not assigned to an employee.'
                 });
             }
         }
 
-        const assetController = hodAc;
+        const fleetReturnApprover = fleetVehicle
+            ? hrHod
+                ? await resolveAssetControllerEmployee(hrHod)
+                : null
+            : null;
+        const assetController = fleetVehicle ? fleetReturnApprover : hodAc;
         if (!assetController && !isAssigneeReturn) {
             return res.status(403).json({
-                message: "Asset return denied: No Asset Controller has been assigned in the organization flow. Please assign an Asset Controller in Settings > Flowchart before performing this operation."
+                message: fleetVehicle
+                    ? "Vehicle return denied: No HR assignee has been configured in the organization flow. Please assign HR in Settings > Flowchart before performing this operation."
+                    : "Asset return denied: No Asset Controller has been assigned in the organization flow. Please assign an Asset Controller in Settings > Flowchart before performing this operation."
             });
         }
 
-        // If an assigned employee requests return (non-elevated), route it to Asset Controller for approval
+        // If an assigned employee requests return (non-elevated), route it to HR (fleet) or Asset Controller for approval
         // with dashboard + email, instead of immediately unassigning.
         if (isAssigneeReturn && !isElevatedReturn) {
             if (!assetController?._id) {
-                return res.status(400).json({ message: 'Asset Controller not found. Cannot request return approval.' });
+                return res.status(400).json({
+                    message: fleetVehicle
+                        ? 'HR assignee not found. Cannot request return approval.'
+                        : 'Asset Controller not found. Cannot request return approval.',
+                });
             }
 
             const requesterEmp = await EmployeeBasic.findById(req.user.employeeObjectId).select('firstName lastName employeeId').lean().catch(() => null);
@@ -7370,7 +7539,9 @@ export const returnAssetItem = async (req, res) => {
                 }
 
                 return res.status(200).json({
-                    message: 'Return request sent to Asset Controller for approval',
+                    message: fleetVehicle
+                        ? 'Return request sent to HR for approval'
+                        : 'Return request sent to Asset Controller for approval',
                     asset: item
                 });
             }
@@ -8309,15 +8480,28 @@ export const deleteAssetDocument = async (req, res) => {
         const isAdminUser = await isReqUserAdmin(req.user);
         const hasAssetDeletePerm =
             uid && (await hasPermission(uid, 'hrm_asset', 'delete'));
-        if (!isAdminUser && !hasAssetDeletePerm) {
-            return res.status(403).json({ message: 'Only administrator can delete asset documents.' });
-        }
 
         const { id, docId } = req.params;
 
         const asset = await AssetItem.findById(id);
         if (!asset) {
             return res.status(404).json({ message: 'Asset not found' });
+        }
+
+        const fleetVehicle = isFleetVehicleAssetFields({ plateNumber: asset.plateNumber });
+        if (fleetVehicle) {
+            if (!isFleetVehicleProfileActive(asset)) {
+                return res.status(403).json({
+                    message: 'Vehicle documents can only be deleted while the vehicle profile is active.',
+                });
+            }
+            if (!isAdminUser) {
+                return res.status(403).json({
+                    message: 'Only administrator can delete vehicle documents.',
+                });
+            }
+        } else if (!isAdminUser && !hasAssetDeletePerm) {
+            return res.status(403).json({ message: 'Only administrator can delete asset documents.' });
         }
 
         const doc = asset.documents.id(docId);
@@ -9847,6 +10031,168 @@ export const handleAssetActionApproval = async (req, res) => {
         if (!asset.pendingAction) return res.status(400).json({ message: 'No pending action' });
 
         const actionType = asset.pendingAction;
+
+        if (actionType === 'Reassign Asset') {
+            const currentUserEmpId = req.user.employeeObjectId?.toString();
+            const isAdminUser = isJwtSystemSuperUser(req.user);
+            const isDesignatedApprover = asset.actionRequiredBy?.toString() === currentUserEmpId;
+            const isHrApprover = await isUserInFlowchart(req.user, 'hr').catch(() => false);
+            const isAuthorizedReassign = isDesignatedApprover || isAdminUser || isHrApprover;
+
+            if (!isAuthorizedReassign) {
+                return res.status(403).json({ message: 'Only HR can approve or reject this reassign request.' });
+            }
+
+            if (!approve) {
+                asset.pendingAction = null;
+                asset.pendingActionDetails = null;
+                asset.actionRequiredBy = null;
+                asset.status = 'Assigned';
+                await asset.save();
+
+                await DashboardAction.findOneAndUpdate(
+                    { requestId: asset._id, requestType: 'Asset Reassign', status: 'Pending' },
+                    {
+                        status: 'Rejected',
+                        actionedDate: new Date(),
+                        actionedBy: req.user?.employeeObjectId || req.user?._id,
+                        comment: String(comment || '').trim(),
+                    },
+                );
+
+                await AssetHistory.create({
+                    assetId: asset._id,
+                    action: 'Comment',
+                    performedBy: req.user.employeeObjectId || req.user._id,
+                    comments: `HR rejected fleet vehicle reassign request. ${comment || ''}`.trim(),
+                    date: new Date(),
+                });
+
+                return res.status(200).json({ message: 'Reassign request rejected.', asset });
+            }
+
+            const payload = asset.pendingActionDetails?.reassignmentPayload;
+            if (!payload?.assignedTo) {
+                return res.status(400).json({ message: 'Reassign details are missing from the pending request.' });
+            }
+
+            const hrApprover = await EmployeeBasic.findById(req.user.employeeObjectId).select('signature');
+            if (!hrApprover?.signature?.url) {
+                return res.status(403).json({
+                    message: 'HR signature is required before approving a vehicle reassignment.',
+                });
+            }
+
+            const employeeToAssign = await EmployeeBasic.findById(payload.assignedTo)
+                .select(
+                    'employeeId firstName lastName companyEmail workEmail personalEmail email primaryReportee department signature enablePortalAccess',
+                )
+                .populate({
+                    path: 'primaryReportee',
+                    select: '_id firstName lastName employeeId companyEmail workEmail',
+                });
+            if (!employeeToAssign) {
+                return res.status(404).json({ message: 'Target employee for reassignment not found' });
+            }
+
+            const previousAssignee = asset.assignedTo;
+            const resolvedActors = resolveEmployeeAssignmentActors(employeeToAssign, req.user.employeeObjectId);
+
+            asset.pendingAction = null;
+            asset.pendingActionDetails = null;
+            asset.assignedToType = 'Employee';
+            asset.assignedTo = employeeToAssign._id;
+            asset.assignedCompany = null;
+            asset.assignedBy = req.user.employeeObjectId;
+            asset.assignmentType = payload.assignmentType || 'Permanent';
+            if (payload.assignmentType === 'Temporary') {
+                const parsedDays = Number(payload.assignedDays);
+                if (!Number.isInteger(parsedDays) || parsedDays < 1 || parsedDays > 60) {
+                    return res.status(400).json({ message: 'Temporary duration must be an integer between 1 and 60 days.' });
+                }
+                asset.assignedDays = parsedDays;
+            } else {
+                asset.assignedDays = null;
+            }
+
+            let actionRequiredBy = null;
+            if (resolvedActors.autoAcceptOnAssign) {
+                if (!employeeToAssign.signature?.url) {
+                    return res.status(403).json({
+                        message:
+                            'Cannot reassign: The employee must have a digital signature on their profile before direct assignment.',
+                    });
+                }
+                applyAcceptedAssignmentState(asset, employeeToAssign._id);
+            } else {
+                asset.acceptanceStatus = 'Pending';
+                asset.actionRequiredBy = resolvedActors.pendingActionActorId;
+                asset.status = 'Pending';
+                actionRequiredBy = resolvedActors.pendingActionActorId;
+            }
+            asset.negotiationHistory = [];
+            await asset.save();
+
+            if (actionRequiredBy) {
+                const subjectName = `${employeeToAssign.firstName || ''} ${employeeToAssign.lastName || ''}`.trim();
+                await DashboardAction.findOneAndUpdate(
+                    { requestId: asset._id, requestType: 'Asset Assignment', status: 'Pending' },
+                    {
+                        assignedTo: actionRequiredBy,
+                        assignedToEmpId: employeeToAssign.employeeId,
+                        requestId: asset._id,
+                        requestType: 'Asset Assignment',
+                        subjectEmployeeId: employeeToAssign.employeeId,
+                        subjectName,
+                        requestedByName: 'HR',
+                        extra1: `${asset.assetId} — ${asset.name}`,
+                        extra2: asset.assignmentType,
+                        status: 'Pending',
+                    },
+                    { upsert: true, new: true, setDefaultsOnInsert: true },
+                );
+            }
+
+            await AssetHistory.create({
+                assetId: asset._id,
+                action: 'Assigned',
+                assignedTo: employeeToAssign._id,
+                assignedToType: 'Employee',
+                performedBy: req.user.employeeObjectId,
+                comments: 'HR approved fleet vehicle reassign request.',
+                date: new Date(),
+            });
+
+            if (previousAssignee) {
+                try {
+                    await sendAssetReassignmentEmail({
+                        asset,
+                        previousAssignee,
+                        newAssignee: employeeToAssign,
+                        previousAssigneeType: 'Employee',
+                        newAssigneeType: 'Employee',
+                        attachments: [],
+                    });
+                } catch (e) {
+                    /* non-fatal */
+                }
+            }
+
+            await DashboardAction.findOneAndUpdate(
+                { requestId: asset._id, requestType: 'Asset Reassign', status: 'Pending' },
+                {
+                    status: 'Approved',
+                    actionedDate: new Date(),
+                    actionedBy: req.user?.employeeObjectId || req.user?._id,
+                },
+            );
+
+            const refreshed = await AssetItem.findById(asset._id).populate(assetActionApprovalPopulate());
+            return res.status(200).json({
+                message: 'Reassignment approved. Awaiting assignee acknowledgment.',
+                asset: refreshed || asset,
+            });
+        }
 
         if (actionType === 'End of Life' && asset.pendingActionDetails?.stage) {
             const stage = asset.pendingActionDetails.stage;

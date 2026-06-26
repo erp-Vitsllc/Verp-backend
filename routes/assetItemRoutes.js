@@ -28,6 +28,16 @@ import {
     respondVehicleDispositionHr,
     submitVehicleDispositionFinance,
 } from '../controllers/vehicleDispositionWorkflowController.js';
+import {
+    submitVehicleInspectionRequest,
+    approveVehicleInspection,
+    rejectVehicleInspection,
+} from '../controllers/vehicleInspectionController.js';
+import {
+    submitVehicleMortgageClose,
+    approveVehicleMortgageClose,
+    rejectVehicleMortgageClose,
+} from '../controllers/vehicleMortgageCloseController.js';
 import { protect } from '../middleware/authMiddleware.js';
 import { downloadAssetListPdf } from '../controllers/asset/downloadAssetListPdf.js';
 import {
@@ -105,6 +115,37 @@ const requireAssetAssignAccess = async (req, res, next) => {
         const isAdminUser = await isAdminForAssetRoutes(req.user);
         const isAssetControllerUser = await isDesignatedAssetController(req.user);
         if (isAdminUser || isAssetControllerUser) return next();
+
+        const { id } = req.params;
+        if (id) {
+            const AssetItem = (await import('../models/AssetItem.js')).default;
+            const assetQuick = await AssetItem.findById(id)
+                .populate('typeId', 'name')
+                .select('plateNumber typeId assignedTo status')
+                .lean()
+                .catch(() => null);
+            if (assetQuick && isVehicleAssetLean(assetQuick)) {
+                const isHrUser = await isDesignatedHr(req.user);
+                if (isHrUser) return next();
+
+                let currentEmpId = req.user?.employeeObjectId?.toString();
+                if (!currentEmpId && req.user?.employeeId) {
+                    const me = await EmployeeBasic.findOne({
+                        employeeId: { $regex: new RegExp(`^${String(req.user.employeeId).replace(/\s+/g, '\\s*')}$`, 'i') }
+                    }).select('_id').lean().catch(() => null);
+                    if (me?._id) currentEmpId = me._id.toString();
+                }
+                const isAssignedVehicle =
+                    String(assetQuick.status || '').trim() === 'Assigned' && !!assetQuick.assignedTo;
+                if (
+                    isAssignedVehicle &&
+                    currentEmpId &&
+                    assetQuick.assignedTo.toString() === currentEmpId
+                ) {
+                    return next();
+                }
+            }
+        }
 
         return res.status(403).json({
             message: 'Access denied. Only Asset Controller or Administrator can assign assets.'
@@ -568,9 +609,17 @@ const requireReturnAssetAccess = async (req, res, next) => {
         }
 
         const AssetItem = (await import('../models/AssetItem.js')).default;
-        const asset = await AssetItem.findById(id).select('assignedTo assignedToType assignedCompany');
+        const asset = await AssetItem.findById(id)
+            .populate('typeId', 'name')
+            .select('assignedTo assignedToType assignedCompany plateNumber typeId')
+            .lean();
         if (!asset) {
             return res.status(404).json({ message: 'Asset not found' });
+        }
+
+        if (isVehicleAssetLean(asset)) {
+            const isHrUser = await isDesignatedHr(req.user);
+            if (isHrUser) return next();
         }
 
         // Company-assigned assets: allow active flowchart company coordinators
@@ -689,6 +738,12 @@ router.post('/:id/reject-vehicle-profile-activation', protect, rejectVehicleProf
 router.post('/:id/submit-vehicle-profile-edit', protect, submitVehicleProfileEdit);
 router.post('/:id/approve-vehicle-profile-edit', protect, approveVehicleProfileEdit);
 router.post('/:id/reject-vehicle-profile-edit', protect, rejectVehicleProfileEdit);
+router.post('/:id/submit-vehicle-inspection-request', protect, submitVehicleInspectionRequest);
+router.post('/:id/approve-vehicle-inspection', protect, approveVehicleInspection);
+router.post('/:id/reject-vehicle-inspection', protect, rejectVehicleInspection);
+router.post('/:id/submit-vehicle-mortgage-close', protect, submitVehicleMortgageClose);
+router.post('/:id/approve-vehicle-mortgage-close', protect, approveVehicleMortgageClose);
+router.post('/:id/reject-vehicle-mortgage-close', protect, rejectVehicleMortgageClose);
 router.post('/:id/submit-vehicle-disposition-request', protect, submitVehicleDispositionRequest);
 router.post('/:id/respond-vehicle-disposition-hr', protect, respondVehicleDispositionHr);
 router.post('/:id/submit-vehicle-disposition-finance', protect, submitVehicleDispositionFinance);

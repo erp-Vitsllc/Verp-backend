@@ -467,6 +467,8 @@ export const getUserActivityStats = async (req, res) => {
             'Employee Document Not Renew',
             'Vehicle Profile Activation',
             'Vehicle Profile Edit',
+            'Vehicle Inspection',
+            'Vehicle Mortgage Close',
             'Vehicle Disposition Request',
         ]);
         const normEmpForAssignee = (s) => (s || '').toString().trim().toLowerCase();

@@ -4,7 +4,6 @@ import { fileURLToPath } from 'url';
 import { PDFDocument, rgb, StandardFonts } from 'pdf-lib';
 import {
     buildEmployeeAssetListRows,
-    formatAssetListDate,
 } from './buildEmployeeAssetListPdfHtml.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -15,23 +14,17 @@ const PAGE_HEIGHT = 934.56;
 const BLACK = rgb(0, 0, 0);
 const LINE = rgb(0, 0, 0);
 
-/** Measured from asset-list-template.pdf — 6 columns: SL | Asset Name | Accessories | Asset ID | QTY | Value */
+/** Measured from asset-list-template.pdf — 7 columns: Serial No | Assigned to | Asset Name | Accessories | Asset ID | QTY | Value */
 const LAYOUT = {
-    infoTable: {
-        x: 56,
-        yTop: 798,
-        width: 483,
-        rowHeight: 25,
-    },
     table: {
         x: 56,
         width: 483,
-        headerTop: 703,
+        headerTop: 810,
         headerHeight: 22,
-        firstRowTop: 681,
+        firstRowTop: 788,
         defaultRowHeight: 22,
         bottomLimit: 155,
-        colX: [56, 88, 193, 338, 423, 458, 539],
+        colX: [56, 88, 168, 253, 348, 418, 453, 539],
     },
 };
 
@@ -39,16 +32,6 @@ function employeeDisplayName(employee) {
     if (!employee) return '—';
     const name = `${employee.firstName || ''} ${employee.lastName || ''}`.trim();
     return name || employee.employeeId || '—';
-}
-
-function resolveHodName(employee) {
-    const hod = employee?.primaryReportee || employee?.reportingAuthority;
-    if (!hod) return '—';
-    if (typeof hod === 'object') {
-        const name = `${hod.firstName || ''} ${hod.lastName || ''}`.trim();
-        return name || hod.employeeId || '—';
-    }
-    return String(hod);
 }
 
 function formatMoney(value) {
@@ -172,15 +155,17 @@ function rowHeightForAsset(row, font) {
     const { colX, defaultRowHeight } = LAYOUT.table;
 
     const slLines = 1;
-    const nameLines = countWrappedLines(font, row.name, 8, colX[1], colX[2]);
-    const accLines = countAccessoryListLines(font, row.accessories, colX[2], colX[3]);
-    const assetIdLines = countWrappedLines(font, row.assetId, 8, colX[3], colX[4]);
-    const qtyLines = countWrappedLines(font, String(row.quantity ?? 1), 8, colX[4], colX[5]);
-    const valueLines = countWrappedLines(font, formatMoney(row.totalValue), 8, colX[5], colX[6]);
+    const assignedLines = countWrappedLines(font, row.assignedTo, 8, colX[1], colX[2]);
+    const nameLines = countWrappedLines(font, row.name, 8, colX[2], colX[3]);
+    const accLines = countAccessoryListLines(font, row.accessories, colX[3], colX[4]);
+    const assetIdLines = countWrappedLines(font, row.assetId, 8, colX[4], colX[5]);
+    const qtyLines = countWrappedLines(font, String(row.quantity ?? 1), 8, colX[5], colX[6]);
+    const valueLines = countWrappedLines(font, formatMoney(row.totalValue), 8, colX[6], colX[7]);
 
     return Math.max(
         defaultRowHeight,
         cellHeightForLines(slLines, 8, defaultRowHeight),
+        cellHeightForLines(assignedLines, 8, defaultRowHeight),
         cellHeightForLines(nameLines, 8, defaultRowHeight),
         cellHeightForLines(accLines, 7, defaultRowHeight),
         cellHeightForLines(assetIdLines, 8, defaultRowHeight),
@@ -223,153 +208,24 @@ function drawPageBackground(page, image) {
     });
 }
 
-function drawInfoTable(page, font, fontBold, header, { columnCount = 3 } = {}) {
-    const { x, yTop, width } = LAYOUT.infoTable;
-    const minRowHeight = LAYOUT.infoTable.rowHeight;
-    const colCount = columnCount === 4 ? 4 : 3;
-    const colW = width / colCount;
-    const colX = Array.from({ length: colCount + 1 }, (_, i) => x + colW * i);
-
-    const headers =
-        colCount === 4
-            ? ['Asset Type', 'Employee Name', 'HOD Name', 'Date']
-            : ['Employee Name', 'HOD Name', 'Date'];
-    const values =
-        colCount === 4
-            ? [header.assetType ?? '—', header.employeeName, header.hodName, header.date]
-            : [header.employeeName, header.hodName, header.date];
-
-    const row1Height = Math.max(
-        minRowHeight,
-        ...headers.map((label, i) =>
-            cellHeightForLines(countWrappedLines(fontBold, label, 8, colX[i], colX[i + 1]), 8, minRowHeight),
-        ),
-    );
-    const row2Height = Math.max(
-        minRowHeight,
-        ...values.map((value, i) =>
-            cellHeightForLines(countWrappedLines(font, value, 9, colX[i], colX[i + 1]), 9, minRowHeight),
-        ),
-    );
-
-    const row1Top = yTop;
-    const row2Top = yTop - row1Height;
-    const totalHeight = row1Height + row2Height;
-
-    drawRectBorder(page, x, row1Top, width, totalHeight);
-    drawLine(page, x, row2Top, x + width, row2Top);
-    for (let i = 1; i < colCount; i += 1) {
-        drawLine(page, colX[i], row1Top, colX[i], row1Top - totalHeight);
-    }
-
-    headers.forEach((label, i) => {
-        drawWrappedTextInCell(page, fontBold, label, colX[i], colX[i + 1], row1Top, row1Height, { size: 8 });
-    });
-    values.forEach((value, i) => {
-        drawWrappedTextInCell(page, font, value, colX[i], colX[i + 1], row2Top, row2Height, { size: 9 });
-    });
-
-    return { top: row1Top, bottom: row1Top - totalHeight, height: totalHeight };
-}
-
-function measureInfoTableHeight(font, fontBold, header, columnCount = 3) {
-    const { x, yTop, width } = LAYOUT.infoTable;
-    const minRowHeight = LAYOUT.infoTable.rowHeight;
-    const colCount = columnCount === 4 ? 4 : 3;
-    const colW = width / colCount;
-    const colX = Array.from({ length: colCount + 1 }, (_, i) => x + colW * i);
-
-    const headers =
-        colCount === 4
-            ? ['Asset Type', 'Employee Name', 'HOD Name', 'Date']
-            : ['Employee Name', 'HOD Name', 'Date'];
-    const values =
-        colCount === 4
-            ? [header.assetType ?? '—', header.employeeName, header.hodName, header.date]
-            : [header.employeeName, header.hodName, header.date];
-
-    const row1Height = Math.max(
-        minRowHeight,
-        ...headers.map((label, i) =>
-            cellHeightForLines(countWrappedLines(fontBold, label, 8, colX[i], colX[i + 1]), 8, minRowHeight),
-        ),
-    );
-    const row2Height = Math.max(
-        minRowHeight,
-        ...values.map((value, i) =>
-            cellHeightForLines(countWrappedLines(font, value, 9, colX[i], colX[i + 1]), 9, minRowHeight),
-        ),
-    );
-
-    return row1Height + row2Height;
-}
-
-function drawInfoTableAt(page, font, fontBold, header, yTop, { columnCount = 3 } = {}) {
-    const { x, width } = LAYOUT.infoTable;
-    const minRowHeight = LAYOUT.infoTable.rowHeight;
-    const colCount = columnCount === 4 ? 4 : 3;
-    const colW = width / colCount;
-    const colX = Array.from({ length: colCount + 1 }, (_, i) => x + colW * i);
-
-    const headers =
-        colCount === 4
-            ? ['Asset Type', 'Employee Name', 'HOD Name', 'Date']
-            : ['Employee Name', 'HOD Name', 'Date'];
-    const values =
-        colCount === 4
-            ? [header.assetType ?? '—', header.employeeName, header.hodName, header.date]
-            : [header.employeeName, header.hodName, header.date];
-
-    const row1Height = Math.max(
-        minRowHeight,
-        ...headers.map((label, i) =>
-            cellHeightForLines(countWrappedLines(fontBold, label, 8, colX[i], colX[i + 1]), 8, minRowHeight),
-        ),
-    );
-    const row2Height = Math.max(
-        minRowHeight,
-        ...values.map((value, i) =>
-            cellHeightForLines(countWrappedLines(font, value, 9, colX[i], colX[i + 1]), 9, minRowHeight),
-        ),
-    );
-
-    const row1Top = yTop;
-    const row2Top = yTop - row1Height;
-    const totalHeight = row1Height + row2Height;
-
-    drawRectBorder(page, x, row1Top, width, totalHeight);
-    drawLine(page, x, row2Top, x + width, row2Top);
-    for (let i = 1; i < colCount; i += 1) {
-        drawLine(page, colX[i], row1Top, colX[i], row1Top - totalHeight);
-    }
-
-    headers.forEach((label, i) => {
-        drawWrappedTextInCell(page, fontBold, label, colX[i], colX[i + 1], row1Top, row1Height, { size: 8 });
-    });
-    values.forEach((value, i) => {
-        drawWrappedTextInCell(page, font, value, colX[i], colX[i + 1], row2Top, row2Height, { size: 9 });
-    });
-
-    return { top: row1Top, bottom: row1Top - totalHeight, height: totalHeight };
-}
-
 function drawTableHeaderAt(page, fontBold, headerTop) {
     const { x, width, headerHeight, colX } = LAYOUT.table;
     const headerBottom = headerTop - headerHeight;
 
     drawRectBorder(page, x, headerTop, width, headerHeight);
 
-    for (let i = 1; i <= 5; i += 1) {
+    for (let i = 1; i <= 6; i += 1) {
         drawLine(page, colX[i], headerTop, colX[i], headerBottom);
     }
 
     const labels = [
-        { text: 'SL', col: 0 },
-        { text: 'Asset Name', col: 1 },
-        { text: 'Accessories', col: 2 },
-        { text: 'Asset ID', col: 3 },
-        { text: 'QTY', col: 4 },
-        { text: 'Value (AED)', col: 5 },
+        { text: 'Serial No', col: 0 },
+        { text: 'Assigned to', col: 1 },
+        { text: 'Asset Name', col: 2 },
+        { text: 'Accessories', col: 3 },
+        { text: 'Asset ID', col: 4 },
+        { text: 'QTY', col: 5 },
+        { text: 'Value (AED)', col: 6 },
     ];
 
     for (const label of labels) {
@@ -393,16 +249,17 @@ function drawAssetRow(page, font, row, rowTop, rowHeight) {
 
     drawRectBorder(page, colX[0], rowTop, colX[colX.length - 1] - colX[0], rowHeight);
 
-    for (let i = 1; i <= 5; i += 1) {
+    for (let i = 1; i <= 6; i += 1) {
         drawLine(page, colX[i], rowTop, colX[i], rowTop - rowHeight);
     }
 
     drawWrappedTextInCell(page, font, String(row.index + 1), colX[0], colX[1], rowTop, rowHeight);
-    drawWrappedTextInCell(page, font, row.name, colX[1], colX[2], rowTop, rowHeight, { align: 'left' });
-    drawAccessoryListInCell(page, font, row.accessories, colX[2], colX[3], rowTop, rowHeight);
-    drawWrappedTextInCell(page, font, row.assetId, colX[3], colX[4], rowTop, rowHeight);
-    drawWrappedTextInCell(page, font, String(row.quantity ?? 1), colX[4], colX[5], rowTop, rowHeight);
-    drawWrappedTextInCell(page, font, formatMoney(row.totalValue), colX[5], colX[6], rowTop, rowHeight);
+    drawWrappedTextInCell(page, font, row.assignedTo || '—', colX[1], colX[2], rowTop, rowHeight, { align: 'left' });
+    drawWrappedTextInCell(page, font, row.name, colX[2], colX[3], rowTop, rowHeight, { align: 'left' });
+    drawAccessoryListInCell(page, font, row.accessories, colX[3], colX[4], rowTop, rowHeight);
+    drawWrappedTextInCell(page, font, row.assetId, colX[4], colX[5], rowTop, rowHeight);
+    drawWrappedTextInCell(page, font, String(row.quantity ?? 1), colX[5], colX[6], rowTop, rowHeight);
+    drawWrappedTextInCell(page, font, formatMoney(row.totalValue), colX[6], colX[7], rowTop, rowHeight);
 }
 
 function drawTotalRow(page, fontBold, rowTop, total) {
@@ -411,18 +268,18 @@ function drawTotalRow(page, fontBold, rowTop, total) {
     const tableWidth = colX[colX.length - 1] - colX[0];
 
     drawRectBorder(page, colX[0], rowTop, tableWidth, rowHeight);
-    drawLine(page, colX[5], rowTop, colX[5], rowTop - rowHeight);
+    drawLine(page, colX[6], rowTop, colX[6], rowTop - rowHeight);
 
     const totalLabel = 'Total';
     const labelWidth = fontBold.widthOfTextAtSize(totalLabel, 8);
     page.drawText(totalLabel, {
-        x: colX[5] - labelWidth - 8,
+        x: colX[6] - labelWidth - 8,
         y: rowTop - rowHeight + 6,
         size: 8,
         font: fontBold,
         color: BLACK,
     });
-    drawWrappedTextInCell(page, fontBold, formatMoney(total), colX[5], colX[6], rowTop, rowHeight);
+    drawWrappedTextInCell(page, fontBold, formatMoney(total), colX[6], colX[7], rowTop, rowHeight);
 }
 
 function paginateRows(listRows, font) {
@@ -448,10 +305,6 @@ function paginateRows(listRows, font) {
     return pages;
 }
 
-const SECTION_GAP = 14;
-const FIRST_SECTION_INFO_TOP = LAYOUT.infoTable.yTop;
-const CONTINUATION_HEADER_TOP = LAYOUT.table.headerTop;
-
 function companyDisplayName(company) {
     if (!company) return 'Company';
     if (typeof company === 'object') {
@@ -460,142 +313,93 @@ function companyDisplayName(company) {
     return String(company);
 }
 
-function groupAssetsByOwner(assets) {
-    const groups = new Map();
-
-    for (const asset of assets || []) {
-        let key;
-        let employeeName;
-        let hodName;
-        let sortKey;
-
-        if (asset.assignedCompany) {
-            const comp = asset.assignedCompany;
-            const compId = typeof comp === 'object' ? comp._id || comp.companyId : comp;
-            key = `company:${compId}`;
-            employeeName = companyDisplayName(comp);
-            hodName = '—';
-            sortKey = `b:${employeeName.toLowerCase()}`;
-        } else if (asset.assignedTo && typeof asset.assignedTo === 'object') {
-            key = `employee:${asset.assignedTo._id}`;
-            employeeName = employeeDisplayName(asset.assignedTo);
-            hodName = resolveHodName(asset.assignedTo);
-            sortKey = `a:${employeeName.toLowerCase()}`;
-        } else {
-            key = 'unassigned';
-            employeeName = 'Unassigned';
-            hodName = '—';
-            sortKey = 'z:unassigned';
-        }
-
-        if (!groups.has(key)) {
-            groups.set(key, { employeeName, hodName, sortKey, assets: [] });
-        }
-        groups.get(key).assets.push(asset);
+function resolveAssetAssigneeName(asset) {
+    if (asset?.assignedCompany) {
+        return companyDisplayName(asset.assignedCompany);
     }
-
-    return [...groups.values()].sort((a, b) => a.sortKey.localeCompare(b.sortKey));
+    if (asset?.assignedTo && typeof asset.assignedTo === 'object') {
+        return employeeDisplayName(asset.assignedTo);
+    }
+    return 'Unassigned';
 }
 
-function drawPageTitle(page, fontBold) {
-    page.drawText('ASSET LIST', {
-        x: 238,
-        y: 828,
-        size: 16,
-        font: fontBold,
-        color: BLACK,
+function getOwnerSortKey(asset) {
+    if (asset?.assignedCompany) {
+        const comp = asset.assignedCompany;
+        const compId = typeof comp === 'object' ? comp._id || comp.companyId : comp;
+        return `b:${companyDisplayName(comp).toLowerCase()}:${compId}`;
+    }
+    if (asset?.assignedTo && typeof asset.assignedTo === 'object') {
+        return `a:${employeeDisplayName(asset.assignedTo).toLowerCase()}:${asset.assignedTo._id || ''}`;
+    }
+    return 'z:unassigned';
+}
+
+function buildAssetListPdfRows(assets, { fallbackAssignee = null } = {}) {
+    const fallbackName = fallbackAssignee ? employeeDisplayName(fallbackAssignee) : null;
+
+    const orderedAssets = [...(assets || [])].sort((a, b) => {
+        const keyCmp = getOwnerSortKey(a).localeCompare(getOwnerSortKey(b));
+        if (keyCmp !== 0) return keyCmp;
+        return String(a?.name || '').localeCompare(String(b?.name || ''));
+    });
+
+    return orderedAssets.map((asset, index) => {
+        const baseRow = buildEmployeeAssetListRows([asset])[0];
+        return {
+            ...baseRow,
+            assignedTo: resolveAssetAssigneeName(asset) || fallbackName || '—',
+            index,
+        };
     });
 }
 
-async function generateGroupedAssetListPdf({ assets, listTitle, outputDoc, font, fontBold, bgImage }) {
-    const groups = groupAssetsByOwner(assets);
-    const today = formatAssetListDate(new Date());
-    const bottomLimit = LAYOUT.table.bottomLimit;
+function renderAssetListPdf({ outputDoc, font, fontBold, bgImage, listRows }) {
+    const total = listRows.reduce((sum, row) => sum + (Number(row.totalValue) || 0), 0);
+    const pages = paginateRows(listRows, font);
 
-    let page = outputDoc.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
-    drawPageBackground(page, bgImage);
-    drawPageTitle(page, fontBold);
-
-    let cursorY = FIRST_SECTION_INFO_TOP;
-
-    const startNewPage = (forNewSection = false) => {
-        page = outputDoc.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
+    pages.forEach((pageRows, pageIndex) => {
+        const page = outputDoc.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
         drawPageBackground(page, bgImage);
-        drawPageTitle(page, fontBold);
-        cursorY = forNewSection ? FIRST_SECTION_INFO_TOP : CONTINUATION_HEADER_TOP;
-    };
+        drawTableHeaderAt(page, fontBold, LAYOUT.table.headerTop);
 
-    for (const group of groups) {
-        const listRows = buildEmployeeAssetListRows(group.assets);
-        const sectionTotal = listRows.reduce((sum, row) => sum + (Number(row.totalValue) || 0), 0);
-        const sectionHeader = {
-            assetType: listTitle || 'Asset List',
-            employeeName: group.employeeName,
-            hodName: group.hodName,
-            date: today,
-        };
-
-        let rowIndex = 0;
-        let sectionStarted = false;
-
-        while (rowIndex < listRows.length) {
-            const row = { ...listRows[rowIndex], index: rowIndex };
-            const rowHeight = rowHeightForAsset(row, font);
-
-            if (!sectionStarted) {
-                const infoHeight = measureInfoTableHeight(font, fontBold, sectionHeader, 4);
-                const blockHeight = infoHeight + 6 + LAYOUT.table.headerHeight + rowHeight;
-                if (cursorY - blockHeight < bottomLimit) {
-                    startNewPage(true);
-                    continue;
-                }
-
-                const infoResult = drawInfoTableAt(page, font, fontBold, sectionHeader, cursorY, { columnCount: 4 });
-                cursorY = infoResult.bottom - 6;
-                const headerResult = drawTableHeaderAt(page, fontBold, cursorY);
-                cursorY = headerResult.firstRowTop;
-                sectionStarted = true;
-            } else if (cursorY - rowHeight < bottomLimit) {
-                startNewPage(false);
-                const headerResult = drawTableHeaderAt(page, fontBold, cursorY);
-                cursorY = headerResult.firstRowTop;
-            }
-
-            const rowTop = cursorY;
-            drawAssetRow(page, font, row, rowTop, rowHeight);
-            cursorY = rowTop - rowHeight;
-            rowIndex += 1;
-        }
-
-        if (listRows.length === 0) {
-            const infoHeight = measureInfoTableHeight(font, fontBold, sectionHeader, 4);
-            if (cursorY - infoHeight - 6 - LAYOUT.table.headerHeight - LAYOUT.table.defaultRowHeight - 18 < bottomLimit) {
-                startNewPage(true);
-            }
-            const infoResult = drawInfoTableAt(page, font, fontBold, sectionHeader, cursorY, { columnCount: 4 });
-            cursorY = infoResult.bottom - 6;
-            const headerResult = drawTableHeaderAt(page, fontBold, cursorY);
-            cursorY = headerResult.firstRowTop;
+        if (pageRows.length === 0 && pageIndex === 0) {
+            const rowTop = LAYOUT.table.firstRowTop;
+            const rowHeight = LAYOUT.table.defaultRowHeight;
             drawAssetRow(
                 page,
                 font,
-                { index: 0, name: 'No assets assigned', assetId: '—', quantity: 0, totalValue: 0, accessories: [] },
-                cursorY,
-                LAYOUT.table.defaultRowHeight,
+                {
+                    index: 0,
+                    assignedTo: '—',
+                    name: 'No assets assigned',
+                    assetId: '—',
+                    quantity: 0,
+                    totalValue: 0,
+                    accessories: [],
+                },
+                rowTop,
+                rowHeight,
             );
-            cursorY -= LAYOUT.table.defaultRowHeight;
+            drawTotalRow(page, fontBold, rowTop - rowHeight, 0);
+            return;
         }
 
-        if (cursorY - 18 < bottomLimit) {
-            startNewPage(true);
-        }
-        drawTotalRow(page, fontBold, cursorY, sectionTotal);
-        cursorY -= 18 + SECTION_GAP;
-        sectionStarted = false;
-    }
+        pageRows.forEach(({ row, rowTop, rowHeight }) => {
+            drawAssetRow(page, font, row, rowTop, rowHeight);
+        });
 
-    const pdfBytes = await outputDoc.save();
-    return Buffer.from(pdfBytes);
+        const isLastPage = pageIndex === pages.length - 1;
+        if (isLastPage) {
+            const last = pageRows[pageRows.length - 1];
+            const totalTop = last
+                ? last.rowTop - last.rowHeight
+                : LAYOUT.table.firstRowTop - LAYOUT.table.defaultRowHeight;
+            drawTotalRow(page, fontBold, totalTop, total);
+        }
+    });
+
+    return outputDoc;
 }
 
 /**
@@ -614,75 +418,14 @@ export async function generateEmployeeAssetListFromTemplatePdf({
         const fontBold = await outputDoc.embedFont(StandardFonts.HelveticaBold);
         const bgImage = await embedBackground(outputDoc);
 
-        if (groupByOwner) {
-            return generateGroupedAssetListPdf({
-                assets,
-                listTitle: listTitle || headerOverride?.employeeName || 'Asset List',
-                outputDoc,
-                font,
-                fontBold,
-                bgImage,
-            });
-        }
+        const fallbackAssignee =
+            headerOverride?.employeeName && headerOverride.employeeName !== listTitle
+                ? { firstName: headerOverride.employeeName }
+                : employee;
 
-        const listRows = buildEmployeeAssetListRows(assets);
-        const header = headerOverride ?? {
-            date: formatAssetListDate(new Date()),
-            employeeName: employeeDisplayName(employee),
-            hodName: resolveHodName(employee),
-        };
+        const listRows = buildAssetListPdfRows(assets, { fallbackAssignee });
 
-        const total = listRows.reduce((sum, row) => sum + (Number(row.totalValue) || 0), 0);
-
-        const pages = paginateRows(listRows, font);
-
-        pages.forEach((pageRows, pageIndex) => {
-            const page = outputDoc.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
-            drawPageBackground(page, bgImage);
-
-            page.drawText('ASSET LIST', {
-                x: 238,
-                y: 828,
-                size: 16,
-                font: fontBold,
-                color: BLACK,
-            });
-
-            drawInfoTable(page, font, fontBold, header);
-            drawTableHeaderAt(page, fontBold, LAYOUT.table.headerTop);
-
-            if (pageRows.length === 0 && pageIndex === 0) {
-                const rowTop = LAYOUT.table.firstRowTop;
-                const rowHeight = LAYOUT.table.defaultRowHeight;
-                drawAssetRow(
-                    page,
-                    font,
-                    {
-                        index: 0,
-                        name: 'No assets assigned',
-                        assetId: '—',
-                        quantity: 0,
-                        totalValue: 0,
-                        accessories: [],
-                    },
-                    rowTop,
-                    rowHeight,
-                );
-                drawTotalRow(page, fontBold, rowTop - rowHeight, 0);
-                return;
-            }
-
-            pageRows.forEach(({ row, rowTop, rowHeight }) => {
-                drawAssetRow(page, font, row, rowTop, rowHeight);
-            });
-
-            const isLastPage = pageIndex === pages.length - 1;
-            if (isLastPage) {
-                const last = pageRows[pageRows.length - 1];
-                const totalTop = last ? last.rowTop - last.rowHeight : LAYOUT.table.firstRowTop - LAYOUT.table.defaultRowHeight;
-                drawTotalRow(page, fontBold, totalTop, total);
-            }
-        });
+        renderAssetListPdf({ outputDoc, font, fontBold, bgImage, listRows });
 
         const pdfBytes = await outputDoc.save();
         return Buffer.from(pdfBytes);
