@@ -160,7 +160,15 @@ export const hasPermission = async (userId, moduleId, permissionType) => {
     }
 
     // Check if module permission exists
-    const modulePermission = userPermissions.permissions[moduleId];
+    let modulePermission = userPermissions.permissions[moduleId];
+    if (
+        !modulePermission &&
+        String(moduleId || '').startsWith('hrm_asset_vehicle') &&
+        moduleId !== 'hrm_asset_vehicle' &&
+        userPermissions.permissions.hrm_asset_vehicle
+    ) {
+        modulePermission = userPermissions.permissions.hrm_asset_vehicle;
+    }
     if (!modulePermission) {
         return false;
     }

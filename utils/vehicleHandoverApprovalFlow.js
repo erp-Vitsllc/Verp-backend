@@ -1,0 +1,764 @@
+import EmployeeBasic from '../models/EmployeeBasic.js';
+import EmployeeDrivingLicense from '../models/EmployeeDrivingLicense.js';
+import User from '../models/User.js';
+import DashboardAction from '../models/DashboardAction.js';
+import Flowchart from '../models/Flowchart.js';
+import AssetHistory from '../models/AssetHistory.js';
+import { getDepartmentHOD } from './getDepartmentHOD.js';
+import { resolveAssetControllerEmployee, getResolvedFleetHrEmployee } from './assetApprovalHelpers.js';
+import { emailFrontendUrl } from './resolveFrontendBaseUrl.js';
+import { sendAssetAssignmentEmail } from './sendAssetAssignmentEmail.js';
+import { sendAssetResponseEmail } from './sendAssetResponseEmail.js';
+import nodemailer from 'nodemailer';
+import { pickEffectiveEmail } from './resolveEmployeeEmail.js';
+
+export const HANDOVER_FLOW_STAGES = {
+    TARGET: 'target',
+    HOD: 'hod',
+    HR: 'hr',
+    /** @deprecated use HR — kept for in-flight records */
+    MANAGEMENT: 'management',
+};
+
+function formatEmployeeDisplayName(emp) {
+    if (!emp) return '';
+    if (typeof emp === 'string') return emp.trim();
+    const name = `${emp.firstName || ''} ${emp.lastName || ''}`.trim();
+    return name || String(emp.employeeId || '').trim();
+}
+
+export function buildInitialHandoverWorkflowMeta({
+    assigneeCanSelfAcknowledge,
+    assigner,
+    assignee,
+    firstActorDoc,
+    assignerActorDoc = null,
+    wasAssignedFromPool = false,
+    assignDate = new Date(),
+}) {
+    const assignerStageDoc = assignerActorDoc || assigner;
+    const assignerName = formatEmployeeDisplayName(assignerStageDoc);
+    const assigneeName = formatEmployeeDisplayName(assignee);
+    const targetStageDoc = assigneeCanSelfAcknowledge ? assignee : firstActorDoc;
+    const targetStageName = formatEmployeeDisplayName(targetStageDoc) || assigneeName;
+
+    return {
+        assigneeCanSelfAcknowledge: !!assigneeCanSelfAcknowledge,
+        assignerUsesAdminOfficer: Boolean(
+            assignerStageDoc &&
+                assigner &&
+                String(assignerStageDoc._id || assignerStageDoc) !== String(assigner._id || assigner),
+        ),
+        wasAssignedFromPool: !!wasAssignedFromPool,
+        stages: {
+            assigner: {
+                actorName: assignerName,
+                actorId: assignerStageDoc?._id?.toString?.() || '',
+                date: assignDate,
+            },
+            target: {
+                actorName: targetStageName,
+                actorId: targetStageDoc?._id?.toString?.() || '',
+                date: null,
+            },
+            hod: { actorName: null, date: null },
+            hr: { actorName: null, date: null },
+        },
+    };
+}
+
+/** Attach digital signatures to workflow stage actors for PDF / handover views. */
+export async function enrichHandoverWorkflowActorSignatures(recordObj, signFileUrl) {
+    const workflow = recordObj?.details?.vehicleHandoverWorkflow;
+    if (!workflow?.stages || typeof workflow.stages !== 'object') return recordObj;
+
+    const stages = { ...workflow.stages };
+    const stageKeys = ['assigner', 'target', 'hod', 'hr', 'management'];
+
+    await Promise.all(
+        stageKeys.map(async (key) => {
+            const stage = stages[key];
+            const actorId = stage?.actorId;
+            if (!stage || !actorId) return;
+
+            try {
+                const emp = await EmployeeBasic.findById(actorId).select('signature').lean();
+                if (!emp?.signature) return;
+
+                const actorSignature = { ...emp.signature };
+                if (actorSignature.url && typeof signFileUrl === 'function') {
+                    actorSignature.url = await signFileUrl(actorSignature.url);
+                }
+                stages[key] = { ...stage, actorSignature };
+            } catch {
+                /* non-fatal */
+            }
+        }),
+    );
+
+    recordObj.details = {
+        ...(recordObj.details && typeof recordObj.details === 'object' ? recordObj.details : {}),
+        vehicleHandoverWorkflow: {
+            ...workflow,
+            stages,
+        },
+    };
+
+    return recordObj;
+}
+
+export async function persistHandoverWorkflowMeta(historyId, workflowMeta) {
+    if (!historyId || !workflowMeta) return;
+    const record = await AssetHistory.findById(historyId).select('details').lean();
+    if (!record) return;
+
+    await AssetHistory.findByIdAndUpdate(historyId, {
+        $set: {
+            details: {
+                ...(record.details && typeof record.details === 'object' ? record.details : {}),
+                vehicleHandoverWorkflow: workflowMeta,
+            },
+        },
+    });
+}
+
+export async function recordHandoverStageApproval(historyId, stageKey, actor, approvedAt = new Date()) {
+    if (!historyId || !stageKey || !actor) return;
+
+    const record = await AssetHistory.findById(historyId).select('details').lean();
+    if (!record) return;
+
+    const existing =
+        record.details?.vehicleHandoverWorkflow && typeof record.details.vehicleHandoverWorkflow === 'object'
+            ? record.details.vehicleHandoverWorkflow
+            : { stages: {} };
+
+    const stages = { ...(existing.stages || {}) };
+    stages[stageKey] = {
+        actorName: formatEmployeeDisplayName(actor),
+        actorId: actor._id?.toString?.() || '',
+        date: approvedAt,
+    };
+
+    await persistHandoverWorkflowMeta(historyId, {
+        ...existing,
+        stages,
+    });
+}
+
+/** Update the original Assigned handover row — do not create a second history entry. */
+export async function updateFleetHandoverHistoryRecord({
+    historyId,
+    action,
+    performedBy,
+    comments,
+    snapshotItem = null,
+    detailsPatch = {},
+}) {
+    if (!historyId) return null;
+
+    const existing = await AssetHistory.findById(historyId);
+    if (!existing) return null;
+
+    const snapshotObj =
+        snapshotItem && typeof snapshotItem.toObject === 'function'
+            ? snapshotItem.toObject()
+            : snapshotItem && typeof snapshotItem === 'object'
+              ? snapshotItem
+              : null;
+
+    const mergedDetails = {
+        ...(existing.details && typeof existing.details === 'object' ? existing.details : {}),
+        ...(snapshotObj || {}),
+        ...detailsPatch,
+    };
+
+    if (action === 'Accepted') {
+        mergedDetails.acceptanceStatus = 'Accepted';
+    } else if (action === 'Rejected') {
+        mergedDetails.acceptanceStatus = 'Rejected';
+    }
+
+    existing.action = action;
+    existing.performedBy = performedBy;
+    if (comments !== undefined && comments !== null) {
+        existing.comments = comments;
+    }
+    existing.details = mergedDetails;
+    existing.markModified('details');
+    await existing.save();
+
+    return existing;
+}
+
+export function resolveFleetHandoverHistoryId(handoverFlow, historyRecord = null) {
+    return (
+        handoverFlow?.historyId ||
+        historyRecord?._id?.toString?.() ||
+        (historyRecord?._id ? String(historyRecord._id) : null)
+    );
+}
+
+const RECEIVER_ASSESSMENT_KEYS = [
+    'spareTyre',
+    'toolsKit',
+    'scissorJack',
+    'firstAidKit',
+    'fireExtinguisher',
+];
+
+const BODY_CONDITION_KEYS = [
+    'frontView',
+    'backView',
+    'frontRightCorner',
+    'backRightCorner',
+    'frontLeftCorner',
+    'backLeftCorner',
+    'frontRightDoor',
+    'backRightDoor',
+    'frontLeftDoor',
+    'backLeftDoor',
+    'frontInsideView',
+    'backInsideView',
+    'frontDashBoard',
+    'carTopView',
+];
+
+function hasDrivingLicenseCard(details) {
+    if (!details || typeof details !== 'object') return false;
+    if (!String(details.number || '').trim()) return false;
+    const document = details.document;
+    return Boolean(
+        document?.url ||
+            document?.data ||
+            document?.publicId ||
+            (typeof document === 'string' && document.trim()),
+    );
+}
+
+function hasPhotoValue(photo) {
+    if (!photo) return false;
+    if (typeof photo === 'string') return !!String(photo).trim();
+    if (typeof photo === 'object') {
+        return Boolean(photo.url || photo.publicId || photo.data || photo.path);
+    }
+    return false;
+}
+
+export async function employeeHasDrivingLicense(employeeId) {
+    if (!employeeId) return false;
+    const row = await EmployeeDrivingLicense.findOne({ employeeId: String(employeeId) })
+        .select('drivingLicenceDetails')
+        .lean();
+    return hasDrivingLicenseCard(row?.drivingLicenceDetails);
+}
+
+export async function employeeHasActivePortalUser(emp) {
+    const empId = emp?.employeeId;
+    if (!empId) return false;
+    const user = await User.findOne({ employeeId: String(empId), status: 'Active' })
+        .select('enablePortalAccess')
+        .lean();
+    return !!(user && user.enablePortalAccess === true);
+}
+
+export function assigneeHasCompanyEmail(emp) {
+    return !!(emp?.companyEmail && String(emp.companyEmail).trim().length > 0);
+}
+
+export async function assigneeCanSelfAcknowledgeFleetHandover(emp) {
+    if (!emp || !assigneeHasCompanyEmail(emp)) return false;
+    if (emp.enablePortalAccess === true) return true;
+    return employeeHasActivePortalUser(emp);
+}
+
+export async function resolveAdminOfficerEmployee() {
+    const row = await getDepartmentHOD('admincontroller');
+    if (!row) return null;
+    return resolveAssetControllerEmployee(row);
+}
+
+export async function resolveHrEmployee() {
+    return getResolvedFleetHrEmployee();
+}
+
+export async function resolveHodEmployee(assignee) {
+    const pr = assignee?.primaryReportee;
+    if (!pr) return null;
+    if (typeof pr === 'object' && pr._id) return pr;
+    return EmployeeBasic.findById(pr)
+        .select('firstName lastName employeeId companyEmail workEmail personalEmail email enablePortalAccess')
+        .lean();
+}
+
+export async function resolveFleetHandoverAssignerActor({
+    assigner,
+    previousAssignee = null,
+    wasFromPool = false,
+    adminOfficer = null,
+}) {
+    const ownerCanSelfServe = previousAssignee
+        ? await assigneeCanSelfAcknowledgeFleetHandover(previousAssignee)
+        : true;
+
+    const useAdminOfficer =
+        wasFromPool || (previousAssignee && !ownerCanSelfServe);
+
+    if (useAdminOfficer && adminOfficer?._id) {
+        return {
+            actorDoc: adminOfficer,
+            actorId: adminOfficer._id,
+            usesAdminOfficer: true,
+        };
+    }
+
+    return {
+        actorDoc: assigner,
+        actorId: assigner?._id || null,
+        usesAdminOfficer: false,
+    };
+}
+
+export async function resolvePreviousHandoverRejectionRecipient(
+    stage,
+    { assigner, assignee, assigneeCanSelfAcknowledge, adminOfficer, historyId },
+) {
+    let assignerUsesAdmin = false;
+    if (historyId) {
+        const record = await AssetHistory.findById(historyId).select('details').lean();
+        assignerUsesAdmin = !!record?.details?.vehicleHandoverWorkflow?.assignerUsesAdminOfficer;
+    }
+
+    if (stage === HANDOVER_FLOW_STAGES.HR) {
+        return resolveHodEmployee(assignee);
+    }
+
+    if (stage === HANDOVER_FLOW_STAGES.HOD) {
+        if (!assigneeCanSelfAcknowledge) return adminOfficer;
+        if (assignee?._id) {
+            return typeof assignee === 'object' && assignee.employeeId
+                ? assignee
+                : EmployeeBasic.findById(assignee._id || assignee)
+                      .select('firstName lastName employeeId companyEmail workEmail personalEmail email')
+                      .lean();
+        }
+        return null;
+    }
+
+    if (stage === HANDOVER_FLOW_STAGES.TARGET) {
+        if (assignerUsesAdmin) return adminOfficer;
+        if (assigner?._id || typeof assigner === 'object') {
+            return typeof assigner === 'object' && assigner.employeeId
+                ? assigner
+                : EmployeeBasic.findById(assigner._id || assigner)
+                      .select('firstName lastName employeeId companyEmail workEmail personalEmail email')
+                      .lean();
+        }
+        return adminOfficer;
+    }
+
+    return adminOfficer;
+}
+
+export async function notifyHandoverRejectedToPrevious({
+    asset,
+    recipient,
+    actor,
+    comment,
+    historyId,
+    stageLabel = 'Vehicle Handover',
+}) {
+    const email = pickEffectiveEmail(recipient);
+    if (!email) {
+        const adminOfficer = await resolveAdminOfficerEmployee();
+        await notifyHandoverRejectedToAdmin({
+            asset,
+            adminOfficer,
+            actor,
+            comment,
+            historyId,
+        });
+        return;
+    }
+
+    const detailsUrl = buildHandoverAssignDetailsUrl(asset._id, historyId);
+    const actorName = formatEmployeeDisplayName(actor) || 'User';
+    const recipientName = formatEmployeeDisplayName(recipient) || 'User';
+
+    await sendSimpleEmail({
+        to: email,
+        subject: `Vehicle handover rejected (${stageLabel}): ${asset.assetId} — ${asset.name || ''}`,
+        html: `
+            <p>Hi ${recipientName},</p>
+            <p>The vehicle handover for <strong>${asset.name || ''}</strong> (${asset.assetId}) was rejected at the <strong>${stageLabel}</strong> step by ${actorName}.</p>
+            ${comment ? `<p><strong>Reason:</strong> ${comment}</p>` : ''}
+            <p><a href="${detailsUrl}">View handover details</a></p>
+        `,
+    }).catch(() => null);
+}
+
+export async function resolveFleetHandoverFirstActor(employeeToAssign) {
+    const canSelf = await assigneeCanSelfAcknowledgeFleetHandover(employeeToAssign);
+    if (canSelf) {
+        return {
+            actorId: employeeToAssign._id,
+            actorDoc: employeeToAssign,
+            assigneeCanSelfAcknowledge: true,
+        };
+    }
+    const adminOfficer = await resolveAdminOfficerEmployee();
+    return {
+        actorId: adminOfficer?._id || null,
+        actorDoc: adminOfficer,
+        assigneeCanSelfAcknowledge: false,
+    };
+}
+
+export function buildHandoverAssignDetailsUrl(assetId, historyId) {
+    const base = String(emailFrontendUrl() || '').replace(/\/+$/, '');
+    return `${base}/HRM/Asset/Vehicle/details/${encodeURIComponent(String(assetId))}/assign/${encodeURIComponent(String(historyId))}`;
+}
+
+export function buildHandoverAttachmentTabUrl(assetId, historyId) {
+    return `${buildHandoverAssignDetailsUrl(assetId, historyId)}?tab=attachment`;
+}
+
+export function buildVehicleDetailUrl(assetId) {
+    const base = String(emailFrontendUrl() || '').replace(/\/+$/, '');
+    return `${base}/HRM/Asset/Vehicle/details/${encodeURIComponent(String(assetId))}?tab=handover`;
+}
+
+export function buildHandoverDashboardExtra3(assetId, historyId) {
+    return JSON.stringify({
+        isFleetVehicle: true,
+        vehicleMongoId: String(assetId),
+        historyId: String(historyId),
+        detailsPath: buildHandoverAssignDetailsUrl(assetId, historyId),
+    });
+}
+
+export function getVehicleHandoverFlow(item) {
+    return item?.pendingActionDetails?.vehicleHandoverFlow || null;
+}
+
+export function isReceiverAssessmentComplete(details = {}) {
+    const source = details.receiverAssessment || details.vehicleAssessmentReportByReceiver || null;
+    if (!source || typeof source !== 'object') return false;
+    return RECEIVER_ASSESSMENT_KEYS.every((key) => {
+        const row = source[key];
+        if (!row || typeof row !== 'object') return false;
+        const present = row.present === true || row.present === 'true';
+        const absent = row.present === false || row.present === 'false';
+        if (!present && !absent) return false;
+        if (present && !hasPhotoValue(row.photo || row.image)) return false;
+        return true;
+    });
+}
+
+export function isBodyConditionReportComplete(details = {}) {
+    const source = details.bodyConditionReport || details.bodyCondition || null;
+    if (!source || typeof source !== 'object') return false;
+    return BODY_CONDITION_KEYS.every((key) => {
+        const row = source[key];
+        if (!row || typeof row !== 'object') return false;
+        return hasPhotoValue(row.photo || row.image);
+    });
+}
+
+export function isHandoverReportsComplete(historyRecord) {
+    const details = historyRecord?.details || {};
+    return isReceiverAssessmentComplete(details) && isBodyConditionReportComplete(details);
+}
+
+export async function upsertHandoverDashboardAction({
+    asset,
+    actor,
+    assigner,
+    historyId,
+    stageLabel = 'Vehicle Handover',
+    subjectName,
+    subjectEmpId,
+}) {
+    if (!actor?._id) return;
+    await DashboardAction.findOneAndUpdate(
+        { requestId: asset._id, requestType: 'Asset Assignment', status: 'Pending' },
+        {
+            assignedTo: actor._id,
+            assignedToEmpId: actor.employeeId,
+            requestId: asset._id,
+            requestType: 'Asset Assignment',
+            subjectEmployeeId: subjectEmpId || '',
+            subjectName: subjectName || '',
+            requestedByName: assigner
+                ? `${assigner.firstName || ''} ${assigner.lastName || ''}`.trim() || 'System'
+                : 'System',
+            extra1: `${asset.assetId} — ${asset.name || ''}`,
+            extra2: stageLabel,
+            extra3: buildHandoverDashboardExtra3(asset._id, historyId),
+            status: 'Pending',
+        },
+        { upsert: true, new: true, setDefaultsOnInsert: true },
+    );
+}
+
+export async function notifyHandoverStageEmail({
+    asset,
+    employee,
+    recipient,
+    stageLabel,
+    historyId,
+    pendingAssignment = true,
+}) {
+    const detailsPath = buildHandoverAssignDetailsUrl(asset._id, historyId);
+    await sendAssetAssignmentEmail({
+        asset,
+        employee,
+        recipient,
+        pendingAssignment,
+        notificationContext: 'assignment',
+        detailsPath,
+        stageLabel,
+    }).catch(() => null);
+}
+
+async function sendSimpleEmail({ to, subject, html }) {
+    const emailUser = process.env.EMAIL_USER?.trim();
+    const emailPass = process.env.EMAIL_PASS?.trim();
+    if (!to || !emailUser || !emailPass) return;
+    const transporter = nodemailer.createTransport({
+        host: 'smtp.office365.com',
+        port: 587,
+        secure: false,
+        auth: { user: emailUser, pass: emailPass },
+    });
+    await transporter.sendMail({
+        from: emailUser,
+        to,
+        subject,
+        html,
+    });
+}
+
+export async function notifyHandoverRejectedToAdmin({ asset, adminOfficer, actor, comment, historyId }) {
+    const email = pickEffectiveEmail(adminOfficer);
+    if (!email) return;
+    const detailsUrl = buildHandoverAssignDetailsUrl(asset._id, historyId);
+    const actorName = `${actor?.firstName || ''} ${actor?.lastName || ''}`.trim() || 'User';
+    await sendSimpleEmail({
+        to: email,
+        subject: `Vehicle handover rejected: ${asset.assetId} — ${asset.name || ''}`,
+        html: `
+            <p>The vehicle handover for <strong>${asset.name || ''}</strong> (${asset.assetId}) was rejected by ${actorName}.</p>
+            ${comment ? `<p><strong>Reason:</strong> ${comment}</p>` : ''}
+            <p><a href="${detailsUrl}">View handover details</a></p>
+        `,
+    }).catch(() => null);
+}
+
+async function listActiveFlowchartEmployees() {
+    const rows = await Flowchart.find({ status: 'Active' })
+        .populate('empObjectId', 'firstName lastName employeeId companyEmail workEmail personalEmail email')
+        .lean();
+    const seen = new Set();
+    const list = [];
+    for (const row of rows || []) {
+        const emp = row.empObjectId;
+        const id = emp?._id?.toString?.();
+        if (!emp || !id || seen.has(id)) continue;
+        seen.add(id);
+        list.push(emp);
+    }
+    return list;
+}
+
+export async function notifyHandoverCompletionEmails({
+    asset,
+    assignee,
+    assigner = null,
+    adminOfficer,
+    hod,
+    hrEmployee,
+    historyId,
+    attachmentBuffers = [],
+}) {
+    const attachmentUrl = buildHandoverAttachmentTabUrl(asset._id, historyId);
+    const detailsUrl = buildHandoverAssignDetailsUrl(asset._id, historyId);
+    const assigneeName = `${assignee?.firstName || ''} ${assignee?.lastName || ''}`.trim() || assignee?.employeeId || 'Assignee';
+
+    const recipients = [];
+    const seen = new Set();
+    const push = (emp) => {
+        const id = emp?._id?.toString?.();
+        if (!emp || !id || seen.has(id)) return;
+        seen.add(id);
+        recipients.push(emp);
+    };
+
+    push(assigner);
+    const canSelf = await assigneeCanSelfAcknowledgeFleetHandover(assignee);
+    if (canSelf) push(assignee);
+    else push(adminOfficer);
+    push(hod);
+    push(hrEmployee);
+
+    const att = attachmentBuffers.map((buf, i) => ({
+        filename: `vehicle-handover-${asset.assetId || i}.pdf`,
+        content: buf,
+        contentType: 'application/pdf',
+    }));
+
+    const downloadButtonHtml = `
+        <p style="margin:20px 0;">
+            <a href="${attachmentUrl}"
+               style="display:inline-block;padding:12px 20px;background:#0f172a;color:#ffffff;text-decoration:none;border-radius:8px;font-weight:600;">
+                Download handover report
+            </a>
+        </p>
+    `;
+
+    for (const recipient of recipients) {
+        const email = pickEffectiveEmail(recipient);
+        if (!email) continue;
+        await sendSimpleEmail({
+            to: email,
+            subject: `Vehicle handover approved: ${asset.assetId} — ${asset.name || ''}`,
+            html: `
+                <p>Vehicle handover for <strong>${asset.name || ''}</strong> (${asset.assetId}) assigned to <strong>${assigneeName}</strong> has been approved by HR.</p>
+                <p>The asset is now assigned. You can open the handover record and download the signed handover report.</p>
+                ${downloadButtonHtml}
+                <p><a href="${detailsUrl}">Open handover details</a></p>
+            `,
+        }).catch(() => null);
+
+        if (att.length) {
+            await sendAssetResponseEmail({
+                asset,
+                actor: assignee,
+                recipient,
+                action: 'Accept',
+                comment: 'Vehicle handover approved.',
+                assignedToType: 'Employee',
+                attachments: att,
+            }).catch(() => null);
+        }
+    }
+}
+
+export async function advanceFleetHandoverOnAccept({
+    item,
+    historyRecord,
+    assigneeDoc,
+    actor,
+    assigner,
+}) {
+    const flow = getVehicleHandoverFlow(item);
+    if (!flow?.stage) {
+        return { finalize: true };
+    }
+
+    const stage = flow.stage;
+    const historyId = flow.historyId || historyRecord?._id?.toString?.();
+
+    if (stage === HANDOVER_FLOW_STAGES.TARGET) {
+        if (!isHandoverReportsComplete(historyRecord)) {
+            return {
+                error: 'Complete Vehicle Assessment Report By Receiver and Body Condition Report before accepting.',
+            };
+        }
+        if (actor?._id) {
+            await recordHandoverStageApproval(historyId, 'target', actor);
+        }
+        if (historyId) {
+            const assignedRow = await AssetHistory.findById(historyId).select('action details').lean();
+            if (assignedRow?.action === 'Assigned') {
+                await AssetHistory.findByIdAndUpdate(historyId, {
+                    $set: {
+                        'details.acceptanceStatus': 'Accepted',
+                    },
+                });
+            }
+        }
+        const hod = await resolveHodEmployee(assigneeDoc);
+        if (!hod?._id) {
+            return { error: 'Primary reportee (HOD) is not configured for the targeted employee.' };
+        }
+        item.pendingActionDetails = {
+            ...(item.pendingActionDetails || {}),
+            vehicleHandoverFlow: {
+                ...flow,
+                stage: HANDOVER_FLOW_STAGES.HOD,
+                historyId,
+            },
+        };
+        item.actionRequiredBy = hod._id;
+        item.acceptanceStatus = 'Pending';
+        item.status = 'Pending';
+        await upsertHandoverDashboardAction({
+            asset: item,
+            actor: hod,
+            assigner,
+            historyId,
+            stageLabel: 'HOD Review',
+            subjectName: `${assigneeDoc?.firstName || ''} ${assigneeDoc?.lastName || ''}`.trim(),
+            subjectEmpId: assigneeDoc?.employeeId,
+        });
+        await notifyHandoverStageEmail({
+            asset: item,
+            employee: assigneeDoc,
+            recipient: hod,
+            stageLabel: 'HOD Review',
+            historyId,
+        });
+        return { advanced: true, stage: HANDOVER_FLOW_STAGES.HOD };
+    }
+
+    if (stage === HANDOVER_FLOW_STAGES.HOD) {
+        if (actor?._id) {
+            await recordHandoverStageApproval(historyId, 'hod', actor);
+        }
+        const hr = await resolveHrEmployee();
+        if (!hr?._id) {
+            return { error: 'HR approver is not configured in the flowchart.' };
+        }
+        item.pendingActionDetails = {
+            ...(item.pendingActionDetails || {}),
+            vehicleHandoverFlow: {
+                ...flow,
+                stage: HANDOVER_FLOW_STAGES.HR,
+                historyId,
+            },
+        };
+        item.actionRequiredBy = hr._id;
+        item.acceptanceStatus = 'Pending';
+        item.status = 'Pending';
+        await upsertHandoverDashboardAction({
+            asset: item,
+            actor: hr,
+            assigner,
+            historyId,
+            stageLabel: 'HR Approval',
+            subjectName: `${assigneeDoc?.firstName || ''} ${assigneeDoc?.lastName || ''}`.trim(),
+            subjectEmpId: assigneeDoc?.employeeId,
+        });
+        await notifyHandoverStageEmail({
+            asset: item,
+            employee: assigneeDoc,
+            recipient: hr,
+            stageLabel: 'HR Approval',
+            historyId,
+        });
+        return { advanced: true, stage: HANDOVER_FLOW_STAGES.HR };
+    }
+
+    if (stage === HANDOVER_FLOW_STAGES.HR || stage === HANDOVER_FLOW_STAGES.MANAGEMENT) {
+        if (actor?._id) {
+            await recordHandoverStageApproval(historyId, 'hr', actor);
+        }
+        if (item.pendingActionDetails?.vehicleHandoverFlow) {
+            delete item.pendingActionDetails.vehicleHandoverFlow;
+        }
+        return { finalize: true, historyId };
+    }
+
+    return { finalize: true };
+}

@@ -1,4 +1,4 @@
-import { deleteDocumentFromS3, normalizeS3Key } from "./s3Upload.js";
+import { normalizeS3Key } from "./s3Upload.js";
 import { awaitAdminDeletionArchive } from "./adminDeletionArchiveRun.js";
 import { isActiveCompanyProfile } from "./companyActivation.js";
 import { isActiveEmployeeProfile } from "./profileFileChangeHrNotify.js";
@@ -22,11 +22,9 @@ export function resolveProfileAttachmentKey(attachment) {
 /**
  * Dispose a profile attachment that is no longer referenced by live profile data.
  *
- * - Non-activated profile: delete from Wasabi immediately.
- * - Activated profile + activation-document queue (not yet committed): retain file.
- * - Activated profile + moved to Old Documents (renew): retain file in Wasabi.
- * - Activated profile + other committed removal/replace: copy to Deleted Records,
- *   email management, keep in Wasabi for 60-day retention purge.
+ * Files are always retained in storage until an admin permanently deletes the record.
+ * Activated profile removals are archived for management review; non-activated profiles
+ * also keep files in storage (no immediate S3 purge).
  */
 export async function disposeRemovedProfileAttachment(
     req,
@@ -42,19 +40,15 @@ export async function disposeRemovedProfileAttachment(
         return { action: "retained" };
     }
 
-    const key = resolveProfileAttachmentKey(attachment);
-
     if (!profileActivated) {
-        if (key) {
-            await deleteDocumentFromS3(key);
-            return { action: "purged_immediate" };
-        }
-        return { action: "none" };
+        return { action: "retained" };
     }
 
     if (!archive?.moduleName || !archive?.recordId) {
         return { action: "retained" };
     }
+
+    const key = resolveProfileAttachmentKey(attachment);
 
     await awaitAdminDeletionArchive(req, {
         moduleName: archive.moduleName,

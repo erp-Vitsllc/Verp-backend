@@ -5,6 +5,11 @@ import { resolveProfileActivationSubmitterId } from "../../utils/resolveProfileA
 import { notifyHrProfileActivationRequestEmail } from "../../utils/notifyHrProfileActivationRequestEmail.js";
 import { clearProfileActivationHoldDashboardRows } from "../../utils/clearProfileActivationHoldDashboardRows.js";
 import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
+import {
+    buildProfileActivationEntityLine,
+    buildProfileActivationPendingMessage,
+    employeeProfileDisplayName,
+} from "../../utils/employeeProfileNotificationMessages.js";
 
 export const submitApproval = async (req, res) => {
     const { id } = req.params;
@@ -70,6 +75,17 @@ export const submitApproval = async (req, res) => {
 
         try {
             const { syncDashboardAction } = await import("../../utils/syncDashboard.js");
+            const dashboardEmployeeName = employeeProfileDisplayName(updated);
+            const activationExtra1 = buildProfileActivationPendingMessage({
+                employeeName: dashboardEmployeeName,
+                employeeId: updated.employeeId,
+                activationType: activationTypeLabel,
+                submittedBy:
+                    req.user?.name ||
+                    [req.user?.firstName, req.user?.lastName].filter(Boolean).join(" ").trim() ||
+                    (isAdminSubmitter ? "Administrator" : ""),
+                pendingCards,
+            });
             await syncDashboardAction({
                 requestId: updated._id,
                 requestType: "Profile Activation",
@@ -77,8 +93,8 @@ export const submitApproval = async (req, res) => {
                 status: "Pending",
                 subjectEmployee: updated,
                 requestedByName: req.user?.name || "",
-                extra1: `${isAdminSubmitter ? "Administrator submission — " : ""}${activationTypeLabel} — HR review${pendingCardsText}`,
-                extra2: updated.designation || "",
+                extra1: activationExtra1,
+                extra2: buildProfileActivationEntityLine(dashboardEmployeeName, updated.employeeId),
                 extra3: JSON.stringify({ activationSubject: "employee", activationViewerRole: "hr" }),
             });
             await clearProfileActivationHoldDashboardRows(updated._id);

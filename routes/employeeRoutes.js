@@ -138,9 +138,15 @@ import { getHierarchy } from "../controllers/employee/getHierarchy.js";
 import { getTeamStats } from "../controllers/stats/getTeamStats.js";
 
 import { getNextEmployeeId } from "../controllers/employee/getNextEmployeeId.js";
+import { getDrivingLicenseHolders } from "../controllers/employee/getDrivingLicenseHolders.js";
 
 // Employee list - requires view permission
 router.get("/", checkPermission('hrm_employees_list', 'view'), getEmployees);
+router.get(
+    "/driving-license-holders",
+    checkPermission('hrm_employees_list', 'view'),
+    getDrivingLicenseHolders,
+);
 router.get("/reportee-options", checkPermission('hrm_employees_view_work', 'view'), getReporteeOptions);
 
 // Get next employee ID - requires create permission (or just authenticated)

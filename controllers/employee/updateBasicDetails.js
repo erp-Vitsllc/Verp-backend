@@ -23,6 +23,7 @@ import {
     validateSalaryHistoryNotEmpty,
     oldestSalaryHistoryStillPresent,
 } from "../../utils/employeeSalaryValidation.js";
+import { salaryMonthKeyFromDate } from "../../utils/salaryHistoryDateUtils.js";
 import { validateEmployeeBankPayload } from "../../utils/employeeBankValidation.js";
 import { validateEmployeeAddressPayload } from "../../utils/employeeAddressValidation.js";
 import { denyCoreEmployeeProfileDelete } from "../../utils/employeeCardDeleteAccess.js";
@@ -448,11 +449,8 @@ export const updateBasicDetails = async (req, res) => {
 
             const monthKeys = new Set();
             for (const entry of newSalaryHistory) {
-                const fromDate = entry?.fromDate;
-                if (!fromDate) continue;
-                const d = new Date(fromDate);
-                if (Number.isNaN(d.getTime())) continue;
-                const key = `${d.getFullYear()}-${d.getMonth()}`;
+                const key = salaryMonthKeyFromDate(entry?.fromDate);
+                if (!key) continue;
                 if (monthKeys.has(key)) {
                     return res.status(400).json({
                         message: "Duplicate salary records for the same month are not allowed.",

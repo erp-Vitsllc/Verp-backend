@@ -3,7 +3,7 @@ import { resolveFrontendBaseUrl, emailFrontendUrl } from '../../utils/resolveFro
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import Company from "../../models/Company.js";
 import User from "../../models/User.js";
-import { uploadDocumentToS3 } from "../../utils/s3Upload.js";
+import { ensureAttachmentPersistedToS3 } from "../../utils/s3Upload.js";
 import nodemailer from "nodemailer";
 import { getDepartmentHOD } from "../../utils/getDepartmentHOD.js";
 import { getManagementHOD } from "../../utils/getManagementHOD.js";
@@ -225,30 +225,17 @@ export const addReward = async (req, res) => {
         if (attachment && attachment.data) {
             try {
                 console.log(`[AddReward] Processing attachment: ${attachment.name}`);
-                const attachmentDataStr = typeof attachment.data === 'string' ? attachment.data : String(attachment.data);
-
-                const uploadResult = await uploadDocumentToS3(
-                    attachmentDataStr,
-                    `rewards/${employeeId}`,
-                    attachment.name || 'reward-attachment.pdf',
-                    'raw'
-                );
-
-                rewardData.attachment = {
-                    url: uploadResult.url,
-                    publicId: uploadResult.publicId,
-                    name: attachment.name || '',
-                    mimeType: attachment.mimeType || 'application/pdf'
-                };
-                console.log(`[AddReward] Attachment uploaded to S3: ${uploadResult.url}`);
+                rewardData.attachment = await ensureAttachmentPersistedToS3(attachment, {
+                    folder: `rewards/${employeeId}`,
+                    fileName: attachment.name || 'reward-attachment.pdf',
+                    resourceType: 'raw',
+                });
+                console.log(`[AddReward] Attachment uploaded to S3: ${rewardData.attachment?.publicId}`);
             } catch (uploadError) {
-                console.error(`[AddReward] Attachment upload failed:`, uploadError);
-                // Fallback to storing raw data if S3 fails, but ideally S3 should work
-                rewardData.attachment = {
-                    data: attachment.data,
-                    name: attachment.name || '',
-                    mimeType: attachment.mimeType || 'application/pdf'
-                };
+                console.error('[AddReward] Attachment upload failed:', uploadError);
+                return res.status(500).json({
+                    message: 'Failed to store attachment in storage. Please try uploading again.',
+                });
             }
         }
 
@@ -653,27 +640,15 @@ ${rewardData.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.padEnd(12)} As
                 // Handle attachment for retry
                 if (attachment && attachment.data) {
                     try {
-                        const attachmentDataStr = typeof attachment.data === 'string' ? attachment.data : String(attachment.data);
-
-                        const uploadResult = await uploadDocumentToS3(
-                            attachmentDataStr,
-                            `rewards/${employeeId}`,
-                            attachment.name || 'reward-attachment.pdf',
-                            'raw'
-                        );
-
-                        retryRewardData.attachment = {
-                            url: uploadResult.url,
-                            publicId: uploadResult.publicId,
-                            name: attachment.name || '',
-                            mimeType: attachment.mimeType || 'application/pdf'
-                        };
+                        retryRewardData.attachment = await ensureAttachmentPersistedToS3(attachment, {
+                            folder: `rewards/${employeeId}`,
+                            fileName: attachment.name || 'reward-attachment.pdf',
+                            resourceType: 'raw',
+                        });
                     } catch (uploadError) {
-                        retryRewardData.attachment = {
-                            data: attachment.data,
-                            name: attachment.name || '',
-                            mimeType: attachment.mimeType || 'application/pdf'
-                        };
+                        return res.status(500).json({
+                            message: 'Failed to store attachment in storage. Please try uploading again.',
+                        });
                     }
                 }
 
@@ -740,27 +715,15 @@ ${rewardData.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.padEnd(12)} As
 
                         if (attachment && attachment.data) {
                             try {
-                                const attachmentDataStr = typeof attachment.data === 'string' ? attachment.data : String(attachment.data);
-
-                                const uploadResult = await uploadDocumentToS3(
-                                    attachmentDataStr,
-                                    `rewards/${employeeId}`,
-                                    attachment.name || 'reward-attachment.pdf',
-                                    'raw'
-                                );
-
-                                fallbackRewardData.attachment = {
-                                    url: uploadResult.url,
-                                    publicId: uploadResult.publicId,
-                                    name: attachment.name || '',
-                                    mimeType: attachment.mimeType || 'application/pdf'
-                                };
+                                fallbackRewardData.attachment = await ensureAttachmentPersistedToS3(attachment, {
+                                    folder: `rewards/${employeeId}`,
+                                    fileName: attachment.name || 'reward-attachment.pdf',
+                                    resourceType: 'raw',
+                                });
                             } catch (uploadError) {
-                                fallbackRewardData.attachment = {
-                                    data: attachment.data,
-                                    name: attachment.name || '',
-                                    mimeType: attachment.mimeType || 'application/pdf'
-                                };
+                                return res.status(500).json({
+                                    message: 'Failed to store attachment in storage. Please try uploading again.',
+                                });
                             }
                         }
 

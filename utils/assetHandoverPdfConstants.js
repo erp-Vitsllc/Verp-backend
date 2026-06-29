@@ -21,3 +21,6 @@ export const BULK_ASSIGNMENT_HANDOVER_PDF_SELECTOR = '#bulk-assignment-handover-
 
 /** Employee profile asset list — print/employee-asset-list (same bg as HandoverFormView). */
 export const EMPLOYEE_ASSET_LIST_PDF_SELECTOR = '#employee-asset-list-container[data-asset-list-ready="true"]';
+
+/** Fleet vehicle handover form — print/vehicle-handover (VehicleHandoverFormView). */
+export const VEHICLE_HANDOVER_PDF_SELECTOR = '#vehicle-handover-print-root[data-handover-ready="true"]';

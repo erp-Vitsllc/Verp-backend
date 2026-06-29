@@ -1,5 +1,10 @@
 import AssetType from '../models/AssetType.js';
 import { uploadDocumentToS3 } from './s3Upload.js';
+import {
+    finalizeVehicleDocumentRenewal,
+    isRenewPrimaryDocumentType,
+    syncVehicleExpiryFieldsFromLiveDocuments,
+} from './vehicleDocumentRenewal.js';
 
 const normType = (t) => String(t || '').toLowerCase().trim();
 
@@ -53,7 +58,7 @@ async function applyDocumentStep(asset, step) {
         const docId = step.docId;
         const doc = asset.documents.id(docId);
         if (doc) doc.deleteOne();
-        return;
+        return null;
     }
     if (step.op === 'post_document') {
         let documentUrl = null;
@@ -73,7 +78,7 @@ async function applyDocumentStep(asset, step) {
             description: body.description || null,
             attachment: documentUrl,
         });
-        return;
+        return asset.documents[asset.documents.length - 1]?._id || null;
     }
     if (step.op === 'put_document') {
         const doc = asset.documents.id(step.docId);
@@ -91,7 +96,9 @@ async function applyDocumentStep(asset, step) {
             );
             doc.attachment = uploadResult.publicId;
         }
+        return doc._id || null;
     }
+    return null;
 }
 
 /**
@@ -101,6 +108,10 @@ async function applyDocumentStep(asset, step) {
  */
 export async function applyVehiclePendingProfileEditEntry(asset, pendingEntry) {
     const steps = Array.isArray(pendingEntry?.steps) ? pendingEntry.steps : [];
+    const action = String(pendingEntry?.action || 'edit').trim();
+    const renewFromDocumentId = pendingEntry?.documentId || null;
+    let newRenewPrimaryDocId = null;
+
     for (const step of steps) {
         if (!step || typeof step !== 'object') continue;
         if (step.op === 'put_asset_type') {
@@ -108,8 +119,21 @@ export async function applyVehiclePendingProfileEditEntry(asset, pendingEntry) {
             continue;
         }
         if (['delete_document', 'post_document', 'put_document'].includes(step.op)) {
-            await applyDocumentStep(asset, step);
+            const createdId = await applyDocumentStep(asset, step);
+            if (
+                action === 'renew' &&
+                step.op === 'post_document' &&
+                isRenewPrimaryDocumentType(step.body?.type)
+            ) {
+                newRenewPrimaryDocId = createdId;
+            }
         }
+    }
+
+    if (action === 'renew' && renewFromDocumentId) {
+        finalizeVehicleDocumentRenewal(asset, renewFromDocumentId, newRenewPrimaryDocId);
+    } else if (action === 'edit') {
+        syncVehicleExpiryFieldsFromLiveDocuments(asset);
     }
 }
 

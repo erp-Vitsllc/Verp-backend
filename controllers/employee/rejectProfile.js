@@ -3,6 +3,11 @@ import { getCompleteEmployee } from "../../services/employeeService.js";
 import { sendProfileNotification } from "../../utils/sendProfileNotification.js";
 import { syncDashboardAction } from "../../utils/syncDashboard.js";
 import { resolveProfileActivationSubmitterEmployee } from "../../utils/resolveProfileActivationSubmitterEmployee.js";
+import {
+    buildProfileActivationEntityLine,
+    buildProfileActivationRejectedMessage,
+    employeeProfileDisplayName,
+} from "../../utils/employeeProfileNotificationMessages.js";
 import { isEmployeeProfileActivationDesignatedHr } from "../../utils/isEmployeeProfileActivationDesignatedHr.js";
 import {
     closeLeftUserDashboardTasks,
@@ -108,6 +113,7 @@ export const rejectProfile = async (req, res) => {
 
         if (submitterForNotify?._id) {
             try {
+                const rejectedName = employeeProfileDisplayName(subjectLean || updated);
                 await syncDashboardAction({
                     requestId: updated._id,
                     requestType: "Profile Activation",
@@ -119,6 +125,11 @@ export const rejectProfile = async (req, res) => {
                     requestedByName: req.user?.name || "",
                     actionedBy: req.user?.employeeObjectId || req.user?._id,
                     comment: reason || "",
+                    extra1: buildProfileActivationRejectedMessage({
+                        employeeName: rejectedName,
+                        employeeId: updated.employeeId,
+                    }),
+                    extra2: buildProfileActivationEntityLine(rejectedName, updated.employeeId),
                     extra3: JSON.stringify({
                         activationSubject: "employee",
                         activationViewerRole: "submitter",

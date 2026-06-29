@@ -12,6 +12,27 @@ export const ON_LEAVE_ADVANCE_NOTICE_DAYS = 5;
 /** Maximum total service duration (initial request + extensions). */
 export const MAX_ASSET_SERVICE_DAYS = 30;
 
+/** Maximum temporary assignment duration for general assets. */
+export const MAX_ASSET_TEMPORARY_ASSIGNMENT_DAYS = 60;
+
+/** Maximum temporary assignment duration for fleet vehicles. */
+export const MAX_FLEET_VEHICLE_TEMPORARY_ASSIGNMENT_DAYS = 30;
+
+export const getMaxTemporaryAssignmentDays = (fleetVehicle) =>
+    fleetVehicle ? MAX_FLEET_VEHICLE_TEMPORARY_ASSIGNMENT_DAYS : MAX_ASSET_TEMPORARY_ASSIGNMENT_DAYS;
+
+export const validateTemporaryAssignmentDays = (assignedDays, fleetVehicle) => {
+    const maxDays = getMaxTemporaryAssignmentDays(fleetVehicle);
+    const parsedDays = Number(assignedDays);
+    if (!Number.isInteger(parsedDays) || parsedDays < 1 || parsedDays > maxDays) {
+        return {
+            valid: false,
+            message: `Temporary duration must be an integer between 1 and ${maxDays} days.`,
+        };
+    }
+    return { valid: true, parsedDays };
+};
+
 export const normalizeAssetStatusKey = (status) => String(status || '').toLowerCase().trim();
 
 const LEGACY_SERVICE_STATUSES = new Set([

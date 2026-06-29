@@ -14,6 +14,15 @@ import { calculateProfileCompletionBackend } from "../../utils/calculateProfileC
 import { getCompleteEmployee } from "../../services/employeeService.js";
 import { isEmployeeActiveForNotifications } from "../../utils/applyEmployeeLeftUserStatus.js";
 import { isEmployeeProfileLiveActive } from "../../utils/employeeDocumentRenewal.js";
+import {
+    buildProfileActivationApprovedMessage,
+    buildProfileActivationEntityLine,
+    buildProfileActivationPendingMessage,
+    buildProfileActivationRejectedMessage,
+    buildProfileActivationSubmittedOutcomeMessage,
+    buildProfileIncompleteMessage,
+    employeeProfileDisplayName,
+} from "../../utils/employeeProfileNotificationMessages.js";
 
 /** Matches owner-style company rows — allow ASCII/en/em dashes between name and document type (same intent as frontend). */
 const COMPANY_OWNER_EXPIRY_BODY_RE =
@@ -811,6 +820,7 @@ export const getUserActivityStats = async (req, res) => {
                 extra1: item.extra1,
                 extra2: item.extra2,
                 extra3: item.extra3,
+                subjectName: item.subjectName || '',
                 targetEmployeeId: item.subjectEmployeeId?.toString(),
                 scope,
             });
@@ -900,10 +910,18 @@ export const getUserActivityStats = async (req, res) => {
         pendingProfiles.forEach(p => {
             const reqIdStr = p._id.toString();
             if (!seenRequests.has(reqIdStr)) {
+                const displayName = employeeProfileDisplayName(p);
                 activityList.push({
-                    id: p._id.toString(), type: 'Profile Activation', requestedBy: `${p.firstName} ${p.lastName}`,
+                    id: p._id.toString(), type: 'Profile Activation', requestedBy: displayName,
                     requestedDate: p.createdAt, actionedDate: null, status: 'Pending',
-                    extra1: p.employeeId, extra2: p.designation, targetEmployeeId: p.employeeId,
+                    extra1: buildProfileActivationPendingMessage({
+                        employeeName: displayName,
+                        employeeId: p.employeeId,
+                        submittedBy: displayName,
+                    }),
+                    extra2: buildProfileActivationEntityLine(displayName, p.employeeId),
+                    subjectName: displayName,
+                    targetEmployeeId: p.employeeId,
                     scope: 'inbox',
                     actionId: profileActivationDeletableActionIdByRequestId.get(reqIdStr) || undefined,
                 });
@@ -1097,8 +1115,12 @@ export const getUserActivityStats = async (req, res) => {
                                 requestedDate: complete.updatedAt || emp.updatedAt || emp.createdAt || new Date(),
                                 actionedDate: null,
                                 status: 'Pending',
-                                extra1: `${displayName} is missing mandatory cards. Please complete them.`,
-                                extra2: `${displayName} (${empKey})`.trim(),
+                                extra1: buildProfileIncompleteMessage({
+                                    employeeName: displayName,
+                                    employeeId: empKey,
+                                }),
+                                extra2: buildProfileActivationEntityLine(displayName, empKey),
+                                subjectName: displayName,
                                 extra3: JSON.stringify({ kind: 'mandatory-cards' }),
                                 targetEmployeeId: empKey,
                                 scope: 'inbox',
@@ -1206,13 +1228,20 @@ export const getUserActivityStats = async (req, res) => {
 
                     const status = manager.profileApprovalStatus === 'active' ? 'Approved' :
                         manager.profileApprovalStatus === 'rejected' ? 'Rejected' : 'Pending';
+                    const managerName = employeeProfileDisplayName(p);
 
                     activityList.push({
                         id: p._id, type: 'Profile Activation', requestedBy: 'Me',
                         requestedDate: latestStep ? latestStep.assignedAt : (p.createdAt || p.updatedAt),
                         actionedDate: (status === 'Approved' || status === 'Rejected') ? (latestStep?.actionedAt || p.updatedAt) : null,
                         status: status,
-                        extra1: p.employeeId, extra2: p.designation,
+                        extra1: buildProfileActivationSubmittedOutcomeMessage({
+                            employeeName: managerName,
+                            employeeId: p.employeeId,
+                            status,
+                        }),
+                        extra2: buildProfileActivationEntityLine(managerName, p.employeeId),
+                        subjectName: managerName,
                         targetEmployeeId: p.employeeId,
                         employeeId: p.employeeId,
                         scope: 'outgoing',
@@ -1268,6 +1297,7 @@ export const getUserActivityStats = async (req, res) => {
                 extra1: item.extra1 || item.subjectEmployeeId,
                 extra2: item.extra2,
                 extra3: item.extra3,
+                subjectName: item.subjectName || '',
                 targetEmployeeId: item.subjectEmployeeId?.toString(),
                 employeeId: targetEmployeeId,
                 scope: isProfileActAssignee ? 'inbox' : 'inbox',
@@ -1787,13 +1817,23 @@ export const getUserActivityStats = async (req, res) => {
 
             mySteps.forEach(step => {
                 const status = step.status === 'active' ? 'Approved' : 'Rejected';
+                const displayName = employeeProfileDisplayName(p);
                 const activityItem = {
-                    id: p._id, type: 'Profile Activation', requestedBy: `${p.firstName} ${p.lastName}`,
+                    id: p._id, type: 'Profile Activation', requestedBy: displayName,
                     requestedDate: step.assignedAt,
                     actionedDate: step.actionedAt || p.updatedAt,
                     status: status,
-                    extra1: `Actioned: ${status}`,
-                    extra2: p.employeeId,
+                    extra1:
+                        status === 'Approved'
+                            ? buildProfileActivationApprovedMessage({
+                                  employeeName: displayName,
+                                  employeeId: p.employeeId,
+                              })
+                            : buildProfileActivationRejectedMessage({
+                                  employeeName: displayName,
+                                  employeeId: p.employeeId,
+                              }),
+                    extra2: buildProfileActivationEntityLine(displayName, p.employeeId),
                     targetEmployeeId: p.employeeId,
                     scope: 'inbox'
                 };

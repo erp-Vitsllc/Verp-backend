@@ -1,5 +1,9 @@
 import DashboardAction from "../models/DashboardAction.js";
 import EmployeeBasic from "../models/EmployeeBasic.js";
+import {
+    buildProfileActivationHoldMessage,
+    buildProfileActivationRejectedMessage,
+} from "./employeeProfileNotificationMessages.js";
 
 /**
  * Synchronize a request with the DashboardAction collection.
@@ -82,7 +86,15 @@ export const syncDashboardAction = async (data) => {
                 const subjectNameDisplay = `${subj.firstName || ''} ${subj.lastName || ''}`.trim() || 'Employee';
                 const outcomeExtra1 =
                     extra1 ||
-                    `[Employee profile] HR ${status.toLowerCase()} your activation — please review the comments and update the profile.`;
+                    (status === "On Hold"
+                        ? buildProfileActivationHoldMessage({
+                              employeeName: subjectNameDisplay,
+                              employeeId: subj.employeeId,
+                          })
+                        : buildProfileActivationRejectedMessage({
+                              employeeName: subjectNameDisplay,
+                              employeeId: subj.employeeId,
+                          }));
                 await DashboardAction.findOneAndUpdate(
                     { requestId, assignedTo: assignee._id, requestType },
                     {

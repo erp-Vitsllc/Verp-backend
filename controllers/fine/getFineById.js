@@ -1,6 +1,6 @@
 import Fine from "../../models/Fine.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
-import { getSignedFileUrl, refreshStoredAttachmentUrls } from "../../utils/s3Upload.js";
+import { getSignedFileUrl, refreshStoredAttachmentUrls, repairStoredAttachments } from "../../utils/s3Upload.js";
 import { getDepartmentHOD } from "../../utils/getDepartmentHOD.js";
 import { getManagementHOD } from "../../utils/getManagementHOD.js";
 import { isUserAdministrator } from "../../services/permissionService.js";
@@ -265,7 +265,28 @@ export const getFineById = async (req, res) => {
             synthesizeSingleRecordGroupFineView(fine);
         }
 
-        // Generate signed URL if attachment exists
+        // Generate signed URL if attachment exists; repair legacy inline data → S3
+        if (fine.attachment?.data || fine.attachment?.base64) {
+            await repairStoredAttachments(fine.attachment, {
+                folder: `fines/${fine.fineId || fine._id}`,
+                fileName: fine.attachment.name || 'fine-attachment.pdf',
+                resourceType: 'raw',
+            });
+            if (fine.attachment?.publicId && fine._id) {
+                await Fine.updateOne(
+                    { _id: fine._id },
+                    {
+                        $set: {
+                            'attachment.publicId': fine.attachment.publicId,
+                            'attachment.url': fine.attachment.url,
+                            'attachment.name': fine.attachment.name,
+                            'attachment.mimeType': fine.attachment.mimeType,
+                        },
+                        $unset: { 'attachment.data': '', 'attachment.base64': '' },
+                    },
+                );
+            }
+        }
         if (fine.attachment?.publicId) {
             try {
                 const signedUrl = await getSignedFileUrl(fine.attachment.publicId);

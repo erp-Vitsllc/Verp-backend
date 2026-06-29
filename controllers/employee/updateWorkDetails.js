@@ -1,6 +1,5 @@
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import User from "../../models/User.js";
-import { getCompleteEmployee } from "../../services/employeeService.js";
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
 import { skipLiveProfileWritesPendingHrAsync, queueOrTriggerProfileChange } from "../../utils/pushPendingReactivationChange.js";
 import { markProfileActivationHoldResolvedForSection } from "../../utils/markProfileActivationHoldResolved.js";
@@ -34,6 +33,12 @@ export const updateWorkDetails = async (req, res) => {
             "enablePortalAccess",
         ];
 
+        const normalizeObjectIdField = (value) => {
+            if (value === undefined || value === null || value === "") return null;
+            if (typeof value === "object" && value?._id) return String(value._id);
+            return value;
+        };
+
         // 2. Filter request body to only include allowed fields
         const updatePayload = {};
         Object.keys(req.body).forEach((key) => {
@@ -47,15 +52,37 @@ export const updateWorkDetails = async (req, res) => {
             return res.status(400).json({ message: "Nothing to update" });
         }
 
-        // Get employeeId from employee record
-        const employee = await getCompleteEmployee(id);
+        if (updatePayload.company !== undefined) {
+            updatePayload.company = normalizeObjectIdField(updatePayload.company);
+        }
+        if (updatePayload.reportingAuthority !== undefined) {
+            updatePayload.reportingAuthority = normalizeObjectIdField(updatePayload.reportingAuthority);
+        }
+        if (updatePayload.primaryReportee !== undefined) {
+            updatePayload.primaryReportee = normalizeObjectIdField(updatePayload.primaryReportee);
+        }
+        if (updatePayload.secondaryReportee !== undefined) {
+            updatePayload.secondaryReportee = normalizeObjectIdField(updatePayload.secondaryReportee);
+        }
+
+        let employee = null;
+        const [loadedEmployee, isSystemAdmin] = await Promise.all([
+            (async () => {
+                if (typeof id === "string" && /^[a-fA-F0-9]{24}$/.test(id)) {
+                    const byId = await EmployeeBasic.findOne({ _id: id }).lean();
+                    if (byId) return byId;
+                }
+                return EmployeeBasic.findOne({ employeeId: id }).lean();
+            })(),
+            req.user?.id ? isUserAdministrator(req.user.id) : Promise.resolve(false),
+        ]);
+        employee = loadedEmployee;
         if (!employee) {
             return res.status(404).json({ message: "Employee not found" });
         }
 
         const employeeId = employee.employeeId;
 
-        const isSystemAdmin = req.user?.id ? await isUserAdministrator(req.user.id) : false;
         const isPortalAdmin =
             isJwtSystemSuperUser(req.user) ||
             isSystemAdmin;
@@ -194,6 +221,7 @@ export const updateWorkDetails = async (req, res) => {
         };
 
         let statusAppliedLiveByAdmin = false;
+        const postResponseTasks = [];
 
         if (!skipLive) {
             const updated = await EmployeeBasic.findOneAndUpdate(
@@ -206,18 +234,30 @@ export const updateWorkDetails = async (req, res) => {
                 return res.status(404).json({ message: "Employee not found" });
             }
 
-            await triggerProfileReactivationIfNeeded({
-                employeeId,
-                actor: req.user,
-                reason: "Work details updated",
-                changeEntry: null,
-                trackDefaultChange: true,
-            });
+            postResponseTasks.push(() =>
+                triggerProfileReactivationIfNeeded({
+                    employeeId,
+                    actor: req.user,
+                    reason: "Work details updated",
+                    changeEntry: null,
+                    trackDefaultChange: true,
+                }),
+            );
 
             if (updatePayload.companyEmail !== undefined) {
-                await User.findOneAndUpdate(
-                    { employeeId: employeeId },
-                    { $set: { companyEmail: updatePayload.companyEmail } }
+                postResponseTasks.push(() =>
+                    User.findOneAndUpdate(
+                        { employeeId },
+                        { $set: { companyEmail: updatePayload.companyEmail } },
+                    ),
+                );
+            }
+            if (updatePayload.enablePortalAccess !== undefined) {
+                postResponseTasks.push(() =>
+                    User.findOneAndUpdate(
+                        { employeeId },
+                        { $set: { enablePortalAccess: !!updatePayload.enablePortalAccess } },
+                    ).catch(() => null),
                 );
             }
         } else {
@@ -243,17 +283,6 @@ export const updateWorkDetails = async (req, res) => {
             });
         }
 
-        try {
-            await markProfileActivationHoldResolvedForSection(employeeId, "workDetails");
-        } catch (_e) {
-            /* ignore */
-        }
-
-        // Get updated employee data
-        const completeEmployee = await getCompleteEmployee(employeeId);
-        delete completeEmployee.password;
-
-        // 7. Return success
         let message = "Work details updated";
         if (skipLive) {
             message = statusAppliedLiveByAdmin
@@ -261,14 +290,28 @@ export const updateWorkDetails = async (req, res) => {
                 : "Work details change queued for HR activation approval.";
         }
 
-        return res.status(200).json({
+        res.status(200).json({
             message,
-            employee: completeEmployee,
+            employeePatch: { ...updatePayload },
         });
 
+        postResponseTasks.push(() =>
+            markProfileActivationHoldResolvedForSection(employeeId, "workDetails").catch(() => null),
+        );
+
+        void (async () => {
+            for (const task of postResponseTasks) {
+                try {
+                    await task();
+                } catch (bgErr) {
+                    console.error("[updateWorkDetails] background task failed:", bgErr);
+                }
+            }
+        })();
+
     } catch (err) {
-        console.error(err);
-        return res.status(500).json({ message: err.message });
+        console.error("[updateWorkDetails]", err);
+        return res.status(500).json({ message: err.message || "Server Error" });
     }
 };
 

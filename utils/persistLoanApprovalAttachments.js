@@ -1,4 +1,4 @@
-import { uploadDocumentToS3 } from './s3Upload.js';
+import { uploadDocumentToS3, s3ObjectExists } from './s3Upload.js';
 import { generateLoanAcknowledgmentPdfBuffer } from './generateLoanAcknowledgmentPdf.js';
 import { appendApprovalAttachmentHistory } from './approvalAttachmentHistory.js';
 
@@ -28,8 +28,7 @@ export async function persistLoanApprovalAttachments(
             const typeSlug = loanDoc.type === 'Advance' ? 'Advance' : 'Loan';
             const filename = `${typeSlug}_Acknowledgment_${loanDoc.loanId || loanDoc._id}.pdf`;
             const uploaded = await uploadDocumentToS3(buffer.toString('base64'), 'loans', filename);
-            const withoutOldAck = entries.filter((e) => e.source !== 'acknowledgment');
-            withoutOldAck.push({
+            const ackEntry = {
                 label: `${typeSlug} Acknowledgment`,
                 name: filename,
                 url: uploaded.url || '',
@@ -37,9 +36,14 @@ export async function persistLoanApprovalAttachments(
                 mimeType: 'application/pdf',
                 source: 'acknowledgment',
                 addedAt: new Date(),
-            });
+            };
+            if (!(await s3ObjectExists(ackEntry.publicId))) {
+                throw new Error('Acknowledgment PDF was not stored in storage.');
+            }
+            const withoutOldAck = entries.filter((e) => e.source !== 'acknowledgment');
+            withoutOldAck.push(ackEntry);
             loanDoc.approvalAttachments = withoutOldAck;
-            appendApprovalAttachmentHistory(loanDoc, [withoutOldAck.find((e) => e.source === 'acknowledgment')].filter(Boolean), {
+            appendApprovalAttachmentHistory(loanDoc, [ackEntry], {
                 trigger,
             });
             await loanDoc.save();

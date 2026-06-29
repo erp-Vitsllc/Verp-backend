@@ -151,6 +151,26 @@ export async function pushPendingReactivationChangeReplaceByDedupeKey(employeeId
         return;
     }
 
+    if (newKey.startsWith("section::")) {
+        const sectionToken = newKey.slice("section::".length);
+        const escaped = sectionToken.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        await EmployeeBasic.updateOne(
+            { employeeId },
+            {
+                $pull: {
+                    pendingReactivationChanges: {
+                        section: { $regex: `^${escaped}$`, $options: "i" },
+                    },
+                },
+            },
+        );
+        await EmployeeBasic.updateOne(
+            { employeeId },
+            { $push: { pendingReactivationChanges: normalizedEntry } },
+        );
+        return;
+    }
+
     const doc = await EmployeeBasic.findOne({ employeeId }).select("pendingReactivationChanges profileActivationHold");
     if (!doc) {
         await pushPendingReactivationChange(employeeId, normalizedEntry);

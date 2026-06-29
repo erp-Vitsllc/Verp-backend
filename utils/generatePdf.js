@@ -141,6 +141,18 @@ async function waitForFinePrintReady(page, selector, timeoutMs = 90000) {
     );
 }
 
+async function waitForVehicleHandoverPrintReady(page, selector, timeoutMs = 120000) {
+    if (!String(selector).includes('vehicle-handover-print-root')) return;
+
+    await page.waitForFunction(
+        () => {
+            const el = document.querySelector('#vehicle-handover-print-root');
+            return el?.getAttribute('data-handover-ready') === 'true';
+        },
+        { timeout: timeoutMs },
+    );
+}
+
 export const generatePdf = async (url, token, user, permissions = {}, selector = '#loan-form-container') => {
     let lastError = null;
     for (let attempt = 1; attempt <= 2; attempt += 1) {
@@ -190,6 +202,7 @@ export const generatePdf = async (url, token, user, permissions = {}, selector =
                 await page.waitForSelector(selector, { timeout: 30000 });
                 console.log(`[generatePdf] Selector found. Waiting for fine print readiness...`);
                 await waitForFinePrintReady(page, selector);
+                await waitForVehicleHandoverPrintReady(page, selector);
                 console.log(`[generatePdf] Content ready. Waiting for layout stability...`);
                 // Small delay to ensure any layout shifts or animations settle
                 await new Promise(resolve => setTimeout(resolve, 500));

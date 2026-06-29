@@ -1,7 +1,7 @@
 import nodemailer from "nodemailer";
+import mongoose from "mongoose";
 import { resolveFrontendBaseUrl, emailFrontendUrl } from '../../utils/resolveFrontendBaseUrl.js';
 import EmployeeBasic from "../../models/EmployeeBasic.js";
-import { getCompleteEmployee } from "../../services/employeeService.js";
 import { resolveFlowchartHrEmployee } from "../../utils/resolveFlowchartHrEmployee.js";
 import { syncDashboardAction } from "../../utils/syncDashboard.js";
 import { resolveProfileActivationSubmitterId } from "../../utils/resolveProfileActivationSubmitterId.js";
@@ -13,11 +13,28 @@ import {
     buildEmployeeActivationHrEmailSubject,
     renderEmailAttachmentLineHtml,
 } from "../../utils/buildEmployeeActivationHrEmail.js";
+import {
+    buildProfileActivationEntityLine,
+    buildProfileActivationPendingMessage,
+    employeeProfileDisplayName,
+} from "../../utils/employeeProfileNotificationMessages.js";
 import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
 import { resolveFrontendHostLabel } from "../../utils/resolveFrontendBaseUrl.js";
 
 /** Subdocument id fallback must match frontend (String(entry._id || index)). */
 const pendingEntryId = (entry, idx) => String(entry?._id ?? idx);
+
+async function loadEmployeeForActivationSubmit(id) {
+    const query =
+        typeof id === "string" && mongoose.Types.ObjectId.isValid(id) && id.length === 24
+            ? { _id: id }
+            : { employeeId: id };
+    return EmployeeBasic.findOne(query)
+        .select(
+            "firstName lastName employeeId profileStatus profileWorkflow pendingReactivationChanges profileApprovalStatus profileSubmittedTo",
+        )
+        .lean();
+}
 
 export const sendApprovalEmail = async (req, res) => {
     const { id } = req.params;
@@ -28,7 +45,7 @@ export const sendApprovalEmail = async (req, res) => {
         : null;
 
     try {
-        const employeeBasic = await getCompleteEmployee(id);
+        const employeeBasic = await loadEmployeeForActivationSubmit(id);
         if (!employeeBasic) {
             return res.status(404).json({ message: "Employee not found" });
         }
@@ -171,15 +188,6 @@ export const sendApprovalEmail = async (req, res) => {
             siteHost,
         });
 
-        console.log(`[sendApprovalEmail] To (HR): ${hrEmail}`);
-        await transporter.sendMail({
-            fromName: submitterName,
-            to: hrEmail,
-            subject,
-            html,
-            ...(emailAttachments.length ? { attachments: emailAttachments } : {}),
-        });
-
         eb.profileApprovalStatus = "submitted";
         eb.profileSubmittedTo = hrEmployee._id;
         eb.profileActivationSubmittedBy = submitterEmployeeId;
@@ -212,6 +220,16 @@ export const sendApprovalEmail = async (req, res) => {
             [req.user?.firstName, req.user?.lastName].filter(Boolean).join(" ").trim() ||
             "";
 
+        const dashboardEmployeeName = employeeProfileDisplayName(subjectForDashboard || employeeBasic);
+        const activationExtra1 = buildProfileActivationPendingMessage({
+            employeeName: dashboardEmployeeName,
+            employeeId: employeeBasic.employeeId,
+            activationType: activationTypeLabel,
+            submittedBy: submitterDisplayName,
+            pendingCards,
+            reason: reasonText,
+        });
+
         await syncDashboardAction({
             requestId: employeeBasic._id,
             requestType: "Profile Activation",
@@ -219,20 +237,35 @@ export const sendApprovalEmail = async (req, res) => {
             status: "Pending",
             subjectEmployee: subjectForDashboard || employeeBasic,
             requestedByName,
-            extra1: `[Employee profile] ${isAdminSubmitter ? "Administrator submission — " : ""}${activationTypeLabel}${reasonText ? ` — ${reasonText}` : ""}${pendingCardsText}`,
-            extra2: employeeBasic.designation || "",
+            extra1: activationExtra1,
+            extra2: buildProfileActivationEntityLine(dashboardEmployeeName, employeeBasic.employeeId),
             extra3: JSON.stringify({ activationSubject: "employee", activationViewerRole: "hr" }),
         });
 
         await clearProfileActivationHoldDashboardRows(employeeBasic._id);
 
-        return res.status(200).json({
+        res.status(200).json({
             message: "Approval request sent successfully.",
             notified: {
                 hrEmail,
                 ccEmails: [],
             },
         });
+
+        void (async () => {
+            try {
+                console.log(`[sendApprovalEmail] To (HR): ${hrEmail}`);
+                await transporter.sendMail({
+                    fromName: submitterName,
+                    to: hrEmail,
+                    subject,
+                    html,
+                    ...(emailAttachments.length ? { attachments: emailAttachments } : {}),
+                });
+            } catch (mailErr) {
+                console.error("Failed to send activation approval email (background):", mailErr);
+            }
+        })();
     } catch (error) {
         console.error("Failed to send approval email:", error);
         return res.status(500).json({ message: error.message || "Failed to send approval email." });

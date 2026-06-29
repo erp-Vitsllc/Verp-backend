@@ -1,7 +1,7 @@
 import express from 'express';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import User from '../models/User.js';
-import { createAssetItem, getAssetItems, getVehicleFleetDashboard, getVehicleFleetServiceRequests, getAllAssignedAssets, getMyAssignedAssetsForReturn, getUnassignedAssetsForEmployee, getCompanyAllocationCoordinatorStatus, getHRCompanyAssets, getOnLeaveAssetsForEmployee, getOnServiceAssetsForEmployee, runAssetServiceOverdueCheck, handleOnLeaveAction, bulkHandleOnLeaveAction, handleOnServiceAction, bulkHandleOnServiceAction, getAssetItemDetail, assignAssetItem, bulkAssignAssetItems, bulkAssignAssetItemsToCompany, downloadHandoverPdf, downloadHistoryHandoverPdf, respondToAssignment, bulkRespondToAssignment, getBulkAssignmentPendingGroup, respondBulkAssignmentGroup, getAssetHistory, getHistoryRecord, returnAssetItem, updateAssetStatus, addAssetDocument, updateAssetDocument, deleteAssetDocument, addAssetService, deleteAssetService, submitAssetServiceDraft, addAssetImage, deleteAssetImage, transferAssetAccessory, manageAccessoryStatus, updateAssetItem, deleteAssetItem, endOfLifeAsset, requestAssetAction, bulkRequestAssetAction, handleAssetActionApproval, finalizeAssetAction, uploadAccessoriesAttachment, requestAccessoryAction, respondAccessoryAction, finalizeAccessoryAction, respondToAssetCreation, bulkRespondToAssetCreation, getBulkAssetDetails, getBulkAssetInventoryForPrint, transferAsset, transferAssigneeAsset, submitDraftForCreationApproval, saveLossDamageFineDraft, getPendingAssetDashboardInbox, deletePendingAssetDashboardInboxItem, getEmployeePreviousAssets } from '../controllers/assetItemController.js';
+import { createAssetItem, getAssetItems, getVehicleFleetDashboard, getVehicleFleetServiceRequests, getAllAssignedAssets, getMyAssignedAssetsForReturn, getUnassignedAssetsForEmployee, getCompanyAllocationCoordinatorStatus, getHRCompanyAssets, getOnLeaveAssetsForEmployee, getOnServiceAssetsForEmployee, runAssetServiceOverdueCheck, handleOnLeaveAction, bulkHandleOnLeaveAction, handleOnServiceAction, bulkHandleOnServiceAction, getAssetItemDetail, assignAssetItem, bulkAssignAssetItems, bulkAssignAssetItemsToCompany, downloadHandoverPdf, downloadHistoryHandoverPdf, downloadVehicleHandoverPdf, respondToAssignment, bulkRespondToAssignment, getBulkAssignmentPendingGroup, respondBulkAssignmentGroup, getAssetHistory, getHistoryRecord, updateHistoryReceiverAssessment, updateHistoryBodyCondition, returnAssetItem, updateAssetStatus, addAssetDocument, updateAssetDocument, deleteAssetDocument, addAssetService, deleteAssetService, submitAssetServiceDraft, addAssetImage, deleteAssetImage, transferAssetAccessory, manageAccessoryStatus, updateAssetItem, deleteAssetItem, endOfLifeAsset, requestAssetAction, bulkRequestAssetAction, handleAssetActionApproval, finalizeAssetAction, uploadAccessoriesAttachment, requestAccessoryAction, respondAccessoryAction, finalizeAccessoryAction, respondToAssetCreation, bulkRespondToAssetCreation, getBulkAssetDetails, getBulkAssetInventoryForPrint, transferAsset, transferAssigneeAsset, submitDraftForCreationApproval, saveLossDamageFineDraft, getPendingAssetDashboardInbox, deletePendingAssetDashboardInboxItem, getEmployeePreviousAssets } from '../controllers/assetItemController.js';
 import { respondVehicleServiceWorkflow, respondVehicleServiceScheduledPeriod } from '../controllers/vehicleServiceWorkflowController.js';
 import {
     requestOwnerOnDuty,
@@ -22,6 +22,7 @@ import {
     submitVehicleProfileEdit,
     approveVehicleProfileEdit,
     rejectVehicleProfileEdit,
+    applyVehicleProfileSection,
 } from '../controllers/vehicleProfileEditController.js';
 import {
     submitVehicleDispositionRequest,
@@ -319,7 +320,7 @@ const requireAssetActionApprover = async (req, res, next) => {
         if (!id) return res.status(400).json({ message: 'Asset id is required' });
 
         const AssetItem = (await import('../models/AssetItem.js')).default;
-        const asset = await AssetItem.findById(id).select('actionRequiredBy pendingAction assignedToType assignedCompany pendingActionDetails').lean();
+        const asset = await AssetItem.findById(id).select('actionRequiredBy pendingAction assignedToType assignedCompany pendingActionDetails plateNumber typeId').populate('typeId', 'name').lean();
         if (!asset) return res.status(404).json({ message: 'Asset not found' });
 
         const currentEmpObjId = req.user?.employeeObjectId?.toString?.() || null;
@@ -332,6 +333,21 @@ const requireAssetActionApprover = async (req, res, next) => {
         const isCompanyCoordinator = await isUserCompanyAssetCoordinator(req.user).catch(() => false);
         const isCompanyAsset = asset.assignedToType === 'Company' && !!asset.assignedCompany;
         const actionType = asset.pendingAction;
+        const isFleetVehicle = isVehicleAssetLean(asset);
+
+        if (
+            isFleetVehicle &&
+            (actionType === 'Return Asset' || actionType === 'Reassign Asset')
+        ) {
+            if (isHR) return next();
+            const uid = req.user?.id || req.user?._id;
+            if (uid) {
+                const canFleetEdit =
+                    (await hasPermission(uid, 'hrm_asset', 'edit')) ||
+                    (await hasPermission(uid, 'hrm_asset_vehicle', 'edit'));
+                if (canFleetEdit) return next();
+            }
+        }
 
         if (actionType === 'End of Life') {
             const stage = asset.pendingActionDetails?.stage;
@@ -713,8 +729,11 @@ router.get('/bulk-assignment-pending/:groupId', protect, getBulkAssignmentPendin
 router.put('/bulk-assignment-respond', protect, respondBulkAssignmentGroup);
 router.get('/:id/history', protect, getAssetHistory);
 router.get('/history-record/:historyId', protect, getHistoryRecord);
+router.put('/history-record/:historyId/receiver-assessment', protect, updateHistoryReceiverAssessment);
+router.put('/history-record/:historyId/body-condition', protect, updateHistoryBodyCondition);
 router.get('/handover-pdf/:id', protect, downloadHandoverPdf);
 router.get('/history-handover-pdf/:historyId', protect, downloadHistoryHandoverPdf);
+router.get('/vehicle-handover-pdf/:vehicleId', protect, downloadVehicleHandoverPdf);
 router.put('/bulk/assign', protect, requireAssetAssignAccess, bulkAssignAssetItems);
 router.put('/bulk/assign-company', protect, requireAssetAssignAccess, bulkAssignAssetItemsToCompany);
 router.put('/bulk/on-leave-action', protect, requireAssetControllerOrAdmin, (req, res, next) => {
@@ -736,6 +755,7 @@ router.post('/:id/approve-vehicle-profile-activation', protect, approveVehiclePr
 router.post('/:id/hold-vehicle-profile-activation', protect, holdVehicleProfileActivation);
 router.post('/:id/reject-vehicle-profile-activation', protect, rejectVehicleProfileActivation);
 router.post('/:id/submit-vehicle-profile-edit', protect, submitVehicleProfileEdit);
+router.post('/:id/apply-vehicle-profile-section', protect, applyVehicleProfileSection);
 router.post('/:id/approve-vehicle-profile-edit', protect, approveVehicleProfileEdit);
 router.post('/:id/reject-vehicle-profile-edit', protect, rejectVehicleProfileEdit);
 router.post('/:id/submit-vehicle-inspection-request', protect, submitVehicleInspectionRequest);

@@ -21,6 +21,9 @@ export const sendAssetAssignmentEmail = async ({
     notificationContext = 'assignment',
     /** transfer only: 'target' | 'target_reportee' | 'asset_controller' | 'sender' */
     transferRecipientRole = null,
+    /** Optional deep link (e.g. vehicle handover assign page) */
+    detailsPath = null,
+    stageLabel = null,
 }) => {
     try {
         const { email: recipientEmail, isFallbackToReportee, employee: resolvedRecipient } =
@@ -97,11 +100,13 @@ export const sendAssetAssignmentEmail = async ({
         const frontendUrl = emailFrontendUrl();
         const assetId = asset._id?.toString() || asset.id?.toString();
         const buttonUrl =
-            isBulk && bulkAssignmentGroupId
-                ? `${frontendUrl}/HRM/Asset?bulkAssignmentGroup=${encodeURIComponent(String(bulkAssignmentGroupId))}`
-                : isBulk
-                  ? `${frontendUrl}/HRM/Asset`
-                  : `${frontendUrl}/HRM/Asset/details/${assetId}`;
+            detailsPath && String(detailsPath).trim()
+                ? String(detailsPath).trim()
+                : isBulk && bulkAssignmentGroupId
+                  ? `${frontendUrl}/HRM/Asset?bulkAssignmentGroup=${encodeURIComponent(String(bulkAssignmentGroupId))}`
+                  : isBulk
+                    ? `${frontendUrl}/HRM/Asset`
+                    : `${frontendUrl}/HRM/Asset/details/${assetId}`;
 
         const acceptUrl = !isBulk && assetId ? `${buttonUrl}?assignmentRespond=Accept` : buttonUrl;
         const rejectUrl = !isBulk && assetId ? `${buttonUrl}?assignmentRespond=Reject` : buttonUrl;
@@ -150,6 +155,7 @@ export const sendAssetAssignmentEmail = async ({
                             ? `An ${isBulk ? 'asset batch has' : 'asset has'} been <strong>transferred</strong> to <strong>${isSelfAssignment ? 'you' : employeeName}</strong>.`
                             : `A new ${isBulk ? 'batch of assets has' : 'asset has'} been ${employee?.isCompany ? 'allocated' : 'assigned'} to <strong>${isSelfAssignment ? 'you' : employeeName}</strong>.`}
                         ${isPrimaryReporteeRecipient ? ' Please review and respond on behalf of your reportee.' : ''}
+                        ${stageLabel ? `<br/><strong>Stage:</strong> ${stageLabel}` : ''}
                     </p>
                     
                     <div style="background-color: #f8fafc; padding: 25px; border-radius: 8px; margin: 25px 0; border: 1px solid #e2e8f0;">

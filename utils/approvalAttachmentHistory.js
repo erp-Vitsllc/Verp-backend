@@ -41,7 +41,8 @@ export function appendApprovalAttachmentHistory(doc, entries = [], { trigger = '
             : {};
 
     entries.forEach((entry) => {
-        if (!entry?.url && !entry?.publicId && !entry?.name) return;
+        if (!entry?.publicId && !entry?.data && !entry?.base64) return;
+        if (!entry?.publicId && !entry?.name) return;
         doc.approvalAttachmentHistory.push({
             label: entry.label || entry.name || 'Document',
             name: entry.name || '',

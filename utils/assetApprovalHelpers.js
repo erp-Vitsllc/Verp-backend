@@ -4,7 +4,7 @@ import AssetItem from '../models/AssetItem.js';
 import DashboardAction from '../models/DashboardAction.js';
 import { getDepartmentHOD, isUserActiveInFlowchart } from './getDepartmentHOD.js';
 import { isJwtSystemSuperUser } from '../utils/systemSuperUser.js';
-import { isUserAdministrator } from '../services/permissionService.js';
+import { hasPermission, isUserAdministrator } from '../services/permissionService.js';
 
 const normEmpId = (s) => (s || '').toString().toLowerCase().replace(/\s+/g, '');
 
@@ -145,8 +145,8 @@ export async function getResolvedFleetHrEmployee() {
     return hrRaw ? resolveAssetControllerEmployee(hrRaw) : null;
 }
 
-/** HR flowchart holder or administrator — may assign / reassign fleet vehicles. */
-export async function userCanAssignFleetVehicleAssets(req) {
+/** HR flowchart holder, administrator, or fleet asset editor — reassign / return fleet vehicles. */
+export async function userCanManageFleetVehicleHandover(req) {
     if (isJwtSystemSuperUser(req.user)) return true;
 
     const isSysAdmin = await isUserAdministrator(req.user?.id);
@@ -167,7 +167,39 @@ export async function userCanAssignFleetVehicleAssets(req) {
     if (hrRaw?.employeeId && req.user?.employeeId) {
         if (normEmpId(hrRaw.employeeId) === normEmpId(req.user.employeeId)) return true;
     }
-    return false;
+
+    const uid = req.user?.id || req.user?._id;
+    if (!uid) return false;
+    return (
+        (await hasPermission(uid, 'hrm_asset', 'edit')) ||
+        (await hasPermission(uid, 'hrm_asset_vehicle', 'edit'))
+    );
+}
+
+/** Active flowchart Admin Officer (admincontroller row). */
+export async function userIsFlowchartAdminOfficer(req) {
+    if (isJwtSystemSuperUser(req.user)) return true;
+
+    let isAdminOfficer = false;
+    try {
+        isAdminOfficer = await isUserActiveInFlowchart(req.user, 'admincontroller');
+    } catch {
+        isAdminOfficer = false;
+    }
+
+    const adminHod = await getDepartmentHOD('admincontroller');
+    if (adminHod?._id && req.user?.employeeObjectId) {
+        if (adminHod._id.toString() === req.user.employeeObjectId.toString()) isAdminOfficer = true;
+    }
+    if (!isAdminOfficer && adminHod?.employeeId && req.user?.employeeId) {
+        if (normEmpId(adminHod.employeeId) === normEmpId(req.user.employeeId)) isAdminOfficer = true;
+    }
+    return isAdminOfficer;
+}
+
+/** Flowchart Admin Officer — may assign fleet vehicles from the pool. */
+export async function userCanAssignFleetVehicleAssets(req) {
+    return userIsFlowchartAdminOfficer(req);
 }
 
 export function isFleetVehicleAssetFields({ plateNumber, typeName } = {}) {

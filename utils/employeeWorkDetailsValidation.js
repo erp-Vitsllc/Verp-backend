@@ -65,8 +65,11 @@ export async function validateEmployeeWorkDetailsPayload(payload = {}, { employe
         const email = normalizeEmail(p.companyEmail);
         if (email.length > MAX_EMAIL_LENGTH) return { ok: false, message: "Company email must be no more than 100 characters" };
         if (!EMAIL_REGEX.test(email)) return { ok: false, message: "Please enter a valid email address" };
-        const uniqueErr = await validateCompanyEmailUnique(email, { skipEmployeeId: skipId });
-        if (uniqueErr) return { ok: false, message: uniqueErr };
+        const currentEmail = normalizeEmail(employee?.companyEmail || "");
+        if (email !== currentEmail) {
+            const uniqueErr = await validateCompanyEmailUnique(email, { skipEmployeeId: skipId });
+            if (uniqueErr) return { ok: false, message: uniqueErr };
+        }
     }
 
     if (p.dateOfJoining !== undefined) {
@@ -89,31 +92,53 @@ export async function validateEmployeeWorkDetailsPayload(payload = {}, { employe
         if (!p.company || !mongoose.Types.ObjectId.isValid(p.company)) {
             return { ok: false, message: "Valid company is required" };
         }
-        const company = await Company.findById(p.company).select("status name").lean();
-        if (!company) return { ok: false, message: "Selected company does not exist" };
-        if (String(company.status || "").toLowerCase() !== "active") {
+    }
+
+    const needsCompany = p.company !== undefined && p.company && mongoose.Types.ObjectId.isValid(p.company);
+    const needsDepartment = p.department !== undefined;
+    const needsDesignation = p.designation !== undefined;
+    const needsReportingManager = Boolean(p.reportingAuthority ?? employee?.reportingAuthority);
+
+    const [companyDoc, deptDoc, desigDoc, mgrDoc] = await Promise.all([
+        needsCompany
+            ? Company.findById(p.company).select("status name").lean()
+            : Promise.resolve(null),
+        needsDepartment
+            ? Department.findOne({ name: String(p.department).trim() }).select("status").lean()
+            : Promise.resolve(null),
+        needsDesignation
+            ? Designation.findOne({ name: String(p.designation).trim() }).select("department status").lean()
+            : Promise.resolve(null),
+        needsReportingManager
+            ? EmployeeBasic.findById(p.reportingAuthority ?? employee?.reportingAuthority)
+                .select("employeeId profileStatus")
+                .lean()
+            : Promise.resolve(null),
+    ]);
+
+    if (needsCompany) {
+        if (!companyDoc) return { ok: false, message: "Selected company does not exist" };
+        if (String(companyDoc.status || "").toLowerCase() !== "active") {
             return { ok: false, message: "Only active companies can be selected" };
         }
     }
 
-    if (p.department !== undefined) {
+    if (needsDepartment) {
         if (!String(p.department || "").trim()) return { ok: false, message: "Department is required" };
-        const dept = await Department.findOne({ name: String(p.department).trim() }).select("status").lean();
-        if (!dept) return { ok: false, message: "Invalid department selected" };
-        if (dept.status && String(dept.status).toLowerCase() !== "active") {
+        if (!deptDoc) return { ok: false, message: "Invalid department selected" };
+        if (deptDoc.status && String(deptDoc.status).toLowerCase() !== "active") {
             return { ok: false, message: "Only active departments can be selected" };
         }
     }
 
-    if (p.designation !== undefined) {
+    if (needsDesignation) {
         const designationName = String(p.designation || "").trim();
         if (!designationName) return { ok: false, message: "Designation is required" };
-        const desig = await Designation.findOne({ name: designationName }).select("department status").lean();
-        if (!desig) return { ok: false, message: "Invalid designation selected" };
-        if (desig.status && String(desig.status).toLowerCase() === "inactive") {
+        if (!desigDoc) return { ok: false, message: "Invalid designation selected" };
+        if (desigDoc.status && String(desigDoc.status).toLowerCase() === "inactive") {
             return { ok: false, message: "Only active designations can be selected" };
         }
-        if (p.department && desig.department && String(desig.department).trim().toLowerCase() !== String(p.department).trim().toLowerCase()) {
+        if (p.department && desigDoc.department && String(desigDoc.department).trim().toLowerCase() !== String(p.department).trim().toLowerCase()) {
             return { ok: false, message: "Designation must belong to the selected department" };
         }
     }
@@ -129,9 +154,8 @@ export async function validateEmployeeWorkDetailsPayload(payload = {}, { employe
     if (reportingAuthority) {
         const ra = String(reportingAuthority);
         if (selfId && ra === selfId) return { ok: false, message: "Employee cannot report to themselves" };
-        const mgr = await EmployeeBasic.findById(reportingAuthority).select("employeeId profileStatus").lean();
-        if (!mgr) return { ok: false, message: "Reporting manager must exist in the system" };
-        if (mgr.employeeId === selfEmpId) return { ok: false, message: "Employee cannot report to themselves" };
+        if (!mgrDoc) return { ok: false, message: "Reporting manager must exist in the system" };
+        if (mgrDoc.employeeId === selfEmpId) return { ok: false, message: "Employee cannot report to themselves" };
     }
 
     const dept = String(p.department || employee?.department || "").trim().toLowerCase();

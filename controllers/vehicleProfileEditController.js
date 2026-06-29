@@ -7,14 +7,15 @@ import { resolveFrontendBaseUrl } from '../utils/resolveFrontendBaseUrl.js';
 import { syncDashboardAction } from '../utils/syncDashboard.js';
 import { resolveProfileActivationSubmitterId } from '../utils/resolveProfileActivationSubmitterId.js';
 import { sendVehicleProfileEditOutcomeEmail } from '../utils/sendVehicleProfileEditEmails.js';
-import { applyAllVehiclePendingProfileEdits } from '../utils/applyVehiclePendingProfileEdits.js';
+import { applyAllVehiclePendingProfileEdits, applyVehiclePendingProfileEditEntry } from '../utils/applyVehiclePendingProfileEdits.js';
 import { VEHICLE_PROFILE_ACTIVATION_SECTION_IDS } from '../utils/vehicleProfileCompletion.js';
+import { userCanManageFleetVehicleHandover } from '../utils/assetApprovalHelpers.js';
 
 const PROTECTED_SECTIONS = new Set(VEHICLE_PROFILE_ACTIVATION_SECTION_IDS);
 
 const SECTION_LABEL = {
     basic: 'Basic details',
-    registration: 'Registration card',
+    registration: 'Mulkia (registration card)',
     insurance: 'Insurance card',
     profile_picture: 'Profile picture',
 };
@@ -35,7 +36,11 @@ const isFleetVehicleAsset = (asset) => {
 const vehicleProfileIsActive = (asset) =>
     String(asset?.vehicleProfileActivationStatus || '').toLowerCase() === 'active';
 
-export const canProcessVehicleProfileEdit = async (req) => isUserInFlowchart(req.user, 'hr').catch(() => false);
+export const canProcessVehicleProfileEdit = async (req) => {
+    const isHr = await isUserInFlowchart(req.user, 'hr').catch(() => false);
+    if (isHr) return true;
+    return userCanManageFleetVehicleHandover(req);
+};
 
 const vehicleSubjectForDashboard = (asset) => ({
     firstName: asset.name || 'Vehicle',
@@ -403,6 +408,83 @@ export const rejectVehicleProfileEdit = async (req, res) => {
     } catch (err) {
         console.error('rejectVehicleProfileEdit:', err);
         return res.status(500).json({ message: err.message || 'Failed to reject profile edit.' });
+    }
+};
+
+/**
+ * POST /api/AssetItem/:id/apply-vehicle-profile-section
+ * HR applies registration / insurance / mulkia edits or renewals immediately on an active profile.
+ */
+export const applyVehicleProfileSection = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { sectionId, action = 'edit', steps = [], documentId = null } = req.body || {};
+
+        const section = String(sectionId || '').trim();
+        if (!PROTECTED_SECTIONS.has(section)) {
+            return res.status(400).json({ message: `Invalid section: ${sectionId}` });
+        }
+        const act = String(action || 'edit').trim();
+        if (!['edit', 'renew', 'not_renew'].includes(act)) {
+            return res.status(400).json({ message: 'Invalid action.' });
+        }
+        if (!Array.isArray(steps) || steps.length === 0) {
+            return res.status(400).json({ message: 'No edit steps provided.' });
+        }
+
+        const asset = await AssetItem.findById(id).populate('typeId', 'name');
+        if (!asset) return res.status(404).json({ message: 'Asset not found' });
+        if (!isFleetVehicleAsset(asset)) {
+            return res.status(400).json({ message: 'Not a fleet vehicle asset.' });
+        }
+
+        const profileActive = vehicleProfileIsActive(asset);
+        if (profileActive && !(await canProcessVehicleProfileEdit(req))) {
+            return res.status(403).json({
+                message: 'Only HR or an authorized fleet administrator can apply changes directly.',
+            });
+        }
+
+        await applyVehiclePendingProfileEditEntry(asset, {
+            sectionId: section,
+            action: act,
+            steps,
+            documentId,
+        });
+
+        const reviewerId = req.user?.employeeObjectId || req.user?._id || null;
+        await asset.save();
+
+        try {
+            const AssetHistory = (await import('../models/AssetHistory.js')).default;
+            const sectionLabel = SECTION_LABEL[section] || section;
+            const actionLabel = act === 'renew' ? 'renewal' : act === 'not_renew' ? 'not renew' : 'edit';
+            await AssetHistory.create({
+                assetId: asset._id,
+                action: 'Update',
+                performedBy: reviewerId,
+                comments: `HR applied ${sectionLabel} ${actionLabel} directly on active profile.`,
+                details: { type: 'VehicleProfileEditDirect', sectionId: section, action: act },
+            });
+        } catch {
+            /* non-fatal */
+        }
+
+        const refreshed = await AssetItem.findById(id)
+            .populate('typeId', 'name')
+            .populate('assignedTo', 'firstName lastName employeeId')
+            .lean();
+
+        return res.status(200).json({
+            message:
+                act === 'renew'
+                    ? 'Renewal applied. The previous document was moved to Old Documents.'
+                    : 'Changes applied successfully.',
+            asset: refreshed,
+        });
+    } catch (err) {
+        console.error('applyVehicleProfileSection:', err);
+        return res.status(500).json({ message: err.message || 'Failed to apply profile section.' });
     }
 };
 

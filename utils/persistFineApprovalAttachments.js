@@ -1,4 +1,4 @@
-import { uploadDocumentToS3 } from './s3Upload.js';
+import { uploadDocumentToS3, ensureAttachmentPersistedToS3, s3ObjectExists } from './s3Upload.js';
 import { generateFineApprovedReportPdfBuffer } from './generateFineApprovedReportPdfBuffer.js';
 import { isAssetLossFineReportApplicable } from './sendAssetLossFineReportEmail.js';
 import { appendApprovalAttachmentHistory } from './approvalAttachmentHistory.js';
@@ -24,15 +24,26 @@ export async function persistFineApprovalAttachments(
 
     const hasSupporting = entries.some(e => e.source === 'supporting');
     if (!hasSupporting && att && (att.url || att.publicId || att.data || att.name)) {
-        entries.push({
-            label: 'Supporting Document',
-            name: att.name || `Supporting-${fineDoc.fineId || fineDoc._id}`,
-            url: att.url || '',
-            publicId: att.publicId || '',
-            mimeType: att.mimeType || 'application/pdf',
-            source: 'supporting',
-            addedAt,
-        });
+        try {
+            const persisted = await ensureAttachmentPersistedToS3(att, {
+                folder: `fines/${fineDoc.fineId || fineDoc._id}`,
+                fileName: att.name || `Supporting-${fineDoc.fineId || fineDoc._id}.pdf`,
+                resourceType: 'raw',
+            });
+            if (persisted?.publicId) {
+                entries.push({
+                    label: 'Supporting Document',
+                    name: persisted.name,
+                    url: persisted.url || '',
+                    publicId: persisted.publicId,
+                    mimeType: persisted.mimeType || 'application/pdf',
+                    source: 'supporting',
+                    addedAt,
+                });
+            }
+        } catch (err) {
+            console.error('[persistFineApprovalAttachments] Supporting document upload failed:', err?.message || err);
+        }
     }
 
     let pdfBase64 = req?.body?.finePdf;
@@ -73,9 +84,33 @@ export async function persistFineApprovalAttachments(
     }
 
     if (entries.length > 0) {
-        fineDoc.approvalAttachments = entries;
-        appendApprovalAttachmentHistory(fineDoc, entries, { trigger, scheduleChange });
-        await fineDoc.save();
+        const verified = [];
+        for (const entry of entries) {
+            if (entry.publicId && (await s3ObjectExists(entry.publicId))) {
+                verified.push(entry);
+                continue;
+            }
+            if (entry.data || entry.base64) {
+                try {
+                    const persisted = await ensureAttachmentPersistedToS3(entry, {
+                        folder: 'fines',
+                        fileName: entry.name || 'approval-document.pdf',
+                        resourceType: 'raw',
+                    });
+                    if (persisted?.publicId) {
+                        verified.push({ ...entry, ...persisted });
+                    }
+                } catch (err) {
+                    console.error('[persistFineApprovalAttachments] Entry persist failed:', err?.message || err);
+                }
+            }
+        }
+
+        if (verified.length > 0) {
+            fineDoc.approvalAttachments = verified;
+            appendApprovalAttachmentHistory(fineDoc, verified, { trigger, scheduleChange });
+            await fineDoc.save();
+        }
     }
 
     return fineDoc;

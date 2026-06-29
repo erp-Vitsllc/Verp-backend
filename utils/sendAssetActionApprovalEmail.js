@@ -47,7 +47,11 @@ export const sendAssetActionApprovalEmail = async (asset, actionType, manager, r
         const tabParam = (actionType === 'Unattach Accessory' || actionType === 'Add Accessory' || actionType === 'Update Accessory')
             ? '&tab=accessories'
             : '';
-        const link = `${frontendUrl}/HRM/Asset/details/${asset._id}?authAction=${authAction}${tabParam}`;
+        const isFleetVehicle = !!String(asset?.plateNumber || '').trim();
+        const fleetHandoverAction = ['Return Asset', 'Reassign Asset'].includes(actionType);
+        const link = isFleetVehicle && fleetHandoverAction
+            ? `${frontendUrl}/HRM/Asset/Vehicle/details/${asset._id}`
+            : `${frontendUrl}/HRM/Asset/details/${asset._id}?authAction=${authAction}${tabParam}`;
 
         const att = normalizePdfAttachments(attachments);
 

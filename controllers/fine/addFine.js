@@ -2,7 +2,7 @@ import Fine from "../../models/Fine.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import User from "../../models/User.js";
 import Company from "../../models/Company.js";
-import { uploadDocumentToS3 } from "../../utils/s3Upload.js";
+import { ensureAttachmentPersistedToS3 } from "../../utils/s3Upload.js";
 import { sendFineApprovalEmail } from "../../utils/sendFineApprovalEmail.js";
 import { isVehicleFinePayload, validateVehicleFinePayload } from "../../utils/validateVehicleFinePayload.js";
 import { normalizeFineSourceSchedule } from "../../utils/normalizeFineSourceSchedule.js";
@@ -207,30 +207,20 @@ export const addFine = async (req, res) => {
             const createdFines = [];
             const errors = [];
 
-            // Process attachment once if possible
+            // Process attachment once — must be stored permanently in S3
             let attachmentData = null;
             if (commonData.attachment && commonData.attachment.data) {
                 try {
-                    const attachmentDataStr = typeof commonData.attachment.data === 'string' ? commonData.attachment.data : String(commonData.attachment.data);
-                    const uploadResult = await uploadDocumentToS3(
-                        attachmentDataStr,
-                        `fines/bulk_${baseFineId}`,
-                        commonData.attachment.name || 'fine-attachment.pdf',
-                        'raw'
-                    );
-                    attachmentData = {
-                        url: uploadResult.url,
-                        publicId: uploadResult.publicId,
-                        name: commonData.attachment.name || '',
-                        mimeType: commonData.attachment.mimeType || 'application/pdf'
-                    };
+                    attachmentData = await ensureAttachmentPersistedToS3(commonData.attachment, {
+                        folder: `fines/bulk_${baseFineId}`,
+                        fileName: commonData.attachment.name || 'fine-attachment.pdf',
+                        resourceType: 'raw',
+                    });
                 } catch (e) {
-                    console.error('[AddFine] Bulk upload error:', e);
-                    attachmentData = {
-                        data: typeof commonData.attachment.data === 'string' ? commonData.attachment.data : String(commonData.attachment.data),
-                        name: commonData.attachment.name || '',
-                        mimeType: commonData.attachment.mimeType || 'application/pdf'
-                    };
+                    console.error('[AddFine] Bulk attachment upload error:', e);
+                    return res.status(500).json({
+                        message: 'Failed to store attachment in storage. Please try uploading again.',
+                    });
                 }
             }
 
@@ -503,31 +493,16 @@ export const addFine = async (req, res) => {
         let attachmentData = null;
         if (attachment && attachment.data) {
             try {
-                // Upload to IDrive (S3)
-                // Note: s3Upload utility handles base64 prefixes automatically, but we can pass raw string too
-                const attachmentDataStr = typeof attachment.data === 'string' ? attachment.data : String(attachment.data);
-
-                const uploadResult = await uploadDocumentToS3(
-                    attachmentDataStr,
-                    `fines/${employeeId}`,
-                    attachment.name || 'fine-attachment.pdf',
-                    'raw'
-                );
-
-                attachmentData = {
-                    url: uploadResult.url,
-                    publicId: uploadResult.publicId,
-                    name: attachment.name || '',
-                    mimeType: attachment.mimeType || 'application/pdf'
-                };
+                attachmentData = await ensureAttachmentPersistedToS3(attachment, {
+                    folder: `fines/${employeeId}`,
+                    fileName: attachment.name || 'fine-attachment.pdf',
+                    resourceType: 'raw',
+                });
             } catch (uploadError) {
                 console.error('Error uploading attachment to IDrive:', uploadError);
-                // Fallback: store base64 data directly if upload fails
-                attachmentData = {
-                    data: typeof attachment.data === 'string' ? attachment.data : String(attachment.data),
-                    name: attachment.name || '',
-                    mimeType: attachment.mimeType || 'application/pdf'
-                };
+                return res.status(500).json({
+                    message: 'Failed to store attachment in storage. Please try uploading again.',
+                });
             }
         }
 

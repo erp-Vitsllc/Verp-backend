@@ -12,6 +12,11 @@ import {
 } from "../../utils/companyActivation.js";
 import { resolveEmployeeProfileStatusWrite } from "../../utils/employeeProfileStatusLock.js";
 import { mapPendingReactivationEntriesWithIds } from "../../utils/pendingReactivationEntryId.js";
+import {
+    buildProfileActivationEntityLine,
+    buildProfileActivationHoldMessage,
+    employeeProfileDisplayName,
+} from "../../utils/employeeProfileNotificationMessages.js";
 
 /**
  * Partial HR review: keep profile submitted + inactive; record which change cards need employee fixes.
@@ -185,7 +190,11 @@ export const holdProfile = async (req, res) => {
                 .lean();
         }
 
-        const outcomeExtra1 = `[Employee profile] On hold — update: ${(doc.profileActivationHold.unapprovedCards || []).join(", ")}`;
+        const outcomeExtra1 = buildProfileActivationHoldMessage({
+            employeeName: employeeProfileDisplayName(subjectLean || doc),
+            employeeId: doc.employeeId,
+            unapprovedCards: doc.profileActivationHold.unapprovedCards || [],
+        });
 
         await syncDashboardAction({
             requestId: doc._id,
@@ -199,6 +208,10 @@ export const holdProfile = async (req, res) => {
             actionedBy: req.user?.employeeObjectId || req.user?._id,
             comment: comment || unapprovedCards.join(", "),
             extra1: outcomeExtra1,
+            extra2: buildProfileActivationEntityLine(
+                employeeProfileDisplayName(subjectLean || doc),
+                doc.employeeId,
+            ),
             extra3: JSON.stringify({ activationSubject: "employee", activationViewerRole: "submitter" }),
         });
 

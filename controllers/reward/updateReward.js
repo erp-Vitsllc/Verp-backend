@@ -8,7 +8,7 @@ import { getManagementHOD } from "../../utils/getManagementHOD.js";
 import { getDepartmentHOD } from "../../utils/getDepartmentHOD.js";
 import { sendHODAuthorizationEmail } from "../../utils/sendHODAuthorizationEmail.js";
 import { generatePdf } from "../../utils/generatePdf.js";
-import { uploadDocumentToS3 } from "../../utils/s3Upload.js";
+import { ensureAttachmentPersistedToS3 } from "../../utils/s3Upload.js";
 import { resolveEmployeeEmail, getFallbackEmailNote, addEmployeeEmailToSet } from "../../utils/resolveEmployeeEmail.js";
 import { isUsernameSystemSuperUser } from "../../utils/systemSuperUser.js";
 
@@ -73,24 +73,17 @@ export const updateReward = async (req, res) => {
         if (attachment && attachment.data) {
             try {
                 console.log(`[UpdateReward] Processing attachment: ${attachment.name}`);
-                const attachmentDataStr = typeof attachment.data === 'string' ? attachment.data : String(attachment.data);
-
-                const uploadResult = await uploadDocumentToS3(
-                    attachmentDataStr,
-                    `rewards/${reward.employeeId}`,
-                    attachment.name || 'reward-attachment.pdf',
-                    'raw'
-                );
-
-                reward.attachment = {
-                    url: uploadResult.url,
-                    publicId: uploadResult.publicId,
-                    name: attachment.name || '',
-                    mimeType: attachment.mimeType || 'application/pdf'
-                };
-                console.log(`[UpdateReward] Attachment updated in S3: ${uploadResult.url}`);
+                reward.attachment = await ensureAttachmentPersistedToS3(attachment, {
+                    folder: `rewards/${reward.employeeId}`,
+                    fileName: attachment.name || 'reward-attachment.pdf',
+                    resourceType: 'raw',
+                });
+                console.log(`[UpdateReward] Attachment updated in S3: ${reward.attachment?.publicId}`);
             } catch (uploadError) {
-                console.error(`[UpdateReward] Attachment upload failed:`, uploadError);
+                console.error('[UpdateReward] Attachment upload failed:', uploadError);
+                return res.status(500).json({
+                    message: 'Failed to store attachment in storage. Please try uploading again.',
+                });
             }
         }
 

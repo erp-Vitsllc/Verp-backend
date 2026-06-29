@@ -11,6 +11,9 @@ const S3_STORAGE_FOLDER_PREFIXES = [
     'asset-photos',
     'asset-service-invoices',
     'asset-service-attachments',
+    'asset-services',
+    'asset-history',
+    'asset-accessories',
     'employee-documents',
     'employee-profiles',
     'employee-signatures',
@@ -19,6 +22,7 @@ const S3_STORAGE_FOLDER_PREFIXES = [
     'signatures',
     'rewards',
     'fines',
+    'loans',
     'company-documents',
 ];
 
@@ -421,6 +425,109 @@ export const getSignedFileUrl = async (key, expiresIn = 86400) => {
         return null;
     }
 };
+
+function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Ensure an attachment is stored permanently in S3 before saving metadata to MongoDB.
+ * Uploads inline base64 when needed; verifies existing keys. Never returns without publicId.
+ */
+export async function ensureAttachmentPersistedToS3(
+    attachment,
+    { folder = 'employee-documents', fileName = 'attachment.pdf', resourceType = 'auto', retries = 3 } = {},
+) {
+    if (!attachment || typeof attachment !== 'object') return null;
+
+    const name = attachment.name || attachment.fileName || fileName;
+    const mimeType = attachment.mimeType || attachment.mime || 'application/pdf';
+
+    const existingKey = attachment.publicId ? normalizeS3Key(String(attachment.publicId).trim()) : null;
+    if (existingKey && (await s3ObjectExists(existingKey))) {
+        const signedUrl = await getSignedFileUrl(existingKey);
+        return {
+            name,
+            mimeType,
+            publicId: existingKey,
+            url: signedUrl || attachment.url || '',
+        };
+    }
+
+    const urlKey = attachment.url ? normalizeS3Key(String(attachment.url).trim()) : null;
+    if (urlKey && (await s3ObjectExists(urlKey))) {
+        const signedUrl = await getSignedFileUrl(urlKey);
+        return {
+            name,
+            mimeType,
+            publicId: urlKey,
+            url: signedUrl || attachment.url || '',
+        };
+    }
+
+    const data = attachment.data || attachment.base64;
+    if (data) {
+        const dataStr = typeof data === 'string' ? data : String(data);
+        let lastErr;
+        for (let attempt = 1; attempt <= retries; attempt += 1) {
+            try {
+                const uploaded = await uploadDocumentToS3(dataStr, folder, name, resourceType);
+                return {
+                    name,
+                    mimeType,
+                    publicId: uploaded.publicId,
+                    url: uploaded.url || '',
+                };
+            } catch (err) {
+                lastErr = err;
+                console.warn(
+                    `[ensureAttachmentPersistedToS3] upload attempt ${attempt}/${retries} failed:`,
+                    err?.message || err,
+                );
+                if (attempt < retries) await sleep(500 * attempt);
+            }
+        }
+        throw new Error(
+            `Failed to persist attachment to storage after ${retries} attempts: ${lastErr?.message || lastErr}`,
+        );
+    }
+
+    if (existingKey || urlKey) {
+        throw new Error(`Attachment file missing from storage: ${existingKey || urlKey}`);
+    }
+
+    return null;
+}
+
+/** Repair attachment arrays/objects that still hold inline data — upload to S3 and strip data field. */
+export async function repairStoredAttachments(items, { folder, fileName = 'attachment.pdf', resourceType = 'auto' } = {}) {
+    if (!items) return items;
+    const list = Array.isArray(items) ? items : [items];
+
+    await Promise.all(
+        list.map(async (item, index) => {
+            if (!item || typeof item !== 'object') return;
+            if (item.publicId && (await s3ObjectExists(normalizeS3Key(item.publicId)))) return;
+            if (!item.data && !item.base64) return;
+
+            const persisted = await ensureAttachmentPersistedToS3(item, {
+                folder,
+                fileName: item.name || `${fileName}-${index + 1}`,
+                resourceType,
+            });
+            if (!persisted?.publicId) return;
+
+            item.publicId = persisted.publicId;
+            item.url = persisted.url;
+            item.name = persisted.name || item.name;
+            item.mimeType = persisted.mimeType || item.mimeType;
+            delete item.data;
+            delete item.base64;
+        }),
+    );
+
+    return items;
+}
 
 /** Store S3 object key in DB — never persist expiring signed URLs when the key can be extracted. */
 export function attachmentValueForDatabase(value) {
