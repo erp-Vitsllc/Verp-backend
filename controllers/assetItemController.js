@@ -15,6 +15,7 @@ import {
     buildHandoverDashboardExtra3,
     buildInitialHandoverWorkflowMeta,
     enrichHandoverWorkflowActorSignatures,
+    signHandoverAssessmentMediaInDetails,
     employeeHasDrivingLicense,
     getVehicleHandoverFlow,
     notifyHandoverCompletionEmails,
@@ -29,6 +30,9 @@ import {
     resolveHodEmployee,
     updateFleetHandoverHistoryRecord,
     upsertHandoverDashboardAction,
+    upsertHandoverAssignerDashboardAction,
+    upsertHandoverAdminOfficerDashboardAction,
+    closeFleetHandoverDashboardActions,
 } from '../utils/vehicleHandoverApprovalFlow.js';
 import { sendAssetResponseEmail } from '../utils/sendAssetResponseEmail.js';
 import { sendAssetReassignmentEmail } from '../utils/sendAssetReassignmentEmail.js';
@@ -111,6 +115,7 @@ import { sendParkingExtensionEmail } from '../utils/sendAssetParkingNotification
 import { notifyAssetControllerReassignmentAcceptedWithHandover } from '../utils/notifyAssetControllerReassignmentAcceptedWithHandover.js';
 import { notifyPreviousAssigneeReassignmentAcceptedWithHandover } from '../utils/notifyPreviousAssigneeReassignmentAcceptedWithHandover.js';
 import { pickEffectiveEmail } from '../utils/resolveEmployeeEmail.js';
+import { submitInspectionHandoverAfterAssessment, isVehicleInspectionWorkflowActive, isInspectionHandoverHistoryRecord, canEditInspectionHandoverContent, VEHICLE_INSPECTION_HANDOVER_KIND } from './vehicleInspectionController.js';
 import { ASSET_HANDOVER_PDF_SELECTOR, VEHICLE_HANDOVER_PDF_SELECTOR } from '../utils/assetHandoverPdfConstants.js';
 import {
     requireBulkAssetInventoryPdfAttachment,
@@ -186,7 +191,8 @@ import { awaitAdminDeletionArchive } from '../utils/adminDeletionArchiveRun.js';
 import {
     cleanupDashboardActionsForDeletedAsset,
     ASSET_DASHBOARD_INBOX_TYPES,
-    ASSET_TOOLS_INBOX_TYPES
+    ASSET_TOOLS_INBOX_TYPES,
+    VEHICLE_DASHBOARD_INBOX_TYPES,
 } from '../utils/cleanupAssetDashboardActions.js';
 import {
     maybeStartVehicleServiceWorkflow,
@@ -3727,15 +3733,24 @@ export const getAssetItemDetail = async (req, res) => {
                             fleetActor.actorId?._id?.toString?.() ||
                             fleetActor.actorId?.toString?.() ||
                             null;
-                    } else if (handoverFlowHeal.stage === 'hod') {
-                        const hod = await resolveHodEmployee(assigneeDoc);
-                        expectedId = hod?._id?.toString?.() || null;
                     } else if (
+                        handoverFlowHeal.stage === 'hod' ||
                         handoverFlowHeal.stage === 'hr' ||
                         handoverFlowHeal.stage === 'management'
                     ) {
                         const hrEmp = await getResolvedFleetHrEmployee();
                         expectedId = hrEmp?._id?.toString?.() || null;
+                        if (handoverFlowHeal.stage === 'hod') {
+                            await AssetItem.updateOne(
+                                { _id: item._id },
+                                {
+                                    $set: {
+                                        'pendingActionDetails.vehicleHandoverFlow.stage': 'hr',
+                                    },
+                                },
+                            );
+                            handoverFlowHeal.stage = 'hr';
+                        }
                     }
                 } else {
                     const resolved = resolveEmployeeAssignmentActors(assigneeDoc, assignerRef);
@@ -3766,12 +3781,64 @@ export const getAssetItemDetail = async (req, res) => {
                                 requestId: item._id,
                                 requestType: 'Asset Assignment',
                                 status: 'Pending',
+                                ...(fleetHeal && handoverFlowHeal?.historyId
+                                    ? {
+                                          extra3: {
+                                              $regex: '"handoverViewerRole"\\s*:\\s*"actor"',
+                                              $options: 'i',
+                                          },
+                                      }
+                                    : {}),
                             },
                             {
                                 assignedTo: expectedId,
                                 assignedToEmpId: healed?.employeeId,
+                                ...(fleetHeal && handoverFlowHeal?.historyId
+                                    ? {
+                                          extra3: buildHandoverDashboardExtra3(
+                                              item._id,
+                                              handoverFlowHeal.historyId,
+                                              { viewerRole: 'actor' },
+                                          ),
+                                          extra2:
+                                              handoverFlowHeal.stage === 'hr' ||
+                                              handoverFlowHeal.stage === 'management'
+                                                  ? 'HR Approval'
+                                                  : 'Vehicle Handover',
+                                      }
+                                    : {}),
                             },
                         );
+                        if (fleetHeal && handoverFlowHeal?.historyId && assignerRef) {
+                            const assignerDoc =
+                                typeof item.assignedBy === 'object' && item.assignedBy?.employeeId
+                                    ? item.assignedBy
+                                    : await EmployeeBasic.findById(assignerRef)
+                                          .select('firstName lastName employeeId')
+                                          .lean();
+                            if (assignerDoc?._id) {
+                                const subjName = assigneeDoc
+                                    ? `${assigneeDoc.firstName || ''} ${assigneeDoc.lastName || ''}`.trim()
+                                    : '';
+                                await upsertHandoverAssignerDashboardAction({
+                                    asset: item,
+                                    assigner: assignerDoc,
+                                    historyId: handoverFlowHeal.historyId,
+                                    subjectName: subjName,
+                                    subjectEmpId: assigneeDoc?.employeeId || '',
+                                }).catch(() => null);
+                                const adminOfficer = await resolveAdminOfficerEmployee();
+                                if (adminOfficer?._id) {
+                                    await upsertHandoverAdminOfficerDashboardAction({
+                                        asset: item,
+                                        adminOfficer,
+                                        historyId: handoverFlowHeal.historyId,
+                                        subjectName: subjName,
+                                        subjectEmpId: assigneeDoc?.employeeId || '',
+                                    }).catch(() => null);
+                                }
+                            }
+                        }
                     }
                 }
             } catch (healErr) {
@@ -3782,12 +3849,15 @@ export const getAssetItemDetail = async (req, res) => {
             isAssetAssignmentAcknowledgmentPending(item) &&
             item.assignedToType === 'Employee' &&
             isFleetVehicleAssetFields({ plateNumber: item.plateNumber, typeName: item.typeId?.name }) &&
-            !getVehicleHandoverFlow(item)
+            !getVehicleHandoverFlow(item) &&
+            !isVehicleInspectionWorkflowActive(item)
         ) {
             try {
                 const latestAssigned = await AssetHistory.findOne({
                     assetId: item._id,
                     action: 'Assigned',
+                    'details.handoverKind': { $ne: VEHICLE_INSPECTION_HANDOVER_KIND },
+                    'details.firstInspection': { $ne: true },
                 })
                     .sort({ createdAt: -1 })
                     .select('_id')
@@ -4780,13 +4850,41 @@ export const assignAssetItem = async (req, res) => {
                             status: 'Pending',
                         };
                         if (fleetVehicle && fleetHandoverHistoryId) {
-                            dashboardPatch.extra3 = buildHandoverDashboardExtra3(item._id, fleetHandoverHistoryId);
+                            dashboardPatch.extra3 = buildHandoverDashboardExtra3(item._id, fleetHandoverHistoryId, {
+                                viewerRole: 'actor',
+                            });
                         }
                         await DashboardAction.findOneAndUpdate(
-                            { requestId: item._id, requestType: 'Asset Assignment', status: 'Pending' },
+                            {
+                                requestId: item._id,
+                                requestType: 'Asset Assignment',
+                                status: 'Pending',
+                                ...(fleetVehicle && fleetHandoverHistoryId
+                                    ? { extra3: { $regex: '"handoverViewerRole"\\s*:\\s*"actor"', $options: 'i' } }
+                                    : {}),
+                            },
                             dashboardPatch,
                             { upsert: true, new: true, setDefaultsOnInsert: true },
                         );
+                        if (fleetVehicle && fleetHandoverHistoryId && assigner?._id) {
+                            await upsertHandoverAssignerDashboardAction({
+                                asset: item,
+                                assigner,
+                                historyId: fleetHandoverHistoryId,
+                                subjectName,
+                                subjectEmpId,
+                            }).catch(() => null);
+                            const adminOfficer = await resolveAdminOfficerEmployee();
+                            if (adminOfficer?._id) {
+                                await upsertHandoverAdminOfficerDashboardAction({
+                                    asset: item,
+                                    adminOfficer,
+                                    historyId: fleetHandoverHistoryId,
+                                    subjectName,
+                                    subjectEmpId,
+                                }).catch(() => null);
+                            }
+                        }
                     } catch (err) {
                         /* non-fatal */
                     }
@@ -5820,6 +5918,13 @@ export const respondToAssignment = async (req, res) => {
             return res.status(404).json({ message: 'Asset not found' });
         }
 
+        if (isVehicleInspectionWorkflowActive(item)) {
+            return res.status(400).json({
+                message:
+                    'This vehicle has a pending inspection handover. Use Send to HR or HR inspection approval instead.',
+            });
+        }
+
         const assignmentBulkGroupId = item.pendingActionDetails?.bulkAssignment?.groupId || null;
 
         const currentUser = req.user.employeeObjectId;
@@ -5965,6 +6070,12 @@ export const respondToAssignment = async (req, res) => {
             const historyRecord = handoverFlow.historyId
                 ? await AssetHistory.findById(handoverFlow.historyId).lean()
                 : null;
+            if (isInspectionHandoverHistoryRecord(historyRecord)) {
+                return res.status(400).json({
+                    message:
+                        'This handover record is a vehicle inspection. Use Send to HR or HR inspection approval instead.',
+                });
+            }
             if (action === 'Accept') {
                 const advance = await advanceFleetHandoverOnAccept({
                     item,
@@ -6097,11 +6208,9 @@ export const respondToAssignment = async (req, res) => {
             if (fleetVehicleRespond && handoverFlow) {
                 const adminOfficer = await resolveAdminOfficerEmployee();
                 const stageLabel =
-                    handoverFlow.stage === 'hod'
-                        ? 'HOD Review'
-                        : handoverFlow.stage === 'hr' || handoverFlow.stage === 'management'
-                          ? 'HR Approval'
-                          : 'Target User / Admin Officer';
+                    handoverFlow.stage === 'hr' || handoverFlow.stage === 'management'
+                        ? 'HR Approval'
+                        : 'Target User / Admin Officer';
                 const previousRecipient = await resolvePreviousHandoverRejectionRecipient(
                     handoverFlow.stage,
                     {
@@ -6457,18 +6566,27 @@ export const respondToAssignment = async (req, res) => {
 
         // Update Dashboard Actions
         try {
-            const existingAction = await DashboardAction.findOne({
-                requestId: item._id,
-                assignedTo: currentUser,
-                status: 'Pending'
-            });
+            if (fleetVehicleRespond && handoverFlow && action === 'Reject') {
+                await closeFleetHandoverDashboardActions(
+                    item._id,
+                    'Rejected',
+                    currentUser,
+                    comments || 'Vehicle handover rejected.',
+                );
+            } else {
+                const existingAction = await DashboardAction.findOne({
+                    requestId: item._id,
+                    assignedTo: currentUser,
+                    status: 'Pending',
+                });
 
-            if (existingAction) {
-                existingAction.status = action === 'Reject' ? 'Rejected' : 'Approved';
-                existingAction.actionedDate = new Date();
-                existingAction.actionedBy = currentUser;
-                existingAction.comment = comments;
-                await existingAction.save();
+                if (existingAction) {
+                    existingAction.status = action === 'Reject' ? 'Rejected' : 'Approved';
+                    existingAction.actionedDate = new Date();
+                    existingAction.actionedBy = currentUser;
+                    existingAction.comment = comments;
+                    await existingAction.save();
+                }
             }
 
             if (action === 'AcceptWithComments') {
@@ -6742,9 +6860,11 @@ export const respondToAssignment = async (req, res) => {
 
             if (fleetVehicleRespond && handoverFlow?.historyId) {
                 try {
-                    await DashboardAction.findOneAndUpdate(
-                        { requestId: item._id, requestType: 'Asset Assignment', status: 'Pending' },
-                        { status: 'Approved' },
+                    await closeFleetHandoverDashboardActions(
+                        item._id,
+                        'Approved',
+                        currentUser,
+                        'Vehicle handover approved by HR.',
                     );
                     const hod = await resolveHodEmployee(item.assignedTo);
                     const adminOfficer = await resolveAdminOfficerEmployee();
@@ -7337,12 +7457,24 @@ const syncPendingAssignmentDashboardRowsForUser = async (relevantIds, targetEmpl
             requestId: item._id,
             requestType: 'Asset Assignment',
         })
-            .select('status')
+            .select('status extra3')
             .lean();
         if (existingRow?.status === 'Dismissed') continue;
 
+        const handoverFlowHeal = item.pendingActionDetails?.vehicleHandoverFlow;
+        const isFleetHandover =
+            handoverFlowHeal?.historyId &&
+            (isFleetVehicleAssetFields({
+                plateNumber: item.plateNumber,
+            }) ||
+                String(existingRow?.extra3 || '').includes('"isFleetVehicle"'));
+
+        const actorRowFilter = isFleetHandover
+            ? { extra3: { $regex: '"handoverViewerRole"\\s*:\\s*"actor"', $options: 'i' } }
+            : {};
+
         await DashboardAction.findOneAndUpdate(
-            { requestId: item._id, requestType: 'Asset Assignment' },
+            { requestId: item._id, requestType: 'Asset Assignment', ...actorRowFilter },
             {
                 $set: {
                     assignedTo: actorId,
@@ -7353,7 +7485,16 @@ const syncPendingAssignmentDashboardRowsForUser = async (relevantIds, targetEmpl
                     subjectName,
                     requestedByName,
                     extra1: `${item.assetId} — ${item.name}`,
-                    extra2: item.assignmentType || '',
+                    extra2: isFleetHandover ? 'Vehicle Handover' : item.assignmentType || '',
+                    ...(isFleetHandover
+                        ? {
+                              extra3: buildHandoverDashboardExtra3(
+                                  item._id,
+                                  handoverFlowHeal.historyId,
+                                  { viewerRole: 'actor' },
+                              ),
+                          }
+                        : {}),
                     status: 'Pending',
                     actionedDate: null,
                     actionedBy: null,
@@ -7363,6 +7504,26 @@ const syncPendingAssignmentDashboardRowsForUser = async (relevantIds, targetEmpl
             },
             { upsert: true, setDefaultsOnInsert: true },
         );
+
+        if (isFleetHandover && assigner?._id) {
+            await upsertHandoverAssignerDashboardAction({
+                asset: item,
+                assigner: typeof assigner === 'object' && assigner._id ? assigner : await EmployeeBasic.findById(assigner).lean(),
+                historyId: handoverFlowHeal.historyId,
+                subjectName,
+                subjectEmpId,
+            }).catch(() => null);
+            const adminOfficer = await resolveAdminOfficerEmployee();
+            if (adminOfficer?._id) {
+                await upsertHandoverAdminOfficerDashboardAction({
+                    asset: item,
+                    adminOfficer,
+                    historyId: handoverFlowHeal.historyId,
+                    subjectName,
+                    subjectEmpId,
+                }).catch(() => null);
+            }
+        }
     }
 };
 
@@ -8747,7 +8908,7 @@ export const getAssetHistory = async (req, res) => {
                 },
             })
             .populate('assignedCompany', 'name companyId')
-            .sort({ date: 1 });
+            .sort({ date: -1, createdAt: -1 });
 
         // Sign URLs for attachments and signatures in snapshots
         const historyWithUrls = await Promise.all(history.map(async (record) => {
@@ -8776,6 +8937,7 @@ export const getAssetHistory = async (req, res) => {
                 if (d.acceptedBy?.signature?.url) {
                     d.acceptedBy.signature.url = await getSignedFileUrl(d.acceptedBy.signature.url);
                 }
+                await signHandoverAssessmentMediaInDetails(d, getSignedFileUrl);
             }
             if (recordObj.performedBy?.signature?.url) {
                 recordObj.performedBy.signature.url = await getSignedFileUrl(recordObj.performedBy.signature.url);
@@ -8862,6 +9024,7 @@ export const getHistoryRecord = async (req, res) => {
             const d = recordObj.details;
             if (d.invoice) d.invoice = await getSignedFileUrl(d.invoice);
             if (d.invoiceFile) d.invoiceFile = await getSignedFileUrl(d.invoiceFile);
+            await signHandoverAssessmentMediaInDetails(d, getSignedFileUrl);
         }
         if (recordObj.performedBy?.signature?.url) {
             recordObj.performedBy.signature.url = await getSignedFileUrl(recordObj.performedBy.signature.url);
@@ -8905,6 +9068,20 @@ export const updateHistoryReceiverAssessment = async (req, res) => {
         const record = await AssetHistory.findById(historyId);
         if (!record) {
             return res.status(404).json({ message: 'History record not found' });
+        }
+
+        if (isInspectionHandoverHistoryRecord(record)) {
+            const asset = await AssetItem.findById(record.assetId)
+                .populate('assignedTo', 'companyEmail enablePortalAccess employeeId')
+                .lean();
+            if (!asset) {
+                return res.status(404).json({ message: 'Asset not found' });
+            }
+            if (!(await canEditInspectionHandoverContent(req, asset, record))) {
+                return res.status(403).json({
+                    message: 'You are not authorized to edit this inspection handover.',
+                });
+            }
         }
 
         const existing =
@@ -9011,7 +9188,7 @@ const BODY_CONDITION_KEYS = [
 export const updateHistoryBodyCondition = async (req, res) => {
     try {
         const { historyId } = req.params;
-        const { bodyConditionReport, partial, bodyConditionCompleted } = req.body;
+        const { bodyConditionReport, partial, bodyConditionCompleted, submitInspectionForHr } = req.body;
 
         if (!bodyConditionReport || typeof bodyConditionReport !== 'object') {
             return res.status(400).json({ message: 'bodyConditionReport is required.' });
@@ -9020,6 +9197,20 @@ export const updateHistoryBodyCondition = async (req, res) => {
         const record = await AssetHistory.findById(historyId);
         if (!record) {
             return res.status(404).json({ message: 'History record not found' });
+        }
+
+        if (isInspectionHandoverHistoryRecord(record)) {
+            const asset = await AssetItem.findById(record.assetId)
+                .populate('assignedTo', 'companyEmail enablePortalAccess employeeId')
+                .lean();
+            if (!asset) {
+                return res.status(404).json({ message: 'Asset not found' });
+            }
+            if (!(await canEditInspectionHandoverContent(req, asset, record))) {
+                return res.status(403).json({
+                    message: 'You are not authorized to edit this inspection handover.',
+                });
+            }
         }
 
         const existing =
@@ -9083,11 +9274,28 @@ export const updateHistoryBodyCondition = async (req, res) => {
         record.markModified('details');
         await record.save();
 
+        let inspectionSubmitResult = null;
+        if (submitInspectionForHr === true) {
+            try {
+                inspectionSubmitResult = await submitInspectionHandoverAfterAssessment(req, record);
+            } catch (inspectionErr) {
+                return res.status(400).json({
+                    message: inspectionErr.message || 'Failed to submit inspection for HR approval.',
+                });
+            }
+        }
+
         const populated = await AssetHistory.findById(historyId)
             .populate('performedBy', 'firstName lastName employeeId')
             .populate('assignedTo', 'firstName lastName employeeId');
 
-        res.status(200).json(populated.toObject());
+        const responseBody = populated.toObject();
+        if (inspectionSubmitResult?.asset) {
+            responseBody.vehicleAsset = inspectionSubmitResult.asset;
+            responseBody.inspectionSubmittedForHr = inspectionSubmitResult.submitted === true;
+        }
+
+        res.status(200).json(responseBody);
     } catch (error) {
         res.status(500).json({ message: 'Server Error' });
     }
@@ -14260,14 +14468,7 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
         const scope = String(req.query.scope || '').trim().toLowerCase();
         let requestTypeFilter;
         if (scope === 'vehicle') {
-            requestTypeFilter = {
-                $in: [
-                    'Vehicle Service Request',
-                    'Vehicle Profile Activation',
-                    'Vehicle Disposition Request',
-                    'Asset Approval',
-                ],
-            };
+            requestTypeFilter = { $in: VEHICLE_DASHBOARD_INBOX_TYPES };
         } else if (scope === 'tools') {
             requestTypeFilter = { $in: ASSET_TOOLS_INBOX_TYPES };
         } else {
@@ -14288,16 +14489,36 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
         // Role-aware fallback: a freshly-appointed HR (or AC) should see in-flight Asset Approvals
         // even when DashboardAction.assignedTo is still the previous role holder (until the boot
         // re-route runs). Match by role + fleet flag stored on extra3 (set at creation time).
-        const [isHrRoleHolder, isAcRoleHolder, isAccountsRoleHolder, isManagementRoleHolder] = await Promise.all([
+        const [isHrRoleHolder, isAcRoleHolder, isAccountsRoleHolder, isManagementRoleHolder, isAdminOfficerHolder] =
+            await Promise.all([
             isUserActiveInFlowchart(currentUser, 'hr'),
             isUserActiveInFlowchart(currentUser, 'assetcontroller'),
             isUserActiveInFlowchart(currentUser, 'accounts'),
             isUserInFlowchart(currentUser, 'management').catch(() => false),
+            isUserActiveInFlowchart(currentUser, 'admincontroller'),
         ]);
         if (isHrRoleHolder) {
             assigneeClauses.push({
                 requestType: 'Asset Approval',
                 extra3: { $regex: '"isFleetVehicle"\\s*:\\s*true', $options: 'i' },
+            });
+            assigneeClauses.push({ requestType: 'Vehicle Inspection' });
+            assigneeClauses.push({ requestType: 'Vehicle Profile Activation' });
+            assigneeClauses.push({ requestType: 'Vehicle Profile Edit' });
+            assigneeClauses.push({ requestType: 'Vehicle Mortgage Close' });
+        }
+        if (isAdminOfficerHolder) {
+            assigneeClauses.push({
+                requestType: 'Vehicle Inspection',
+                extra3: { $regex: '"inspectionFormTask"\\s*:\\s*true', $options: 'i' },
+            });
+            assigneeClauses.push({
+                requestType: 'Vehicle Inspection',
+                extra3: { $regex: '"activationViewerRole"\\s*:\\s*"inspection_assignee"', $options: 'i' },
+            });
+            assigneeClauses.push({
+                requestType: 'Asset Assignment',
+                extra3: { $regex: '"handoverViewerRole"\\s*:\\s*"adminOfficer"', $options: 'i' },
             });
         }
         if (isAcRoleHolder) {

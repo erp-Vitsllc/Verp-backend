@@ -21,6 +21,21 @@ export const ASSET_DASHBOARD_INBOX_TYPES = [
     'Asset Overdue',
     'Vehicle Service Request',
     'Vehicle Profile Activation',
+    'Vehicle Profile Edit',
+    'Vehicle Inspection',
+    'Vehicle Mortgage Close',
+    'Vehicle Disposition Request',
+];
+
+/** Fleet vehicle dashboard bell / vehicle-scope pending inbox. */
+export const VEHICLE_DASHBOARD_INBOX_TYPES = [
+    'Vehicle Service Request',
+    'Vehicle Profile Activation',
+    'Vehicle Profile Edit',
+    'Vehicle Inspection',
+    'Vehicle Mortgage Close',
+    'Vehicle Disposition Request',
+    'Asset Approval',
 ];
 
 /** Tools / equipment Asset Management inbox — excludes fleet-only vehicle service workflow. */

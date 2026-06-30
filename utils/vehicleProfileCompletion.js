@@ -55,6 +55,14 @@ export function isVehicleProfilePictureComplete(asset) {
     return Boolean(asset?.imagePreview || asset?.photo || asset?.images?.[0]?.url);
 }
 
+export function isVehicleInspectionComplete(asset) {
+    const status = String(asset?.vehicleInspectionStatus || '').toLowerCase();
+    if (status === 'active') return true;
+    return (asset?.documents || []).some(
+        (doc) => String(doc?.type || '').trim().toLowerCase() === 'vehicle inspection',
+    );
+}
+
 export const VEHICLE_PROFILE_ACTIVATION_SECTION_IDS = [
     'basic',
     'registration',
@@ -75,6 +83,9 @@ export function assertVehicleProfileActivationReady(asset) {
     }
     if (!isVehicleProfilePictureComplete(asset)) {
         return 'Upload a profile picture before submitting.';
+    }
+    if (!isVehicleInspectionComplete(asset)) {
+        return 'Complete vehicle inspection (Admin Officer request and HR approval) before submitting for activation.';
     }
     return null;
 }

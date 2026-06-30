@@ -31,8 +31,10 @@ import {
 } from '../controllers/vehicleDispositionWorkflowController.js';
 import {
     submitVehicleInspectionRequest,
+    submitInspectionHandoverForHr,
     approveVehicleInspection,
     rejectVehicleInspection,
+    updateHistoryVehicleInspectionForm,
 } from '../controllers/vehicleInspectionController.js';
 import {
     submitVehicleMortgageClose,
@@ -731,6 +733,8 @@ router.get('/:id/history', protect, getAssetHistory);
 router.get('/history-record/:historyId', protect, getHistoryRecord);
 router.put('/history-record/:historyId/receiver-assessment', protect, updateHistoryReceiverAssessment);
 router.put('/history-record/:historyId/body-condition', protect, updateHistoryBodyCondition);
+router.post('/history-record/:historyId/submit-inspection-for-hr', protect, submitInspectionHandoverForHr);
+router.put('/history-record/:historyId/vehicle-inspection-form', protect, updateHistoryVehicleInspectionForm);
 router.get('/handover-pdf/:id', protect, downloadHandoverPdf);
 router.get('/history-handover-pdf/:historyId', protect, downloadHistoryHandoverPdf);
 router.get('/vehicle-handover-pdf/:vehicleId', protect, downloadVehicleHandoverPdf);

@@ -504,7 +504,7 @@ const assetItemSchema = new mongoose.Schema({
     /** Formal vehicle inspection record (HR-approved create request). */
     vehicleInspectionStatus: {
         type: String,
-        enum: ['none', 'pending_hr', 'active'],
+        enum: ['none', 'draft', 'pending_hr', 'active'],
         default: 'none',
     },
     vehicleInspectionSubmittedAt: { type: Date, default: null },
@@ -513,10 +513,21 @@ const assetItemSchema = new mongoose.Schema({
         ref: 'EmployeeBasic',
         default: null,
     },
+    /** Employee who initiated the inspection handover (Handover By) — set once at create. */
+    vehicleInspectionRequestedBy: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'EmployeeBasic',
+        default: null,
+    },
     vehicleInspectionApprovedAt: { type: Date, default: null },
     vehicleInspectionApprovedBy: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'EmployeeBasic',
+        default: null,
+    },
+    vehicleInspectionHandoverHistoryId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'AssetHistory',
         default: null,
     },
     /** Mortgage closure: requester → HR approve → archive to old documents & clear live mortgage. */

@@ -328,8 +328,11 @@ export const syncDashboardAction = async (data) => {
             assignedTo: actualAssignedTo,
             status: 'Pending',
         };
-        // Parallel disposition: Accounts + Management may share the same assignee — keep separate bell rows.
-        if (requestType === 'Vehicle Disposition Request' && pendingExtra3) {
+        // Parallel disposition + inspection handover: separate bell rows per viewer role / task type.
+        if (
+            (requestType === 'Vehicle Disposition Request' || requestType === 'Vehicle Inspection') &&
+            pendingExtra3
+        ) {
             pendingUpsertFilter.extra3 = pendingExtra3;
         }
 

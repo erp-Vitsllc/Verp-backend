@@ -450,6 +450,18 @@ export const getUserActivityStats = async (req, res) => {
                 requestType: "Company Activation",
                 status: "Pending",
             });
+            dashboardOrConditions.push({
+                requestType: 'Vehicle Inspection',
+                status: 'Pending',
+            });
+            dashboardOrConditions.push({
+                requestType: 'Vehicle Profile Activation',
+                status: 'Pending',
+            });
+            dashboardOrConditions.push({
+                requestType: 'Vehicle Profile Edit',
+                status: 'Pending',
+            });
         }
 
         const dispositionRowVisibleToViewer = (item) => {
@@ -537,7 +549,7 @@ export const getUserActivityStats = async (req, res) => {
                 .lean()
                 .maxTimeMS(6000),
             DashboardAction.find({
-                requestType: { $in: ['Vehicle Profile Activation', 'Vehicle Profile Edit'] },
+                requestType: { $in: ['Vehicle Profile Activation', 'Vehicle Profile Edit', 'Vehicle Inspection'] },
                 status: { $in: ['Approved', 'Rejected', 'On Hold'] },
                 $or: profileActivationOutcomeOr,
             })
@@ -573,6 +585,18 @@ export const getUserActivityStats = async (req, res) => {
             dashboardPendingItemsRaw.filter((item) => {
                 if (!dispositionRowVisibleToViewer(item)) return false;
                 if (!ASSIGNMENT_STRICT_TYPES.has(item.requestType)) return true;
+                if (
+                    isCurrentHrHolder &&
+                    item.status === 'Pending' &&
+                    [
+                        'Vehicle Inspection',
+                        'Vehicle Profile Activation',
+                        'Vehicle Profile Edit',
+                        'Vehicle Mortgage Close',
+                    ].includes(item.requestType)
+                ) {
+                    return true;
+                }
                 return dashboardRowAssignedToViewer(item);
             })
             )
@@ -798,16 +822,30 @@ export const getUserActivityStats = async (req, res) => {
                 item.requestType === 'Asset Approval' &&
                 assetCreationViewerRole === 'creator';
 
+            let handoverViewerRole = null;
+            if (item.requestType === 'Asset Assignment' && item.extra3) {
+                try {
+                    handoverViewerRole = JSON.parse(item.extra3).handoverViewerRole || null;
+                } catch {
+                    handoverViewerRole = null;
+                }
+            }
+            const isHandoverAssignerCopy =
+                item.requestType === 'Asset Assignment' && handoverViewerRole === 'assigner';
+
             const assignedToViewer = dashboardRowAssignedToViewer(item);
-            const scope =
-                assignedToViewer ||
-                isCompanyActivationRequesterCopy ||
-                item.requestType === 'Company Document Not Renew' ||
-                item.requestType === 'Employee Document Not Renew'
-                    ? 'inbox'
-                    : isCreatorSideAssetApproval || isVehicleActivationRequesterCopy || isAssetCreationCreatorCopy
-                      ? 'outgoing'
-                      : 'inbox';
+            const scope = isHandoverAssignerCopy
+                ? 'outgoing'
+                : assignedToViewer ||
+                    isCompanyActivationRequesterCopy ||
+                    item.requestType === 'Company Document Not Renew' ||
+                    item.requestType === 'Employee Document Not Renew'
+                  ? 'inbox'
+                  : isCreatorSideAssetApproval ||
+                      isVehicleActivationRequesterCopy ||
+                      isAssetCreationCreatorCopy
+                    ? 'outgoing'
+                    : 'inbox';
 
             activityList.push({
                 id: displayId,
