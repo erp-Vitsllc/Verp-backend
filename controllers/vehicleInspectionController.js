@@ -12,6 +12,7 @@ import {
     isFleetVehicleAssetFields,
     isFleetVehicleProfileActive,
     resolveAssetControllerEmployee,
+    getResolvedFleetHrEmployee,
 } from '../utils/assetApprovalHelpers.js';
 import { isHandoverReportsComplete, buildHandoverAssignDetailsPath, assigneeCanSelfAcknowledgeFleetHandover } from '../utils/vehicleHandoverApprovalFlow.js';
 
@@ -687,33 +688,113 @@ async function sendInspectionApprovedStakeholderEmails({
     }
 }
 
-async function notifyHrForVehicleInspection({ req, asset, handoverHistory, submitterId }) {
-    const designatedHr = await getDepartmentHOD('hr');
-    if (!designatedHr?._id) {
-        throw new Error('No HR assignee is configured in the flowchart.');
-    }
-    const { email: hrEmail } = resolveEmployeeEmail(designatedHr);
-    if (!hrEmail?.trim()) {
-        throw new Error('Flowchart HR has no email address.');
-    }
-
-    await AssetItem.updateOne(
-        { _id: asset._id },
+async function closeInspectionAssigneeDashboardTasks(assetId, comment = 'Submitted to HR for approval') {
+    if (!assetId) return;
+    await DashboardAction.updateMany(
+        {
+            requestId: assetId,
+            requestType: 'Vehicle Inspection',
+            status: 'Pending',
+            extra3: {
+                $regex:
+                    '("inspectionFormTask"|"inspectionVehicleAssigneeTask"|"inspection_assignee"|"inspection_vehicle_assignee"|"inspection_requester")',
+                $options: 'i',
+            },
+        },
         {
             $set: {
-                vehicleInspectionStatus: 'pending_hr',
-                vehicleInspectionSubmittedAt: new Date(),
-                vehicleInspectionSubmittedBy: submitterId,
-                vehicleInspectionHandoverHistoryId: handoverHistory._id,
+                status: 'Approved',
+                actionedDate: new Date(),
+                comment,
+            },
+        },
+    );
+}
+
+async function upsertInspectionHrDashboardAction({
+    asset,
+    handoverHistory,
+    hrEmployee,
+    requestedByName,
+    vehicleLabel,
+}) {
+    await DashboardAction.updateMany(
+        {
+            requestId: asset._id,
+            requestType: 'Vehicle Inspection',
+            status: 'Pending',
+            assignedTo: hrEmployee._id,
+        },
+        {
+            $set: {
+                status: 'Approved',
+                actionedDate: new Date(),
+                comment: 'Superseded by latest HR review task',
             },
         },
     );
 
+    const hrExtra3 = buildInspectionDashboardExtra3(asset._id, handoverHistory._id, 'flowchart_hr', {
+        inspectionReview: true,
+    });
+    const subject = vehicleSubjectForDashboard(asset);
+
+    await DashboardAction.findOneAndUpdate(
+        {
+            requestId: asset._id,
+            requestType: 'Vehicle Inspection',
+            assignedTo: hrEmployee._id,
+            status: 'Pending',
+            extra3: { $regex: '"inspectionReview"\\s*:\\s*true', $options: 'i' },
+        },
+        {
+            assignedTo: hrEmployee._id,
+            assignedToEmpId: hrEmployee.employeeId,
+            requestId: asset._id,
+            requestType: 'Vehicle Inspection',
+            status: 'Pending',
+            subjectEmployeeId: subject.employeeId,
+            subjectName: `${subject.firstName || ''} ${subject.lastName || ''}`.trim(),
+            requestedByName: requestedByName || 'System',
+            requestedDate: new Date(),
+            extra1: `[Fleet] ${vehicleLabel} — HR approval required`,
+            extra2: '',
+            extra3: hrExtra3,
+        },
+        { upsert: true, new: true, setDefaultsOnInsert: true },
+    );
+}
+
+async function notifyHrForVehicleInspection({
+    req,
+    asset,
+    handoverHistory,
+    submitterId,
+    skipStatusUpdate = false,
+}) {
+    const designatedHr = await getResolvedFleetHrEmployee();
+    if (!designatedHr?._id) {
+        throw new Error('No HR assignee is configured in the flowchart.');
+    }
+    const { email: hrEmail } = resolveEmployeeEmail(designatedHr);
+
+    if (!skipStatusUpdate) {
+        await AssetItem.updateOne(
+            { _id: asset._id },
+            {
+                $set: {
+                    vehicleInspectionStatus: 'pending_hr',
+                    vehicleInspectionSubmittedAt: new Date(),
+                    vehicleInspectionSubmittedBy: submitterId,
+                    vehicleInspectionHandoverHistoryId: handoverHistory._id,
+                },
+            },
+        );
+    }
+
     const vehicleLabel = `${asset.name || 'Vehicle'} (${asset.assetId || asset._id})`;
     const detailUrl = buildInspectionHandoverDetailsUrl(req, asset._id, handoverHistory._id);
     const hrName = `${designatedHr.firstName || ''} ${designatedHr.lastName || ''}`.trim() || 'HR';
-
-    await sendHrInspectionRequestEmail({ req, hrEmail, hrName, vehicleLabel, detailUrl });
 
     const requestedByName =
         req.user?.name ||
@@ -721,30 +802,19 @@ async function notifyHrForVehicleInspection({ req, asset, handoverHistory, submi
         req.user?.employeeId ||
         '';
 
-    await updateInspectionAdminAwaitingHrTrack({
+    await closeInspectionAssigneeDashboardTasks(asset._id);
+
+    await upsertInspectionHrDashboardAction({
         asset,
         handoverHistory,
+        hrEmployee: designatedHr,
         requestedByName,
+        vehicleLabel,
     });
 
-    await syncDashboardAction({
-        requestId: asset._id,
-        requestType: 'Vehicle Inspection',
-        assignedTo: String(designatedHr._id),
-        status: 'Pending',
-        subjectEmployee: vehicleSubjectForDashboard(asset),
-        requestedByName,
-        extra1: `[Fleet] ${vehicleLabel} — vehicle inspection create request`,
-        extra2: '',
-        extra3: JSON.stringify({
-            activationSubject: 'vehicle',
-            activationViewerRole: 'flowchart_hr',
-            vehicleMongoId: String(asset._id),
-            historyId: String(handoverHistory._id),
-            detailsPath: buildHandoverAssignDetailsPath(asset._id, handoverHistory._id),
-            inspectionReview: true,
-        }),
-    });
+    if (hrEmail?.trim()) {
+        await sendHrInspectionRequestEmail({ req, hrEmail, hrName, vehicleLabel, detailUrl });
+    }
 }
 
 /**
@@ -771,13 +841,38 @@ export async function submitInspectionHandoverAfterAssessment(req, record) {
     if (!linkedId || String(linkedId) !== String(record._id)) {
         throw new Error('Inspection handover is not linked to this vehicle.');
     }
-    if (String(asset.vehicleInspectionStatus || '').toLowerCase() !== 'draft') {
-        return { submitted: false, alreadySubmitted: true };
-    }
 
     const submitterId = await resolveProfileActivationSubmitterId(req);
     if (!submitterId) {
         throw new Error('Your portal login must be linked to an Employee record.');
+    }
+
+    const lockedAsset = await AssetItem.findOneAndUpdate(
+        {
+            _id: asset._id,
+            vehicleInspectionStatus: 'draft',
+            vehicleInspectionHandoverHistoryId: record._id,
+        },
+        {
+            $set: {
+                vehicleInspectionStatus: 'pending_hr',
+                vehicleInspectionSubmittedAt: new Date(),
+                vehicleInspectionSubmittedBy: submitterId,
+            },
+        },
+        { new: true },
+    )
+        .populate('typeId', 'name')
+        .lean();
+
+    if (!lockedAsset) {
+        const current = await AssetItem.findById(asset._id)
+            .select('vehicleInspectionStatus')
+            .lean();
+        if (String(current?.vehicleInspectionStatus || '').toLowerCase() === 'pending_hr') {
+            return { submitted: false, alreadySubmitted: true };
+        }
+        throw new Error('Inspection could not be submitted. Refresh the page and try again.');
     }
 
     const workflow = record.details?.vehicleHandoverWorkflow || {};
@@ -802,9 +897,15 @@ export async function submitInspectionHandoverAfterAssessment(req, record) {
     record.markModified('details');
     await record.save();
 
-    await notifyHrForVehicleInspection({ req, asset, handoverHistory: record, submitterId });
+    await notifyHrForVehicleInspection({
+        req,
+        asset: lockedAsset,
+        handoverHistory: record,
+        submitterId,
+        skipStatusUpdate: true,
+    });
 
-    const refreshedAsset = await AssetItem.findById(asset._id).populate('typeId', 'name').lean();
+    const refreshedAsset = await AssetItem.findById(lockedAsset._id).populate('typeId', 'name').lean();
     return { submitted: true, asset: refreshedAsset };
 }
 

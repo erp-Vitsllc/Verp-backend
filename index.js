@@ -31,6 +31,7 @@ import { processDocumentExpiryReminders } from "./utils/processDocumentExpiryRem
 import { processVehicleServiceHoldReminders } from "./utils/processVehicleServiceHoldReminders.js";
 import { processVehicleServiceScheduledPhase } from "./utils/processVehicleServiceScheduledPhase.js";
 import { processAssetServiceOverdue } from "./utils/processAssetServiceOverdue.js";
+import { processFleetHandoverEscalation } from "./utils/processFleetHandoverEscalation.js";
 import { processBirthdayWishes } from "./utils/processBirthdayWishes.js";
 import { setupEmailSubjectTag } from "./utils/setupEmailSubjectTag.js";
 import { purgeExpiredAdminDeletionArchives } from "./services/adminDeletionArchiveService.js";
@@ -63,6 +64,17 @@ setInterval(() => { processParkingAssets(); }, 6 * 60 * 60 * 1000);
 setTimeout(() => { processTemporaryAssignments(); }, 45 * 1000);
 // Run more frequently so "ends on date" feels accurate to users.
 setInterval(() => { processTemporaryAssignments(); }, 60 * 60 * 1000);
+
+setTimeout(() => {
+    processFleetHandoverEscalation().catch((e) =>
+        console.error('[processFleetHandoverEscalation] startup failed:', e?.message || e),
+    );
+}, 75 * 1000);
+setInterval(() => {
+    processFleetHandoverEscalation().catch((e) =>
+        console.error('[processFleetHandoverEscalation] scheduled run failed:', e?.message || e),
+    );
+}, 6 * 60 * 60 * 1000);
 
 setTimeout(() => { processAccidentAssets(); }, 60 * 1000);
 setInterval(() => { processAccidentAssets(); }, 24 * 60 * 60 * 1000);

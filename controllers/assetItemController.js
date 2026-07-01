@@ -33,7 +33,10 @@ import {
     upsertHandoverAssignerDashboardAction,
     upsertHandoverAdminOfficerDashboardAction,
     closeFleetHandoverDashboardActions,
+    markHandoverLifecycleOnHistory,
+    HANDOVER_LIFECYCLE,
 } from '../utils/vehicleHandoverApprovalFlow.js';
+import { markHandoverEscalationResolved } from '../utils/vehicleHandoverEscalation.js';
 import { sendAssetResponseEmail } from '../utils/sendAssetResponseEmail.js';
 import { sendAssetReassignmentEmail } from '../utils/sendAssetReassignmentEmail.js';
 import DashboardAction from '../models/DashboardAction.js';
@@ -4808,6 +4811,10 @@ export const assignAssetItem = async (req, res) => {
                     stage: 'target',
                     historyId: fleetHandoverHistoryId,
                     assigneeCanSelfAcknowledge: fleetHandoverActor?.assigneeCanSelfAcknowledge ?? false,
+                    escalation: {
+                        requestedAt: new Date(),
+                        lastReminderDay: null,
+                    },
                 },
             };
             await item.save();
@@ -4912,9 +4919,26 @@ export const assignAssetItem = async (req, res) => {
                             })
                             .populate({ path: 'assignedBy', select: 'firstName lastName employeeId signature' });
                         if (snapshotForHistory) {
+                            const existingHistory = await AssetHistory.findById(fleetHandoverHistoryId)
+                                .select('details')
+                                .lean();
                             await AssetHistory.findByIdAndUpdate(fleetHandoverHistoryId, {
-                                details: snapshotForHistory.toObject(),
+                                details: {
+                                    ...snapshotForHistory.toObject(),
+                                    ...(existingHistory?.details?.vehicleHandoverWorkflow
+                                        ? {
+                                              vehicleHandoverWorkflow:
+                                                  existingHistory.details.vehicleHandoverWorkflow,
+                                          }
+                                        : {}),
+                                    handoverLifecycleStatus: HANDOVER_LIFECYCLE.PENDING,
+                                },
                             });
+                        } else {
+                            await markHandoverLifecycleOnHistory(
+                                fleetHandoverHistoryId,
+                                HANDOVER_LIFECYCLE.PENDING,
+                            ).catch(() => null);
                         }
                     } catch (err) {
                         /* non-fatal */
@@ -6088,6 +6112,13 @@ export const respondToAssignment = async (req, res) => {
                     return res.status(400).json({ message: advance.error });
                 }
                 if (advance.advanced) {
+                    if (handoverFlow?.stage === 'target') {
+                        const updatedFlow = getVehicleHandoverFlow(item);
+                        item.pendingActionDetails = {
+                            ...(item.pendingActionDetails || {}),
+                            vehicleHandoverFlow: markHandoverEscalationResolved(updatedFlow || {}),
+                        };
+                    }
                     await item.save();
                     const stagedItem = await AssetItem.findById(id)
                         .populate('assignedCompany')
@@ -6367,6 +6398,20 @@ export const respondToAssignment = async (req, res) => {
             }
 
         } else if (action === 'Accept' || action === 'AcceptWithComments') {
+            if (
+                fleetVehicleRespond &&
+                handoverFlow &&
+                action === 'Accept' &&
+                getVehicleHandoverFlow(item)
+            ) {
+                const flowNow = getVehicleHandoverFlow(item);
+                if (flowNow?.stage === 'hr' || flowNow?.stage === 'management') {
+                    if (item.pendingActionDetails?.vehicleHandoverFlow) {
+                        delete item.pendingActionDetails.vehicleHandoverFlow;
+                    }
+                }
+            }
+
             // Handle HR Handover / Asset Transfer: Reassign 'assignedTo' to the person who accepted
             if (item.pendingAction === 'Asset Transfer' && item.actionRequiredBy?.toString() === currentUser.toString()) {
                 item.assignedTo = currentUser;
@@ -6563,6 +6608,21 @@ export const respondToAssignment = async (req, res) => {
         }
 
         await item.save();
+
+        if (
+            fleetVehicleRespond &&
+            handoverFlow?.stage === 'target' &&
+            (action === 'Reject' || action === 'Accept')
+        ) {
+            const flowAfter = getVehicleHandoverFlow(item);
+            if (flowAfter && !flowAfter.escalation?.resolvedAt) {
+                item.pendingActionDetails = {
+                    ...(item.pendingActionDetails || {}),
+                    vehicleHandoverFlow: markHandoverEscalationResolved(flowAfter),
+                };
+                await item.save();
+            }
+        }
 
         // Update Dashboard Actions
         try {
@@ -14502,10 +14562,24 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
                 requestType: 'Asset Approval',
                 extra3: { $regex: '"isFleetVehicle"\\s*:\\s*true', $options: 'i' },
             });
-            assigneeClauses.push({ requestType: 'Vehicle Inspection' });
+            assigneeClauses.push({
+                requestType: 'Vehicle Inspection',
+                extra3: { $regex: '"inspectionReview"\\s*:\\s*true', $options: 'i' },
+            });
+            assigneeClauses.push({
+                requestType: 'Vehicle Inspection',
+                extra3: { $regex: '"activationViewerRole"\\s*:\\s*"flowchart_hr"', $options: 'i' },
+            });
             assigneeClauses.push({ requestType: 'Vehicle Profile Activation' });
             assigneeClauses.push({ requestType: 'Vehicle Profile Edit' });
             assigneeClauses.push({ requestType: 'Vehicle Mortgage Close' });
+            assigneeClauses.push({
+                requestType: 'Asset Assignment',
+                extra3: {
+                    $regex: '"isFleetVehicle"\\s*:\\s*true.*"handoverViewerRole"\\s*:\\s*"actor"',
+                    $options: 'i',
+                },
+            });
         }
         if (isAdminOfficerHolder) {
             assigneeClauses.push({
@@ -14579,6 +14653,28 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
             seen.add(k);
             unique.push(it);
         }
+
+        const hrInspectionSeen = new Set();
+        const dedupedInspectionHr = [];
+        for (const it of unique) {
+            if (it.requestType !== 'Vehicle Inspection') {
+                dedupedInspectionHr.push(it);
+                continue;
+            }
+            const meta = parseExtra3(it.extra3);
+            const isHrReview =
+                meta?.inspectionReview === true || meta?.activationViewerRole === 'flowchart_hr';
+            if (!isHrReview) {
+                dedupedInspectionHr.push(it);
+                continue;
+            }
+            const assetKey = it.requestId?.toString();
+            if (assetKey && hrInspectionSeen.has(assetKey)) continue;
+            if (assetKey) hrInspectionSeen.add(assetKey);
+            dedupedInspectionHr.push(it);
+        }
+        unique.length = 0;
+        unique.push(...dedupedInspectionHr);
 
         const oidStr = (x) => String(x ?? '').trim();
         const validOid = (id) => mongoose.Types.ObjectId.isValid(oidStr(id));

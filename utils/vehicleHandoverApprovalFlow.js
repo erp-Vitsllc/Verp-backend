@@ -20,7 +20,7 @@ export const HANDOVER_FLOW_STAGES = {
     MANAGEMENT: 'management',
 };
 
-function formatEmployeeDisplayName(emp) {
+export function formatEmployeeDisplayName(emp) {
     if (!emp) return '';
     if (typeof emp === 'string') return emp.trim();
     const name = `${emp.firstName || ''} ${emp.lastName || ''}`.trim();
@@ -205,6 +205,49 @@ export async function recordHandoverStageApproval(historyId, stageKey, actor, ap
 }
 
 /** Update the original Assigned handover row — do not create a second history entry. */
+export const HANDOVER_LIFECYCLE = {
+    PENDING: 'pending',
+    ACCEPTED: 'accepted',
+    APPROVED: 'approved',
+    REJECTED: 'rejected',
+};
+
+export async function markHandoverLifecycleOnHistory(historyId, lifecycle, extraFields = {}) {
+    if (!historyId || !lifecycle) return;
+    const patch = {
+        'details.handoverLifecycleStatus': lifecycle,
+        ...extraFields,
+    };
+    await AssetHistory.findByIdAndUpdate(historyId, { $set: patch });
+}
+
+export async function resolvePreviousHandoverAssignee(assetId, currentHistoryId) {
+    if (!assetId) return null;
+    const current = currentHistoryId
+        ? await AssetHistory.findById(currentHistoryId).select('createdAt date').lean()
+        : null;
+    const beforeDate = current?.createdAt || current?.date;
+
+    const filter = {
+        assetId,
+        action: { $in: ['Assigned', 'Accepted'] },
+        assignedTo: { $ne: null },
+        'details.handoverKind': { $ne: 'vehicle_inspection' },
+        'details.firstInspection': { $ne: true },
+    };
+    if (currentHistoryId) filter._id = { $ne: currentHistoryId };
+    if (beforeDate) filter.createdAt = { $lt: beforeDate };
+
+    const row = await AssetHistory.findOne(filter)
+        .sort({ createdAt: -1 })
+        .select('assignedTo')
+        .lean();
+    if (!row?.assignedTo) return null;
+    return EmployeeBasic.findById(row.assignedTo)
+        .select('firstName lastName employeeId companyEmail workEmail personalEmail email')
+        .lean();
+}
+
 export async function updateFleetHandoverHistoryRecord({
     historyId,
     action,
@@ -233,8 +276,11 @@ export async function updateFleetHandoverHistoryRecord({
 
     if (action === 'Accepted') {
         mergedDetails.acceptanceStatus = 'Accepted';
+        mergedDetails.handoverLifecycleStatus = HANDOVER_LIFECYCLE.APPROVED;
+        mergedDetails.handoverHrApprovedAt = new Date();
     } else if (action === 'Rejected') {
         mergedDetails.acceptanceStatus = 'Rejected';
+        mergedDetails.handoverLifecycleStatus = HANDOVER_LIFECYCLE.REJECTED;
     }
 
     existing.action = action;
@@ -761,6 +807,20 @@ export async function notifyHandoverCompletionEmails({
     const detailsUrl = buildHandoverAssignDetailsUrl(asset._id, historyId);
     const assigneeName = `${assignee?.firstName || ''} ${assignee?.lastName || ''}`.trim() || assignee?.employeeId || 'Assignee';
 
+    const assigneeDoc =
+        assignee?._id && assignee?.employeeId
+            ? assignee
+            : assignee?._id
+              ? await EmployeeBasic.findById(assignee._id)
+                    .select(
+                        'firstName lastName employeeId companyEmail workEmail personalEmail email primaryReportee',
+                    )
+                    .populate('primaryReportee', 'firstName lastName employeeId companyEmail workEmail personalEmail email')
+                    .lean()
+              : null;
+
+    const previousAssignee = await resolvePreviousHandoverAssignee(asset._id, historyId);
+
     const recipients = [];
     const seen = new Set();
     const push = (emp) => {
@@ -770,11 +830,23 @@ export async function notifyHandoverCompletionEmails({
         recipients.push(emp);
     };
 
+    push(assigneeDoc || assignee);
+    push(adminOfficer);
     push(assigner);
-    const canSelf = await assigneeCanSelfAcknowledgeFleetHandover(assignee);
-    if (canSelf) push(assignee);
-    else push(adminOfficer);
-    push(hrEmployee);
+    push(previousAssignee);
+
+    const primaryReportee = assigneeDoc?.primaryReportee;
+    if (primaryReportee?._id) {
+        push(
+            typeof primaryReportee === 'object' && primaryReportee.employeeId
+                ? primaryReportee
+                : await EmployeeBasic.findById(primaryReportee._id || primaryReportee)
+                      .select('firstName lastName employeeId companyEmail workEmail personalEmail email')
+                      .lean(),
+        );
+    } else if (hod?._id) {
+        push(hod);
+    }
 
     const att = attachmentBuffers.map((buf, i) => ({
         filename: `vehicle-handover-${asset.assetId || i}.pdf`,
@@ -858,10 +930,8 @@ export async function advanceFleetHandoverOnAccept({
         if (historyId) {
             const assignedRow = await AssetHistory.findById(historyId).select('action details').lean();
             if (assignedRow?.action === 'Assigned') {
-                await AssetHistory.findByIdAndUpdate(historyId, {
-                    $set: {
-                        'details.acceptanceStatus': 'Accepted',
-                    },
+                await markHandoverLifecycleOnHistory(historyId, HANDOVER_LIFECYCLE.ACCEPTED, {
+                    'details.handoverTargetAcceptedAt': new Date(),
                 });
             }
         }
