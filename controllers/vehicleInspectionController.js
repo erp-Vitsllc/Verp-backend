@@ -14,7 +14,13 @@ import {
     resolveAssetControllerEmployee,
     getResolvedFleetHrEmployee,
 } from '../utils/assetApprovalHelpers.js';
-import { isHandoverReportsComplete, buildHandoverAssignDetailsPath, assigneeCanSelfAcknowledgeFleetHandover } from '../utils/vehicleHandoverApprovalFlow.js';
+import {
+    isHandoverReportsComplete,
+    buildHandoverAssignDetailsPath,
+    assigneeCanSelfAcknowledgeFleetHandover,
+    buildFleetHandoverDisplayLabels,
+    formatEmployeeDisplayName,
+} from '../utils/vehicleHandoverApprovalFlow.js';
 
 export const VEHICLE_INSPECTION_DOC_TYPE = 'Vehicle Inspection';
 export const VEHICLE_INSPECTION_HANDOVER_KIND = 'vehicle_inspection';
@@ -30,12 +36,6 @@ export function isInspectionHandoverHistoryRecord(record) {
 export function isVehicleInspectionWorkflowActive(asset) {
     const status = String(asset?.vehicleInspectionStatus || '').toLowerCase();
     return status === 'draft' || status === 'pending_hr';
-}
-
-function formatEmployeeDisplayName(emp) {
-    if (!emp) return '';
-    const name = `${emp.firstName || ''} ${emp.lastName || ''}`.trim();
-    return name || String(emp.employeeId || '').trim();
 }
 
 function buildInspectionHandoverWorkflowMeta(submitterEmp, adminOfficerEmp) {
@@ -82,6 +82,11 @@ async function createInspectionHandoverHistoryRow({
         assigneeCanSelfAcknowledge: assigneeCanSelf,
         vehicleAssigneeId: vehicleAssigneeEmp?._id?.toString?.() || '',
     };
+    const { handoverByDisplay, handoverToDisplay } = buildFleetHandoverDisplayLabels({
+        workflowMeta,
+        assignee: adminOfficerEmp,
+        isInspection: true,
+    });
 
     return AssetHistory.create({
         assetId,
@@ -97,6 +102,8 @@ async function createInspectionHandoverHistoryRow({
             inspectionFormStatus: 'draft',
             vehicleInspectionForm: {},
             vehicleHandoverWorkflow: workflowMeta,
+            handoverByDisplay,
+            handoverToDisplay,
         },
     });
 }
@@ -171,8 +178,8 @@ export async function canEditInspectionHandoverContent(req, asset, record) {
             typeof assetDoc.assignedTo === 'object'
                 ? assetDoc.assignedTo
                 : await EmployeeBasic.findById(assetDoc.assignedTo)
-                      .select('companyEmail enablePortalAccess employeeId')
-                      .lean();
+                    .select('companyEmail enablePortalAccess employeeId')
+                    .lean();
         assigneeCanSelf = assigneeDoc
             ? await assigneeCanSelfAcknowledgeFleetHandover(assigneeDoc)
             : false;
@@ -286,7 +293,7 @@ const sendHrInspectionRequestEmail = async ({ req, hrEmail, hrName, vehicleLabel
                 </div>
             `,
         })
-        .catch(() => {});
+        .catch(() => { });
 };
 
 function buildInspectionDashboardExtra3(assetId, historyId, viewerRole, extra = {}) {
@@ -335,7 +342,7 @@ async function sendInspectionAssigneeTaskEmail({
                 </div>
             `,
         })
-        .catch(() => {});
+        .catch(() => { });
 }
 
 async function sendInspectionRequesterAckEmail({ to, recipientName, vehicleLabel, adminName, detailUrl }) {
@@ -365,7 +372,7 @@ async function sendInspectionRequesterAckEmail({ to, recipientName, vehicleLabel
                 </div>
             `,
         })
-        .catch(() => {});
+        .catch(() => { });
 }
 
 async function notifyInspectionHandoverRequester({
@@ -477,8 +484,8 @@ async function notifyInspectionHandoverVehicleAssignee({
         typeof assigneeRef === 'object' && assigneeRef?._id
             ? assigneeRef
             : await EmployeeBasic.findById(assigneeRef)
-                  .select('_id employeeId firstName lastName companyEmail workEmail personalEmail email enablePortalAccess')
-                  .lean();
+                .select('_id employeeId firstName lastName companyEmail workEmail personalEmail email enablePortalAccess')
+                .lean();
     if (!assigneeEmp?._id) return;
 
     const assigneeCanSelf = await assigneeCanSelfAcknowledgeFleetHandover(assigneeEmp);
@@ -608,7 +615,7 @@ const sendInspectionOutcomeEmail = async ({ submitterEmployee, reviewerName, veh
                 </div>
             `,
         })
-        .catch(() => {});
+        .catch(() => { });
 };
 
 async function sendInspectionApprovedStakeholderEmails({
@@ -628,15 +635,15 @@ async function sendInspectionApprovedStakeholderEmails({
 
     const historyRecord = historyId
         ? await AssetHistory.findById(historyId)
-              .populate({
-                  path: 'assignedTo',
-                  select: 'firstName lastName employeeId companyEmail workEmail personalEmail email primaryReportee',
-                  populate: {
-                      path: 'primaryReportee',
-                      select: 'firstName lastName employeeId companyEmail workEmail personalEmail email',
-                  },
-              })
-              .lean()
+            .populate({
+                path: 'assignedTo',
+                select: 'firstName lastName employeeId companyEmail workEmail personalEmail email primaryReportee',
+                populate: {
+                    path: 'primaryReportee',
+                    select: 'firstName lastName employeeId companyEmail workEmail personalEmail email',
+                },
+            })
+            .lean()
         : null;
 
     const adminOfficer = historyRecord?.assignedTo || null;
@@ -684,7 +691,7 @@ async function sendInspectionApprovedStakeholderEmails({
                     </div>
                 `,
             })
-            .catch(() => {});
+            .catch(() => { });
     }
 }
 
@@ -1006,10 +1013,10 @@ export const submitVehicleInspectionRequest = async (req, res) => {
                 ? typeof asset.assignedTo === 'object'
                     ? asset.assignedTo
                     : await EmployeeBasic.findById(asset.assignedTo)
-                          .select(
-                              'firstName lastName employeeId companyEmail enablePortalAccess workEmail personalEmail email',
-                          )
-                          .lean()
+                        .select(
+                            'firstName lastName employeeId companyEmail enablePortalAccess workEmail personalEmail email',
+                        )
+                        .lean()
                 : null;
 
         const handoverHistory = await createInspectionHandoverHistoryRow({
@@ -1175,8 +1182,8 @@ export const approveVehicleInspection = async (req, res) => {
 
         const requesterEmp = requesterId
             ? await EmployeeBasic.findById(requesterId)
-                  .select('_id employeeId firstName lastName companyEmail workEmail email personalEmail')
-                  .lean()
+                .select('_id employeeId firstName lastName companyEmail workEmail email personalEmail')
+                .lean()
             : null;
 
         sendInspectionOutcomeEmail({
@@ -1185,14 +1192,14 @@ export const approveVehicleInspection = async (req, res) => {
             vehicleLabel,
             detailUrl,
             status: 'approved',
-        }).catch(() => {});
+        }).catch(() => { });
 
         sendInspectionApprovedStakeholderEmails({
             req,
             asset,
             historyId,
             reviewerDisplayName,
-        }).catch(() => {});
+        }).catch(() => { });
 
         if (historyId) {
             const historyRecord = await AssetHistory.findById(historyId)
@@ -1319,8 +1326,8 @@ export const rejectVehicleInspection = async (req, res) => {
 
         const requesterEmp = requesterId
             ? await EmployeeBasic.findById(requesterId)
-                  .select('_id employeeId firstName lastName companyEmail workEmail email personalEmail')
-                  .lean()
+                .select('_id employeeId firstName lastName companyEmail workEmail email personalEmail')
+                .lean()
             : null;
 
         sendInspectionOutcomeEmail({
@@ -1329,7 +1336,7 @@ export const rejectVehicleInspection = async (req, res) => {
             vehicleLabel,
             detailUrl,
             status: 'rejected',
-        }).catch(() => {});
+        }).catch(() => { });
 
         if (requesterId) {
             await syncDashboardAction({
@@ -1397,22 +1404,22 @@ export const updateHistoryVehicleInspectionForm = async (req, res) => {
         const normalized = normalizeInspectionFormPayload(vehicleInspectionForm);
         const merged = partial
             ? {
-                  ...existing,
-                  ...(vehicleInspectionForm.inspectionDate !== undefined
-                      ? { inspectionDate: normalized.inspectionDate }
-                      : {}),
-                  ...(vehicleInspectionForm.odometerReading !== undefined
-                      ? { odometerReading: normalized.odometerReading }
-                      : {}),
-                  ...(vehicleInspectionForm.overallCondition !== undefined
-                      ? { overallCondition: normalized.overallCondition }
-                      : {}),
-                  ...(vehicleInspectionForm.notes !== undefined ? { notes: normalized.notes } : {}),
-              }
+                ...existing,
+                ...(vehicleInspectionForm.inspectionDate !== undefined
+                    ? { inspectionDate: normalized.inspectionDate }
+                    : {}),
+                ...(vehicleInspectionForm.odometerReading !== undefined
+                    ? { odometerReading: normalized.odometerReading }
+                    : {}),
+                ...(vehicleInspectionForm.overallCondition !== undefined
+                    ? { overallCondition: normalized.overallCondition }
+                    : {}),
+                ...(vehicleInspectionForm.notes !== undefined ? { notes: normalized.notes } : {}),
+            }
             : {
-                  ...existing,
-                  ...normalized,
-              };
+                ...existing,
+                ...normalized,
+            };
 
         if (!partial || submitForHr) {
             const validationError = validateInspectionFormComplete(merged);
@@ -1459,8 +1466,8 @@ export const updateHistoryVehicleInspectionForm = async (req, res) => {
             message: submitForHr
                 ? 'Inspection form submitted. HR will be notified for approval.'
                 : partial
-                  ? 'Inspection form draft saved.'
-                  : 'Inspection form saved.',
+                    ? 'Inspection form draft saved.'
+                    : 'Inspection form saved.',
             historyRecord: refreshed,
             vehicleInspectionStatus: submitForHr ? 'pending_hr' : 'draft',
             asset: refreshedAsset,

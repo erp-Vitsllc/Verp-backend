@@ -27,6 +27,131 @@ export function formatEmployeeDisplayName(emp) {
     return name || String(emp.employeeId || '').trim();
 }
 
+export function formatHandoverPersonDisplayLabel(person) {
+    const name = formatEmployeeDisplayName(person);
+    const empId = String(person?.employeeId || '').trim();
+    if (name && empId) return `${name} (${empId})`;
+    return name || empId || '—';
+}
+
+/** Frozen table labels — do not derive from live asset after creation. */
+export function buildFleetHandoverDisplayLabels({
+    workflowMeta = null,
+    assigner = null,
+    assignee = null,
+    previousAssignee = null,
+    adminOfficer = null,
+    isInspection = false,
+    isReturn = false,
+}) {
+    if (isReturn) {
+        const returningEmp = previousAssignee || assignee;
+        const adminLabel =
+            workflowMeta?.stages?.target?.actorName ||
+            formatHandoverPersonDisplayLabel(adminOfficer) ||
+            '—';
+        return {
+            handoverByDisplay: formatHandoverPersonDisplayLabel(returningEmp) || '—',
+            handoverToDisplay: adminLabel,
+        };
+    }
+    if (isInspection) {
+        const targetName =
+            workflowMeta?.stages?.target?.actorName ||
+            formatEmployeeDisplayName(adminOfficer || assignee);
+        const targetEmpId = String(
+            workflowMeta?.stages?.target?.actorEmployeeId ||
+                adminOfficer?.employeeId ||
+                assignee?.employeeId ||
+                '',
+        ).trim();
+        const handoverToDisplay =
+            targetName && targetEmpId ? `${targetName} (${targetEmpId})` : targetName || targetEmpId || '—';
+        return { handoverByDisplay: '—', handoverToDisplay };
+    }
+
+    const fromPool = Boolean(workflowMeta?.wasAssignedFromPool);
+    let handoverByDisplay;
+    if (fromPool) {
+        handoverByDisplay =
+            workflowMeta?.stages?.assigner?.actorName ||
+            formatHandoverPersonDisplayLabel(adminOfficer || assigner) ||
+            '—';
+    } else if (previousAssignee) {
+        handoverByDisplay = formatHandoverPersonDisplayLabel(previousAssignee) || '—';
+    } else {
+        handoverByDisplay =
+            workflowMeta?.stages?.assigner?.actorName ||
+            formatHandoverPersonDisplayLabel(assigner) ||
+            '—';
+    }
+
+    const handoverToDisplay = formatHandoverPersonDisplayLabel(assignee) || '—';
+    return { handoverByDisplay, handoverToDisplay };
+}
+
+const HANDOVER_HISTORY_IMMUTABLE_DETAIL_KEYS = [
+    'handoverByDisplay',
+    'handoverToDisplay',
+    'vehicleHandoverWorkflow',
+    'handoverKind',
+    'handoverLifecycleStatus',
+    'handoverTargetAcceptedAt',
+    'handoverHrApprovedAt',
+    'firstInspection',
+    'inspectionFormStatus',
+    'inspectionReview',
+    'reportsCopiedFromPreviousAssignment',
+];
+
+export function preserveHandoverHistoryImmutableDetails(existingDetails = {}, mergedDetails = {}) {
+    const next = { ...mergedDetails };
+    for (const key of HANDOVER_HISTORY_IMMUTABLE_DETAIL_KEYS) {
+        if (existingDetails[key] !== undefined && existingDetails[key] !== null) {
+            next[key] = existingDetails[key];
+        }
+    }
+    return next;
+}
+
+export const VEHICLE_RETURN_HANDOVER_KIND = 'vehicle_return';
+
+export function isReturnHandoverHistoryRecord(record) {
+    if (!record) return false;
+    if (String(record?.details?.handoverKind || '').trim() === VEHICLE_RETURN_HANDOVER_KIND) {
+        return true;
+    }
+    return String(record?.action || '').trim() === 'Returned' &&
+        !!record?.details?.vehicleHandoverWorkflow &&
+        !record?.details?.handoverKind;
+}
+
+export function buildReturnHandoverWorkflowMeta({ adminOfficer, requester, prevAssignee, assignDate = new Date() }) {
+    const adminName = formatEmployeeDisplayName(adminOfficer);
+    return {
+        handoverKind: VEHICLE_RETURN_HANDOVER_KIND,
+        assigneeCanSelfAcknowledge: false,
+        assignerUsesAdminOfficer: true,
+        prevAssigneeId: prevAssignee?._id?.toString?.() || '',
+        stages: {
+            assigner: {
+                actorName: '—',
+                actorId: requester?._id?.toString?.() || '',
+                actorEmployeeId: String(requester?.employeeId || '').trim(),
+                date: assignDate,
+            },
+            target: {
+                actorName: adminName,
+                actorId: adminOfficer?._id?.toString?.() || '',
+                actorEmployeeId: String(adminOfficer?.employeeId || '').trim(),
+                date: null,
+            },
+            hod: { actorName: null, date: null },
+            hr: { actorName: null, date: null },
+        },
+    };
+}
+
 export function buildInitialHandoverWorkflowMeta({
     assigneeCanSelfAcknowledge,
     assigner,
@@ -34,6 +159,7 @@ export function buildInitialHandoverWorkflowMeta({
     firstActorDoc,
     assignerActorDoc = null,
     wasAssignedFromPool = false,
+    previousAssignee = null,
     assignDate = new Date(),
 }) {
     const assignerStageDoc = assignerActorDoc || assigner;
@@ -50,6 +176,9 @@ export function buildInitialHandoverWorkflowMeta({
                 String(assignerStageDoc._id || assignerStageDoc) !== String(assigner._id || assigner),
         ),
         wasAssignedFromPool: !!wasAssignedFromPool,
+        ...(previousAssignee?._id
+            ? { previousAssigneeId: previousAssignee._id.toString() }
+            : {}),
         stages: {
             assigner: {
                 actorName: assignerName,
@@ -268,11 +397,14 @@ export async function updateFleetHandoverHistoryRecord({
               ? snapshotItem
               : null;
 
-    const mergedDetails = {
-        ...(existing.details && typeof existing.details === 'object' ? existing.details : {}),
-        ...(snapshotObj || {}),
-        ...detailsPatch,
-    };
+    const mergedDetails = preserveHandoverHistoryImmutableDetails(
+        existing.details && typeof existing.details === 'object' ? existing.details : {},
+        {
+            ...(snapshotObj || {}),
+            ...(existing.details && typeof existing.details === 'object' ? existing.details : {}),
+            ...detailsPatch,
+        },
+    );
 
     if (action === 'Accepted') {
         mergedDetails.acceptanceStatus = 'Accepted';

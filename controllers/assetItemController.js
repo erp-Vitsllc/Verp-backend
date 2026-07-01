@@ -35,6 +35,8 @@ import {
     closeFleetHandoverDashboardActions,
     markHandoverLifecycleOnHistory,
     HANDOVER_LIFECYCLE,
+    buildFleetHandoverDisplayLabels,
+    formatEmployeeDisplayName,
 } from '../utils/vehicleHandoverApprovalFlow.js';
 import { markHandoverEscalationResolved } from '../utils/vehicleHandoverEscalation.js';
 import { sendAssetResponseEmail } from '../utils/sendAssetResponseEmail.js';
@@ -4599,6 +4601,8 @@ export const assignAssetItem = async (req, res) => {
         let fleetHandoverActor = null;
         let fleetHandoverHistoryId = null;
         let fleetAssignerActor = null;
+        let fleetPreviousAssigneeEmp = null;
+        let fleetAdminOfficerEmp = null;
 
         if (assignedToType === 'Company') {
             // Assigning to a Company
@@ -4673,8 +4677,10 @@ export const assignAssetItem = async (req, res) => {
                         )
                         .lean();
                 }
+                fleetPreviousAssigneeEmp = previousAssigneeEmp;
                 const adminOfficerForAssigner =
                     fleetHandoverActor.actorDoc || (await resolveAdminOfficerEmployee());
+                fleetAdminOfficerEmp = adminOfficerForAssigner;
                 fleetAssignerActor = await resolveFleetHandoverAssignerActor({
                     assigner,
                     previousAssignee: previousAssigneeEmp,
@@ -4906,6 +4912,7 @@ export const assignAssetItem = async (req, res) => {
                             firstActorDoc: fleetHandoverActor?.actorDoc,
                             assignerActorDoc: fleetAssignerActor?.actorDoc || assigner,
                             wasAssignedFromPool,
+                            previousAssignee: fleetPreviousAssigneeEmp,
                             assignDate: new Date(),
                         });
                         await persistHandoverWorkflowMeta(fleetHandoverHistoryId, workflowMeta);
@@ -4922,6 +4929,13 @@ export const assignAssetItem = async (req, res) => {
                             const existingHistory = await AssetHistory.findById(fleetHandoverHistoryId)
                                 .select('details')
                                 .lean();
+                            const { handoverByDisplay, handoverToDisplay } = buildFleetHandoverDisplayLabels({
+                                workflowMeta,
+                                assigner: fleetAssignerActor?.actorDoc || assigner,
+                                assignee: employeeToAssign,
+                                previousAssignee: fleetPreviousAssigneeEmp,
+                                adminOfficer: fleetAdminOfficerEmp,
+                            });
                             await AssetHistory.findByIdAndUpdate(fleetHandoverHistoryId, {
                                 details: {
                                     ...snapshotForHistory.toObject(),
@@ -4932,13 +4946,10 @@ export const assignAssetItem = async (req, res) => {
                                           }
                                         : {}),
                                     handoverLifecycleStatus: HANDOVER_LIFECYCLE.PENDING,
+                                    handoverByDisplay,
+                                    handoverToDisplay,
                                 },
                             });
-                        } else {
-                            await markHandoverLifecycleOnHistory(
-                                fleetHandoverHistoryId,
-                                HANDOVER_LIFECYCLE.PENDING,
-                            ).catch(() => null);
                         }
                     } catch (err) {
                         /* non-fatal */
@@ -8552,13 +8563,30 @@ export const returnAssetItem = async (req, res) => {
 
         await item.save();
 
+        const prevAssigneeEmp = prevAssignedTo
+            ? await EmployeeBasic.findById(prevAssignedTo)
+                  .select('firstName lastName employeeId')
+                  .lean()
+                  .catch(() => null)
+            : null;
+        const returnAdminOfficer = fleetVehicle ? await resolveAdminOfficerEmployee().catch(() => null) : null;
+        const returnDisplay = buildFleetHandoverDisplayLabels({
+            assignee: prevAssigneeEmp,
+            previousAssignee: prevAssigneeEmp,
+            adminOfficer: returnAdminOfficer,
+            isReturn: true,
+        });
+
         // Log History with Snapshot
         await AssetHistory.create({
             assetId: item._id,
             action: 'Returned',
             assignedTo: prevAssignedTo,
             performedBy: req.user._id,
-            details: returnSnapshot
+            details: {
+                ...returnSnapshot,
+                ...returnDisplay,
+            },
         });
 
         // If Asset Controller/Admin returned it, notify the previously assigned employee by email.
