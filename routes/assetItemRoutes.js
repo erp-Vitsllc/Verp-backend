@@ -1,8 +1,16 @@
 import express from 'express';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import User from '../models/User.js';
-import { createAssetItem, getAssetItems, getVehicleFleetDashboard, getVehicleFleetServiceRequests, getAllAssignedAssets, getMyAssignedAssetsForReturn, getUnassignedAssetsForEmployee, getCompanyAllocationCoordinatorStatus, getHRCompanyAssets, getOnLeaveAssetsForEmployee, getOnServiceAssetsForEmployee, runAssetServiceOverdueCheck, handleOnLeaveAction, bulkHandleOnLeaveAction, handleOnServiceAction, bulkHandleOnServiceAction, getAssetItemDetail, assignAssetItem, bulkAssignAssetItems, bulkAssignAssetItemsToCompany, downloadHandoverPdf, downloadHistoryHandoverPdf, downloadVehicleHandoverPdf, respondToAssignment, bulkRespondToAssignment, getBulkAssignmentPendingGroup, respondBulkAssignmentGroup, getAssetHistory, getHistoryRecord, updateHistoryReceiverAssessment, updateHistoryBodyCondition, returnAssetItem, updateAssetStatus, addAssetDocument, updateAssetDocument, deleteAssetDocument, addAssetService, deleteAssetService, submitAssetServiceDraft, addAssetImage, deleteAssetImage, transferAssetAccessory, manageAccessoryStatus, updateAssetItem, deleteAssetItem, endOfLifeAsset, requestAssetAction, bulkRequestAssetAction, handleAssetActionApproval, finalizeAssetAction, uploadAccessoriesAttachment, requestAccessoryAction, respondAccessoryAction, finalizeAccessoryAction, respondToAssetCreation, bulkRespondToAssetCreation, getBulkAssetDetails, getBulkAssetInventoryForPrint, transferAsset, transferAssigneeAsset, submitDraftForCreationApproval, saveLossDamageFineDraft, getPendingAssetDashboardInbox, deletePendingAssetDashboardInboxItem, getEmployeePreviousAssets } from '../controllers/assetItemController.js';
+import { createAssetItem, getAssetItems, getVehicleFleetDashboard, getVehicleFleetServiceRequests, getAllAssignedAssets, getMyAssignedAssetsForReturn, getUnassignedAssetsForEmployee, getCompanyAllocationCoordinatorStatus, getHRCompanyAssets, getOnLeaveAssetsForEmployee, getOnServiceAssetsForEmployee, runAssetServiceOverdueCheck, handleOnLeaveAction, bulkHandleOnLeaveAction, handleOnServiceAction, bulkHandleOnServiceAction, getAssetItemDetail, assignAssetItem, bulkAssignAssetItems, bulkAssignAssetItemsToCompany, downloadHandoverPdf, downloadHistoryHandoverPdf, downloadVehicleHandoverPdf, respondToAssignment, bulkRespondToAssignment, getBulkAssignmentPendingGroup, respondBulkAssignmentGroup, getAssetHistory, getHistoryRecord, updateHistoryReceiverAssessment, updateHistoryBodyCondition, returnAssetItem, updateAssetStatus, addAssetDocument, updateAssetDocument, deleteAssetDocument, addAssetService, deleteAssetService, updateAssetServiceDraft, submitAssetServiceDraft, saveOilServiceDetailsDraftHandler, submitOilServiceDetailsHandler, submitTireChangeGarageHandler, completeTireChangeHandler, updateTireChangeQuoteEmployeeRowsHandler, submitMechanicalWorkGarageHandler, completeMechanicalWorkHandler, updateMechanicalWorkQuoteEmployeeRowsHandler, submitBodyWorkGarageHandler, completeBodyWorkHandler, updateBodyWorkQuoteEmployeeRowsHandler, submitAccidentRepairGarageHandler, completeAccidentRepairHandler, updateAccidentRepairQuoteEmployeeRowsHandler, updateOilServiceDatesHandler, updateShopServiceExtendDateHandler, addAssetImage, deleteAssetImage, transferAssetAccessory, manageAccessoryStatus, updateAssetItem, deleteAssetItem, endOfLifeAsset, requestAssetAction, bulkRequestAssetAction, handleAssetActionApproval, finalizeAssetAction, uploadAccessoriesAttachment, requestAccessoryAction, respondAccessoryAction, finalizeAccessoryAction, respondToAssetCreation, bulkRespondToAssetCreation, getBulkAssetDetails, getBulkAssetInventoryForPrint, transferAsset, transferAssigneeAsset, submitDraftForCreationApproval, saveLossDamageFineDraft, getPendingAssetDashboardInbox, deletePendingAssetDashboardInboxItem, getEmployeePreviousAssets } from '../controllers/assetItemController.js';
 import { respondVehicleServiceWorkflow, respondVehicleServiceScheduledPeriod } from '../controllers/vehicleServiceWorkflowController.js';
+import {
+    listVehicleOilServiceTypes,
+    addVehicleOilServiceType,
+} from '../controllers/vehicleOilServiceTypeController.js';
+import {
+    listVehicleCarWashTypes,
+    addVehicleCarWashType,
+} from '../controllers/vehicleCarWashTypeController.js';
 import {
     requestOwnerOnDuty,
     getOwnerOnDutyReview,
@@ -782,9 +790,51 @@ router.put('/:id/status', protect, requireAssetFullAccess, updateAssetStatus);
 router.post('/:id/document', protect, requireAssetFullAccess, addAssetDocument);
 router.put('/:id/document/:docId', protect, requireAssetFullAccess, updateAssetDocument);
 router.delete('/:id/document/:docId', protect, requireAssetControllerOrAdmin, deleteAssetDocument);
+router.get('/oil-service-types', protect, listVehicleOilServiceTypes);
+router.post('/oil-service-types', protect, addVehicleOilServiceType);
+router.get('/car-wash-types', protect, listVehicleCarWashTypes);
+router.post('/car-wash-types', protect, addVehicleCarWashType);
+
 router.post('/:id/service', protect, requireAssetFullAccess, addAssetService);
 router.delete('/:id/service/:serviceId', protect, requireAssetFullAccess, deleteAssetService);
+router.put('/:id/service/:serviceId', protect, requireAssetFullAccess, updateAssetServiceDraft);
 router.post('/:id/service/:serviceId/submit-request', protect, requireAssetFullAccess, submitAssetServiceDraft);
+router.put('/:id/service/:serviceId/oil-dates', protect, requireAssetFullAccess, updateOilServiceDatesHandler);
+router.put('/:id/service/:serviceId/extend-date', protect, requireAssetFullAccess, updateShopServiceExtendDateHandler);
+router.post('/:id/service/:serviceId/oil-details/save', protect, requireAssetFullAccess, saveOilServiceDetailsDraftHandler);
+router.post('/:id/service/:serviceId/oil-details/submit', protect, requireAssetFullAccess, submitOilServiceDetailsHandler);
+router.put('/:id/service/:serviceId/tire-change/garage', protect, requireAssetFullAccess, submitTireChangeGarageHandler);
+router.put(
+    '/:id/service/:serviceId/tire-change/quote-employees',
+    protect,
+    requireAssetFullAccess,
+    updateTireChangeQuoteEmployeeRowsHandler,
+);
+router.post('/:id/service/:serviceId/tire-change/complete', protect, requireAssetFullAccess, completeTireChangeHandler);
+router.put('/:id/service/:serviceId/mechanical-work/garage', protect, requireAssetFullAccess, submitMechanicalWorkGarageHandler);
+router.put(
+    '/:id/service/:serviceId/mechanical-work/quote-employees',
+    protect,
+    requireAssetFullAccess,
+    updateMechanicalWorkQuoteEmployeeRowsHandler,
+);
+router.post('/:id/service/:serviceId/mechanical-work/complete', protect, requireAssetFullAccess, completeMechanicalWorkHandler);
+router.put('/:id/service/:serviceId/body-work/garage', protect, requireAssetFullAccess, submitBodyWorkGarageHandler);
+router.put(
+    '/:id/service/:serviceId/body-work/quote-employees',
+    protect,
+    requireAssetFullAccess,
+    updateBodyWorkQuoteEmployeeRowsHandler,
+);
+router.post('/:id/service/:serviceId/body-work/complete', protect, requireAssetFullAccess, completeBodyWorkHandler);
+router.put('/:id/service/:serviceId/accident-repair/garage', protect, requireAssetFullAccess, submitAccidentRepairGarageHandler);
+router.put(
+    '/:id/service/:serviceId/accident-repair/quote-employees',
+    protect,
+    requireAssetFullAccess,
+    updateAccidentRepairQuoteEmployeeRowsHandler,
+);
+router.post('/:id/service/:serviceId/accident-repair/complete', protect, requireAssetFullAccess, completeAccidentRepairHandler);
 router.post('/:id/service-workflow/respond', protect, respondVehicleServiceWorkflow);
 router.post('/:id/service-workflow/period', protect, respondVehicleServiceScheduledPeriod);
 router.post('/:id/images', protect, requireAssetFullAccess, addAssetImage);

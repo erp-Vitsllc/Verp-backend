@@ -1,8 +1,10 @@
 import AssetItem from "../models/AssetItem.js";
 import { syncDashboardAction } from "./syncDashboard.js";
 import { sendVehicleServiceWorkflowEmail } from "./sendVehicleServiceWorkflowEmail.js";
+import { getDepartmentHOD } from "./getDepartmentHOD.js";
+import { isTireChangeWorkflow, tireChangeDetailsPath, notifyTireChangeStakeholder } from "./tireChangeWorkflow.js";
 
-const DAY_MS = 24 * 60 * 60 * 1000;
+const TWO_DAYS_MS = 2 * 24 * 60 * 60 * 1000;
 
 const isDue = (remindAt) => {
     if (!remindAt) return false;
@@ -11,35 +13,73 @@ const isDue = (remindAt) => {
     return t <= Date.now();
 };
 
-const holdReminderPath = (assetId, serviceRecordId) => {
-    if (!assetId || !serviceRecordId) return null;
-    return `/HRM/Asset/Vehicle/service-requests/details/${assetId}/${serviceRecordId}`;
-};
-
 /**
- * Send deferred reminder/task for Accounts hold (1 day before hold-until date).
- * This runs periodically from backend index.js.
+ * Hold reminders + pending-accounts nudges for vehicle service workflows.
+ * Tire change: every 2 days → Admin Officer. Other services: legacy assignee reminder.
  */
 export async function processVehicleServiceHoldReminders() {
     try {
         const assets = await AssetItem.find({
             "activeServiceWorkflow.stage": "pending_accounts",
-            "activeServiceWorkflow.accountsHold.holdUntilDate": { $ne: null },
-            "activeServiceWorkflow.accountsHold.reminderSentAt": null,
         }).populate("assignedTo", "firstName lastName employeeId");
 
         for (const asset of assets) {
             const wf = asset?.activeServiceWorkflow || {};
+            const serviceSub = wf.serviceRecordId ? asset.services?.id?.(wf.serviceRecordId) : null;
+            const isTire = isTireChangeWorkflow(wf, serviceSub);
             const hold = wf.accountsHold || {};
-            if (!asset.assignedTo?._id) continue;
+            const detailsPath = tireChangeDetailsPath(asset._id, wf.serviceRecordId);
 
-            const holdUntil = hold.holdUntilDate ? new Date(hold.holdUntilDate) : null;
-            if (!holdUntil || Number.isNaN(holdUntil.getTime())) continue;
+            if (isTire) {
+                const remindAt = hold.remindAt
+                    ? new Date(hold.remindAt)
+                    : wf.accountsReminderAt
+                      ? new Date(wf.accountsReminderAt)
+                      : null;
+                if (!isDue(remindAt)) continue;
 
-            const remindAt = hold.remindAt ? new Date(hold.remindAt) : new Date(holdUntil.getTime() - DAY_MS);
+                const adminOfficer = await getDepartmentHOD("admincontroller");
+                if (!adminOfficer?._id) continue;
+
+                const holdUntil = hold.holdUntilDate ? new Date(hold.holdUntilDate) : null;
+                const extra2 = hold?.reason
+                    ? `Accounts hold reminder: ${hold.reason}`
+                    : "Accounts has not approved garage details yet";
+
+                await notifyTireChangeStakeholder({
+                    asset,
+                    serviceRecordId: wf.serviceRecordId,
+                    recipient: adminOfficer,
+                    requestedByName: "Accounts",
+                    extra2,
+                    stageLabel: "Tire change — accounts follow-up",
+                    actionLabel: "Tire change accounts reminder",
+                    detailLine: holdUntil
+                        ? `Accounts placed this tire change on hold until ${holdUntil.toLocaleDateString()}. Reason: ${hold.reason || "No reason provided"}.`
+                        : "Accounts has not approved the garage details yet. Please follow up or update garage information if needed.",
+                });
+
+                if (hold?.holdUntilDate) {
+                    wf.accountsHold.reminderSentAt = new Date();
+                    wf.accountsHold.remindAt = new Date(Date.now() + TWO_DAYS_MS);
+                } else {
+                    wf.accountsReminderAt = new Date(Date.now() + TWO_DAYS_MS);
+                }
+                asset.activeServiceWorkflow = wf;
+                asset.markModified("activeServiceWorkflow");
+                await asset.save();
+                continue;
+            }
+
+            if (!hold?.holdUntilDate || hold.reminderSentAt || !asset.assignedTo?._id) continue;
+
+            const holdUntil = new Date(hold.holdUntilDate);
+            if (Number.isNaN(holdUntil.getTime())) continue;
+
+            const remindAt = hold.remindAt ? new Date(hold.remindAt) : new Date(holdUntil.getTime() - 24 * 60 * 60 * 1000);
             if (!isDue(remindAt)) continue;
 
-            const detailsPath = holdReminderPath(asset._id, wf.serviceRecordId);
+            const legacyPath = `/HRM/Asset/Vehicle/service-requests/details/${asset._id}/${wf.serviceRecordId}`;
 
             await syncDashboardAction({
                 requestId: asset._id,
@@ -53,7 +93,7 @@ export async function processVehicleServiceHoldReminders() {
                 extra3: JSON.stringify({
                     vehicleId: String(asset._id),
                     serviceRecordId: wf.serviceRecordId ? String(wf.serviceRecordId) : "",
-                    detailsPath: detailsPath || "",
+                    detailsPath: legacyPath,
                 }),
             });
 
@@ -63,7 +103,7 @@ export async function processVehicleServiceHoldReminders() {
                 stageLabel: "Service hold reminder",
                 actionLabel: "Vehicle service — hold follow-up",
                 detailLine: `Hold follow-up is due on ${holdUntil.toLocaleDateString()}. Reason: ${hold.reason || "No reason provided"}.`,
-                linkPath: detailsPath,
+                linkPath: legacyPath,
             });
 
             asset.activeServiceWorkflow.accountsHold.reminderSentAt = new Date();

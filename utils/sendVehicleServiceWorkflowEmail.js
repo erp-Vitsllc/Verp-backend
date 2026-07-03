@@ -1,6 +1,6 @@
 import nodemailer from 'nodemailer';
 import { resolveFrontendBaseUrl, emailFrontendUrl } from './resolveFrontendBaseUrl.js';
-import { resolveEmployeeEmail } from './resolveEmployeeEmail.js';
+import { resolveEmployeeEmailWithReporteeLoaded, getFallbackEmailNote, employeeDisplayName } from './resolveEmployeeEmail.js';
 
 /**
  * Notify flowchart role when a vehicle service workflow step is waiting or completed.
@@ -12,13 +12,27 @@ export async function sendVehicleServiceWorkflowEmail({
     actionLabel,
     detailLine,
     linkPath,
+    cc = [],
 }) {
     try {
-        const { email: to } = resolveEmployeeEmail(recipient);
+        const { email: to, isFallbackToReportee, employee } =
+            await resolveEmployeeEmailWithReporteeLoaded(recipient);
         if (!to) {
             console.warn('[VehicleServiceWorkflow] No email for recipient', recipient?.employeeId);
             return;
         }
+        const full = employee || recipient;
+        const greetingName =
+            isFallbackToReportee && full?.primaryReportee
+                ? full.primaryReportee.firstName || 'there'
+                : recipient.firstName || full?.firstName || '';
+        const fallbackNote =
+            isFallbackToReportee && full?.primaryReportee
+                ? getFallbackEmailNote(
+                      employeeDisplayName(full),
+                      employeeDisplayName(full.primaryReportee),
+                  )
+                : '';
         const emailUser = process.env.EMAIL_USER?.trim();
         const emailPass = process.env.EMAIL_PASS?.trim();
         if (!emailUser || !emailPass) return;
@@ -41,7 +55,8 @@ export async function sendVehicleServiceWorkflowEmail({
                     <p style="margin:8px 0 0;font-size:13px;opacity:.95;">${stageLabel}</p>
                 </div>
                 <div style="padding:24px;">
-                    <p>Hello <strong>${recipient.firstName || ''}</strong>,</p>
+                    ${fallbackNote}
+                    <p>Hello <strong>${greetingName}</strong>,</p>
                     <p style="color:#475569;">${detailLine || 'Please review this vehicle service workflow in VeRP.'}</p>
                     <table style="width:100%;margin:16px 0;background:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;">
                         <tr><td style="padding:10px 14px;font-size:12px;color:#64748b;">Asset</td><td style="padding:10px 14px;font-weight:700;">${asset.assetId || ''} — ${asset.name || ''}</td></tr>
@@ -53,9 +68,14 @@ export async function sendVehicleServiceWorkflowEmail({
                 </div>
             </div>`;
 
+        const ccList = (Array.isArray(cc) ? cc : [])
+            .map((addr) => String(addr || '').trim())
+            .filter((addr) => addr && addr.toLowerCase() !== to.toLowerCase());
+
         await transporter.sendMail({
-            fromName: "VeRP Portal",
+            from: `"VeRP Portal" <${emailUser}>`,
             to,
+            ...(ccList.length ? { cc: ccList } : {}),
             subject,
             html
         });

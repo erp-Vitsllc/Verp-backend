@@ -30,6 +30,8 @@ import { processAccidentAssets } from "./utils/processAccidentAssets.js";
 import { processDocumentExpiryReminders } from "./utils/processDocumentExpiryReminders.js";
 import { processVehicleServiceHoldReminders } from "./utils/processVehicleServiceHoldReminders.js";
 import { processVehicleServiceScheduledPhase } from "./utils/processVehicleServiceScheduledPhase.js";
+import { processOilServiceOverdue, processOilServiceStartDateActivation, processOilServiceDueAutoCreate } from "./utils/oilServiceWorkflow.js";
+import { processShopServiceStartDateActivation } from "./utils/vehicleShopServiceScheduled.js";
 import { processAssetServiceOverdue } from "./utils/processAssetServiceOverdue.js";
 import { processFleetHandoverEscalation } from "./utils/processFleetHandoverEscalation.js";
 import { processBirthdayWishes } from "./utils/processBirthdayWishes.js";
@@ -102,6 +104,14 @@ setInterval(() => { processVehicleServiceHoldReminders(); }, 6 * 60 * 60 * 1000)
 // Scheduled vehicle service window: flip to "On Service" on the first day, email AC after window ends.
 setTimeout(() => { processVehicleServiceScheduledPhase(); }, 150 * 1000);
 setInterval(() => { processVehicleServiceScheduledPhase(); }, 2 * 60 * 60 * 1000);
+setTimeout(() => { processOilServiceOverdue(); }, 180 * 1000);
+setInterval(() => { processOilServiceOverdue(); }, 2 * 60 * 60 * 1000);
+setTimeout(() => { processOilServiceStartDateActivation(); }, 165 * 1000);
+setInterval(() => { processOilServiceStartDateActivation(); }, 2 * 60 * 60 * 1000);
+setTimeout(() => { processShopServiceStartDateActivation(); }, 170 * 1000);
+setInterval(() => { processShopServiceStartDateActivation(); }, 2 * 60 * 60 * 1000);
+setTimeout(() => { processOilServiceDueAutoCreate(); }, 195 * 1000);
+setInterval(() => { processOilServiceDueAutoCreate(); }, 2 * 60 * 60 * 1000);
 
 // Tools/equipment on service: expiry-day email, overdue tasks for bell + dashboard.
 setTimeout(() => {

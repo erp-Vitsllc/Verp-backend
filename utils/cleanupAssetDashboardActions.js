@@ -36,6 +36,8 @@ export const VEHICLE_DASHBOARD_INBOX_TYPES = [
     'Vehicle Mortgage Close',
     'Vehicle Disposition Request',
     'Asset Approval',
+    'Asset Assignment',
+    'Asset Return',
 ];
 
 /** Tools / equipment Asset Management inbox — excludes fleet-only vehicle service workflow. */
@@ -122,4 +124,42 @@ export async function cleanupDashboardActionsForDeletedAsset(deletedId) {
             requestType: { $in: ASSET_DASHBOARD_INBOX_TYPES }
         });
     }
+}
+
+function parseDashboardExtra3(extra3) {
+    if (!extra3) return {};
+    if (typeof extra3 === 'object') return extra3;
+    try {
+        return JSON.parse(String(extra3));
+    } catch {
+        return {};
+    }
+}
+
+/** Permanently remove inbox rows for a deleted vehicle service request. */
+export async function deleteDashboardActionsForVehicleService(assetId, serviceRecordId) {
+    if (assetId == null) return;
+    const oidStr = String(assetId).trim();
+    if (!mongoose.Types.ObjectId.isValid(oidStr)) return;
+    const oid = new mongoose.Types.ObjectId(oidStr);
+    const targetServiceId = serviceRecordId ? String(serviceRecordId) : '';
+
+    const rows = await DashboardAction.find({
+        requestId: oid,
+        requestType: 'Vehicle Service Request',
+    })
+        .select('_id extra3')
+        .lean();
+
+    const idsToDelete = rows
+        .filter((row) => {
+            if (!targetServiceId) return true;
+            const meta = parseDashboardExtra3(row.extra3);
+            if (!meta?.serviceRecordId) return false;
+            return String(meta.serviceRecordId) === targetServiceId;
+        })
+        .map((row) => row._id);
+
+    if (!idsToDelete.length) return;
+    await DashboardAction.deleteMany({ _id: { $in: idsToDelete } });
 }

@@ -703,6 +703,18 @@ const HANDOVER_ADMIN_OFFICER_ROW_FILTER = {
     extra3: { $regex: '"handoverViewerRole"\\s*:\\s*"adminOfficer"', $options: 'i' },
 };
 
+const HANDOVER_TARGET_ASSIGNEE_ROW_FILTER = {
+    extra3: { $regex: '"handoverViewerRole"\\s*:\\s*"targetAssignee"', $options: 'i' },
+};
+
+export function isFleetHandoverDashboardMeta(meta) {
+    return meta?.isFleetVehicle === true && !!meta?.historyId;
+}
+
+export function isFleetHandoverTrackingViewerRole(viewerRole) {
+    return ['assigner', 'adminOfficer', 'targetAssignee'].includes(String(viewerRole || '').trim());
+}
+
 export function getVehicleHandoverFlow(item) {
     return item?.pendingActionDetails?.vehicleHandoverFlow || null;
 }
@@ -835,6 +847,44 @@ export async function upsertHandoverAdminOfficerDashboardAction({
             extra1: `${asset.assetId} — ${asset.name || ''}`,
             extra2: stageLabel,
             extra3: buildHandoverDashboardExtra3(asset._id, historyId, { viewerRole: 'adminOfficer' }),
+            status: 'Pending',
+        },
+        { upsert: true, new: true, setDefaultsOnInsert: true },
+    );
+}
+
+/** Tracking row for the new assignee — visible until HR final approval. */
+export async function upsertHandoverTargetAssigneeDashboardAction({
+    asset,
+    assignee,
+    historyId,
+    subjectName,
+    subjectEmpId,
+    assigner = null,
+    stageLabel = 'Vehicle Handover — assigned to you',
+}) {
+    if (!assignee?._id || !historyId) return;
+    const assignerName = assigner
+        ? `${assigner.firstName || ''} ${assigner.lastName || ''}`.trim() || 'System'
+        : 'System';
+    await DashboardAction.findOneAndUpdate(
+        {
+            requestId: asset._id,
+            requestType: 'Asset Assignment',
+            status: 'Pending',
+            ...HANDOVER_TARGET_ASSIGNEE_ROW_FILTER,
+        },
+        {
+            assignedTo: assignee._id,
+            assignedToEmpId: assignee.employeeId,
+            requestId: asset._id,
+            requestType: 'Asset Assignment',
+            subjectEmployeeId: subjectEmpId || assignee.employeeId || '',
+            subjectName: subjectName || '',
+            requestedByName: assignerName,
+            extra1: `${asset.assetId} — ${asset.name || ''}`,
+            extra2: stageLabel,
+            extra3: buildHandoverDashboardExtra3(asset._id, historyId, { viewerRole: 'targetAssignee' }),
             status: 'Pending',
         },
         { upsert: true, new: true, setDefaultsOnInsert: true },

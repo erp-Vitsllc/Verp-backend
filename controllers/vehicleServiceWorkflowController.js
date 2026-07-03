@@ -11,6 +11,45 @@ import { resolveEmployeeEmail } from '../utils/resolveEmployeeEmail.js';
 import { isUserAdministrator } from '../services/permissionService.js';
 import { isJwtSystemSuperUser } from '../utils/systemSuperUser.js';
 import {
+    actorMayManageOilService,
+    userIsOilServiceAdminOfficer,
+    closeOilServicePendingDashboardActions,
+} from '../utils/oilServiceWorkflow.js';
+import {
+    advanceTireChangeAfterAccountsApprove,
+    advanceTireChangeAfterHrApprove,
+    isTireChangeWorkflow,
+    notifyTireChangeAccountsHoldToAdmin,
+    TIRE_CHANGE_STAGE,
+} from '../utils/tireChangeWorkflow.js';
+import {
+    advanceMechanicalWorkAfterAccountsApprove,
+    advanceMechanicalWorkAfterHrApprove,
+    isMechanicalWorkWorkflow,
+} from '../utils/mechanicalWorkWorkflow.js';
+import {
+    advanceBodyWorkAfterAccountsApprove,
+    advanceBodyWorkAfterHrApprove,
+    isBodyWorkWorkflow,
+} from '../utils/bodyWorkWorkflow.js';
+import {
+    advanceAccidentRepairAfterAccountsApprove,
+    advanceAccidentRepairAfterHrApprove,
+    isAccidentRepairWorkflow,
+    notifyAccidentRepairStakeholder,
+    ACCIDENT_REPAIR_STAGE,
+} from '../utils/accidentRepairWorkflow.js';
+import {
+    isCarWashServiceRecord,
+    setCarWashPaymentStatusOnService,
+    closeCarWashPendingDashboardActions,
+    carWashDetailsPath,
+    carWashDashboardMeta,
+    notifyCarWashAccountsApproved,
+    CAR_WASH_PAYMENT_PENDING,
+    CAR_WASH_PAYMENT_NOT_PAID,
+} from '../utils/carWashWorkflow.js';
+import {
     applyServiceActiveState,
     applyPostServiceOperationalState,
     isServiceActive,
@@ -37,18 +76,43 @@ function computeInclusiveWindowEnd(startDate, durationDays) {
     return e;
 }
 
-function vehicleServiceDetailsPath(assetId, serviceRecordId) {
+function vehicleServiceDetailsPath(assetId, serviceRecordId, serviceType = '') {
     if (!assetId || !serviceRecordId) return null;
+    const type = String(serviceType || '').trim();
+    if (type === 'Tire Change') {
+        return `/HRM/Asset/Vehicle/details/${assetId}/tire-change/${serviceRecordId}`;
+    }
+    if (type === 'Mechanical Work') {
+        return `/HRM/Asset/Vehicle/details/${assetId}/mechanical-work/${serviceRecordId}`;
+    }
+    if (type === 'Body Work') {
+        return `/HRM/Asset/Vehicle/details/${assetId}/body-work/${serviceRecordId}`;
+    }
+    if (type === 'Accident Repair') {
+        return `/HRM/Asset/Vehicle/details/${assetId}/accident-repair/${serviceRecordId}`;
+    }
+    if (type === 'Oil Service') {
+        return `/HRM/Asset/Vehicle/details/${assetId}/oil-service/${serviceRecordId}`;
+    }
     return `/HRM/Asset/Vehicle/service-requests/details/${assetId}/${serviceRecordId}`;
 }
 
-function vehicleServiceDashboardMeta(asset, serviceRecordId) {
-    const path = vehicleServiceDetailsPath(asset?._id, serviceRecordId);
+function vehicleServiceDetailsPathForWorkflow(asset, wf) {
+    return vehicleServiceDetailsPath(asset?._id, wf?.serviceRecordId, wf?.serviceTypeLabel || '');
+}
+
+function vehicleServiceDashboardMeta(asset, serviceRecordId, serviceType = '') {
+    const path = vehicleServiceDetailsPath(asset?._id, serviceRecordId, serviceType);
     return JSON.stringify({
         vehicleId: asset?._id ? String(asset._id) : '',
         serviceRecordId: serviceRecordId ? String(serviceRecordId) : '',
+        serviceType: String(serviceType || ''),
         detailsPath: path || '',
     });
+}
+
+function vehicleServiceDashboardMetaForWorkflow(asset, wf) {
+    return vehicleServiceDashboardMeta(asset, wf?.serviceRecordId, wf?.serviceTypeLabel || '');
 }
 
 function resolveStatusAfterService(asset, wf) {
@@ -113,6 +177,9 @@ async function resolveAssigneeForStage(stage) {
     if (stage === STAGE.HR) return getDepartmentHOD('hr');
     if (stage === STAGE.ACCOUNTS) return getDepartmentHOD('accounts');
     if (stage === STAGE.ADMIN || stage === STAGE.SCHEDULED) return getDepartmentHOD('assetcontroller');
+    if (stage === 'pending_admin_officer' || stage === 'pending_admin_return') {
+        return getDepartmentHOD('admincontroller');
+    }
     if (stage === STAGE.MANAGEMENT) return getManagementHOD();
     return null;
 }
@@ -152,6 +219,14 @@ async function actorMayAct(reqUser, assignee) {
     const actor = await resolveActorEmployee(reqUser);
     if (!actor?._id) return false;
     return String(actor._id) === String(assignee._id);
+}
+
+async function actorMayManageOilServiceForAsset(reqUser, asset) {
+    return actorMayManageOilService(reqUser, asset);
+}
+
+function isOilServiceWorkflowRecord(wf, serviceSub) {
+    return String(serviceSub?.serviceType || wf?.serviceTypeLabel || '').trim() === 'Oil Service';
 }
 
 function parseRemarkMeta(remarkValue) {
@@ -223,10 +298,7 @@ export async function userMayRespondVehicleServiceWorkflow(reqUser, stage) {
     return actorMayAct(reqUser, assignee);
 }
 
-/**
- * Apply the same field set as POST /AssetItem/:id/service to an existing services[] subdoc during workflow approval.
- */
-async function mergeWorkflowServiceRecord(asset, serviceRecordId, body) {
+export async function mergeWorkflowServiceRecord(asset, serviceRecordId, body) {
     if (!serviceRecordId || !body || typeof body !== 'object') return;
     const sub = asset.services.id(serviceRecordId);
     if (!sub) return;
@@ -247,7 +319,11 @@ async function mergeWorkflowServiceRecord(asset, serviceRecordId, body) {
         shopInvoice,
         attachment,
         quotation2,
-        quotation3
+        quotation3,
+        tireCondition,
+        bodyWorkImages,
+        returnOtherDoc,
+        newConditionImages,
     } = body;
 
     // Return-to-live files: workshop completion report vs shop invoice (legacy invoice key treated as completion when shopInvoice omitted).
@@ -338,22 +414,128 @@ async function mergeWorkflowServiceRecord(asset, serviceRecordId, body) {
     if (description != null) sub.description = description;
     if (paidBy != null) sub.paidBy = paidBy;
     if (value !== undefined) sub.value = Number(value) || 0;
-    if (remark !== undefined) sub.remark = remark;
+
+    let remarkMeta = parseRemarkMeta(sub.remark);
+    if (remark !== undefined) {
+        try {
+            const incoming = typeof remark === 'string' ? JSON.parse(remark) : remark;
+            if (incoming && typeof incoming === 'object') {
+                const incomingRemark = { ...incoming };
+                if (Array.isArray(incomingRemark.bodyWorkImages) && incomingRemark.bodyWorkImages.length === 0) {
+                    delete incomingRemark.bodyWorkImages;
+                }
+                if (Array.isArray(incomingRemark.newConditionImages)) {
+                    delete incomingRemark.newConditionImages;
+                }
+                remarkMeta = { ...remarkMeta, ...incomingRemark };
+            }
+        } catch {
+            /* keep parsed remarkMeta */
+        }
+    }
+
     if (Number.isFinite(Number(serviceDurationDays)) && Number(serviceDurationDays) >= 1) {
         const n = Math.floor(Number(serviceDurationDays));
         sub.serviceDuration = `${n} day${n === 1 ? '' : 's'}`;
-        const r = parseRemarkMeta(sub.remark);
         if (scheduledServiceDate) {
-            r.adminScheduledServiceDate = String(scheduledServiceDate).slice(0, 10);
+            remarkMeta.adminScheduledServiceDate = String(scheduledServiceDate).slice(0, 10);
         }
-        r.adminServiceDurationDays = n;
-        sub.remark = JSON.stringify(r);
+        remarkMeta.adminServiceDurationDays = n;
     }
     if (serviceCompletionReportUrl != null) sub.serviceCompletionReport = serviceCompletionReportUrl;
     if (shopInvoiceDocUrl != null) sub.shopInvoice = shopInvoiceDocUrl;
     if (attachmentUrl != null) sub.attachment = attachmentUrl;
     if (quotation2Url != null) sub.quotation2 = quotation2Url;
     if (quotation3Url != null) sub.quotation3 = quotation3Url;
+
+    if (tireCondition?.data) {
+        try {
+            const uploadResult = await uploadDocumentToS3(
+                tireCondition.data,
+                'asset-service-attachments',
+                tireCondition.name || `service-tire-condition-${Date.now()}.jpg`,
+            );
+            remarkMeta.tireConditionUrl = uploadResult.publicId;
+            remarkMeta.tireConditionName = tireCondition.name || '';
+        } catch (error) {
+            console.error('[mergeWorkflowServiceRecord] tireCondition upload:', error);
+            throw new Error('Failed to upload tire condition file');
+        }
+    }
+    if (Array.isArray(bodyWorkImages) && bodyWorkImages.length) {
+        const uploaded = [];
+        for (const img of bodyWorkImages) {
+            if (!img?.data) continue;
+            try {
+                const uploadResult = await uploadDocumentToS3(
+                    img.data,
+                    'asset-service-attachments',
+                    img.name || `body-work-image-${Date.now()}.jpg`,
+                );
+                uploaded.push({
+                    url: uploadResult.publicId,
+                    name: img.name || 'Rectification photo',
+                });
+            } catch (error) {
+                console.error('[mergeWorkflowServiceRecord] bodyWorkImages upload:', error);
+                throw new Error('Failed to upload rectification photos');
+            }
+        }
+        if (uploaded.length) {
+            const existing = Array.isArray(remarkMeta.bodyWorkImages) ? remarkMeta.bodyWorkImages : [];
+            remarkMeta.bodyWorkImages = [...existing, ...uploaded];
+        }
+    }
+    if (returnOtherDoc?.data) {
+        try {
+            const uploadResult = await uploadDocumentToS3(
+                returnOtherDoc.data,
+                'asset-service-invoices',
+                returnOtherDoc.name || `return-other-doc-${Date.now()}.pdf`,
+            );
+            sub.invoice = uploadResult.publicId;
+            remarkMeta.returnOtherDocUrl = uploadResult.publicId;
+            remarkMeta.returnOtherDocName = returnOtherDoc.name || '';
+        } catch (error) {
+            console.error('[mergeWorkflowServiceRecord] returnOtherDoc upload:', error);
+            throw new Error('Failed to upload other document');
+        }
+    }
+    if (Array.isArray(newConditionImages) && newConditionImages.length) {
+        const uploaded = [];
+        for (const img of newConditionImages) {
+            if (!img?.data) continue;
+            try {
+                const uploadResult = await uploadDocumentToS3(
+                    img.data,
+                    'asset-service-attachments',
+                    img.name || `new-condition-image-${Date.now()}.jpg`,
+                );
+                uploaded.push({
+                    url: uploadResult.publicId,
+                    name: img.name || 'New condition photo',
+                });
+            } catch (error) {
+                console.error('[mergeWorkflowServiceRecord] newConditionImages upload:', error);
+                throw new Error('Failed to upload new condition photos');
+            }
+        }
+        if (uploaded.length) {
+            const existing = Array.isArray(remarkMeta.newConditionImages) ? remarkMeta.newConditionImages : [];
+            remarkMeta.newConditionImages = [...existing, ...uploaded];
+        }
+    }
+
+    if (
+        remark !== undefined ||
+        tireCondition?.data ||
+        (Array.isArray(bodyWorkImages) && bodyWorkImages.length) ||
+        returnOtherDoc?.data ||
+        (Array.isArray(newConditionImages) && newConditionImages.length) ||
+        Number.isFinite(Number(serviceDurationDays))
+    ) {
+        sub.remark = JSON.stringify(remarkMeta);
+    }
 
     const ck = body.currentKm != null ? Number(body.currentKm) : null;
     if (ck && !Number.isNaN(ck) && ck > (asset.currentKilometer || 0)) {
@@ -478,6 +660,61 @@ export async function maybeStartVehicleServiceWorkflow(asset, { serviceRecordId,
 
         if (!isVehicle) return;
 
+        if (String(serviceType || '').trim() === 'Oil Service') {
+            return;
+        }
+
+        const requesterName = await getRequesterName(req.user);
+        const isAccidentRepair = String(serviceType || '').trim() === 'Accident Repair';
+
+        if (isAccidentRepair) {
+            const adminOfficer = await getDepartmentHOD('admincontroller');
+
+            asset.activeServiceWorkflow = {
+                serviceRecordId,
+                stage: ACCIDENT_REPAIR_STAGE.ADMIN_OFFICER,
+                previousStatus: asset.status,
+                serviceTypeLabel: serviceType || '',
+                history: [],
+            };
+            await pushWorkflowHistory(asset, {
+                stage: ACCIDENT_REPAIR_STAGE.ADMIN_OFFICER,
+                action: 'created',
+                note: 'Accident repair assignment submitted',
+                byName: requesterName,
+            });
+
+            const requesterEmp = req?.user ? await resolveActorEmployee(req.user) : null;
+            await logVehicleServiceWorkflowToAssetHistory(asset, {
+                stage: ACCIDENT_REPAIR_STAGE.ADMIN_OFFICER,
+                workflowAction: 'start',
+                note: 'Accident repair assignment submitted',
+                byName: requesterName,
+                performedById: requesterEmp?._id,
+                serviceTypeLabel: serviceType || '',
+                hasServiceUpdates: false,
+                serviceRecordId,
+            });
+
+            if (adminOfficer?._id) {
+                await notifyAccidentRepairStakeholder({
+                    asset,
+                    serviceRecordId,
+                    recipient: adminOfficer,
+                    requestedByName: requesterName,
+                    extra2: 'Complete Garage / Service Details',
+                    stageLabel: 'Garage details required',
+                    actionLabel: 'Accident repair — garage update',
+                    detailLine: `${requesterName} submitted the Vehicle Accident Form. Please open the Accident Repair page, complete Garage / Service Details, and click Done.`,
+                });
+            }
+
+            persistWorkflowSnapshotToServiceSubdoc(asset);
+            asset.markModified('activeServiceWorkflow');
+            await asset.save();
+            return;
+        }
+
         const cur = asset.activeServiceWorkflow;
         if (cur?.stage && ![STAGE.COMPLETE, STAGE.REJECTED].includes(cur.stage)) {
             return;
@@ -528,7 +765,9 @@ export async function maybeStartVehicleServiceWorkflow(asset, { serviceRecordId,
             serviceRecordId
         });
 
-        const requesterName = await getRequesterName(req.user);
+        const isTireChange = String(serviceType || '').trim() === 'Tire Change';
+        const plate = [asset.plateEmirate, asset.plateNumber].filter(Boolean).join(' ').trim();
+        const assetLabel = `${asset.assetId || ''}${plate ? ` (${plate})` : ''}`.trim();
 
         await syncDashboardAction({
             requestId: asset._id,
@@ -538,17 +777,21 @@ export async function maybeStartVehicleServiceWorkflow(asset, { serviceRecordId,
             subjectEmployee: subjectEmp,
             requestedByName: requesterName,
             extra1: `${asset.assetId} — ${serviceType || 'Service'}`,
-            extra2: 'Awaiting HR approval',
-            extra3: vehicleServiceDashboardMeta(asset, serviceRecordId),
+            extra2: isTireChange
+                ? 'Tire change submitted — review quotations'
+                : 'Awaiting HR approval',
+            extra3: vehicleServiceDashboardMeta(asset, serviceRecordId, serviceType),
         });
 
         await sendWorkflowEmailWithConsole({
             recipient: hr,
             asset,
-            stageLabel: 'HR approval required',
-            actionLabel: 'New vehicle service request',
-            detailLine: `${requesterName} logged a service (${serviceType}). Please approve or reject in your dashboard.`,
-            linkPath: vehicleServiceDetailsPath(asset._id, serviceRecordId),
+            stageLabel: isTireChange ? 'HR quotation review required' : 'HR approval required',
+            actionLabel: isTireChange ? 'Tire change — quotation review' : 'New vehicle service request',
+            detailLine: isTireChange
+                ? `${requesterName} submitted a tire change request for ${assetLabel}. Open the Tire Change details page, drag Quote 1/2/3 into Approved Quote, then approve or reject.`
+                : `${requesterName} logged a service (${serviceType}). Please approve or reject in your dashboard.`,
+            linkPath: vehicleServiceDetailsPath(asset._id, serviceRecordId, serviceType),
         });
 
         persistWorkflowSnapshotToServiceSubdoc(asset);
@@ -556,6 +799,86 @@ export async function maybeStartVehicleServiceWorkflow(asset, { serviceRecordId,
         await asset.save();
     } catch (e) {
         console.error('[VehicleServiceWorkflow] start failed:', e);
+    }
+}
+
+/**
+ * Car Wash: skip HR/Admin/Scheduled — submit goes straight to Accounts validation.
+ */
+export async function maybeStartCarWashWorkflow(asset, { serviceRecordId, req }) {
+    try {
+        const serviceSub = asset.services?.id?.(serviceRecordId);
+        if (!serviceSub) return;
+
+        const cur = asset.activeServiceWorkflow;
+        if (cur?.stage && ![STAGE.COMPLETE, STAGE.REJECTED].includes(cur.stage)) {
+            return;
+        }
+
+        const accounts = await resolveAssigneeForStage(STAGE.ACCOUNTS);
+        if (!accounts?._id) {
+            console.warn('[CarWashWorkflow] No Flowchart Accounts — workflow not started');
+            return;
+        }
+
+        setCarWashPaymentStatusOnService(serviceSub, CAR_WASH_PAYMENT_PENDING);
+
+        asset.activeServiceWorkflow = {
+            serviceRecordId,
+            stage: STAGE.ACCOUNTS,
+            previousStatus: asset.status,
+            serviceTypeLabel: 'Car Wash',
+            history: [],
+        };
+
+        const requesterName = await getRequesterName(req.user);
+        const requesterEmp = req?.user ? await resolveActorEmployee(req.user) : null;
+
+        await pushWorkflowHistory(asset, {
+            stage: STAGE.ACCOUNTS,
+            action: 'created',
+            note: 'Car wash request submitted for Accounts validation',
+            byName: requesterName,
+        });
+
+        await logVehicleServiceWorkflowToAssetHistory(asset, {
+            stage: STAGE.ACCOUNTS,
+            workflowAction: 'start',
+            note: 'Car wash request submitted for Accounts validation',
+            byName: requesterName,
+            performedById: requesterEmp?._id,
+            serviceTypeLabel: 'Car Wash',
+            hasServiceUpdates: false,
+            serviceRecordId,
+        });
+
+        await syncDashboardAction({
+            requestId: asset._id,
+            requestType: 'Vehicle Service Request',
+            status: 'Pending',
+            assignedTo: accounts._id,
+            subjectEmployee: asset.assignedTo,
+            requestedByName: requesterName,
+            extra1: `${asset.assetId} — Car Wash`,
+            extra2: 'Awaiting Accounts validation',
+            extra3: carWashDashboardMeta(asset, serviceRecordId),
+        });
+
+        await sendWorkflowEmailWithConsole({
+            recipient: accounts,
+            asset,
+            stageLabel: 'Accounts validation required',
+            actionLabel: 'New car wash request',
+            detailLine: `${requesterName} submitted a car wash request. Please validate the amount in VeRP.`,
+            linkPath: carWashDetailsPath(asset._id, serviceRecordId),
+        });
+
+        persistWorkflowSnapshotToServiceSubdoc(asset);
+        asset.markModified('activeServiceWorkflow');
+        asset.markModified('services');
+        await asset.save();
+    } catch (e) {
+        console.error('[CarWashWorkflow] start failed:', e);
     }
 }
 
@@ -569,8 +892,8 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
     try {
         const { id } = req.params;
         const { action, comment, serviceUpdates, holdReason, holdDays, holdUntilDate } = req.body || {};
-        if (!['approve', 'reject', 'hold', 'unhold'].includes(action)) {
-            return res.status(400).json({ message: 'action must be approve, reject, hold, or unhold' });
+        if (!['approve', 'reject', 'hold', 'unhold', 'save'].includes(action)) {
+            return res.status(400).json({ message: 'action must be approve, reject, hold, unhold, or save' });
         }
 
         const asset = await AssetItem.findById(id).populate('assignedTo', 'firstName lastName employeeId');
@@ -589,11 +912,20 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
             });
         }
         const assignee = await resolveAssigneeForStage(stage);
-        if (!assignee?._id && !isPortalAdmin(req.user)) {
+        const serviceSubEarly = wf.serviceRecordId ? asset.services?.id?.(wf.serviceRecordId) : null;
+        const isOilServiceWf = isOilServiceWorkflowRecord(wf, serviceSubEarly);
+        const oilServiceManager = isOilServiceWf ? await actorMayManageOilServiceForAsset(req.user, asset) : false;
+        const oilManagerStage =
+            isOilServiceWf &&
+            oilServiceManager &&
+            [STAGE.HR, STAGE.ACCOUNTS, STAGE.ADMIN].includes(stage) &&
+            ['approve', 'save'].includes(action);
+
+        if (!assignee?._id && !isPortalAdmin(req.user) && !oilManagerStage) {
             return res.status(503).json({ message: 'Workflow role is not configured in Flowchart (assignee missing).' });
         }
 
-        const allowed = await actorMayAct(req.user, assignee);
+        const allowed = (await actorMayAct(req.user, assignee)) || oilManagerStage;
         if (!allowed) {
             return res.status(403).json({ message: 'You are not authorized for this workflow step' });
         }
@@ -606,9 +938,31 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
         const performedById = actorEmp?._id;
 
         if (action === 'approve' && (stage === STAGE.HR || stage === STAGE.ACCOUNTS) && !actorSignatureUrl) {
-            return res.status(400).json({
-                message: 'Digital signature is required. Please add your signature in profile before approval.',
-            });
+            const oilBypass = isOilServiceWf && oilServiceManager && stage === STAGE.HR;
+            if (!oilBypass) {
+                return res.status(400).json({
+                    message: 'Digital signature is required. Please add your signature in profile before approval.',
+                });
+            }
+        }
+
+        if (action === 'save') {
+            if (!wf.serviceRecordId) {
+                return res.status(400).json({ message: 'No service record linked to this workflow.' });
+            }
+            if (!serviceUpdates || typeof serviceUpdates !== 'object') {
+                return res.status(400).json({ message: 'serviceUpdates is required to save request details.' });
+            }
+            try {
+                await mergeWorkflowServiceRecord(asset, wf.serviceRecordId, serviceUpdates);
+            } catch (mergeErr) {
+                return res.status(400).json({ message: mergeErr.message || 'Could not update service record' });
+            }
+            persistWorkflowSnapshotToServiceSubdoc(asset);
+            asset.markModified('services');
+            await asset.save();
+            const fresh = await AssetItem.findById(asset._id).populate('assignedTo', 'firstName lastName employeeId');
+            return res.json({ message: 'Request details saved', asset: fresh });
         }
 
         if (action === 'hold') {
@@ -661,20 +1015,24 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
             persistWorkflowSnapshotToServiceSubdoc(asset);
             asset.markModified('activeServiceWorkflow');
             await asset.save();
-            try {
-                const hr = await resolveAssigneeForStage(STAGE.HR);
-                if (hr?._id) {
-                    await sendWorkflowEmailWithConsole({
-                        recipient: hr,
-                        asset,
-                        stageLabel: 'Accounts hold',
-                        actionLabel: 'Vehicle service request is on hold',
-                        detailLine: `Accounts placed this request on hold until ${holdUntil.toISOString().slice(0, 10)}. Reason: ${reason}.`,
-                        linkPath: vehicleServiceDetailsPath(asset._id, wf.serviceRecordId),
-                    });
+            if (isTireWf) {
+                await notifyTireChangeAccountsHoldToAdmin(asset, asset.activeServiceWorkflow, reason, actorName);
+            } else {
+                try {
+                    const hr = await resolveAssigneeForStage(STAGE.HR);
+                    if (hr?._id) {
+                        await sendWorkflowEmailWithConsole({
+                            recipient: hr,
+                            asset,
+                            stageLabel: 'Accounts hold',
+                            actionLabel: 'Vehicle service request is on hold',
+                            detailLine: `Accounts placed this request on hold until ${holdUntil.toISOString().slice(0, 10)}. Reason: ${reason}.`,
+                            linkPath: vehicleServiceDetailsPathForWorkflow(asset, wf),
+                        });
+                    }
+                } catch (e) {
+                    console.error('[VehicleServiceWorkflow] hold notify HR failed:', e);
                 }
-            } catch (e) {
-                console.error('[VehicleServiceWorkflow] hold notify HR failed:', e);
             }
             const holdFresh = await AssetItem.findById(asset._id).populate('assignedTo', 'firstName lastName employeeId');
             return res.json({
@@ -757,6 +1115,72 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
             }
         }
 
+        const serviceSubCarWash = wf.serviceRecordId ? asset.services?.id?.(wf.serviceRecordId) : null;
+        const isCarWashWf = isCarWashServiceRecord(serviceSubCarWash, wf);
+        if (action === 'approve' && stage === STAGE.ACCOUNTS && isCarWashWf) {
+            const validatedAmount = Number(serviceSubCarWash?.value);
+            if (!Number.isFinite(validatedAmount) || validatedAmount <= 0) {
+                return res.status(400).json({ message: 'A valid amount is required before approval.' });
+            }
+
+            if (assignee?._id) {
+                await syncDashboardAction({
+                    requestId: asset._id,
+                    requestType: 'Vehicle Service Request',
+                    status: 'Approved',
+                    assignedTo: assignee._id,
+                    actionedBy: performedById,
+                    comment: comment || 'Amount validated',
+                    subjectEmployee: asset.assignedTo,
+                    requestedByName: actorName,
+                });
+            }
+
+            setCarWashPaymentStatusOnService(serviceSubCarWash, CAR_WASH_PAYMENT_NOT_PAID);
+            asset.activeServiceWorkflow.stage = STAGE.COMPLETE;
+            asset.status = resolveStatusAfterService(asset, wf);
+
+            await pushWorkflowHistory(asset, {
+                stage: STAGE.ACCOUNTS,
+                action: 'approve',
+                note: comment || 'Amount validated — Not paid',
+                byName: actorName,
+                bySignatureUrl: actorSignatureUrl,
+            });
+            await logVehicleServiceWorkflowToAssetHistory(asset, {
+                stage: STAGE.ACCOUNTS,
+                workflowAction: 'approve',
+                note: comment || 'Amount validated — Not paid',
+                byName: actorName,
+                performedById,
+                serviceTypeLabel: 'Car Wash',
+                hasServiceUpdates: hadServiceUpdates,
+                serviceRecordId: wf.serviceRecordId,
+            });
+
+            await closeCarWashPendingDashboardActions(asset._id, wf.serviceRecordId, {
+                actionedBy: performedById,
+                comment: comment || 'Car wash validated',
+            });
+
+            persistWorkflowSnapshotToServiceSubdoc(asset);
+            asset.markModified('services');
+            await asset.save();
+
+            await notifyCarWashAccountsApproved({
+                asset,
+                serviceRecordId: wf.serviceRecordId,
+                actorName,
+                validatedAmount: serviceSubCarWash?.value,
+            });
+
+            const fresh = await AssetItem.findById(asset._id).populate('assignedTo', 'firstName lastName employeeId');
+            return res.json({
+                message: 'Car wash validated. Status updated to Not paid.',
+                asset: fresh,
+            });
+        }
+
         if (action === 'approve' && stage === STAGE.HR && wf.serviceRecordId) {
             const serviceSub = asset.services?.id?.(wf.serviceRecordId);
             if (serviceSub && requiresQuotationSelection(serviceSub.serviceType || wf.serviceTypeLabel)) {
@@ -806,7 +1230,7 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
                             stageLabel: 'Service request rejected',
                             actionLabel: 'Vehicle service rejected',
                             detailLine: `Your service request was rejected at ${STAGE_LABEL[stage] || stage}. Reason: ${comment || 'No reason provided'}. You can edit and re-submit.`,
-                            linkPath: vehicleServiceDetailsPath(asset._id, wf.serviceRecordId),
+                            linkPath: vehicleServiceDetailsPathForWorkflow(asset, wf),
                         });
                         await syncDashboardAction({
                             requestId: asset._id,
@@ -819,7 +1243,7 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
                             requestedByName: actorName,
                             extra1: `${asset.assetId} — ${wf.serviceTypeLabel || 'Service'}`,
                             extra2: `Rejected at ${STAGE_LABEL[stage] || stage}`,
-                            extra3: vehicleServiceDashboardMeta(asset, wf.serviceRecordId),
+                            extra3: vehicleServiceDashboardMetaForWorkflow(asset, wf),
                         });
                     }
                 }
@@ -856,7 +1280,197 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
             serviceRecordId: wf.serviceRecordId
         });
 
+        const serviceSubForOil = wf.serviceRecordId ? asset.services?.id?.(wf.serviceRecordId) : null;
+        const isTireWf = isTireChangeWorkflow(wf, serviceSubForOil);
+        const isMechWf = isMechanicalWorkWorkflow(wf, serviceSubForOil);
+        const isBodyWf = isBodyWorkWorkflow(wf, serviceSubForOil);
+        const isAccWf = isAccidentRepairWorkflow(wf, serviceSubForOil);
+        const oilServiceType = isOilServiceWorkflowRecord(wf, serviceSubForOil);
+        if (
+            action === 'approve' &&
+            oilServiceType &&
+            oilServiceManager &&
+            [STAGE.HR, STAGE.ACCOUNTS, STAGE.ADMIN].includes(stage)
+        ) {
+            const meta = parseRemarkMeta(serviceSubForOil?.remark);
+            const handOverRaw = meta.handOverDate;
+            const returnRaw = meta.returnDate;
+            if (!handOverRaw || !returnRaw) {
+                return res.status(400).json({
+                    message: 'Hand over date and return date are required before submitting service details.',
+                });
+            }
+            const startD = new Date(handOverRaw);
+            const endD = new Date(returnRaw);
+            if (Number.isNaN(startD.getTime()) || Number.isNaN(endD.getTime())) {
+                return res.status(400).json({ message: 'Invalid hand over or return date.' });
+            }
+            const msPerDay = 24 * 60 * 60 * 1000;
+            const durationDays = Math.max(
+                1,
+                Math.floor((utcDayStart(endD) - utcDayStart(startD)) / msPerDay) + 1,
+            );
+
+            if (!asset.activeServiceWorkflow) asset.activeServiceWorkflow = {};
+            asset.activeServiceWorkflow.scheduledServiceDate = startD;
+            asset.activeServiceWorkflow.serviceWindowEndDate = endD;
+            asset.activeServiceWorkflow.serviceDurationDays = durationDays;
+            asset.activeServiceWorkflow.stage = STAGE.COMPLETE;
+            if (serviceSubForOil) {
+                serviceSubForOil.serviceDuration = `${durationDays} day${durationDays === 1 ? '' : 's'}`;
+                const remarkComplete = parseRemarkMeta(serviceSubForOil.remark);
+                remarkComplete.vehicleServiceCompleted = 'live';
+                remarkComplete.vehicleServiceCompletedAt = new Date().toISOString();
+                serviceSubForOil.remark = JSON.stringify(remarkComplete);
+            }
+            asset.status = resolveStatusAfterService(asset, wf);
+            persistWorkflowSnapshotToServiceSubdoc(asset);
+            asset.markModified('services');
+            asset.markModified('activeServiceWorkflow');
+            await asset.save();
+            const performedBy = (await resolveActorEmployee(req.user))?._id;
+            await closeOilServicePendingDashboardActions(asset._id, wf.serviceRecordId, {
+                comment: 'Oil service completed. Vehicle status restored.',
+                actionedBy: performedBy,
+            });
+            const oilFresh = await AssetItem.findById(asset._id).populate(
+                'assignedTo',
+                'firstName lastName employeeId',
+            );
+            return res.json({
+                message: 'Oil service completed. Vehicle status restored.',
+                asset: oilFresh,
+            });
+        }
+
+        if (
+            action === 'approve' &&
+            isTireWf &&
+            stage === STAGE.HR
+        ) {
+            persistWorkflowSnapshotToServiceSubdoc(asset);
+            await advanceTireChangeAfterHrApprove(asset, asset.activeServiceWorkflow, actorName);
+            const tireHrFresh = await AssetItem.findById(asset._id).populate(
+                'assignedTo',
+                'firstName lastName employeeId',
+            );
+            return res.json({ message: 'HR approved — sent to Admin Officer for garage details', asset: tireHrFresh });
+        }
+
+        if (
+            action === 'approve' &&
+            isTireWf &&
+            stage === STAGE.ACCOUNTS
+        ) {
+            persistWorkflowSnapshotToServiceSubdoc(asset);
+            await advanceTireChangeAfterAccountsApprove(asset, asset.activeServiceWorkflow, actorName);
+            const tireAccFresh = await AssetItem.findById(asset._id).populate(
+                'assignedTo',
+                'firstName lastName employeeId',
+            );
+            return res.json({
+                message: 'Accounts approved — service scheduled; vehicle will go on service on the start date',
+                asset: tireAccFresh,
+            });
+        }
+
+        if (
+            action === 'approve' &&
+            isMechWf &&
+            stage === STAGE.HR
+        ) {
+            persistWorkflowSnapshotToServiceSubdoc(asset);
+            await advanceMechanicalWorkAfterHrApprove(asset, asset.activeServiceWorkflow, actorName);
+            const mechHrFresh = await AssetItem.findById(asset._id).populate(
+                'assignedTo',
+                'firstName lastName employeeId',
+            );
+            return res.json({ message: 'HR approved — sent to Admin Officer for garage details', asset: mechHrFresh });
+        }
+
+        if (
+            action === 'approve' &&
+            isMechWf &&
+            stage === STAGE.ACCOUNTS
+        ) {
+            persistWorkflowSnapshotToServiceSubdoc(asset);
+            await advanceMechanicalWorkAfterAccountsApprove(asset, asset.activeServiceWorkflow, actorName);
+            const mechAccFresh = await AssetItem.findById(asset._id).populate(
+                'assignedTo',
+                'firstName lastName employeeId',
+            );
+            return res.json({
+                message: 'Accounts approved — service scheduled; vehicle will go on service on the start date',
+                asset: mechAccFresh,
+            });
+        }
+
+        if (
+            action === 'approve' &&
+            isBodyWf &&
+            stage === STAGE.HR
+        ) {
+            persistWorkflowSnapshotToServiceSubdoc(asset);
+            await advanceBodyWorkAfterHrApprove(asset, asset.activeServiceWorkflow, actorName);
+            const bodyHrFresh = await AssetItem.findById(asset._id).populate(
+                'assignedTo',
+                'firstName lastName employeeId',
+            );
+            return res.json({ message: 'HR approved — sent to Admin Officer for garage details', asset: bodyHrFresh });
+        }
+
+        if (
+            action === 'approve' &&
+            isBodyWf &&
+            stage === STAGE.ACCOUNTS
+        ) {
+            persistWorkflowSnapshotToServiceSubdoc(asset);
+            await advanceBodyWorkAfterAccountsApprove(asset, asset.activeServiceWorkflow, actorName);
+            const bodyAccFresh = await AssetItem.findById(asset._id).populate(
+                'assignedTo',
+                'firstName lastName employeeId',
+            );
+            return res.json({
+                message: 'Accounts approved — service scheduled; vehicle will go on service on the start date',
+                asset: bodyAccFresh,
+            });
+        }
+
+        if (
+            action === 'approve' &&
+            isAccWf &&
+            stage === STAGE.HR
+        ) {
+            persistWorkflowSnapshotToServiceSubdoc(asset);
+            await advanceAccidentRepairAfterHrApprove(asset, asset.activeServiceWorkflow, actorName);
+            const accHrFresh = await AssetItem.findById(asset._id).populate(
+                'assignedTo',
+                'firstName lastName employeeId',
+            );
+            return res.json({ message: 'HR approved — sent to Admin Officer for garage details', asset: accHrFresh });
+        }
+
+        if (
+            action === 'approve' &&
+            isAccWf &&
+            stage === STAGE.ACCOUNTS
+        ) {
+            persistWorkflowSnapshotToServiceSubdoc(asset);
+            await advanceAccidentRepairAfterAccountsApprove(asset, asset.activeServiceWorkflow, actorName);
+            const accAccFresh = await AssetItem.findById(asset._id).populate(
+                'assignedTo',
+                'firstName lastName employeeId',
+            );
+            return res.json({
+                message: 'Accounts approved — service scheduled; vehicle will go on service on the start date',
+                asset: accAccFresh,
+            });
+        }
+
         let nextStage = null;
+        if (isTireWf || isMechWf || isBodyWf || isAccWf) {
+            return res.status(400).json({ message: 'Invalid service workflow step for this action.' });
+        }
         if (stage === STAGE.HR) nextStage = STAGE.ACCOUNTS;
         else if (stage === STAGE.ACCOUNTS) nextStage = STAGE.ADMIN;
         else if (stage === STAGE.MANAGEMENT) nextStage = STAGE.COMPLETE;
@@ -903,7 +1517,7 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
                     requestedByName: requesterName,
                     extra1: `${asset.assetId} — ${wf.serviceTypeLabel || 'Service'}`,
                     extra2: 'Service scheduled — use Extend or Mark live during the service window',
-                    extra3: vehicleServiceDashboardMeta(asset, wf.serviceRecordId),
+                    extra3: vehicleServiceDashboardMetaForWorkflow(asset, wf),
                 });
                 await sendWorkflowEmailWithConsole({
                     recipient: nextAssignee,
@@ -911,7 +1525,7 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
                     stageLabel: 'Service scheduled (asset controller)',
                     actionLabel: 'Vehicle service window is scheduled',
                     detailLine: `A service date and duration are set. The vehicle is waiting for service until the first service day, then you can use Extend or Mark live during the window.`,
-                    linkPath: vehicleServiceDetailsPath(asset._id, wf.serviceRecordId),
+                    linkPath: vehicleServiceDetailsPathForWorkflow(asset, wf),
                 });
             }
 
@@ -932,7 +1546,7 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
                         stageLabel: 'Admin approved; service scheduled',
                         actionLabel: 'Vehicle service moved to scheduled window',
                         detailLine: `Admin approved and scheduled this service window. Current vehicle status: ${asset.status}.`,
-                        linkPath: vehicleServiceDetailsPath(asset._id, wf.serviceRecordId),
+                        linkPath: vehicleServiceDetailsPathForWorkflow(asset, wf),
                     });
                 }
             } catch (notifyErr) {
@@ -983,7 +1597,7 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
                 requestedByName: requesterName,
                 extra1: `${asset.assetId} — ${wf.serviceTypeLabel || 'Service'}`,
                 extra2,
-                extra3: vehicleServiceDashboardMeta(asset, wf.serviceRecordId),
+                extra3: vehicleServiceDashboardMetaForWorkflow(asset, wf),
             });
 
             await sendWorkflowEmailWithConsole({
@@ -992,7 +1606,7 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
                 stageLabel: extra2,
                 actionLabel: 'Vehicle service workflow',
                 detailLine: `The request moved to the next step. Please review in VeRP.`,
-                linkPath: vehicleServiceDetailsPath(asset._id, wf.serviceRecordId),
+                linkPath: vehicleServiceDetailsPathForWorkflow(asset, wf),
             });
         }
 
@@ -1006,7 +1620,7 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
                         stageLabel: 'HR approved; sent to Accounts',
                         actionLabel: 'Vehicle service request update',
                         detailLine: `Your vehicle service request was approved by HR and moved to Accounts review.`,
-                        linkPath: vehicleServiceDetailsPath(asset._id, wf.serviceRecordId),
+                        linkPath: vehicleServiceDetailsPathForWorkflow(asset, wf),
                     });
                 }
             } catch (notifyErr) {
@@ -1252,7 +1866,7 @@ export const respondVehicleServiceScheduledPeriod = async (req, res) => {
                         stageLabel: 'Service extended',
                         actionLabel: 'Vehicle service return date updated',
                         detailLine: `Service window extended by ${ext} day(s). New expected return date: ${newEnd.toISOString().slice(0, 10)}.`,
-                        linkPath: vehicleServiceDetailsPath(asset._id, serviceRecordId),
+                        linkPath: vehicleServiceDetailsPathForWorkflow(asset, wf),
                     });
                 }
             } catch (notifyErr) {
@@ -1370,7 +1984,7 @@ export const respondVehicleServiceScheduledPeriod = async (req, res) => {
                         stageLabel: 'Vehicle marked live',
                         actionLabel: 'Service workflow completed',
                         detailLine: `Service is marked live and completed. Vehicle status is restored to ${asset.status}.`,
-                        linkPath: vehicleServiceDetailsPath(asset._id, serviceRecordId),
+                        linkPath: vehicleServiceDetailsPathForWorkflow(asset, wf),
                     });
                 }
             } catch (notifyErr) {
@@ -1512,7 +2126,7 @@ export const respondVehicleServiceScheduledPeriod = async (req, res) => {
                             stageLabel: 'Service extended',
                             actionLabel: 'Vehicle service return date updated',
                             detailLine: `Service remains On Service and return date is extended to ${r.accidentReturnDate || '—'}.`,
-                            linkPath: vehicleServiceDetailsPath(asset._id, serviceRecordId),
+                            linkPath: vehicleServiceDetailsPathForWorkflow(asset, wf),
                         });
                     }
                 } catch (notifyErr) {

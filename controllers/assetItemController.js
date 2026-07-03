@@ -32,6 +32,10 @@ import {
     upsertHandoverDashboardAction,
     upsertHandoverAssignerDashboardAction,
     upsertHandoverAdminOfficerDashboardAction,
+    upsertHandoverTargetAssigneeDashboardAction,
+    notifyHandoverStageEmail,
+    isFleetHandoverDashboardMeta,
+    isFleetHandoverTrackingViewerRole,
     closeFleetHandoverDashboardActions,
     markHandoverLifecycleOnHistory,
     HANDOVER_LIFECYCLE,
@@ -63,7 +67,27 @@ import { notifyLossDamageRejectedToRequester } from '../utils/notifyLossDamageRe
 import { resolveAssetCreatorEmployee } from '../utils/assetApprovalHelpers.js';
 import { hasPermission, isUserAdministrator } from '../services/permissionService.js';
 import { collectAssetDocumentIdsForDeletion } from '../utils/assetDocumentDeletion.js';
-import { completeAssetServiceOverdueTasks, processAssetServiceOverdue } from '../utils/processAssetServiceOverdue.js';
+import {
+    actorMayManageOilService,
+    actorMayManageTireChangeRequest,
+    appendOilServiceActivity,
+    getRequesterName,
+    submitOilServiceAssignment,
+    saveOilServiceDetailsDraft,
+    submitOilServiceDetails,
+    updateOilServiceDates,
+    userMayEditOilServiceDates,
+    closeOilServicePendingDashboardActions,
+    healStaleOilServicePendingDashboardActions,
+    activateOilServiceOnStartDate,
+    processOilServiceStartDateActivation,
+    maybeAutoCreateOilServiceDue,
+} from '../utils/oilServiceWorkflow.js';
+import { activateShopServiceOnStartDate } from '../utils/vehicleShopServiceScheduled.js';
+import {
+    updateShopServiceExtendDate,
+    userMayExtendServiceEndDate,
+} from '../utils/vehicleShopServiceExtendDate.js';
 import {
     resolveAssetControllerEmployee,
     getAssetRequesterDisplayName,
@@ -190,20 +214,46 @@ import {
     notifyAdminDeletedWholeAsset,
     isReqUserAdmin,
     getAssetControllerNotificationEmail,
+    scheduleManagementAdminDeletionEmail,
 } from '../utils/sendAdminDeletionNotificationEmails.js';
 import { isJwtSystemSuperUser } from '../utils/systemSuperUser.js';
 import { awaitAdminDeletionArchive } from '../utils/adminDeletionArchiveRun.js';
 import {
     cleanupDashboardActionsForDeletedAsset,
+    deleteDashboardActionsForVehicleService,
     ASSET_DASHBOARD_INBOX_TYPES,
     ASSET_TOOLS_INBOX_TYPES,
     VEHICLE_DASHBOARD_INBOX_TYPES,
 } from '../utils/cleanupAssetDashboardActions.js';
 import {
     maybeStartVehicleServiceWorkflow,
+    maybeStartCarWashWorkflow,
     getWorkflowAssigneePayloadForStage,
-    userMayRespondVehicleServiceWorkflow
+    userMayRespondVehicleServiceWorkflow,
+    mergeWorkflowServiceRecord,
 } from './vehicleServiceWorkflowController.js';
+import { actorMayManageCarWashRequest } from '../utils/carWashWorkflow.js';
+import {
+    submitTireChangeGarage,
+    completeTireChangeService,
+    appendTireChangeActivity,
+    updateTireChangeQuoteEmployeeRows,
+} from '../utils/tireChangeWorkflow.js';
+import {
+    submitMechanicalWorkGarage,
+    completeMechanicalWorkService,
+    updateMechanicalWorkQuoteEmployeeRows,
+} from '../utils/mechanicalWorkWorkflow.js';
+import {
+    submitBodyWorkGarage,
+    completeBodyWorkService,
+    updateBodyWorkQuoteEmployeeRows,
+} from '../utils/bodyWorkWorkflow.js';
+import {
+    submitAccidentRepairGarage,
+    completeAccidentRepairService,
+    updateAccidentRepairQuoteEmployeeRows,
+} from '../utils/accidentRepairWorkflow.js';
 import {
     generateVegaAccessoryCatalogId,
     syncAllAccessoryInstancesForAsset,
@@ -885,6 +935,20 @@ const getActorPermissionFlagsForAsset = async (reqUser, asset) => {
     };
 };
 
+const actorMayManageOilServiceRequest = async (reqUser, asset) => actorMayManageOilService(reqUser, asset);
+
+const isTireChangeServiceType = (serviceType) => String(serviceType || '').trim() === 'Tire Change';
+
+const VEHICLE_SERVICE_TAB_REQUEST_TYPES = new Set([
+    'Tire Change',
+    'Mechanical Work',
+    'Body Work',
+    'Accident Repair',
+]);
+
+const isVehicleServiceTabRequestType = (serviceType) =>
+    VEHICLE_SERVICE_TAB_REQUEST_TYPES.has(String(serviceType || '').trim());
+
 
 export const getAssetItems = async (req, res) => {
     try {
@@ -938,10 +1002,12 @@ export const getAssetItems = async (req, res) => {
 
 /**
  * Fleet dashboard for vehicle assets: reminders, status, charts (service cost, model years, usage proxy).
+ * Pass `?scope=list` for a lightweight vehicle list payload (skips charts and heavy service history).
  * @route GET /api/AssetItem/vehicle-fleet-dashboard
  */
 export const getVehicleFleetDashboard = async (req, res) => {
     try {
+        const listOnly = String(req.query.scope || '').trim().toLowerCase() === 'list';
         const fallbackAssetController = await getDepartmentHOD('assetcontroller');
         const draftVis = buildDraftVisibilityQuery(req.user);
         const vehicleTypeDocs = await AssetType.find({
@@ -957,14 +1023,16 @@ export const getVehicleFleetDashboard = async (req, res) => {
                 ...(vehicleTypeIds.length ? [{ typeId: { $in: vehicleTypeIds } }] : []),
             ],
         };
+        const fleetSelect = listOnly
+            ? 'assetId name plateEmirate plateNumber modelYear assetValue status registrationExpiryDate insuranceExpiryDate nextServiceDate oilChangeDate gearOilDueDate currentKilometer assignedTo assignedCompany acceptanceStatus pendingAction actionRequiredBy createdBy vehicleProfileActivationStatus vehicleDispositionStatus warrantyEnabled warrantyExpiryDate warrantyYears onServiceActive onLeaveActive typeId'
+            : 'assetId name plateEmirate plateNumber modelYear assetValue status registrationExpiryDate insuranceExpiryDate nextServiceDate oilChangeDate gearOilDueDate lastServiceDate currentKilometer assignedTo assignedCompany acceptanceStatus pendingAction services documents actionRequiredBy createdBy vehicleProfileActivationStatus vehicleDispositionStatus assignmentType temporaryEndDate warrantyEnabled warrantyExpiryDate warrantyYears accessories parkingExtendedDays parkingReminderSentAt parkingDurationCompleteSentAt onServiceActive onLeaveActive';
         const items = await AssetItem.find({ $and: [draftVis, fleetScope] })
             .populate('typeId', 'name')
             .populate('assignedTo', 'firstName lastName employeeId')
             .populate('assignedCompany', 'name nickName companyShortName companyName')
             .populate('actionRequiredBy', 'firstName lastName employeeId')
-            .select(
-                'assetId name plateEmirate plateNumber modelYear assetValue status registrationExpiryDate insuranceExpiryDate nextServiceDate oilChangeDate gearOilDueDate lastServiceDate currentKilometer assignedTo assignedCompany acceptanceStatus pendingAction services documents actionRequiredBy createdBy vehicleProfileActivationStatus vehicleDispositionStatus assignmentType temporaryEndDate warrantyEnabled warrantyExpiryDate warrantyYears accessories parkingExtendedDays parkingReminderSentAt parkingDurationCompleteSentAt onServiceActive onLeaveActive'
-            )
+            .select(fleetSelect)
+            .maxTimeMS(20000)
             .lean();
 
         const isVehicleAsset = (it) => {
@@ -975,12 +1043,6 @@ export const getVehicleFleetDashboard = async (req, res) => {
         };
 
         const vehicles = items.filter(isVehicleAsset);
-        const vehicleIds = vehicles.map((v) => v._id);
-
-        const now = new Date();
-        now.setHours(0, 0, 0, 0);
-        const soonEnd = new Date(now);
-        soonEnd.setDate(soonEnd.getDate() + 30);
 
         const registrationExpiry = (v) => {
             if (v.registrationExpiryDate) return new Date(v.registrationExpiryDate);
@@ -988,6 +1050,70 @@ export const getVehicleFleetDashboard = async (req, res) => {
             if (reg?.expiryDate) return new Date(reg.expiryDate);
             return null;
         };
+
+        const fleetRows = vehicles.map((v) => {
+            const total = listOnly
+                ? 0
+                : (v.services || []).reduce((sum, s) => sum + Number(s.value || 0), 0);
+            const workflowController = v.actionRequiredBy && typeof v.actionRequiredBy === 'object' ? v.actionRequiredBy : null;
+            const resolvedController = workflowController || ((!v.assignedTo && fallbackAssetController) ? fallbackAssetController : null);
+            const hasControllerObjectId = !!resolvedController?._id;
+            const controllerPayload = resolvedController
+                ? {
+                    _id: hasControllerObjectId
+                        ? resolvedController._id
+                        : `flowchart_${resolvedController.category || 'assetcontroller'}`,
+                    firstName:
+                        resolvedController.firstName ||
+                        resolvedController.employeeName?.split(' ')[0] ||
+                        'Asset',
+                    lastName:
+                        resolvedController.lastName ||
+                        resolvedController.employeeName?.split(' ').slice(1).join(' ') ||
+                        'Controller',
+                    employeeId: resolvedController.employeeId || '',
+                }
+                : null;
+            const regExpResolved = registrationExpiry(v);
+            return {
+                _id: v._id,
+                assetId: v.assetId,
+                plateEmirate: v.plateEmirate || '',
+                plateNumber: v.plateNumber,
+                label: (v.plateNumber || v.assetId || 'Asset').toString().slice(0, 18),
+                totalServiceCost: total,
+                assetValue: Number(v.assetValue || 0),
+                modelYear: v.modelYear || '',
+                status: v.status,
+                vehicleDispositionStatus: v.vehicleDispositionStatus || 'active',
+                vehicleProfileActivationStatus: v.vehicleProfileActivationStatus || '',
+                assignedTo: v.assignedTo,
+                assignedCompany: v.assignedCompany,
+                acceptanceStatus: v.acceptanceStatus || '',
+                pendingAction: v.pendingAction || '',
+                actionRequiredBy: v.actionRequiredBy,
+                onServiceActive: v.onServiceActive === true,
+                onLeaveActive: v.onLeaveActive === true,
+                assetController: controllerPayload,
+                assetControllerId: controllerPayload?._id || null,
+                registrationExpiryDate: regExpResolved,
+                nextServiceDate: v.nextServiceDate || null,
+                gearOilDueDate: v.gearOilDueDate || null,
+                oilChangeDate: v.oilChangeDate || null,
+                currentKilometer: v.currentKilometer
+            };
+        });
+
+        if (listOnly) {
+            return res.json({ vehicles: fleetRows });
+        }
+
+        const vehicleIds = vehicles.map((v) => v._id);
+
+        const now = new Date();
+        now.setHours(0, 0, 0, 0);
+        const soonEnd = new Date(now);
+        soonEnd.setDate(soonEnd.getDate() + 30);
 
         const nextMaintenanceDate = (v) => {
             const dates = [v.nextServiceDate, v.gearOilDueDate].filter(Boolean).map((d) => new Date(d));
@@ -1049,54 +1175,6 @@ export const getVehicleFleetDashboard = async (req, res) => {
                 requestType: { $in: ASSET_DASHBOARD_INBOX_TYPES }
             });
         }
-
-        const fleetRows = vehicles.map((v) => {
-            const total = (v.services || []).reduce((sum, s) => sum + Number(s.value || 0), 0);
-            const workflowController = v.actionRequiredBy && typeof v.actionRequiredBy === 'object' ? v.actionRequiredBy : null;
-            const resolvedController = workflowController || ((!v.assignedTo && fallbackAssetController) ? fallbackAssetController : null);
-            const hasControllerObjectId = !!resolvedController?._id;
-            const controllerPayload = resolvedController
-                ? {
-                    _id: hasControllerObjectId
-                        ? resolvedController._id
-                        : `flowchart_${resolvedController.category || 'assetcontroller'}`,
-                    firstName:
-                        resolvedController.firstName ||
-                        resolvedController.employeeName?.split(' ')[0] ||
-                        'Asset',
-                    lastName:
-                        resolvedController.lastName ||
-                        resolvedController.employeeName?.split(' ').slice(1).join(' ') ||
-                        'Controller',
-                    employeeId: resolvedController.employeeId || '',
-                }
-                : null;
-            const regExpResolved = registrationExpiry(v);
-            return {
-                _id: v._id,
-                assetId: v.assetId,
-                plateEmirate: v.plateEmirate || '',
-                plateNumber: v.plateNumber,
-                label: (v.plateNumber || v.assetId || 'Asset').toString().slice(0, 18),
-                totalServiceCost: total,
-                assetValue: Number(v.assetValue || 0),
-                modelYear: v.modelYear || '',
-                status: v.status,
-                vehicleDispositionStatus: v.vehicleDispositionStatus || 'active',
-                vehicleProfileActivationStatus: v.vehicleProfileActivationStatus || '',
-                assignedTo: v.assignedTo,
-                assignedCompany: v.assignedCompany,
-                acceptanceStatus: v.acceptanceStatus || '',
-                pendingAction: v.pendingAction || '',
-                actionRequiredBy: v.actionRequiredBy,
-                onServiceActive: v.onServiceActive === true,
-                onLeaveActive: v.onLeaveActive === true,
-                assetController: controllerPayload,
-                assetControllerId: controllerPayload?._id || null,
-                registrationExpiryDate: regExpResolved,
-                currentKilometer: v.currentKilometer
-            };
-        });
 
         const monthTotals = {};
         for (const v of vehicles) {
@@ -1376,7 +1454,7 @@ export const getVehicleFleetServiceRequests = async (req, res) => {
         const draftVis = buildDraftVisibilityQuery(req.user);
         const items = await AssetItem.find({ $and: [draftVis] })
             .populate('typeId', 'name')
-            .select('assetId name plateEmirate plateNumber services typeId activeServiceWorkflow')
+            .select('assetId name plateEmirate plateNumber services typeId activeServiceWorkflow vehicleProfileActivationStatus')
             .lean();
 
         const isVehicleAsset = (it) => {
@@ -1436,6 +1514,10 @@ export const getVehicleFleetServiceRequests = async (req, res) => {
             const wf = v.activeServiceWorkflow || {};
             const wfSid = wf.serviceRecordId;
             for (const s of v.services || []) {
+                const serviceTypeLabel = String(s.serviceType || '').trim();
+                if (serviceTypeLabel === 'Oil Service' || serviceTypeLabel === 'Car Wash') {
+                    continue;
+                }
                 const [attachment, quotation2, quotation3, invoice] = await Promise.all([
                     s.attachment ? getSignedFileUrl(s.attachment) : Promise.resolve(null),
                     s.quotation2 ? getSignedFileUrl(s.quotation2) : Promise.resolve(null),
@@ -1540,6 +1622,7 @@ export const getVehicleFleetServiceRequests = async (req, res) => {
                     vehicleId: v._id,
                     vehicleAssetId: v.assetId,
                     vehicleLabel: vLabel,
+                    vehicleProfileActivationStatus: v.vehicleProfileActivationStatus || '',
                     attachment,
                     quotation2,
                     quotation3,
@@ -1750,18 +1833,14 @@ export const getUnassignedAssetsForEmployee = async (req, res) => {
         }
 
         const items = await AssetItem.find({
-            status: { $in: ['Unassigned', 'Returned', 'Pending'] }
+            status: { $in: ['Unassigned', 'Returned'] },
         })
             .select('assetId name assetValue status purchaseDate invoiceFile typeId categoryId')
             .populate('typeId', 'name type')
             .populate('categoryId', 'name category')
             .sort({ assetId: 1 });
 
-        const filteredItems = items.filter(item => {
-            const status = item.status?.toString().trim();
-
-            return status === 'Unassigned' || status === 'Returned' || status === 'Pending';
-        });
+        const filteredItems = items.filter((item) => isAssignableFromPoolStatus(item.status));
 
         res.status(200).json({
             items: filteredItems,
@@ -4115,6 +4194,9 @@ export const getAssetItemDetail = async (req, res) => {
                         if (Array.isArray(remarkObj.bodyWorkImages)) {
                             remarkObj.bodyWorkImages = await signRemarkImages(remarkObj.bodyWorkImages);
                         }
+                        if (Array.isArray(remarkObj.newConditionImages)) {
+                            remarkObj.newConditionImages = await signRemarkImages(remarkObj.newConditionImages);
+                        }
                         service.remark = JSON.stringify(remarkObj);
                     }
                 } catch (_e) {
@@ -4134,6 +4216,10 @@ export const getAssetItemDetail = async (req, res) => {
         const deferHeavyServiceSigning =
             String(req.query.deferServiceSigning || '').toLowerCase() === '1' ||
             String(req.query.deferServiceSigning || '').toLowerCase() === 'true';
+
+        const deferLightDetail =
+            String(req.query.light || '').toLowerCase() === '1' ||
+            String(req.query.light || '').toLowerCase() === 'true';
 
         const headerSignTasks = [
             itemObj.typeId?.imagePreview
@@ -4212,7 +4298,10 @@ export const getAssetItemDetail = async (req, res) => {
         ];
 
         let signTasks;
-        if (deferHeavyServiceSigning) {
+        if (deferLightDetail) {
+            itemObj.deferredAttachmentSigning = true;
+            signTasks = headerSignTasks.filter(Boolean);
+        } else if (deferHeavyServiceSigning) {
             itemObj.deferredAttachmentSigning = true;
             signTasks = nonServiceAttachmentSignTasks;
         } else {
@@ -4339,6 +4428,82 @@ export const getAssetItemDetail = async (req, res) => {
             };
         }
 
+        try {
+            for (const s of itemObj.services || []) {
+                if (String(s.serviceType || '').trim() !== 'Oil Service') continue;
+                let remark = {};
+                try {
+                    remark = typeof s.remark === 'string' ? JSON.parse(s.remark) : (s.remark || {});
+                } catch {
+                    remark = {};
+                }
+                if (String(remark.vehicleServiceCompleted || '').toLowerCase() === 'live') {
+                    await closeOilServicePendingDashboardActions(item._id, s._id, {
+                        comment: 'Oil service completed',
+                    });
+                }
+            }
+            await healStaleOilServicePendingDashboardActions({ assetIds: [item._id] });
+            const freshForOilActivation = await AssetItem.findById(item._id).select(
+                'services activeServiceWorkflow onServiceActive status',
+            );
+            if (freshForOilActivation) {
+                await activateOilServiceOnStartDate(freshForOilActivation, { byName: 'System' });
+                const freshForShopActivation = await AssetItem.findById(item._id).select(
+                    'services activeServiceWorkflow onServiceActive status assignedTo plateEmirate plateNumber assetId',
+                );
+                if (freshForShopActivation) {
+                    const shopWf = freshForShopActivation.activeServiceWorkflow || {};
+                    const shopType = String(shopWf.serviceTypeLabel || '').trim();
+                    if (
+                        shopType === 'Tire Change' ||
+                        shopType === 'Mechanical Work' ||
+                        shopType === 'Body Work' ||
+                        shopType === 'Accident Repair'
+                    ) {
+                        const linkPath =
+                            shopType === 'Tire Change'
+                                ? `/HRM/Asset/Vehicle/details/${item._id}/tire-change/${shopWf.serviceRecordId}`
+                                : shopType === 'Mechanical Work'
+                                  ? `/HRM/Asset/Vehicle/details/${item._id}/mechanical-work/${shopWf.serviceRecordId}`
+                                  : shopType === 'Body Work'
+                                    ? `/HRM/Asset/Vehicle/details/${item._id}/body-work/${shopWf.serviceRecordId}`
+                                    : `/HRM/Asset/Vehicle/details/${item._id}/accident-repair/${shopWf.serviceRecordId}`;
+                        const dashboardMeta = JSON.stringify({
+                            vehicleId: String(item._id),
+                            serviceRecordId: String(shopWf.serviceRecordId || ''),
+                            serviceType: shopType,
+                            detailsPath: linkPath,
+                        });
+                        await activateShopServiceOnStartDate(freshForShopActivation, {
+                            serviceTypeLabel: shopType,
+                            linkPath,
+                            dashboardMeta,
+                            byName: 'System',
+                            notify: true,
+                        });
+                    }
+                }
+                const freshForOilDue = await AssetItem.findById(item._id).select(
+                    'assetId plateNumber plateEmirate services activeServiceWorkflow currentKilometer nextServiceDate assignedTo vehicleProfileActivationStatus typeId',
+                ).populate('typeId', 'name');
+                if (freshForOilDue) {
+                    await maybeAutoCreateOilServiceDue(freshForOilDue);
+                }
+                const activated = await AssetItem.findById(item._id).select(
+                    'services activeServiceWorkflow onServiceActive status',
+                ).lean();
+                if (activated) {
+                    itemObj.services = activated.services;
+                    itemObj.activeServiceWorkflow = activated.activeServiceWorkflow;
+                    itemObj.onServiceActive = activated.onServiceActive;
+                    itemObj.status = activated.status;
+                }
+            }
+        } catch (healErr) {
+            /* non-fatal */
+        }
+
         res.status(200).json(itemObj);
     } catch (error) {
         res.status(500).json({ message: 'Server Error' });
@@ -4374,8 +4539,10 @@ export const assignAssetItem = async (req, res) => {
             return res.status(400).json({ message: FLEET_PROFILE_INACTIVE_ASSIGNMENT_MSG });
         }
 
-        // Check if this is a reassignment (asset was previously assigned)
-        const isReassignment = item.status === 'Assigned' && (item.assignedTo || item.assignedCompany);
+        // Check if this is a reassignment (asset was previously assigned, or assignee acknowledgment is still open)
+        const isReassignment =
+            (item.status === 'Assigned' || isAssetAssignmentAcknowledgmentPending(item)) &&
+            (item.assignedTo || item.assignedCompany);
         const isParkingReassignment = false;
 
         if (isLeaveActive(item)) {
@@ -4887,7 +5054,7 @@ export const assignAssetItem = async (req, res) => {
                                 subjectName,
                                 subjectEmpId,
                             }).catch(() => null);
-                            const adminOfficer = await resolveAdminOfficerEmployee();
+                            const adminOfficer = fleetAdminOfficerEmp || (await resolveAdminOfficerEmployee());
                             if (adminOfficer?._id) {
                                 await upsertHandoverAdminOfficerDashboardAction({
                                     asset: item,
@@ -4895,7 +5062,22 @@ export const assignAssetItem = async (req, res) => {
                                     historyId: fleetHandoverHistoryId,
                                     subjectName,
                                     subjectEmpId,
+                                    stageLabel: 'Vehicle Handover — admin review required',
                                 }).catch(() => null);
+                            }
+                            if (employeeToAssign?._id) {
+                                const actorId = String(actionRequiredBy?._id || actionRequiredBy || '');
+                                const assigneeId = String(employeeToAssign._id);
+                                if (!actorId || assigneeId !== actorId) {
+                                    await upsertHandoverTargetAssigneeDashboardAction({
+                                        asset: item,
+                                        assignee: employeeToAssign,
+                                        historyId: fleetHandoverHistoryId,
+                                        subjectName,
+                                        subjectEmpId,
+                                        assigner,
+                                    }).catch(() => null);
+                                }
                             }
                         }
                     } catch (err) {
@@ -5113,7 +5295,26 @@ export const assignAssetItem = async (req, res) => {
                             recipient: employeeToAssign,
                             attachments: assignAttachments,
                             pendingAssignment: true,
+                            detailsPath:
+                                fleetVehicle && fleetHandoverHistoryId
+                                    ? buildHandoverAssignDetailsUrl(item._id, fleetHandoverHistoryId)
+                                    : null,
+                            stageLabel: fleetVehicle ? 'Vehicle Handover — assigned to you' : null,
                         }).catch(() => null);
+                    }
+
+                    if (fleetVehicle && fleetHandoverHistoryId) {
+                        const adminOfficer = fleetAdminOfficerEmp || (await resolveAdminOfficerEmployee().catch(() => null));
+                        const adminId = adminOfficer?._id?.toString?.();
+                        if (adminOfficer?._id && adminId !== recipientId) {
+                            await notifyHandoverStageEmail({
+                                asset: itemForEmail || item,
+                                employee: employeeToAssign,
+                                recipient: adminOfficer,
+                                stageLabel: 'Admin Officer — vehicle handover review',
+                                historyId: fleetHandoverHistoryId,
+                            }).catch(() => null);
+                        }
                     }
                 }
 
@@ -7448,10 +7649,17 @@ const countPendingBulkAssignmentBatch = async (meta, bulkAssetIds = []) => {
 const isAssignmentAcknowledgmentStillPending = (asset) => {
     if (!asset) return false;
     if (asset.pendingAction) return false;
+    if (asset.fleetHandoverActive) return true;
     return (
         asset.acceptanceStatus === 'Pending' &&
         (asset.status === 'Pending' || asset.status === 'Assigned')
     );
+};
+
+const isFleetVehicleInboxAsset = (asset, meta = null) => {
+    if (isFleetHandoverDashboardMeta(meta)) return true;
+    const plate = String(asset?.plateNumber || '').trim();
+    return Boolean(plate);
 };
 
 const closeStaleAssignmentDashboardAction = async (
@@ -7592,7 +7800,29 @@ const syncPendingAssignmentDashboardRowsForUser = async (relevantIds, targetEmpl
                     historyId: handoverFlowHeal.historyId,
                     subjectName,
                     subjectEmpId,
+                    stageLabel: 'Vehicle Handover — admin review required',
                 }).catch(() => null);
+            }
+            if (item.assignedTo && item.assignedToType === 'Employee') {
+                const assigneeRef =
+                    typeof item.assignedTo === 'object' && item.assignedTo._id
+                        ? item.assignedTo
+                        : await EmployeeBasic.findById(item.assignedTo)
+                              .select('firstName lastName employeeId companyEmail workEmail personalEmail email')
+                              .lean()
+                              .catch(() => null);
+                const actorId = String(actorRef?._id || actorRef || '');
+                const assigneeId = String(assigneeRef?._id || '');
+                if (assigneeRef?._id && assigneeId && assigneeId !== actorId) {
+                    await upsertHandoverTargetAssigneeDashboardAction({
+                        asset: item,
+                        assignee: assigneeRef,
+                        historyId: handoverFlowHeal.historyId,
+                        subjectName,
+                        subjectEmpId,
+                        assigner,
+                    }).catch(() => null);
+                }
             }
         }
     }
@@ -9683,7 +9913,71 @@ export const addAssetService = async (req, res) => {
         // - assigner (asset.assignedBy) with full permissions
         // - primary reportee delegation when assignee has NO companyEmail
         const actorFlags = await getActorPermissionFlagsForAsset(req.user, asset);
-        if (!isFleetVehicleServiceRequest && !actorFlags.canAct) {
+        const isOilServiceBootstrap =
+            isVehicleAssetForServiceGate() &&
+            String(serviceType || '').trim() === 'Oil Service' &&
+            !!isDraft;
+        const isVehicleServiceTabBootstrap =
+            isVehicleAssetForServiceGate() &&
+            isVehicleServiceTabRequestType(serviceType) &&
+            !!isDraft &&
+            !isTireChangeServiceType(serviceType);
+        const isCarWashRequest =
+            isVehicleAssetForServiceGate() &&
+            String(serviceType || '').trim() === 'Car Wash';
+        if (isVehicleAssetForServiceGate() && isTireChangeServiceType(serviceType)) {
+            let earlyRemark = {};
+            if (remark && typeof remark === 'string') {
+                try {
+                    earlyRemark = JSON.parse(remark);
+                } catch {
+                    earlyRemark = {};
+                }
+            } else if (remark && typeof remark === 'object') {
+                earlyRemark = remark;
+            }
+            if (req.body?.autoCreated || earlyRemark?.autoCreated) {
+                return res.status(403).json({
+                    message:
+                        'Tire change requests cannot be auto-created by the system. Only Super User, Admin Officer, or assigned user can create them manually.',
+                });
+            }
+            if (!isDraft) {
+                return res.status(403).json({
+                    message:
+                        'Tire change must be created as a pending request from the vehicle Service tab (Request Tire Change).',
+                });
+            }
+            if (String(serviceRequestSource || '').trim() !== 'vehicle_asset_detail') {
+                return res.status(403).json({
+                    message: 'Tire change requests must be created from the vehicle asset Service tab.',
+                });
+            }
+            const allowed = await actorMayManageTireChangeRequest(req.user, asset);
+            if (!allowed) {
+                return res.status(403).json({
+                    message:
+                        'Access denied. Only Super User, Admin Officer, or assigned user can create a tire change request.',
+                });
+            }
+        } else if (isCarWashRequest) {
+            const allowed = await actorMayManageCarWashRequest(req.user, asset);
+            if (!allowed) {
+                return res.status(403).json({
+                    message:
+                        'Access denied. Only the Admin Officer or assigned user can raise a car wash request.',
+                });
+            }
+        } else if (isOilServiceBootstrap || isVehicleServiceTabBootstrap) {
+            const allowed = await actorMayManageOilServiceRequest(req.user, asset);
+            if (!allowed) {
+                return res.status(403).json({
+                    message: isOilServiceBootstrap
+                        ? 'Access denied. Only admin or the assigned user can raise an oil service request.'
+                        : 'Access denied. Only admin or the assigned user can raise this service request.',
+                });
+            }
+        } else if (!isFleetVehicleServiceRequest && !actorFlags.canAct) {
             return res.status(403).json({ message: 'Access denied. Only Asset Controller/Admin, assigner, assigned user, or (if assignee has no company email) primary reportee can add service records.' });
         }
 
@@ -9811,8 +10105,20 @@ export const addAssetService = async (req, res) => {
         if (accidentImageUrls.length) {
             remarkObj.accidentImages = accidentImageUrls;
         }
-        remarkObj.requestStatus = isDraft ? 'draft' : 'submitted';
+        remarkObj.requestStatus =
+            isVehicleAssetForServiceGate() &&
+            (String(serviceType || '').trim() === 'Oil Service' || isVehicleServiceTabRequestType(serviceType)) &&
+            isDraft
+                ? String(parsedRemark?.requestStatus || 'pending').toLowerCase() === 'draft'
+                    ? 'draft'
+                    : 'pending'
+                : isDraft
+                  ? 'draft'
+                  : 'submitted';
         remarkObj.requestedByUserId = req.user?.id || req.user?._id || null;
+        if (String(serviceType || '').trim() === 'Car Wash' && !isDraft) {
+            remarkObj.carWashPaymentStatus = 'pending';
+        }
         const newService = {
             _id: new mongoose.Types.ObjectId(),
             serviceType,
@@ -9831,6 +10137,36 @@ export const addAssetService = async (req, res) => {
         };
 
         asset.services.push(newService);
+
+        const isOilServicePendingCreate =
+            isVehicleAssetForServiceGate() &&
+            String(serviceType || '').trim() === 'Oil Service' &&
+            isDraft &&
+            remarkObj.requestStatus === 'pending';
+        if (isOilServicePendingCreate) {
+            const creatorName = await getRequesterName(req.user);
+            appendOilServiceActivity(newService, {
+                type: 'service_created',
+                byName: creatorName,
+                note: 'Oil service request created',
+            });
+        }
+
+        const isTireChangePendingCreate =
+            isVehicleAssetForServiceGate() &&
+            isTireChangeServiceType(serviceType) &&
+            isDraft &&
+            remarkObj.requestStatus === 'pending';
+        if (isTireChangePendingCreate) {
+            const creatorName = await getRequesterName(req.user);
+            remarkObj.requestedByName = creatorName;
+            newService.remark = JSON.stringify(remarkObj);
+            appendTireChangeActivity(newService, {
+                type: 'service_created',
+                byName: creatorName,
+                note: 'Tire change request created',
+            });
+        }
 
         // Update asset's current kilometer if provided in service record
         if (currentKm && Number(currentKm) > (asset.currentKilometer || 0)) {
@@ -9861,13 +10197,33 @@ export const addAssetService = async (req, res) => {
         await asset.save();
 
         const lastServiceDoc = asset.services[asset.services.length - 1];
-        if (!isDraft) {
+        const skipWorkflowForOilPending =
+            isVehicleAssetForServiceGate() &&
+            String(serviceType || '').trim() === 'Oil Service' &&
+            isDraft &&
+            remarkObj.requestStatus === 'pending';
+        const skipWorkflowForVehicleTabPending =
+            isVehicleAssetForServiceGate() &&
+            isVehicleServiceTabRequestType(serviceType) &&
+            isDraft &&
+            remarkObj.requestStatus === 'pending';
+        const skipLegacyWorkflowForOil =
+            isVehicleAssetForServiceGate() &&
+            String(serviceType || '').trim() === 'Oil Service';
+        if (!isDraft && !skipWorkflowForOilPending && !skipWorkflowForVehicleTabPending && !skipLegacyWorkflowForOil) {
             try {
-                await maybeStartVehicleServiceWorkflow(asset, {
-                    serviceRecordId: lastServiceDoc._id,
-                    serviceType,
-                    req
-                });
+                if (String(serviceType || '').trim() === 'Car Wash') {
+                    await maybeStartCarWashWorkflow(asset, {
+                        serviceRecordId: lastServiceDoc._id,
+                        req,
+                    });
+                } else {
+                    await maybeStartVehicleServiceWorkflow(asset, {
+                        serviceRecordId: lastServiceDoc._id,
+                        serviceType,
+                        req,
+                    });
+                }
             } catch (wfErr) {
             }
         }
@@ -9927,6 +10283,18 @@ export const deleteAssetService = async (req, res) => {
             return res.status(404).json({ message: 'Asset not found' });
         }
 
+        const isFleetVehicle =
+            String(asset.plateNumber || '').trim() !== '' ||
+            String(asset.vehicleProfileActivationStatus || '').trim() !== '';
+        if (
+            isFleetVehicle &&
+            String(asset.vehicleProfileActivationStatus || '').toLowerCase() !== 'active'
+        ) {
+            return res.status(400).json({
+                message: 'Service records can only be deleted when the vehicle profile is active.',
+            });
+        }
+
         const serviceSubdoc = asset.services?.id?.(serviceId);
         if (!serviceSubdoc) {
             return res.status(404).json({ message: 'Service record not found' });
@@ -9934,7 +10302,23 @@ export const deleteAssetService = async (req, res) => {
 
         const removedServiceType = serviceSubdoc.serviceType || 'Service';
         const serviceSnapshot = serviceSubdoc.toObject ? serviceSubdoc.toObject() : { ...serviceSubdoc };
-        await awaitAdminDeletionArchive(req, {
+
+        await deleteDashboardActionsForVehicleService(asset._id, serviceId);
+
+        serviceSubdoc.deleteOne();
+        asset.markModified('services');
+
+        if (
+            asset.activeServiceWorkflow?.serviceRecordId &&
+            String(asset.activeServiceWorkflow.serviceRecordId) === String(serviceId)
+        ) {
+            asset.activeServiceWorkflow = undefined;
+            asset.markModified('activeServiceWorkflow');
+        }
+
+        await asset.save();
+
+        scheduleManagementAdminDeletionEmail(req, {
             moduleName: 'Vehicle Service Record',
             recordId: asset.assetId || String(asset._id),
             details: `${removedServiceType} service (${serviceId})`,
@@ -9945,20 +10329,6 @@ export const deleteAssetService = async (req, res) => {
                 service: serviceSnapshot,
             },
         });
-        serviceSubdoc.deleteOne();
-        asset.markModified('services');
-
-        if (
-            asset.activeServiceWorkflow?.serviceRecordId &&
-            String(asset.activeServiceWorkflow.serviceRecordId) === String(serviceId)
-        ) {
-            asset.activeServiceWorkflow.stage = 'rejected';
-            asset.activeServiceWorkflow.serviceRecordId = null;
-            asset.activeServiceWorkflow.accountsHold = null;
-            asset.markModified('activeServiceWorkflow');
-        }
-
-        await asset.save();
 
         try {
             await AssetHistory.create({
@@ -9980,6 +10350,130 @@ export const deleteAssetService = async (req, res) => {
 // @desc    Submit a previously saved draft service request (starts workflow)
 // @route   POST /api/AssetItem/:id/service/:serviceId/submit-request
 // @access  Private
+export const updateAssetServiceDraft = async (req, res) => {
+    try {
+        const { id, serviceId } = req.params;
+        const asset = await AssetItem.findById(id).populate('typeId', 'name');
+        if (!asset) return res.status(404).json({ message: 'Asset not found' });
+
+        const service = asset.services?.id?.(serviceId);
+        if (!service) return res.status(404).json({ message: 'Service record not found' });
+
+        const remarkObj = (() => {
+            try {
+                return service.remark ? JSON.parse(service.remark) : {};
+            } catch {
+                return {};
+            }
+        })();
+        const reqStatus = String(remarkObj?.requestStatus || '').toLowerCase();
+        if (!['draft', 'pending'].includes(reqStatus)) {
+            return res.status(400).json({ message: 'Only pending service requests can be updated.' });
+        }
+
+        const isVehicleAssetForServiceGate = () => {
+            const plate = String(asset.plateNumber || '').trim();
+            if (plate) return true;
+            const name = (asset.typeId && typeof asset.typeId === 'object' && asset.typeId.name)
+                ? String(asset.typeId.name)
+                : '';
+            const t = name.toLowerCase();
+            return t.includes('vehicle') || t.includes('car') || t.includes('fleet') || t.includes('truck');
+        };
+
+        const actorFlags = await getActorPermissionFlagsForAsset(req.user, asset);
+        const isOilServicePending =
+            String(service.serviceType || '').trim() === 'Oil Service' &&
+            ['draft', 'pending'].includes(String(remarkObj?.requestStatus || '').toLowerCase());
+        const isVehicleServiceTabPending =
+            isVehicleServiceTabRequestType(service.serviceType) &&
+            ['draft', 'pending'].includes(String(remarkObj?.requestStatus || '').toLowerCase());
+        const isTireChangePending =
+            isTireChangeServiceType(service.serviceType) &&
+            ['draft', 'pending'].includes(String(remarkObj?.requestStatus || '').toLowerCase());
+        if (isTireChangePending) {
+            const allowed = await actorMayManageTireChangeRequest(req.user, asset);
+            if (!allowed) {
+                return res.status(403).json({
+                    message:
+                        'Access denied. Only Super User, Admin Officer, or assigned user can update this tire change request.',
+                });
+            }
+        } else if (isOilServicePending || isVehicleServiceTabPending) {
+            const allowed = await actorMayManageOilServiceRequest(req.user, asset);
+            if (!allowed) {
+                return res.status(403).json({
+                    message: isOilServicePending
+                        ? 'Access denied. Only admin or the assigned user can update this oil service request.'
+                        : 'Access denied. Only admin or the assigned user can update this service request.',
+                });
+            }
+        } else if (!actorFlags.canAct) {
+            return res.status(403).json({
+                message: 'Access denied. Only Asset Controller/Admin, assigner, assigned user, or primary reportee can update service records.',
+            });
+        }
+
+        const body = { ...(req.body || {}) };
+        if (body.remark && typeof body.remark === 'string') {
+            try {
+                const parsed = JSON.parse(body.remark);
+                const keepStatus = String(remarkObj?.requestStatus || 'pending').toLowerCase();
+                if (['draft', 'pending'].includes(keepStatus)) {
+                    parsed.requestStatus = keepStatus;
+                } else if (keepStatus === 'submitted') {
+                    parsed.requestStatus = 'submitted';
+                }
+                body.remark = JSON.stringify(parsed);
+            } catch {
+                /* keep as sent */
+            }
+        }
+
+        await mergeWorkflowServiceRecord(asset, serviceId, body);
+
+        if (isOilServicePending || isVehicleServiceTabPending) {
+            const editorName = await getRequesterName(req.user);
+            if (isOilServicePending) {
+                appendOilServiceActivity(service, {
+                    type: 'service_updated',
+                    byName: editorName,
+                    note: 'Assignment details updated',
+                });
+            }
+            asset.markModified('services');
+        }
+
+        if (isTireChangePending) {
+            const editorName = await getRequesterName(req.user);
+            appendTireChangeActivity(service, {
+                type: 'service_updated',
+                byName: editorName,
+                note: 'Assignment details updated',
+            });
+            asset.markModified('services');
+        }
+
+        if (isVehicleAssetForServiceGate() && body.serviceType === 'Oil Service' && body.date) {
+            asset.oilChangeDate = new Date(body.date);
+            asset.lastServiceDate = new Date(body.date);
+        }
+
+        await asset.save();
+
+        const updated = asset.services.id(serviceId);
+        const out = updated?.toObject ? updated.toObject() : updated;
+        if (out?.invoice) out.invoice = await getSignedFileUrl(out.invoice);
+        if (out?.attachment) out.attachment = await getSignedFileUrl(out.attachment);
+        if (out?.quotation2) out.quotation2 = await getSignedFileUrl(out.quotation2);
+        if (out?.quotation3) out.quotation3 = await getSignedFileUrl(out.quotation3);
+
+        return res.json({ message: 'Service draft updated successfully', service: out });
+    } catch (error) {
+        return res.status(500).json({ message: error.message || 'Failed to update service draft' });
+    }
+};
+
 export const submitAssetServiceDraft = async (req, res) => {
     try {
         const { id, serviceId } = req.params;
@@ -9996,18 +10490,39 @@ export const submitAssetServiceDraft = async (req, res) => {
             }
         })();
         const reqStatus = String(remarkObj?.requestStatus || '').toLowerCase();
-        if (reqStatus !== 'draft') {
-            return res.status(400).json({ message: 'Only draft service requests can be submitted.' });
+        if (!['draft', 'pending'].includes(reqStatus)) {
+            return res.status(400).json({ message: 'Only pending service requests can be submitted.' });
         }
 
-        const actorEmployeeId = String(req.user?.employeeObjectId || '');
-        const requestedById = String(service.requestedBy || '');
-        if (requestedById && actorEmployeeId && requestedById !== actorEmployeeId) {
-            const isJwtAdmin = isJwtSystemSuperUser(req.user);
-            const isSysAdmin = await isUserAdministrator(req.user?.id);
-            if (!isJwtAdmin && !isSysAdmin) {
-                return res.status(403).json({ message: 'Only the draft creator or admin can submit this request.' });
+        const allowed =
+            String(service.serviceType || '').trim() === 'Car Wash'
+                ? await actorMayManageCarWashRequest(req.user, asset)
+                : isTireChangeServiceType(service.serviceType)
+                  ? await actorMayManageTireChangeRequest(req.user, asset)
+                  : await actorMayManageOilServiceRequest(req.user, asset);
+        if (!allowed) {
+            const st = String(service.serviceType || '').trim();
+            return res.status(403).json({
+                message:
+                    st === 'Car Wash'
+                        ? 'Access denied. Only Admin Officer or the assigned user can submit this car wash request.'
+                        : st === 'Oil Service'
+                          ? 'Access denied. Only Admin Officer or the assigned user can submit this oil service request.'
+                          : st === 'Tire Change'
+                            ? 'Access denied. Only Super User, Admin Officer, or assigned user can submit this tire change request.'
+                            : 'Access denied. Only Admin Officer or the assigned user can submit this service request.',
+            });
+        }
+
+        if (String(service.serviceType || '').trim() === 'Oil Service') {
+            try {
+                await submitOilServiceAssignment(asset, serviceId, req);
+            } catch (oilErr) {
+                return res.status(400).json({ message: oilErr.message || 'Could not submit oil service assignment.' });
             }
+            const fresh = await AssetItem.findById(asset._id).lean();
+            const out = fresh?.services?.find((s) => String(s._id) === String(service._id)) || service.toObject();
+            return res.json({ message: 'Oil service assignment submitted', service: out, asset: fresh });
         }
 
         const activeStage = String(asset.activeServiceWorkflow?.stage || '').trim().toLowerCase();
@@ -10019,24 +10534,335 @@ export const submitAssetServiceDraft = async (req, res) => {
         }
 
         remarkObj.requestStatus = 'submitted';
-        service.remark = JSON.stringify(remarkObj);
+        remarkObj.assignmentSubmittedAt = new Date().toISOString();
+        if (String(service.serviceType || '').trim() === 'Car Wash') {
+            remarkObj.carWashPaymentStatus = 'pending';
+        }
+        if (isTireChangeServiceType(service.serviceType)) {
+            const requesterName = await getRequesterName(req.user);
+            remarkObj.requestedByName = requesterName;
+            service.remark = JSON.stringify(remarkObj);
+            appendTireChangeActivity(service, {
+                type: 'request_submitted',
+                byName: requesterName,
+                note: 'Tire change request submitted',
+            });
+        } else {
+            service.remark = JSON.stringify(remarkObj);
+        }
         asset.markModified('services');
         await asset.save();
 
         try {
-            await maybeStartVehicleServiceWorkflow(asset, {
-                serviceRecordId: service._id,
-                serviceType: service.serviceType,
-                req,
-            });
+            if (String(service.serviceType || '').trim() === 'Car Wash') {
+                await maybeStartCarWashWorkflow(asset, {
+                    serviceRecordId: service._id,
+                    req,
+                });
+            } else {
+                await maybeStartVehicleServiceWorkflow(asset, {
+                    serviceRecordId: service._id,
+                    serviceType: service.serviceType,
+                    req,
+                });
+            }
         } catch (wfErr) {
         }
 
         const fresh = await AssetItem.findById(asset._id).lean();
         const out = fresh?.services?.find((s) => String(s._id) === String(service._id)) || service.toObject();
-        return res.json({ message: 'Draft submitted successfully', service: out });
+        return res.json({ message: 'Draft submitted successfully', service: out, asset: fresh });
     } catch (error) {
         return res.status(500).json({ message: error.message || 'Internal server error' });
+    }
+};
+
+export const saveOilServiceDetailsDraftHandler = async (req, res) => {
+    try {
+        const { id, serviceId } = req.params;
+        const asset = await AssetItem.findById(id).populate('assignedTo', 'firstName lastName employeeId');
+        if (!asset) return res.status(404).json({ message: 'Asset not found' });
+
+        const allowed = await actorMayManageOilServiceRequest(req.user, asset);
+        if (!allowed) {
+            return res.status(403).json({ message: 'Access denied.' });
+        }
+
+        await saveOilServiceDetailsDraft(asset, serviceId, req.body?.serviceUpdates || req.body);
+        const fresh = await AssetItem.findById(asset._id).populate('assignedTo', 'firstName lastName employeeId');
+        return res.json({ message: 'Service details saved', asset: fresh });
+    } catch (error) {
+        return res.status(400).json({ message: error.message || 'Could not save service details' });
+    }
+};
+
+export const submitOilServiceDetailsHandler = async (req, res) => {
+    try {
+        const { id, serviceId } = req.params;
+        const asset = await AssetItem.findById(id).populate('assignedTo', 'firstName lastName employeeId');
+        if (!asset) return res.status(404).json({ message: 'Asset not found' });
+
+        const allowed = await actorMayManageOilServiceRequest(req.user, asset);
+        if (!allowed) {
+            return res.status(403).json({ message: 'Access denied.' });
+        }
+
+        const fresh = await submitOilServiceDetails(asset, serviceId, req.body?.serviceUpdates || req.body, req);
+        return res.json({
+            message: 'Oil service completed. Vehicle status restored.',
+            asset: fresh,
+        });
+    } catch (error) {
+        return res.status(400).json({ message: error.message || 'Could not submit service details' });
+    }
+};
+
+export const updateTireChangeQuoteEmployeeRowsHandler = async (req, res) => {
+    try {
+        const { id, serviceId } = req.params;
+        const asset = await AssetItem.findById(id).populate('assignedTo', 'firstName lastName employeeId');
+        if (!asset) return res.status(404).json({ message: 'Asset not found' });
+
+        await updateTireChangeQuoteEmployeeRows(asset, serviceId, req.body?.employeeRows, req);
+        const fresh = await AssetItem.findById(asset._id).populate('assignedTo', 'firstName lastName employeeId');
+        return res.json({
+            message: 'Employee liability rows saved',
+            asset: fresh,
+        });
+    } catch (error) {
+        return res.status(400).json({ message: error.message || 'Could not save employee rows' });
+    }
+};
+
+export const submitTireChangeGarageHandler = async (req, res) => {
+    try {
+        const { id, serviceId } = req.params;
+        const asset = await AssetItem.findById(id).populate('assignedTo', 'firstName lastName employeeId');
+        if (!asset) return res.status(404).json({ message: 'Asset not found' });
+
+        await submitTireChangeGarage(asset, serviceId, req.body || {}, req);
+        const fresh = await AssetItem.findById(asset._id).populate('assignedTo', 'firstName lastName employeeId');
+        return res.json({
+            message: 'Garage details saved — sent to Accounts for approval',
+            asset: fresh,
+        });
+    } catch (error) {
+        return res.status(400).json({ message: error.message || 'Could not update garage' });
+    }
+};
+
+export const completeTireChangeHandler = async (req, res) => {
+    try {
+        const { id, serviceId } = req.params;
+        const asset = await AssetItem.findById(id).populate('assignedTo', 'firstName lastName employeeId');
+        if (!asset) return res.status(404).json({ message: 'Asset not found' });
+
+        await completeTireChangeService(asset, serviceId, req.body || {}, req);
+        const fresh = await AssetItem.findById(asset._id).populate('assignedTo', 'firstName lastName employeeId');
+        return res.json({
+            message: 'Tire change completed',
+            asset: fresh,
+        });
+    } catch (error) {
+        return res.status(400).json({ message: error.message || 'Could not complete tire change' });
+    }
+};
+
+export const updateMechanicalWorkQuoteEmployeeRowsHandler = async (req, res) => {
+    try {
+        const { id, serviceId } = req.params;
+        const asset = await AssetItem.findById(id).populate('assignedTo', 'firstName lastName employeeId');
+        if (!asset) return res.status(404).json({ message: 'Asset not found' });
+
+        await updateMechanicalWorkQuoteEmployeeRows(asset, serviceId, req.body?.employeeRows, req);
+        const fresh = await AssetItem.findById(asset._id).populate('assignedTo', 'firstName lastName employeeId');
+        return res.json({
+            message: 'Employee liability rows saved',
+            asset: fresh,
+        });
+    } catch (error) {
+        return res.status(400).json({ message: error.message || 'Could not save employee rows' });
+    }
+};
+
+export const submitMechanicalWorkGarageHandler = async (req, res) => {
+    try {
+        const { id, serviceId } = req.params;
+        const asset = await AssetItem.findById(id).populate('assignedTo', 'firstName lastName employeeId');
+        if (!asset) return res.status(404).json({ message: 'Asset not found' });
+
+        await submitMechanicalWorkGarage(asset, serviceId, req.body || {}, req);
+        const fresh = await AssetItem.findById(asset._id).populate('assignedTo', 'firstName lastName employeeId');
+        return res.json({
+            message: 'Garage details saved — sent to Accounts for approval',
+            asset: fresh,
+        });
+    } catch (error) {
+        return res.status(400).json({ message: error.message || 'Could not update garage' });
+    }
+};
+
+export const completeMechanicalWorkHandler = async (req, res) => {
+    try {
+        const { id, serviceId } = req.params;
+        const asset = await AssetItem.findById(id).populate('assignedTo', 'firstName lastName employeeId');
+        if (!asset) return res.status(404).json({ message: 'Asset not found' });
+
+        await completeMechanicalWorkService(asset, serviceId, req.body || {}, req);
+        const fresh = await AssetItem.findById(asset._id).populate('assignedTo', 'firstName lastName employeeId');
+        return res.json({
+            message: 'Mechanical work completed',
+            asset: fresh,
+        });
+    } catch (error) {
+        return res.status(400).json({ message: error.message || 'Could not complete mechanical work' });
+    }
+};
+
+export const updateBodyWorkQuoteEmployeeRowsHandler = async (req, res) => {
+    try {
+        const { id, serviceId } = req.params;
+        const asset = await AssetItem.findById(id).populate('assignedTo', 'firstName lastName employeeId');
+        if (!asset) return res.status(404).json({ message: 'Asset not found' });
+
+        await updateBodyWorkQuoteEmployeeRows(asset, serviceId, req.body?.employeeRows, req);
+        const fresh = await AssetItem.findById(asset._id).populate('assignedTo', 'firstName lastName employeeId');
+        return res.json({
+            message: 'Employee liability rows saved',
+            asset: fresh,
+        });
+    } catch (error) {
+        return res.status(400).json({ message: error.message || 'Could not save employee rows' });
+    }
+};
+
+export const submitBodyWorkGarageHandler = async (req, res) => {
+    try {
+        const { id, serviceId } = req.params;
+        const asset = await AssetItem.findById(id).populate('assignedTo', 'firstName lastName employeeId');
+        if (!asset) return res.status(404).json({ message: 'Asset not found' });
+
+        await submitBodyWorkGarage(asset, serviceId, req.body || {}, req);
+        const fresh = await AssetItem.findById(asset._id).populate('assignedTo', 'firstName lastName employeeId');
+        return res.json({
+            message: 'Garage details saved — sent to Accounts for approval',
+            asset: fresh,
+        });
+    } catch (error) {
+        return res.status(400).json({ message: error.message || 'Could not update garage' });
+    }
+};
+
+export const completeBodyWorkHandler = async (req, res) => {
+    try {
+        const { id, serviceId } = req.params;
+        const asset = await AssetItem.findById(id).populate('assignedTo', 'firstName lastName employeeId');
+        if (!asset) return res.status(404).json({ message: 'Asset not found' });
+
+        await completeBodyWorkService(asset, serviceId, req.body || {}, req);
+        const fresh = await AssetItem.findById(asset._id).populate('assignedTo', 'firstName lastName employeeId');
+        return res.json({
+            message: 'Body work completed',
+            asset: fresh,
+        });
+    } catch (error) {
+        return res.status(400).json({ message: error.message || 'Could not complete body work' });
+    }
+};
+
+export const updateAccidentRepairQuoteEmployeeRowsHandler = async (req, res) => {
+    try {
+        const { id, serviceId } = req.params;
+        const asset = await AssetItem.findById(id).populate('assignedTo', 'firstName lastName employeeId');
+        if (!asset) return res.status(404).json({ message: 'Asset not found' });
+
+        await updateAccidentRepairQuoteEmployeeRows(asset, serviceId, req.body?.employeeRows, req);
+        const fresh = await AssetItem.findById(asset._id).populate('assignedTo', 'firstName lastName employeeId');
+        return res.json({
+            message: 'Employee liability rows saved',
+            asset: fresh,
+        });
+    } catch (error) {
+        return res.status(400).json({ message: error.message || 'Could not save employee rows' });
+    }
+};
+
+export const submitAccidentRepairGarageHandler = async (req, res) => {
+    try {
+        const { id, serviceId } = req.params;
+        const asset = await AssetItem.findById(id).populate('assignedTo', 'firstName lastName employeeId');
+        if (!asset) return res.status(404).json({ message: 'Asset not found' });
+
+        await submitAccidentRepairGarage(asset, serviceId, req.body || {}, req);
+        const fresh = await AssetItem.findById(asset._id).populate('assignedTo', 'firstName lastName employeeId');
+        return res.json({
+            message: 'Garage details saved — sent to Accounts for approval',
+            asset: fresh,
+        });
+    } catch (error) {
+        return res.status(400).json({ message: error.message || 'Could not update garage' });
+    }
+};
+
+export const completeAccidentRepairHandler = async (req, res) => {
+    try {
+        const { id, serviceId } = req.params;
+        const asset = await AssetItem.findById(id).populate('assignedTo', 'firstName lastName employeeId');
+        if (!asset) return res.status(404).json({ message: 'Asset not found' });
+
+        await completeAccidentRepairService(asset, serviceId, req.body || {}, req);
+        const fresh = await AssetItem.findById(asset._id).populate('assignedTo', 'firstName lastName employeeId');
+        return res.json({
+            message: 'Accident repair completed',
+            asset: fresh,
+        });
+    } catch (error) {
+        return res.status(400).json({ message: error.message || 'Could not complete accident repair' });
+    }
+};
+
+export const updateOilServiceDatesHandler = async (req, res) => {
+    try {
+        const { id, serviceId } = req.params;
+        const asset = await AssetItem.findById(id).populate('assignedTo', 'firstName lastName employeeId');
+        if (!asset) return res.status(404).json({ message: 'Asset not found' });
+
+        const mayEditDates = await userMayEditOilServiceDates(req.user, asset, serviceId);
+        if (!mayEditDates) {
+            return res.status(403).json({
+                message:
+                    'Only the Admin Officer, assigned user (while scheduled), or Super User can update service dates.',
+            });
+        }
+
+        const { serviceStartDate, serviceEndDate } = req.body || {};
+        await updateOilServiceDates(asset, serviceId, { serviceStartDate, serviceEndDate }, req.user);
+        const fresh = await AssetItem.findById(asset._id).populate('assignedTo', 'firstName lastName employeeId');
+        return res.json({ message: 'Service dates updated', asset: fresh });
+    } catch (error) {
+        return res.status(400).json({ message: error.message || 'Could not update service dates' });
+    }
+};
+
+export const updateShopServiceExtendDateHandler = async (req, res) => {
+    try {
+        const { id, serviceId } = req.params;
+        const asset = await AssetItem.findById(id).populate('assignedTo', 'firstName lastName employeeId');
+        if (!asset) return res.status(404).json({ message: 'Asset not found' });
+
+        const mayEdit = await userMayExtendServiceEndDate(req.user, asset, serviceId);
+        if (!mayEdit) {
+            return res.status(403).json({
+                message: 'Only the Admin Officer, assigned user, or Super User can update the extend date.',
+            });
+        }
+
+        const { serviceEndDate } = req.body || {};
+        await updateShopServiceExtendDate(asset, serviceId, { serviceEndDate }, req.user);
+        const fresh = await AssetItem.findById(asset._id).populate('assignedTo', 'firstName lastName employeeId');
+        return res.json({ message: 'Extend date updated', asset: fresh });
+    } catch (error) {
+        return res.status(400).json({ message: error.message || 'Could not update extend date' });
     }
 };
 
@@ -14481,6 +15307,19 @@ export const deleteAssetItem = async (req, res) => {
         // 2. Creator: Only if Status is Draft/Pending
 
         const isAdminUser = await isReqUserAdmin(req.user);
+        const isFleetVehicle =
+            String(asset.plateNumber || '').trim() !== '' ||
+            String(asset.vehicleProfileActivationStatus || '').trim() !== '';
+        if (
+            isAdminUser &&
+            isFleetVehicle &&
+            String(asset.vehicleProfileActivationStatus || '').toLowerCase() !== 'active'
+        ) {
+            return res.status(400).json({
+                message: 'Vehicles can only be deleted by admin when the profile is active.',
+            });
+        }
+
         const {
             shouldBlockAssetDeleteBecauseOfAccessories,
             accessoryDeleteBlockMessage,
@@ -14640,6 +15479,7 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
         );
         if (!skipSync) {
             await syncPendingAssignmentDashboardRowsForUser(relevantIds, targetEmployeeId);
+            await healStaleOilServicePendingDashboardActions();
         }
 
         const parseExtra3 = (raw) => {
@@ -14860,6 +15700,7 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
                 actionRequiredBy: asset.actionRequiredBy,
                 pendingAction: asset.pendingAction,
                 assignedTo: asset.assignedTo,
+                fleetHandoverActive: Boolean(asset.pendingActionDetails?.vehicleHandoverFlow?.historyId),
                 bulkAssignmentGroupId: asset.pendingActionDetails?.bulkAssignment?.groupId || null,
                 accessories: accList.map((ac) => ({
                     _id: ac._id,
@@ -15028,6 +15869,18 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
                     itemsAfterCompletedFilter.push(row);
                     continue;
                 }
+                const isFleetHandover = isFleetHandoverDashboardMeta(meta);
+                const viewerRole = String(meta?.handoverViewerRole || '').trim();
+                if (isFleetHandover && isFleetHandoverTrackingViewerRole(viewerRole)) {
+                    if (!isAssignmentAcknowledgmentStillPending(row.asset)) {
+                        if (row.dashboardActionId) {
+                            staleAssignmentDashboardIds.add(String(row.dashboardActionId));
+                        }
+                        continue;
+                    }
+                    itemsAfterCompletedFilter.push(row);
+                    continue;
+                }
                 if (!isAssignmentAcknowledgmentStillPending(row.asset)) {
                     if (row.dashboardActionId) {
                         staleAssignmentDashboardIds.add(String(row.dashboardActionId));
@@ -15113,15 +15966,28 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
 
         if (scope === 'vehicle') {
             items = items.filter((row) => {
-                if (row.requestType !== 'Asset Approval') return true;
-                const plate = String(row.asset?.plateNumber || '').trim();
-                if (plate) return true;
-                try {
-                    const meta = typeof row.extra3 === 'string' ? JSON.parse(row.extra3) : row.extra3;
-                    return meta?.isFleetVehicle === true;
-                } catch {
-                    return false;
+                if (row.requestType === 'Asset Approval') {
+                    const plate = String(row.asset?.plateNumber || '').trim();
+                    if (plate) return true;
+                    try {
+                        const meta = typeof row.extra3 === 'string' ? JSON.parse(row.extra3) : row.extra3;
+                        return meta?.isFleetVehicle === true;
+                    } catch {
+                        return false;
+                    }
                 }
+                if (row.requestType === 'Asset Assignment') {
+                    try {
+                        const meta = typeof row.extra3 === 'string' ? JSON.parse(row.extra3) : row.extra3;
+                        return isFleetVehicleInboxAsset(row.asset, meta);
+                    } catch {
+                        return isFleetVehicleInboxAsset(row.asset, null);
+                    }
+                }
+                if (row.requestType === 'Asset Return') {
+                    return isFleetVehicleInboxAsset(row.asset, null);
+                }
+                return true;
             });
         }
 

@@ -164,8 +164,8 @@ export const generatePdf = async (url, token, user, permissions = {}, selector =
             console.log(`[generatePdf] Starting generation for: ${url} (attempt ${attempt}/2)`);
             page = await browser.newPage();
 
-            // set viewport
-            await page.setViewport({ width: 1200, height: 800 });
+            // set viewport — match A4 width for consistent handover layout
+            await page.setViewport({ width: 794, height: 1123 });
 
         // Authenticate before navigation
             if (token && user) {
@@ -261,6 +261,26 @@ export const generatePdf = async (url, token, user, permissions = {}, selector =
                     })
             );
             await new Promise((r) => setTimeout(r, 300));
+
+            const isVehicleHandover =
+                String(selector).includes('vehicle-handover-print-root');
+
+            if (isVehicleHandover) {
+                await page.emulateMediaType('screen');
+                const pdfBuffer = await renderPdfWithFallback(page, {
+                    format: 'A4',
+                    landscape: false,
+                    printBackground: true,
+                    preferCSSPageSize: true,
+                    margin: {
+                        top: '0mm',
+                        right: '0mm',
+                        bottom: '0mm',
+                        left: '0mm',
+                    },
+                });
+                return pdfOutputToBuffer(pdfBuffer);
+            }
 
         // Calculate the height of the content dynamically
             const height = await page.evaluate((sel) => {
