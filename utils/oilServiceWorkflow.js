@@ -5,6 +5,7 @@ import DashboardAction from '../models/DashboardAction.js';
 import { isFleetVehicleProfileActive } from './assetApprovalHelpers.js';
 import { getDepartmentHOD, isUserActiveInFlowchart } from './getDepartmentHOD.js';
 import { syncDashboardAction } from './syncDashboard.js';
+import { closeAdminOfficerServiceTrackNotification } from './vehicleServiceAdminOfficerNotification.js';
 import { sendVehicleServiceWorkflowEmail } from './sendVehicleServiceWorkflowEmail.js';
 import { resolveEmployeeEmail } from './resolveEmployeeEmail.js';
 import {
@@ -369,6 +370,13 @@ async function notifyOilServiceDetailsCompleted({
     await closeOilServicePendingDashboardActions(asset._id, serviceRecordId, {
         comment: detailLine || 'Oil service completed',
         actionedBy,
+    });
+
+    await closeAdminOfficerServiceTrackNotification({
+        assetId: asset._id,
+        serviceRecordId,
+        actionedBy,
+        comment: detailLine || 'Oil service completed',
     });
 }
 
@@ -1183,6 +1191,21 @@ export async function maybeAutoCreateOilServiceDue(assetDoc) {
         actionLabel: 'Oil change due — service request created',
         detailLine,
     });
+
+    try {
+        const { notifyAdminOfficerOnVehicleServiceCreated } = await import(
+            './vehicleServiceAdminOfficerNotification.js'
+        );
+        await notifyAdminOfficerOnVehicleServiceCreated({
+            asset: populated,
+            serviceRecordId: serviceId,
+            serviceType: 'Oil Service',
+            requestedByName: 'System',
+            sendEmail: false,
+        });
+    } catch (notifyErr) {
+        console.error('[OilService] Admin officer track notify on auto-create failed:', notifyErr);
+    }
 
     return true;
 }

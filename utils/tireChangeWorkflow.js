@@ -5,6 +5,7 @@ import Fine from '../models/Fine.js';
 import { getDepartmentHOD } from './getDepartmentHOD.js';
 import { syncDashboardAction } from './syncDashboard.js';
 import { sendVehicleServiceWorkflowEmail } from './sendVehicleServiceWorkflowEmail.js';
+import { closeAdminOfficerServiceTrackNotification } from './vehicleServiceAdminOfficerNotification.js';
 import { resolveEmployeeEmail } from './resolveEmployeeEmail.js';
 import { applyPostServiceOperationalState } from './assetOperationalFlags.js';
 import { actorMayManageTireChangeRequest, getRequesterName } from './oilServiceWorkflow.js';
@@ -461,6 +462,14 @@ export async function completeTireChangeService(asset, serviceId, serviceUpdates
         extra1: `${asset.assetId} — Tire Change`,
         extra2: 'Completed',
         extra3: tireChangeDashboardMeta(asset, serviceId),
+    });
+
+    await closeAdminOfficerServiceTrackNotification({
+        assetId: asset._id,
+        serviceRecordId: serviceId,
+        actionedBy: req.user?.employeeObjectId || req.user?._id,
+        comment: 'Tire change completed',
+        requestedByName: actorName,
     });
 
     return asset;

@@ -4,6 +4,7 @@ import AssetHistory from '../models/AssetHistory.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import { uploadDocumentToS3 } from '../utils/s3Upload.js';
 import { syncDashboardAction } from '../utils/syncDashboard.js';
+import { closeAdminOfficerServiceTrackNotification } from '../utils/vehicleServiceAdminOfficerNotification.js';
 import { getDepartmentHOD } from '../utils/getDepartmentHOD.js';
 import { getManagementHOD } from '../utils/getManagementHOD.js';
 import { sendVehicleServiceWorkflowEmail } from '../utils/sendVehicleServiceWorkflowEmail.js';
@@ -1163,6 +1164,14 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
                 comment: comment || 'Car wash validated',
             });
 
+            await closeAdminOfficerServiceTrackNotification({
+                assetId: asset._id,
+                serviceRecordId: wf.serviceRecordId,
+                actionedBy: performedById,
+                comment: comment || 'Car wash completed',
+                requestedByName: actorName,
+            });
+
             persistWorkflowSnapshotToServiceSubdoc(asset);
             asset.markModified('services');
             await asset.save();
@@ -1332,6 +1341,13 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
             await closeOilServicePendingDashboardActions(asset._id, wf.serviceRecordId, {
                 comment: 'Oil service completed. Vehicle status restored.',
                 actionedBy: performedBy,
+            });
+            await closeAdminOfficerServiceTrackNotification({
+                assetId: asset._id,
+                serviceRecordId: wf.serviceRecordId,
+                actionedBy: performedBy,
+                comment: 'Oil service completed. Vehicle status restored.',
+                requestedByName: actorName,
             });
             const oilFresh = await AssetItem.findById(asset._id).populate(
                 'assignedTo',
@@ -1568,6 +1584,13 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
             asset.status = resolveStatusAfterService(asset, wf);
             persistWorkflowSnapshotToServiceSubdoc(asset);
             await asset.save();
+            await closeAdminOfficerServiceTrackNotification({
+                assetId: asset._id,
+                serviceRecordId: wf.serviceRecordId,
+                actionedBy: performedById,
+                comment: comment || 'Service workflow completed',
+                requestedByName: actorName,
+            });
             const doneFresh = await AssetItem.findById(asset._id).populate('assignedTo', 'firstName lastName employeeId');
             return res.json({ message: 'Service workflow completed', asset: doneFresh });
         }
@@ -1992,6 +2015,13 @@ export const respondVehicleServiceScheduledPeriod = async (req, res) => {
             }
             persistWorkflowSnapshotToServiceSubdoc(asset);
             await asset.save();
+            await closeAdminOfficerServiceTrackNotification({
+                assetId: asset._id,
+                serviceRecordId: wf.serviceRecordId,
+                actionedBy: performedById,
+                comment: goLiveNote || 'Service workflow completed',
+                requestedByName: actorName,
+            });
             const doneFresh = await AssetItem.findById(asset._id).populate('assignedTo', 'firstName lastName employeeId');
             return res.json({ message: 'Vehicle is back in normal use — service workflow completed.', asset: doneFresh });
         }
@@ -2082,6 +2112,13 @@ export const respondVehicleServiceScheduledPeriod = async (req, res) => {
                         requestedByName: actorName,
                     });
                 }
+                await closeAdminOfficerServiceTrackNotification({
+                    assetId: asset._id,
+                    serviceRecordId,
+                    actionedBy: performedById,
+                    comment: 'Completed from status update',
+                    requestedByName: actorName,
+                });
             } else if (normalized === 'on_service') {
                 applyServiceActiveState(asset);
                 wf.stage = STAGE.SCHEDULED;

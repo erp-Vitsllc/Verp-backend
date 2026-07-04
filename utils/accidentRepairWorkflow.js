@@ -5,6 +5,7 @@ import Fine from '../models/Fine.js';
 import { getDepartmentHOD } from './getDepartmentHOD.js';
 import { syncDashboardAction } from './syncDashboard.js';
 import { sendVehicleServiceWorkflowEmail } from './sendVehicleServiceWorkflowEmail.js';
+import { closeAdminOfficerServiceTrackNotification } from './vehicleServiceAdminOfficerNotification.js';
 import { applyPostServiceOperationalState } from './assetOperationalFlags.js';
 import { actorMayManageTireChangeRequest, getRequesterName } from './oilServiceWorkflow.js';
 import { generateFineIdInternal } from '../controllers/fine/addFine.js';
@@ -491,6 +492,14 @@ export async function completeAccidentRepairService(asset, serviceId, serviceUpd
             linkPath: accidentRepairDetailsPath(asset._id, serviceId),
         });
     }
+
+    await closeAdminOfficerServiceTrackNotification({
+        assetId: asset._id,
+        serviceRecordId: serviceId,
+        actionedBy: req.user?.employeeObjectId || req.user?._id,
+        comment: 'Accident repair completed',
+        requestedByName: actorName,
+    });
 
     return asset;
 }

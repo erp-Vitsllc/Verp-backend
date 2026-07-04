@@ -225,6 +225,7 @@ import {
     ASSET_TOOLS_INBOX_TYPES,
     VEHICLE_DASHBOARD_INBOX_TYPES,
 } from '../utils/cleanupAssetDashboardActions.js';
+import { notifyAdminOfficerOnVehicleServiceCreated } from '../utils/vehicleServiceAdminOfficerNotification.js';
 import {
     maybeStartVehicleServiceWorkflow,
     maybeStartCarWashWorkflow,
@@ -10197,6 +10198,26 @@ export const addAssetService = async (req, res) => {
         await asset.save();
 
         const lastServiceDoc = asset.services[asset.services.length - 1];
+
+        if (isVehicleAssetForServiceGate()) {
+            const createStatus = String(remarkObj.requestStatus || '').toLowerCase();
+            const notifyAdminOnCreate = !isDraft || createStatus === 'pending';
+            if (notifyAdminOnCreate && lastServiceDoc?._id) {
+                try {
+                    const creatorName =
+                        remarkObj.requestedByName || (await getRequesterName(req.user));
+                    await notifyAdminOfficerOnVehicleServiceCreated({
+                        asset,
+                        serviceRecordId: lastServiceDoc._id,
+                        serviceType,
+                        requestedByName: creatorName,
+                    });
+                } catch (notifyErr) {
+                    console.error('[addAssetService] Admin officer create notify failed:', notifyErr);
+                }
+            }
+        }
+
         const skipWorkflowForOilPending =
             isVehicleAssetForServiceGate() &&
             String(serviceType || '').trim() === 'Oil Service' &&
