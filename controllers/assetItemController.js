@@ -5047,6 +5047,7 @@ export const assignAssetItem = async (req, res) => {
                             dashboardPatch,
                             { upsert: true, new: true, setDefaultsOnInsert: true },
                         );
+                        await healDuplicatePendingAssignmentDashboardRows(item._id).catch(() => null);
                         if (fleetVehicle && fleetHandoverHistoryId && assigner?._id) {
                             await upsertHandoverAssignerDashboardAction({
                                 asset: item,
@@ -5921,18 +5922,27 @@ export const bulkAssignAssetItemsToCompany = async (req, res) => {
                 });
             } else if (assets.length === 1) {
                 const one = assets[0];
-                await DashboardAction.create({
-                    assignedTo: actionRequiredBy,
-                    assignedToEmpId: companyCoordinator.employeeId,
-                    requestId: one._id,
-                    requestType: 'Asset Assignment',
-                    subjectEmployeeId: targetCompany.companyId,
-                    subjectName: companyName,
-                    requestedByName: `${assigner?.firstName || 'System'} ${assigner?.lastName || ''}`.trim(),
-                    extra1: `${one.assetId} — ${one.name}`,
-                    extra2: one.assignmentType,
-                    status: 'Pending',
-                });
+                await DashboardAction.findOneAndUpdate(
+                    {
+                        requestId: one._id,
+                        requestType: 'Asset Assignment',
+                        status: 'Pending',
+                    },
+                    {
+                        assignedTo: actionRequiredBy,
+                        assignedToEmpId: companyCoordinator.employeeId,
+                        requestId: one._id,
+                        requestType: 'Asset Assignment',
+                        subjectEmployeeId: targetCompany.companyId,
+                        subjectName: companyName,
+                        requestedByName: `${assigner?.firstName || 'System'} ${assigner?.lastName || ''}`.trim(),
+                        extra1: `${one.assetId} — ${one.name}`,
+                        extra2: one.assignmentType,
+                        status: 'Pending',
+                    },
+                    { upsert: true, new: true, setDefaultsOnInsert: true },
+                );
+                await healDuplicatePendingAssignmentDashboardRows(one._id).catch(() => null);
             }
         } catch (err) {
         }
@@ -7680,6 +7690,68 @@ const closeStaleAssignmentDashboardAction = async (
     );
 };
 
+/** One pending bell per asset (or per fleet handover viewer role). Closes duplicate rows in DB. */
+const healDuplicatePendingAssignmentDashboardRows = async (requestId) => {
+    if (!requestId || !mongoose.Types.ObjectId.isValid(String(requestId))) return;
+    const rows = await DashboardAction.find({
+        requestId,
+        requestType: 'Asset Assignment',
+        status: 'Pending',
+    })
+        .sort({ requestedDate: -1 })
+        .select('_id extra3 requestedDate')
+        .lean();
+    if (rows.length <= 1) return;
+
+    const groups = new Map();
+    for (const row of rows) {
+        const meta = parseDashboardExtra3(row.extra3);
+        const roleKey = isFleetHandoverDashboardMeta(meta)
+            ? `handover:${String(meta?.handoverViewerRole || 'actor').trim()}`
+            : 'default';
+        if (!groups.has(roleKey)) groups.set(roleKey, []);
+        groups.get(roleKey).push(row);
+    }
+
+    for (const groupRows of groups.values()) {
+        if (groupRows.length <= 1) continue;
+        const sorted = [...groupRows].sort(
+            (a, b) => new Date(b.requestedDate || 0) - new Date(a.requestedDate || 0),
+        );
+        const [, ...dupes] = sorted;
+        for (const dupe of dupes) {
+            await closeStaleAssignmentDashboardAction(
+                dupe._id,
+                'Auto-closed: duplicate assignment notification.',
+            );
+        }
+    }
+};
+
+/** In-memory dedupe for pending inbox rows (same rules as healDuplicatePendingAssignmentDashboardRows). */
+const dedupeAssignmentDashboardInboxRows = (items, parseExtra3Fn) => {
+    const kept = [];
+    const seen = new Set();
+    const sorted = [...items].sort(
+        (a, b) => new Date(b.requestedDate || 0) - new Date(a.requestedDate || 0),
+    );
+    for (const it of sorted) {
+        if (String(it.requestType || '').trim() !== 'Asset Assignment' || !it.requestId) {
+            kept.push(it);
+            continue;
+        }
+        const meta = parseExtra3Fn(it.extra3);
+        const roleKey = isFleetHandoverDashboardMeta(meta)
+            ? `handover:${String(meta?.handoverViewerRole || 'actor').trim()}`
+            : 'default';
+        const key = `${it.requestId}:${roleKey}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        kept.push(it);
+    }
+    return kept;
+};
+
 /** Recreate or reopen inbox rows when an asset still awaits acknowledgment but the bell row is missing or was wrongly auto-closed. */
 const syncPendingAssignmentDashboardRowsForUser = async (relevantIds, targetEmployeeId) => {
     const actorIds = [
@@ -7784,6 +7856,7 @@ const syncPendingAssignmentDashboardRowsForUser = async (relevantIds, targetEmpl
             },
             { upsert: true, setDefaultsOnInsert: true },
         );
+        await healDuplicatePendingAssignmentDashboardRows(item._id).catch(() => null);
 
         if (isFleetHandover && assigner?._id) {
             await upsertHandoverAssignerDashboardAction({
@@ -8695,18 +8768,27 @@ export const returnAssetItem = async (req, res) => {
 
                     const approver = assignedToType === 'Company' ? adminCoordinator : companyCoordinator;
 
-                    await DashboardAction.create({
-                        assignedTo: approver._id,
-                        assignedToEmpId: approver.employeeId,
-                        requestId: item._id,
-                        requestType: 'Asset Assignment',
-                        subjectEmployeeId: subjectEmpId,
-                        subjectName: subjectName,
-                        requestedByName: `${assigner?.firstName || "System"} ${assigner?.lastName || ""} `.trim(),
-                        extra1: `${item.assetId} - ${item.name} `,
-                        extra2: item.assignmentType || 'Permanent',
-                        status: 'Pending'
-                    });
+                    await DashboardAction.findOneAndUpdate(
+                        {
+                            requestId: item._id,
+                            requestType: 'Asset Assignment',
+                            status: 'Pending',
+                        },
+                        {
+                            assignedTo: approver._id,
+                            assignedToEmpId: approver.employeeId,
+                            requestId: item._id,
+                            requestType: 'Asset Assignment',
+                            subjectEmployeeId: subjectEmpId,
+                            subjectName: subjectName,
+                            requestedByName: `${assigner?.firstName || "System"} ${assigner?.lastName || ""} `.trim(),
+                            extra1: `${item.assetId} - ${item.name} `,
+                            extra2: item.assignmentType || 'Permanent',
+                            status: 'Pending',
+                        },
+                        { upsert: true, new: true, setDefaultsOnInsert: true },
+                    );
+                    await healDuplicatePendingAssignmentDashboardRows(item._id).catch(() => null);
 
                     const itemForHrEmail = await AssetItem.findById(item._id).populate('categoryId', 'name');
                     const targetFullForTransfer =
@@ -15564,6 +15646,22 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
         }
         unique.length = 0;
         unique.push(...dedupedInspectionHr);
+
+        const assignmentRequestIds = [
+            ...new Set(
+                unique
+                    .filter((it) => it.requestType === 'Asset Assignment' && it.requestId)
+                    .map((it) => it.requestId.toString()),
+            ),
+        ];
+        if (assignmentRequestIds.length) {
+            await Promise.all(
+                assignmentRequestIds.map((rid) => healDuplicatePendingAssignmentDashboardRows(rid).catch(() => null)),
+            );
+        }
+        const dedupedAssignmentRows = dedupeAssignmentDashboardInboxRows(unique, parseExtra3);
+        unique.length = 0;
+        unique.push(...dedupedAssignmentRows);
 
         const oidStr = (x) => String(x ?? '').trim();
         const validOid = (id) => mongoose.Types.ObjectId.isValid(oidStr(id));
