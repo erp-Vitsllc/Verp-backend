@@ -54,20 +54,10 @@ export async function sendFleetHandoverReminderEmail({
     const detailUrl = buildHandoverAssignDetailsUrl(asset._id, historyId);
     const subject = `Reminder (day ${daysElapsed}): vehicle handover pending — ${asset.assetId || asset.name || 'Vehicle'}`;
 
-    const recipients = new Map();
-    const push = (emp) => {
-        const email = pickEffectiveEmail(emp);
-        if (!email) return;
-        const key = email.toLowerCase();
-        if (recipients.has(key)) return;
-        recipients.set(key, formatEmployeeDisplayName(emp) || 'there');
-    };
+    const adminEmail = pickEffectiveEmail(adminOfficer);
+    if (!adminEmail?.trim()) return;
 
-    push(actionRecipient);
-    push(adminOfficer);
-    if (assigneeDoc?.companyEmail?.trim()) {
-        push(assigneeDoc);
-    }
+    const recipients = new Map([[adminEmail.toLowerCase(), formatEmployeeDisplayName(adminOfficer) || 'there']]);
 
     for (const [email, name] of recipients.entries()) {
         await sendHtmlEmail({

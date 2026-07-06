@@ -30,6 +30,14 @@ import {
     isExpiryTaskWindow,
     isExpiryHrTaskDueForDoc,
 } from "./documentExpiryReminderStages.js";
+import AssetItem from "../models/AssetItem.js";
+import { resolveFrontendBaseUrl } from "./resolveFrontendBaseUrl.js";
+import {
+    collectVehicleExpiryDocuments,
+    isFleetVehicleAsset,
+    resolveVehicleExpiryFocusCard,
+    resolveVehicleExpiryTab,
+} from "./vehicleExpiryScanUtils.js";
 
 const STAGE_1_MARKER = 30;
 const STAGE_2_MARKER = 20;
@@ -743,11 +751,129 @@ const migrateLegacyEmployeeDocExpiryActions = async () => {
     }
 };
 
+const processVehicleReminders = async () => {
+    const assets = await AssetItem.find({
+        vehicleProfileActivationStatus: "active",
+        $or: [
+            { plateNumber: { $regex: /\S/ } },
+            { vehicleBrand: { $exists: true, $ne: "" } },
+        ],
+    })
+        .populate("typeId", "name")
+        .select(
+            "_id assetId name plateNumber documents vehicleDispositionStatus vehicleProfileActivationStatus nextServiceDate gearOilDueDate",
+        )
+        .lean();
+
+    const recipients = await getFlowchartRecipientBundle();
+
+    for (const asset of assets) {
+        if (!isFleetVehicleAsset(asset)) continue;
+
+        const docs = collectVehicleExpiryDocuments(asset);
+        const vehicleLabel = `${asset.name || "Vehicle"} (${asset.assetId || asset._id})`;
+
+        const activeTaskWindowExtra1 = new Set(
+            docs
+                .filter((doc) => isExpiryHrTaskDueForDoc(getDaysUntil(doc.expiryDate)))
+                .map((doc) => {
+                    const expLabel = formatExpiryDateLabel(doc.expiryDate);
+                    return `Expiry follow-up required: ${doc.label}${expLabel ? ` (Exp: ${expLabel})` : ""}`;
+                }),
+        );
+
+        await removeObsoleteExpiryActions({
+            requestId: asset._id,
+            requestType: "Vehicle Document Expiry Reminder",
+            allowedExtra1Set: activeTaskWindowExtra1,
+        });
+
+        await purgeNonHrExpiryTasks({
+            requestId: asset._id,
+            requestType: "Vehicle Document Expiry Reminder",
+            hrObjectId: recipients.hr?._id || null,
+        });
+
+        for (const doc of docs) {
+            const days = getDaysUntil(doc.expiryDate);
+            if (days == null) continue;
+
+            const expLabel = formatExpiryDateLabel(doc.expiryDate);
+            const extra1 = `Expiry follow-up required: ${doc.label}${expLabel ? ` (Exp: ${expLabel})` : ""}`;
+            const extra2 = vehicleLabel;
+            const extra3 = JSON.stringify({
+                activationSubject: "vehicle",
+                vehicleMongoId: String(asset._id),
+                vehicleDocType: doc.docType,
+                focusCard: resolveVehicleExpiryFocusCard(doc.docType),
+                vehicleTab: resolveVehicleExpiryTab(doc.docType),
+            });
+
+            if (isExpiryHrTaskDueForDoc(days) && recipients.hr?._id) {
+                await ensureDashboardAction({
+                    assignedTo: recipients.hr._id,
+                    assignedToEmpId: recipients.hr.employeeId,
+                    requestId: asset._id,
+                    subjectEmployeeId: asset.assetId || "",
+                    subjectName: asset.name || "Vehicle",
+                    extra1,
+                    extra2,
+                    extra3,
+                    requestType: "Vehicle Document Expiry Reminder",
+                });
+            }
+
+            const docKey = `vehicle:${asset._id}:${doc.key}`;
+            const emailStage = getEmailReminderStageMarker(days);
+            if (emailStage == null) continue;
+
+            const alreadySent = await wasReminderSent({
+                targetType: "vehicle",
+                targetId: String(asset._id),
+                docKey,
+                daysBefore: emailStage,
+            });
+            if (alreadySent) continue;
+
+            const stageLabel = getReminderStageLabel(emailStage);
+            const detailUrl = `${resolveFrontendBaseUrl()}/HRM/Asset/Vehicle/details/${asset._id}?tab=${encodeURIComponent(resolveVehicleExpiryTab(doc.docType))}&focusCard=${encodeURIComponent(resolveVehicleExpiryFocusCard(doc.docType))}`;
+            const subject = `Vehicle document expiry ${stageLabel}: ${vehicleLabel}`;
+            const html = `
+                <div style="font-family: Arial, sans-serif; line-height: 1.6;">
+                    <h3>Vehicle Document Expiry Reminder (${stageLabel})</h3>
+                    <p><strong>Vehicle:</strong> ${vehicleLabel}</p>
+                    <p><strong>Document:</strong> ${doc.label}</p>
+                    <p><strong>Expiry Date:</strong> ${new Date(doc.expiryDate).toLocaleDateString("en-GB")}</p>
+                    <p><strong>Current lead time:</strong> ${days} day(s) before expiry.</p>
+                    <p style="margin-top:12px;color:#555;font-size:13px;"><em>This email is sent to the designated <strong>Admin Officer</strong> and <strong>HR</strong> on the organizational flowchart. Follow-up tasks are assigned only to designated HR.</em></p>
+                    <p><a href="${detailUrl}">Open vehicle profile</a></p>
+                </div>
+            `;
+
+            await sendExpiryReminderEmail({
+                to: recipients.emails,
+                subject,
+                html,
+            });
+
+            await markReminderSent({
+                targetType: "vehicle",
+                targetId: String(asset._id),
+                docKey,
+                daysBefore: emailStage,
+                expiryDate: doc.expiryDate,
+                metadata: { assetId: asset.assetId, docLabel: doc.label },
+            });
+        }
+    }
+};
+
 export const processDocumentExpiryReminders = async () => {
     try {
         await migrateLegacyEmployeeDocExpiryActions();
         await processCompanyReminders();
         await processEmployeeReminders();
+        await processVehicleReminders();
     } catch (err) {
         console.error("[processDocumentExpiryReminders] Non-fatal error:", err?.message || err);
     }

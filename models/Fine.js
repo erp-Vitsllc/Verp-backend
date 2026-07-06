@@ -259,6 +259,18 @@ const fineSchema = new mongoose.Schema(
             type: Date,
             default: null,
         },
+        /** Links a vehicle handover fine to a specific accessory or body-condition item. */
+        handoverApprovalContext: {
+            historyId: { type: String, default: null },
+            vehicleId: { type: String, default: null },
+            itemType: { type: String, enum: ['accessory', 'body', null], default: null },
+            itemKey: { type: String, default: null },
+            itemLabel: { type: String, default: '' },
+        },
+        handoverHrApproval: {
+            type: Boolean,
+            default: false,
+        },
         breakdownItems: [{
             kind: { type: String, enum: ['main', 'accessory'] },
             assetId: { type: String },

@@ -21,6 +21,7 @@ export const HR_DASHBOARD_REQUEST_TYPES = [
     "Vehicle Disposition Request",
     "Document Expiry Reminder",
     "Employee Document Expiry Reminder",
+    "Vehicle Document Expiry Reminder",
     "Company Document Not Renew",
     "Employee Document Not Renew",
 ];

@@ -42,7 +42,13 @@ import {
     buildFleetHandoverDisplayLabels,
     formatEmployeeDisplayName,
 } from '../utils/vehicleHandoverApprovalFlow.js';
-import { markHandoverEscalationResolved } from '../utils/vehicleHandoverEscalation.js';
+import {
+    buildInitialHandoverEscalationMeta,
+    markHandoverEscalationResolved,
+    resolveHandoverEscalationRequestedAt,
+    seedPreviousHandoverReportsOnHistory,
+} from '../utils/vehicleHandoverEscalation.js';
+import { syncVehicleAccessoriesListOnAssessmentComplete } from '../utils/vehicleAccessoriesListSync.js';
 import { sendAssetResponseEmail } from '../utils/sendAssetResponseEmail.js';
 import { sendAssetReassignmentEmail } from '../utils/sendAssetReassignmentEmail.js';
 import DashboardAction from '../models/DashboardAction.js';
@@ -1025,8 +1031,8 @@ export const getVehicleFleetDashboard = async (req, res) => {
             ],
         };
         const fleetSelect = listOnly
-            ? 'assetId name plateEmirate plateNumber modelYear assetValue status registrationExpiryDate insuranceExpiryDate nextServiceDate oilChangeDate gearOilDueDate currentKilometer assignedTo assignedCompany acceptanceStatus pendingAction actionRequiredBy createdBy vehicleProfileActivationStatus vehicleDispositionStatus warrantyEnabled warrantyExpiryDate warrantyYears onServiceActive onLeaveActive typeId'
-            : 'assetId name plateEmirate plateNumber modelYear assetValue status registrationExpiryDate insuranceExpiryDate nextServiceDate oilChangeDate gearOilDueDate lastServiceDate currentKilometer assignedTo assignedCompany acceptanceStatus pendingAction services documents actionRequiredBy createdBy vehicleProfileActivationStatus vehicleDispositionStatus assignmentType temporaryEndDate warrantyEnabled warrantyExpiryDate warrantyYears accessories parkingExtendedDays parkingReminderSentAt parkingDurationCompleteSentAt onServiceActive onLeaveActive';
+            ? 'assetId name plateEmirate plateNumber modelYear assetValue status registrationExpiryDate insuranceExpiryDate nextServiceDate oilChangeDate gearOilDueDate currentKilometer assignedTo assignedCompany acceptanceStatus pendingAction actionRequiredBy createdBy vehicleProfileActivationStatus vehicleDispositionStatus warrantyEnabled warrantyExpiryDate warrantyYears onServiceActive onLeaveActive typeId assignedDate pendingActionDetails updatedAt'
+            : 'assetId name plateEmirate plateNumber modelYear assetValue status registrationExpiryDate insuranceExpiryDate nextServiceDate oilChangeDate gearOilDueDate lastServiceDate currentKilometer assignedTo assignedCompany acceptanceStatus pendingAction services documents actionRequiredBy createdBy vehicleProfileActivationStatus vehicleDispositionStatus assignmentType temporaryEndDate warrantyEnabled warrantyExpiryDate warrantyYears accessories parkingExtendedDays parkingReminderSentAt parkingDurationCompleteSentAt onServiceActive onLeaveActive assignedDate pendingActionDetails updatedAt';
         const items = await AssetItem.find({ $and: [draftVis, fleetScope] })
             .populate('typeId', 'name')
             .populate('assignedTo', 'firstName lastName employeeId')
@@ -1092,6 +1098,9 @@ export const getVehicleFleetDashboard = async (req, res) => {
                 assignedCompany: v.assignedCompany,
                 acceptanceStatus: v.acceptanceStatus || '',
                 pendingAction: v.pendingAction || '',
+                pendingActionDetails: v.pendingActionDetails || null,
+                assignedDate: v.assignedDate || null,
+                updatedAt: v.updatedAt || null,
                 actionRequiredBy: v.actionRequiredBy,
                 onServiceActive: v.onServiceActive === true,
                 onLeaveActive: v.onLeaveActive === true,
@@ -3949,6 +3958,7 @@ export const getAssetItemDetail = async (req, res) => {
                     .lean();
 
                 if (latestAssigned?._id) {
+                    const historyId = latestAssigned._id.toString();
                     const assigneeForFlow =
                         typeof item.assignedTo === 'object' && item.assignedTo?.employeeId
                             ? item.assignedTo
@@ -3960,18 +3970,65 @@ export const getAssetItemDetail = async (req, res) => {
                     const fleetActor = assigneeForFlow
                         ? await resolveFleetHandoverFirstActor(assigneeForFlow)
                         : null;
+                    const requestedAt = await resolveHandoverEscalationRequestedAt(historyId);
 
                     item.pendingActionDetails = {
                         ...(item.pendingActionDetails || {}),
                         vehicleHandoverFlow: {
                             stage: 'target',
-                            historyId: latestAssigned._id.toString(),
+                            historyId,
                             assigneeCanSelfAcknowledge: fleetActor?.assigneeCanSelfAcknowledge ?? false,
+                            escalation: buildInitialHandoverEscalationMeta(requestedAt),
                         },
                     };
                     await item.save();
                 }
             } catch (flowHealErr) {
+                /* non-fatal */
+            }
+        }
+
+        const handoverFlowForEscalation = getVehicleHandoverFlow(item);
+        if (
+            handoverFlowForEscalation?.stage === 'target' &&
+            handoverFlowForEscalation?.historyId &&
+            !handoverFlowForEscalation?.escalation?.requestedAt &&
+            isFleetVehicleAssetFields({ plateNumber: item.plateNumber, typeName: item.typeId?.name }) &&
+            item.assignedToType === 'Employee' &&
+            String(item.acceptanceStatus || '').trim() === 'Pending'
+        ) {
+            try {
+                const requestedAt = await resolveHandoverEscalationRequestedAt(
+                    handoverFlowForEscalation.historyId,
+                );
+                await AssetItem.updateOne(
+                    { _id: item._id },
+                    {
+                        $set: {
+                            'pendingActionDetails.vehicleHandoverFlow.escalation':
+                                buildInitialHandoverEscalationMeta(requestedAt),
+                        },
+                    },
+                );
+                item.pendingActionDetails = {
+                    ...(item.pendingActionDetails || {}),
+                    vehicleHandoverFlow: {
+                        ...handoverFlowForEscalation,
+                        escalation: buildInitialHandoverEscalationMeta(requestedAt),
+                    },
+                };
+            } catch (escalationHealErr) {
+                /* non-fatal */
+            }
+        }
+
+        if (handoverFlowForEscalation?.historyId) {
+            try {
+                await seedPreviousHandoverReportsOnHistory({
+                    historyId: handoverFlowForEscalation.historyId,
+                    assetId: item._id,
+                });
+            } catch (seedHealErr) {
                 /* non-fatal */
             }
         }
@@ -4517,7 +4574,9 @@ export const getAssetItemDetail = async (req, res) => {
 export const assignAssetItem = async (req, res) => {
     try {
         const { id } = req.params;
-        const { assignedTo, assignedToType, assignmentType, assignedDays } = req.body;
+        const { assignedTo, assignedToType, assignmentType, assignedDays, assignmentReason: assignmentReasonRaw } =
+            req.body;
+        const assignmentReason = String(assignmentReasonRaw || req.body.reason || '').trim();
 
         if (!assignedTo || !assignmentType) {
             return res.status(400).json({ message: 'Target and assignment type are required' });
@@ -4660,6 +4719,9 @@ export const assignAssetItem = async (req, res) => {
             if (assignedToType !== 'Employee' || !assignedTo) {
                 return res.status(400).json({ message: 'Fleet reassign requests must target an employee.' });
             }
+            if (!assignmentReason) {
+                return res.status(400).json({ message: 'Assignment reason is required for vehicle reassignment.' });
+            }
 
             item.pendingAction = 'Reassign Asset';
             item.pendingActionDetails = {
@@ -4668,6 +4730,7 @@ export const assignAssetItem = async (req, res) => {
                     assignedToType: 'Employee',
                     assignmentType,
                     assignedDays: assignedDays ?? null,
+                    assignmentReason,
                 },
                 requestedBy: actingEmpObjectId,
                 requestedAt: new Date(),
@@ -4708,8 +4771,9 @@ export const assignAssetItem = async (req, res) => {
                 assetId: item._id,
                 action: 'Comment',
                 performedBy: actingEmpObjectId,
-                comments: 'Fleet vehicle reassign request submitted for HR approval.',
+                comments: assignmentReason || 'Fleet vehicle reassign request submitted for HR approval.',
                 date: new Date(),
+                details: { assignmentReason },
             });
 
             const updatedItem = await AssetItem.findById(id)
@@ -4730,6 +4794,10 @@ export const assignAssetItem = async (req, res) => {
                 message: 'Reassign request sent to HR for approval',
                 asset: updatedItem,
             });
+        }
+
+        if (fleetVehicle && assignedToType === 'Employee' && !assignmentReason) {
+            return res.status(400).json({ message: 'Assignment reason is required for vehicle handover.' });
         }
 
         // New assignments from the pool must start from Unassigned or Returned.
@@ -4969,6 +5037,7 @@ export const assignAssetItem = async (req, res) => {
                 assignedTo: item.assignedTo,
                 assignedCompany: item.assignedCompany,
                 performedBy: req.user.employeeObjectId,
+                comments: assignmentReason,
                 details: {
                     assetId: item.assetId,
                     name: item.name,
@@ -4976,19 +5045,28 @@ export const assignAssetItem = async (req, res) => {
                     assignedToType: item.assignedToType,
                     assignedTo: item.assignedTo,
                     assignedBy: item.assignedBy,
+                    assignmentReason,
+                    assignmentType: item.assignmentType,
+                    assignedDays: item.assignedDays ?? null,
                 },
             });
             fleetHandoverHistoryId = historyRecord._id.toString();
+            try {
+                await seedPreviousHandoverReportsOnHistory({
+                    historyId: fleetHandoverHistoryId,
+                    assetId: item._id,
+                });
+            } catch (seedErr) {
+                /* non-fatal */
+            }
             item.pendingActionDetails = {
                 ...(item.pendingActionDetails || {}),
+                assignmentReason,
                 vehicleHandoverFlow: {
                     stage: 'target',
                     historyId: fleetHandoverHistoryId,
                     assigneeCanSelfAcknowledge: fleetHandoverActor?.assigneeCanSelfAcknowledge ?? false,
-                    escalation: {
-                        requestedAt: new Date(),
-                        lastReminderDay: null,
-                    },
+                    escalation: buildInitialHandoverEscalationMeta(),
                 },
             };
             await item.save();
@@ -5121,8 +5199,12 @@ export const assignAssetItem = async (req, res) => {
                                 adminOfficer: fleetAdminOfficerEmp,
                             });
                             await AssetHistory.findByIdAndUpdate(fleetHandoverHistoryId, {
+                                comments: assignmentReason || undefined,
                                 details: {
                                     ...snapshotForHistory.toObject(),
+                                    assignmentReason,
+                                    assignmentType: item.assignmentType,
+                                    assignedDays: item.assignedDays ?? null,
                                     ...(existingHistory?.details?.vehicleHandoverWorkflow
                                         ? {
                                               vehicleHandoverWorkflow:
@@ -6147,7 +6229,7 @@ export const downloadHandoverPdf = async (req, res) => {
 export const respondToAssignment = async (req, res) => {
     try {
         const { id } = req.params;
-        const { action, comments } = req.body; // action: 'Accept', 'Reject', 'AcceptWithComments'
+        const { action, comments, handoverFineId } = req.body; // action: 'Accept', 'Reject', 'AcceptWithComments'
 
         if (!['Accept', 'Reject', 'AcceptWithComments'].includes(action)) {
             return res.status(400).json({ message: 'Invalid action.' });
@@ -6204,12 +6286,15 @@ export const respondToAssignment = async (req, res) => {
         });
         const handoverFlow = getVehicleHandoverFlow(item);
         let isFleetHandoverAdminDelegate = false;
+        if (fleetVehicleRespond && handoverFlow?.stage === 'target') {
+            isFleetHandoverAdminDelegate = await userIsFlowchartAdminOfficer(req);
+        }
+        let isFleetHandoverHrActor = false;
         if (
             fleetVehicleRespond &&
-            handoverFlow?.stage === 'target' &&
-            handoverFlow.assigneeCanSelfAcknowledge === false
+            (handoverFlow?.stage === 'hr' || handoverFlow?.stage === 'management')
         ) {
-            isFleetHandoverAdminDelegate = await userIsFlowchartAdminOfficer(req);
+            isFleetHandoverHrActor = await isUserActiveInFlowchart(req.user, 'hr');
         }
 
         // If assignee has NO company email OR NO ERP login access, allow assignee.primaryReportee to act as delegate
@@ -6267,7 +6352,8 @@ export const respondToAssignment = async (req, res) => {
                 !isAssigner &&
                 !isPrimaryReporteeDelegate &&
                 !isDesignatedResponder &&
-                !isFleetHandoverAdminDelegate
+                !isFleetHandoverAdminDelegate &&
+                !isFleetHandoverHrActor
             ) {
                 return res.status(403).json({ message: 'You are not authorized to respond to this assignment.' });
             }
@@ -6279,6 +6365,7 @@ export const respondToAssignment = async (req, res) => {
                     isPrimaryReporteeDelegate ||
                     isDesignatedResponder ||
                     isFleetHandoverAdminDelegate ||
+                    isFleetHandoverHrActor ||
                     (isAssignee && assigneeId && item.actionRequiredBy.toString() === assigneeId);
 
                 if (!isActingOnAssignedTurn) {
@@ -6629,6 +6716,19 @@ export const respondToAssignment = async (req, res) => {
             ) {
                 const flowNow = getVehicleHandoverFlow(item);
                 if (flowNow?.stage === 'hr' || flowNow?.stage === 'management') {
+                    const historyId = flowNow.historyId || handoverFlow?.historyId;
+                    if (historyId) {
+                        const handoverPatch = {
+                            'details.handoverApprovedWithFine': Boolean(handoverFineId),
+                            'details.handoverLifecycleStatus': 'approved',
+                        };
+                        if (handoverFineId) {
+                            handoverPatch['details.handoverFineId'] = String(handoverFineId);
+                        }
+                        void AssetHistory.updateOne({ _id: historyId }, { $set: handoverPatch }).catch(
+                            () => null,
+                        );
+                    }
                     if (item.pendingActionDetails?.vehicleHandoverFlow) {
                         delete item.pendingActionDetails.vehicleHandoverFlow;
                     }
@@ -7690,7 +7790,7 @@ const closeStaleAssignmentDashboardAction = async (
     );
 };
 
-/** One pending bell per asset (or per fleet handover viewer role). Closes duplicate rows in DB. */
+/** One pending bell per asset per assignee (viewer sees each task once even if they hold multiple roles). */
 const healDuplicatePendingAssignmentDashboardRows = async (requestId) => {
     if (!requestId || !mongoose.Types.ObjectId.isValid(String(requestId))) return;
     const rows = await DashboardAction.find({
@@ -7699,25 +7799,33 @@ const healDuplicatePendingAssignmentDashboardRows = async (requestId) => {
         status: 'Pending',
     })
         .sort({ requestedDate: -1 })
-        .select('_id extra3 requestedDate')
+        .select('_id assignedTo extra3 requestedDate')
         .lean();
     if (rows.length <= 1) return;
 
     const groups = new Map();
     for (const row of rows) {
-        const meta = parseDashboardExtra3(row.extra3);
-        const roleKey = isFleetHandoverDashboardMeta(meta)
-            ? `handover:${String(meta?.handoverViewerRole || 'actor').trim()}`
-            : 'default';
-        if (!groups.has(roleKey)) groups.set(roleKey, []);
-        groups.get(roleKey).push(row);
+        const assigneeKey = String(row.assignedTo || '');
+        if (!groups.has(assigneeKey)) groups.set(assigneeKey, []);
+        groups.get(assigneeKey).push(row);
     }
 
     for (const groupRows of groups.values()) {
         if (groupRows.length <= 1) continue;
-        const sorted = [...groupRows].sort(
-            (a, b) => new Date(b.requestedDate || 0) - new Date(a.requestedDate || 0),
-        );
+        const sorted = [...groupRows].sort((a, b) => {
+            const metaA = parseDashboardExtra3(a.extra3);
+            const metaB = parseDashboardExtra3(b.extra3);
+            const score = (meta) => {
+                const role = String(meta?.handoverViewerRole || '').trim();
+                if (role === 'actor') return 3;
+                if (role === 'assigner') return 2;
+                if (role === 'adminOfficer') return 1;
+                return 0;
+            };
+            const diff = score(metaB) - score(metaA);
+            if (diff !== 0) return diff;
+            return new Date(b.requestedDate || 0) - new Date(a.requestedDate || 0);
+        });
         const [, ...dupes] = sorted;
         for (const dupe of dupes) {
             await closeStaleAssignmentDashboardAction(
@@ -7728,7 +7836,7 @@ const healDuplicatePendingAssignmentDashboardRows = async (requestId) => {
     }
 };
 
-/** In-memory dedupe for pending inbox rows (same rules as healDuplicatePendingAssignmentDashboardRows). */
+/** In-memory dedupe: one inbox row per asset assignment (not per handover viewer role). */
 const dedupeAssignmentDashboardInboxRows = (items, parseExtra3Fn) => {
     const kept = [];
     const seen = new Set();
@@ -7741,10 +7849,11 @@ const dedupeAssignmentDashboardInboxRows = (items, parseExtra3Fn) => {
             continue;
         }
         const meta = parseExtra3Fn(it.extra3);
-        const roleKey = isFleetHandoverDashboardMeta(meta)
-            ? `handover:${String(meta?.handoverViewerRole || 'actor').trim()}`
-            : 'default';
-        const key = `${it.requestId}:${roleKey}`;
+        if (meta?.isBulkAssignment === true) {
+            kept.push(it);
+            continue;
+        }
+        const key = String(it.requestId);
         if (seen.has(key)) continue;
         seen.add(key);
         kept.push(it);
@@ -9298,22 +9407,66 @@ export const deleteAssetImage = async (req, res) => {
 export const getAssetHistory = async (req, res) => {
     try {
         const { id } = req.params;
-        const history = await AssetHistory.find({ assetId: id })
-            .populate('performedBy', 'firstName lastName employeeId signature')
-            .populate({
-                path: 'assignedTo',
-                select: 'firstName lastName employeeId primaryReportee enablePortalAccess companyEmail signature',
-                populate: {
-                    path: 'primaryReportee',
-                    select: 'firstName lastName employeeId signature',
-                },
-            })
-            .populate('assignedCompany', 'name companyId')
-            .sort({ date: -1, createdAt: -1 });
+        const [history, assetMeta] = await Promise.all([
+            AssetHistory.find({ assetId: id })
+                .populate('performedBy', 'firstName lastName employeeId signature')
+                .populate({
+                    path: 'assignedTo',
+                    select: 'firstName lastName employeeId primaryReportee enablePortalAccess companyEmail signature',
+                    populate: {
+                        path: 'primaryReportee',
+                        select: 'firstName lastName employeeId signature',
+                    },
+                })
+                .populate('assignedCompany', 'name companyId')
+                .sort({ date: -1, createdAt: -1 }),
+            AssetItem.findById(id)
+                .select('pendingActionDetails assignmentType assignedDays')
+                .lean(),
+        ]);
+
+        const handoverHistoryId = assetMeta?.pendingActionDetails?.vehicleHandoverFlow?.historyId;
+        const activeAssignmentReason = String(
+            assetMeta?.pendingActionDetails?.assignmentReason || '',
+        ).trim();
 
         // Sign URLs for attachments and signatures in snapshots
         const historyWithUrls = await Promise.all(history.map(async (record) => {
             const recordObj = record.toObject();
+
+            if (
+                handoverHistoryId &&
+                activeAssignmentReason &&
+                String(recordObj._id) === String(handoverHistoryId) &&
+                !String(recordObj.details?.assignmentReason || '').trim()
+            ) {
+                recordObj.comments = activeAssignmentReason;
+                recordObj.details = {
+                    ...(recordObj.details && typeof recordObj.details === 'object' ? recordObj.details : {}),
+                    assignmentReason: activeAssignmentReason,
+                };
+                void AssetHistory.updateOne(
+                    { _id: recordObj._id },
+                    {
+                        $set: {
+                            comments: activeAssignmentReason,
+                            'details.assignmentReason': activeAssignmentReason,
+                        },
+                    },
+                ).catch(() => null);
+            } else if (
+                String(recordObj.action || '').trim() === 'Assigned' &&
+                !String(recordObj.details?.assignmentReason || '').trim() &&
+                !String(recordObj.comments || '').trim() &&
+                assetMeta?.assignmentType
+            ) {
+                recordObj.details = {
+                    ...(recordObj.details && typeof recordObj.details === 'object' ? recordObj.details : {}),
+                    assignmentType: recordObj.details?.assignmentType || assetMeta.assignmentType,
+                    assignedDays: recordObj.details?.assignedDays ?? assetMeta.assignedDays ?? null,
+                };
+            }
+
             if (recordObj.file) {
                 recordObj.file = await getSignedFileUrl(recordObj.file);
             }
@@ -9417,7 +9570,64 @@ export const getHistoryRecord = async (req, res) => {
             }
         }
 
-        const recordObj = record.toObject();
+        let recordForResponse = record;
+        try {
+            const seedResult = await seedPreviousHandoverReportsOnHistory({
+                historyId: record._id,
+                assetId: record.assetId,
+            });
+            if (seedResult.applied) {
+                recordForResponse = await AssetHistory.findById(historyId)
+                    .populate('performedBy', 'firstName lastName employeeId signature')
+                    .populate({
+                        path: 'assignedTo',
+                        select: 'firstName lastName employeeId primaryReportee enablePortalAccess companyEmail signature',
+                        populate: {
+                            path: 'primaryReportee',
+                            select: 'firstName lastName employeeId signature',
+                        },
+                    });
+            }
+        } catch {
+            /* non-fatal */
+        }
+
+        try {
+            const assetMeta = await AssetItem.findById(record.assetId)
+                .select('pendingActionDetails assignmentType assignedDays')
+                .lean();
+            const activeHistoryId = assetMeta?.pendingActionDetails?.vehicleHandoverFlow?.historyId;
+            const assignmentReason = String(
+                assetMeta?.pendingActionDetails?.assignmentReason || '',
+            ).trim();
+            if (
+                assignmentReason &&
+                activeHistoryId &&
+                String(recordForResponse._id) === String(activeHistoryId) &&
+                !String(recordForResponse.details?.assignmentReason || '').trim()
+            ) {
+                await AssetHistory.updateOne(
+                    { _id: recordForResponse._id },
+                    {
+                        $set: {
+                            comments: assignmentReason,
+                            'details.assignmentReason': assignmentReason,
+                        },
+                    },
+                );
+                recordForResponse.comments = assignmentReason;
+                recordForResponse.details = {
+                    ...(recordForResponse.details && typeof recordForResponse.details === 'object'
+                        ? recordForResponse.details
+                        : {}),
+                    assignmentReason,
+                };
+            }
+        } catch {
+            /* non-fatal */
+        }
+
+        const recordObj = recordForResponse.toObject();
         if (recordObj.file) {
             recordObj.file = await getSignedFileUrl(recordObj.file);
         }
@@ -9511,6 +9721,9 @@ export const updateHistoryReceiverAssessment = async (req, res) => {
             merged[key] = {
                 present: row.present,
                 photo: row.present === true ? row.photo || null : null,
+                ...(row.amount != null && row.amount !== '' && Number.isFinite(Number(row.amount))
+                    ? { amount: Number(row.amount) }
+                    : {}),
             };
         }
 
@@ -9555,6 +9768,10 @@ export const updateHistoryReceiverAssessment = async (req, res) => {
         record.details = detailsBase;
         record.markModified('details');
         await record.save();
+
+        if (req.body.assessmentCompleted === true) {
+            await syncVehicleAccessoriesListOnAssessmentComplete(record, merged).catch(() => null);
+        }
 
         const populated = await AssetHistory.findById(historyId)
             .populate('performedBy', 'firstName lastName employeeId')
@@ -9742,6 +9959,15 @@ export const addAssetDocument = async (req, res) => {
         });
 
         await asset.save();
+        try {
+            const { clearVehicleExpiryNotificationsForDocument } = await import(
+                '../utils/vehicleExpiryNotificationHelpers.js'
+            );
+            const addedDoc = asset.documents[asset.documents.length - 1];
+            await clearVehicleExpiryNotificationsForDocument(asset, addedDoc || type);
+        } catch {
+            /* non-fatal */
+        }
         // Only notify on Service-specific document add flows.
         // For general documents (Registration, Insurance, etc.) there is no serviceType context.
         if (String(type || '').trim().toLowerCase() === 'service') {
@@ -9822,6 +10048,15 @@ export const updateAssetDocument = async (req, res) => {
         }
 
         await asset.save();
+
+        try {
+            const { clearVehicleExpiryNotificationsForDocument } = await import(
+                '../utils/vehicleExpiryNotificationHelpers.js'
+            );
+            await clearVehicleExpiryNotificationsForDocument(asset, doc);
+        } catch {
+            /* non-fatal */
+        }
 
         // Log to history
         try {
@@ -16135,6 +16370,23 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
             if (viewerRole === 'accounts') return isAccountsRoleHolder;
             if (viewerRole === 'management') return isManagementRoleHolder;
             return false;
+        });
+
+        const assignmentInboxSeen = new Set();
+        items = items.filter((row) => {
+            if (row.requestType !== 'Asset Assignment' || row.isBulk) return true;
+            let meta = null;
+            try {
+                meta = typeof row.extra3 === 'string' ? JSON.parse(row.extra3) : row.extra3;
+            } catch {
+                meta = null;
+            }
+            if (meta?.isBulkAssignment === true) return true;
+            const assetKey = String(row.primaryAssetId || row.requestObjectId || '');
+            if (!assetKey) return true;
+            if (assignmentInboxSeen.has(assetKey)) return false;
+            assignmentInboxSeen.add(assetKey);
+            return true;
         });
 
         res.json({ count: items.length, items });

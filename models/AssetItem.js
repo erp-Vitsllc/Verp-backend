@@ -377,6 +377,41 @@ const assetItemSchema = new mongoose.Schema({
         detachedAt: { type: Date, default: Date.now }
     }],
     accessoriesAttachment: { type: String, default: null },
+    /** Extra vehicle assessment accessory snapshots (rows below the live handover row). */
+    vehicleAccessoriesListEntries: [{
+        createdAt: { type: Date, default: Date.now },
+        sourceHistoryId: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'AssetHistory',
+            default: null,
+        },
+        kind: { type: String, trim: true, default: 'manual' },
+        spareTyre: {
+            present: { type: Boolean, default: null },
+            photo: { type: String, default: null },
+            amount: { type: Number, default: null },
+        },
+        toolsKit: {
+            present: { type: Boolean, default: null },
+            photo: { type: String, default: null },
+            amount: { type: Number, default: null },
+        },
+        scissorJack: {
+            present: { type: Boolean, default: null },
+            photo: { type: String, default: null },
+            amount: { type: Number, default: null },
+        },
+        firstAidKit: {
+            present: { type: Boolean, default: null },
+            photo: { type: String, default: null },
+            amount: { type: Number, default: null },
+        },
+        fireExtinguisher: {
+            present: { type: Boolean, default: null },
+            photo: { type: String, default: null },
+            amount: { type: Number, default: null },
+        },
+    }],
     vehicleCode: { type: String, trim: true },
     /** Fleet make/manufacturer (e.g. Toyota). Editable per vehicle; typeId may be shared. */
     vehicleBrand: { type: String, trim: true, default: '' },
@@ -485,7 +520,7 @@ const assetItemSchema = new mongoose.Schema({
     /** Post-activation edits to mandatory profile sections (basic, registration, insurance, photo). */
     vehicleProfileEditReviewStatus: {
         type: String,
-        enum: ['none', 'pending_hr', 'rejected'],
+        enum: ['none', 'draft', 'pending_hr', 'rejected'],
         default: 'none',
     },
     vehicleProfileEditSubmittedAt: { type: Date, default: null },
@@ -499,6 +534,8 @@ const assetItemSchema = new mongoose.Schema({
         action: { type: String, enum: ['edit', 'renew', 'not_renew'], default: 'edit' },
         steps: { type: mongoose.Schema.Types.Mixed, default: [] },
         documentId: { type: mongoose.Schema.Types.ObjectId, default: null },
+        previousRows: { type: mongoose.Schema.Types.Mixed, default: [] },
+        proposedRows: { type: mongoose.Schema.Types.Mixed, default: [] },
         createdAt: { type: Date, default: Date.now },
     }],
     /** Formal vehicle inspection record (HR-approved create request). */

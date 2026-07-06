@@ -984,9 +984,6 @@ export const submitVehicleInspectionRequest = async (req, res) => {
         if (inspectionStatus === 'pending_hr') {
             return res.status(400).json({ message: 'A vehicle inspection request is already pending HR approval.' });
         }
-        if (hasVehicleInspectionHistory(asset)) {
-            return res.status(400).json({ message: 'A vehicle inspection record already exists for this vehicle.' });
-        }
 
         const submitterId = await resolveProfileActivationSubmitterId(req);
         if (!submitterId) {

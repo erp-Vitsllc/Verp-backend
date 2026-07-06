@@ -343,7 +343,11 @@ export const syncDashboardAction = async (data) => {
                 requestType: requestType,
                 status: 'Pending',
                 subjectEmployeeId: subjectEmployee?.employeeId,
-                subjectName: subjectEmployee ? `${subjectEmployee.firstName} ${subjectEmployee.lastName}` : (data.subjectName || ''),
+                subjectName: subjectEmployee
+                    ? `${subjectEmployee.firstName || ''} ${subjectEmployee.lastName || ''}`.trim() ||
+                      data.subjectName ||
+                      'Vehicle'
+                    : data.subjectName || '',
                 requestedByName: requestedByName || '',
                 requestedDate: new Date(),
                 extra1: extra1,

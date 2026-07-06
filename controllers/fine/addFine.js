@@ -346,8 +346,26 @@ export const addFine = async (req, res) => {
                     createdBy: req.user._id
                 };
 
+                if (commonData.handoverApprovalContext) {
+                    finePayload.handoverApprovalContext = commonData.handoverApprovalContext;
+                }
+                if (commonData.handoverHrApproval === true) {
+                    finePayload.handoverHrApproval = true;
+                }
+
                 // BULK: Route directly to HR (no reportee step)
-                if (finePayload.fineStatus !== 'Draft' && hrHOD) {
+                if (commonData.handoverHrApproval === true) {
+                    finePayload.fineStatus = commonData.fineStatus === 'Approved' ? 'Approved' : 'Pending Accounts';
+                    finePayload.workflow = [
+                        {
+                            role: 'HR',
+                            assignedTo: req.user._id,
+                            status: 'Approved',
+                            assignedAt: new Date(),
+                            actionedAt: new Date(),
+                        },
+                    ];
+                } else if (finePayload.fineStatus !== 'Draft' && hrHOD) {
                     try {
                         const hrUser = await User.findOne({ employeeId: hrHOD.employeeId });
                         if (hrUser) {

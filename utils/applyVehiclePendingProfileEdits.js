@@ -5,6 +5,7 @@ import {
     isRenewPrimaryDocumentType,
     syncVehicleExpiryFieldsFromLiveDocuments,
 } from './vehicleDocumentRenewal.js';
+import { clearVehicleExpiryNotificationsForSection } from './vehicleExpiryNotificationHelpers.js';
 
 const normType = (t) => String(t || '').toLowerCase().trim();
 
@@ -134,6 +135,11 @@ export async function applyVehiclePendingProfileEditEntry(asset, pendingEntry) {
         finalizeVehicleDocumentRenewal(asset, renewFromDocumentId, newRenewPrimaryDocId);
     } else if (action === 'edit') {
         syncVehicleExpiryFieldsFromLiveDocuments(asset);
+    }
+
+    const sectionId = String(pendingEntry?.sectionId || '').trim();
+    if (sectionId === 'registration' || sectionId === 'insurance') {
+        await clearVehicleExpiryNotificationsForSection(asset, sectionId);
     }
 }
 

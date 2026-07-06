@@ -776,6 +776,7 @@ export async function maybeStartVehicleServiceWorkflow(asset, { serviceRecordId,
             status: 'Pending',
             assignedTo: hr._id,
             subjectEmployee: subjectEmp,
+            subjectName: asset.name || asset.assetId || 'Vehicle',
             requestedByName: requesterName,
             extra1: `${asset.assetId} — ${serviceType || 'Service'}`,
             extra2: isTireChange

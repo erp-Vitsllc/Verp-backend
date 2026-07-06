@@ -81,7 +81,7 @@ setInterval(() => {
 setTimeout(() => { processAccidentAssets(); }, 60 * 1000);
 setInterval(() => { processAccidentAssets(); }, 24 * 60 * 60 * 1000);
 
-// Run company/employee document expiry reminders (30/20/10/0 day emails + HR tasks).
+// Run company/employee/vehicle document expiry reminders (30/20/10/0 day emails + HR tasks).
 setTimeout(() => { processDocumentExpiryReminders(); }, 90 * 1000);
 setInterval(() => { processDocumentExpiryReminders(); }, 24 * 60 * 60 * 1000);
 

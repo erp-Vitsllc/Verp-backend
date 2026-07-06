@@ -27,6 +27,7 @@ import {
     rejectVehicleProfileActivation,
 } from '../controllers/vehicleProfileActivationController.js';
 import {
+    queueVehicleProfileEdit,
     submitVehicleProfileEdit,
     approveVehicleProfileEdit,
     rejectVehicleProfileEdit,
@@ -766,6 +767,7 @@ router.post('/:id/submit-vehicle-profile-activation', protect, submitVehicleProf
 router.post('/:id/approve-vehicle-profile-activation', protect, approveVehicleProfileActivation);
 router.post('/:id/hold-vehicle-profile-activation', protect, holdVehicleProfileActivation);
 router.post('/:id/reject-vehicle-profile-activation', protect, rejectVehicleProfileActivation);
+router.post('/:id/queue-vehicle-profile-edit', protect, queueVehicleProfileEdit);
 router.post('/:id/submit-vehicle-profile-edit', protect, submitVehicleProfileEdit);
 router.post('/:id/apply-vehicle-profile-section', protect, applyVehicleProfileSection);
 router.post('/:id/approve-vehicle-profile-edit', protect, approveVehicleProfileEdit);

@@ -483,6 +483,7 @@ export const getUserActivityStats = async (req, res) => {
         const ASSIGNMENT_STRICT_TYPES = new Set([
             'Document Expiry Reminder',
             'Employee Document Expiry Reminder',
+            'Vehicle Document Expiry Reminder',
             'Company Activation',
             'Company Document Not Renew',
             'Employee Document Not Renew',

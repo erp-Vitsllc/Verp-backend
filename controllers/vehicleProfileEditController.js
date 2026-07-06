@@ -49,14 +49,95 @@ const vehicleSubjectForDashboard = (asset) => ({
     designation: asset.typeId?.name || '',
 });
 
+async function notifyHrOfVehicleProfileEditSubmission(req, asset, designatedHr, submitterId) {
+    const vehicleLabel = `${asset.name || 'Vehicle'} (${asset.assetId || asset._id})`;
+    const pending = Array.isArray(asset.vehiclePendingProfileEdits) ? asset.vehiclePendingProfileEdits : [];
+    const sectionSummary = pending
+        .map((entry) => SECTION_LABEL[entry.sectionId] || entry.sectionId)
+        .filter(Boolean)
+        .join(', ');
+
+    const emailUser = process.env.EMAIL_USER?.trim();
+    const emailPass = process.env.EMAIL_PASS?.trim();
+    if (emailUser && emailPass && designatedHr) {
+        const { email: hrEmail } = resolveEmployeeEmail(designatedHr);
+        if (hrEmail?.trim()) {
+            const transporter = nodemailer.createTransport({
+                host: 'smtp.office365.com',
+                port: 587,
+                secure: false,
+                auth: { user: emailUser, pass: emailPass },
+            });
+            const hrName = `${designatedHr.firstName || ''} ${designatedHr.lastName || ''}`.trim() || 'HR';
+            const detailUrl = `${resolveFrontendBaseUrl(req)}/HRM/Asset/Vehicle/details/${asset._id}`;
+            await transporter.sendMail({
+                from: `"VeRP Portal" <${emailUser}>`,
+                to: hrEmail,
+                subject: `Vehicle profile edit review: ${vehicleLabel}`,
+                html: `
+                    <div style="font-family:Arial,sans-serif;line-height:1.6;max-width:640px;margin:0 auto;">
+                        <h2 style="color:#1d4ed8;">Vehicle profile edit — HR review</h2>
+                        <p>Hello <strong>${hrName}</strong>,</p>
+                        <p>Submitted changes for activated vehicle <strong>${vehicleLabel}</strong>${sectionSummary ? `: <strong>${sectionSummary}</strong>` : ''}.</p>
+                        <p>Please review and approve or reject in VeRP.</p>
+                        <p><a href="${detailUrl}" style="background:#2563eb;color:#fff;padding:12px 20px;text-decoration:none;border-radius:8px;">Open vehicle</a></p>
+                    </div>
+                `,
+            }).catch(() => {});
+        }
+    }
+
+    const requestedByName =
+        req.user?.name ||
+        [req.user?.firstName, req.user?.lastName].filter(Boolean).join(' ').trim() ||
+        req.user?.employeeId ||
+        '';
+
+    await syncDashboardAction({
+        requestId: asset._id,
+        requestType: 'Vehicle Profile Edit',
+        assignedTo: String(designatedHr._id),
+        status: 'Pending',
+        subjectEmployee: vehicleSubjectForDashboard(asset),
+        requestedByName,
+        extra1: `[Fleet] ${vehicleLabel} — profile edit pending HR`,
+        extra2: sectionSummary,
+        extra3: JSON.stringify({
+            activationSubject: 'vehicle',
+            activationViewerRole: 'flowchart_hr',
+            vehicleMongoId: String(asset._id),
+        }),
+    });
+
+    try {
+        const AssetHistory = (await import('../models/AssetHistory.js')).default;
+        await AssetHistory.create({
+            assetId: asset._id,
+            action: 'Update',
+            performedBy: submitterId,
+            comments: `Submitted vehicle profile edits for HR approval (${sectionSummary || 'changes'}).`,
+            details: { type: 'VehicleProfileEditSubmit', pendingCount: pending.length },
+        });
+    } catch {
+        /* non-fatal */
+    }
+}
+
 /**
- * POST /api/AssetItem/:id/submit-vehicle-profile-edit
- * Queue edits while profile is active; HR must approve before changes apply.
+ * POST /api/AssetItem/:id/queue-vehicle-profile-edit
+ * Save one section change locally; submitter sends batch to HR separately.
  */
-export const submitVehicleProfileEdit = async (req, res) => {
+export const queueVehicleProfileEdit = async (req, res) => {
     try {
         const { id } = req.params;
-        const { sectionId, action = 'edit', steps = [], documentId = null } = req.body || {};
+        const {
+            sectionId,
+            action = 'edit',
+            steps = [],
+            documentId = null,
+            previousRows = [],
+            proposedRows = [],
+        } = req.body || {};
         const section = String(sectionId || '').trim();
         const act = String(action || 'edit').trim();
 
@@ -81,6 +162,81 @@ export const submitVehicleProfileEdit = async (req, res) => {
             });
         }
 
+        const reviewStatus = String(asset.vehicleProfileEditReviewStatus || 'none').toLowerCase();
+        if (reviewStatus === 'pending_hr') {
+            return res.status(400).json({
+                message: 'This vehicle already has edits awaiting HR approval.',
+            });
+        }
+
+        const pendingEntry = {
+            sectionId: section,
+            action: act,
+            steps,
+            documentId: documentId || null,
+            previousRows: Array.isArray(previousRows) ? previousRows : [],
+            proposedRows: Array.isArray(proposedRows) ? proposedRows : [],
+            createdAt: new Date(),
+        };
+
+        const existingPending = Array.isArray(asset.vehiclePendingProfileEdits)
+            ? asset.vehiclePendingProfileEdits.filter((row) => String(row.sectionId) !== section)
+            : [];
+        existingPending.push(pendingEntry);
+
+        await AssetItem.updateOne(
+            { _id: id },
+            {
+                $set: {
+                    vehicleProfileEditReviewStatus: 'draft',
+                    vehiclePendingProfileEdits: existingPending,
+                },
+            },
+        );
+
+        return res.status(200).json({
+            message: 'Change saved. Submit for HR approval when all edits are ready.',
+            vehicleProfileEditReviewStatus: 'draft',
+            queued: true,
+        });
+    } catch (err) {
+        console.error('queueVehicleProfileEdit:', err);
+        return res.status(500).json({ message: err.message || 'Failed to queue profile edit.' });
+    }
+};
+
+/**
+ * POST /api/AssetItem/:id/submit-vehicle-profile-edit
+ * Send all queued draft edits to HR for approval.
+ */
+export const submitVehicleProfileEdit = async (req, res) => {
+    try {
+        const { id } = req.params;
+
+        const asset = await AssetItem.findById(id).populate('typeId', 'name').lean();
+        if (!asset) return res.status(404).json({ message: 'Asset not found' });
+        if (!isFleetVehicleAsset(asset)) {
+            return res.status(400).json({ message: 'Not a fleet vehicle asset.' });
+        }
+        if (!vehicleProfileIsActive(asset)) {
+            return res.status(400).json({
+                message: 'HR approval for edits is only required after the vehicle profile is active.',
+            });
+        }
+
+        const reviewStatus = String(asset.vehicleProfileEditReviewStatus || 'none').toLowerCase();
+        if (reviewStatus === 'pending_hr') {
+            return res.status(400).json({ message: 'Edits are already awaiting HR approval.' });
+        }
+        if (reviewStatus !== 'draft' && reviewStatus !== 'rejected') {
+            return res.status(400).json({ message: 'No draft profile edits to submit.' });
+        }
+
+        const pending = Array.isArray(asset.vehiclePendingProfileEdits) ? asset.vehiclePendingProfileEdits : [];
+        if (!pending.length) {
+            return res.status(400).json({ message: 'No pending profile edits to submit.' });
+        }
+
         const submitterId = await resolveProfileActivationSubmitterId(req);
         if (!submitterId) {
             return res.status(400).json({
@@ -97,19 +253,6 @@ export const submitVehicleProfileEdit = async (req, res) => {
             return res.status(400).json({ message: 'Flowchart HR has no email address.' });
         }
 
-        const pendingEntry = {
-            sectionId: section,
-            action: act,
-            steps,
-            documentId: documentId || null,
-            createdAt: new Date(),
-        };
-
-        const existingPending = Array.isArray(asset.vehiclePendingProfileEdits)
-            ? asset.vehiclePendingProfileEdits
-            : [];
-        const wasPending = String(asset.vehicleProfileEditReviewStatus || '').toLowerCase() === 'pending_hr';
-
         await AssetItem.updateOne(
             { _id: id },
             {
@@ -118,79 +261,11 @@ export const submitVehicleProfileEdit = async (req, res) => {
                     vehicleProfileEditSubmittedAt: new Date(),
                     vehicleProfileEditSubmittedBy: submitterId,
                 },
-                $push: { vehiclePendingProfileEdits: pendingEntry },
             },
         );
 
-        const vehicleLabel = `${asset.name || 'Vehicle'} (${asset.assetId || id})`;
-        const sectionLabel = SECTION_LABEL[section] || section;
-        const actionLabel = act === 'renew' ? 'renewal' : act === 'not_renew' ? 'not renew' : 'edit';
-
-        if (!wasPending) {
-            const emailUser = process.env.EMAIL_USER?.trim();
-            const emailPass = process.env.EMAIL_PASS?.trim();
-            if (emailUser && emailPass) {
-                const transporter = nodemailer.createTransport({
-                    host: 'smtp.office365.com',
-                    port: 587,
-                    secure: false,
-                    auth: { user: emailUser, pass: emailPass },
-                });
-                const hrName = `${designatedHr.firstName || ''} ${designatedHr.lastName || ''}`.trim() || 'HR';
-                const detailUrl = `${resolveFrontendBaseUrl(req)}/HRM/Asset/Vehicle/details/${id}`;
-                await transporter.sendMail({
-                    from: `"VeRP Portal" <${emailUser}>`,
-                    to: hrEmail,
-                    subject: `Vehicle profile edit review: ${vehicleLabel}`,
-                    html: `
-                        <div style="font-family:Arial,sans-serif;line-height:1.6;max-width:640px;margin:0 auto;">
-                            <h2 style="color:#1d4ed8;">Vehicle profile edit — HR review</h2>
-                            <p>Hello <strong>${hrName}</strong>,</p>
-                            <p>A user submitted a <strong>${actionLabel}</strong> for <strong>${sectionLabel}</strong> on activated vehicle <strong>${vehicleLabel}</strong>.</p>
-                            <p>Please review and approve or reject in VeRP.</p>
-                            <p><a href="${detailUrl}" style="background:#2563eb;color:#fff;padding:12px 20px;text-decoration:none;border-radius:8px;">Open vehicle</a></p>
-                        </div>
-                    `,
-                }).catch(() => {});
-            }
-        }
-
-        const requestedByName =
-            req.user?.name ||
-            [req.user?.firstName, req.user?.lastName].filter(Boolean).join(' ').trim() ||
-            req.user?.employeeId ||
-            '';
-
-        await syncDashboardAction({
-            requestId: asset._id,
-            requestType: 'Vehicle Profile Edit',
-            assignedTo: String(designatedHr._id),
-            status: 'Pending',
-            subjectEmployee: vehicleSubjectForDashboard(asset),
-            requestedByName,
-            extra1: `[Fleet] ${vehicleLabel} — ${sectionLabel} ${actionLabel} pending HR`,
-            extra2: '',
-            extra3: JSON.stringify({
-                activationSubject: 'vehicle',
-                activationViewerRole: 'flowchart_hr',
-                vehicleMongoId: String(asset._id),
-                sectionId: section,
-                action: act,
-            }),
-        });
-
-        try {
-            const AssetHistory = (await import('../models/AssetHistory.js')).default;
-            await AssetHistory.create({
-                assetId: asset._id,
-                action: 'Update',
-                performedBy: submitterId,
-                comments: `Submitted ${sectionLabel} ${actionLabel} for HR approval (active profile).`,
-                details: { type: 'VehicleProfileEditSubmit', sectionId: section, action: act },
-            });
-        } catch {
-            /* non-fatal */
-        }
+        const assetForNotify = { ...asset, vehiclePendingProfileEdits: pending };
+        await notifyHrOfVehicleProfileEditSubmission(req, assetForNotify, designatedHr, submitterId);
 
         return res.status(200).json({
             message: 'Changes submitted for HR review. They will apply after approval.',
@@ -201,7 +276,6 @@ export const submitVehicleProfileEdit = async (req, res) => {
         return res.status(500).json({ message: err.message || 'Failed to submit profile edit.' });
     }
 };
-
 /**
  * POST /api/AssetItem/:id/approve-vehicle-profile-edit
  */

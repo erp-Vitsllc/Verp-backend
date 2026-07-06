@@ -1060,6 +1060,56 @@ export const uploadInvoice = async (req, res) => {
     }
 };
 
+const VEHICLE_ACCESSORIES_LIST_KEYS = [
+    'spareTyre',
+    'toolsKit',
+    'scissorJack',
+    'firstAidKit',
+    'fireExtinguisher',
+];
+
+async function persistVehicleAccessoriesListPhoto(photo) {
+    if (!photo) return null;
+    if (typeof photo === 'string' && photo.startsWith('data:image')) {
+        const uploadResult = await uploadDocumentToS3(photo, 'asset-accessories');
+        return uploadResult.publicId;
+    }
+    return photo;
+}
+
+async function normalizeVehicleAccessoriesListEntries(entries) {
+    if (!Array.isArray(entries)) return [];
+
+    const normalized = [];
+    for (const entry of entries) {
+        if (!entry || typeof entry !== 'object') continue;
+        const next = {
+            ...(entry._id ? { _id: entry._id } : {}),
+            createdAt: entry.createdAt ? new Date(entry.createdAt) : new Date(),
+        };
+
+        for (const key of VEHICLE_ACCESSORIES_LIST_KEYS) {
+            const row = entry[key];
+            if (!row || typeof row !== 'object') continue;
+            const present =
+                row.present === true ? true : row.present === false ? false : null;
+            let photo = present === true ? row.photo || null : null;
+            if (photo) {
+                photo = await persistVehicleAccessoriesListPhoto(photo);
+            }
+            const amount =
+                row.amount != null && row.amount !== '' && Number.isFinite(Number(row.amount))
+                    ? Number(row.amount)
+                    : null;
+            next[key] = { present, photo, amount };
+        }
+
+        normalized.push(next);
+    }
+
+    return normalized;
+}
+
 // @desc    Update Asset Item (General)
 // @route   PUT /api/AssetType/:id
 // @access  Private
@@ -1377,6 +1427,13 @@ export const updateAssetItem = async (req, res) => {
                 if (key === 'onServiceActive' || key === 'onLeaveActive') {
                     if (!isAdmin && !isAssetControllerEffective) continue;
                     asset[key] = updates[key] === true || updates[key] === 'yes';
+                    continue;
+                }
+                if (key === 'vehicleAccessoriesListEntries' && Array.isArray(updates[key])) {
+                    asset.vehicleAccessoriesListEntries = await normalizeVehicleAccessoriesListEntries(
+                        updates[key],
+                    );
+                    asset.markModified('vehicleAccessoriesListEntries');
                     continue;
                 }
                 if (key === 'accessories' && Array.isArray(updates[key])) {
