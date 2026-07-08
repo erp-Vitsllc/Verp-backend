@@ -265,6 +265,69 @@ export function isAssetAssignmentAcknowledgmentPending(asset) {
     return !!(asset.assignedTo || asset.assignedCompany);
 }
 
+function isAwaitingAssetCreationApproval(asset) {
+    if (!asset) return false;
+    if (asset.pendingAction) return false;
+    if (isAssetAssignmentAcknowledgmentPending(asset)) return false;
+    return (
+        asset.status === 'Submitted for Approval' ||
+        asset.status === 'Pending' ||
+        (asset.status === 'Draft' && asset.actionRequiredBy)
+    );
+}
+
+/**
+ * Profile is already active but creation-approval fields were left behind — clear them so UI
+ * does not keep showing the yellow "Vehicle creation approval" banner.
+ */
+export async function healStaleCreationApprovalAfterProfileActive(asset) {
+    if (!asset?._id) return false;
+    if (String(asset.vehicleProfileActivationStatus || '').toLowerCase() !== 'active') {
+        return false;
+    }
+    if (!isAwaitingAssetCreationApproval(asset) && !asset.actionRequiredBy) {
+        return false;
+    }
+
+    const nextStatus =
+        asset.assignedTo || asset.assignedCompany
+            ? 'Assigned'
+            : asset.status === 'Submitted for Approval'
+              ? 'Unassigned'
+              : asset.status;
+
+    try {
+        await AssetItem.updateOne(
+            { _id: asset._id },
+            {
+                $set: {
+                    status: nextStatus,
+                },
+                $unset: { actionRequiredBy: 1 },
+            },
+        );
+        asset.status = nextStatus;
+        asset.actionRequiredBy = null;
+
+        await DashboardAction.updateMany(
+            { requestId: asset._id, requestType: 'Asset Approval', status: 'Pending' },
+            {
+                status: 'Approved',
+                actionedDate: new Date(),
+                comment: 'Auto-closed: vehicle profile is already active.',
+            },
+        );
+    } catch (err) {
+        console.error(
+            '[healStaleCreationApprovalAfterProfileActive] failed:',
+            err?.message || err,
+        );
+        return false;
+    }
+
+    return true;
+}
+
 /**
  * For an asset awaiting creation approval, re-point `actionRequiredBy` and any pending
  * Asset Approval DashboardAction at the *current* role holder when the stored approver is stale.
@@ -275,16 +338,18 @@ export function isAssetAssignmentAcknowledgmentPending(asset) {
 export async function syncStaleAssetCreationApprover(asset) {
     if (!asset || !asset._id) return null;
 
+    if (String(asset.vehicleProfileActivationStatus || '').toLowerCase() === 'active') {
+        await healStaleCreationApprovalAfterProfileActive(asset);
+        return null;
+    }
+
     // Assignment acknowledgments also use status Pending — never replace assignee/reportee routing.
     if (isAssetAssignmentAcknowledgmentPending(asset)) return null;
 
     // Assets with active pending actions (like EOL or Loss & Damage) should not sync creation approvers.
     if (asset.pendingAction) return null;
 
-    const awaiting =
-        asset.status === 'Submitted for Approval' ||
-        asset.status === 'Pending' ||
-        (asset.status === 'Draft' && asset.actionRequiredBy);
+    const awaiting = isAwaitingAssetCreationApproval(asset);
     if (!awaiting) return null;
 
     const currentApprover = await resolveCurrentCreationApproverForAsset(asset);

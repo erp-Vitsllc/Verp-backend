@@ -1095,9 +1095,8 @@ export const approveVehicleInspection = async (req, res) => {
         if (String(asset.vehicleInspectionStatus || '').toLowerCase() !== 'pending_hr') {
             return res.status(400).json({ message: 'No pending vehicle inspection request to approve.' });
         }
-        if (hasVehicleInspectionHistory(asset)) {
-            return res.status(400).json({ message: 'A vehicle inspection record already exists for this vehicle.' });
-        }
+
+        const alreadyHasInspectionRecord = hasVehicleInspectionHistory(asset);
 
         const requesterId =
             asset.vehicleInspectionRequestedBy || asset.vehicleInspectionSubmittedBy || null;
@@ -1153,7 +1152,7 @@ export const approveVehicleInspection = async (req, res) => {
                     vehicleInspectionSubmittedBy: 1,
                     vehicleInspectionRequestedBy: 1,
                 },
-                $push: { documents: inspectionDoc },
+                ...(alreadyHasInspectionRecord ? {} : { $push: { documents: inspectionDoc } }),
             },
         );
 

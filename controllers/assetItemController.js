@@ -6,7 +6,7 @@ import EmployeeBasic from '../models/EmployeeBasic.js';
 import AssetHistory from '../models/AssetHistory.js';
 import Company from '../models/Company.js';
 import User from '../models/User.js';
-import { getSignedFileUrl, uploadDocumentToS3 } from '../utils/s3Upload.js';
+import { getSignedFileUrl, uploadDocumentToS3, persistStoredAttachmentValue, deleteDocumentFromS3, normalizeS3Key } from '../utils/s3Upload.js';
 import { generatePdf } from '../utils/generatePdf.js';
 import { sendAssetAssignmentEmail } from '../utils/sendAssetAssignmentEmail.js';
 import {
@@ -47,8 +47,9 @@ import {
     markHandoverEscalationResolved,
     resolveHandoverEscalationRequestedAt,
     seedPreviousHandoverReportsOnHistory,
+    stripUnconfirmedBodyConditionDetails,
 } from '../utils/vehicleHandoverEscalation.js';
-import { syncVehicleAccessoriesListOnAssessmentComplete } from '../utils/vehicleAccessoriesListSync.js';
+import { syncVehicleAccessoriesListOnAssessmentComplete, signVehicleAccessoriesListEntries } from '../utils/vehicleAccessoriesListSync.js';
 import { sendAssetResponseEmail } from '../utils/sendAssetResponseEmail.js';
 import { sendAssetReassignmentEmail } from '../utils/sendAssetReassignmentEmail.js';
 import DashboardAction from '../models/DashboardAction.js';
@@ -4355,15 +4356,25 @@ export const getAssetItemDetail = async (req, res) => {
                 : []),
         ];
 
+        const vehicleAccessoriesListSignTask =
+            Array.isArray(itemObj.vehicleAccessoriesListEntries) &&
+            itemObj.vehicleAccessoriesListEntries.length
+                ? signVehicleAccessoriesListEntries(itemObj.vehicleAccessoriesListEntries, signKey).then(
+                      (signed) => {
+                          itemObj.vehicleAccessoriesListEntries = signed;
+                      },
+                  )
+                : null;
+
         let signTasks;
         if (deferLightDetail) {
             itemObj.deferredAttachmentSigning = true;
-            signTasks = headerSignTasks.filter(Boolean);
+            signTasks = [...headerSignTasks, vehicleAccessoriesListSignTask];
         } else if (deferHeavyServiceSigning) {
             itemObj.deferredAttachmentSigning = true;
-            signTasks = nonServiceAttachmentSignTasks;
+            signTasks = [...nonServiceAttachmentSignTasks, vehicleAccessoriesListSignTask];
         } else {
-            signTasks = [...nonServiceAttachmentSignTasks];
+            signTasks = [...nonServiceAttachmentSignTasks, vehicleAccessoriesListSignTask];
             if (itemObj.services?.length) {
                 signTasks.push(...itemObj.services.map((s) => signOneService(s)));
             }
@@ -4597,6 +4608,13 @@ export const assignAssetItem = async (req, res) => {
 
         if (fleetVehicle && !isFleetVehicleProfileActive(item)) {
             return res.status(400).json({ message: FLEET_PROFILE_INACTIVE_ASSIGNMENT_MSG });
+        }
+
+        if (fleetVehicle && isVehicleInspectionWorkflowActive(item)) {
+            return res.status(400).json({
+                message:
+                    'Complete and approve the vehicle inspection handover before assigning or reassigning this vehicle.',
+            });
         }
 
         // Check if this is a reassignment (asset was previously assigned, or assignee acknowledgment is still open)
@@ -5193,9 +5211,8 @@ export const assignAssetItem = async (req, res) => {
                                 .lean();
                             const { handoverByDisplay, handoverToDisplay } = buildFleetHandoverDisplayLabels({
                                 workflowMeta,
-                                assigner: fleetAssignerActor?.actorDoc || assigner,
+                                assigner,
                                 assignee: employeeToAssign,
-                                previousAssignee: fleetPreviousAssigneeEmp,
                                 adminOfficer: fleetAdminOfficerEmp,
                             });
                             await AssetHistory.findByIdAndUpdate(fleetHandoverHistoryId, {
@@ -6247,13 +6264,6 @@ export const respondToAssignment = async (req, res) => {
             return res.status(404).json({ message: 'Asset not found' });
         }
 
-        if (isVehicleInspectionWorkflowActive(item)) {
-            return res.status(400).json({
-                message:
-                    'This vehicle has a pending inspection handover. Use Send to HR or HR inspection approval instead.',
-            });
-        }
-
         const assignmentBulkGroupId = item.pendingActionDetails?.bulkAssignment?.groupId || null;
 
         const currentUser = req.user.employeeObjectId;
@@ -6708,15 +6718,15 @@ export const respondToAssignment = async (req, res) => {
             }
 
         } else if (action === 'Accept' || action === 'AcceptWithComments') {
-            if (
-                fleetVehicleRespond &&
-                handoverFlow &&
-                action === 'Accept' &&
-                getVehicleHandoverFlow(item)
-            ) {
+            if (fleetVehicleRespond && handoverFlow && action === 'Accept') {
                 const flowNow = getVehicleHandoverFlow(item);
-                if (flowNow?.stage === 'hr' || flowNow?.stage === 'management') {
-                    const historyId = flowNow.historyId || handoverFlow?.historyId;
+                const hrStage =
+                    handoverFlow.stage === 'hr' ||
+                    handoverFlow.stage === 'management' ||
+                    flowNow?.stage === 'hr' ||
+                    flowNow?.stage === 'management';
+                if (hrStage) {
+                    const historyId = flowNow?.historyId || handoverFlow?.historyId;
                     if (historyId) {
                         const handoverPatch = {
                             'details.handoverApprovedWithFine': Boolean(handoverFineId),
@@ -7075,10 +7085,29 @@ export const respondToAssignment = async (req, res) => {
                 acceptComment = `Accepted by HR on behalf of company.${comments ? ` ${comments}` : ''}`;
             }
 
-            const fleetHandoverHistoryId = handoverFlow?.historyId;
+            const fleetHandoverHistoryId =
+                handoverFlow?.historyId ||
+                (await (async () => {
+                    if (!fleetVehicleRespond) return null;
+                    const assigneeId = item.assignedTo?._id || item.assignedTo;
+                    if (!assigneeId) return null;
+                    const openHandover = await AssetHistory.findOne({
+                        assetId: item._id,
+                        assignedTo: assigneeId,
+                        action: { $in: ['Assigned', 'Accepted'] },
+                        'details.handoverKind': { $ne: 'vehicle_inspection' },
+                        'details.firstInspection': { $ne: true },
+                    })
+                        .sort({ createdAt: -1 })
+                        .select('_id')
+                        .lean();
+                    return openHandover?._id?.toString?.() || null;
+                })());
             let acceptHistDoc;
 
             if (fleetVehicleRespond && fleetHandoverHistoryId) {
+                const wasHrHandoverApproval =
+                    handoverFlow?.stage === 'hr' || handoverFlow?.stage === 'management';
                 acceptHistDoc = await updateFleetHandoverHistoryRecord({
                     historyId: fleetHandoverHistoryId,
                     action: 'Accepted',
@@ -7089,6 +7118,9 @@ export const respondToAssignment = async (req, res) => {
                         isAcceptedByManager: isManager,
                         isAcceptedByHR: isHR,
                         isAcceptedByAdminOfficer: isFleetHandoverAdminDelegate,
+                        handoverLifecycleStatus: wasHrHandoverApproval
+                            ? HANDOVER_LIFECYCLE.APPROVED
+                            : HANDOVER_LIFECYCLE.ACCEPTED,
                     },
                 });
             } else {
@@ -9404,33 +9436,135 @@ export const deleteAssetImage = async (req, res) => {
 // @desc    Get asset history
 // @route   GET /api/AssetItem/:id/history
 // @access  Private
+
+const HANDOVER_LIST_DETAIL_KEYS = [
+    'assignmentReason',
+    'handoverLifecycleStatus',
+    'handoverKind',
+    'firstInspection',
+    'receiverAssessmentCompleted',
+    'bodyConditionCompleted',
+    'vehicleHandoverWorkflow',
+    'assignmentType',
+    'assignedDays',
+    'handoverApprovedWithFine',
+    'acceptanceStatus',
+    'inspectionFormStatus',
+    'handoverByDisplay',
+    'handoverToDisplay',
+    'assignedTo',
+    'assignedToType',
+    'assignedCompany',
+    'reason',
+    'rejectionReason',
+    'extensionReason',
+    'userStory',
+    'byName',
+    'performedByName',
+];
+
+function slimHandoverHistoryForList(recordObj, assetMeta, handoverHistoryId, activeAssignmentReason) {
+    const rawDetails =
+        recordObj.details && typeof recordObj.details === 'object' ? recordObj.details : {};
+    const details = {};
+    HANDOVER_LIST_DETAIL_KEYS.forEach((key) => {
+        if (rawDetails[key] !== undefined && rawDetails[key] !== null) {
+            details[key] = rawDetails[key];
+        }
+    });
+
+    if (
+        handoverHistoryId &&
+        activeAssignmentReason &&
+        String(recordObj._id) === String(handoverHistoryId) &&
+        !String(details.assignmentReason || '').trim()
+    ) {
+        details.assignmentReason = activeAssignmentReason;
+    } else if (
+        String(recordObj.action || '').trim() === 'Assigned' &&
+        !String(details.assignmentReason || '').trim() &&
+        !String(recordObj.comments || '').trim() &&
+        assetMeta?.assignmentType
+    ) {
+        details.assignmentType = details.assignmentType || assetMeta.assignmentType;
+        details.assignedDays = details.assignedDays ?? assetMeta.assignedDays ?? null;
+    }
+
+    return {
+        _id: recordObj._id,
+        date: recordObj.date,
+        createdAt: recordObj.createdAt,
+        action: recordObj.action,
+        comments: recordObj.comments,
+        assignedTo: recordObj.assignedTo,
+        assignedCompany: recordObj.assignedCompany,
+        assignedToType: recordObj.assignedToType,
+        performedBy: recordObj.performedBy,
+        details,
+    };
+}
+
 export const getAssetHistory = async (req, res) => {
     try {
         const { id } = req.params;
-        const [history, assetMeta] = await Promise.all([
-            AssetHistory.find({ assetId: id })
-                .populate('performedBy', 'firstName lastName employeeId signature')
-                .populate({
-                    path: 'assignedTo',
-                    select: 'firstName lastName employeeId primaryReportee enablePortalAccess companyEmail signature',
-                    populate: {
-                        path: 'primaryReportee',
-                        select: 'firstName lastName employeeId signature',
-                    },
-                })
+        const forHandoverList =
+            String(req.query.forHandover || '').toLowerCase() === '1' ||
+            String(req.query.forHandover || '').toLowerCase() === 'true';
+
+        const assetMeta = await AssetItem.findById(id)
+            .select('pendingActionDetails assignmentType assignedDays')
+            .lean();
+
+        if (forHandoverList) {
+            const handoverDetailProjection = HANDOVER_LIST_DETAIL_KEYS.map(
+                (key) => `details.${key}`,
+            ).join(' ');
+
+            const history = await AssetHistory.find({ assetId: id })
+                .select(
+                    `action date createdAt comments assignedTo assignedCompany assignedToType performedBy ${handoverDetailProjection}`,
+                )
+                .populate('performedBy', 'firstName lastName employeeId')
+                .populate('assignedTo', 'firstName lastName employeeId')
                 .populate('assignedCompany', 'name companyId')
-                .sort({ date: -1, createdAt: -1 }),
-            AssetItem.findById(id)
-                .select('pendingActionDetails assignmentType assignedDays')
-                .lean(),
-        ]);
+                .sort({ date: -1, createdAt: -1 })
+                .lean();
+
+            const handoverHistoryId = assetMeta?.pendingActionDetails?.vehicleHandoverFlow?.historyId;
+            const activeAssignmentReason = String(
+                assetMeta?.pendingActionDetails?.assignmentReason || '',
+            ).trim();
+
+            return res.status(200).json(
+                history.map((recordObj) =>
+                    slimHandoverHistoryForList(
+                        recordObj,
+                        assetMeta,
+                        handoverHistoryId,
+                        activeAssignmentReason,
+                    ),
+                ),
+            );
+        }
+
+        const history = await AssetHistory.find({ assetId: id })
+            .populate('performedBy', 'firstName lastName employeeId signature')
+            .populate({
+                path: 'assignedTo',
+                select: 'firstName lastName employeeId primaryReportee enablePortalAccess companyEmail signature',
+                populate: {
+                    path: 'primaryReportee',
+                    select: 'firstName lastName employeeId signature',
+                },
+            })
+            .populate('assignedCompany', 'name companyId')
+            .sort({ date: -1, createdAt: -1 });
 
         const handoverHistoryId = assetMeta?.pendingActionDetails?.vehicleHandoverFlow?.historyId;
         const activeAssignmentReason = String(
             assetMeta?.pendingActionDetails?.assignmentReason || '',
         ).trim();
 
-        // Sign URLs for attachments and signatures in snapshots
         const historyWithUrls = await Promise.all(history.map(async (record) => {
             const recordObj = record.toObject();
 
@@ -9477,17 +9611,15 @@ export const getAssetHistory = async (req, res) => {
                 if (d.attachment) d.attachment = await getSignedFileUrl(d.attachment);
                 if (d.serviceRecord?.invoice) d.serviceRecord.invoice = await getSignedFileUrl(d.serviceRecord.invoice);
                 if (d.serviceRecord?.attachment) d.serviceRecord.attachment = await getSignedFileUrl(d.serviceRecord.attachment);
-                if (d.completionRecord?.attachment) d.completionRecord.attachment = await getSignedFileUrl(d.completionRecord.attachment);
-
-                // Sign assignedBy signature inside snapshot
+                if (d.completionRecord?.attachment) {
+                    d.completionRecord.attachment = await getSignedFileUrl(d.completionRecord.attachment);
+                }
                 if (d.assignedBy?.signature?.url) {
                     d.assignedBy.signature.url = await getSignedFileUrl(d.assignedBy.signature.url);
                 }
-                // Sign assignedTo signature inside snapshot
                 if (d.assignedTo?.signature?.url) {
                     d.assignedTo.signature.url = await getSignedFileUrl(d.assignedTo.signature.url);
                 }
-                // Sign acceptedBy signature inside snapshot
                 if (d.acceptedBy?.signature?.url) {
                     d.acceptedBy.signature.url = await getSignedFileUrl(d.acceptedBy.signature.url);
                 }
@@ -9627,6 +9759,23 @@ export const getHistoryRecord = async (req, res) => {
             /* non-fatal */
         }
 
+        try {
+            const rawDetails =
+                recordForResponse.details && typeof recordForResponse.details === 'object'
+                    ? recordForResponse.details
+                    : {};
+            const { details: healedDetails, changed } = stripUnconfirmedBodyConditionDetails(rawDetails);
+            if (changed) {
+                await AssetHistory.updateOne(
+                    { _id: recordForResponse._id },
+                    { $set: { 'details.bodyConditionReport': {} } },
+                );
+                recordForResponse.details = healedDetails;
+            }
+        } catch {
+            /* non-fatal */
+        }
+
         const recordObj = recordForResponse.toObject();
         if (recordObj.file) {
             recordObj.file = await getSignedFileUrl(recordObj.file);
@@ -9653,6 +9802,153 @@ export const getHistoryRecord = async (req, res) => {
         res.status(200).json(recordObj);
     } catch (error) {
         res.status(500).json({ message: 'Server Error' });
+    }
+};
+
+const DELETABLE_HANDOVER_HISTORY_ACTIONS = new Set([
+    'Assigned',
+    'Accepted',
+    'Transfer',
+    'ControllerHandover',
+    'Returned',
+    'Unassigned',
+    'Rejected',
+]);
+
+function handoverAssigneeKey(entity) {
+    if (!entity) return '';
+    if (String(entity.assignedToType || '').toLowerCase() === 'company') {
+        const companyId = entity.assignedCompany?._id || entity.assignedCompany;
+        return `company:${companyId || ''}`;
+    }
+    const assigneeId = entity.assignedTo?._id || entity.assignedTo;
+    return `emp:${assigneeId || ''}`;
+}
+
+function isActivePendingAssignedHandover(asset, record) {
+    if (!asset || !record) return false;
+    if (String(record.action || '').trim() !== 'Assigned') return false;
+    if (String(asset.acceptanceStatus || '').trim() !== 'Pending') return false;
+    return handoverAssigneeKey(asset) === handoverAssigneeKey(record);
+}
+
+function buildHandoverDeleteAssetPatch(asset, record, historyId) {
+    const assetPatch = {};
+    const flow = asset.pendingActionDetails?.vehicleHandoverFlow;
+    const flowMatchesDeleted =
+        flow?.historyId && String(flow.historyId) === String(historyId);
+    const isPendingAssigned = isActivePendingAssignedHandover(asset, record);
+
+    if (flowMatchesDeleted || isPendingAssigned) {
+        assetPatch.pendingAction = null;
+        assetPatch.actionRequiredBy = null;
+        const nextDetails = { ...(asset.pendingActionDetails || {}) };
+        delete nextDetails.vehicleHandoverFlow;
+        assetPatch.pendingActionDetails = Object.keys(nextDetails).length ? nextDetails : null;
+        if (isPendingAssigned || flowMatchesDeleted) {
+            assetPatch.acceptanceStatus = 'Accepted';
+        }
+    }
+
+    if (
+        asset.vehicleInspectionHandoverHistoryId &&
+        String(asset.vehicleInspectionHandoverHistoryId) === String(historyId)
+    ) {
+        assetPatch.vehicleInspectionHandoverHistoryId = null;
+        const inspStatus = String(asset.vehicleInspectionStatus || '').toLowerCase();
+        if (inspStatus === 'pending_hr' || inspStatus === 'draft') {
+            assetPatch.vehicleInspectionStatus = null;
+        }
+    }
+
+    return { assetPatch, isActiveFlow: flowMatchesDeleted };
+}
+
+// @desc    Delete a vehicle handover history record (system Super User only)
+// @route   DELETE /api/AssetItem/history-record/:historyId
+// @access  System Super User
+export const deleteVehicleHandoverHistory = async (req, res) => {
+    try {
+        if (!isJwtSystemSuperUser(req.user)) {
+            return res.status(403).json({
+                message: 'Only the system Super User can delete handover records.',
+            });
+        }
+
+        const { historyId } = req.params;
+        if (!mongoose.Types.ObjectId.isValid(historyId)) {
+            return res.status(400).json({ message: 'Invalid history record id.' });
+        }
+
+        const record = await AssetHistory.findById(historyId)
+            .select('action assetId file assignedTo assignedToType assignedCompany')
+            .lean();
+        if (!record) {
+            return res.status(404).json({ message: 'History record not found' });
+        }
+
+        const action = String(record.action || '').trim();
+        if (!DELETABLE_HANDOVER_HISTORY_ACTIONS.has(action)) {
+            return res.status(400).json({
+                message: 'Only handover history rows can be deleted from this screen.',
+            });
+        }
+
+        await AssetHistory.findByIdAndDelete(historyId);
+
+        const asset = await AssetItem.findById(record.assetId).select(
+            'pendingActionDetails vehicleInspectionHandoverHistoryId vehicleInspectionStatus vehicleAccessoriesListEntries acceptanceStatus assignedTo assignedCompany assignedToType',
+        );
+
+        let isActiveFlow = false;
+        if (asset) {
+            const { assetPatch, isActiveFlow: activeFlow } = buildHandoverDeleteAssetPatch(
+                asset,
+                record,
+                historyId,
+            );
+            isActiveFlow = activeFlow;
+
+            if (Array.isArray(asset.vehicleAccessoriesListEntries)) {
+                const filtered = asset.vehicleAccessoriesListEntries.filter(
+                    (entry) => String(entry?.sourceHistoryId || '') !== String(historyId),
+                );
+                if (filtered.length !== asset.vehicleAccessoriesListEntries.length) {
+                    assetPatch.vehicleAccessoriesListEntries = filtered;
+                }
+            }
+
+            if (Object.keys(assetPatch).length) {
+                await AssetItem.findByIdAndUpdate(asset._id, { $set: assetPatch });
+            }
+        }
+
+        res.status(200).json({
+            message: 'Handover record deleted successfully.',
+            assetId: record.assetId,
+            historyId,
+        });
+
+        void (async () => {
+            try {
+                if (isActiveFlow && asset?._id) {
+                    void closeFleetHandoverDashboardActions(
+                        asset._id,
+                        'Rejected',
+                        req.user?.employeeObjectId || req.user?._id,
+                        'Handover record deleted by Super User.',
+                    );
+                }
+
+                if (record.file) {
+                    await deleteDocumentFromS3(record.file);
+                }
+            } catch (cleanupError) {
+                console.warn('[deleteVehicleHandoverHistory] cleanup failed:', cleanupError?.message || cleanupError);
+            }
+        })();
+    } catch (error) {
+        res.status(500).json({ message: 'Server Error', error: error.message });
     }
 };
 
@@ -9852,9 +10148,40 @@ export const updateHistoryBodyCondition = async (req, res) => {
                 }
             }
 
+            let photo = row.photo || null;
+            if (photo) {
+                photo = await persistStoredAttachmentValue(photo, 'asset-history', `${key}-body-condition`);
+                if (typeof photo === 'string' && photo.startsWith('http')) {
+                    photo = normalizeS3Key(photo) || photo;
+                }
+            }
+
+            const existingRow =
+                existing[key] && typeof existing[key] === 'object' ? existing[key] : {};
+            const photoSource =
+                row.photoSource === 'previous' || row.photoSource === 'new'
+                    ? row.photoSource
+                    : existingRow.photoSource === 'previous' || existingRow.photoSource === 'new'
+                      ? existingRow.photoSource
+                      : null;
+
+            const comment = typeof row.comment === 'string' ? row.comment.trim() : '';
+            if (!partial && photoSource === 'new' && photo && !comment) {
+                return res.status(400).json({
+                    message: `${label}: comment is required when using a new image.`,
+                });
+            }
+            const userSelected =
+                row.userSelected === true ||
+                Boolean(comment) ||
+                photoSource === 'previous' ||
+                photoSource === 'new';
+
             merged[key] = {
-                comment: typeof row.comment === 'string' ? row.comment.trim() : '',
-                photo: row.photo || null,
+                comment,
+                photo,
+                ...(photoSource ? { photoSource } : {}),
+                ...(userSelected ? { userSelected: true } : {}),
             };
         }
 
@@ -9884,6 +10211,11 @@ export const updateHistoryBodyCondition = async (req, res) => {
                         message: `${label}: photo is required before completing body condition report.`,
                     });
                 }
+                if (row?.photoSource === 'new' && !String(row?.comment || '').trim()) {
+                    return res.status(400).json({
+                        message: `${label}: comment is required when using a new image.`,
+                    });
+                }
             }
             detailsBase.bodyConditionCompleted = true;
         }
@@ -9908,6 +10240,9 @@ export const updateHistoryBodyCondition = async (req, res) => {
             .populate('assignedTo', 'firstName lastName employeeId');
 
         const responseBody = populated.toObject();
+        if (responseBody.details) {
+            await signHandoverAssessmentMediaInDetails(responseBody.details, getSignedFileUrl);
+        }
         if (inspectionSubmitResult?.asset) {
             responseBody.vehicleAsset = inspectionSubmitResult.asset;
             responseBody.inspectionSubmittedForHr = inspectionSubmitResult.submitted === true;

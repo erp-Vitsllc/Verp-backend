@@ -42,6 +42,9 @@ tmp/
 temp/
 *.tmp
 
+# Zoho OAuth tokens (local file store — never commit)
+data/zoho-tokens.json
+
 
 
 

@@ -19,6 +19,7 @@ import assetAccessoryCatalogRoute from "./routes/assetAccessoryCatalogRoutes.js"
 import flowchartRoute from "./routes/flowchartRoutes.js";
 import adminDeletionArchiveRoute from "./routes/adminDeletionArchiveRoutes.js"; // <-- Add flowchart routes
 import storageRoute from "./routes/storageRoutes.js";
+import zohoRoute from "./routes/zohoRoutes.js";
 import { commonLimiter } from "./middleware/rateLimitMiddleware.js";
 import { resolveFrontendBaseUrl, runWithRequestFrontendBaseUrl } from "./utils/resolveFrontendBaseUrl.js";
 import dotenv from "dotenv";
@@ -251,6 +252,7 @@ app.use("/api/AssetAccessoryCatalog", assetAccessoryCatalogRoute);
 app.use("/api/Flowchart", flowchartRoute);
 app.use("/api/AdminDeletionArchive", adminDeletionArchiveRoute);
 app.use("/api/storage", storageRoute);
+app.use("/api/zoho", zohoRoute);
 
 const PORT = process.env.PORT || 5000;
 

@@ -1,6 +1,6 @@
 import AssetItem from '../models/AssetItem.js';
 import AssetHistory from '../models/AssetHistory.js';
-import { uploadDocumentToS3 } from './s3Upload.js';
+import { normalizeS3Key, uploadDocumentToS3 } from './s3Upload.js';
 
 const RECEIVER_ASSESSMENT_KEYS = [
     'spareTyre',
@@ -34,21 +34,72 @@ function resolveAssessmentSource(historyEntry) {
 }
 
 function pickAssessmentBlock(source, key) {
-    if (!source || typeof source !== 'object') return { present: null, photo: null };
+    if (!source || typeof source !== 'object') return { present: null, photo: null, amount: null };
     const nested = source[key];
     if (nested && typeof nested === 'object') {
+        const present =
+            nested.present === true ? true : nested.present === false ? false : nested.photo ? true : null;
         return {
-            present:
-                nested.present === true ? true : nested.present === false ? false : null,
+            present,
             photo: nested.photo ?? nested.image ?? nested.attachment ?? null,
             amount: nested.amount ?? null,
         };
     }
+    const photo = source[`${key}Photo`] ?? source[`${key}Image`] ?? null;
+    const present =
+        nested === true ? true : nested === false ? false : photo ? true : null;
     return {
-        present: nested === true ? true : nested === false ? false : null,
-        photo: source[`${key}Photo`] ?? source[`${key}Image`] ?? null,
+        present,
+        photo,
         amount: source[`${key}Amount`] ?? null,
     };
+}
+
+function storedEntryHasAssessmentData(entry) {
+    if (!entry || typeof entry !== 'object') return false;
+    return RECEIVER_ASSESSMENT_KEYS.some((key) => {
+        const block = pickAssessmentBlock(entry, key);
+        return block.present === true || block.present === false || Boolean(block.photo);
+    });
+}
+
+function findPreviousAccessoriesListBaselineEntry(asset, currentHistoryId = '') {
+    const entries = Array.isArray(asset?.vehicleAccessoriesListEntries)
+        ? asset.vehicleAccessoriesListEntries
+        : [];
+    if (!entries.length) return null;
+
+    const currentId = String(currentHistoryId || '');
+    const ranked = [...entries].sort((a, b) => {
+        const diff = entryTimestamp(b) - entryTimestamp(a);
+        if (diff !== 0) return diff;
+        return String(b?._id || '').localeCompare(String(a?._id || ''));
+    });
+
+    for (const entry of ranked) {
+        const kind = String(entry?.kind || 'manual');
+        const sourceId = String(entry?.sourceHistoryId || '');
+        if (kind === 'assignment_change' && sourceId && sourceId === currentId) continue;
+        if (storedEntryHasAssessmentData(entry)) return entry;
+    }
+
+    return null;
+}
+
+function buildPreviousSourceFromStoredEntry(entry) {
+    if (!entry) return null;
+    const source = {};
+    for (const key of RECEIVER_ASSESSMENT_KEYS) {
+        const block = pickAssessmentBlock(entry, key);
+        if (block.present === true || block.present === false || block.photo) {
+            source[key] = {
+                present: block.present,
+                photo: block.photo,
+                amount: block.amount,
+            };
+        }
+    }
+    return Object.keys(source).length ? source : null;
 }
 
 function normalizePhotoKey(photo) {
@@ -82,15 +133,29 @@ function presentValueChanged(previousPresent, currentPresent) {
 }
 
 function assessmentChangedVsPrevious(currentMerged, previousSource) {
-    if (!previousSource) return false;
-    return RECEIVER_ASSESSMENT_KEYS.some((key) => {
+    const { any } = computeAssessmentChangeMap(currentMerged, previousSource);
+    return any;
+}
+
+function computeAssessmentChangeMap(currentMerged, previousSource) {
+    const changedByKey = {};
+    let any = false;
+
+    if (!previousSource) {
+        return { any: false, changedByKey };
+    }
+
+    for (const key of RECEIVER_ASSESSMENT_KEYS) {
         const current = pickAssessmentBlock(currentMerged, key);
         const previous = pickAssessmentBlock(previousSource, key);
-        return (
+        const itemChanged =
             photosDiffer(previous.photo, current.photo) ||
-            presentValueChanged(previous.present, current.present)
-        );
-    });
+            presentValueChanged(previous.present, current.present);
+        changedByKey[key] = itemChanged;
+        if (itemChanged) any = true;
+    }
+
+    return { any, changedByKey };
 }
 
 function findPreviousAssessmentHandoverEntry(assetHistory, currentHistoryId) {
@@ -120,20 +185,64 @@ function findPreviousAssessmentHandoverEntry(assetHistory, currentHistoryId) {
     return candidates[0] || null;
 }
 
-async function persistAssessmentPhoto(photo) {
+async function persistAccessoriesListPhotoRef(photo) {
     if (!photo) return null;
     if (typeof photo === 'string' && photo.startsWith('data:image')) {
         const uploadResult = await uploadDocumentToS3(photo, 'asset-accessories');
         return uploadResult.publicId;
     }
+    if (typeof photo === 'string') {
+        const normalized = normalizeS3Key(photo);
+        if (normalized) return normalized;
+        if (photo.startsWith('http')) return null;
+        return photo.trim() || null;
+    }
     return photo;
 }
 
-async function buildStoredEntryFromAssessment(merged, historyId) {
+export async function signVehicleAccessoriesListEntries(entries, signFileUrl) {
+    if (!Array.isArray(entries) || typeof signFileUrl !== 'function') return entries;
+
+    return Promise.all(
+        entries.map(async (entry) => {
+            if (!entry || typeof entry !== 'object') return entry;
+            const next = { ...entry };
+
+            for (const key of RECEIVER_ASSESSMENT_KEYS) {
+                const row = entry[key];
+                if (!row || typeof row !== 'object') continue;
+
+                let photo = row.photo ?? null;
+                if (photo && typeof photo === 'string') {
+                    const trimmed = photo.trim();
+                    if (trimmed.startsWith('data:')) {
+                        next[key] = { ...row, photo: trimmed };
+                        continue;
+                    }
+                    const storageKey = normalizeS3Key(trimmed) || trimmed;
+                    const signed = await signFileUrl(storageKey);
+                    next[key] = { ...row, photo: signed || trimmed };
+                    continue;
+                }
+
+                next[key] = { ...row };
+            }
+
+            return next;
+        }),
+    );
+}
+
+async function persistAssessmentPhoto(photo) {
+    return persistAccessoriesListPhotoRef(photo);
+}
+
+async function buildStoredEntryFromAssessment(merged, historyId, changedByKey = {}) {
     const entry = {
         createdAt: new Date(),
         sourceHistoryId: historyId,
         kind: 'assignment_change',
+        changedByKey: { ...changedByKey },
     };
 
     for (const key of RECEIVER_ASSESSMENT_KEYS) {
@@ -167,21 +276,40 @@ export async function syncVehicleAccessoriesListOnAssessmentComplete(historyReco
         .lean();
 
     const previousEntry = findPreviousAssessmentHandoverEntry(historyList, historyId);
-    const previousSource = previousEntry ? resolveAssessmentSource(previousEntry) : null;
+    let previousSource = previousEntry ? resolveAssessmentSource(previousEntry) : null;
+    if (!previousSource) {
+        const storedBaseline = findPreviousAccessoriesListBaselineEntry(asset, historyId);
+        previousSource = buildPreviousSourceFromStoredEntry(storedBaseline);
+    }
 
-    if (!previousSource) return;
-    if (!assessmentChangedVsPrevious(mergedAssessment, previousSource)) return;
+    const { any: hasChanges, changedByKey } = computeAssessmentChangeMap(
+        mergedAssessment,
+        previousSource,
+    );
 
-    const existing = Array.isArray(asset.vehicleAccessoriesListEntries)
-        ? asset.vehicleAccessoriesListEntries
-        : [];
-    const alreadyStored = existing.some(
+    if (!previousSource || !hasChanges) return;
+
+    const existingIdx = (asset.vehicleAccessoriesListEntries || []).findIndex(
         (row) => String(row?.sourceHistoryId || '') === String(historyId),
     );
-    if (alreadyStored) return;
 
-    const storedEntry = await buildStoredEntryFromAssessment(mergedAssessment, historyId);
-    asset.vehicleAccessoriesListEntries = [...existing, storedEntry];
+    const storedEntry = await buildStoredEntryFromAssessment(
+        mergedAssessment,
+        historyId,
+        changedByKey,
+    );
+
+    if (existingIdx >= 0) {
+        const subdoc = asset.vehicleAccessoriesListEntries[existingIdx];
+        Object.entries(storedEntry).forEach(([key, value]) => {
+            subdoc[key] = value;
+        });
+    } else {
+        if (!Array.isArray(asset.vehicleAccessoriesListEntries)) {
+            asset.vehicleAccessoriesListEntries = [];
+        }
+        asset.vehicleAccessoriesListEntries.push(storedEntry);
+    }
     asset.markModified('vehicleAccessoriesListEntries');
     await asset.save();
 }

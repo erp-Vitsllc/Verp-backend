@@ -209,6 +209,7 @@ const MODULES_STRUCTURE = [
     HRM_MODULE,
     { id: 'crm', label: 'CRM', parent: null },
     { id: 'purchases', label: 'Purchases', parent: null },
+    { id: 'sales', label: 'Sales', parent: null },
     { id: 'accounts', label: 'Accounts', parent: null },
     { id: 'production', label: 'Production', parent: null },
     { id: 'reports', label: 'Reports', parent: null },

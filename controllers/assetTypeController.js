@@ -7,7 +7,7 @@ import { getDepartmentHOD, isUserInFlowchart } from '../utils/getDepartmentHOD.j
 import { isUserAdministrator } from '../services/permissionService.js';
 import { isJwtSystemSuperUser } from '../utils/systemSuperUser.js';
 import mongoose from 'mongoose';
-import { uploadDocumentToS3, getSignedFileUrl, persistStoredAttachmentValue } from '../utils/s3Upload.js';
+import { uploadDocumentToS3, getSignedFileUrl, persistStoredAttachmentValue, normalizeS3Key } from '../utils/s3Upload.js';
 import { sendAssetCreationApprovalEmail } from '../utils/sendAssetCreationApprovalEmail.js';
 import {
     buildCreationRequestHandoverAttachments,
@@ -43,6 +43,7 @@ import { cleanupDashboardActionsForDeletedAsset } from '../utils/cleanupAssetDas
 import { isTransientMongoError } from '../utils/mongoTransientRetry.js';
 import { migrateLegacyOperationalFlags } from '../utils/assetOperationalFlags.js';
 import { isAssetStatusBlockingAccessoryAdd } from '../utils/assetPendingAccessoryVisibility.js';
+import { signVehicleAccessoriesListEntries } from '../utils/vehicleAccessoriesListSync.js';
 
 /** Collapse duplicate accessory rows in a PUT payload (match by Mongo subdoc _id or accessoryId, not name). */
 function dedupeAccessoryPayloadById(arr) {
@@ -1074,6 +1075,12 @@ async function persistVehicleAccessoriesListPhoto(photo) {
         const uploadResult = await uploadDocumentToS3(photo, 'asset-accessories');
         return uploadResult.publicId;
     }
+    if (typeof photo === 'string') {
+        const normalized = normalizeS3Key(photo);
+        if (normalized) return normalized;
+        if (photo.startsWith('http')) return null;
+        return photo.trim() || null;
+    }
     return photo;
 }
 
@@ -1086,7 +1093,14 @@ async function normalizeVehicleAccessoriesListEntries(entries) {
         const next = {
             ...(entry._id ? { _id: entry._id } : {}),
             createdAt: entry.createdAt ? new Date(entry.createdAt) : new Date(),
+            kind: String(entry.kind || 'manual').trim() || 'manual',
         };
+        if (entry.sourceHistoryId) {
+            next.sourceHistoryId = entry.sourceHistoryId;
+        }
+        if (entry.changedByKey && typeof entry.changedByKey === 'object') {
+            next.changedByKey = entry.changedByKey;
+        }
 
         for (const key of VEHICLE_ACCESSORIES_LIST_KEYS) {
             const row = entry[key];
@@ -1880,6 +1894,13 @@ export const updateAssetItem = async (req, res) => {
                     attachment: acc.attachment ? await getSignedFileUrl(acc.attachment) : null
                 };
             }));
+        }
+
+        if (Array.isArray(assetObj.vehicleAccessoriesListEntries) && assetObj.vehicleAccessoriesListEntries.length) {
+            assetObj.vehicleAccessoriesListEntries = await signVehicleAccessoriesListEntries(
+                assetObj.vehicleAccessoriesListEntries,
+                getSignedFileUrl,
+            );
         }
 
         res.status(200).json(assetObj);

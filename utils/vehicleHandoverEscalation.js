@@ -156,10 +156,45 @@ export function cloneHandoverReportFieldsForSeed(prevDetails = {}) {
     const ra = cloneJson(
         prevDetails.receiverAssessment || prevDetails.vehicleAssessmentReportByReceiver,
     );
-    const bc = cloneJson(prevDetails.bodyConditionReport || prevDetails.bodyCondition);
     if (ra && Object.keys(ra).length) out.receiverAssessment = ra;
-    if (bc && Object.keys(bc).length) out.bodyConditionReport = bc;
     return out;
+}
+
+export function bodyConditionReportHasUserSelectedRows(bodyConditionReport) {
+    if (!bodyConditionReport || typeof bodyConditionReport !== 'object') return false;
+    return Object.values(bodyConditionReport).some(
+        (row) => row && typeof row === 'object' && row.userSelected === true,
+    );
+}
+
+/** True when the assignee has edited at least one body view (not only auto-copied photos). */
+export function bodyConditionReportHasUserEdits(bodyConditionReport) {
+    if (!bodyConditionReport || typeof bodyConditionReport !== 'object') return false;
+    return Object.values(bodyConditionReport).some((row) => {
+        if (!row || typeof row !== 'object') return false;
+        if (row.userSelected === true) return true;
+        if (row.photoSource === 'previous' || row.photoSource === 'new') return true;
+        if (String(row.comment ?? row.notes ?? '').trim()) return true;
+        return false;
+    });
+}
+
+/** Remove auto-copied body photos until the assignee picks Previous / New via Add. */
+export function stripUnconfirmedBodyConditionDetails(details = {}) {
+    if (!details || typeof details !== 'object' || details.bodyConditionCompleted === true) {
+        return { details, changed: false };
+    }
+    const bc = details.bodyConditionReport;
+    if (!bc || typeof bc !== 'object' || !Object.keys(bc).length) {
+        return { details, changed: false };
+    }
+    if (bodyConditionReportHasUserEdits(bc)) {
+        return { details, changed: false };
+    }
+    return {
+        details: { ...details, bodyConditionReport: {} },
+        changed: true,
+    };
 }
 
 /**
@@ -187,9 +222,7 @@ export async function seedPreviousHandoverReportsOnHistory({ historyId, assetId 
     if (needsAssessment && cloned.receiverAssessment) {
         patch.receiverAssessment = cloned.receiverAssessment;
     }
-    if (needsBody && cloned.bodyConditionReport) {
-        patch.bodyConditionReport = cloned.bodyConditionReport;
-    }
+    // Body condition starts empty on new handover — user picks Previous or New per view via Add.
     if (!Object.keys(patch).length) return { applied: false, reason: 'empty_previous_reports' };
 
     record.details = {

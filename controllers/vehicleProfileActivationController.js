@@ -333,9 +333,21 @@ export const approveVehicleProfileActivation = async (req, res) => {
                     vehicleProfileActivationSubmittedBy: 1,
                     vehicleProfileActivationDescription: 1,
                     vehicleProfileActivationSections: 1,
+                    actionRequiredBy: 1,
                 },
             },
         );
+
+        if (['Pending', 'Submitted for Approval'].includes(String(asset.status || ''))) {
+            await AssetItem.updateOne(
+                { _id: id },
+                {
+                    $set: {
+                        status: asset.assignedTo || asset.assignedCompany ? 'Assigned' : 'Unassigned',
+                    },
+                },
+            );
+        }
 
         try {
             const DashboardAction = (await import('../models/DashboardAction.js')).default;

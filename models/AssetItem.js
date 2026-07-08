@@ -386,6 +386,7 @@ const assetItemSchema = new mongoose.Schema({
             default: null,
         },
         kind: { type: String, trim: true, default: 'manual' },
+        changedByKey: { type: mongoose.Schema.Types.Mixed, default: null },
         spareTyre: {
             present: { type: Boolean, default: null },
             photo: { type: String, default: null },

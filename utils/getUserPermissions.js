@@ -94,6 +94,7 @@ const getAllPermissionsEnabled = () => {
         'hrm_ncr',
         'crm',
         'purchases',
+        'sales',
         'accounts',
         'production',
         'reports',

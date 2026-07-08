@@ -11,6 +11,7 @@ import { sendAssetAssignmentEmail } from './sendAssetAssignmentEmail.js';
 import { sendAssetResponseEmail } from './sendAssetResponseEmail.js';
 import nodemailer from 'nodemailer';
 import { pickEffectiveEmail } from './resolveEmployeeEmail.js';
+import { normalizeS3Key } from './s3Upload.js';
 
 export const HANDOVER_FLOW_STAGES = {
     TARGET: 'target',
@@ -245,22 +246,31 @@ export async function signHandoverAssessmentMediaInDetails(details, signFileUrl)
 
         if (typeof photo === 'string') {
             const trimmed = photo.trim();
-            if (!trimmed || trimmed.startsWith('data:') || trimmed.startsWith('http')) return trimmed;
+            if (!trimmed) return photo;
+            if (trimmed.startsWith('data:')) return trimmed;
+
+            const storageKey = normalizeS3Key(trimmed);
+            if (storageKey) {
+                const signed = await signFileUrl(storageKey);
+                return signed || trimmed;
+            }
+            if (trimmed.startsWith('http')) return trimmed;
+
             const signed = await signFileUrl(trimmed);
             return signed || trimmed;
         }
 
         if (typeof photo === 'object' && !Array.isArray(photo)) {
             const next = { ...photo };
-            if (typeof next.url === 'string') {
-                const url = next.url.trim();
-                if (url.startsWith('http') || url.startsWith('data:')) return next;
-                const signed = await signFileUrl(url);
-                if (signed) next.url = signed;
-            }
-            if (next.publicId) {
-                const signed = await signFileUrl(next.publicId);
-                if (signed) next.url = signed;
+            const ref = next.publicId || next.url || next.path;
+            if (ref) {
+                const storageKey = normalizeS3Key(String(ref));
+                if (storageKey) {
+                    const signed = await signFileUrl(storageKey);
+                    if (signed) next.url = signed;
+                } else if (typeof next.url === 'string' && next.url.trim().startsWith('http')) {
+                    return next;
+                }
             }
             return next;
         }
@@ -289,6 +299,9 @@ export async function signHandoverAssessmentMediaInDetails(details, signFileUrl)
     }
     if (details.bodyConditionReport) {
         details.bodyConditionReport = await signPhotoMap(details.bodyConditionReport);
+    }
+    if (details.bodyCondition) {
+        details.bodyCondition = await signPhotoMap(details.bodyCondition);
     }
 
     return details;
