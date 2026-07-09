@@ -50,7 +50,7 @@ import {
     seedPreviousHandoverReportsOnHistory,
     stripUnconfirmedBodyConditionDetails,
 } from '../utils/vehicleHandoverEscalation.js';
-import { syncVehicleAccessoriesListOnAssessmentComplete, signVehicleAccessoriesListEntries } from '../utils/vehicleAccessoriesListSync.js';
+import { syncVehicleAccessoriesListOnAssessmentComplete, signVehicleAccessoriesListEntries, buildPendingAccessoriesChanges, applyPendingHandoverAccessoriesToVehicleList } from '../utils/vehicleAccessoriesListSync.js';
 import { sendAssetResponseEmail } from '../utils/sendAssetResponseEmail.js';
 import { sendAssetReassignmentEmail } from '../utils/sendAssetReassignmentEmail.js';
 import DashboardAction from '../models/DashboardAction.js';
@@ -6769,9 +6769,18 @@ export const respondToAssignment = async (req, res) => {
                         if (handoverFineId) {
                             handoverPatch['details.handoverFineId'] = String(handoverFineId);
                         }
-                        void AssetHistory.updateOne({ _id: historyId }, { $set: handoverPatch }).catch(
+                        handoverPatch['details.handoverHrApprovedAt'] = new Date();
+                        await AssetHistory.updateOne({ _id: historyId }, { $set: handoverPatch }).catch(
                             () => null,
                         );
+                        try {
+                            const historyForAccessories = await AssetHistory.findById(historyId).lean();
+                            if (historyForAccessories) {
+                                await applyPendingHandoverAccessoriesToVehicleList(historyForAccessories);
+                            }
+                        } catch {
+                            /* non-fatal */
+                        }
                     }
                     if (item.pendingActionDetails?.vehicleHandoverFlow) {
                         delete item.pendingActionDetails.vehicleHandoverFlow;
@@ -10164,6 +10173,16 @@ export const updateHistoryReceiverAssessment = async (req, res) => {
 
         if (Object.keys(merged).length > 0 || receiverAssessment) {
             detailsBase.receiverAssessment = merged;
+        }
+
+        const assetForPending = await AssetItem.findById(record.assetId).select('vehicleAccessoriesListEntries');
+        if (assetForPending) {
+            const pendingChanges = await buildPendingAccessoriesChanges(assetForPending, merged);
+            if (pendingChanges.length > 0) {
+                detailsBase.pendingAccessoriesChanges = pendingChanges;
+            } else if (detailsBase.pendingAccessoriesChanges) {
+                delete detailsBase.pendingAccessoriesChanges;
+            }
         }
 
         if (req.body.assessmentCompleted === true) {

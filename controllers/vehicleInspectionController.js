@@ -22,6 +22,7 @@ import {
     buildFleetHandoverDisplayLabels,
     formatEmployeeDisplayName,
 } from '../utils/vehicleHandoverApprovalFlow.js';
+import { applyPendingHandoverAccessoriesToVehicleList } from '../utils/vehicleAccessoriesListSync.js';
 
 export const VEHICLE_INSPECTION_DOC_TYPE = 'Vehicle Inspection';
 export const VEHICLE_INSPECTION_HANDOVER_KIND = 'vehicle_inspection';
@@ -855,7 +856,7 @@ export async function submitInspectionHandoverAfterAssessment(req, record) {
 
     if (!isHandoverReportsComplete(record)) {
         throw new Error(
-            'Complete Vehicle Assessment Report and Body Condition Report before submitting for HR approval.',
+            'Complete Body Condition Report before submitting for HR approval.',
         );
     }
 
@@ -1191,7 +1192,9 @@ export const approveVehicleInspection = async (req, res) => {
             'HR';
 
         const historyRecord = asset.vehicleInspectionHandoverHistoryId
-            ? await AssetHistory.findById(asset.vehicleInspectionHandoverHistoryId).select('details').lean()
+            ? await AssetHistory.findById(asset.vehicleInspectionHandoverHistoryId)
+                .select('details assetId')
+                .lean()
             : null;
         const inspectionForm = historyRecord?.details?.vehicleInspectionForm || {};
         const receiverAssessment = historyRecord?.details?.receiverAssessment || null;
@@ -1219,6 +1222,9 @@ export const approveVehicleInspection = async (req, res) => {
                 asset.vehicleInspectionHandoverHistoryId,
                 reviewerEmp,
             );
+            if (historyRecord) {
+                await applyPendingHandoverAccessoriesToVehicleList(historyRecord).catch(() => null);
+            }
         } catch {
             /* non-fatal */
         }

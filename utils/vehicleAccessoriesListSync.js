@@ -294,47 +294,237 @@ async function buildStoredEntryFromAssessment(merged, historyId, changedByKey = 
 }
 
 export async function syncVehicleAccessoriesListOnAssessmentComplete(historyRecord, mergedAssessment) {
-    if (!historyRecord?.assetId || !historyRecord?._id || !mergedAssessment) return;
+    // Accessories list updates are deferred until HR approval — see applyPendingHandoverAccessoriesToVehicleList.
+    return { deferred: true };
+}
+
+function findLatestLiveAccessoriesEntry(asset) {
+    const entries = Array.isArray(asset?.vehicleAccessoriesListEntries)
+        ? asset.vehicleAccessoriesListEntries
+        : [];
+    const liveEntries = entries.filter((entry) => String(entry?.kind || '') === 'live_accessories');
+    if (!liveEntries.length) return null;
+    return [...liveEntries].sort((a, b) => {
+        const aTs = new Date(a?.createdAt || 0).getTime();
+        const bTs = new Date(b?.createdAt || 0).getTime();
+        if (bTs !== aTs) return bTs - aTs;
+        return String(b?._id || '').localeCompare(String(a?._id || ''));
+    })[0];
+}
+
+function liveRowHasArchiveableState(row = {}) {
+    return row.present === true || row.present === false || Boolean(row.photo);
+}
+
+function shouldArchiveLiveRowForPendingApply(previousRow = {}, nextRow = {}) {
+    if (!liveRowHasArchiveableState(previousRow)) return false;
+    if (nextRow.present === false && previousRow.present !== false) return true;
+    return (
+        photosDiffer(previousRow.photo, nextRow.photo) ||
+        presentValueChanged(previousRow.present, nextRow.present)
+    );
+}
+
+function assessmentRowDiffers(previousRow = {}, nextRow = {}) {
+    return (
+        photosDiffer(previousRow.photo, nextRow.photo) ||
+        presentValueChanged(previousRow.present, nextRow.present)
+    );
+}
+
+async function buildReplacedLiveEntry(accessoryKey, row, historyId) {
+    let photo = row.present === true ? row.photo || null : null;
+    if (photo) {
+        photo = await persistAssessmentPhoto(photo);
+    }
+    const entry = {
+        createdAt: new Date(),
+        kind: 'replaced_live',
+        replacedKey: accessoryKey,
+        changedByKey: { [accessoryKey]: true },
+    };
+    if (historyId) entry.sourceHistoryId = historyId;
+    entry[accessoryKey] = {
+        present: row.present === false ? false : true,
+        photo,
+        amount:
+            row.amount != null && row.amount !== '' && Number.isFinite(Number(row.amount))
+                ? Number(row.amount)
+                : null,
+    };
+    return entry;
+}
+
+async function buildLiveAccessoriesEntryFromForm(liveForm, historyId) {
+    const entry = {
+        createdAt: new Date(),
+        kind: 'live_accessories',
+    };
+    if (historyId) entry.sourceHistoryId = historyId;
+
+    for (const key of RECEIVER_ASSESSMENT_KEYS) {
+        const row = liveForm[key];
+        if (!row || typeof row !== 'object') continue;
+        const present =
+            row.present === true ? true : row.present === false ? false : null;
+        if (present !== true && present !== false) continue;
+        let photo = present === true ? row.photo || null : null;
+        if (present === true && !photo) continue;
+        if (photo) {
+            photo = await persistAssessmentPhoto(photo);
+        }
+        entry[key] = {
+            present,
+            photo: present === true ? photo : null,
+            amount:
+                row.amount != null && row.amount !== '' && Number.isFinite(Number(row.amount))
+                    ? Number(row.amount)
+                    : null,
+        };
+    }
+
+    return entry;
+}
+
+/** Build temp change log vs current live list (stored on history until HR approves). */
+export async function buildPendingAccessoriesChanges(asset, mergedAssessment) {
+    if (!asset || !mergedAssessment || typeof mergedAssessment !== 'object') return [];
+
+    const liveEntry = findLatestLiveAccessoriesEntry(asset);
+    const changes = [];
+
+    for (const key of RECEIVER_ASSESSMENT_KEYS) {
+        const pending = pickAssessmentBlock(mergedAssessment, key);
+        const current = liveEntry ? pickAssessmentBlock(liveEntry, key) : { present: null, photo: null };
+        if (!assessmentRowDiffers(current, pending)) continue;
+
+        let nextPhoto = pending.present === true ? pending.photo || null : null;
+        if (nextPhoto) {
+            nextPhoto = await persistAssessmentPhoto(nextPhoto);
+        }
+
+        changes.push({
+            key,
+            previousPresent: current.present ?? null,
+            previousPhoto: current.photo ?? null,
+            nextPresent: pending.present === true ? true : pending.present === false ? false : null,
+            nextPhoto,
+            updatedAt: new Date(),
+        });
+    }
+
+    return changes;
+}
+
+/**
+ * After HR approves handover/inspection, apply pending receiverAssessment to vehicle accessories list.
+ * Changed live items move prior values to replaced_live (Old Accessories).
+ */
+export async function applyPendingHandoverAccessoriesToVehicleList(historyRecord) {
+    if (!historyRecord?.assetId || !historyRecord?._id) {
+        return { applied: false };
+    }
+
+    const details = historyRecord.details || {};
+    if (details.pendingAccessoriesApplied === true) {
+        return { applied: false, alreadyApplied: true };
+    }
+
+    const mergedAssessment = resolveAssessmentSource(historyRecord);
+    if (!mergedAssessment || typeof mergedAssessment !== 'object') {
+        return { applied: false };
+    }
+
+    const asset = await AssetItem.findById(historyRecord.assetId);
+    if (!asset) {
+        return { applied: false };
+    }
 
     const historyId = historyRecord._id;
-    const asset = await AssetItem.findById(historyRecord.assetId);
-    if (!asset) return;
-
-    const historyList = await AssetHistory.find({ assetId: historyRecord.assetId })
-        .select('action createdAt date details')
-        .lean();
-
-    const storedBaseline = findPreviousAccessoriesListBaselineEntry(asset, historyId);
-    const previousSource = buildPreviousSourceFromStoredEntry(storedBaseline);
-
-    const { any: hasChanges, changedByKey } = computeAssessmentChangeMap(
-        mergedAssessment,
-        previousSource,
+    const liveEntry = findLatestLiveAccessoriesEntry(asset);
+    const currentLiveByKey = Object.fromEntries(
+        RECEIVER_ASSESSMENT_KEYS.map((key) => [
+            key,
+            liveEntry ? pickAssessmentBlock(liveEntry, key) : { present: null, photo: null, amount: null },
+        ]),
     );
 
-    if (!previousSource || !hasChanges) return;
+    let nextEntries = (Array.isArray(asset.vehicleAccessoriesListEntries)
+        ? asset.vehicleAccessoriesListEntries
+        : []
+    ).filter((entry) => String(entry?.kind || '') !== 'live_accessories');
 
-    const existingIdx = (asset.vehicleAccessoriesListEntries || []).findIndex(
-        (row) => String(row?.sourceHistoryId || '') === String(historyId),
-    );
+    const newLiveForm = {};
+    let anyListChange = false;
 
-    const storedEntry = await buildStoredEntryFromAssessment(
-        mergedAssessment,
-        historyId,
-        changedByKey,
-    );
-
-    if (existingIdx >= 0) {
-        const subdoc = asset.vehicleAccessoriesListEntries[existingIdx];
-        Object.entries(storedEntry).forEach(([key, value]) => {
-            subdoc[key] = value;
-        });
-    } else {
-        if (!Array.isArray(asset.vehicleAccessoriesListEntries)) {
-            asset.vehicleAccessoriesListEntries = [];
+    for (const key of RECEIVER_ASSESSMENT_KEYS) {
+        const pending = pickAssessmentBlock(mergedAssessment, key);
+        if (typeof pending.present !== 'boolean') {
+            const current = currentLiveByKey[key];
+            if (current.present === true && current.photo) {
+                newLiveForm[key] = { present: true, photo: current.photo, amount: current.amount };
+            } else if (current.present === false) {
+                newLiveForm[key] = { present: false, photo: null, amount: null };
+            }
+            continue;
         }
-        asset.vehicleAccessoriesListEntries.push(storedEntry);
+
+        const normalizedPending = {
+            present: pending.present,
+            photo: pending.present === true ? pending.photo || null : null,
+            amount: pending.amount ?? null,
+        };
+
+        const current = currentLiveByKey[key] || { present: null, photo: null, amount: null };
+
+        if (!assessmentRowDiffers(current, normalizedPending)) {
+            if (current.present === true && current.photo) {
+                newLiveForm[key] = { present: true, photo: current.photo, amount: current.amount };
+            } else if (current.present === false) {
+                newLiveForm[key] = { present: false, photo: null, amount: null };
+            }
+            continue;
+        }
+
+        anyListChange = true;
+
+        if (shouldArchiveLiveRowForPendingApply(current, normalizedPending)) {
+            nextEntries.push(await buildReplacedLiveEntry(key, current, historyId));
+        }
+
+        if (normalizedPending.present === true && normalizedPending.photo) {
+            newLiveForm[key] = {
+                present: true,
+                photo: normalizedPending.photo,
+                amount: normalizedPending.amount,
+            };
+        } else if (normalizedPending.present === false) {
+            newLiveForm[key] = { present: false, photo: null, amount: null };
+        }
     }
-    asset.markModified('vehicleAccessoriesListEntries');
-    await asset.save();
+
+    const hasLiveRows = RECEIVER_ASSESSMENT_KEYS.some((key) => {
+        const row = newLiveForm[key];
+        return row && (row.present === true || row.present === false);
+    });
+
+    if (anyListChange && hasLiveRows) {
+        nextEntries.push(await buildLiveAccessoriesEntryFromForm(newLiveForm, historyId));
+        asset.vehicleAccessoriesListEntries = nextEntries;
+        asset.markModified('vehicleAccessoriesListEntries');
+        await asset.save();
+    }
+
+    await AssetHistory.updateOne(
+        { _id: historyId },
+        {
+            $set: {
+                'details.pendingAccessoriesApplied': true,
+                'details.pendingAccessoriesAppliedAt': new Date(),
+            },
+            $unset: { 'details.pendingAccessoriesChanges': 1 },
+        },
+    );
+
+    return { applied: anyListChange && hasLiveRows };
 }

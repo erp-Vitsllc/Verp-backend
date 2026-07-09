@@ -774,6 +774,10 @@ export function isBodyConditionReportComplete(details = {}) {
 
 export function isHandoverReportsComplete(historyRecord) {
     const details = historyRecord?.details || {};
+    const handoverKind = String(details.handoverKind || '').trim();
+    if (handoverKind === 'vehicle_inspection') {
+        return isBodyConditionReportComplete(details);
+    }
     return isReceiverAssessmentComplete(details) && isBodyConditionReportComplete(details);
 }
 
