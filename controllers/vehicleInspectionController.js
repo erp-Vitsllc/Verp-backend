@@ -10,6 +10,7 @@ import { syncDashboardAction } from '../utils/syncDashboard.js';
 import { resolveProfileActivationSubmitterId } from '../utils/resolveProfileActivationSubmitterId.js';
 import {
     isFleetVehicleAssetFields,
+    isFleetVehicleAsset,
     isFleetVehicleProfileActive,
     resolveAssetControllerEmployee,
     getResolvedFleetHrEmployee,
@@ -38,7 +39,7 @@ export function isVehicleInspectionWorkflowActive(asset) {
     return status === 'draft' || status === 'pending_hr';
 }
 
-function buildInspectionHandoverWorkflowMeta(submitterEmp, adminOfficerEmp) {
+function buildInspectionHandoverWorkflowMeta(submitterEmp, targetEmp) {
     const now = new Date();
     return {
         handoverKind: VEHICLE_INSPECTION_HANDOVER_KIND,
@@ -50,9 +51,9 @@ function buildInspectionHandoverWorkflowMeta(submitterEmp, adminOfficerEmp) {
                 date: now,
             },
             target: {
-                actorName: formatEmployeeDisplayName(adminOfficerEmp),
-                actorId: adminOfficerEmp?._id?.toString?.() || '',
-                actorEmployeeId: String(adminOfficerEmp?.employeeId || '').trim(),
+                actorName: formatEmployeeDisplayName(targetEmp),
+                actorId: targetEmp?._id?.toString?.() || '',
+                actorEmployeeId: String(targetEmp?.employeeId || '').trim(),
                 date: now,
             },
             hr: { actorName: null, actorId: null, actorEmployeeId: null, date: null },
@@ -71,20 +72,30 @@ async function createInspectionHandoverHistoryRow({
     submitterEmp,
     adminOfficerEmp,
     vehicleAssigneeEmp = null,
+    isReinspection = false,
 }) {
+    const targetEmp = isReinspection
+        ? adminOfficerEmp
+        : vehicleAssigneeEmp?._id
+          ? vehicleAssigneeEmp
+          : adminOfficerEmp;
+
     let assigneeCanSelf = false;
-    if (vehicleAssigneeEmp?._id) {
-        assigneeCanSelf = await assigneeCanSelfAcknowledgeFleetHandover(vehicleAssigneeEmp);
+    if (targetEmp?._id) {
+        assigneeCanSelf = await assigneeCanSelfAcknowledgeFleetHandover(targetEmp);
     }
 
     const workflowMeta = {
-        ...buildInspectionHandoverWorkflowMeta(submitterEmp, adminOfficerEmp),
+        ...buildInspectionHandoverWorkflowMeta(submitterEmp, targetEmp),
         assigneeCanSelfAcknowledge: assigneeCanSelf,
         vehicleAssigneeId: vehicleAssigneeEmp?._id?.toString?.() || '',
+        ...(isReinspection ? { reinspection: true } : {}),
     };
+
     const { handoverByDisplay, handoverToDisplay } = buildFleetHandoverDisplayLabels({
         workflowMeta,
-        assignee: adminOfficerEmp,
+        assignee: targetEmp,
+        adminOfficer: adminOfficerEmp,
         isInspection: true,
     });
 
@@ -92,12 +103,13 @@ async function createInspectionHandoverHistoryRow({
         assetId,
         action: 'Assigned',
         assignedToType: 'Employee',
-        assignedTo: adminOfficerEmp._id,
+        assignedTo: targetEmp._id,
         performedBy: submitterEmp?._id || null,
-        comments: 'Do inspection',
+        comments: isReinspection ? 'Reinspection' : 'Do inspection',
         details: {
             handoverKind: VEHICLE_INSPECTION_HANDOVER_KIND,
-            firstInspection: true,
+            firstInspection: !isReinspection,
+            reinspection: isReinspection,
             acceptanceStatus: 'Pending',
             inspectionFormStatus: 'draft',
             vehicleInspectionForm: {},
@@ -150,6 +162,12 @@ export async function canEditInspectionHandoverContent(req, asset, record) {
 
     const linkedId = asset?.vehicleInspectionHandoverHistoryId;
     if (!linkedId || String(linkedId) !== String(record._id)) return false;
+
+    if (record?.details?.reinspection === true) {
+        const adminOfficer = await resolveFlowchartAdminOfficerEmployee();
+        if (!adminOfficer?._id) return false;
+        return String(userId) === String(adminOfficer._id);
+    }
 
     const isAdmin = await isUserInFlowchart(req.user, 'admincontroller').catch(() => false);
 
@@ -234,14 +252,6 @@ async function markInspectionHandoverHistoryRejected(historyId, reviewerId) {
     });
 }
 
-const isFleetVehicleAsset = (asset) => {
-    if (!asset) return false;
-    return isFleetVehicleAssetFields({
-        plateNumber: asset.plateNumber,
-        typeName: asset.typeId?.name || '',
-    });
-};
-
 const vehicleSubjectForDashboard = (asset) => ({
     firstName: asset.name || 'Vehicle',
     lastName: `(${asset.assetId || ''})`.trim(),
@@ -259,11 +269,20 @@ const hasVehicleInspectionHistory = (asset) =>
 
 export const canProcessVehicleInspection = async (req) => isUserInFlowchart(req.user, 'hr').catch(() => false);
 
-const canSubmitVehicleInspection = async (req, asset) => {
+const canSubmitVehicleInspection = async (req) => {
     const submitterId = await resolveProfileActivationSubmitterId(req);
     if (!submitterId) return false;
-    if (isFleetVehicleProfileActive(asset)) return true;
     return isUserInFlowchart(req.user, 'admincontroller').catch(() => false);
+};
+
+const canSubmitVehicleReinspection = async (req) => {
+    const submitterId = await resolveProfileActivationSubmitterId(req);
+    if (!submitterId) return false;
+    const inFlowchart = await isUserInFlowchart(req.user, 'admincontroller').catch(() => false);
+    if (!inFlowchart) return false;
+    const adminOfficer = await resolveFlowchartAdminOfficerEmployee();
+    if (!adminOfficer?._id) return false;
+    return String(adminOfficer._id) === String(submitterId);
 };
 
 const sendHrInspectionRequestEmail = async ({ req, hrEmail, hrName, vehicleLabel, detailUrl }) => {
@@ -966,12 +985,9 @@ export const submitVehicleInspectionRequest = async (req, res) => {
         if (!isFleetVehicleAsset(asset)) {
             return res.status(400).json({ message: 'Not a fleet vehicle asset.' });
         }
-        if (!(await canSubmitVehicleInspection(req, asset))) {
-            const profileActive = isFleetVehicleProfileActive(asset);
+        if (!(await canSubmitVehicleInspection(req))) {
             return res.status(403).json({
-                message: profileActive
-                    ? 'Your portal login must be linked to an Employee record and the vehicle profile must be active.'
-                    : 'Only the flowchart Admin Officer can request vehicle inspection while the profile is inactive.',
+                message: 'Only the flowchart Admin Officer can create vehicle inspections.',
             });
         }
 
@@ -984,100 +1000,168 @@ export const submitVehicleInspectionRequest = async (req, res) => {
         if (inspectionStatus === 'pending_hr') {
             return res.status(400).json({ message: 'A vehicle inspection request is already pending HR approval.' });
         }
-
-        const submitterId = await resolveProfileActivationSubmitterId(req);
-        if (!submitterId) {
+        if (inspectionStatus === 'active' || hasVehicleInspectionHistory(asset)) {
             return res.status(400).json({
-                message: 'Your portal login must be linked to an Employee record before you can submit a request.',
+                message: 'Vehicle inspection is already complete. Use Create Reinspection for a new inspection cycle.',
             });
         }
 
-        const [submitterEmp, adminOfficerEmp] = await Promise.all([
-            EmployeeBasic.findById(submitterId).select('firstName lastName employeeId').lean(),
-            resolveFlowchartAdminOfficerEmployee(),
-        ]);
-        if (!submitterEmp?._id) {
-            return res.status(400).json({ message: 'Submitter employee record not found.' });
-        }
-        if (!adminOfficerEmp?._id) {
-            return res.status(400).json({
-                message: 'Admin Officer is not configured in the flowchart.',
-            });
-        }
-
-        const vehicleAssigneeEmp =
-            asset.assignedTo && String(asset.status || '').toLowerCase() === 'assigned'
-                ? typeof asset.assignedTo === 'object'
-                    ? asset.assignedTo
-                    : await EmployeeBasic.findById(asset.assignedTo)
-                        .select(
-                            'firstName lastName employeeId companyEmail enablePortalAccess workEmail personalEmail email',
-                        )
-                        .lean()
-                : null;
-
-        const handoverHistory = await createInspectionHandoverHistoryRow({
-            assetId: asset._id,
-            submitterEmp,
-            adminOfficerEmp,
-            vehicleAssigneeEmp,
-        });
-
-        await AssetItem.updateOne(
-            { _id: id },
-            {
-                $set: {
-                    vehicleInspectionStatus: 'draft',
-                    vehicleInspectionSubmittedAt: new Date(),
-                    vehicleInspectionRequestedBy: submitterId,
-                    vehicleInspectionSubmittedBy: submitterId,
-                    vehicleInspectionHandoverHistoryId: handoverHistory._id,
-                },
-            },
-        );
-
-        const assetForNotify = await AssetItem.findById(id).populate('typeId', 'name').lean();
-        const requestedByName = formatEmployeeDisplayName(submitterEmp) || 'System';
-
-        await notifyInspectionHandoverAssignee({
-            req,
-            asset: assetForNotify || asset,
-            handoverHistory,
-            adminOfficerEmp,
-            submitterEmp,
-        });
-
-        await notifyInspectionHandoverVehicleAssignee({
-            req,
-            asset: assetForNotify || asset,
-            handoverHistory,
-            submitterEmp,
-        });
-
-        const samePerson =
-            String(submitterEmp._id) === String(adminOfficerEmp._id) ||
-            String(submitterEmp._id) === String(handoverHistory.assignedTo);
-        if (!samePerson) {
-            await notifyInspectionHandoverRequester({
-                req,
-                asset: assetForNotify || asset,
-                handoverHistory,
-                submitterEmp,
-                adminOfficerEmp,
-                requestedByName,
-            });
-        }
-
-        return res.status(200).json({
-            message: 'Inspection handover created. Complete the assessment from the handover row.',
-            vehicleInspectionStatus: 'draft',
-            handoverHistoryId: handoverHistory._id,
-        });
+        return createVehicleInspectionHandover(req, res, asset, { isReinspection: false });
     } catch (err) {
         console.error('submitVehicleInspectionRequest:', err);
         return res.status(500).json({ message: err.message || 'Failed to submit inspection request.' });
     }
 };
+
+/**
+ * POST /api/AssetItem/:id/submit-vehicle-reinspection-request
+ */
+export const submitVehicleReinspectionRequest = async (req, res) => {
+    try {
+        const { id } = req.params;
+
+        const asset = await AssetItem.findById(id)
+            .populate('typeId', 'name')
+            .populate(
+                'assignedTo',
+                'firstName lastName employeeId companyEmail enablePortalAccess workEmail personalEmail email',
+            )
+            .lean();
+        if (!asset) return res.status(404).json({ message: 'Asset not found' });
+        if (!isFleetVehicleAsset(asset)) {
+            return res.status(400).json({ message: 'Not a fleet vehicle asset.' });
+        }
+        if (!(await canSubmitVehicleReinspection(req))) {
+            return res.status(403).json({
+                message: 'Only the flowchart Admin Officer can create vehicle reinspections.',
+            });
+        }
+        if (!isFleetVehicleProfileActive(asset)) {
+            return res.status(400).json({
+                message: 'Vehicle profile must be activated before creating a reinspection.',
+            });
+        }
+
+        const inspectionStatus = String(asset.vehicleInspectionStatus || '').toLowerCase();
+        if (inspectionStatus === 'draft') {
+            return res.status(400).json({
+                message: 'A reinspection handover is already in progress. Complete it from the handover table.',
+            });
+        }
+        if (inspectionStatus === 'pending_hr') {
+            return res.status(400).json({
+                message: 'A vehicle reinspection request is already pending HR approval.',
+            });
+        }
+        if (inspectionStatus !== 'active' && !hasVehicleInspectionHistory(asset)) {
+            return res.status(400).json({
+                message: 'Complete the first vehicle inspection before creating a reinspection.',
+            });
+        }
+
+        return createVehicleInspectionHandover(req, res, asset, { isReinspection: true });
+    } catch (err) {
+        console.error('submitVehicleReinspectionRequest:', err);
+        return res.status(500).json({ message: err.message || 'Failed to submit reinspection request.' });
+    }
+};
+
+async function createVehicleInspectionHandover(req, res, asset, { isReinspection = false } = {}) {
+    const id = asset._id;
+
+    const submitterId = await resolveProfileActivationSubmitterId(req);
+    if (!submitterId) {
+        return res.status(400).json({
+            message: 'Your portal login must be linked to an Employee record before you can submit a request.',
+        });
+    }
+
+    const [submitterEmp, adminOfficerEmp] = await Promise.all([
+        EmployeeBasic.findById(submitterId).select('firstName lastName employeeId').lean(),
+        resolveFlowchartAdminOfficerEmployee(),
+    ]);
+    if (!submitterEmp?._id) {
+        return res.status(400).json({ message: 'Submitter employee record not found.' });
+    }
+    if (!adminOfficerEmp?._id) {
+        return res.status(400).json({
+            message: 'Admin Officer is not configured in the flowchart.',
+        });
+    }
+
+    const vehicleAssigneeEmp =
+        asset.assignedTo && String(asset.status || '').toLowerCase() === 'assigned'
+            ? typeof asset.assignedTo === 'object'
+                ? asset.assignedTo
+                : await EmployeeBasic.findById(asset.assignedTo)
+                      .select(
+                          'firstName lastName employeeId companyEmail enablePortalAccess workEmail personalEmail email',
+                      )
+                      .lean()
+            : null;
+
+    const handoverHistory = await createInspectionHandoverHistoryRow({
+        assetId: asset._id,
+        submitterEmp,
+        adminOfficerEmp,
+        vehicleAssigneeEmp,
+        isReinspection,
+    });
+
+    await AssetItem.updateOne(
+        { _id: id },
+        {
+            $set: {
+                vehicleInspectionStatus: 'draft',
+                vehicleInspectionSubmittedAt: new Date(),
+                vehicleInspectionRequestedBy: submitterId,
+                vehicleInspectionSubmittedBy: submitterId,
+                vehicleInspectionHandoverHistoryId: handoverHistory._id,
+            },
+        },
+    );
+
+    const assetForNotify = await AssetItem.findById(id).populate('typeId', 'name').lean();
+    const requestedByName = formatEmployeeDisplayName(submitterEmp) || 'System';
+
+    await notifyInspectionHandoverAssignee({
+        req,
+        asset: assetForNotify || asset,
+        handoverHistory,
+        adminOfficerEmp,
+        submitterEmp,
+    });
+
+    await notifyInspectionHandoverVehicleAssignee({
+        req,
+        asset: assetForNotify || asset,
+        handoverHistory,
+        submitterEmp,
+    });
+
+    const samePerson =
+        String(submitterEmp._id) === String(adminOfficerEmp._id) ||
+        String(submitterEmp._id) === String(handoverHistory.assignedTo);
+    if (!samePerson) {
+        await notifyInspectionHandoverRequester({
+            req,
+            asset: assetForNotify || asset,
+            handoverHistory,
+            submitterEmp,
+            adminOfficerEmp,
+            requestedByName,
+        });
+    }
+
+    return res.status(200).json({
+        message: isReinspection
+            ? 'Reinspection handover created. Complete the assessment from the handover row.'
+            : 'Inspection handover created. Complete the assessment from the handover row.',
+        vehicleInspectionStatus: 'draft',
+        handoverHistoryId: handoverHistory._id,
+        reinspection: isReinspection,
+    });
+}
 
 /**
  * POST /api/AssetItem/:id/approve-vehicle-inspection
@@ -1276,26 +1360,35 @@ export const rejectVehicleInspection = async (req, res) => {
             [req.user?.firstName, req.user?.lastName].filter(Boolean).join(' ').trim() ||
             'HR';
 
+        const pendingHistoryId = asset.vehicleInspectionHandoverHistoryId;
+        const pendingHistory = pendingHistoryId
+            ? await AssetHistory.findById(pendingHistoryId).select('details').lean()
+            : null;
+        const isReinspectionReject = pendingHistory?.details?.reinspection === true;
+        const restoreActiveAfterReject =
+            isReinspectionReject && hasVehicleInspectionHistory(asset);
+
         await AssetItem.updateOne(
             { _id: id },
             {
-                $set: { vehicleInspectionStatus: 'none' },
+                $set: { vehicleInspectionStatus: restoreActiveAfterReject ? 'active' : 'none' },
                 $unset: {
                     vehicleInspectionSubmittedAt: 1,
                     vehicleInspectionSubmittedBy: 1,
                     vehicleInspectionRequestedBy: 1,
-                    vehicleInspectionApprovedAt: 1,
-                    vehicleInspectionApprovedBy: 1,
+                    ...(restoreActiveAfterReject
+                        ? {}
+                        : {
+                              vehicleInspectionApprovedAt: 1,
+                              vehicleInspectionApprovedBy: 1,
+                          }),
                     vehicleInspectionHandoverHistoryId: 1,
                 },
             },
         );
 
         try {
-            await markInspectionHandoverHistoryRejected(
-                asset.vehicleInspectionHandoverHistoryId,
-                reviewerId,
-            );
+            await markInspectionHandoverHistoryRejected(pendingHistoryId, reviewerId);
         } catch {
             /* non-fatal */
         }

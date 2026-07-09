@@ -298,6 +298,29 @@ export const getFineById = async (req, res) => {
             await refreshStoredAttachmentUrls([fine.attachment]);
         }
 
+        if (Array.isArray(fine.attachments) && fine.attachments.length > 0) {
+            await repairStoredAttachments(fine.attachments, {
+                folder: `fines/${fine.fineId || fine._id}`,
+                fileName: 'fine-attachment',
+                resourceType: 'auto',
+            });
+
+            await Promise.all(
+                fine.attachments.map(async (item, index) => {
+                    if (!item) return;
+                    if (item.publicId) {
+                        try {
+                            item.url = await getSignedFileUrl(item.publicId);
+                        } catch (err) {
+                            console.error(`Error signing attachment URL [${index}]:`, err);
+                        }
+                    } else if (item.url) {
+                        await refreshStoredAttachmentUrls([item]);
+                    }
+                }),
+            );
+        }
+
         if (Array.isArray(fine.approvalAttachments) && fine.approvalAttachments.length > 0) {
             await refreshStoredAttachmentUrls(fine.approvalAttachments);
         }

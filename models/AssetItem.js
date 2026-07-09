@@ -386,6 +386,7 @@ const assetItemSchema = new mongoose.Schema({
             default: null,
         },
         kind: { type: String, trim: true, default: 'manual' },
+        replacedKey: { type: String, trim: true, default: null },
         changedByKey: { type: mongoose.Schema.Types.Mixed, default: null },
         spareTyre: {
             present: { type: Boolean, default: null },
@@ -419,6 +420,8 @@ const assetItemSchema = new mongoose.Schema({
     /** UAE emirate selected in Add Vehicle (drives license plate artwork). */
     plateEmirate: { type: String, trim: true, default: '' },
     plateNumber: { type: String, trim: true },
+    /** Locator GPS device id (MyLocator Plus) for fleet sync. */
+    locatorDeviceId: { type: Number, default: null, index: true },
     modelYear: { type: String, trim: true },
     currentKilometer: { type: Number, default: 0 },
     /** Lifecycle for fleet reporting — separate from operational `status` (Assigned, etc.). */

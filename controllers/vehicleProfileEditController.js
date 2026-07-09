@@ -553,7 +553,9 @@ export const applyVehicleProfileSection = async (req, res) => {
             message:
                 act === 'renew'
                     ? 'Renewal applied. The previous document was moved to Old Documents.'
-                    : 'Changes applied successfully.',
+                    : act === 'not_renew'
+                      ? 'Not renew applied. Document removed from Live and moved to Old Documents.'
+                      : 'Changes applied successfully.',
             asset: refreshed,
         });
     } catch (err) {

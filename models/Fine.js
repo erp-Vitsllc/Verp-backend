@@ -208,6 +208,13 @@ const fineSchema = new mongoose.Schema(
             name: { type: String },
             mimeType: { type: String }
         },
+        attachments: [{
+            url: { type: String },
+            publicId: { type: String },
+            data: { type: String },
+            name: { type: String },
+            mimeType: { type: String },
+        }],
         createdBy: {
             type: mongoose.Schema.Types.ObjectId,
             ref: "User",

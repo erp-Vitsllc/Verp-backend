@@ -9,7 +9,7 @@ import {
 const TOKEN_EXPIRY_BUFFER_MS = 5 * 60 * 1000;
 const DEFAULT_OAUTH_SCOPE = 'ZohoBooks.contacts.READ';
 
-function getZohoConfig() {
+export function getZohoConfig() {
     return {
         clientId: process.env.ZOHO_CLIENT_ID || '',
         clientSecret: process.env.ZOHO_CLIENT_SECRET || '',
@@ -25,6 +25,14 @@ function getZohoConfig() {
             '',
         ),
     };
+}
+
+export function getZohoOrganizationId() {
+    const organizationId = String(getZohoConfig().organizationId || '').trim();
+    if (!organizationId) {
+        throw new Error('Zoho Books organization is not configured. Set ZOHO_ORGANIZATION_ID.');
+    }
+    return organizationId;
 }
 
 function assertOAuthConfig(config) {
@@ -220,6 +228,13 @@ export async function getAccessToken() {
     return refreshAccessToken(stored.refresh_token);
 }
 
+function extractZohoContactPage(data, kind) {
+    if (Array.isArray(data?.contacts)) return data.contacts;
+    if (kind === 'customer' && Array.isArray(data?.customers)) return data.customers;
+    if (kind === 'vendor' && Array.isArray(data?.vendors)) return data.vendors;
+    return [];
+}
+
 export async function fetchVendors() {
     const config = getZohoConfig();
     assertBooksConfig(config);
@@ -255,7 +270,7 @@ export async function fetchVendors() {
             throw new Error(data.message || 'Failed to fetch vendors from Zoho Books');
         }
 
-        const pageVendors = Array.isArray(data.contacts) ? data.contacts : [];
+        const pageVendors = extractZohoContactPage(data, 'vendor');
         vendors.push(...pageVendors);
 
         hasMore = Boolean(data.page_context?.has_more_page);
@@ -304,7 +319,7 @@ export async function fetchCustomers() {
             throw new Error(data.message || 'Failed to fetch customers from Zoho Books');
         }
 
-        const pageCustomers = Array.isArray(data.contacts) ? data.contacts : [];
+        const pageCustomers = extractZohoContactPage(data, 'customer');
         customers.push(...pageCustomers);
 
         hasMore = Boolean(data.page_context?.has_more_page);

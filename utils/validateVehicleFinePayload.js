@@ -136,7 +136,9 @@ export function validateVehicleFinePayload(body, options = {}) {
 
     const hasAttachment =
         hasExistingAttachment ||
-        (body.attachment && (body.attachment.data || body.attachment.url));
+        (body.attachment && (body.attachment.data || body.attachment.url)) ||
+        (Array.isArray(body.attachments) &&
+            body.attachments.some((item) => item?.data || item?.url || item?.publicId));
     if (!isDraft && !hasAttachment) errors.attachment = 'Supporting document is required';
 
     if (Object.keys(errors).length === 0) return { valid: true };
@@ -148,5 +150,10 @@ export function validateVehicleFinePayload(body, options = {}) {
 export function isVehicleFinePayload(body) {
     const ft = String(body?.fineType || '').trim();
     const sub = String(body?.subCategory || '').trim();
-    return ft === 'Vehicle Fine' || sub === 'Vehicle Fine';
+    return (
+        ft === 'Vehicle Fine' ||
+        sub === 'Vehicle Fine' ||
+        ft === 'Vehicle Damage' ||
+        sub === 'Vehicle Damage'
+    );
 }

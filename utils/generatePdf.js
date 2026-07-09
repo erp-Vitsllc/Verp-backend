@@ -167,6 +167,12 @@ export const generatePdf = async (url, token, user, permissions = {}, selector =
             // set viewport — match A4 width for consistent handover layout
             await page.setViewport({ width: 794, height: 1123 });
 
+            if (token) {
+                await page.setExtraHTTPHeaders({
+                    Authorization: `Bearer ${token}`,
+                });
+            }
+
         // Authenticate before navigation
             if (token && user) {
                 await page.evaluateOnNewDocument((token, user, permissions) => {

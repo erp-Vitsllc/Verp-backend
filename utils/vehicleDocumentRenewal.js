@@ -37,6 +37,25 @@ function insuranceAttachmentsForDoc(mainDoc, list) {
     });
 }
 
+function warrantyAttachmentsForDoc(mainDoc, list) {
+    if (!mainDoc || normType(mainDoc.type) !== 'warranty') return [];
+    const issueKey = dateKey(mainDoc.issueDate);
+    const expiryKey = dateKey(mainDoc.expiryDate);
+    return (list || []).filter((d) => {
+        if (normType(d.type) !== 'warranty attachment') return false;
+        return dateKey(d.issueDate) === issueKey && dateKey(d.expiryDate) === expiryKey;
+    });
+}
+
+function permitAttachmentsForDoc(mainDoc, list) {
+    if (!mainDoc || normType(mainDoc.type) !== 'permit') return [];
+    const issueKey = dateKey(mainDoc.issueDate);
+    return (list || []).filter((d) => {
+        if (normType(d.type) !== 'permit attachment') return false;
+        return dateKey(d.issueDate) === issueKey;
+    });
+}
+
 function resolveParentDocument(doc, allDocs) {
     const t = normType(doc?.type);
     if (t === 'registration attachment') {
@@ -59,6 +78,23 @@ function resolveParentDocument(doc, allDocs) {
                 dateKey(d.expiryDate) === expiryKey,
         );
     }
+    if (t === 'warranty attachment') {
+        const issueKey = dateKey(doc.issueDate);
+        const expiryKey = dateKey(doc.expiryDate);
+        return (allDocs || []).find(
+            (d) =>
+                normType(d.type) === 'warranty' &&
+                dateKey(d.issueDate) === issueKey &&
+                dateKey(d.expiryDate) === expiryKey,
+        );
+    }
+    if (t === 'permit attachment') {
+        const issueKey = dateKey(doc.issueDate);
+        return (allDocs || []).find(
+            (d) =>
+                normType(d.type) === 'permit' && dateKey(d.issueDate) === issueKey,
+        );
+    }
     return null;
 }
 
@@ -79,16 +115,43 @@ export function collectVehicleRenewalDocumentGroup(asset, documentId) {
         const primary = t === 'registration' ? doc : resolveParentDocument(doc, all) || doc;
         return [primary, ...registrationAttachmentsForDoc(primary, all)];
     }
+    if (t === 'warranty' || t === 'warranty attachment') {
+        const primary = t === 'warranty' ? doc : resolveParentDocument(doc, all) || doc;
+        return [primary, ...warrantyAttachmentsForDoc(primary, all)];
+    }
+    if (t === 'permit' || t === 'permit attachment') {
+        const primary = t === 'permit' ? doc : resolveParentDocument(doc, all) || doc;
+        return [primary, ...permitAttachmentsForDoc(primary, all)];
+    }
     return [doc];
 }
 
-function markSubdocumentRenewed(subdoc) {
+function markSubdocumentRenewed(subdoc, { notRenewed = false } = {}) {
     const meta = parseDescription(subdoc);
     meta.isRenewed = true;
-    meta.renewedAt = new Date().toISOString();
-    delete meta.notRenewed;
+    meta.renewedAt = meta.renewedAt || new Date().toISOString();
+    if (notRenewed) {
+        meta.notRenewed = true;
+        meta.notRenewedAt = meta.notRenewedAt || new Date().toISOString();
+    } else {
+        delete meta.notRenewed;
+        delete meta.notRenewedAt;
+    }
     subdoc.description = JSON.stringify(meta);
     subdoc.status = 'old';
+}
+
+/** Apply archived status when description JSON marks a row renewed / not renewed. */
+export function syncVehicleDocumentStatusFromDescription(doc) {
+    if (!doc || doc.description == null) return;
+    try {
+        const meta = parseDescription(doc);
+        if (meta.isRenewed || meta.notRenewed) {
+            doc.status = 'old';
+        }
+    } catch {
+        /* non-JSON description */
+    }
 }
 
 /**
@@ -124,6 +187,8 @@ export function finalizeVehicleDocumentRenewal(asset, oldDocumentId, newDocument
 function pickLatestLiveDoc(asset, primaryType) {
     const docs = (asset.documents || []).filter((d) => normType(d.type) === primaryType);
     const live = docs.filter((d) => {
+        const status = String(d.status || d.documentStatus || '').toLowerCase();
+        if (['old', 'renewed', 'archived', 'inactive'].includes(status)) return false;
         const meta = parseDescription(d);
         return !meta.isRenewed && !meta.notRenewed;
     });

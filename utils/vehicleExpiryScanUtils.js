@@ -1,3 +1,5 @@
+import { isFleetVehicleAsset } from './assetApprovalHelpers.js';
+
 const normType = (t) => String(t || '').toLowerCase().trim();
 
 function parseDescription(doc) {
@@ -19,18 +21,7 @@ export const VEHICLE_EXPIRY_DOC_LABELS = {
     mortgage: 'Mortgage',
 };
 
-export function isFleetVehicleAsset(asset) {
-    if (!asset) return false;
-    const plate = String(asset.plateNumber || '').trim();
-    if (plate) return true;
-    const tn = String(asset.typeId?.name || asset.type || '').toLowerCase();
-    return (
-        tn.includes('vehicle') ||
-        tn.includes('car') ||
-        tn.includes('fleet') ||
-        tn.includes('truck')
-    );
-}
+export { isFleetVehicleAsset };
 
 export function isVehicleDocumentArchived(doc) {
     if (!doc) return true;

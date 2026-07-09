@@ -3,6 +3,7 @@ import { uploadDocumentToS3 } from './s3Upload.js';
 import {
     finalizeVehicleDocumentRenewal,
     isRenewPrimaryDocumentType,
+    syncVehicleDocumentStatusFromDescription,
     syncVehicleExpiryFieldsFromLiveDocuments,
 } from './vehicleDocumentRenewal.js';
 import { clearVehicleExpiryNotificationsForSection } from './vehicleExpiryNotificationHelpers.js';
@@ -89,6 +90,7 @@ async function applyDocumentStep(asset, step) {
         if (body.issueDate !== undefined) doc.issueDate = body.issueDate;
         if (body.expiryDate !== undefined) doc.expiryDate = body.expiryDate;
         if (body.description !== undefined) doc.description = body.description;
+        syncVehicleDocumentStatusFromDescription(doc);
         if (body.document?.data) {
             const uploadResult = await uploadDocumentToS3(
                 body.document.data,
@@ -133,6 +135,8 @@ export async function applyVehiclePendingProfileEditEntry(asset, pendingEntry) {
 
     if (action === 'renew' && renewFromDocumentId) {
         finalizeVehicleDocumentRenewal(asset, renewFromDocumentId, newRenewPrimaryDocId);
+    } else if (action === 'not_renew') {
+        syncVehicleExpiryFieldsFromLiveDocuments(asset);
     } else if (action === 'edit') {
         syncVehicleExpiryFieldsFromLiveDocuments(asset);
     }

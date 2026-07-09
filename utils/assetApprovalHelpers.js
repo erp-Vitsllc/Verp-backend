@@ -202,9 +202,7 @@ export async function userCanAssignFleetVehicleAssets(req) {
     return userIsFlowchartAdminOfficer(req);
 }
 
-export function isFleetVehicleAssetFields({ plateNumber, typeName } = {}) {
-    const plate = String(plateNumber || '').trim();
-    if (plate) return true;
+function hasFleetVehicleTypeName(typeName) {
     const tn = String(typeName || '').toLowerCase();
     return (
         tn.includes('vehicle') ||
@@ -214,13 +212,53 @@ export function isFleetVehicleAssetFields({ plateNumber, typeName } = {}) {
     );
 }
 
+function hasFleetVehicleRecordMarkers(asset) {
+    if (!asset || typeof asset !== 'object') return false;
+    if (String(asset.vehicleBrand || '').trim()) return true;
+    if (String(asset.vehicleCode || '').trim()) return true;
+    if (String(asset.plateEmirate || '').trim()) return true;
+    const profileStatus = String(asset.vehicleProfileActivationStatus || '').trim().toLowerCase();
+    if (profileStatus && profileStatus !== 'none') return true;
+    const inspectionStatus = String(asset.vehicleInspectionStatus || '').trim().toLowerCase();
+    if (inspectionStatus && inspectionStatus !== 'none') return true;
+    if (asset.vehicleDispositionStatus != null && String(asset.vehicleDispositionStatus).trim()) {
+        return true;
+    }
+    if (Array.isArray(asset.vehicleAccessoriesListEntries) && asset.vehicleAccessoriesListEntries.length > 0) {
+        return true;
+    }
+    return false;
+}
+
+export function isFleetVehicleAssetFields({ plateNumber, typeName, asset } = {}) {
+    const plate = String(plateNumber ?? asset?.plateNumber ?? '').trim();
+    if (plate) return true;
+    const tn = typeName ?? asset?.typeId?.name ?? asset?.type ?? '';
+    if (hasFleetVehicleTypeName(tn)) return true;
+    if (asset) return hasFleetVehicleRecordMarkers(asset);
+    return false;
+}
+
+export function isFleetVehicleAsset(asset) {
+    if (!asset) return false;
+    return isFleetVehicleAssetFields({
+        plateNumber: asset.plateNumber,
+        typeName: asset.typeId?.name || asset.type || '',
+        asset,
+    });
+}
+
 export const FLEET_PROFILE_INACTIVE_ASSIGNMENT_MSG =
     'Vehicle profile must be active before assign, reassign, or return actions can be performed. Complete profile activation first.';
 
 /** Fleet vehicles require `vehicleProfileActivationStatus === active` for assignment workflows. */
 export function isFleetVehicleProfileActive(asset) {
     if (!asset) return false;
-    if (!isFleetVehicleAssetFields({ plateNumber: asset.plateNumber, typeName: asset.typeId?.name || asset.type })) {
+    if (!isFleetVehicleAssetFields({
+        plateNumber: asset.plateNumber,
+        typeName: asset.typeId?.name || asset.type,
+        asset,
+    })) {
         return true;
     }
     return String(asset.vehicleProfileActivationStatus || '').toLowerCase().trim() === 'active';

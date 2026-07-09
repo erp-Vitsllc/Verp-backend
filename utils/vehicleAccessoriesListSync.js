@@ -79,7 +79,8 @@ function findPreviousAccessoriesListBaselineEntry(asset, currentHistoryId = '') 
     for (const entry of ranked) {
         const kind = String(entry?.kind || 'manual');
         const sourceId = String(entry?.sourceHistoryId || '');
-        if (kind === 'assignment_change' && sourceId && sourceId === currentId) continue;
+        if (currentId && sourceId && sourceId === currentId) continue;
+        if (kind === 'live_accessories') continue;
         if (storedEntryHasAssessmentData(entry)) return entry;
     }
 
@@ -200,6 +201,46 @@ async function persistAccessoriesListPhotoRef(photo) {
     return photo;
 }
 
+async function signAccessoryPhotoValue(photo, signFileUrl) {
+    if (!photo) return photo;
+
+    if (typeof photo === 'string') {
+        const trimmed = photo.trim();
+        if (!trimmed) return photo;
+        if (trimmed.startsWith('data:')) return trimmed;
+        if (trimmed.startsWith('http')) {
+            const storageKey = normalizeS3Key(trimmed);
+            if (storageKey) {
+                const signed = await signFileUrl(storageKey);
+                return signed || trimmed;
+            }
+            return trimmed;
+        }
+        const storageKey = normalizeS3Key(trimmed) || trimmed;
+        const signed = await signFileUrl(storageKey);
+        return signed || trimmed;
+    }
+
+    if (typeof photo === 'object' && !Array.isArray(photo)) {
+        const ref = photo.publicId || photo.path || photo.url;
+        if (!ref) return photo;
+        const storageKey = normalizeS3Key(String(ref));
+        if (storageKey) {
+            const signed = await signFileUrl(storageKey);
+            if (signed) return signed;
+        }
+        if (typeof photo.url === 'string' && photo.url.trim().startsWith('http')) {
+            return photo.url.trim();
+        }
+        if (typeof ref === 'string' && ref.trim().startsWith('http')) {
+            return ref.trim();
+        }
+        return storageKey || photo;
+    }
+
+    return photo;
+}
+
 export async function signVehicleAccessoriesListEntries(entries, signFileUrl) {
     if (!Array.isArray(entries) || typeof signFileUrl !== 'function') return entries;
 
@@ -212,20 +253,8 @@ export async function signVehicleAccessoriesListEntries(entries, signFileUrl) {
                 const row = entry[key];
                 if (!row || typeof row !== 'object') continue;
 
-                let photo = row.photo ?? null;
-                if (photo && typeof photo === 'string') {
-                    const trimmed = photo.trim();
-                    if (trimmed.startsWith('data:')) {
-                        next[key] = { ...row, photo: trimmed };
-                        continue;
-                    }
-                    const storageKey = normalizeS3Key(trimmed) || trimmed;
-                    const signed = await signFileUrl(storageKey);
-                    next[key] = { ...row, photo: signed || trimmed };
-                    continue;
-                }
-
-                next[key] = { ...row };
+                const signedPhoto = await signAccessoryPhotoValue(row.photo ?? null, signFileUrl);
+                next[key] = { ...row, photo: signedPhoto };
             }
 
             return next;
@@ -275,12 +304,8 @@ export async function syncVehicleAccessoriesListOnAssessmentComplete(historyReco
         .select('action createdAt date details')
         .lean();
 
-    const previousEntry = findPreviousAssessmentHandoverEntry(historyList, historyId);
-    let previousSource = previousEntry ? resolveAssessmentSource(previousEntry) : null;
-    if (!previousSource) {
-        const storedBaseline = findPreviousAccessoriesListBaselineEntry(asset, historyId);
-        previousSource = buildPreviousSourceFromStoredEntry(storedBaseline);
-    }
+    const storedBaseline = findPreviousAccessoriesListBaselineEntry(asset, historyId);
+    const previousSource = buildPreviousSourceFromStoredEntry(storedBaseline);
 
     const { any: hasChanges, changedByKey } = computeAssessmentChangeMap(
         mergedAssessment,

@@ -29,6 +29,10 @@ import {
     isFleetVehicleAssetFields,
 } from '../utils/assetApprovalHelpers.js';
 import {
+    FLEET_VEHICLE_ASSET_ID_PREFIX,
+    generateNextFleetVehicleAssetId,
+} from '../utils/fleetVehicleAssetId.js';
+import {
     notifyAdminDeletedAssetTypeOrCategory,
     notifyAdminDeletedWholeAsset,
     notifyAdminRemovedAccessoriesFromAssignedAsset,
@@ -325,17 +329,24 @@ export const createAssetType = async (req, res) => {
             const requesterDisplayName = await getAssetRequesterDisplayName(req);
 
             // Fetch the starting numeric part for IDs
-            const prefix = 'VEGA-ASSET-';
-            const regex = new RegExp(`^${prefix}\\d+$`);
-            const lastItem = await AssetItem.findOne({
-                assetId: { $regex: regex }
-            }).sort({ assetId: -1 });
-
+            const prefix = fleetVehicle ? FLEET_VEHICLE_ASSET_ID_PREFIX : 'VEGA-ASSET-';
             let startingNum = 1;
-            if (lastItem && lastItem.assetId) {
-                const numStr = lastItem.assetId.substring(prefix.length);
-                const numericPart = parseInt(numStr, 10);
-                if (!isNaN(numericPart)) startingNum = numericPart + 1;
+
+            if (fleetVehicle) {
+                const nextFleetId = await generateNextFleetVehicleAssetId();
+                const fleetNum = parseInt(nextFleetId.substring(prefix.length), 10);
+                if (Number.isFinite(fleetNum)) startingNum = fleetNum;
+            } else {
+                const regex = new RegExp(`^${prefix}\\d+$`);
+                const lastItem = await AssetItem.findOne({
+                    assetId: { $regex: regex },
+                }).sort({ assetId: -1 });
+
+                if (lastItem?.assetId) {
+                    const numStr = lastItem.assetId.substring(prefix.length);
+                    const numericPart = parseInt(numStr, 10);
+                    if (!isNaN(numericPart)) startingNum = numericPart + 1;
+                }
             }
 
             // Handle Image Upload
@@ -1100,6 +1111,9 @@ async function normalizeVehicleAccessoriesListEntries(entries) {
         }
         if (entry.changedByKey && typeof entry.changedByKey === 'object') {
             next.changedByKey = entry.changedByKey;
+        }
+        if (entry.replacedKey) {
+            next.replacedKey = String(entry.replacedKey).trim();
         }
 
         for (const key of VEHICLE_ACCESSORIES_LIST_KEYS) {

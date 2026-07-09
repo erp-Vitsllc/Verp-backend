@@ -35,6 +35,21 @@ export function formatHandoverPersonDisplayLabel(person) {
     return name || empId || '—';
 }
 
+/** Name shown on fleet pending badges — assignee when they can self-acknowledge, else admin officer. */
+export function buildHandoverFlowPendingActorName(assignee, fleetActor) {
+    if (!fleetActor) {
+        return formatHandoverPersonDisplayLabel(assignee) || '';
+    }
+    if (fleetActor.assigneeCanSelfAcknowledge) {
+        return (
+            formatHandoverPersonDisplayLabel(assignee) ||
+            formatHandoverPersonDisplayLabel(fleetActor.actorDoc) ||
+            ''
+        );
+    }
+    return formatHandoverPersonDisplayLabel(fleetActor.actorDoc) || 'Admin Officer';
+}
+
 /** Frozen table labels — do not derive from live asset after creation. */
 export function buildFleetHandoverDisplayLabels({
     workflowMeta = null,
@@ -100,6 +115,7 @@ const HANDOVER_HISTORY_IMMUTABLE_DETAIL_KEYS = [
     'handoverTargetAcceptedAt',
     'handoverHrApprovedAt',
     'firstInspection',
+    'reinspection',
     'inspectionFormStatus',
     'inspectionReview',
     'reportsCopiedFromPreviousAssignment',

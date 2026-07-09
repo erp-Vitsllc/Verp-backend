@@ -20,6 +20,9 @@ import flowchartRoute from "./routes/flowchartRoutes.js";
 import adminDeletionArchiveRoute from "./routes/adminDeletionArchiveRoutes.js"; // <-- Add flowchart routes
 import storageRoute from "./routes/storageRoutes.js";
 import zohoRoute from "./routes/zohoRoutes.js";
+import locatorRoute from "./routes/locatorRoutes.js";
+import { startLocatorWebSocket } from "./services/locatorWebSocketService.js";
+import { recordLocatorSnapshotsFromLatest } from "./services/locatorSnapshotService.js";
 import { commonLimiter } from "./middleware/rateLimitMiddleware.js";
 import { resolveFrontendBaseUrl, runWithRequestFrontendBaseUrl } from "./utils/resolveFrontendBaseUrl.js";
 import dotenv from "dotenv";
@@ -253,6 +256,7 @@ app.use("/api/Flowchart", flowchartRoute);
 app.use("/api/AdminDeletionArchive", adminDeletionArchiveRoute);
 app.use("/api/storage", storageRoute);
 app.use("/api/zoho", zohoRoute);
+app.use("/api/locator", locatorRoute);
 
 const PORT = process.env.PORT || 5000;
 
@@ -268,6 +272,17 @@ async function startServer() {
     app.listen(PORT, "0.0.0.0", () => {
         console.log(`Server running at http://localhost:${PORT}`);
         console.log(`Health check: http://localhost:${PORT}/api/health`);
+        startLocatorWebSocket();
+        setTimeout(() => {
+            recordLocatorSnapshotsFromLatest().catch((e) =>
+                console.error('[LocatorSnapshot] startup capture failed:', e?.message || e),
+            );
+        }, 45 * 1000);
+        setInterval(() => {
+            recordLocatorSnapshotsFromLatest().catch((e) =>
+                console.error('[LocatorSnapshot] scheduled capture failed:', e?.message || e),
+            );
+        }, 15 * 60 * 1000);
     });
 }
 

@@ -110,6 +110,19 @@ export const getFines = async (req, res) => {
                 fine.attachment.url = signedUrl;
             }
 
+            if (Array.isArray(fine.attachments) && fine.attachments.length > 0) {
+                fine.attachments = await Promise.all(
+                    fine.attachments.map(async (attachment) => {
+                        if (!attachment) return attachment;
+                        if (attachment.publicId) {
+                            const signedUrl = await getSignedFileUrl(attachment.publicId);
+                            return { ...attachment, url: signedUrl || attachment.url };
+                        }
+                        return attachment;
+                    }),
+                );
+            }
+
             if ((!fine.companyName || fine.companyName === 'N/A') && fine.assignedEmployees?.length > 0) {
                 const empId = fine.assignedEmployees[0].employeeId;
                 if (empId && empId !== 'VEGA-HR-0000') {

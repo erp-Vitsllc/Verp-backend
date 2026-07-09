@@ -20,6 +20,7 @@ import {
     snapshotDeductionScheduleOnApproval,
 } from "../../utils/fineDeductionScheduleSnapshot.js";
 import { normalizeFineSourceSchedule } from "../../utils/normalizeFineSourceSchedule.js";
+import { ensureAttachmentPersistedToS3 } from "../../utils/s3Upload.js";
 
 export const updateFine = async (req, res) => {
     try {
@@ -27,6 +28,27 @@ export const updateFine = async (req, res) => {
         
         let { id } = req.params;
         const updates = req.body;
+
+        if (Array.isArray(updates.attachments) && updates.attachments.some((item) => item?.data)) {
+            const folder = `fines/${id}`;
+            const persisted = [];
+            for (let index = 0; index < updates.attachments.length; index += 1) {
+                const item = updates.attachments[index];
+                if (!item) continue;
+                if (item.data) {
+                    const saved = await ensureAttachmentPersistedToS3(item, {
+                        folder,
+                        fileName: item.name || `fine-attachment-${index + 1}`,
+                        resourceType: 'auto',
+                    });
+                    if (saved) persisted.push(saved);
+                } else if (item.url || item.publicId) {
+                    persisted.push(item);
+                }
+            }
+            updates.attachments = persisted;
+            if (persisted[0]) updates.attachment = persisted[0];
+        }
 
         // Security check for attachment URL to prevent SSRF (Early exit)
         if (updates.attachment && updates.attachment.url) {
@@ -151,7 +173,7 @@ export const updateFine = async (req, res) => {
         // 1. Explicitly Define Allowed Fields (Fix Mass Assignment)
         const allowedUpdates = [
             'fineStatus', 'description', 'awardedDate', 'remarks',
-            'attachment', 'category', 'subCategory', 'vehicleId', 'assetId', 'assetName',
+            'attachment', 'attachments', 'category', 'subCategory', 'vehicleId', 'assetId', 'assetName',
             'projectId', 'projectName', 'engineerName', 'responsibleFor',
             'fineAmount', 'employeeAmount', 'companyAmount', 'serviceCharge', 'payableDuration', 'monthStart',
             'sourceOfIncome', 'assetDepreciationAmount', 'assetPurchaseDate',
@@ -176,6 +198,7 @@ export const updateFine = async (req, res) => {
             payableDuration: updates.payableDuration ?? fine.payableDuration,
             monthStart: updates.monthStart ?? fine.monthStart,
             attachment: updates.attachment ?? fine.attachment,
+            attachments: updates.attachments ?? fine.attachments,
         };
         if (isVehicleFinePayload(mergedVehicleFine)) {
             const strictSubmit =
@@ -188,7 +211,11 @@ export const updateFine = async (req, res) => {
                     hasExistingAttachment: Boolean(
                         mergedVehicleFine.attachment?.url ||
                         mergedVehicleFine.attachment?.data ||
-                        fine.attachment?.url
+                        fine.attachment?.url ||
+                        (Array.isArray(mergedVehicleFine.attachments) &&
+                            mergedVehicleFine.attachments.some((item) => item?.url || item?.publicId)) ||
+                        (Array.isArray(fine.attachments) &&
+                            fine.attachments.some((item) => item?.url || item?.publicId))
                     ),
                 });
                 if (!vehicleCheck.valid) {
@@ -356,6 +383,13 @@ export const updateFine = async (req, res) => {
                             console.warn("[UpdateFine] Invalid URL. Skipping.");
                         } else {
                             f.attachment = updates.attachment;
+                        }
+                    } else if (key === 'attachments') {
+                        f.attachments = updates.attachments;
+                        if (updates.attachment) {
+                            f.attachment = updates.attachment;
+                        } else if (Array.isArray(updates.attachments) && updates.attachments[0]) {
+                            f.attachment = updates.attachments[0];
                         }
                     } else if (key === 'fineStatus' && statusHandled) {
                         // Already handled by Draft -> Pending or Resubmit logic

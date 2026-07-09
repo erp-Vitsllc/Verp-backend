@@ -7,6 +7,29 @@ import { sendFineApprovalEmail } from "../../utils/sendFineApprovalEmail.js";
 import { isVehicleFinePayload, validateVehicleFinePayload } from "../../utils/validateVehicleFinePayload.js";
 import { normalizeFineSourceSchedule } from "../../utils/normalizeFineSourceSchedule.js";
 
+async function persistFineAttachmentsList(attachments, folder) {
+    if (!Array.isArray(attachments) || attachments.length === 0) return [];
+
+    const persisted = [];
+    for (let index = 0; index < attachments.length; index += 1) {
+        const item = attachments[index];
+        if (!item) continue;
+
+        if (item.data) {
+            const saved = await ensureAttachmentPersistedToS3(item, {
+                folder,
+                fileName: item.name || `fine-attachment-${index + 1}`,
+                resourceType: 'auto',
+            });
+            if (saved) persisted.push(saved);
+        } else if (item.url || item.publicId) {
+            persisted.push(item);
+        }
+    }
+
+    return persisted;
+}
+
 /**
  * Generate unique random fine ID (4 digits)
  */
@@ -147,7 +170,10 @@ export const addFine = async (req, res) => {
             const fineStatusToCheck = commonData.fineStatus || req.body.fineStatus;
             const validationMode = fineStatusToCheck === 'Draft' ? 'draft' : 'strict';
             const hasExistingAttachment = Boolean(
-                commonData.attachment?.url || commonData.attachment?.data
+                commonData.attachment?.url ||
+                commonData.attachment?.data ||
+                (Array.isArray(commonData.attachments) &&
+                    commonData.attachments.some((item) => item?.url || item?.publicId || item?.data))
             );
             const vehicleCheck = validateVehicleFinePayload(req.body, {
                 mode: validationMode,
@@ -209,6 +235,7 @@ export const addFine = async (req, res) => {
 
             // Process attachment once — must be stored permanently in S3
             let attachmentData = null;
+            let attachmentsData = [];
             if (commonData.attachment && commonData.attachment.data) {
                 try {
                     attachmentData = await ensureAttachmentPersistedToS3(commonData.attachment, {
@@ -222,6 +249,26 @@ export const addFine = async (req, res) => {
                         message: 'Failed to store attachment in storage. Please try uploading again.',
                     });
                 }
+            }
+
+            if (Array.isArray(commonData.attachments) && commonData.attachments.length > 0) {
+                try {
+                    attachmentsData = await persistFineAttachmentsList(
+                        commonData.attachments,
+                        `fines/bulk_${baseFineId}`,
+                    );
+                } catch (e) {
+                    console.error('[AddFine] Bulk attachments upload error:', e);
+                    return res.status(500).json({
+                        message: 'Failed to store attachments in storage. Please try uploading again.',
+                    });
+                }
+            }
+
+            if (!attachmentData && attachmentsData.length > 0) {
+                attachmentData = attachmentsData[0];
+            } else if (attachmentData && attachmentsData.length === 0) {
+                attachmentsData = [attachmentData];
             }
 
             // Pre-calculate totals
@@ -323,6 +370,7 @@ export const addFine = async (req, res) => {
                     awardedDate: commonData.awardedDate ? new Date(commonData.awardedDate) : new Date(),
                     remarks: commonData.remarks || '',
                     attachment: attachmentData,
+                    attachments: attachmentsData.length > 0 ? attachmentsData : undefined,
                     category: commonData.category || 'Other',
                     subCategory: commonData.subCategory || '',
                     company: (empData.employeeId === 'VEGA-HR-0000' && commonData.company) 
