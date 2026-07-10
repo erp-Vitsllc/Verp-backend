@@ -201,6 +201,7 @@ import {
     closeStaleOwnerOnDutyDashboardAction,
     refreshStaleOwnerOnDutyDashboardForOwner,
 } from './ownerOnDutyController.js';
+import { buildVehicleFleetAnalytics } from '../utils/vehicleFleetAnalytics.js';
 
 /** Upload server-generated handover PDF bytes to S3; store returned key on AssetHistory.file */
 async function persistHandoverPdfBufferToHistory(pdfBuffer, filename) {
@@ -1037,8 +1038,8 @@ export const getVehicleFleetDashboard = async (req, res) => {
             ],
         };
         const fleetSelect = listOnly
-            ? 'assetId name plateEmirate plateNumber modelYear assetValue status registrationExpiryDate insuranceExpiryDate nextServiceDate oilChangeDate gearOilDueDate currentKilometer assignedTo assignedCompany acceptanceStatus pendingAction actionRequiredBy createdBy vehicleProfileActivationStatus vehicleDispositionStatus warrantyEnabled warrantyExpiryDate warrantyYears onServiceActive onLeaveActive typeId assignedDate pendingActionDetails updatedAt'
-            : 'assetId name plateEmirate plateNumber modelYear assetValue status registrationExpiryDate insuranceExpiryDate nextServiceDate oilChangeDate gearOilDueDate lastServiceDate currentKilometer assignedTo assignedCompany acceptanceStatus pendingAction services documents actionRequiredBy createdBy vehicleProfileActivationStatus vehicleDispositionStatus assignmentType temporaryEndDate warrantyEnabled warrantyExpiryDate warrantyYears accessories parkingExtendedDays parkingReminderSentAt parkingDurationCompleteSentAt onServiceActive onLeaveActive assignedDate pendingActionDetails updatedAt';
+            ? 'assetId name vehicleBrand plateEmirate plateNumber modelYear assetValue status registrationExpiryDate insuranceExpiryDate nextServiceDate oilChangeDate gearOilDueDate currentKilometer assignedTo assignedCompany acceptanceStatus pendingAction actionRequiredBy createdBy vehicleProfileActivationStatus vehicleDispositionStatus warrantyEnabled warrantyExpiryDate warrantyYears onServiceActive onLeaveActive typeId assignedDate pendingActionDetails updatedAt'
+            : 'assetId name vehicleBrand plateEmirate plateNumber modelYear assetValue status registrationExpiryDate insuranceExpiryDate nextServiceDate oilChangeDate gearOilDueDate lastServiceDate currentKilometer assignedTo assignedCompany acceptanceStatus pendingAction services documents actionRequiredBy createdBy vehicleProfileActivationStatus vehicleDispositionStatus assignmentType temporaryEndDate warrantyEnabled warrantyExpiryDate warrantyYears accessories parkingExtendedDays parkingReminderSentAt parkingDurationCompleteSentAt onServiceActive onLeaveActive assignedDate pendingActionDetails updatedAt';
         const items = await AssetItem.find({ $and: [draftVis, fleetScope] })
             .populate('typeId', 'name')
             .populate('assignedTo', 'firstName lastName employeeId')
@@ -1306,6 +1307,8 @@ export const getVehicleFleetDashboard = async (req, res) => {
             return { labels, usage, idle };
         };
 
+        const fleetAnalytics = buildVehicleFleetAnalytics(vehicles);
+
         res.json({
             reminders: {
                 service: { due: serviceDue, dueSoon: serviceDueSoon },
@@ -1317,6 +1320,7 @@ export const getVehicleFleetDashboard = async (req, res) => {
             serviceCostByMonth,
             vehicles: fleetRows,
             modelYearDistribution,
+            fleetAnalytics,
             usageByPeriod: {
                 day: buildUsageSeries('day'),
                 week: buildUsageSeries('week'),

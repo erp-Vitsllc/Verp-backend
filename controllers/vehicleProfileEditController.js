@@ -18,6 +18,12 @@ const SECTION_LABEL = {
     registration: 'Mulkia (registration card)',
     insurance: 'Insurance card',
     profile_picture: 'Profile picture',
+    warranty: 'Warranty card',
+    permit: 'Permit card',
+    petrol: 'Petrol card',
+    toll: 'Toll card',
+    documents: 'Documents',
+    mortgage: 'Mortgage details',
 };
 
 const isFleetVehicleAsset = (asset) => {

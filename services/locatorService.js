@@ -181,9 +181,27 @@ async function getValidToken({ force = false } = {}) {
     return session.token;
 }
 
-export async function fetchLatestPositions() {
+const LATEST_POSITIONS_CACHE_MS = 25 * 1000;
+let latestPositionsCache = { at: 0, data: null };
+
+export async function fetchLatestPositions({ allowStale = false } = {}) {
     assertLocatorConfig();
-    assertRateLimit('latest-positions', 3, 60 * 1000);
+
+    if (
+        latestPositionsCache.data &&
+        Date.now() - latestPositionsCache.at < LATEST_POSITIONS_CACHE_MS
+    ) {
+        return latestPositionsCache.data;
+    }
+
+    try {
+        assertRateLimit('latest-positions', 12, 60 * 1000);
+    } catch (error) {
+        if (allowStale && latestPositionsCache.data) {
+            return latestPositionsCache.data;
+        }
+        throw error;
+    }
 
     const client = buildApiClient();
     let token = await getValidToken();
@@ -221,11 +239,14 @@ export async function fetchLatestPositions() {
         ? payload.data.positions.map(normalizeRestPosition)
         : [];
 
-    return {
+    const result = {
         positions,
         notexist: payload?.data?.notexist || [],
         total: payload?.data?.total ?? positions.length,
     };
+
+    latestPositionsCache = { at: Date.now(), data: result };
+    return result;
 }
 
 export async function fetchLiveByImei(imei) {

@@ -68,6 +68,12 @@ export const VEHICLE_PROFILE_ACTIVATION_SECTION_IDS = [
     'registration',
     'insurance',
     'profile_picture',
+    'warranty',
+    'permit',
+    'petrol',
+    'toll',
+    'documents',
+    'mortgage',
 ];
 
 /** Returns first missing requirement message, or null when profile is 100% ready. */

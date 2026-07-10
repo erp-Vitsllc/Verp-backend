@@ -130,6 +130,8 @@ function markSubdocumentRenewed(subdoc, { notRenewed = false } = {}) {
     const meta = parseDescription(subdoc);
     meta.isRenewed = true;
     meta.renewedAt = meta.renewedAt || new Date().toISOString();
+    // Match employee oldDocuments archiveReason: Replaced vs Not Renewed
+    meta.archiveReason = notRenewed ? 'Not Renewed' : 'Replaced';
     if (notRenewed) {
         meta.notRenewed = true;
         meta.notRenewedAt = meta.notRenewedAt || new Date().toISOString();

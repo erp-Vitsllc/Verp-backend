@@ -1,4 +1,5 @@
 import LocatorGpsSnapshot from '../models/LocatorGpsSnapshot.js';
+import AssetItem from '../models/AssetItem.js';
 import { fetchLatestPositions, isLocatorConfigured } from './locatorService.js';
 
 const SNAPSHOT_MIN_INTERVAL_MS = 2 * 60 * 1000;
@@ -251,6 +252,81 @@ function buildOdometerChart(positions) {
     );
 }
 
+function normalizePlateDigits(value) {
+    return String(value || '').replace(/\D/g, '');
+}
+
+function extractPlateCandidatesFromLocatorName(name) {
+    const text = String(name || '');
+    const matches = text.match(/\d{3,6}/g) || [];
+    return [...new Set(matches.map(normalizePlateDigits).filter(Boolean))];
+}
+
+function matchFleetVehicleByGpsName(gpsName, fleetVehicles) {
+    const candidates = extractPlateCandidatesFromLocatorName(gpsName);
+    if (!candidates.length) return null;
+
+    for (const vehicle of fleetVehicles) {
+        const plateDigits = normalizePlateDigits(vehicle.plateNumber);
+        if (!plateDigits) continue;
+        if (
+            candidates.some(
+                (candidate) =>
+                    plateDigits === candidate ||
+                    plateDigits.endsWith(candidate) ||
+                    candidate.endsWith(plateDigits),
+            )
+        ) {
+            return vehicle;
+        }
+    }
+
+    return null;
+}
+
+async function buildGpsTrackedVehicles(positions) {
+    const fleetVehicles = await AssetItem.find({
+        $or: [
+            { locatorDeviceId: { $ne: null } },
+            { plateNumber: { $exists: true, $nin: [null, ''] } },
+        ],
+    })
+        .select(
+            'assetId name plateNumber plateEmirate modelYear assetValue vehicleBrand locatorDeviceId',
+        )
+        .lean();
+
+    const byDeviceId = new Map();
+    for (const vehicle of fleetVehicles) {
+        if (vehicle.locatorDeviceId != null) {
+            byDeviceId.set(String(vehicle.locatorDeviceId), vehicle);
+        }
+    }
+
+    const rows = (positions || []).map((position) => {
+        const deviceId = position?.deviceId;
+        const gpsName = position?.deviceName || `Device ${deviceId}`;
+        const erp =
+            byDeviceId.get(String(deviceId)) || matchFleetVehicleByGpsName(gpsName, fleetVehicles);
+        const attrs = position?.attributes || {};
+
+        return {
+            deviceId,
+            gpsName,
+            vehicleName: erp
+                ? [erp.vehicleBrand, erp.name].filter(Boolean).join(' ') || gpsName
+                : gpsName,
+            plateNumber: erp?.plateNumber || '',
+            modelYear: erp?.modelYear || '',
+            assetValue: erp ? Number(erp.assetValue || 0) : null,
+            currentKm: toOdometerKm(attrs),
+            matched: Boolean(erp),
+        };
+    });
+
+    return rows.sort((a, b) => String(a.gpsName).localeCompare(String(b.gpsName)));
+}
+
 function buildRunningKmDaySeries(snapshots, positions, now = new Date()) {
     const labels = getDayLabelsForCurrentMonth(now);
     const byDevice = groupSnapshotsByDevice(snapshots);
@@ -378,25 +454,151 @@ function buildIdleByVehicle(snapshots, positions, start, end) {
     return sortVehicleBars(rows);
 }
 
-function buildSalikWiseSeries(snapshots, positions, mode, now = new Date()) {
-    let start;
-    let end;
+function getWeekRange(now = new Date()) {
+    const start = startOfDay(now);
+    const day = start.getDay();
+    const mondayOffset = day === 0 ? -6 : 1 - day;
+    start.setDate(start.getDate() + mondayOffset);
 
-    if (mode === 'day') {
-        start = startOfDay(now);
-        start.setDate(start.getDate() - 1);
-        end = endOfDay(start);
-    } else if (mode === 'week') {
-        ({ start, end } = getWeekRange(now));
-    } else {
-        start = new Date(now.getFullYear(), now.getMonth(), 1);
-        end = endOfDay(now);
+    const end = endOfDay(new Date(start));
+    end.setDate(start.getDate() + 6);
+
+    return { start, end };
+}
+
+function getWeekOptionsForYear(now = new Date()) {
+    const options = [];
+    const year = now.getFullYear();
+    const seen = new Set();
+    let cursor = new Date(year, 0, 1);
+
+    while (cursor <= now) {
+        const { start, end } = getWeekRange(cursor);
+        const key = start.toISOString().slice(0, 10);
+        if (!seen.has(key) && start.getFullYear() === year) {
+            seen.add(key);
+            const effectiveEnd = end > endOfDay(now) ? endOfDay(now) : end;
+            options.push({
+                key,
+                label: `Week of ${formatDayLabel(start)}`,
+                sublabel: `${formatDayLabel(start)} – ${formatDayLabel(effectiveEnd)}`,
+                start,
+                end: effectiveEnd,
+            });
+        }
+        const next = new Date(end);
+        next.setDate(next.getDate() + 1);
+        cursor = next;
     }
 
+    return options;
+}
+
+function buildRunningKmByVehicleForRange(snapshots, positions, start, end) {
     const byDevice = groupSnapshotsByDevice(snapshots);
     const liveMap = buildLivePositionMap(positions);
     const rows = [];
     const seen = new Set();
+    const today = startOfDay(new Date());
+    const rangeIncludesToday = start <= endOfDay(today) && end >= today;
+
+    for (const [deviceId, deviceRows] of byDevice.entries()) {
+        const inBucket = deviceRows.filter((row) => {
+            const at = new Date(row.capturedAt);
+            return at >= start && at <= end;
+        });
+        if (!inBucket.length && !rangeIncludesToday) continue;
+
+        const name =
+            inBucket[inBucket.length - 1]?.deviceName ||
+            liveMap.get(deviceId)?.deviceName ||
+            `Device ${deviceId}`;
+        seen.add(String(deviceId));
+        let value = runningKmBetweenSnapshots(
+            inBucket,
+            rangeIncludesToday ? liveMap.get(deviceId) || null : null,
+        );
+        if (value === 0 && rangeIncludesToday && liveMap.get(deviceId)) {
+            value = liveDistanceKm(liveMap.get(deviceId));
+        }
+        rows.push({ name, value: Number(value.toFixed(2)) });
+    }
+
+    for (const position of positions || []) {
+        const deviceId = String(position?.deviceId || '');
+        if (!deviceId || seen.has(deviceId)) continue;
+        if (!rangeIncludesToday) continue;
+        rows.push({
+            name: position?.deviceName || `Device ${deviceId}`,
+            value: liveDistanceKm(position),
+        });
+    }
+
+    return sortVehicleBars(rows);
+}
+
+function buildLocatorPeriodBucket(options, buildRows) {
+    const byKey = {};
+    for (const option of options) {
+        byKey[option.key] = buildRows(option.start, option.end);
+    }
+    return {
+        defaultKey: options[options.length - 1]?.key || '',
+        options: options.map(({ key, label, sublabel }) => ({ key, label, sublabel })),
+        byKey,
+    };
+}
+
+function buildMonthOptionsForYear(now = new Date()) {
+    return Array.from({ length: now.getMonth() + 1 }, (_, monthIndex) => {
+        const start = new Date(now.getFullYear(), monthIndex, 1);
+        const end =
+            monthIndex === now.getMonth()
+                ? endOfDay(now)
+                : endOfDay(new Date(now.getFullYear(), monthIndex + 1, 0));
+        return {
+            key: `${now.getFullYear()}-${String(monthIndex + 1).padStart(2, '0')}`,
+            label: start.toLocaleDateString('en-US', { month: 'long' }),
+            sublabel: String(now.getFullYear()),
+            start,
+            end,
+        };
+    });
+}
+
+function buildDayOptionsForCurrentMonth(now = new Date()) {
+    return getDayLabelsForCurrentMonth(now).map((bucket) => ({
+        key: bucket.key,
+        label: bucket.start.toLocaleDateString('en-US', { weekday: 'long' }),
+        sublabel: formatDayLabel(bucket.start),
+        start: bucket.start,
+        end: bucket.end,
+    }));
+}
+
+function buildRunningKmByVehicleDashboard(snapshots, positions, now = new Date()) {
+    const dayOptions = buildDayOptionsForCurrentMonth(now);
+
+    const weekOptions = getWeekOptionsForYear(now);
+    const monthOptions = buildMonthOptionsForYear(now);
+
+    const buildRows = (start, end) =>
+        buildRunningKmByVehicleForRange(snapshots, positions, start, end);
+
+    return {
+        day: buildLocatorPeriodBucket(dayOptions, buildRows),
+        week: buildLocatorPeriodBucket(weekOptions, buildRows),
+        month: buildLocatorPeriodBucket(monthOptions, buildRows),
+    };
+}
+
+function buildSalikWiseForRange(snapshots, positions, start, end, now = new Date()) {
+    const byDevice = groupSnapshotsByDevice(snapshots);
+    const liveMap = buildLivePositionMap(positions);
+    const rows = [];
+    const seen = new Set();
+    const today = startOfDay(now);
+    const rangeIncludesToday = start <= endOfDay(today) && end >= today;
 
     for (const [deviceId, deviceRows] of byDevice.entries()) {
         const inBucket = deviceRows.filter((row) => {
@@ -418,6 +620,8 @@ function buildSalikWiseSeries(snapshots, positions, mode, now = new Date()) {
     for (const position of positions || []) {
         const deviceId = String(position?.deviceId || '');
         const name = position?.deviceName || `Device ${deviceId}`;
+        if (!deviceId || seen.has(deviceId)) continue;
+
         const liveKm = liveDistanceKm(position);
         const existing = rows.find((row) => row.name === name);
 
@@ -426,7 +630,7 @@ function buildSalikWiseSeries(snapshots, positions, mode, now = new Date()) {
             continue;
         }
 
-        if (mode === 'month' || mode === 'week') {
+        if (rangeIncludesToday) {
             rows.push({ name, value: liveKm });
         }
     }
@@ -434,16 +638,59 @@ function buildSalikWiseSeries(snapshots, positions, mode, now = new Date()) {
     return sortVehicleBars(rows);
 }
 
-function getWeekRange(now = new Date()) {
-    const start = startOfDay(now);
-    const day = start.getDay();
-    const mondayOffset = day === 0 ? -6 : 1 - day;
-    start.setDate(start.getDate() + mondayOffset);
+function buildSalikWiseSeries(snapshots, positions, mode, now = new Date()) {
+    let start;
+    let end;
 
-    const end = endOfDay(new Date(start));
-    end.setDate(start.getDate() + 6);
+    if (mode === 'day') {
+        start = startOfDay(now);
+        start.setDate(start.getDate() - 1);
+        end = endOfDay(start);
+    } else if (mode === 'week') {
+        ({ start, end } = getWeekRange(now));
+    } else {
+        start = new Date(now.getFullYear(), now.getMonth(), 1);
+        end = endOfDay(now);
+    }
 
-    return { start, end };
+    return buildSalikWiseForRange(snapshots, positions, start, end, now);
+}
+
+function buildIdleTimeByVehicleDashboard(snapshots, positions, now = new Date()) {
+    const dayOptions = buildDayOptionsForCurrentMonth(now);
+    const weekOptions = getWeekOptionsForYear(now);
+    const monthOptions = buildMonthOptionsForYear(now);
+
+    const buildRows = (start, end) => buildIdleByVehicle(snapshots, positions, start, end);
+
+    return {
+        day: buildLocatorPeriodBucket(dayOptions, buildRows),
+        week: buildLocatorPeriodBucket(weekOptions, buildRows),
+        month: buildLocatorPeriodBucket(monthOptions, buildRows),
+    };
+}
+
+function buildSalikWiseByVehicleDashboard(snapshots, positions, now = new Date()) {
+    const yesterday = startOfDay(now);
+    yesterday.setDate(yesterday.getDate() - 1);
+    const dayOptions = [
+        {
+            key: yesterday.toISOString().slice(0, 10),
+            label: 'Yesterday',
+            sublabel: formatDayLabel(yesterday),
+            start: yesterday,
+            end: endOfDay(yesterday),
+        },
+    ];
+    const weekOptions = getWeekOptionsForYear(now);
+    const monthOptions = buildMonthOptionsForYear(now);
+    const buildRows = (start, end) => buildSalikWiseForRange(snapshots, positions, start, end, now);
+
+    return {
+        day: buildLocatorPeriodBucket(dayOptions, buildRows),
+        week: buildLocatorPeriodBucket(weekOptions, buildRows),
+        month: buildLocatorPeriodBucket(monthOptions, buildRows),
+    };
 }
 
 export async function buildLocatorFleetDashboard() {
@@ -458,10 +705,11 @@ export async function buildLocatorFleetDashboard() {
     const yearStart = new Date(now.getFullYear() - 1, 0, 1);
 
     let positions = [];
+    let snapshotWarning = null;
+
     try {
-        const latest = await fetchLatestPositions();
+        const latest = await fetchLatestPositions({ allowStale: true });
         positions = latest.positions || [];
-        await Promise.all((positions || []).map((position) => recordLocatorSnapshot(position, 'rest')));
     } catch (error) {
         return {
             configured: true,
@@ -470,35 +718,37 @@ export async function buildLocatorFleetDashboard() {
         };
     }
 
+    try {
+        await Promise.all(
+            (positions || []).map((position) => recordLocatorSnapshot(position, 'rest')),
+        );
+    } catch (error) {
+        snapshotWarning = error?.message || 'Failed to save GPS snapshots';
+        console.warn('[LocatorFleetDashboard] Snapshot capture failed:', snapshotWarning);
+    }
+
     const snapshots = await LocatorGpsSnapshot.find({
         capturedAt: { $gte: yearStart },
     })
         .sort({ capturedAt: 1 })
         .lean();
 
-    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-    const yearOnlyStart = new Date(now.getFullYear(), 0, 1);
-
     return {
         configured: true,
         connected: true,
         generatedAt: now.toISOString(),
+        snapshotWarning,
+        vehicleCount: positions.length,
         odometerByVehicle: buildOdometerChart(positions),
+        gpsTrackedVehicles: await buildGpsTrackedVehicles(positions),
+        runningKmByVehicle: buildRunningKmByVehicleDashboard(snapshots, positions, now),
         runningKm: {
             day: buildRunningKmDaySeries(snapshots, positions, now),
             month: buildRunningKmMonthSeries(snapshots, positions, now),
             year: buildRunningKmYearSeries(snapshots, positions, now),
         },
-        idleTimeByVehicle: {
-            day: buildIdleByVehicle(snapshots, positions, monthStart, endOfDay(now)),
-            month: buildIdleByVehicle(snapshots, positions, yearOnlyStart, endOfDay(now)),
-            year: buildIdleByVehicle(snapshots, positions, yearStart, endOfDay(now)),
-        },
-        salikWise: {
-            day: buildSalikWiseSeries(snapshots, positions, 'day', now),
-            week: buildSalikWiseSeries(snapshots, positions, 'week', now),
-            month: buildSalikWiseSeries(snapshots, positions, 'month', now),
-        },
+        idleTimeByVehicle: buildIdleTimeByVehicleDashboard(snapshots, positions, now),
+        salikWise: buildSalikWiseByVehicleDashboard(snapshots, positions, now),
         snapshotCount: snapshots.length,
     };
 }
