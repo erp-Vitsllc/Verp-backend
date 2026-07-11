@@ -43,6 +43,7 @@ import {
     buildFleetHandoverDisplayLabels,
     formatEmployeeDisplayName,
 } from '../utils/vehicleHandoverApprovalFlow.js';
+import { allocateNextServiceReqNo } from '../utils/assetServiceReqNo.js';
 import {
     buildInitialHandoverEscalationMeta,
     markHandoverEscalationResolved,
@@ -202,6 +203,8 @@ import {
     refreshStaleOwnerOnDutyDashboardForOwner,
 } from './ownerOnDutyController.js';
 import { buildVehicleFleetAnalytics } from '../utils/vehicleFleetAnalytics.js';
+import { resolveRegistrationExpiryDate } from '../utils/vehicleDocumentRenewal.js';
+import { collectVehicleExpiryDocuments, resolveVehicleExpiryFocusCard, resolveVehicleExpiryTab } from '../utils/vehicleExpiryScanUtils.js';
 
 /** Upload server-generated handover PDF bytes to S3; store returned key on AssetHistory.file */
 async function persistHandoverPdfBufferToHistory(pdfBuffer, filename) {
@@ -242,7 +245,7 @@ import {
     userMayRespondVehicleServiceWorkflow,
     mergeWorkflowServiceRecord,
 } from './vehicleServiceWorkflowController.js';
-import { actorMayManageCarWashRequest } from '../utils/carWashWorkflow.js';
+import { actorMayManageCarWashRequest, findExistingCarWashForMonth, getLatestOccupiedCarWashMonth, normalizeCarWashMonthKey } from '../utils/carWashWorkflow.js';
 import {
     submitTireChangeGarage,
     completeTireChangeService,
@@ -1038,7 +1041,7 @@ export const getVehicleFleetDashboard = async (req, res) => {
             ],
         };
         const fleetSelect = listOnly
-            ? 'assetId name vehicleBrand plateEmirate plateNumber modelYear assetValue status registrationExpiryDate insuranceExpiryDate nextServiceDate oilChangeDate gearOilDueDate currentKilometer assignedTo assignedCompany acceptanceStatus pendingAction actionRequiredBy createdBy vehicleProfileActivationStatus vehicleDispositionStatus warrantyEnabled warrantyExpiryDate warrantyYears onServiceActive onLeaveActive typeId assignedDate pendingActionDetails updatedAt'
+            ? 'assetId name vehicleBrand plateEmirate plateNumber modelYear assetValue status registrationExpiryDate insuranceExpiryDate nextServiceDate oilChangeDate gearOilDueDate currentKilometer assignedTo assignedCompany acceptanceStatus pendingAction actionRequiredBy createdBy vehicleProfileActivationStatus vehicleDispositionStatus warrantyEnabled warrantyExpiryDate warrantyYears onServiceActive onLeaveActive typeId assignedDate pendingActionDetails updatedAt documents.type documents.expiryDate documents.issueDate documents.createdAt documents.status documents.documentStatus documents.description'
             : 'assetId name vehicleBrand plateEmirate plateNumber modelYear assetValue status registrationExpiryDate insuranceExpiryDate nextServiceDate oilChangeDate gearOilDueDate lastServiceDate currentKilometer assignedTo assignedCompany acceptanceStatus pendingAction services documents actionRequiredBy createdBy vehicleProfileActivationStatus vehicleDispositionStatus assignmentType temporaryEndDate warrantyEnabled warrantyExpiryDate warrantyYears accessories parkingExtendedDays parkingReminderSentAt parkingDurationCompleteSentAt onServiceActive onLeaveActive assignedDate pendingActionDetails updatedAt';
         const items = await AssetItem.find({ $and: [draftVis, fleetScope] })
             .populate('typeId', 'name')
@@ -1062,12 +1065,7 @@ export const getVehicleFleetDashboard = async (req, res) => {
             ? await resolveAdminOfficerEmployee().catch(() => null)
             : null;
 
-        const registrationExpiry = (v) => {
-            if (v.registrationExpiryDate) return new Date(v.registrationExpiryDate);
-            const reg = (v.documents || []).find((d) => String(d.type || '').toLowerCase() === 'registration');
-            if (reg?.expiryDate) return new Date(reg.expiryDate);
-            return null;
-        };
+        const registrationExpiry = (v) => resolveRegistrationExpiryDate(v);
 
         const fleetRows = vehicles.map((v) => {
             const total = listOnly
@@ -1169,8 +1167,32 @@ export const getVehicleFleetDashboard = async (req, res) => {
         let serviceDueSoon = 0;
         let regDue = 0;
         let regDueSoon = 0;
+        let oilServiceDue = 0;
+        let registrationExpiresWithin30 = 0;
+        let totalServices = 0;
+        const oilServiceDueRows = [];
+        const registrationExpiresWithin30Rows = [];
+
+        const dayDiff = (dateVal) => {
+            const t = new Date(dateVal);
+            if (Number.isNaN(t.getTime())) return null;
+            t.setHours(0, 0, 0, 0);
+            return Math.round((t.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+        };
+
+        const plateOf = (v) =>
+            [v.plateEmirate, v.plateNumber].filter(Boolean).join(' ').trim() || String(v.assetId || '').trim() || '—';
+
+        const vehicleModalBase = (v) => ({
+            vehicleId: String(v._id),
+            assetId: v.assetId || '',
+            plate: plateOf(v),
+            vehicleName: String(v.name || v.vehicleBrand || '').trim(),
+        });
 
         for (const v of vehicles) {
+            totalServices += Array.isArray(v.services) ? v.services.length : 0;
+
             const sd = nextMaintenanceDate(v);
             if (sd) {
                 const t = new Date(sd);
@@ -1178,24 +1200,144 @@ export const getVehicleFleetDashboard = async (req, res) => {
                 if (t < now) serviceDue++;
                 else if (t <= soonEnd) serviceDueSoon++;
             }
+
+            const oilDueRaw = v.gearOilDueDate || v.nextServiceDate || null;
+            if (oilDueRaw) {
+                const oilDiff = dayDiff(oilDueRaw);
+                if (oilDiff != null && oilDiff <= 0) {
+                    oilServiceDue++;
+                    oilServiceDueRows.push({
+                        ...vehicleModalBase(v),
+                        cardName: v.gearOilDueDate ? 'Gear Oil Service' : 'Oil / Next Service',
+                        expiryDate: oilDueRaw,
+                        daysRemaining: oilDiff,
+                        focusCard: 'vehicleService',
+                        tab: 'service',
+                    });
+                }
+            }
+
             const rd = registrationExpiry(v);
             if (rd) {
                 const t = new Date(rd);
                 t.setHours(0, 0, 0, 0);
                 if (t < now) regDue++;
                 else if (t <= soonEnd) regDueSoon++;
+                const regDiff = dayDiff(rd);
+                if (regDiff != null && regDiff <= 30) {
+                    registrationExpiresWithin30++;
+                    registrationExpiresWithin30Rows.push({
+                        ...vehicleModalBase(v),
+                        cardName: 'Mulkia (Registration)',
+                        expiryDate: rd,
+                        daysRemaining: regDiff,
+                        focusCard: 'vehicleRegistration',
+                        tab: 'basic',
+                    });
+                }
             }
         }
 
-        const stNorm = (s) => String(s || '').toLowerCase();
+        const docExpiryBuckets = {
+            Expired: [],
+            '10-30 Days': [],
+            More: [],
+        };
+        for (const v of vehicles) {
+            for (const doc of collectVehicleExpiryDocuments(v)) {
+                if (String(doc.docType || '') === 'service') continue;
+                const diff = dayDiff(doc.expiryDate);
+                if (diff == null) continue;
+                let key = 'More';
+                if (diff < 0) key = 'Expired';
+                else if (diff <= 30) key = '10-30 Days';
+                docExpiryBuckets[key].push({
+                    ...vehicleModalBase(v),
+                    cardName: doc.label,
+                    docType: doc.docType,
+                    expiryDate: doc.expiryDate,
+                    daysRemaining: diff,
+                    focusCard: resolveVehicleExpiryFocusCard(doc.docType),
+                    tab: resolveVehicleExpiryTab(doc.docType),
+                });
+            }
+        }
+        const sortExpiryRows = (rows) =>
+            [...rows].sort((a, b) => {
+                const an = Number(a?.daysRemaining);
+                const bn = Number(b?.daysRemaining);
+                if (Number.isFinite(an) && Number.isFinite(bn) && an !== bn) return an - bn;
+                return String(a?.plate || '').localeCompare(String(b?.plate || ''));
+            });
+
+        const documentExpiryChartData = [
+            { name: 'Expired', value: docExpiryBuckets.Expired.length, docs: sortExpiryRows(docExpiryBuckets.Expired) },
+            {
+                name: '10-30 Days',
+                value: docExpiryBuckets['10-30 Days'].length,
+                docs: sortExpiryRows(docExpiryBuckets['10-30 Days']),
+            },
+            { name: 'More', value: docExpiryBuckets.More.length, docs: sortExpiryRows(docExpiryBuckets.More) },
+        ];
+
+        const stNorm = (s) => String(s || '').toLowerCase().trim();
         let assigned = 0;
         let unassigned = 0;
         let inService = 0;
+        const assignedRows = [];
+        const unassignedRows = [];
+        const inServiceRows = [];
+        const totalServiceRows = [];
         for (const v of vehicles) {
             const st = stNorm(v.status);
-            if (v.assignedTo && st === 'assigned') assigned++;
-            if (!v.assignedTo && st === 'unassigned') unassigned++;
-            if (['service', 'on service', 'maintenance', 'online'].includes(st)) inService++;
+            const base = vehicleModalBase(v);
+            const serviceCount = Array.isArray(v.services) ? v.services.length : 0;
+            if (serviceCount > 0) {
+                totalServiceRows.push({
+                    ...base,
+                    cardName: 'Service records',
+                    serviceCount,
+                    daysRemaining: null,
+                    expiryDate: null,
+                    focusCard: '',
+                    tab: 'service',
+                });
+            }
+            // Assigned / Unassigned: vehicle status only (match fleet list summary).
+            if (st === 'assigned') {
+                assigned++;
+                assignedRows.push({
+                    ...base,
+                    cardName: 'Assigned',
+                    daysRemaining: null,
+                    expiryDate: null,
+                    focusCard: '',
+                    tab: 'basic',
+                });
+            }
+            if (st === 'unassigned' || st === 'available') {
+                unassigned++;
+                unassignedRows.push({
+                    ...base,
+                    cardName: 'Unassigned',
+                    daysRemaining: null,
+                    expiryDate: null,
+                    focusCard: '',
+                    tab: 'basic',
+                });
+            }
+            // In service: currently on service mode (not waiting / pending requests).
+            if (st === 'service' || st === 'on service' || st === 'in service') {
+                inService++;
+                inServiceRows.push({
+                    ...base,
+                    cardName: 'In service',
+                    daysRemaining: null,
+                    expiryDate: null,
+                    focusCard: '',
+                    tab: 'service',
+                });
+            }
         }
 
         let handoverPending = 0;
@@ -1312,9 +1454,23 @@ export const getVehicleFleetDashboard = async (req, res) => {
         res.json({
             reminders: {
                 service: { due: serviceDue, dueSoon: serviceDueSoon },
-                registration: { due: regDue, dueSoon: regDueSoon }
+                registration: { due: regDue, dueSoon: regDueSoon },
+                oilServiceDue,
+                registrationExpiresWithin30,
+                oilServiceDueRows: sortExpiryRows(oilServiceDueRows),
+                registrationExpiresWithin30Rows: sortExpiryRows(registrationExpiresWithin30Rows),
             },
-            vehicleStatus: { assigned, unassigned, inService },
+            vehicleStatus: {
+                assigned,
+                unassigned,
+                inService,
+                totalServices,
+                assignedRows,
+                unassignedRows,
+                inServiceRows,
+                totalServiceRows,
+            },
+            documentExpiryChartData,
             serviceRequest: { pending: daPending, confirmed: daApproved },
             handoverRequest: { pending: handoverPending, confirmed: handoverConfirmed },
             serviceCostByMonth,
@@ -5251,6 +5407,7 @@ export const assignAssetItem = async (req, res) => {
                                 workflowMeta,
                                 assigner,
                                 assignee: employeeToAssign,
+                                previousAssignee: fleetPreviousAssigneeEmp,
                                 adminOfficer: fleetAdminOfficerEmp,
                             });
                             await AssetHistory.findByIdAndUpdate(fleetHandoverHistoryId, {
@@ -6284,7 +6441,7 @@ export const downloadHandoverPdf = async (req, res) => {
 export const respondToAssignment = async (req, res) => {
     try {
         const { id } = req.params;
-        const { action, comments, handoverFineId } = req.body; // action: 'Accept', 'Reject', 'AcceptWithComments'
+        const { action, comments, handoverFineId, handoverFineIds } = req.body; // action: 'Accept', 'Reject', 'AcceptWithComments'
 
         if (!['Accept', 'Reject', 'AcceptWithComments'].includes(action)) {
             return res.status(400).json({ message: 'Invalid action.' });
@@ -6766,12 +6923,23 @@ export const respondToAssignment = async (req, res) => {
                 if (hrStage) {
                     const historyId = flowNow?.historyId || handoverFlow?.historyId;
                     if (historyId) {
+                        const fineIdList = [
+                            ...(Array.isArray(handoverFineIds) ? handoverFineIds : []),
+                            ...(handoverFineId ? [handoverFineId] : []),
+                        ]
+                            .map((value) => String(value || '').trim())
+                            .filter(Boolean);
+                        const uniqueFineIds = [...new Set(fineIdList)];
+                        const primaryFineId = uniqueFineIds[0] || null;
                         const handoverPatch = {
-                            'details.handoverApprovedWithFine': Boolean(handoverFineId),
+                            'details.handoverApprovedWithFine': uniqueFineIds.length > 0,
                             'details.handoverLifecycleStatus': 'approved',
                         };
-                        if (handoverFineId) {
-                            handoverPatch['details.handoverFineId'] = String(handoverFineId);
+                        if (primaryFineId) {
+                            handoverPatch['details.handoverFineId'] = String(primaryFineId);
+                        }
+                        if (uniqueFineIds.length > 0) {
+                            handoverPatch['details.handoverFineIds'] = uniqueFineIds;
                         }
                         handoverPatch['details.handoverHrApprovedAt'] = new Date();
                         await AssetHistory.updateOne({ _id: historyId }, { $set: handoverPatch }).catch(
@@ -8609,9 +8777,18 @@ export const returnAssetItem = async (req, res) => {
             return res.status(400).json({ message: FLEET_PROFILE_INACTIVE_ASSIGNMENT_MSG });
         }
 
+        if (fleetVehicle && String(item.status || '').trim().toLowerCase() !== 'assigned') {
+            return res.status(400).json({
+                message: 'Return is available only when the vehicle status is Assigned.',
+            });
+        }
+
         const isJwtAdmin = isJwtSystemSuperUser(req.user);
         const isSysAdmin = await isUserAdministrator(req.user?.id);
         const isAcFlow = await isUserInFlowchart(req.user, 'assetcontroller');
+        const isAdminOfficerFlow = fleetVehicle
+            ? await isUserInFlowchart(req.user, 'admincontroller').catch(() => false)
+            : false;
         const isHrFlow = fleetVehicle ? await isUserInFlowchart(req.user, 'hr').catch(() => false) : false;
         const hrHod = fleetVehicle ? await getDepartmentHOD('hr').catch(() => null) : null;
         const matchesDeptHr =
@@ -8634,6 +8811,7 @@ export const returnAssetItem = async (req, res) => {
             isSysAdmin ||
             isAcFlow ||
             matchesDeptAc ||
+            isAdminOfficerFlow ||
             (fleetVehicle && (isHrFlow || matchesDeptHr)) ||
             (isCompanyCoordinatorFlow && isCompanyAssignedAsset);
 
@@ -8653,7 +8831,7 @@ export const returnAssetItem = async (req, res) => {
             if (!isElevatedReturn && !isAssigneeReturn) {
                 return res.status(403).json({
                     message: fleetVehicle
-                        ? 'Only the assigned employee, HR, or an administrator can return this vehicle.'
+                        ? 'Only the assigned employee, Admin Officer, HR, or an administrator can return this vehicle.'
                         : 'Only the assigned employee, Asset Controller, or an administrator can return this asset.'
                 });
             }
@@ -8661,7 +8839,7 @@ export const returnAssetItem = async (req, res) => {
             if (!isElevatedReturn) {
                 return res.status(403).json({
                     message: fleetVehicle
-                        ? 'Only HR or an administrator can return a vehicle that is not assigned to an employee.'
+                        ? 'Only Admin Officer, HR, or an administrator can return a vehicle that is not assigned to an employee.'
                         : 'Only Asset Controller or an administrator can return an asset that is not assigned to an employee.'
                 });
             }
@@ -9239,6 +9417,7 @@ export const updateAssetStatus = async (req, res) => {
             // Build service record
             serviceRecord = {
                 _id: new mongoose.Types.ObjectId(),
+                serviceReqNo: allocateNextServiceReqNo(item),
                 date: new Date(),
                 expiryDate: expiryDate,
                 serviceDuration: normalizedDuration,
@@ -9285,6 +9464,7 @@ export const updateAssetStatus = async (req, res) => {
             if (serviceReport || amount) {
                 completionRecord = {
                     _id: new mongoose.Types.ObjectId(),
+                    serviceReqNo: allocateNextServiceReqNo(item),
                     date: new Date(),
                     description: serviceReport,
                     value: amount || 0,
@@ -9489,6 +9669,7 @@ const HANDOVER_LIST_DETAIL_KEYS = [
     'handoverLifecycleStatus',
     'handoverKind',
     'firstInspection',
+    'reinspection',
     'receiverAssessmentCompleted',
     'bodyConditionCompleted',
     'receiverAssessment',
@@ -9500,6 +9681,9 @@ const HANDOVER_LIST_DETAIL_KEYS = [
     'assignedDays',
     'handoverApprovedWithFine',
     'handoverItemFineWaivers',
+    'handoverItemFineInclusions',
+    'handoverFineId',
+    'handoverFineIds',
     'acceptanceStatus',
     'inspectionFormStatus',
     'handoverByDisplay',
@@ -10433,7 +10617,9 @@ function normalizeHandoverItemFineWaivers(list) {
     return normalized;
 }
 
-// @desc    Waive or restore a handover accessory/body item from item-level fines
+const normalizeHandoverItemFineInclusions = normalizeHandoverItemFineWaivers;
+
+// @desc    Mark handover accessory/body item as include/exclude for fine (HR decision)
 // @route   PUT /api/AssetItem/history-record/:historyId/handover-item-fine-waiver
 // @access  Private (Flowchart HR or admin)
 export const updateHistoryHandoverItemFineWaiver = async (req, res) => {
@@ -10441,7 +10627,19 @@ export const updateHistoryHandoverItemFineWaiver = async (req, res) => {
         const { historyId } = req.params;
         const itemType = String(req.body?.itemType || '').trim();
         const itemKey = String(req.body?.itemKey || '').trim();
-        const waived = req.body?.waived === true;
+        const decisionRaw = String(req.body?.decision || '').trim().toLowerCase();
+        const waived =
+            decisionRaw === 'exclude'
+                ? true
+                : decisionRaw === 'include'
+                  ? false
+                  : req.body?.waived === true;
+        const include =
+            decisionRaw === 'include'
+                ? true
+                : decisionRaw === 'exclude'
+                  ? false
+                  : req.body?.included === true;
 
         if (!itemType || !itemKey) {
             return res.status(400).json({ message: 'itemType and itemKey are required.' });
@@ -10464,16 +10662,20 @@ export const updateHistoryHandoverItemFineWaiver = async (req, res) => {
         const detailsBase =
             record.details && typeof record.details === 'object' ? { ...record.details } : {};
         const existingWaivers = normalizeHandoverItemFineWaivers(detailsBase.handoverItemFineWaivers);
-        const waiverId = `${itemType}:${itemKey}`;
+        const existingInclusions = normalizeHandoverItemFineInclusions(
+            detailsBase.handoverItemFineInclusions,
+        );
+        const decisionId = `${itemType}:${itemKey}`;
 
         let nextWaivers = existingWaivers.filter(
-            (entry) => `${entry.itemType}:${entry.itemKey}` !== waiverId,
+            (entry) => `${entry.itemType}:${entry.itemKey}` !== decisionId,
         );
-        if (waived) {
-            nextWaivers.push({ itemType, itemKey });
-        }
+        let nextInclusions = existingInclusions.filter(
+            (entry) => `${entry.itemType}:${entry.itemKey}` !== decisionId,
+        );
 
-        if (waived) {
+        if (waived || decisionRaw === 'exclude') {
+            nextWaivers.push({ itemType, itemKey });
             const linkedFine = await Fine.findOne({
                 'handoverApprovalContext.historyId': String(historyId),
                 'handoverApprovalContext.itemType': itemType,
@@ -10482,9 +10684,12 @@ export const updateHistoryHandoverItemFineWaiver = async (req, res) => {
             if (linkedFine) {
                 await Fine.findByIdAndDelete(linkedFine._id);
             }
+        } else if (include || decisionRaw === 'include') {
+            nextInclusions.push({ itemType, itemKey });
         }
 
         detailsBase.handoverItemFineWaivers = nextWaivers;
+        detailsBase.handoverItemFineInclusions = nextInclusions;
         record.details = detailsBase;
         record.markModified('details');
         await record.save();
@@ -10804,21 +11009,8 @@ export const addAssetService = async (req, res) => {
             });
         }
 
-        // Avoid overlapping vehicle service workflows on the same asset.
-        // If one request is already in pipeline, force users to finish/reject it first
-        // so each newly raised request starts cleanly from HR.
-        if (isVehicleAssetForServiceGate() && !isDraft) {
-            const activeStage = String(asset.activeServiceWorkflow?.stage || '').trim();
-            const hasActiveWorkflow =
-                activeStage &&
-                !['complete', 'rejected'].includes(activeStage.toLowerCase());
-            if (hasActiveWorkflow) {
-                return res.status(409).json({
-                    message:
-                        'A vehicle service request is already in progress for this asset. Please complete or reject the current workflow before raising a new request.',
-                });
-            }
-        }
+        // Multiple same-type (and cross-type) service requests may coexist.
+        // A previous request still ending does not block raising or approving the next.
 
         // Fleet vehicle service request: any authenticated user (same rule as route middleware).
         const isFleetVehicleServiceRequest =
@@ -10882,6 +11074,31 @@ export const addAssetService = async (req, res) => {
                 return res.status(403).json({
                     message:
                         'Access denied. Only the Admin Officer or assigned user can raise a car wash request.',
+                });
+            }
+            let earlyCarWashRemark = {};
+            if (remark && typeof remark === 'string') {
+                try {
+                    earlyCarWashRemark = JSON.parse(remark);
+                } catch {
+                    earlyCarWashRemark = {};
+                }
+            } else if (remark && typeof remark === 'object') {
+                earlyCarWashRemark = remark;
+            }
+            const washMonth = earlyCarWashRemark?.carWashMonth;
+            if (washMonth && findExistingCarWashForMonth(asset, washMonth)) {
+                return res.status(400).json({
+                    message:
+                        'This vehicle already has a car wash for that month. Only one car wash is allowed per month.',
+                });
+            }
+            const washMonthKey = normalizeCarWashMonthKey(washMonth);
+            const latestWashMonth = getLatestOccupiedCarWashMonth(asset);
+            if (washMonthKey && latestWashMonth && washMonthKey <= latestWashMonth) {
+                return res.status(400).json({
+                    message:
+                        'Car wash month must be after the previous wash month. Previous and earlier months are not allowed.',
                 });
             }
         } else if (isOilServiceBootstrap || isVehicleServiceTabBootstrap) {
@@ -11037,6 +11254,7 @@ export const addAssetService = async (req, res) => {
         }
         const newService = {
             _id: new mongoose.Types.ObjectId(),
+            serviceReqNo: allocateNextServiceReqNo(asset),
             serviceType,
             date: date || new Date(),
             expiryDate: expiryDate || null,
@@ -11459,14 +11677,6 @@ export const submitAssetServiceDraft = async (req, res) => {
             const fresh = await AssetItem.findById(asset._id).lean();
             const out = fresh?.services?.find((s) => String(s._id) === String(service._id)) || service.toObject();
             return res.json({ message: 'Oil service assignment submitted', service: out, asset: fresh });
-        }
-
-        const activeStage = String(asset.activeServiceWorkflow?.stage || '').trim().toLowerCase();
-        if (activeStage && !['complete', 'rejected'].includes(activeStage)) {
-            return res.status(409).json({
-                message:
-                    'A vehicle service request is already in progress for this asset. Please complete or reject the current workflow before submitting this draft.',
-            });
         }
 
         remarkObj.requestStatus = 'submitted';

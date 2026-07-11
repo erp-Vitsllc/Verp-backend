@@ -217,6 +217,7 @@ function hasFleetVehicleRecordMarkers(asset) {
     if (String(asset.vehicleBrand || '').trim()) return true;
     if (String(asset.vehicleCode || '').trim()) return true;
     if (String(asset.plateEmirate || '').trim()) return true;
+    if (asset.locatorDeviceId != null && asset.locatorDeviceId !== '') return true;
     const profileStatus = String(asset.vehicleProfileActivationStatus || '').trim().toLowerCase();
     if (profileStatus && profileStatus !== 'none') return true;
     const inspectionStatus = String(asset.vehicleInspectionStatus || '').trim().toLowerCase();

@@ -14,6 +14,11 @@ import {
 } from './assetOperationalFlags.js';
 import { mergeWorkflowServiceRecord } from '../controllers/vehicleServiceWorkflowController.js';
 import { isReqUserSystemSuperUser } from './systemSuperUser.js';
+import { allocateNextServiceReqNo } from './assetServiceReqNo.js';
+import {
+    commitWorkflowContext,
+    getWorkflowContextForService,
+} from './vehicleServiceWorkflowResolve.js';
 
 const STAGE_SCHEDULED = 'scheduled_service';
 const STAGE_COMPLETE = 'complete';
@@ -26,11 +31,16 @@ export function isOilServiceWorkflowRecord(wf, service) {
 }
 
 export function isOilServiceLive(asset, service = null) {
-    const wf = asset?.activeServiceWorkflow || {};
+    const serviceId = service?._id;
+    const ctx = serviceId
+        ? getWorkflowContextForService(asset, serviceId)
+        : { wf: asset?.activeServiceWorkflow || null, bindActive: true };
+    const wf = ctx.wf || {};
     if (!isOilServiceWorkflowRecord(wf, service)) return false;
     if (wf.oilServiceLiveAt) return true;
     const remark = parseOilServiceRemark(service);
     if (remark?.oilServiceLiveAt) return true;
+    if (!ctx.bindActive) return false;
     return asset?.onServiceActive === true && String(wf.stage || '').toLowerCase() === STAGE_SCHEDULED;
 }
 
@@ -681,6 +691,15 @@ export async function submitOilServiceAssignment(asset, serviceId, req) {
     remark.workflowStage = STAGE_SCHEDULED;
     service.remark = JSON.stringify(remark);
 
+    // Keep prior in-progress workflow on its service row when starting another oil request.
+    const priorWf = asset.activeServiceWorkflow;
+    if (
+        priorWf?.serviceRecordId &&
+        String(priorWf.serviceRecordId) !== String(service._id)
+    ) {
+        persistWorkflowSnapshot(asset);
+    }
+
     if (!asset.activeServiceWorkflow) asset.activeServiceWorkflow = {};
     asset.activeServiceWorkflow = {
         serviceRecordId: service._id,
@@ -692,7 +711,7 @@ export async function submitOilServiceAssignment(asset, serviceId, req) {
         serviceDurationEmailSentAt: null,
         oilServiceOverdueNotifiedAt: null,
         oilServiceLiveAt: null,
-        history: asset.activeServiceWorkflow?.history || [],
+        history: [],
     };
 
     recordOilServiceActivity(asset, service, service._id, {
@@ -748,12 +767,9 @@ export async function submitOilServiceAssignment(asset, serviceId, req) {
 export async function saveOilServiceDetailsDraft(asset, serviceId, serviceUpdates) {
     const service = asset.services?.id?.(serviceId);
     if (!service) throw new Error('Service record not found');
-    const wf = asset.activeServiceWorkflow;
+    const { wf, bindActive } = getWorkflowContextForService(asset, serviceId);
     if (!wf || wf.stage !== STAGE_SCHEDULED) {
         throw new Error('Oil service details can only be saved while the service is active.');
-    }
-    if (String(wf.serviceRecordId) !== String(serviceId)) {
-        throw new Error('Service record does not match active workflow.');
     }
     if (!isOilServiceLive(asset, service)) {
         throw new Error('Service details are available only after the scheduled start date, when the vehicle is on service.');
@@ -768,7 +784,7 @@ export async function saveOilServiceDetailsDraft(asset, serviceId, serviceUpdate
         service.remark = JSON.stringify({ ...remark, ...parseOilServiceRemark(service) });
     }
 
-    persistWorkflowSnapshot(asset);
+    commitWorkflowContext(asset, serviceId, { wf, bindActive });
     asset.markModified('services');
     await asset.save();
     return asset;
@@ -780,12 +796,9 @@ export async function saveOilServiceDetailsDraft(asset, serviceId, serviceUpdate
 export async function submitOilServiceDetails(asset, serviceId, serviceUpdates, req) {
     const service = asset.services?.id?.(serviceId);
     if (!service) throw new Error('Service record not found');
-    const wf = asset.activeServiceWorkflow;
+    const { wf, bindActive } = getWorkflowContextForService(asset, serviceId);
     if (!wf || wf.stage !== STAGE_SCHEDULED) {
         throw new Error('Oil service details can only be submitted while the service is active.');
-    }
-    if (String(wf.serviceRecordId) !== String(serviceId)) {
-        throw new Error('Service record does not match active workflow.');
     }
     if (!isOilServiceLive(asset, service)) {
         throw new Error('Service details can only be submitted after the scheduled start date, when the vehicle is on service.');
@@ -820,12 +833,13 @@ export async function submitOilServiceDetails(asset, serviceId, serviceUpdates, 
         note: 'Oil service completed',
     });
 
-    applyPostServiceOperationalState(asset, { statusBeforeService: wf.previousStatus || null });
-    asset.onServiceActive = false;
+    if (bindActive) {
+        applyPostServiceOperationalState(asset, { statusBeforeService: wf.previousStatus || null });
+        asset.onServiceActive = false;
+    }
 
-    persistWorkflowSnapshot(asset);
+    commitWorkflowContext(asset, serviceId, { wf, bindActive });
     asset.markModified('services');
-    asset.markModified('activeServiceWorkflow');
     await asset.save();
 
     const populated = await AssetItem.findById(asset._id)
@@ -856,7 +870,7 @@ export async function submitOilServiceDetails(asset, serviceId, serviceUpdates, 
 export async function updateOilServiceDates(asset, serviceId, { serviceStartDate, serviceEndDate }, reqUser) {
     const service = asset.services?.id?.(serviceId);
     if (!service) throw new Error('Service record not found');
-    const wf = asset.activeServiceWorkflow;
+    const { wf, bindActive } = getWorkflowContextForService(asset, serviceId);
     if (!wf || wf.stage !== STAGE_SCHEDULED) {
         throw new Error('Service dates can only be updated during an active oil service.');
     }
@@ -913,9 +927,8 @@ export async function updateOilServiceDates(asset, serviceId, { serviceStartDate
         mergedRemark.nextChangeMonth = String(serviceEndDate).slice(0, 7);
     }
     service.remark = JSON.stringify(mergedRemark);
-    persistWorkflowSnapshot(asset);
+    commitWorkflowContext(asset, serviceId, { wf, bindActive });
     asset.markModified('services');
-    asset.markModified('activeServiceWorkflow');
     await asset.save();
     return asset;
 }
@@ -924,7 +937,7 @@ export async function updateOilServiceDates(asset, serviceId, { serviceStartDate
 export async function updateOilServiceEndDateExtend(asset, serviceId, { serviceEndDate }, reqUser) {
     const service = asset.services?.id?.(serviceId);
     if (!service) throw new Error('Service record not found');
-    const wf = asset.activeServiceWorkflow;
+    const { wf, bindActive } = getWorkflowContextForService(asset, serviceId);
     if (!wf || !isOilServiceWorkflowRecord(wf, service)) {
         throw new Error('Not an oil service workflow.');
     }
@@ -956,9 +969,8 @@ export async function updateOilServiceEndDateExtend(asset, serviceId, { serviceE
     }
 
     service.remark = JSON.stringify(remark);
-    persistWorkflowSnapshot(asset);
+    commitWorkflowContext(asset, serviceId, { wf, bindActive });
     asset.markModified('services');
-    asset.markModified('activeServiceWorkflow');
     await asset.save();
     return asset;
 }
@@ -1137,6 +1149,7 @@ export async function maybeAutoCreateOilServiceDue(assetDoc) {
 
     const newService = {
         _id: serviceId,
+        serviceReqNo: allocateNextServiceReqNo(assetDoc),
         serviceType: 'Oil Service',
         date: new Date(),
         currentKm: remarkObj.currentKm,

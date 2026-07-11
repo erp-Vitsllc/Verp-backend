@@ -72,34 +72,26 @@ export function buildFleetHandoverDisplayLabels({
         };
     }
     if (isInspection) {
-        const targetName =
-            workflowMeta?.stages?.target?.actorName ||
-            formatEmployeeDisplayName(adminOfficer || assignee);
-        const targetEmpId = String(
-            workflowMeta?.stages?.target?.actorEmployeeId ||
-                adminOfficer?.employeeId ||
-                assignee?.employeeId ||
-                '',
-        ).trim();
-        const handoverToDisplay =
-            targetName && targetEmpId ? `${targetName} (${targetEmpId})` : targetName || targetEmpId || '—';
-        return { handoverByDisplay: '—', handoverToDisplay };
+        // Inspection / reinspection: By stays empty; To = owner if assigned, else Admin Officer.
+        const custodian = previousAssignee || adminOfficer || assignee;
+        return {
+            handoverByDisplay: '—',
+            handoverToDisplay: formatHandoverPersonDisplayLabel(custodian) || '—',
+        };
     }
 
+    // Assign / reassign: By = Admin Officer if unassigned (from pool), else current assigned owner;
+    // To = targeted user.
     const fromPool = Boolean(workflowMeta?.wasAssignedFromPool);
     let handoverByDisplay;
-    if (fromPool) {
+    if (fromPool || !previousAssignee) {
         handoverByDisplay =
-            workflowMeta?.stages?.assigner?.actorName ||
-            formatHandoverPersonDisplayLabel(adminOfficer || assigner) ||
-            '—';
-    } else if (previousAssignee) {
-        handoverByDisplay = formatHandoverPersonDisplayLabel(previousAssignee) || '—';
-    } else {
-        handoverByDisplay =
+            formatHandoverPersonDisplayLabel(adminOfficer) ||
             workflowMeta?.stages?.assigner?.actorName ||
             formatHandoverPersonDisplayLabel(assigner) ||
             '—';
+    } else {
+        handoverByDisplay = formatHandoverPersonDisplayLabel(previousAssignee) || '—';
     }
 
     const handoverToDisplay = formatHandoverPersonDisplayLabel(assignee) || '—';
@@ -776,9 +768,39 @@ export function isHandoverReportsComplete(historyRecord) {
     const details = historyRecord?.details || {};
     const handoverKind = String(details.handoverKind || '').trim();
     if (handoverKind === 'vehicle_inspection') {
-        return isBodyConditionReportComplete(details);
+        return details.bodyConditionCompleted === true || isBodyConditionReportComplete(details);
+    }
+    if (details.receiverAssessmentCompleted === true && details.bodyConditionCompleted === true) {
+        return true;
     }
     return isReceiverAssessmentComplete(details) && isBodyConditionReportComplete(details);
+}
+
+export function getHandoverReportsIncompleteError(historyRecord) {
+    const details = historyRecord?.details || {};
+    const handoverKind = String(details.handoverKind || '').trim();
+    if (handoverKind === 'vehicle_inspection') {
+        if (details.bodyConditionCompleted === true || isBodyConditionReportComplete(details)) {
+            return null;
+        }
+        return 'Complete Body Condition Report (Go to Approval) before accepting.';
+    }
+
+    const assessmentOk =
+        details.receiverAssessmentCompleted === true || isReceiverAssessmentComplete(details);
+    const bodyOk =
+        details.bodyConditionCompleted === true || isBodyConditionReportComplete(details);
+
+    if (assessmentOk && bodyOk) return null;
+
+    const missing = [];
+    if (!assessmentOk) {
+        missing.push('Vehicle Accessories (click Process Next)');
+    }
+    if (!bodyOk) {
+        missing.push('Body Condition Report (click Go to Approval)');
+    }
+    return `Complete ${missing.join(' and ')} before accepting.`;
 }
 
 export async function upsertHandoverDashboardAction({
@@ -1136,7 +1158,9 @@ export async function advanceFleetHandoverOnAccept({
     if (stage === HANDOVER_FLOW_STAGES.TARGET) {
         if (!isHandoverReportsComplete(historyRecord)) {
             return {
-                error: 'Complete Vehicle Assessment Report By Receiver and Body Condition Report before accepting.',
+                error:
+                    getHandoverReportsIncompleteError(historyRecord) ||
+                    'Complete Vehicle Accessories (Process Next) and Body Condition Report (Go to Approval) before accepting.',
             };
         }
         if (actor?._id) {

@@ -27,6 +27,7 @@ import {
     resolveAssetCreationApproverEmployee,
     creationApproverRoleLabel,
     isFleetVehicleAssetFields,
+    userIsFlowchartAdminOfficer,
 } from '../utils/assetApprovalHelpers.js';
 import {
     FLEET_VEHICLE_ASSET_ID_PREFIX,
@@ -1148,7 +1149,8 @@ export const updateAssetItem = async (req, res) => {
 
         const isAdmin =
             isJwtSystemSuperUser(req.user) ||
-            await isUserAdministrator(req.user?.id);
+            (await isUserAdministrator(req.user?.id)) ||
+            (await userIsFlowchartAdminOfficer(req).catch(() => false));
         const isAssetController = await isUserInFlowchart(req.user, 'assetcontroller');
 
         // Asset Category / Asset Type documents (not AssetItem): only Asset Controller may edit names and images
@@ -1304,21 +1306,17 @@ export const updateAssetItem = async (req, res) => {
 
         const vehicleTypeCheck = await AssetItem.findById(id)
             .populate('typeId', 'name')
-            .select('plateNumber typeId')
+            .select(
+                'plateNumber plateEmirate typeId vehicleBrand vehicleCode vehicleProfileActivationStatus vehicleInspectionStatus vehicleDispositionStatus vehicleAccessoriesListEntries locatorDeviceId',
+            )
             .lean()
             .catch(() => null);
-        const isFleetVehicleAssetForCollaborativeEdit = (() => {
-            if (!vehicleTypeCheck) return false;
-            const plate = String(vehicleTypeCheck.plateNumber || '').trim();
-            if (plate) return true;
-            const tn = String(vehicleTypeCheck.typeId?.name || '').toLowerCase();
-            return (
-                tn.includes('vehicle') ||
-                tn.includes('car') ||
-                tn.includes('fleet') ||
-                tn.includes('truck')
-            );
-        })();
+        // Locator stubs often have no plate yet — still treat as fleet via emirate / profile / device markers.
+        const isFleetVehicleAssetForCollaborativeEdit = isFleetVehicleAssetFields({
+            plateNumber: vehicleTypeCheck?.plateNumber,
+            typeName: vehicleTypeCheck?.typeId?.name,
+            asset: vehicleTypeCheck,
+        });
 
         if (isSubmittedForApproval) {
             if (isCreator && !isAdmin) {

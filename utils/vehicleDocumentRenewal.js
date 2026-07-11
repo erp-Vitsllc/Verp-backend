@@ -211,6 +211,20 @@ export function syncVehicleExpiryFieldsFromLiveDocuments(asset) {
     if (ins?.expiryDate) asset.insuranceExpiryDate = ins.expiryDate;
 }
 
+/** Prefer stored field; otherwise latest live registration document expiry. */
+export function resolveRegistrationExpiryDate(asset) {
+    if (asset?.registrationExpiryDate) {
+        const d = new Date(asset.registrationExpiryDate);
+        if (!Number.isNaN(d.getTime())) return d;
+    }
+    const reg = pickLatestLiveDoc(asset, 'registration');
+    if (reg?.expiryDate) {
+        const d = new Date(reg.expiryDate);
+        if (!Number.isNaN(d.getTime())) return d;
+    }
+    return null;
+}
+
 export function isRenewPrimaryDocumentType(typeName) {
     const t = normType(typeName);
     return t === 'registration' || t === 'insurance';

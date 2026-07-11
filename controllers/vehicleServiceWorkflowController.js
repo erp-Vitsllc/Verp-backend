@@ -671,6 +671,10 @@ export async function maybeStartVehicleServiceWorkflow(asset, { serviceRecordId,
         if (isAccidentRepair) {
             const adminOfficer = await getDepartmentHOD('admincontroller');
 
+            if (asset.activeServiceWorkflow?.serviceRecordId) {
+                persistWorkflowSnapshotToServiceSubdoc(asset);
+            }
+
             asset.activeServiceWorkflow = {
                 serviceRecordId,
                 stage: ACCIDENT_REPAIR_STAGE.ADMIN_OFFICER,
@@ -717,18 +721,10 @@ export async function maybeStartVehicleServiceWorkflow(asset, { serviceRecordId,
         }
 
         const cur = asset.activeServiceWorkflow;
-        if (cur?.stage && ![STAGE.COMPLETE, STAGE.REJECTED].includes(cur.stage)) {
-            return;
-        }
-
-        if (
-            cur?.serviceRecordId &&
-            [STAGE.COMPLETE, STAGE.REJECTED].includes(cur.stage)
-        ) {
-            const prevSub = asset.services?.id?.(cur.serviceRecordId);
-            if (prevSub && !prevSub.workflowSnapshot?.stage) {
-                persistWorkflowSnapshotToServiceSubdoc(asset);
-            }
+        // Snapshot any in-progress (or finished) workflow onto its service row so a new
+        // request can start while a previous same-type service is still ending.
+        if (cur?.serviceRecordId) {
+            persistWorkflowSnapshotToServiceSubdoc(asset);
         }
 
         const hr = await resolveAssigneeForStage(STAGE.HR);
@@ -813,8 +809,8 @@ export async function maybeStartCarWashWorkflow(asset, { serviceRecordId, req })
         if (!serviceSub) return;
 
         const cur = asset.activeServiceWorkflow;
-        if (cur?.stage && ![STAGE.COMPLETE, STAGE.REJECTED].includes(cur.stage)) {
-            return;
+        if (cur?.serviceRecordId) {
+            persistWorkflowSnapshotToServiceSubdoc(asset);
         }
 
         const accounts = await resolveAssigneeForStage(STAGE.ACCOUNTS);

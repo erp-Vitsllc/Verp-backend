@@ -7,6 +7,7 @@ const locatorGpsSnapshotSchema = new mongoose.Schema(
         uniqueId: { type: String, default: '', index: true },
         odometer: { type: Number, default: 0 },
         totalDistanceM: { type: Number, default: 0 },
+        expenseAed: { type: Number, default: 0 },
         state: { type: String, default: '' },
         speedKmh: { type: Number, default: 0 },
         capturedAt: { type: Date, default: Date.now },

@@ -10,6 +10,10 @@ import { resolveEmployeeEmail } from './resolveEmployeeEmail.js';
 import { applyPostServiceOperationalState } from './assetOperationalFlags.js';
 import { actorMayManageTireChangeRequest, getRequesterName } from './oilServiceWorkflow.js';
 import { generateFineIdInternal } from '../controllers/fine/addFine.js';
+import {
+    commitWorkflowContext,
+    getWorkflowContextForService,
+} from './vehicleServiceWorkflowResolve.js';
 
 export const TIRE_CHANGE_STAGE = {
     HR: 'pending_hr',
@@ -174,12 +178,9 @@ export async function updateTireChangeQuoteEmployeeRows(asset, serviceId, employ
         throw new Error('Not a tire change service record.');
     }
 
-    const wf = asset.activeServiceWorkflow || {};
-    if (!isTireChangeWorkflow(wf, service)) {
+    const { wf, bindActive } = getWorkflowContextForService(asset, serviceId);
+    if (!wf || !isTireChangeWorkflow(wf, service)) {
         throw new Error('No active tire change workflow for this service.');
-    }
-    if (String(wf.serviceRecordId) !== String(serviceId)) {
-        throw new Error('Service record does not match active workflow.');
     }
     const stage = String(wf.stage || '').toLowerCase();
     if ([TIRE_CHANGE_STAGE.COMPLETE, TIRE_CHANGE_STAGE.REJECTED].includes(stage)) {
@@ -205,6 +206,7 @@ export async function updateTireChangeQuoteEmployeeRows(asset, serviceId, employ
     remark.employeeLiabilityRows = payload;
     remark.employeeLiabilityTotal = payload.reduce((sum, row) => sum + row.paidAmount, 0);
     service.remark = JSON.stringify(remark);
+    commitWorkflowContext(asset, serviceId, { wf, bindActive });
     asset.markModified('services');
     await asset.save();
 
@@ -214,11 +216,8 @@ export async function updateTireChangeQuoteEmployeeRows(asset, serviceId, employ
 export async function submitTireChangeGarage(asset, serviceId, serviceUpdates, req) {
     const service = asset.services?.id?.(serviceId);
     if (!service) throw new Error('Service record not found');
-    const wf = asset.activeServiceWorkflow || {};
-    if (!isTireChangeWorkflow(wf, service)) throw new Error('Not a tire change workflow.');
-    if (String(wf.serviceRecordId) !== String(serviceId)) {
-        throw new Error('Service record does not match active workflow.');
-    }
+    const { wf, bindActive } = getWorkflowContextForService(asset, serviceId);
+    if (!wf || !isTireChangeWorkflow(wf, service)) throw new Error('Not a tire change workflow.');
     if (String(wf.stage || '').toLowerCase() !== TIRE_CHANGE_STAGE.ADMIN_OFFICER) {
         throw new Error('Garage can only be updated while waiting for Admin Officer.');
     }
@@ -249,8 +248,7 @@ export async function submitTireChangeGarage(asset, serviceId, serviceUpdates, r
     wf.stage = TIRE_CHANGE_STAGE.ACCOUNTS;
     wf.accountsPendingSince = new Date();
     wf.accountsReminderAt = new Date(Date.now() + TWO_DAYS_MS);
-    asset.activeServiceWorkflow = wf;
-    asset.markModified('activeServiceWorkflow');
+    commitWorkflowContext(asset, serviceId, { wf, bindActive });
     asset.markModified('services');
     await asset.save();
 
@@ -404,11 +402,8 @@ export async function createTireChangeEmployeeFines(asset, service, reqUser) {
 export async function completeTireChangeService(asset, serviceId, serviceUpdates, req) {
     const service = asset.services?.id?.(serviceId);
     if (!service) throw new Error('Service record not found');
-    const wf = asset.activeServiceWorkflow || {};
-    if (!isTireChangeWorkflow(wf, service)) throw new Error('Not a tire change workflow.');
-    if (String(wf.serviceRecordId) !== String(serviceId)) {
-        throw new Error('Service record does not match active workflow.');
-    }
+    const { wf, bindActive } = getWorkflowContextForService(asset, serviceId);
+    if (!wf || !isTireChangeWorkflow(wf, service)) throw new Error('Not a tire change workflow.');
     const stage = String(wf.stage || '').toLowerCase();
     const { SHOP_SERVICE_SCHEDULED_STAGE, isShopServiceLive } = await import('./vehicleShopServiceScheduled.js');
     const mayComplete =
@@ -441,13 +436,14 @@ export async function completeTireChangeService(asset, serviceId, serviceUpdates
 
     wf.stage = TIRE_CHANGE_STAGE.COMPLETE;
     wf.completedAt = new Date();
-    asset.activeServiceWorkflow = wf;
-    applyPostServiceOperationalState(asset, { statusBeforeService: wf.previousStatus || null });
+    commitWorkflowContext(asset, serviceId, { wf, bindActive });
+    if (bindActive) {
+        applyPostServiceOperationalState(asset, { statusBeforeService: wf.previousStatus || null });
+    }
 
     await createTireChangeEmployeeFines(asset, asset.services.id(serviceId), req.user);
 
     asset.markModified('services');
-    asset.markModified('activeServiceWorkflow');
     await asset.save();
 
     await syncDashboardAction({

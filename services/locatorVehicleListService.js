@@ -6,6 +6,10 @@ import { generateNextFleetVehicleAssetId } from '../utils/fleetVehicleAssetId.js
 import { fetchLatestPositions, isLocatorConfigured, locatorLogin } from './locatorService.js';
 import { getCachedLocatorPositions } from './locatorWebSocketService.js';
 import { readLocatorTokens } from '../utils/locatorTokenStore.js';
+import { resolveRegistrationExpiryDate } from '../utils/vehicleDocumentRenewal.js';
+
+const ERP_VEHICLE_LIST_SELECT =
+    'assetId name plateEmirate plateNumber modelYear currentKilometer status registrationExpiryDate assignedTo assignedCompany acceptanceStatus vehicleProfileActivationStatus vehicleDispositionStatus onServiceActive onLeaveActive pendingAction actionRequiredBy assignedDate pendingActionDetails updatedAt locatorDeviceId documents.type documents.expiryDate documents.issueDate documents.createdAt documents.status documents.documentStatus documents.description';
 
 let lastLocatorLatestFetchAt = 0;
 const LOCATOR_LATEST_MIN_INTERVAL_MS = 60 * 1000;
@@ -502,9 +506,7 @@ async function loadErpFleetVehicles() {
         .populate('typeId', 'name')
         .populate('assignedTo', 'firstName lastName employeeId')
         .populate('assignedCompany', 'name nickName companyShortName companyName')
-        .select(
-            'assetId name plateEmirate plateNumber modelYear currentKilometer status registrationExpiryDate assignedTo assignedCompany acceptanceStatus vehicleProfileActivationStatus vehicleDispositionStatus onServiceActive onLeaveActive pendingAction actionRequiredBy assignedDate pendingActionDetails updatedAt locatorDeviceId',
-        )
+        .select(ERP_VEHICLE_LIST_SELECT)
         .lean();
 
     return items.filter((it) => {
@@ -516,7 +518,7 @@ async function loadErpFleetVehicles() {
 }
 
 function mapErpVehicleToListRow(erp, locatorOverlay = null) {
-    const regExp = erp.registrationExpiryDate ? new Date(erp.registrationExpiryDate) : null;
+    const regExp = resolveRegistrationExpiryDate(erp);
 
     return {
         _id: erp._id,
@@ -725,9 +727,7 @@ async function loadErpVehicleByLocatorDeviceId(deviceId) {
         .populate('typeId', 'name')
         .populate('assignedTo', 'firstName lastName employeeId')
         .populate('assignedCompany', 'name nickName companyShortName companyName')
-        .select(
-            'assetId name plateEmirate plateNumber modelYear currentKilometer status registrationExpiryDate assignedTo assignedCompany acceptanceStatus vehicleProfileActivationStatus vehicleDispositionStatus onServiceActive onLeaveActive pendingAction actionRequiredBy assignedDate pendingActionDetails updatedAt locatorDeviceId',
-        )
+        .select(ERP_VEHICLE_LIST_SELECT)
         .lean();
 
     return item || null;

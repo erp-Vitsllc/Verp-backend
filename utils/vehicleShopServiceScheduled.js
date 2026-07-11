@@ -3,6 +3,7 @@ import { getDepartmentHOD } from './getDepartmentHOD.js';
 import { sendVehicleServiceWorkflowEmail } from './sendVehicleServiceWorkflowEmail.js';
 import { syncDashboardAction } from './syncDashboard.js';
 import { applyServiceActiveState } from './assetOperationalFlags.js';
+import { getWorkflowContextForService } from './vehicleServiceWorkflowResolve.js';
 
 export const SHOP_SERVICE_SCHEDULED_STAGE = 'scheduled_service';
 
@@ -187,9 +188,13 @@ export function isShopServiceWorkflowRecord(wf, service) {
 export function isShopServiceLive(asset, service) {
     const remark = parseRemark(service);
     if (String(remark.shopServiceLiveAt || '').trim()) return true;
+    const serviceId = service?._id;
+    if (serviceId) {
+        const { wf } = getWorkflowContextForService(asset, serviceId);
+        return Boolean(wf?.shopServiceLiveAt);
+    }
     const wf = asset?.activeServiceWorkflow || {};
-    if (wf.shopServiceLiveAt) return true;
-    return false;
+    return Boolean(wf.shopServiceLiveAt);
 }
 
 /**

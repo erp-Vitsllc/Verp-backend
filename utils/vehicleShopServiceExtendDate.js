@@ -7,6 +7,10 @@ import {
 } from './oilServiceWorkflow.js';
 import { SHOP_SERVICE_TYPE_LABELS } from './vehicleShopServiceScheduled.js';
 import { isReqUserSystemSuperUser } from './systemSuperUser.js';
+import {
+    commitWorkflowContext,
+    getWorkflowContextForService,
+} from './vehicleServiceWorkflowResolve.js';
 
 const BLOCKED_STAGES = new Set(['complete', 'rejected']);
 
@@ -43,8 +47,8 @@ export async function userMayExtendServiceEndDate(reqUser, asset, serviceId) {
     const service = asset.services?.id?.(serviceId);
     if (!service) return false;
 
-    const wf = asset.activeServiceWorkflow || {};
-    if (String(wf.serviceRecordId) !== String(serviceId)) return false;
+    const { wf } = getWorkflowContextForService(asset, serviceId);
+    if (!wf) return false;
     if (!isExtendDateServiceType(wf.serviceTypeLabel)) return false;
 
     const stage = String(wf.stage || '').toLowerCase();
@@ -64,9 +68,9 @@ export async function updateShopServiceExtendDate(asset, serviceId, { serviceEnd
     const service = asset.services?.id?.(serviceId);
     if (!service) throw new Error('Service record not found');
 
-    const wf = asset.activeServiceWorkflow || {};
-    if (String(wf.serviceRecordId) !== String(serviceId)) {
-        throw new Error('Service record does not match active workflow.');
+    const { wf, bindActive } = getWorkflowContextForService(asset, serviceId);
+    if (!wf) {
+        throw new Error('No workflow found for this service.');
     }
     if (!isExtendDateServiceType(wf.serviceTypeLabel)) {
         throw new Error('This service type does not support extend date updates.');
@@ -110,8 +114,7 @@ export async function updateShopServiceExtendDate(asset, serviceId, { serviceEnd
     }
 
     service.remark = JSON.stringify(remark);
-    asset.activeServiceWorkflow = wf;
-    asset.markModified('activeServiceWorkflow');
+    commitWorkflowContext(asset, serviceId, { wf, bindActive });
     asset.markModified('services');
     await asset.save();
     return asset;

@@ -75,11 +75,9 @@ async function createInspectionHandoverHistoryRow({
     vehicleAssigneeEmp = null,
     isReinspection = false,
 }) {
-    const targetEmp = isReinspection
-        ? adminOfficerEmp
-        : vehicleAssigneeEmp?._id
-          ? vehicleAssigneeEmp
-          : adminOfficerEmp;
+    // Inspection and reinspection both target the current custodian:
+    // assigned → asset owner; otherwise Admin Officer.
+    const targetEmp = vehicleAssigneeEmp?._id ? vehicleAssigneeEmp : adminOfficerEmp;
 
     let assigneeCanSelf = false;
     if (targetEmp?._id) {
@@ -96,6 +94,7 @@ async function createInspectionHandoverHistoryRow({
     const { handoverByDisplay, handoverToDisplay } = buildFleetHandoverDisplayLabels({
         workflowMeta,
         assignee: targetEmp,
+        previousAssignee: vehicleAssigneeEmp,
         adminOfficer: adminOfficerEmp,
         isInspection: true,
     });

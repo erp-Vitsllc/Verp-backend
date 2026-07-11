@@ -28,6 +28,63 @@ export function parseCarWashRemark(service) {
     }
 }
 
+export function normalizeCarWashMonthKey(ym) {
+    const m = String(ym || '').trim().match(/^(\d{4})-(\d{1,2})/);
+    if (!m) return '';
+    const month = parseInt(m[2], 10);
+    if (!month || month < 1 || month > 12) return '';
+    return `${m[1]}-${String(month).padStart(2, '0')}`;
+}
+
+function isRejectedCarWashService(service, asset) {
+    const serviceId = toIdString(service?._id);
+    const stage = String(
+        service?.workflowSnapshot?.stage ||
+            (serviceId &&
+            toIdString(asset?.activeServiceWorkflow?.serviceRecordId) === serviceId
+                ? asset?.activeServiceWorkflow?.stage
+                : '') ||
+            '',
+    ).toLowerCase();
+    return stage === 'rejected';
+}
+
+/** Latest occupied car-wash month key (`yyyy-MM`), or empty. */
+export function getLatestOccupiedCarWashMonth(asset, { excludeServiceId = null } = {}) {
+    const occupied = [];
+    const services = Array.isArray(asset?.services) ? asset.services : [];
+    const excludeId = toIdString(excludeServiceId);
+    for (const service of services) {
+        if (String(service?.serviceType || '').trim() !== 'Car Wash') continue;
+        if (excludeId && toIdString(service?._id) === excludeId) continue;
+        if (isRejectedCarWashService(service, asset)) continue;
+        const remark = parseCarWashRemark(service);
+        const monthKey = normalizeCarWashMonthKey(remark.carWashMonth);
+        if (monthKey) occupied.push(monthKey);
+    }
+    if (!occupied.length) return '';
+    occupied.sort();
+    return occupied[occupied.length - 1];
+}
+
+/** One car wash per vehicle per month (rejected requests do not occupy the month). */
+export function findExistingCarWashForMonth(asset, month, { excludeServiceId = null } = {}) {
+    const monthKey = normalizeCarWashMonthKey(month);
+    if (!monthKey || !asset) return null;
+    const excludeId = toIdString(excludeServiceId);
+    const services = Array.isArray(asset.services) ? asset.services : [];
+    for (const service of services) {
+        if (String(service?.serviceType || '').trim() !== 'Car Wash') continue;
+        if (excludeId && toIdString(service?._id) === excludeId) continue;
+        if (isRejectedCarWashService(service, asset)) continue;
+        const remark = parseCarWashRemark(service);
+        if (normalizeCarWashMonthKey(remark.carWashMonth) === monthKey) {
+            return service;
+        }
+    }
+    return null;
+}
+
 function toIdString(v) {
     if (!v) return null;
     if (typeof v === 'string') return v;

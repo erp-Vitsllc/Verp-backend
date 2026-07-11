@@ -628,6 +628,8 @@ const assetItemSchema = new mongoose.Schema({
         attachment: { type: String } // URL to uploaded document
     }],
     services: [{
+        /** Human-readable request id: `{assetId}-{NNN}` e.g. VEGA-Veh-001-001 */
+        serviceReqNo: { type: String, default: '' },
         serviceType: {
             type: String,
             enum: [

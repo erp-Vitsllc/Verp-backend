@@ -519,19 +519,13 @@ export const addFine = async (req, res) => {
             return res.status(400).json({ message: "Fine Type is required" });
         }
 
-        // Strict > 0 check only if NOT 0-liability logic (e.g. company paid)
-        // Check implies: if Total Fine > 0, it's valid.
-        // fineAmount usually comes as Total.
-        if ((!fineAmount || isNaN(fineAmount) || fineAmount < 0) && (!companyAmount || companyAmount <= 0)) {
-            // Allow fineAmount=0 IF companyAmount > 0
-            /* 
-               Refined Logic:
-               User passes fineAmount (Employee Share usually in frontend logic causing error).
-               We should verify: Is there ANY money involved?
-            */
-            const totalMoney = (parseFloat(fineAmount) || 0) + (parseFloat(companyAmount) || 0);
-            if (totalMoney <= 0) {
-                return res.status(400).json({ message: "Fine Amount is required and must be greater than zero" });
+        // Strict > 0 check only if NOT Draft and NOT 0-liability logic (e.g. company paid)
+        if (fineStatus !== 'Draft') {
+            if ((!fineAmount || isNaN(fineAmount) || fineAmount < 0) && (!companyAmount || companyAmount <= 0)) {
+                const totalMoney = (parseFloat(fineAmount) || 0) + (parseFloat(companyAmount) || 0);
+                if (totalMoney <= 0) {
+                    return res.status(400).json({ message: "Fine Amount is required and must be greater than zero" });
+                }
             }
         }
 

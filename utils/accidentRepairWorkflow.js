@@ -9,6 +9,10 @@ import { closeAdminOfficerServiceTrackNotification } from './vehicleServiceAdmin
 import { applyPostServiceOperationalState } from './assetOperationalFlags.js';
 import { actorMayManageTireChangeRequest, getRequesterName } from './oilServiceWorkflow.js';
 import { generateFineIdInternal } from '../controllers/fine/addFine.js';
+import {
+    commitWorkflowContext,
+    getWorkflowContextForService,
+} from './vehicleServiceWorkflowResolve.js';
 
 export const ACCIDENT_REPAIR_STAGE = {
     HR: 'pending_hr',
@@ -171,12 +175,9 @@ export async function updateAccidentRepairQuoteEmployeeRows(asset, serviceId, em
         throw new Error('Not a accident repair service record.');
     }
 
-    const wf = asset.activeServiceWorkflow || {};
-    if (!isAccidentRepairWorkflow(wf, service)) {
+    const { wf, bindActive } = getWorkflowContextForService(asset, serviceId);
+    if (!wf || !isAccidentRepairWorkflow(wf, service)) {
         throw new Error('No active accident repair workflow for this service.');
-    }
-    if (String(wf.serviceRecordId) !== String(serviceId)) {
-        throw new Error('Service record does not match active workflow.');
     }
     const stage = String(wf.stage || '').toLowerCase();
     if ([ACCIDENT_REPAIR_STAGE.COMPLETE, ACCIDENT_REPAIR_STAGE.REJECTED].includes(stage)) {
@@ -211,11 +212,8 @@ export async function updateAccidentRepairQuoteEmployeeRows(asset, serviceId, em
 export async function submitAccidentRepairGarage(asset, serviceId, serviceUpdates, req) {
     const service = asset.services?.id?.(serviceId);
     if (!service) throw new Error('Service record not found');
-    const wf = asset.activeServiceWorkflow || {};
-    if (!isAccidentRepairWorkflow(wf, service)) throw new Error('Not an accident repair workflow.');
-    if (String(wf.serviceRecordId) !== String(serviceId)) {
-        throw new Error('Service record does not match active workflow.');
-    }
+    const { wf, bindActive } = getWorkflowContextForService(asset, serviceId);
+    if (!wf || !isAccidentRepairWorkflow(wf, service)) throw new Error('Not an accident repair workflow.');
     const stage = String(wf.stage || '').toLowerCase();
     const remarkBefore = parseRemark(service);
     const garageAlreadySubmitted = Boolean(wf.garageSubmittedAt || remarkBefore.garageSubmittedByName);
@@ -252,8 +250,7 @@ export async function submitAccidentRepairGarage(asset, serviceId, serviceUpdate
     wf.stage = ACCIDENT_REPAIR_STAGE.ACCOUNTS;
     wf.accountsPendingSince = new Date();
     wf.accountsReminderAt = new Date(Date.now() + TWO_DAYS_MS);
-    asset.activeServiceWorkflow = wf;
-    asset.markModified('activeServiceWorkflow');
+    commitWorkflowContext(asset, serviceId, { wf, bindActive });
     asset.markModified('services');
     await asset.save();
 
@@ -407,11 +404,8 @@ export async function createAccidentRepairEmployeeFines(asset, service, reqUser)
 export async function completeAccidentRepairService(asset, serviceId, serviceUpdates, req) {
     const service = asset.services?.id?.(serviceId);
     if (!service) throw new Error('Service record not found');
-    const wf = asset.activeServiceWorkflow || {};
-    if (!isAccidentRepairWorkflow(wf, service)) throw new Error('Not an accident repair workflow.');
-    if (String(wf.serviceRecordId) !== String(serviceId)) {
-        throw new Error('Service record does not match active workflow.');
-    }
+    const { wf, bindActive } = getWorkflowContextForService(asset, serviceId);
+    if (!wf || !isAccidentRepairWorkflow(wf, service)) throw new Error('Not an accident repair workflow.');
     const stage = String(wf.stage || '').toLowerCase();
     const { SHOP_SERVICE_SCHEDULED_STAGE, isShopServiceLive } = await import('./vehicleShopServiceScheduled.js');
     const mayComplete =
@@ -447,13 +441,14 @@ export async function completeAccidentRepairService(asset, serviceId, serviceUpd
 
     wf.stage = ACCIDENT_REPAIR_STAGE.COMPLETE;
     wf.completedAt = new Date();
-    asset.activeServiceWorkflow = wf;
-    applyPostServiceOperationalState(asset, { statusBeforeService: wf.previousStatus || null });
+    commitWorkflowContext(asset, serviceId, { wf, bindActive });
+    if (bindActive) {
+        applyPostServiceOperationalState(asset, { statusBeforeService: wf.previousStatus || null });
+    }
 
     await createAccidentRepairEmployeeFines(asset, asset.services.id(serviceId), req.user);
 
     asset.markModified('services');
-    asset.markModified('activeServiceWorkflow');
     await asset.save();
 
     await syncDashboardAction({

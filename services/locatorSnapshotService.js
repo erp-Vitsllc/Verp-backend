@@ -7,6 +7,9 @@ const lastSnapshotAtByDevice = new Map();
 
 const MONTH_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
+/** Standard Dubai Salik gate charge used when Locator reports crossing counts only. */
+const SALIK_GATE_FEE_AED = 4;
+
 function toOdometerKm(attrs = {}) {
     if (attrs.totalDistanceKm != null && attrs.totalDistanceKm !== '') {
         const parsed = Number(String(attrs.totalDistanceKm).replace(/,/g, ''));
@@ -21,6 +24,41 @@ function toOdometerKm(attrs = {}) {
     return 0;
 }
 
+/** Resolve Salik toll price (AED) from Locator position / attributes — not distance. */
+function toSalikPriceAed(source = {}) {
+    const attrs =
+        source?.attributes && typeof source.attributes === 'object' ? source.attributes : source || {};
+
+    const moneyKeys = [
+        'expenses',
+        'expense',
+        'salikCost',
+        'salikAmount',
+        'salikPrice',
+        'tollCost',
+        'tollAmount',
+        'tollFee',
+        'cost',
+        'expenseAed',
+    ];
+    for (const key of moneyKeys) {
+        const raw = attrs[key] ?? source?.[key];
+        if (raw == null || raw === '') continue;
+        const n = Number(String(raw).replace(/,/g, '').replace(/aed/gi, '').trim());
+        if (Number.isFinite(n) && n >= 0) return Number(n.toFixed(2));
+    }
+
+    const countKeys = ['salik', 'salikCount', 'tollCount', 'gateCount', 'salikGates'];
+    for (const key of countKeys) {
+        const raw = attrs[key] ?? source?.[key];
+        if (raw == null || raw === '') continue;
+        const n = Number(String(raw).replace(/,/g, '').trim());
+        if (Number.isFinite(n) && n > 0) return Number((n * SALIK_GATE_FEE_AED).toFixed(2));
+    }
+
+    return 0;
+}
+
 function normalizeRestSnapshot(position) {
     const attrs = position?.attributes || {};
     return {
@@ -29,6 +67,7 @@ function normalizeRestSnapshot(position) {
         uniqueId: String(attrs.uniqueId || position?.uniqueId || '').trim(),
         odometer: Number(attrs.odometer) || 0,
         totalDistanceM: Number(attrs.totalDistance) || 0,
+        expenseAed: toSalikPriceAed(position),
         state: String(attrs.state || '').toLowerCase(),
         speedKmh: Number(position?.speedKmh) || 0,
         capturedAt: position?.deviceTime ? new Date(position.deviceTime) : new Date(),
@@ -42,6 +81,7 @@ function normalizeWsSnapshot(position) {
         uniqueId: String(position?.uniqueId || '').trim(),
         odometer: Number(position?.odometer) || 0,
         totalDistanceM: Number(position?.totalDistance) || 0,
+        expenseAed: toSalikPriceAed(position),
         state: String(position?.state || '').toLowerCase(),
         speedKmh: Number(position?.speedKmh) || 0,
         capturedAt: position?.deviceTime ? new Date(position.deviceTime) : new Date(),
@@ -154,18 +194,12 @@ function idleMinutesFromLivePosition(position) {
     const attrs = position?.attributes || {};
     const state = String(attrs.state || '').toLowerCase();
 
-    if (state === 'idling') {
-        const fromDuration = parseStatusDurationToMinutes(position?.status_duration);
-        if (fromDuration > 0) return fromDuration;
-        if (Number(attrs.ifstopped) > 0) return Math.round(Number(attrs.ifstopped) / 60);
-    }
+    // Match Locator "idling" (engine on, not moving) — not parking/ignition-off.
+    if (state !== 'idling') return 0;
 
-    if (state === 'parking') {
-        const fromDuration = parseStatusDurationToMinutes(position?.status_duration);
-        if (fromDuration > 0) return fromDuration;
-        if (Number(attrs.ifstopped) > 0) return Math.round(Number(attrs.ifstopped) / 60);
-    }
-
+    const fromDuration = parseStatusDurationToMinutes(position?.status_duration);
+    if (fromDuration > 0) return fromDuration;
+    if (Number(attrs.ifstopped) > 0) return Math.round(Number(attrs.ifstopped) / 60);
     return 0;
 }
 
@@ -200,8 +234,43 @@ function runningKmBetweenSnapshots(rows, livePosition = null) {
     return livePosition ? liveDistanceKm(livePosition) : 0;
 }
 
+/** Period Salik spend (AED): cumulative expense counter delta, not distance. */
+function salikPriceBetweenSnapshots(rows, livePosition = null) {
+    const livePrice = livePosition ? toSalikPriceAed(livePosition) : 0;
+    if (!rows?.length) return livePrice;
+
+    const sorted = [...rows].sort((a, b) => new Date(a.capturedAt) - new Date(b.capturedAt));
+    const readings = sorted
+        .map((row) => Number(row.expenseAed))
+        .filter((n) => Number.isFinite(n) && n >= 0);
+
+    if (livePrice > 0) readings.push(livePrice);
+
+    if (readings.length >= 2) {
+        const first = readings[0];
+        const last = readings[readings.length - 1];
+        const delta = last - first;
+        if (delta > 0) return Number(delta.toFixed(2));
+        // Counter reset / non-cumulative samples: use max reading in the window.
+        const max = Math.max(...readings);
+        if (max > 0) return Number(max.toFixed(2));
+    }
+
+    if (readings.length === 1 && readings[0] > 0) return Number(readings[0].toFixed(2));
+    return livePrice > 0 ? livePrice : 0;
+}
+
 function idleMinutesBetweenSnapshots(rows, livePosition = null) {
+    if (!rows?.length) {
+        return livePosition ? idleMinutesFromLivePosition(livePosition) : 0;
+    }
+
     if (rows.length < 2) {
+        const only = rows[0];
+        if (String(only?.state || '').toLowerCase() === 'idling') {
+            // Single sample while idling: credit at least the snapshot spacing (2 min) when known.
+            return livePosition ? idleMinutesFromLivePosition(livePosition) || 2 : 2;
+        }
         return livePosition ? idleMinutesFromLivePosition(livePosition) : 0;
     }
 
@@ -211,7 +280,8 @@ function idleMinutesBetweenSnapshots(rows, livePosition = null) {
     for (let i = 1; i < sorted.length; i += 1) {
         const prev = sorted[i - 1];
         const next = sorted[i];
-        if (!['idling', 'parking'].includes(prev.state)) continue;
+        // Only engine-on idling — parking is ignition-off and is not Locator "Excessive Idling".
+        if (String(prev.state || '').toLowerCase() !== 'idling') continue;
 
         const gap = new Date(next.capturedAt) - new Date(prev.capturedAt);
         if (gap > 0 && gap < 6 * 60 * 60 * 1000) {
@@ -282,6 +352,103 @@ function matchFleetVehicleByGpsName(gpsName, fleetVehicles) {
     }
 
     return null;
+}
+
+function formatVehiclePlateLabel(vehicle) {
+    const plate = [vehicle?.plateEmirate, vehicle?.plateNumber]
+        .map((part) => String(part || '').trim())
+        .filter(Boolean)
+        .join(' ')
+        .trim();
+    if (plate) return plate;
+    if (String(vehicle?.plateNumber || '').trim()) return String(vehicle.plateNumber).trim();
+    return '';
+}
+
+/** Chart axis label: Assigned → assignee first name; otherwise plate (or “no plate not added”). */
+function resolveLocatorChartVehicleLabel(vehicle, fallbackGpsName = '') {
+    const status = String(vehicle?.status || '').trim().toLowerCase();
+    if (status === 'assigned') {
+        const firstName = String(vehicle?.assignedTo?.firstName || '').trim();
+        if (firstName) return firstName;
+    }
+    const plate = formatVehiclePlateLabel(vehicle);
+    if (plate) return plate;
+    if (vehicle) return 'no plate not added';
+    const fallback = String(fallbackGpsName || '').trim();
+    return fallback || 'no plate not added';
+}
+
+async function createLocatorChartLabelResolver(positions) {
+    const fleetVehicles = await AssetItem.find({
+        $or: [
+            { locatorDeviceId: { $ne: null } },
+            { plateNumber: { $exists: true, $nin: [null, ''] } },
+        ],
+    })
+        .select(
+            'assetId name plateNumber plateEmirate status locatorDeviceId assignedTo',
+        )
+        .populate('assignedTo', 'firstName lastName')
+        .lean();
+
+    const byDeviceId = new Map();
+    for (const vehicle of fleetVehicles) {
+        if (vehicle.locatorDeviceId != null) {
+            byDeviceId.set(String(vehicle.locatorDeviceId), vehicle);
+        }
+    }
+
+    const positionNameByDevice = new Map();
+    for (const position of positions || []) {
+        if (position?.deviceId == null) continue;
+        positionNameByDevice.set(
+            String(position.deviceId),
+            String(position?.deviceName || '').trim(),
+        );
+    }
+
+    return (deviceId, gpsName = '') => {
+        const id = deviceId != null && deviceId !== '' ? String(deviceId) : '';
+        const gps =
+            String(gpsName || '').trim() ||
+            (id ? positionNameByDevice.get(id) || '' : '') ||
+            '';
+        const erp =
+            (id ? byDeviceId.get(id) : null) ||
+            matchFleetVehicleByGpsName(gps, fleetVehicles);
+        return resolveLocatorChartVehicleLabel(erp, gps || `Device ${id || ''}`.trim());
+    };
+}
+
+function applyLocatorChartLabels(rows, resolveLabel) {
+    return (rows || []).map((row) => {
+        const gpsName = String(row?.name || row?.label || '').trim();
+        const label = resolveLabel(row?.deviceId, gpsName);
+        return {
+            ...row,
+            name: label,
+            chartLabel: label,
+        };
+    });
+}
+
+function mapLocatorDashboardBucketLabels(dashboard, resolveLabel) {
+    if (!dashboard?.byKey) return dashboard;
+    const byKey = {};
+    for (const [key, rows] of Object.entries(dashboard.byKey)) {
+        byKey[key] = applyLocatorChartLabels(rows, resolveLabel);
+    }
+    return { ...dashboard, byKey };
+}
+
+function mapLocatorPeriodDashboardLabels(dashboard, resolveLabel) {
+    if (!dashboard) return dashboard;
+    return {
+        day: mapLocatorDashboardBucketLabels(dashboard.day, resolveLabel),
+        week: mapLocatorDashboardBucketLabels(dashboard.week, resolveLabel),
+        month: mapLocatorDashboardBucketLabels(dashboard.month, resolveLabel),
+    };
 }
 
 async function buildGpsTrackedVehicles(positions) {
@@ -425,6 +592,8 @@ function buildIdleByVehicle(snapshots, positions, start, end) {
     const liveMap = buildLivePositionMap(positions);
     const rows = [];
     const seen = new Set();
+    const today = startOfDay(new Date());
+    const rangeIncludesToday = start <= endOfDay(today) && end >= today;
 
     for (const [deviceId, deviceRows] of byDevice.entries()) {
         const inBucket = deviceRows.filter((row) => {
@@ -433,22 +602,33 @@ function buildIdleByVehicle(snapshots, positions, start, end) {
         });
         if (!inBucket.length) continue;
 
-        const name = inBucket[inBucket.length - 1]?.deviceName || `Device ${deviceId}`;
+        const name =
+            inBucket[inBucket.length - 1]?.deviceName ||
+            liveMap.get(deviceId)?.deviceName ||
+            `Device ${deviceId}`;
         seen.add(String(deviceId));
+        // Never mix today's live idle into a past day/week/month bucket.
+        const liveForRange = rangeIncludesToday ? liveMap.get(deviceId) || null : null;
         rows.push({
             name,
-            value: idleMinutesBetweenSnapshots(inBucket, liveMap.get(deviceId) || null) ||
-                idleMinutesFromLivePosition(liveMap.get(deviceId) || null),
+            value: idleMinutesBetweenSnapshots(inBucket, liveForRange),
+            deviceId,
         });
     }
 
-    for (const position of positions || []) {
-        const deviceId = String(position?.deviceId || '');
-        if (!deviceId || seen.has(deviceId)) continue;
-        rows.push({
-            name: position?.deviceName || `Device ${deviceId}`,
-            value: idleMinutesFromLivePosition(position),
-        });
+    // Live-only vehicles only belong on charts that include today.
+    if (rangeIncludesToday) {
+        for (const position of positions || []) {
+            const deviceId = String(position?.deviceId || '');
+            if (!deviceId || seen.has(deviceId)) continue;
+            const value = idleMinutesFromLivePosition(position);
+            if (value <= 0) continue;
+            rows.push({
+                name: position?.deviceName || `Device ${deviceId}`,
+                value,
+                deviceId,
+            });
+        }
     }
 
     return sortVehicleBars(rows);
@@ -521,7 +701,7 @@ function buildRunningKmByVehicleForRange(snapshots, positions, start, end) {
         if (value === 0 && rangeIncludesToday && liveMap.get(deviceId)) {
             value = liveDistanceKm(liveMap.get(deviceId));
         }
-        rows.push({ name, value: Number(value.toFixed(2)) });
+        rows.push({ name, value: Number(value.toFixed(2)), deviceId });
     }
 
     for (const position of positions || []) {
@@ -531,6 +711,7 @@ function buildRunningKmByVehicleForRange(snapshots, positions, start, end) {
         rows.push({
             name: position?.deviceName || `Device ${deviceId}`,
             value: liveDistanceKm(position),
+            deviceId,
         });
     }
 
@@ -605,16 +786,18 @@ function buildSalikWiseForRange(snapshots, positions, start, end, now = new Date
             const at = new Date(row.capturedAt);
             return at >= start && at <= end;
         });
-        if (!inBucket.length) continue;
+        if (!inBucket.length && !(rangeIncludesToday && liveMap.get(deviceId))) continue;
 
-        const name = inBucket[inBucket.length - 1]?.deviceName || `Device ${deviceId}`;
+        const name =
+            inBucket[inBucket.length - 1]?.deviceName ||
+            liveMap.get(deviceId)?.deviceName ||
+            `Device ${deviceId}`;
         seen.add(String(deviceId));
-        let value = runningKmBetweenSnapshots(inBucket, liveMap.get(deviceId) || null);
-        if (value === 0 && liveMap.get(deviceId)) {
-            value = liveDistanceKm(liveMap.get(deviceId));
-        }
-
-        rows.push({ name, value });
+        const value = salikPriceBetweenSnapshots(
+            inBucket,
+            rangeIncludesToday ? liveMap.get(deviceId) || null : null,
+        );
+        rows.push({ name, value, deviceId });
     }
 
     for (const position of positions || []) {
@@ -622,16 +805,18 @@ function buildSalikWiseForRange(snapshots, positions, start, end, now = new Date
         const name = position?.deviceName || `Device ${deviceId}`;
         if (!deviceId || seen.has(deviceId)) continue;
 
-        const liveKm = liveDistanceKm(position);
-        const existing = rows.find((row) => row.name === name);
+        const livePrice = toSalikPriceAed(position);
+        const existing = rows.find(
+            (row) => String(row.deviceId || '') === deviceId || row.name === name,
+        );
 
         if (existing) {
-            if (existing.value === 0 && liveKm > 0) existing.value = liveKm;
+            if (existing.value === 0 && livePrice > 0) existing.value = livePrice;
             continue;
         }
 
-        if (rangeIncludesToday) {
-            rows.push({ name, value: liveKm });
+        if (rangeIncludesToday && livePrice > 0) {
+            rows.push({ name, value: livePrice, deviceId });
         }
     }
 
@@ -671,17 +856,7 @@ function buildIdleTimeByVehicleDashboard(snapshots, positions, now = new Date())
 }
 
 function buildSalikWiseByVehicleDashboard(snapshots, positions, now = new Date()) {
-    const yesterday = startOfDay(now);
-    yesterday.setDate(yesterday.getDate() - 1);
-    const dayOptions = [
-        {
-            key: yesterday.toISOString().slice(0, 10),
-            label: 'Yesterday',
-            sublabel: formatDayLabel(yesterday),
-            start: yesterday,
-            end: endOfDay(yesterday),
-        },
-    ];
+    const dayOptions = buildDayOptionsForCurrentMonth(now);
     const weekOptions = getWeekOptionsForYear(now);
     const monthOptions = buildMonthOptionsForYear(now);
     const buildRows = (start, end) => buildSalikWiseForRange(snapshots, positions, start, end, now);
@@ -733,22 +908,33 @@ export async function buildLocatorFleetDashboard() {
         .sort({ capturedAt: 1 })
         .lean();
 
+    const resolveLabel = await createLocatorChartLabelResolver(positions);
+
     return {
         configured: true,
         connected: true,
         generatedAt: now.toISOString(),
         snapshotWarning,
         vehicleCount: positions.length,
-        odometerByVehicle: buildOdometerChart(positions),
+        odometerByVehicle: applyLocatorChartLabels(buildOdometerChart(positions), resolveLabel),
         gpsTrackedVehicles: await buildGpsTrackedVehicles(positions),
-        runningKmByVehicle: buildRunningKmByVehicleDashboard(snapshots, positions, now),
+        runningKmByVehicle: mapLocatorPeriodDashboardLabels(
+            buildRunningKmByVehicleDashboard(snapshots, positions, now),
+            resolveLabel,
+        ),
         runningKm: {
             day: buildRunningKmDaySeries(snapshots, positions, now),
             month: buildRunningKmMonthSeries(snapshots, positions, now),
             year: buildRunningKmYearSeries(snapshots, positions, now),
         },
-        idleTimeByVehicle: buildIdleTimeByVehicleDashboard(snapshots, positions, now),
-        salikWise: buildSalikWiseByVehicleDashboard(snapshots, positions, now),
+        idleTimeByVehicle: mapLocatorPeriodDashboardLabels(
+            buildIdleTimeByVehicleDashboard(snapshots, positions, now),
+            resolveLabel,
+        ),
+        salikWise: mapLocatorPeriodDashboardLabels(
+            buildSalikWiseByVehicleDashboard(snapshots, positions, now),
+            resolveLabel,
+        ),
         snapshotCount: snapshots.length,
     };
 }
