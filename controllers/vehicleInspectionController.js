@@ -97,6 +97,7 @@ async function createInspectionHandoverHistoryRow({
         previousAssignee: vehicleAssigneeEmp,
         adminOfficer: adminOfficerEmp,
         isInspection: true,
+        isReinspection,
     });
 
     return AssetHistory.create({
@@ -231,6 +232,8 @@ async function markInspectionHandoverHistoryApproved(historyId, reviewerEmp) {
         action: 'Accepted',
         $set: {
             'details.acceptanceStatus': 'Accepted',
+            'details.handoverLifecycleStatus': 'approved',
+            'details.handoverHrApprovedAt': new Date(),
             'details.vehicleHandoverWorkflow': { ...workflow, stages },
         },
     });

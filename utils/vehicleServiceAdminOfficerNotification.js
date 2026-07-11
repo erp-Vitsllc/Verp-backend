@@ -103,6 +103,22 @@ export async function notifyAdminOfficerOnVehicleServiceCreated({
             detailLine: `${requestedByName} created a ${serviceTypeLabel} request for ${asset.assetId || ''}${plate ? ` (${plate})` : ''}. Open the service details page — this task closes when the service is completed.`,
             linkPath,
         });
+
+        // Also notify the assigned driver/user when the vehicle has one (same create path as Admin Officer).
+        if (subjectEmp?._id && String(subjectEmp._id) !== String(adminOfficer._id)) {
+            try {
+                await sendVehicleServiceWorkflowEmail({
+                    recipient: subjectEmp,
+                    asset: populated || asset,
+                    stageLabel: 'New vehicle service request',
+                    actionLabel: `${serviceTypeLabel} created`,
+                    detailLine: `A ${serviceTypeLabel} request was created for your assigned vehicle ${asset.assetId || ''}${plate ? ` (${plate})` : ''}.`,
+                    linkPath,
+                });
+            } catch (assigneeMailErr) {
+                console.error('[VehicleService] Assignee create notify failed:', assigneeMailErr);
+            }
+        }
     }
 }
 

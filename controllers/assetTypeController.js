@@ -79,12 +79,22 @@ export const getAssetTypeRoleMeta = async (req, res) => {
     try {
         const isJwtOrEnvAdmin = await isAdminUser(req.user);
         const isFlowchartOrgAdmin = await isUserInFlowchart(req.user, 'admincontroller').catch(() => false);
-        const isAdmin = isJwtOrEnvAdmin || isFlowchartOrgAdmin;
+        const isAdminOfficer =
+            isFlowchartOrgAdmin || (await userIsFlowchartAdminOfficer(req).catch(() => false));
+        const isAdmin = isJwtOrEnvAdmin || isAdminOfficer;
         const acHodMeta = await getDepartmentHOD('assetcontroller');
         const acEmpMeta = acHodMeta ? await resolveAssetControllerEmployee(acHodMeta) : null;
         const isAssetController = await userCanDirectAddAssetToPool(req, acEmpMeta);
         const canDirectAddAsset = isAssetController;
-        res.status(200).json({ isAdmin, isAssetController, canDirectAddAsset });
+        // Flowchart AC / Admin Officer use Vehicle + Tools even when group perms are unchecked.
+        const bypassAssetModules = isAdmin || isAssetController;
+        res.status(200).json({
+            isAdmin,
+            isAdminOfficer,
+            isAssetController,
+            canDirectAddAsset,
+            bypassAssetModules,
+        });
     } catch (error) {
         console.error('getAssetTypeRoleMeta:', error?.message || error);
         res.status(500).json({ message: 'Server Error' });

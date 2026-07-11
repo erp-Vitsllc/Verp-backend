@@ -58,6 +58,7 @@ export function buildFleetHandoverDisplayLabels({
     previousAssignee = null,
     adminOfficer = null,
     isInspection = false,
+    isReinspection = false,
     isReturn = false,
 }) {
     if (isReturn) {
@@ -72,11 +73,20 @@ export function buildFleetHandoverDisplayLabels({
         };
     }
     if (isInspection) {
-        // Inspection / reinspection: By stays empty; To = owner if assigned, else Admin Officer.
+        // Custodian = assigned owner if vehicle is assigned, else Admin Officer.
         const custodian = previousAssignee || adminOfficer || assignee;
+        const custodianLabel = formatHandoverPersonDisplayLabel(custodian) || '—';
+        if (isReinspection) {
+            // Reinspection: By and To are both the custodian.
+            return {
+                handoverByDisplay: custodianLabel,
+                handoverToDisplay: custodianLabel,
+            };
+        }
+        // First inspection: By stays empty; To = custodian.
         return {
             handoverByDisplay: '—',
-            handoverToDisplay: formatHandoverPersonDisplayLabel(custodian) || '—',
+            handoverToDisplay: custodianLabel,
         };
     }
 
@@ -508,6 +518,77 @@ export async function employeeHasDrivingLicense(employeeId) {
         .select('drivingLicenceDetails')
         .lean();
     return hasDrivingLicenseCard(row?.drivingLicenceDetails);
+}
+
+/** Profile driving-license start (issue) date for Hand Over To / assignee. */
+export async function getEmployeeDrivingLicenseIssueDate(employeeId) {
+    if (!employeeId) return null;
+    const row = await EmployeeDrivingLicense.findOne({ employeeId: String(employeeId) })
+        .select('drivingLicenceDetails.issueDate')
+        .lean();
+    return row?.drivingLicenceDetails?.issueDate || null;
+}
+
+/**
+ * Attach profile `drivingLicenceDetails.issueDate` onto populated `assignedTo`
+ * so handover UI can compute Driving License Age (issue date → today).
+ */
+export async function attachAssigneeDrivingLicenseIssueDate(assignedTo) {
+    if (!assignedTo || typeof assignedTo !== 'object') return assignedTo;
+    if (assignedTo.drivingLicenceDetails?.issueDate || assignedTo.drivingLicenseDetails?.issueDate) {
+        return assignedTo;
+    }
+    const employeeId = assignedTo.employeeId;
+    if (!employeeId) return assignedTo;
+    const issueDate = await getEmployeeDrivingLicenseIssueDate(employeeId);
+    if (!issueDate) return assignedTo;
+    assignedTo.drivingLicenceDetails = {
+        ...(assignedTo.drivingLicenceDetails && typeof assignedTo.drivingLicenceDetails === 'object'
+            ? assignedTo.drivingLicenceDetails
+            : {}),
+        issueDate,
+    };
+    return assignedTo;
+}
+
+/** Batch-attach license issue dates for handover history list rows. */
+export async function attachAssigneeDrivingLicenseIssueDates(records = []) {
+    if (!Array.isArray(records) || records.length === 0) return records;
+    const employeeIds = [
+        ...new Set(
+            records
+                .map((row) => row?.assignedTo?.employeeId)
+                .filter(Boolean)
+                .map((id) => String(id)),
+        ),
+    ];
+    if (employeeIds.length === 0) return records;
+
+    const licenseRows = await EmployeeDrivingLicense.find({ employeeId: { $in: employeeIds } })
+        .select('employeeId drivingLicenceDetails.issueDate')
+        .lean();
+    const issueByEmployeeId = new Map(
+        licenseRows
+            .filter((row) => row?.drivingLicenceDetails?.issueDate)
+            .map((row) => [String(row.employeeId), row.drivingLicenceDetails.issueDate]),
+    );
+
+    for (const record of records) {
+        const assignee = record?.assignedTo;
+        if (!assignee || typeof assignee !== 'object') continue;
+        if (assignee.drivingLicenceDetails?.issueDate || assignee.drivingLicenseDetails?.issueDate) {
+            continue;
+        }
+        const issueDate = issueByEmployeeId.get(String(assignee.employeeId || ''));
+        if (!issueDate) continue;
+        assignee.drivingLicenceDetails = {
+            ...(assignee.drivingLicenceDetails && typeof assignee.drivingLicenceDetails === 'object'
+                ? assignee.drivingLicenceDetails
+                : {}),
+            issueDate,
+        };
+    }
+    return records;
 }
 
 export async function employeeHasActivePortalUser(emp) {

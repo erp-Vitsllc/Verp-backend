@@ -17,6 +17,8 @@ import {
     enrichHandoverWorkflowActorSignatures,
     signHandoverAssessmentMediaInDetails,
     employeeHasDrivingLicense,
+    attachAssigneeDrivingLicenseIssueDate,
+    attachAssigneeDrivingLicenseIssueDates,
     getVehicleHandoverFlow,
     notifyHandoverCompletionEmails,
     notifyHandoverRejectedToAdmin,
@@ -1042,7 +1044,7 @@ export const getVehicleFleetDashboard = async (req, res) => {
         };
         const fleetSelect = listOnly
             ? 'assetId name vehicleBrand plateEmirate plateNumber modelYear assetValue status registrationExpiryDate insuranceExpiryDate nextServiceDate oilChangeDate gearOilDueDate currentKilometer assignedTo assignedCompany acceptanceStatus pendingAction actionRequiredBy createdBy vehicleProfileActivationStatus vehicleDispositionStatus warrantyEnabled warrantyExpiryDate warrantyYears onServiceActive onLeaveActive typeId assignedDate pendingActionDetails updatedAt documents.type documents.expiryDate documents.issueDate documents.createdAt documents.status documents.documentStatus documents.description'
-            : 'assetId name vehicleBrand plateEmirate plateNumber modelYear assetValue status registrationExpiryDate insuranceExpiryDate nextServiceDate oilChangeDate gearOilDueDate lastServiceDate currentKilometer assignedTo assignedCompany acceptanceStatus pendingAction services documents actionRequiredBy createdBy vehicleProfileActivationStatus vehicleDispositionStatus assignmentType temporaryEndDate warrantyEnabled warrantyExpiryDate warrantyYears accessories parkingExtendedDays parkingReminderSentAt parkingDurationCompleteSentAt onServiceActive onLeaveActive assignedDate pendingActionDetails updatedAt';
+            : 'assetId name vehicleBrand plateEmirate plateNumber modelYear assetValue status registrationExpiryDate insuranceExpiryDate nextServiceDate oilChangeDate gearOilDueDate lastServiceDate currentKilometer assignedTo assignedCompany acceptanceStatus pendingAction services documents actionRequiredBy createdBy vehicleProfileActivationStatus vehicleDispositionStatus assignmentType temporaryEndDate warrantyEnabled warrantyExpiryDate warrantyYears accessories parkingExtendedDays parkingReminderSentAt parkingDurationCompleteSentAt onServiceActive onLeaveActive assignedDate pendingActionDetails updatedAt activeServiceWorkflow';
         const items = await AssetItem.find({ $and: [draftVis, fleetScope] })
             .populate('typeId', 'name')
             .populate('assignedTo', 'firstName lastName employeeId')
@@ -1169,7 +1171,6 @@ export const getVehicleFleetDashboard = async (req, res) => {
         let regDueSoon = 0;
         let oilServiceDue = 0;
         let registrationExpiresWithin30 = 0;
-        let totalServices = 0;
         const oilServiceDueRows = [];
         const registrationExpiresWithin30Rows = [];
 
@@ -1191,8 +1192,6 @@ export const getVehicleFleetDashboard = async (req, res) => {
         });
 
         for (const v of vehicles) {
-            totalServices += Array.isArray(v.services) ? v.services.length : 0;
-
             const sd = nextMaintenanceDate(v);
             if (sd) {
                 const t = new Date(sd);
@@ -1281,6 +1280,81 @@ export const getVehicleFleetDashboard = async (req, res) => {
         ];
 
         const stNorm = (s) => String(s || '').toLowerCase().trim();
+        const empDisplayName = (emp) => formatEmployeeDisplayName(emp) || '';
+        const companyDisplayName = (c) =>
+            String(c?.nickName || c?.companyShortName || c?.companyName || c?.name || '').trim();
+        const assignedUserOf = (v) => {
+            const emp = empDisplayName(v.assignedTo);
+            if (emp) return emp;
+            const company = companyDisplayName(v.assignedCompany);
+            if (company) return company;
+            return 'Unassigned';
+        };
+        const calendarDaysSince = (dateVal) => {
+            if (!dateVal) return null;
+            const t = new Date(dateVal);
+            if (Number.isNaN(t.getTime())) return null;
+            t.setHours(0, 0, 0, 0);
+            return Math.max(0, Math.round((now.getTime() - t.getTime()) / (1000 * 60 * 60 * 24)));
+        };
+        const parseServiceRemark = (service) => {
+            if (!service?.remark || typeof service.remark !== 'string') return {};
+            try {
+                const parsed = JSON.parse(service.remark);
+                return parsed && typeof parsed === 'object' ? parsed : {};
+            } catch {
+                return {};
+            }
+        };
+        const stagePendingLabel = (stage) => {
+            const key = String(stage || '').toLowerCase().trim();
+            const map = {
+                requester: 'Requester',
+                admin: 'Admin Officer',
+                admin_officer: 'Admin Officer',
+                adminofficer: 'Admin Officer',
+                hr: 'HR',
+                accounts: 'Accounts',
+                asset_controller: 'Asset Controller',
+                assetcontroller: 'Asset Controller',
+                scheduled_service: 'Scheduled service',
+                on_service: 'On service',
+                workshop: 'Workshop',
+                return_to_live: 'Return to live',
+            };
+            if (!key) return '';
+            return map[key] || key.replace(/_/g, ' ');
+        };
+        const isPendingVehicleService = (asset, service) => {
+            if (!service) return false;
+            const remark = parseServiceRemark(service);
+            const requestStatus = String(remark.requestStatus || '').toLowerCase();
+            const serviceStatus = String(remark.serviceStatus || remark.accidentServiceStatus || '')
+                .toLowerCase()
+                .replace(/\s+/g, '_');
+            if (String(remark.vehicleServiceCompleted || '').toLowerCase() === 'live') return false;
+            if (serviceStatus === 'complete' || serviceStatus === 'completed') return false;
+
+            const activeWf = asset?.activeServiceWorkflow || {};
+            const activeMatch =
+                activeWf?.serviceRecordId &&
+                String(activeWf.serviceRecordId) === String(service._id || '');
+            const stage = String(
+                service?.workflowSnapshot?.stage ||
+                    (activeMatch ? activeWf.stage : '') ||
+                    remark.workflowStage ||
+                    remark.stage ||
+                    '',
+            )
+                .toLowerCase()
+                .trim();
+            if (stage === 'complete' || stage === 'rejected') return false;
+            if (['draft', 'pending', 'submitted'].includes(requestStatus)) return true;
+            if (activeMatch && stage) return true;
+            if (stage && !['complete', 'rejected'].includes(stage)) return true;
+            return false;
+        };
+
         let assigned = 0;
         let unassigned = 0;
         let inService = 0;
@@ -1288,28 +1362,95 @@ export const getVehicleFleetDashboard = async (req, res) => {
         const unassignedRows = [];
         const inServiceRows = [];
         const totalServiceRows = [];
+
+        const pendingServiceActions = vehicleIds.length
+            ? await DashboardAction.find({
+                  requestId: { $in: vehicleIds },
+                  requestType: 'Vehicle Service Request',
+                  status: 'Pending',
+              })
+                  .populate('assignedTo', 'firstName lastName employeeId')
+                  .select('requestId assignedTo extra3')
+                  .lean()
+                  .catch(() => [])
+            : [];
+        const pendingForByServiceKey = new Map();
+        for (const row of pendingServiceActions) {
+            let serviceRecordId = '';
+            try {
+                const meta =
+                    typeof row.extra3 === 'object' && row.extra3
+                        ? row.extra3
+                        : JSON.parse(String(row.extra3 || '{}'));
+                serviceRecordId = String(meta?.serviceRecordId || '').trim();
+            } catch {
+                serviceRecordId = '';
+            }
+            const key = `${String(row.requestId)}:${serviceRecordId || '*'}`;
+            const name = empDisplayName(row.assignedTo);
+            if (name) pendingForByServiceKey.set(key, name);
+        }
+
         for (const v of vehicles) {
             const st = stNorm(v.status);
             const base = vehicleModalBase(v);
-            const serviceCount = Array.isArray(v.services) ? v.services.length : 0;
-            if (serviceCount > 0) {
+            const assignedUser = assignedUserOf(v);
+
+            for (const service of v.services || []) {
+                if (!isPendingVehicleService(v, service)) continue;
+                const remark = parseServiceRemark(service);
+                const serviceId = String(service._id || '');
+                const activeWf = v.activeServiceWorkflow || {};
+                const activeMatch =
+                    activeWf?.serviceRecordId && String(activeWf.serviceRecordId) === serviceId;
+                const stage = String(
+                    service?.workflowSnapshot?.stage ||
+                        (activeMatch ? activeWf.stage : '') ||
+                        remark.workflowStage ||
+                        remark.stage ||
+                        '',
+                ).trim();
+                const startRaw =
+                    remark.serviceStartDate ||
+                    remark.scheduledServiceDate ||
+                    activeWf?.scheduledServiceDate ||
+                    service.date ||
+                    null;
+                const pendingFor =
+                    pendingForByServiceKey.get(`${String(v._id)}:${serviceId}`) ||
+                    pendingForByServiceKey.get(`${String(v._id)}:*`) ||
+                    (activeMatch ? empDisplayName(v.actionRequiredBy) : '') ||
+                    stagePendingLabel(stage) ||
+                    '—';
+
                 totalServiceRows.push({
                     ...base,
-                    cardName: 'Service records',
-                    serviceCount,
-                    daysRemaining: null,
+                    modalKind: 'pendingService',
+                    cardName: service.serviceType || remark.serviceTypeLabel || 'Service',
+                    serviceType: service.serviceType || remark.serviceTypeLabel || 'Service',
+                    serviceId,
+                    assignedUser,
+                    pendingForWhom: pendingFor,
+                    serviceStartDate: startRaw,
+                    daysPending: calendarDaysSince(startRaw),
+                    daysRemaining: calendarDaysSince(startRaw),
                     expiryDate: null,
                     focusCard: '',
                     tab: 'service',
                 });
             }
+
             // Assigned / Unassigned: vehicle status only (match fleet list summary).
             if (st === 'assigned') {
                 assigned++;
                 assignedRows.push({
                     ...base,
+                    modalKind: 'assigned',
                     cardName: 'Assigned',
-                    daysRemaining: null,
+                    vehicleName: base.vehicleName || '—',
+                    assignedUser,
+                    daysAssigned: calendarDaysSince(v.assignedDate),
+                    daysRemaining: calendarDaysSince(v.assignedDate),
                     expiryDate: null,
                     focusCard: '',
                     tab: 'basic',
@@ -1319,8 +1460,11 @@ export const getVehicleFleetDashboard = async (req, res) => {
                 unassigned++;
                 unassignedRows.push({
                     ...base,
+                    modalKind: 'unassigned',
                     cardName: 'Unassigned',
-                    daysRemaining: null,
+                    vehicleName: base.vehicleName || '—',
+                    daysUnassigned: calendarDaysSince(v.updatedAt),
+                    daysRemaining: calendarDaysSince(v.updatedAt),
                     expiryDate: null,
                     focusCard: '',
                     tab: 'basic',
@@ -1339,6 +1483,8 @@ export const getVehicleFleetDashboard = async (req, res) => {
                 });
             }
         }
+
+        const totalServices = totalServiceRows.length;
 
         let handoverPending = 0;
         let handoverConfirmed = 0;
@@ -9668,6 +9814,7 @@ const HANDOVER_LIST_DETAIL_KEYS = [
     'assignmentReason',
     'handoverLifecycleStatus',
     'handoverKind',
+    'handoverHrApprovedAt',
     'firstInspection',
     'reinspection',
     'receiverAssessmentCompleted',
@@ -9821,6 +9968,8 @@ export const getAssetHistory = async (req, res) => {
                     return slim;
                 }),
             );
+
+            await attachAssigneeDrivingLicenseIssueDates(slimmed);
 
             return res.status(200).json(slimmed);
         }
@@ -10076,6 +10225,10 @@ export const getHistoryRecord = async (req, res) => {
             );
         }
         await enrichHandoverWorkflowActorSignatures(recordObj, getSignedFileUrl);
+
+        if (recordObj.assignedTo) {
+            await attachAssigneeDrivingLicenseIssueDate(recordObj.assignedTo);
+        }
 
         res.status(200).json(recordObj);
     } catch (error) {
@@ -11056,9 +11209,10 @@ export const addAssetService = async (req, res) => {
                         'Tire change must be created as a pending request from the vehicle Service tab (Request Tire Change).',
                 });
             }
-            if (String(serviceRequestSource || '').trim() !== 'vehicle_asset_detail') {
+            if (String(serviceRequestSource || '').trim() !== 'vehicle_asset_detail' &&
+                String(serviceRequestSource || '').trim() !== 'vehicle_fleet_dashboard') {
                 return res.status(403).json({
-                    message: 'Tire change requests must be created from the vehicle asset Service tab.',
+                    message: 'Tire change requests must be created from the vehicle asset Service tab or Vehicle list.',
                 });
             }
             const allowed = await actorMayManageTireChangeRequest(req.user, asset);
