@@ -121,8 +121,20 @@ const isDesignatedHr = async (user) => {
     return false;
 };
 
+/** Flowchart Admin Officer (admincontroller) — assigns fleet vehicles from the pool. */
+const isDesignatedAdminOfficer = async (user) => {
+    if (!user) return false;
+    if (await isUserInFlowchart(user, 'admincontroller')) return true;
+    const hod = await getDepartmentHOD('admincontroller');
+    if (!hod) return false;
+    if (hod._id && user.employeeObjectId && hod._id.toString() === user.employeeObjectId.toString()) return true;
+    if (hod.employeeId && user.employeeId && normEmp(hod.employeeId) === normEmp(user.employeeId)) return true;
+    return false;
+};
+
 /**
- * Only Asset Controller or Administrator may assign assets (no assignee/assigner bypass).
+ * Tools: Asset Controller or portal Administrator.
+ * Fleet vehicles: also flowchart Admin Officer (and HR / current assignee for reassign flows).
  */
 const requireAssetAssignAccess = async (req, res, next) => {
     try {
@@ -139,6 +151,10 @@ const requireAssetAssignAccess = async (req, res, next) => {
                 .lean()
                 .catch(() => null);
             if (assetQuick && isVehicleAssetLean(assetQuick)) {
+                // Align with assignAssetItem / userCanAssignFleetVehicleAssets
+                const isAdminOfficer = await isDesignatedAdminOfficer(req.user);
+                if (isAdminOfficer) return next();
+
                 const isHrUser = await isDesignatedHr(req.user);
                 if (isHrUser) return next();
 
@@ -158,6 +174,10 @@ const requireAssetAssignAccess = async (req, res, next) => {
                 ) {
                     return next();
                 }
+
+                return res.status(403).json({
+                    message: 'Access denied. Only the flowchart Admin Officer can assign fleet vehicles.'
+                });
             }
         }
 

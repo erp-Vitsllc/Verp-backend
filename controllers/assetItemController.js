@@ -5049,7 +5049,7 @@ export const assignAssetItem = async (req, res) => {
         if (!canAssign) {
             return res.status(403).json({
                 message: fleetVehicle
-                    ? 'Only HR or Administrator can assign fleet vehicles.'
+                    ? 'Only the flowchart Admin Officer can assign fleet vehicles.'
                     : 'Only Asset Controller or Administrator can assign assets.',
             });
         }
