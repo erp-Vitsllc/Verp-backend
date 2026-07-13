@@ -30,17 +30,41 @@ const rewardSchema = new mongoose.Schema(
         rewardStatus: {
             type: String,
             required: true,
-            enum: ['Draft', 'Pending', 'Pending HR', 'Pending Accounts', 'Pending Authorization', 'Approved', 'Rejected', 'Cancelled'],
+            enum: [
+                'Draft',
+                'Pending',
+                'Pending HR',
+                'Pending Accounts',
+                'Pending Authorization',
+                'Approved', // Cash/Gift: approved, awaiting payment (Not Paid). Certificate: final.
+                'Approved (Paid)',
+                'Rejected',
+                'Cancelled',
+            ],
             default: 'Draft'
         },
         approvalStatus: {
             type: String,
-            enum: ['Draft', 'Pending', 'Pending HR', 'Pending Accounts', 'Pending Authorization', 'Approved', 'Rejected', 'Cancelled'],
+            enum: [
+                'Draft',
+                'Pending',
+                'Pending HR',
+                'Pending Accounts',
+                'Pending Authorization',
+                'Approved',
+                'Approved (Paid)',
+                'Rejected',
+                'Cancelled',
+            ],
             default: 'Draft'
         },
         amount: {
             type: Number,
             default: null
+        },
+        paidAmount: {
+            type: Number,
+            default: 0
         },
         description: {
             type: String,
@@ -117,6 +141,13 @@ const rewardSchema = new mongoose.Schema(
             default: null
         },
         attachment: {
+            url: { type: String },
+            publicId: { type: String },
+            name: { type: String },
+            mimeType: { type: String }
+        },
+        /** Generated certificate PDF saved on final approval */
+        certificateAttachment: {
             url: { type: String },
             publicId: { type: String },
             name: { type: String },

@@ -1,6 +1,18 @@
 import Reward from "../../models/Reward.js";
 import { getDepartmentHOD } from "../../utils/getDepartmentHOD.js";
 import { getManagementHOD } from "../../utils/getManagementHOD.js";
+import { getSignedFileUrl } from "../../utils/s3Upload.js";
+
+async function withFreshSignedUrl(fileMeta) {
+    if (!fileMeta?.publicId) return fileMeta || null;
+    try {
+        const url = await getSignedFileUrl(fileMeta.publicId);
+        if (!url) return fileMeta;
+        return { ...fileMeta, url };
+    } catch {
+        return fileMeta;
+    }
+}
 
 export const getRewardById = async (req, res) => {
     try {
@@ -54,10 +66,17 @@ export const getRewardById = async (req, res) => {
         const accountsHOD = await getDepartmentHOD('finance', reward.employeeId);
         const ceoHOD = await getManagementHOD(reward.employeeId);
 
+        const [attachment, certificateAttachment] = await Promise.all([
+            withFreshSignedUrl(reward.attachment),
+            withFreshSignedUrl(reward.certificateAttachment),
+        ]);
+
         return res.status(200).json({
             message: "Reward fetched successfully",
             reward: {
                 ...reward,
+                attachment,
+                certificateAttachment,
                 hrHODName: hrHOD ? `${hrHOD.firstName} ${hrHOD.lastName}` : 'Unknown',
                 hrHODId: hrHOD ? hrHOD.employeeId : null,
                 accountsHODName: accountsHOD ? `${accountsHOD.firstName} ${accountsHOD.lastName}` : 'Unknown',
@@ -74,5 +93,3 @@ export const getRewardById = async (req, res) => {
         });
     }
 };
-
-

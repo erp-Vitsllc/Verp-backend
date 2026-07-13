@@ -2,6 +2,7 @@ import Payment from "../../models/Payment.js";
 import DashboardAction from "../../models/DashboardAction.js";
 import Fine from "../../models/Fine.js";
 import Loan from "../../models/Loan.js";
+import Reward from "../../models/Reward.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { sendPaymentNotificationEmail } from "../../utils/sendCombinedPaymentEmail.js";
 import {
@@ -114,6 +115,19 @@ export const respondToPayment = async (req, res) => {
                             loan.approvalStatus = 'Paid';
                         }
                         await loan.save();
+                    }
+                } else if (relatedEntityType === 'Reward') {
+                    let reward = null;
+                    if (relatedEntityId) {
+                        reward = await Reward.findById(relatedEntityId);
+                    }
+                    if (!reward && referenceId) {
+                        const cleanRef = String(referenceId).replace(/^rewrd\./i, '');
+                        reward = await Reward.findOne({ rewardId: cleanRef });
+                    }
+                    if (reward) {
+                        const { applyRewardPaymentTotals } = await import('../../utils/rewardPaymentStatus.js');
+                        await applyRewardPaymentTotals(reward);
                     }
                 }
             }

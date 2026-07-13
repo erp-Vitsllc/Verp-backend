@@ -320,13 +320,13 @@ export const updateReward = async (req, res) => {
                                     role: 'Primary Reportee'
                                 });
 
-                                // Add other steps for tracker visibility if not already added
+                                // Tracker steps wait as Draft until their turn (sequential bells)
                                 if (isCashOrGift) {
                                     const accountsHOD = await getDepartmentHOD('accounts', hodContext);
                                     if (accountsHOD) {
                                         const accountsUser = await User.findOne({ employeeId: accountsHOD.employeeId });
                                         if (accountsUser) {
-                                            reward.workflow.push({ role: 'Accounts', assignedTo: accountsUser._id, status: 'Pending', assignedAt: new Date() });
+                                            reward.workflow.push({ role: 'Accounts', assignedTo: accountsUser._id, status: 'Draft', assignedAt: new Date() });
                                         }
                                     }
                                 }
@@ -337,7 +337,7 @@ export const updateReward = async (req, res) => {
                                         reward.workflow.push({
                                             role: 'Management',
                                             assignedTo: managementUser._id,
-                                            status: isCashOrGift ? 'Pending' : 'Draft',
+                                            status: 'Draft',
                                             assignedAt: new Date()
                                         });
                                     }
@@ -565,6 +565,26 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
                             managerStep.status = 'Approved';
                             managerStep.actionedAt = new Date();
                         }
+
+                        let accountsStep = reward.workflow.find(w => w.role === 'Accounts');
+                        if (accountsStep) {
+                            accountsStep.status = 'Pending';
+                            accountsStep.assignedAt = new Date();
+                            accountsStep.assignedTo = hodUser._id;
+                        } else {
+                            reward.workflow.push({
+                                role: 'Accounts',
+                                assignedTo: hodUser._id,
+                                status: 'Pending',
+                                assignedAt: new Date()
+                            });
+                        }
+
+                        try {
+                            await sendHODAuthorizationEmail('Reward', reward, targetHOD, approverDetails);
+                        } catch (mailErr) {
+                            console.error('[UpdateReward] Accounts stage email failed:', mailErr);
+                        }
                     }
                 }
             } else if (nextInternalStage === 'Pending Authorization') {
@@ -672,48 +692,57 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
 
             // If status is being approved (Final), send email to recipient
             if (finalStatus === 'Approved' && currentStatus !== 'Approved') {
+                const isCashOrGiftFinal =
+                    reward.rewardType === 'Cash Reward' ||
+                    reward.rewardType === 'Gift Reward' ||
+                    (parseFloat(reward.amount || 0) > 0);
+
                 try {
-                    // Send email to the *Employee* (receiver of reward), Manager, and Creator
+                    // Emails: reward target (TO); reportee, creator, management, accounts, all@vegadigital.ae (CC)
                     const employeeForEmail = await EmployeeBasic.findOne({ employeeId: reward.employeeId })
                         .select('firstName lastName email companyEmail primaryReportee')
                         .populate('primaryReportee', 'firstName lastName email companyEmail')
                         .lean();
 
-                    const creator = await User.findById(reward.createdBy).select('email companyEmail').lean();
+                    const creator = await User.findById(reward.createdBy).select('email companyEmail name username').lean();
 
                     if (employeeForEmail) {
                         const toEmails = new Set();
                         const ccEmails = new Set();
 
-                        // 1. Employee Email (fallback to primaryReportee when emp has no email)
                         const { email: empEmail, isFallbackToReportee, employeeName, reporteeName } = resolveEmployeeEmail(employeeForEmail);
                         if (empEmail) toEmails.add(empEmail);
 
-                        // 2. Manager Email (His Reportee/Supervisor)
                         if (employeeForEmail.primaryReportee) {
                             const { email: managerEmail } = resolveEmployeeEmail(employeeForEmail.primaryReportee);
                             if (managerEmail && !toEmails.has(managerEmail)) ccEmails.add(managerEmail);
                         }
 
-                        if (creator?.companyEmail) {
-                            const creatorEmail = String(creator.companyEmail).trim();
+                        if (creator?.companyEmail || creator?.email) {
+                            const creatorEmail = String(creator.companyEmail || creator.email).trim();
                             if (creatorEmail) ccEmails.add(creatorEmail);
                         }
 
+                        // Always CC company-wide + Accounts flowchart HOD
+                        ccEmails.add('all@vegadigital.ae');
+
                         try {
-                            const { getDepartmentHOD } = await import("../../utils/getDepartmentHOD.js");
-                            const { getManagementHOD } = await import("../../utils/getManagementHOD.js");
-
-                            const hrHOD = await getDepartmentHOD('hr', reward.employeeId);
-                            addEmployeeEmailToSet(ccEmails, hrHOD);
-
-                            const accountsHOD = await getDepartmentHOD('finance', reward.employeeId);
-                            addEmployeeEmailToSet(ccEmails, accountsHOD);
-
-                            const managementHOD = await getManagementHOD(reward.employeeId);
+                            const managementHOD = await getManagementHOD(hodContext);
                             addEmployeeEmailToSet(ccEmails, managementHOD);
                         } catch (e) {
-                            console.warn("[UpdateReward] Could not fetch HOD emails for CC", e.message);
+                            console.warn("[UpdateReward] Could not fetch Management HOD email for CC", e.message);
+                        }
+
+                        try {
+                            const accountsHOD = await getDepartmentHOD('accounts', hodContext);
+                            addEmployeeEmailToSet(ccEmails, accountsHOD);
+                        } catch (e) {
+                            console.warn("[UpdateReward] Could not fetch Accounts HOD email for CC", e.message);
+                        }
+
+                        // Avoid duplicating TO addresses in CC
+                        for (const to of toEmails) {
+                            ccEmails.delete(to);
                         }
 
                         const toRecipients = Array.from(toEmails);
@@ -737,13 +766,17 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
                                     auth: { user: emailUser, pass: emailPass }
                                 });
 
-                                const subject = "Congratulations! Reward Request Approved";
+                                const statusLabel = isCashOrGiftFinal ? 'Approved (Not Paid)' : 'Approved';
+                                const subject = isCashOrGiftFinal
+                                    ? `Reward Approved (Not Paid): ${reward.rewardType} - ${employeeForEmail.firstName} ${employeeForEmail.lastName}`
+                                    : "Congratulations! Reward Request Approved";
                                 const html = `
                                     <div style="font-family: Arial, sans-serif; color: #333; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #eee; border-radius: 10px;">
-                                        <h2 style="color: #2e7d32; text-align: center;">Reward Approved</h2>
+                                        <h2 style="color: #2e7d32; text-align: center;">Reward ${statusLabel}</h2>
                                         ${isFallbackToReportee ? getFallbackEmailNote(employeeName, reporteeName) : ''}
                                         <p>Dear All,</p>
-                                        <p>We are pleased to inform you that the reward request for <strong>${employeeForEmail.firstName} ${employeeForEmail.lastName}</strong> regarding <strong>${reward.rewardType}</strong> (${reward.title}) has been <strong>Approved</strong>.</p>
+                                        <p>We are pleased to inform you that the reward request for <strong>${employeeForEmail.firstName} ${employeeForEmail.lastName}</strong> regarding <strong>${reward.rewardType}</strong> (${reward.title}) has been <strong>${statusLabel}</strong>.</p>
+                                        ${isCashOrGiftFinal ? `<p>Amount: <strong>AED ${Number(reward.amount || 0).toLocaleString()}</strong>. Accounts will process payment next.</p>` : ''}
                                         <p>Please find the reward certificate ${reward.attachment && (reward.attachment.url || reward.attachment.publicId) ? 'and original documentation' : ''} attached to this email.</p>
                                         <br>
                                         <p>Best Regards,</p>
@@ -787,9 +820,8 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
                                 }
 
                                 // --- 2. Generate and Add Certificate PDF ---
-                                // Prepare Permissions and User Payload for Puppeteer
                                 const requestingUserId = req.user?.id || req.body.createdBy?._id;
-                                let userPayload = { id: requestingUserId, role: 'Admin' }; // Default fallback
+                                let userPayload = { id: requestingUserId, role: 'Admin' };
                                 let token = req.headers.authorization?.split(' ')[1] || '';
 
                                 try {
@@ -808,8 +840,6 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
                                     console.warn("[UpdateReward] Failed to build user payload for Puppeteer:", uErr);
                                 }
 
-                                // Construct URL
-                                const origin = req.headers.origin || (req.headers.referer ? new URL(req.headers.referer).origin : null);
                                 const baseUrl = resolveFrontendBaseUrl(req);
                                 const printUrl = `${baseUrl}/HRM/Reward/${reward._id}`;
                                 const selector = '#certificate-container';
@@ -817,7 +847,6 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
                                 console.log(`[UpdateReward] Generating Certificate PDF via Puppeteer from: ${printUrl}`);
 
                                 try {
-                                    // Ensure reward state is saved so emails are accurate
                                     await reward.save();
 
                                     let pdfBuffer = null;
@@ -847,6 +876,26 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
                                             contentType: 'application/pdf'
                                         });
                                         console.log(`[UpdateReward] Success: Certificate PDF attached. Size: ${pdfBuffer.length}`);
+
+                                        // Persist certificate on the reward so Attachment tab can open it
+                                        try {
+                                            const base64Pdf = `data:application/pdf;base64,${pdfBuffer.toString('base64')}`;
+                                            reward.certificateAttachment = await ensureAttachmentPersistedToS3(
+                                                {
+                                                    data: base64Pdf,
+                                                    name: `Certificate-${reward.rewardId || reward._id}.pdf`,
+                                                    mimeType: 'application/pdf',
+                                                },
+                                                {
+                                                    folder: 'rewards',
+                                                    fileName: `Certificate-${reward.rewardId || reward._id}.pdf`,
+                                                },
+                                            );
+                                            await reward.save();
+                                            console.log(`[UpdateReward] Certificate saved to reward.certificateAttachment`);
+                                        } catch (storeErr) {
+                                            console.error('[UpdateReward] Failed to store certificate on reward:', storeErr?.message || storeErr);
+                                        }
                                     } else {
                                         console.warn(`[UpdateReward] Warning: PDF buffer too small or null: ${pdfBuffer ? pdfBuffer.length : 'null'}`);
                                     }
@@ -866,7 +915,7 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
                                 console.error("[UpdateReward] ERROR: Missing EMAIL_USER or EMAIL_PASS environment variables");
                             }
                         } else {
-                            console.warn(`[UpdateReward] WARNING: Employee ${empName} has no email address. Skipping email.`);
+                            console.warn(`[UpdateReward] WARNING: Employee has no email address. Skipping email.`);
                         }
                     } else {
                         console.error(`[UpdateReward] ERROR: Employee not found for ID ${reward.employeeId}`);
@@ -1013,39 +1062,67 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
         // === SYNC DASHBOARD ACTION ===
         try {
             const { syncDashboardAction } = await import("../../utils/syncDashboard.js");
+            const { syncRewardPaymentDueBell } = await import("../../utils/rewardPaymentStatus.js");
             const employee = await EmployeeBasic.findOne({ employeeId: reward.employeeId });
 
-            // 1. Resolve current pending steps
-            // If this was an approval/rejection action, we should mark the ACTIONING user's pending task as done.
-            const isFinalStatus = ['Approved', 'Rejected', 'Cancelled'].includes(reward.rewardStatus);
-            await syncDashboardAction({
-                requestId: reward._id,
-                requestType: 'Reward',
-                // For final statuses, clear all pending for this request. 
-                // For intermediate (where status might still be 'Pending' but approvalStatus changed),
-                // we specifically clear the caller's pending task to support parallel workflows.
-                assignedTo: isFinalStatus ? null : req.user?._id,
-                status: isFinalStatus ? reward.rewardStatus : 'Approved',
-                subjectEmployee: employee,
-                requestedByName: req.user.name,
-                actionedBy: req.user?._id,
-                comment: remarks
-            });
+            const amountDue = parseFloat(reward.amount || 0);
+            const isCashOrGiftDash =
+                reward.rewardType === 'Cash Reward' ||
+                reward.rewardType === 'Gift Reward' ||
+                amountDue > 0;
+            const needsAccountsPayment =
+                reward.rewardStatus === 'Approved' &&
+                isCashOrGiftDash &&
+                amountDue > 0 &&
+                amountDue - parseFloat(reward.paidAmount || 0) > 0.01;
 
-            // 2. If there's a new pending step, create it
-            const nextPendingStep = reward.workflow?.find(w => w.status === 'Pending');
-            if (nextPendingStep) {
-                console.log(`[UpdateReward] Syncing Next Dashboard Action for: ${nextPendingStep.assignedTo} (Role: ${nextPendingStep.role})`);
+            // Terminal = no further approval/payment tasks (certificate Approved, or Paid / Rejected / Cancelled)
+            const isTerminalStatus =
+                ['Rejected', 'Cancelled', 'Approved (Paid)'].includes(reward.rewardStatus) ||
+                (reward.rewardStatus === 'Approved' && !needsAccountsPayment);
+
+            if (needsAccountsPayment) {
+                // Clear approval bells, then create Accounts pay task
                 await syncDashboardAction({
                     requestId: reward._id,
                     requestType: 'Reward',
-                    assignedTo: nextPendingStep.assignedTo,
-                    status: 'Pending',
+                    assignedTo: null,
+                    status: 'Approved',
                     subjectEmployee: employee,
-                    requestedByName: req.user.name,
-                    extra1: reward.rewardType,
-                    extra2: reward.amount ? `AED ${reward.amount}` : reward.title
+                    requestedByName: req.user?.name,
+                    actionedBy: req.user?._id,
+                    comment: remarks
                 });
+                console.log('[UpdateReward] Syncing Accounts Pay bell after Approved (Not Paid)');
+                await syncRewardPaymentDueBell(reward, employee, req.user?.name || '');
+            } else {
+                await syncDashboardAction({
+                    requestId: reward._id,
+                    requestType: 'Reward',
+                    assignedTo: isTerminalStatus ? null : req.user?._id,
+                    status: isTerminalStatus
+                        ? (reward.rewardStatus === 'Approved (Paid)' ? 'Approved' : reward.rewardStatus)
+                        : 'Approved',
+                    subjectEmployee: employee,
+                    requestedByName: req.user?.name,
+                    actionedBy: req.user?._id,
+                    comment: remarks
+                });
+
+                const nextPendingStep = reward.workflow?.find(w => w.status === 'Pending');
+                if (nextPendingStep) {
+                    console.log(`[UpdateReward] Syncing Next Dashboard Action for: ${nextPendingStep.assignedTo} (Role: ${nextPendingStep.role})`);
+                    await syncDashboardAction({
+                        requestId: reward._id,
+                        requestType: 'Reward',
+                        assignedTo: nextPendingStep.assignedTo,
+                        status: 'Pending',
+                        subjectEmployee: employee,
+                        requestedByName: req.user?.name,
+                        extra1: reward.rewardType,
+                        extra2: reward.amount ? `AED ${reward.amount}` : reward.title
+                    });
+                }
             }
         } catch (syncErr) {
             console.error("[UpdateReward] Dashboard Sync Error:", syncErr);
