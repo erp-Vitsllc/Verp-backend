@@ -324,16 +324,36 @@ export const applyAcceptedAssignmentState = (item, acceptedByEmpObjectId, option
     item.actionRequiredBy = null;
     item.acceptedBy = acceptedByEmpObjectId;
 
-    if (!preserveParking && item.assignmentType === 'Temporary' && item.assignedDays) {
+    // Always stamp assignedDate on accept so "days assigned" (start → today) works for
+    // Permanent as well as Temporary. Temporary also gets an end date from assignedDays.
+    if (!preserveParking) {
+        stampAssignmentDatesOnAccept(item);
+    }
+};
+
+/**
+ * Record assignment start (and temporary end) when an assignment is accepted.
+ * Permanent assignments previously left assignedDate null, so fleet "No of Days Assigned" showed "—".
+ */
+export const stampAssignmentDatesOnAccept = (item) => {
+    if (!item) return;
+
+    const start = item.assignedDate ? new Date(item.assignedDate) : new Date();
+    item.assignedDate = start;
+
+    if (item.assignmentType === 'Temporary' && item.assignedDays) {
         const parsedDays = Number(item.assignedDays);
-        const start = new Date();
         const end = new Date(start);
         end.setDate(end.getDate() + parsedDays);
-        item.assignedDate = start;
         item.temporaryEndDate = end;
-        item.temporaryReminderSentAt = null;
-        item.temporaryExpiredSentAt = null;
+        if (!item.temporaryReminderSentAt) item.temporaryReminderSentAt = null;
+        if (!item.temporaryExpiredSentAt) item.temporaryExpiredSentAt = null;
+        return;
     }
+
+    item.temporaryEndDate = null;
+    item.temporaryReminderSentAt = null;
+    item.temporaryExpiredSentAt = null;
 };
 
 /** One-time normalize legacy status strings into flags (mutates item). */

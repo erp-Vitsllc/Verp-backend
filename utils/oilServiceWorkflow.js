@@ -1047,14 +1047,22 @@ function hasOpenOilServiceRequest(asset) {
     return false;
 }
 
-function resolveNextOilServiceDateFromApprovedRow(approvedRemark) {
-    const month = String(approvedRemark?.nextChangeMonth || '').trim();
+function resolveNextOilServiceDateFromRemark(remark, asset) {
+    const month = String(remark?.nextChangeMonth || '').trim();
     if (/^\d{4}-\d{2}$/.test(month)) {
         return new Date(`${month}-01`);
     }
-    const end = String(approvedRemark?.serviceEndDate || '').trim();
+    const end = String(remark?.serviceEndDate || '').trim();
     if (/^\d{4}-\d{2}-\d{2}/.test(end)) {
         return new Date(end.slice(0, 10));
+    }
+    const remarkNext = String(remark?.nextServiceDate || '').trim();
+    if (/^\d{4}-\d{2}-\d{2}/.test(remarkNext)) {
+        return new Date(remarkNext.slice(0, 10));
+    }
+    if (asset?.nextServiceDate) {
+        const assetNext = new Date(asset.nextServiceDate);
+        if (!Number.isNaN(assetNext.getTime())) return assetNext;
     }
     return null;
 }
@@ -1066,26 +1074,51 @@ function formatOilDueDateLabel(value) {
     return d.toISOString().slice(0, 10);
 }
 
-function evaluateOilServiceDue(asset, approvedPreviousRow) {
-    if (!approvedPreviousRow) {
+/** True when an auto-created due request is still open (blocks duplicate auto-create). */
+function hasOpenAutoCreatedOilService(asset) {
+    for (const service of asset?.services || []) {
+        if (String(service?.serviceType || '').trim() !== 'Oil Service') continue;
+        const remark = parseOilServiceRemark(service);
+        if (!remark?.autoCreated) continue;
+        if (isOpenOilServiceRecord(asset, service)) return true;
+    }
+    return false;
+}
+
+/**
+ * Due when:
+ * 1) vehicle current km == previous row next oil change km, or
+ * 2) previous row next oil service date == today.
+ * Previous row may be any status (not only completed).
+ */
+function evaluateOilServiceDue(asset, previousRow) {
+    if (!previousRow) {
         return { due: false, dateDue: false, kmDue: false, nextDate: null, nextKm: null };
     }
 
-    const approvedRemark = parseOilServiceRemark(approvedPreviousRow);
+    const previousRemark = parseOilServiceRemark(previousRow);
     const today = utcDayStart(new Date());
-    const nextDate = resolveNextOilServiceDateFromApprovedRow(approvedRemark);
-    const dateDue = nextDate != null && utcDayStart(nextDate) <= today;
+    const nextDate = resolveNextOilServiceDateFromRemark(previousRemark, asset);
+    const nextDateDay = nextDate != null ? utcDayStart(nextDate) : null;
+    const dateDue = nextDateDay != null && today != null && nextDateDay === today;
 
-    const nextKm = Number(approvedRemark?.nextChangeKm);
+    const nextKm = Number(previousRemark?.nextChangeKm);
     const currentKm = Number(asset?.currentKilometer);
     const kmDue =
         Number.isFinite(nextKm) &&
         nextKm > 0 &&
         Number.isFinite(currentKm) &&
-        currentKm >= nextKm;
+        currentKm === nextKm;
 
     if (!dateDue && !kmDue) {
-        return { due: false, dateDue: false, kmDue: false, nextDate, nextKm: null };
+        return {
+            due: false,
+            dateDue: false,
+            kmDue: false,
+            nextDate,
+            nextKm: Number.isFinite(nextKm) && nextKm > 0 ? nextKm : null,
+            currentKm: Number.isFinite(currentKm) ? currentKm : null,
+        };
     }
 
     let reason = 'due_date';
@@ -1104,18 +1137,19 @@ function evaluateOilServiceDue(asset, approvedPreviousRow) {
 }
 
 /**
- * When the latest oil service row is approved/complete and its next service date
- * or next change km is reached, create a pending oil service row and notify
- * Admin Officer + assignee.
+ * When the previous oil service row (any status) has next service date == today
+ * or current km == next change km, create a pending oil service row and email
+ * Admin Officer, assigned user, and Management.
  */
 export async function maybeAutoCreateOilServiceDue(assetDoc) {
     if (!assetDoc) return false;
     if (!String(assetDoc.plateNumber || '').trim()) return false;
     if (!isFleetVehicleProfileActive(assetDoc)) return false;
-    if (hasOpenOilServiceRequest(assetDoc)) return false;
+    // Only block when an auto-created due request is already open (not by previous-row status).
+    if (hasOpenAutoCreatedOilService(assetDoc)) return false;
 
     const previousRow = findPreviousOilServiceRow(assetDoc);
-    if (!previousRow || !isApprovedOilServiceRow(assetDoc, previousRow)) return false;
+    if (!previousRow) return false;
 
     const dueInfo = evaluateOilServiceDue(assetDoc, previousRow);
     if (!dueInfo.due) return false;
@@ -1123,13 +1157,15 @@ export async function maybeAutoCreateOilServiceDue(assetDoc) {
     const previousRemark = parseOilServiceRemark(previousRow);
     const followId = previousRemark.autoOilFollowUpServiceId;
     if (followId) {
-        const followUp = assetDoc.services?.id?.(followId);
-        if (followUp && isOpenOilServiceRecord(assetDoc, followUp)) return false;
+        const followUp =
+            assetDoc.services?.id?.(followId) ||
+            (assetDoc.services || []).find((s) => String(s?._id) === String(followId));
+        if (followUp) return false;
     }
 
     const completedMeta = previousRemark;
     const currentKm = Number(
-        completedMeta?.currentKm ?? previousRow?.currentKm ?? assetDoc.currentKilometer ?? 0,
+        assetDoc.currentKilometer ?? completedMeta?.currentKm ?? previousRow?.currentKm ?? 0,
     );
     const serviceId = new mongoose.Types.ObjectId();
     const remarkObj = {
@@ -1167,10 +1203,10 @@ export async function maybeAutoCreateOilServiceDue(assetDoc) {
     });
 
     if (previousRow) {
-        const completedRemark = parseOilServiceRemark(previousRow);
-        completedRemark.autoOilFollowUpServiceId = String(serviceId);
-        completedRemark.autoOilFollowUpCreatedAt = new Date().toISOString();
-        previousRow.remark = JSON.stringify(completedRemark);
+        const sourceRemark = parseOilServiceRemark(previousRow);
+        sourceRemark.autoOilFollowUpServiceId = String(serviceId);
+        sourceRemark.autoOilFollowUpCreatedAt = new Date().toISOString();
+        previousRow.remark = JSON.stringify(sourceRemark);
     }
 
     assetDoc.markModified('services');
@@ -1185,14 +1221,15 @@ export async function maybeAutoCreateOilServiceDue(assetDoc) {
     if (!populated) return true;
 
     const adminOfficer = await getDepartmentHOD('admincontroller');
+    const management = await getDepartmentHOD('management');
     const plate = [populated.plateEmirate, populated.plateNumber].filter(Boolean).join(' ').trim();
     const detailParts = [];
     if (dueInfo.dateDue) {
-        detailParts.push(`next service date reached (${formatOilDueDateLabel(dueInfo.nextDate)})`);
+        detailParts.push(`next oil service date is today (${formatOilDueDateLabel(dueInfo.nextDate)})`);
     }
     if (dueInfo.kmDue) {
         detailParts.push(
-            `odometer ${dueInfo.currentKm} km reached scheduled ${dueInfo.nextKm} km`,
+            `current odometer ${dueInfo.currentKm} km equals next oil change ${dueInfo.nextKm} km`,
         );
     }
     const detailLine = `Oil change is due for ${populated.assetId || ''}${plate ? ` (${plate})` : ''}. ${detailParts.join('; ')}. A pending oil service request was created automatically.`;
@@ -1200,7 +1237,7 @@ export async function maybeAutoCreateOilServiceDue(assetDoc) {
     await notifyStakeholders({
         asset: populated,
         serviceRecordId: serviceId,
-        recipients: [adminOfficer, populated.assignedTo],
+        recipients: [adminOfficer, populated.assignedTo, management],
         actionLabel: 'Oil change due — service request created',
         detailLine,
     });
@@ -1223,7 +1260,7 @@ export async function maybeAutoCreateOilServiceDue(assetDoc) {
     return true;
 }
 
-/** Cron: auto-create pending oil service requests when date or km is due. */
+/** Cron: auto-create pending oil service when next date == today or current km == next change km. */
 export async function processOilServiceDueAutoCreate() {
     try {
         const items = await AssetItem.find({

@@ -633,6 +633,7 @@ const requireAssetFullAccess = async (req, res, next) => {
 
 /**
  * Return asset: Admin / designated Asset Controller, or the employee assigned to the asset (not unassigned inventory).
+ * Fleet vehicles: also flowchart Admin Officer and HR (matches returnAssetItem).
  */
 const requireReturnAssetAccess = async (req, res, next) => {
     try {
@@ -641,6 +642,30 @@ const requireReturnAssetAccess = async (req, res, next) => {
         if (isAdminUser || isAssetControllerUser) return next();
 
         const { id } = req.params;
+        if (!id) {
+            return res.status(403).json({
+                message: 'Access denied. Only the assigned employee, Admin Officer, HR, Asset Controller, or an administrator can return this asset.'
+            });
+        }
+
+        const AssetItem = (await import('../models/AssetItem.js')).default;
+        const asset = await AssetItem.findById(id)
+            .populate('typeId', 'name')
+            .select('assignedTo assignedToType assignedCompany plateNumber typeId assetId vehicleBrand vehicleCode plateEmirate locatorDeviceId vehicleProfileActivationStatus vehicleDispositionStatus')
+            .lean();
+        if (!asset) {
+            return res.status(404).json({ message: 'Asset not found' });
+        }
+
+        const isFleetVehicle = isVehicleAssetLean(asset);
+        if (isFleetVehicle) {
+            const isAdminOfficer = await isDesignatedAdminOfficer(req.user);
+            if (isAdminOfficer) return next();
+
+            const isHrUser = await isDesignatedHr(req.user);
+            if (isHrUser) return next();
+        }
+
         let currentEmpId = req.user?.employeeObjectId?.toString();
         if (!currentEmpId && req.user?.employeeId) {
             const emp = await EmployeeBasic.findOne({
@@ -651,24 +676,12 @@ const requireReturnAssetAccess = async (req, res, next) => {
             if (emp) currentEmpId = emp._id.toString();
         }
 
-        if (!id || !currentEmpId) {
+        if (!currentEmpId) {
             return res.status(403).json({
-                message: 'Access denied. Only the assigned employee, Asset Controller, or an administrator can return this asset.'
+                message: isFleetVehicle
+                    ? 'Access denied. Only the assigned employee, Admin Officer, HR, or an administrator can return this vehicle.'
+                    : 'Access denied. Only the assigned employee, flowchart Assigned User/Admin, Asset Controller, or an administrator can return this asset.'
             });
-        }
-
-        const AssetItem = (await import('../models/AssetItem.js')).default;
-        const asset = await AssetItem.findById(id)
-            .populate('typeId', 'name')
-            .select('assignedTo assignedToType assignedCompany plateNumber typeId')
-            .lean();
-        if (!asset) {
-            return res.status(404).json({ message: 'Asset not found' });
-        }
-
-        if (isVehicleAssetLean(asset)) {
-            const isHrUser = await isDesignatedHr(req.user);
-            if (isHrUser) return next();
         }
 
         // Company-assigned assets: allow active flowchart company coordinators
@@ -686,7 +699,9 @@ const requireReturnAssetAccess = async (req, res, next) => {
         }
 
         return res.status(403).json({
-            message: 'Access denied. Only the assigned employee, flowchart Assigned User/Admin, Asset Controller, or an administrator can return this asset.'
+            message: isFleetVehicle
+                ? 'Access denied. Only the assigned employee, Admin Officer, HR, or an administrator can return this vehicle.'
+                : 'Access denied. Only the assigned employee, flowchart Assigned User/Admin, Asset Controller, or an administrator can return this asset.'
         });
     } catch (error) {
         next(error);

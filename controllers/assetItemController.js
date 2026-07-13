@@ -135,6 +135,7 @@ import {
     applyLeavePackToCustodian,
     applyServiceActiveState,
     applyAcceptedAssignmentState,
+    stampAssignmentDatesOnAccept,
     clearParkingFlags,
     healStaleParkingFields,
     clearServiceFlag,
@@ -1290,6 +1291,33 @@ export const getVehicleFleetDashboard = async (req, res) => {
             t.setHours(0, 0, 0, 0);
             return Math.max(0, Math.round((now.getTime() - t.getTime()) / (1000 * 60 * 60 * 24)));
         };
+
+        // Legacy Permanent assignments never stored assignedDate — fall back to latest Accepted/Assigned history.
+        const assignedMissingDateIds = vehicles
+            .filter((v) => stNorm(v.status) === 'assigned' && !v.assignedDate)
+            .map((v) => v._id)
+            .filter(Boolean);
+        const assignedStartByAssetId = new Map();
+        if (assignedMissingDateIds.length) {
+            const historyStarts = await AssetHistory.aggregate([
+                {
+                    $match: {
+                        assetId: { $in: assignedMissingDateIds },
+                        action: { $in: ['Accepted', 'Assigned'] },
+                    },
+                },
+                { $sort: { date: -1 } },
+                { $group: { _id: '$assetId', startDate: { $first: '$date' } } },
+            ]);
+            for (const row of historyStarts) {
+                if (row?._id && row.startDate) {
+                    assignedStartByAssetId.set(String(row._id), row.startDate);
+                }
+            }
+        }
+        const resolveAssignedStartDate = (v) =>
+            v.assignedDate || assignedStartByAssetId.get(String(v._id)) || null;
+
         const parseServiceRemark = (service) => {
             if (!service?.remark || typeof service.remark !== 'string') return {};
             try {
@@ -1436,14 +1464,15 @@ export const getVehicleFleetDashboard = async (req, res) => {
             // Assigned / Unassigned: vehicle status only (match fleet list summary).
             if (st === 'assigned') {
                 assigned++;
+                const assignedStart = resolveAssignedStartDate(v);
                 assignedRows.push({
                     ...base,
                     modalKind: 'assigned',
                     cardName: 'Assigned',
                     vehicleName: base.vehicleName || '—',
                     assignedUser,
-                    daysAssigned: calendarDaysSince(v.assignedDate),
-                    daysRemaining: calendarDaysSince(v.assignedDate),
+                    daysAssigned: calendarDaysSince(assignedStart),
+                    daysRemaining: calendarDaysSince(assignedStart),
                     expiryDate: null,
                     focusCard: '',
                     tab: 'basic',
@@ -5867,17 +5896,17 @@ export const bulkAssignAssetItems = async (req, res) => {
         }
 
         if (autoAcceptOnAssign) {
+            const start = new Date();
             Object.assign(updateData, {
                 status: 'Assigned',
                 acceptanceStatus: 'Accepted',
                 actionRequiredBy: null,
                 acceptedBy: assignedTo,
+                assignedDate: start,
             });
             if (assignmentType === 'Temporary' && updateData.assignedDays) {
-                const start = new Date();
                 const end = new Date(start);
                 end.setDate(end.getDate() + updateData.assignedDays);
-                updateData.assignedDate = start;
                 updateData.temporaryEndDate = end;
             }
         } else {
@@ -7129,24 +7158,10 @@ export const respondToAssignment = async (req, res) => {
                 item.actionRequiredBy = null;
                 item.acceptedBy = req.user.employeeObjectId;
 
-                // Temporary assignment expiration applies only to normal "Assigned" assets,
-                // not parking or service reassignment.
+                // Stamp assignment start (and temporary end) for normal Assigned assets —
+                // not parking or service reassignment (those restore prior dates below).
                 if (!parkingCtx?.isParkingReassign && !serviceCtx?.isServiceReassign) {
-                    if (item.assignmentType === 'Temporary' && item.assignedDays) {
-                        const parsedDays = Number(item.assignedDays);
-                        const start = item.assignedDate ? new Date(item.assignedDate) : new Date();
-                        const end = new Date(start);
-                        end.setDate(end.getDate() + parsedDays);
-                        item.assignedDate = start;
-                        item.temporaryEndDate = end;
-                        if (!item.temporaryReminderSentAt) item.temporaryReminderSentAt = null;
-                        if (!item.temporaryExpiredSentAt) item.temporaryExpiredSentAt = null;
-                    } else {
-                        item.assignedDate = null;
-                        item.temporaryEndDate = null;
-                        item.temporaryReminderSentAt = null;
-                        item.temporaryExpiredSentAt = null;
-                    }
+                    stampAssignmentDatesOnAccept(item);
                 } else if (parkingCtx?.isParkingReassign) {
                     item.assignmentType = parkingCtx.oldAssignmentType ?? item.assignmentType;
                     item.assignedDays = parkingCtx.oldAssignedDays ?? item.assignedDays;
@@ -7780,22 +7795,8 @@ export const bulkRespondToAssignment = async (req, res) => {
                     item.actionRequiredBy = null;
                     item.acceptedBy = currentUser;
 
-                    // Temporary assignment: ensure end date is set for reminder + auto unassign.
-                    if (item.assignmentType === 'Temporary' && item.assignedDays) {
-                        const parsedDays = Number(item.assignedDays);
-                        const start = item.assignedDate ? new Date(item.assignedDate) : new Date();
-                        const end = new Date(start);
-                        end.setDate(end.getDate() + parsedDays);
-                        item.assignedDate = start;
-                        item.temporaryEndDate = end;
-                        if (!item.temporaryReminderSentAt) item.temporaryReminderSentAt = null;
-                        if (!item.temporaryExpiredSentAt) item.temporaryExpiredSentAt = null;
-                    } else {
-                        item.assignedDate = null;
-                        item.temporaryEndDate = null;
-                        item.temporaryReminderSentAt = null;
-                        item.temporaryExpiredSentAt = null;
-                    }
+                    // Stamp assignment start for Permanent + Temporary (days-assigned + temp expiry).
+                    stampAssignmentDatesOnAccept(item);
                 } else {
                     // Rejection
                     if (item.pendingAction === 'Asset Transfer') {
@@ -8662,24 +8663,6 @@ export const respondBulkAssignmentGroup = async (req, res) => {
         const results = { accepted: [], rejected: [] };
         const acceptedPdfJobs = [];
 
-        const applyTempDatesOnAccept = (item) => {
-            if (item.assignmentType === 'Temporary' && item.assignedDays) {
-                const parsedDays = Number(item.assignedDays);
-                const start = item.assignedDate ? new Date(item.assignedDate) : new Date();
-                const end = new Date(start);
-                end.setDate(end.getDate() + parsedDays);
-                item.assignedDate = start;
-                item.temporaryEndDate = end;
-                if (!item.temporaryReminderSentAt) item.temporaryReminderSentAt = null;
-                if (!item.temporaryExpiredSentAt) item.temporaryExpiredSentAt = null;
-            } else {
-                item.assignedDate = null;
-                item.temporaryEndDate = null;
-                item.temporaryReminderSentAt = null;
-                item.temporaryExpiredSentAt = null;
-            }
-        };
-
         for (const idStr of accepted) {
             const item = byId.get(idStr);
             if (!item) continue;
@@ -8688,7 +8671,7 @@ export const respondBulkAssignmentGroup = async (req, res) => {
             item.actionRequiredBy = null;
             item.acceptedBy = currentUser;
             item.pendingActionDetails = null;
-            applyTempDatesOnAccept(item);
+            stampAssignmentDatesOnAccept(item);
             await item.save();
 
             const snapshotItem = await AssetItem.findById(item._id)
