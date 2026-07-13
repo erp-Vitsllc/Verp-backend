@@ -59,6 +59,9 @@ import {
     checkEmployeeProfileActivationAction,
     checkEmployeeManualDocumentEdit,
     checkEmployeeOldDocumentDelete,
+    checkLoanOrAdvanceCreatePermission,
+    checkLoanMutatePermission,
+    checkLoanViewPermission,
 } from "../middleware/permissionMiddleware.js";
 import { deleteOldDocument } from "../controllers/employee/deleteOldDocument.js";
 import { getEmployeeDocument } from "../controllers/employee/getEmployeeDocument.js";
@@ -125,9 +128,8 @@ router.get("/me", async (req, res) => {
     }
 });
 
-// Get loan eligible employees - requires view permission
-// Place this BEFORE /:id routes to prevent conflict
-router.get("/loan-eligible", getLoanEligibleEmployees);
+// Get loan eligible employees — needed when creating Loan/Advance
+router.get("/loan-eligible", checkLoanMutatePermission(), getLoanEligibleEmployees);
 
 import { getDashboardStats } from "../controllers/stats/getDashboardStats.js";
 import { getUserActivityStats } from "../controllers/stats/getUserActivityStats.js";
@@ -291,22 +293,16 @@ router.post("/:id/probation/hod-confirm", checkPermission('hrm_employees_view_wo
 router.post("/:id/probation/employee-respond", employeeRespondProbationChange);
 router.post("/:id/probation/hr-finalize", checkPermission('hrm_employees_view_work', 'edit'), blockLeftUserWrites, finalizeProbationByHR);
 
-// Request Loan/Advance - requires view permission (anyone can apply usually, or restricted?)
-// Using 'view' permission on 'hrm_loan' for now as basic access check
-// Request Loan/Advance - requires view permission (anyone can apply usually, or restricted?)
-// Using 'view' permission on 'hrm_loan' for now as basic access check
-// Request Loan/Advance - requires view permission (anyone can apply usually, or restricted?)
-// Using 'view' permission on 'hrm_loan' for now as basic access check
-// Request Loan/Advance - requires view permission (anyone can apply usually, or restricted?)
-router.post("/request-loan", requestLoan);
-// Approve/Reject Loan - requires edit permission
-router.put("/loans/:id/status", checkPermission('hrm_loan', 'edit'), approveLoan);
-router.put("/loans/:id", updateLoanDetails); // temporarily open; handler still validates ownership/flow
-router.get("/loans/:id/pdf", getLoanPdf); // temporarily open for all authenticated users
-router.get("/loans/:id/acknowledgment-pdf", downloadLoanAcknowledgmentPdf);
-router.get("/loans", getLoans); // temporarily open for all authenticated users
-router.get("/loans/:id", getLoanById); // temporarily open for all authenticated users
-router.delete("/loans/:id", deleteLoan); // temporarily open; handler checks role/ownership
+// Loan / Advance — Create Loan / Create Advance children (parent Loan is View-only)
+router.post("/request-loan", checkLoanOrAdvanceCreatePermission(), requestLoan);
+// Approval — workflow validates actor inside the handler (parent Edit is disabled in the chart)
+router.put("/loans/:id/status", approveLoan);
+router.put("/loans/:id", checkLoanMutatePermission(), updateLoanDetails);
+router.get("/loans/:id/pdf", checkLoanViewPermission(), getLoanPdf);
+router.get("/loans/:id/acknowledgment-pdf", checkLoanViewPermission(), downloadLoanAcknowledgmentPdf);
+router.get("/loans", checkLoanViewPermission(), getLoans);
+router.get("/loans/:id", checkLoanViewPermission(), getLoanById);
+router.delete("/loans/:id", deleteLoan); // handler restricts delete to admin
 
 
 // Get specific document - requires view permission

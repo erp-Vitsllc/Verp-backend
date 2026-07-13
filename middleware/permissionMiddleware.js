@@ -76,6 +76,159 @@ export const checkPermission = (moduleId, permissionType = 'view') => {
     };
 };
 
+/**
+ * Pass if the user has any of the [moduleId, permissionType] pairs.
+ * Used when UI grants a child row (e.g. hrm_reward_create) while the parent is View-only.
+ * @param {Array<[string, string]>} pairs
+ * @param {string} [deniedMessage]
+ */
+export const checkAnyModulePermission = (pairs = [], deniedMessage) => {
+    return async (req, res, next) => {
+        try {
+            const userId = req.user?.id;
+            if (!userId) {
+                return res.status(401).json({ message: "Not authorized, no user found" });
+            }
+
+            const { hasPermission } = await import("../services/permissionService.js");
+
+            if (await isPortalSuperUser(req)) {
+                return next();
+            }
+
+            const list = Array.isArray(pairs) ? pairs : [];
+            for (const entry of list) {
+                const moduleId = entry?.[0];
+                const permissionType = entry?.[1] || 'view';
+                if (moduleId && (await hasPermission(userId, moduleId, permissionType))) {
+                    return next();
+                }
+            }
+
+            return res.status(403).json({
+                message:
+                    deniedMessage ||
+                    "Access denied. You don't have the required module permission.",
+            });
+        } catch (error) {
+            console.error("Error checking module permissions:", error);
+            return res.status(500).json({ message: "Error checking permissions" });
+        }
+    };
+};
+
+/** Flags accepted on a "Create X = ALL" chart child (matches frontend canAccess* helpers). */
+const CREATE_CHILD_FLAGS = ["view", "create", "edit", "delete", "isDownload"];
+
+function createChildPermissionPairs(createModuleId, legacyParentId = null) {
+    const pairs = CREATE_CHILD_FLAGS.map((flag) => [createModuleId, flag]);
+    if (legacyParentId) {
+        pairs.push([legacyParentId, "create"], [legacyParentId, "edit"]);
+    }
+    return pairs;
+}
+
+/**
+ * Create Reward chart row (hrm_reward_create) is the mutate grant; parent hrm_reward is View-only.
+ * Also accepts legacy flat hrm_reward create/edit for older groups.
+ */
+export const checkRewardMutatePermission = () =>
+    checkAnyModulePermission(
+        createChildPermissionPairs("hrm_reward_create", "hrm_reward"),
+        "Access denied. Create Reward permission is required.",
+    );
+
+/**
+ * Add Fine chart row (hrm_fine_add); parent hrm_fine is View-only.
+ */
+export const checkFineMutatePermission = () =>
+    checkAnyModulePermission(
+        createChildPermissionPairs("hrm_fine_add", "hrm_fine"),
+        "Access denied. Add Fine permission is required.",
+    );
+
+/**
+ * Create Loan / Create Advance chart rows; parent hrm_loan* is View-only.
+ * Uses req.body.type to pick the correct child module.
+ */
+export const checkLoanOrAdvanceCreatePermission = () => {
+    return async (req, res, next) => {
+        try {
+            const userId = req.user?.id;
+            if (!userId) {
+                return res.status(401).json({ message: "Not authorized, no user found" });
+            }
+
+            const { hasPermission } = await import("../services/permissionService.js");
+
+            if (await isPortalSuperUser(req)) {
+                return next();
+            }
+
+            const type = String(req.body?.type || "").toLowerCase();
+            const isAdvance = type.includes("advance");
+            const createModuleId = isAdvance
+                ? "hrm_loan_advance_create"
+                : "hrm_loan_loan_create";
+            const pairs = createChildPermissionPairs(createModuleId, "hrm_loan");
+
+            for (const [moduleId, permissionType] of pairs) {
+                if (await hasPermission(userId, moduleId, permissionType)) {
+                    return next();
+                }
+            }
+
+            return res.status(403).json({
+                message: isAdvance
+                    ? "Access denied. Create Advance permission is required."
+                    : "Access denied. Create Loan permission is required.",
+            });
+        } catch (error) {
+            console.error("Error checking loan/advance create permission:", error);
+            return res.status(500).json({ message: "Error checking permissions" });
+        }
+    };
+};
+
+/**
+ * Update loan/advance when user has Create Loan and/or Create Advance.
+ */
+export const checkLoanMutatePermission = () =>
+    checkAnyModulePermission(
+        [
+            ...createChildPermissionPairs("hrm_loan_loan_create", "hrm_loan"),
+            ...createChildPermissionPairs("hrm_loan_advance_create", null),
+        ],
+        "Access denied. Create Loan or Create Advance permission is required.",
+    );
+
+/**
+ * List/detail access for Loan/Advance (parents are View-only; any loan branch View is enough).
+ */
+export const checkLoanViewPermission = () =>
+    checkAnyModulePermission(
+        [
+            ["hrm_loan", "view"],
+            ["hrm_loan_loan", "view"],
+            ["hrm_loan_advance", "view"],
+            ["hrm_loan_loan_create", "view"],
+            ["hrm_loan_advance_create", "view"],
+        ],
+        "Access denied. Loan/Advance view permission is required.",
+    );
+
+/**
+ * Fine list/detail — parent View or Add Fine child.
+ */
+export const checkFineViewPermission = () =>
+    checkAnyModulePermission(
+        [
+            ["hrm_fine", "view"],
+            ["hrm_fine_add", "view"],
+        ],
+        "Access denied. Fine view permission is required.",
+    );
+
 /** Card-level field groups for PATCH /Employee/basic-details/:id (matches frontend profile cards). */
 const BASIC_DETAILS_PATCH_GROUPS = [
     {

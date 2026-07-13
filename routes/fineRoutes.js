@@ -6,7 +6,10 @@ import { updateFine } from "../controllers/fine/updateFine.js";
 import { deleteFine } from "../controllers/fine/deleteFine.js";
 import { approveFine } from "../controllers/fine/approveFine.js";
 import { protect } from "../middleware/authMiddleware.js";
-import { checkPermission } from "../middleware/permissionMiddleware.js";
+import {
+    checkFineMutatePermission,
+    checkFineViewPermission,
+} from "../middleware/permissionMiddleware.js";
 
 import { downloadFinePdf } from "../controllers/fine/downloadFinePdf.js";
 import { downloadFineApprovedReportPdf } from "../controllers/fine/downloadFineApprovedReportPdf.js";
@@ -19,25 +22,19 @@ router.use(protect);
 
 router.get("/dashboard/pending-inbox", getPendingFineDashboardInbox);
 
-// Get all fines - temporarily open for all authenticated users
-router.get("/", getFines);
+// List / detail / PDF — Fine View (or Add Fine child)
+router.get("/", checkFineViewPermission(), getFines);
+router.get("/:id", checkFineViewPermission(), getFineById);
+router.get("/:id/approved-report-pdf", checkFineViewPermission(), downloadFineApprovedReportPdf);
+router.get("/:id/pdf", checkFineViewPermission(), downloadFinePdf);
 
-// Get fine by ID - temporarily open for all authenticated users
-router.get("/:id", getFineById);
+// Create / update / delete — Add Fine child (parent Fine is View-only in the chart)
+router.post("/", checkFineMutatePermission(), addFine);
+router.patch("/:id", checkFineMutatePermission(), updateFine);
+router.put("/:id", checkFineMutatePermission(), updateFine);
+router.delete("/:id", checkFineMutatePermission(), deleteFine);
 
-// Download Fine PDF - temporarily open for all authenticated users
-router.get("/:id/approved-report-pdf", downloadFineApprovedReportPdf);
-router.get("/:id/pdf", downloadFinePdf);
-
-// Add fine - temporarily open for testing
-router.post("/", /* checkPermission('hrm_fine', 'create'), */ addFine);
-
-// Update fine - temporarily open for testing
-router.patch("/:id", /* checkPermission('hrm_fine', 'edit'), */ updateFine);
-router.put("/:id", /* checkPermission('hrm_fine', 'edit'), */ updateFine);
-router.put("/:id/approve", approveFine); // Granular approval logic handles permission internally
-
-// Delete fine - temporarily open for testing
-router.delete("/:id", /* checkPermission('hrm_fine', 'delete'), */ deleteFine);
+// Approval — workflow validates actor inside the handler
+router.put("/:id/approve", approveFine);
 
 export default router;
