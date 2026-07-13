@@ -628,11 +628,33 @@ export const getAssetTypes = async (req, res) => {
 
             if (toolsOnly) {
                 assetQuery.$and = assetQuery.$and || [];
+                // Tools list: VEGA-ASSET-* only; never fleet IDs or plated/fleet-marked rows.
+                assetQuery.$and.push({ assetId: { $regex: /^VEGA-ASSET-/i } });
                 assetQuery.$and.push({
                     $or: [
                         { plateNumber: { $exists: false } },
                         { plateNumber: null },
                         { plateNumber: '' },
+                    ],
+                });
+                assetQuery.$and.push({
+                    $or: [
+                        { locatorDeviceId: { $exists: false } },
+                        { locatorDeviceId: null },
+                    ],
+                });
+                assetQuery.$and.push({
+                    $or: [
+                        { plateEmirate: { $exists: false } },
+                        { plateEmirate: null },
+                        { plateEmirate: '' },
+                    ],
+                });
+                assetQuery.$and.push({
+                    $or: [
+                        { vehicleBrand: { $exists: false } },
+                        { vehicleBrand: null },
+                        { vehicleBrand: '' },
                     ],
                 });
             }

@@ -117,6 +117,7 @@ import {
     FLEET_PROFILE_INACTIVE_ASSIGNMENT_MSG,
     userIsFlowchartAdminOfficer,
 } from '../utils/assetApprovalHelpers.js';
+import { buildFleetVehicleMongoScope } from '../utils/fleetVehicleAssetId.js';
 import AssetAccessoryCatalog from '../models/AssetAccessoryCatalog.js';
 import { sendAssignedEmployeeActionEmail } from '../utils/sendAssignedEmployeeActionEmail.js';
 import { processParkingAssets } from '../utils/processParkingAssets.js';
@@ -1032,16 +1033,8 @@ export const getVehicleFleetDashboard = async (req, res) => {
             .select('_id')
             .lean();
         const vehicleTypeIds = vehicleTypeDocs.map((t) => t._id);
-        const fleetScope = {
-            $or: [
-                { plateNumber: { $exists: true, $nin: [null, ''] } },
-                { vehicleBrand: { $exists: true, $nin: [null, ''] } },
-                { vehicleCode: { $exists: true, $nin: [null, ''] } },
-                { plateEmirate: { $exists: true, $nin: [null, ''] } },
-                { vehicleProfileActivationStatus: { $exists: true, $nin: [null, '', 'none'] } },
-                ...(vehicleTypeIds.length ? [{ typeId: { $in: vehicleTypeIds } }] : []),
-            ],
-        };
+        // Exclude tools (VEGA-ASSET-*): shared AssetItem defaults used to match every row.
+        const fleetScope = buildFleetVehicleMongoScope({ vehicleTypeIds });
         const fleetSelect = listOnly
             ? 'assetId name vehicleBrand plateEmirate plateNumber modelYear assetValue status registrationExpiryDate insuranceExpiryDate nextServiceDate oilChangeDate gearOilDueDate currentKilometer assignedTo assignedCompany acceptanceStatus pendingAction actionRequiredBy createdBy vehicleProfileActivationStatus vehicleDispositionStatus warrantyEnabled warrantyExpiryDate warrantyYears onServiceActive onLeaveActive typeId assignedDate pendingActionDetails updatedAt documents.type documents.expiryDate documents.issueDate documents.createdAt documents.status documents.documentStatus documents.description'
             : 'assetId name vehicleBrand plateEmirate plateNumber modelYear assetValue status registrationExpiryDate insuranceExpiryDate nextServiceDate oilChangeDate gearOilDueDate lastServiceDate currentKilometer assignedTo assignedCompany acceptanceStatus pendingAction services documents actionRequiredBy createdBy vehicleProfileActivationStatus vehicleDispositionStatus assignmentType temporaryEndDate warrantyEnabled warrantyExpiryDate warrantyYears accessories parkingExtendedDays parkingReminderSentAt parkingDurationCompleteSentAt onServiceActive onLeaveActive assignedDate pendingActionDetails updatedAt activeServiceWorkflow';

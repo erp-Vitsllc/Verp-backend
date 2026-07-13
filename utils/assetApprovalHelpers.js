@@ -5,6 +5,7 @@ import DashboardAction from '../models/DashboardAction.js';
 import { getDepartmentHOD, isUserActiveInFlowchart } from './getDepartmentHOD.js';
 import { isJwtSystemSuperUser } from '../utils/systemSuperUser.js';
 import { hasPermission, isUserAdministrator } from '../services/permissionService.js';
+import { FLEET_VEHICLE_ASSET_ID_PREFIX } from './fleetVehicleAssetId.js';
 
 const normEmpId = (s) => (s || '').toString().toLowerCase().replace(/\s+/g, '');
 
@@ -214,17 +215,21 @@ function hasFleetVehicleTypeName(typeName) {
 
 function hasFleetVehicleRecordMarkers(asset) {
     if (!asset || typeof asset !== 'object') return false;
+    // Tools use VEGA-ASSET-*; fleet vehicles use VEGA-VHCL-*.
+    const assetId = String(asset.assetId || '').trim().toUpperCase();
+    if (assetId.startsWith(FLEET_VEHICLE_ASSET_ID_PREFIX.toUpperCase())) return true;
     if (String(asset.vehicleBrand || '').trim()) return true;
     if (String(asset.vehicleCode || '').trim()) return true;
     if (String(asset.plateEmirate || '').trim()) return true;
     if (asset.locatorDeviceId != null && asset.locatorDeviceId !== '') return true;
+    // Schema defaults on AssetItem apply to tools too ('inactive' / 'active').
+    // Only non-default fleet workflow values count as vehicle markers.
     const profileStatus = String(asset.vehicleProfileActivationStatus || '').trim().toLowerCase();
-    if (profileStatus && profileStatus !== 'none') return true;
+    if (profileStatus && !['none', 'inactive'].includes(profileStatus)) return true;
     const inspectionStatus = String(asset.vehicleInspectionStatus || '').trim().toLowerCase();
     if (inspectionStatus && inspectionStatus !== 'none') return true;
-    if (asset.vehicleDispositionStatus != null && String(asset.vehicleDispositionStatus).trim()) {
-        return true;
-    }
+    const disposition = String(asset.vehicleDispositionStatus || '').trim().toLowerCase();
+    if (disposition && disposition !== 'active') return true;
     if (Array.isArray(asset.vehicleAccessoriesListEntries) && asset.vehicleAccessoriesListEntries.length > 0) {
         return true;
     }

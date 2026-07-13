@@ -2,7 +2,8 @@ import AssetItem from '../models/AssetItem.js';
 import AssetType from '../models/AssetType.js';
 import AssetCategory from '../models/AssetCategory.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
-import { generateNextFleetVehicleAssetId } from '../utils/fleetVehicleAssetId.js';
+import { generateNextFleetVehicleAssetId, buildFleetVehicleMongoScope } from '../utils/fleetVehicleAssetId.js';
+import { isFleetVehicleAssetFields } from '../utils/assetApprovalHelpers.js';
 import { fetchLatestPositions, isLocatorConfigured, locatorLogin } from './locatorService.js';
 import { getCachedLocatorPositions } from './locatorWebSocketService.js';
 import { readLocatorTokens } from '../utils/locatorTokenStore.js';
@@ -495,12 +496,7 @@ async function loadErpFleetVehicles() {
         .lean();
 
     const vehicleTypeIds = vehicleTypeDocs.map((t) => t._id);
-    const fleetScope = {
-        $or: [
-            { plateNumber: { $exists: true, $nin: [null, ''] } },
-            ...(vehicleTypeIds.length ? [{ typeId: { $in: vehicleTypeIds } }] : []),
-        ],
-    };
+    const fleetScope = buildFleetVehicleMongoScope({ vehicleTypeIds });
 
     const items = await AssetItem.find(fleetScope)
         .populate('typeId', 'name')
@@ -509,12 +505,13 @@ async function loadErpFleetVehicles() {
         .select(ERP_VEHICLE_LIST_SELECT)
         .lean();
 
-    return items.filter((it) => {
-        const plate = (it.plateNumber || '').trim();
-        if (plate) return true;
-        const t = (it.typeId?.name || '').toLowerCase();
-        return t.includes('vehicle') || t.includes('car') || t.includes('fleet') || t.includes('truck');
-    });
+    return items.filter((it) =>
+        isFleetVehicleAssetFields({
+            plateNumber: it.plateNumber,
+            typeName: it.typeId?.name || '',
+            asset: it,
+        }),
+    );
 }
 
 function mapErpVehicleToListRow(erp, locatorOverlay = null) {
