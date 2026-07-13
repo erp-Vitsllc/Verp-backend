@@ -1126,7 +1126,8 @@ export const getUserActivityStats = async (req, res) => {
                     .maxTimeMS(10000);
 
                 const liveActiveEmployees = employeesForScan.filter((emp) => isEmployeeProfileLiveActive(emp));
-                const batchSize = 5;
+                // Higher concurrency — previous batchSize of 5 made user-stats (Request Activity) very slow for HR.
+                const batchSize = 20;
 
                 for (let i = 0; i < liveActiveEmployees.length; i += batchSize) {
                     const batch = liveActiveEmployees.slice(i, i + batchSize);

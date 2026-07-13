@@ -4,6 +4,7 @@ import { getRewards } from "../controllers/reward/getRewards.js";
 import { getRewardById } from "../controllers/reward/getRewardById.js";
 import { updateReward } from "../controllers/reward/updateReward.js";
 import { deleteReward } from "../controllers/reward/deleteReward.js";
+import { getPendingRewardDashboardInbox } from "../controllers/reward/getPendingRewardDashboardInbox.js";
 import { protect } from "../middleware/authMiddleware.js";
 import {
     checkPermission,
@@ -14,6 +15,9 @@ const router = express.Router();
 
 // All reward routes require authentication
 router.use(protect);
+
+// Must be registered before /:id
+router.get("/dashboard/pending-inbox", getPendingRewardDashboardInbox);
 
 // List / detail — parent Reward View
 router.get("/", checkPermission("hrm_reward", "view"), getRewards);

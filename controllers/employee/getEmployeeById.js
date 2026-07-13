@@ -96,9 +96,9 @@ export const getEmployeeById = async (req, res) => {
                 })
             );
 
+            // All workflow statuses — profile Rewards tab shows pending through paid (not approved-only).
             const rewards = await Reward.find({
                 employeeId: employee.employeeId,
-                rewardStatus: 'Approved'
             }).sort({ createdAt: -1 }).lean();
 
             // Fetch Approved Loans and Advances

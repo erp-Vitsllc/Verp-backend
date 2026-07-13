@@ -386,6 +386,7 @@ ${rewardData.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.padEnd(12)} As
 
             // === SYNC DASHBOARD ACTION ===
             const { syncDashboardAction } = await import("../../utils/syncDashboard.js");
+            const { rewardStageBellLabel } = await import("../../utils/rewardStageBellLabel.js");
 
             if (savedReward.rewardStatus === 'Draft' && req.user) {
                 // Creator bell: send this draft for approval
@@ -402,21 +403,24 @@ ${rewardData.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.padEnd(12)} As
                     status: 'Pending',
                     subjectEmployee: employee,
                     requestedByName: req.user.name || req.user.username || '',
-                    extra1: 'Send for Approval',
+                    extra1: rewardStageBellLabel('Requester'),
                     extra2: savedReward.amount ? `AED ${savedReward.amount}` : savedReward.title
                 });
             } else if (savedReward.rewardStatus !== 'Draft') {
-                const managerStep = savedReward.workflow?.find(w => w.status === 'Pending' && w.role === 'Manager');
-                if (managerStep) {
-                    console.log(`[AddReward] Syncing Dashboard for Manager: ${managerStep.assignedTo}`);
+                const nextPendingStep = savedReward.workflow?.find(w => w.status === 'Pending');
+                if (nextPendingStep) {
+                    console.log(`[AddReward] Syncing Dashboard for ${nextPendingStep.role}: ${nextPendingStep.assignedTo}`);
                     await syncDashboardAction({
                         requestId: savedReward._id,
                         requestType: 'Reward',
-                        assignedTo: managerStep.assignedTo,
+                        assignedTo: nextPendingStep.assignedTo,
                         status: 'Pending',
                         subjectEmployee: employee,
                         requestedByName: req.user?.name || '',
-                        extra1: savedReward.rewardType,
+                        extra1: rewardStageBellLabel(nextPendingStep.role, {
+                            rewardType: savedReward.rewardType,
+                            rewardStatus: savedReward.rewardStatus,
+                        }),
                         extra2: savedReward.amount ? `AED ${savedReward.amount}` : savedReward.title
                     });
                 }

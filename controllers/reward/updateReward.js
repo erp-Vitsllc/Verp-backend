@@ -10,7 +10,7 @@ import { sendHODAuthorizationEmail } from "../../utils/sendHODAuthorizationEmail
 import { generatePdf } from "../../utils/generatePdf.js";
 import { ensureAttachmentPersistedToS3 } from "../../utils/s3Upload.js";
 import { resolveEmployeeEmail, getFallbackEmailNote, addEmployeeEmailToSet } from "../../utils/resolveEmployeeEmail.js";
-import { isUsernameSystemSuperUser } from "../../utils/systemSuperUser.js";
+import { isUsernameSystemSuperUser, isReqUserSystemSuperUser } from "../../utils/systemSuperUser.js";
 
 export const updateReward = async (req, res) => {
     try {
@@ -39,6 +39,27 @@ export const updateReward = async (req, res) => {
         const reward = await Reward.findById(id);
         if (!reward) {
             return res.status(404).json({ message: "Reward not found" });
+        }
+
+        const approvedStatuses = new Set(['Approved', 'Approved (Paid)', 'Paid', 'Completed', 'Active']);
+        const certFieldsProvided = [
+            title,
+            employeeName,
+            certHeader,
+            certSubHeader,
+            certPresentationText,
+            certSigner1Name,
+            certSigner1Title,
+            certSigner2Name,
+            certSigner2Title,
+        ].some((v) => v !== undefined);
+        if (certFieldsProvided && approvedStatuses.has(String(reward.rewardStatus || '').trim())) {
+            const isSysAdmin = await isReqUserSystemSuperUser(req.user);
+            if (!isSysAdmin) {
+                return res.status(403).json({
+                    message: 'Only system administrators can edit the certificate after the reward is approved.',
+                });
+            }
         }
 
         // If employeeId is being updated, verify employee exists and update name
@@ -1096,10 +1117,13 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
                 console.log('[UpdateReward] Syncing Accounts Pay bell after Approved (Not Paid)');
                 await syncRewardPaymentDueBell(reward, employee, req.user?.name || '');
             } else {
+                const { rewardStageBellLabel } = await import("../../utils/rewardStageBellLabel.js");
+
+                // Clear previous stage bells for this reward, then open the next assignee's bell
                 await syncDashboardAction({
                     requestId: reward._id,
                     requestType: 'Reward',
-                    assignedTo: isTerminalStatus ? null : req.user?._id,
+                    assignedTo: null,
                     status: isTerminalStatus
                         ? (reward.rewardStatus === 'Approved (Paid)' ? 'Approved' : reward.rewardStatus)
                         : 'Approved',
@@ -1119,7 +1143,10 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
                         status: 'Pending',
                         subjectEmployee: employee,
                         requestedByName: req.user?.name,
-                        extra1: reward.rewardType,
+                        extra1: rewardStageBellLabel(nextPendingStep.role, {
+                            rewardType: reward.rewardType,
+                            rewardStatus: reward.rewardStatus,
+                        }),
                         extra2: reward.amount ? `AED ${reward.amount}` : reward.title
                     });
                 }
