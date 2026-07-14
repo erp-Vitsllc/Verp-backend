@@ -270,9 +270,61 @@ export const generatePdf = async (url, token, user, permissions = {}, selector =
 
             const isVehicleHandover =
                 String(selector).includes('vehicle-handover-print-root');
+            // Asset handover uses CSS @page A4 + fixed VITS letterhead on every page
+            const isAssetHandover =
+                String(selector).includes('asset-handover-container');
 
-            if (isVehicleHandover) {
-                await page.emulateMediaType('screen');
+            if (isVehicleHandover || isAssetHandover) {
+                if (isAssetHandover) {
+                    // Stacked A4 page frames — left-align so each letterhead page clips cleanly
+                    await page.evaluate(() => {
+                        document.body.style.display = 'block';
+                        document.body.style.justifyContent = '';
+                        document.body.style.alignItems = '';
+                        document.body.style.margin = '0';
+                        document.body.style.padding = '0';
+                        const root = document.querySelector('.vits-letterhead-pdf-root');
+                        if (root) {
+                            root.style.margin = '0';
+                            root.style.maxWidth = '210mm';
+                        }
+                    });
+                    await page.addStyleTag({
+                        content: `
+                            @page { size: A4 portrait; margin: 0 !important; }
+                            html, body {
+                                margin: 0 !important;
+                                padding: 0 !important;
+                                background: #ffffff !important;
+                            }
+                            .vits-letterhead-pdf-root {
+                                background: #ffffff !important;
+                            }
+                            /* Force each letterhead frame onto its own PDF page */
+                            .vits-letterhead-pdf-page {
+                                box-shadow: none !important;
+                                border: none !important;
+                                margin: 0 !important;
+                                margin-top: 0 !important;
+                                page-break-after: always !important;
+                                break-after: page !important;
+                                page-break-inside: avoid !important;
+                                break-inside: avoid !important;
+                            }
+                            .vits-letterhead-pdf-page + .vits-letterhead-pdf-page {
+                                margin-top: 0 !important;
+                                page-break-before: always !important;
+                                break-before: page !important;
+                            }
+                            .vits-letterhead-pdf-page--last {
+                                page-break-after: auto !important;
+                                break-after: auto !important;
+                            }
+                        `,
+                    });
+                }
+                // Use print media so page-break rules apply to separate PDF sheets
+                await page.emulateMediaType('print');
                 const pdfBuffer = await renderPdfWithFallback(page, {
                     format: 'A4',
                     landscape: false,

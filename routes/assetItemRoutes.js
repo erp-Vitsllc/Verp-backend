@@ -54,6 +54,7 @@ import {
 } from '../controllers/vehicleMortgageCloseController.js';
 import { protect } from '../middleware/authMiddleware.js';
 import { downloadAssetListPdf } from '../controllers/asset/downloadAssetListPdf.js';
+import { downloadAssetListExcel } from '../controllers/asset/downloadAssetListExcel.js';
 import {
     isUserInFlowchart,
     getDepartmentHOD,
@@ -771,6 +772,7 @@ router.get('/company-allocation/coordinator', protect, getCompanyAllocationCoord
 router.get('/company-assets/hr/:employeeId', protect, getHRCompanyAssets);
 router.get('/previous/:employeeId', protect, getEmployeePreviousAssets);
 router.get('/asset-list/pdf', protect, downloadAssetListPdf);
+router.get('/asset-list/excel', protect, downloadAssetListExcel);
 router.get('/detail/:id', protect, getAssetItemDetail);
 router.get('/bulk/details', protect, getBulkAssetDetails);
 router.get('/bulk/print-inventory', protect, getBulkAssetInventoryForPrint);

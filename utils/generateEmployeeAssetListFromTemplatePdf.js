@@ -2,9 +2,11 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { PDFDocument, rgb, StandardFonts } from 'pdf-lib';
+import { buildEmployeeAssetListRows } from './buildEmployeeAssetListPdfHtml.js';
 import {
-    buildEmployeeAssetListRows,
-} from './buildEmployeeAssetListPdfHtml.js';
+    ASSET_LIST_CLASSIC_COLUMN_KEYS,
+    resolveAssetListExportColumns,
+} from './assetListExportColumns.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const BG_IMAGE_PATH = path.join(__dirname, '../assets/templates/asset-list-page-bg.jpg');
@@ -14,7 +16,7 @@ const PAGE_HEIGHT = 934.56;
 const BLACK = rgb(0, 0, 0);
 const LINE = rgb(0, 0, 0);
 
-/** Measured from asset-list-template.pdf — 7 columns: Serial No | Assigned to | Asset Name | Accessories | Asset ID | QTY | Value */
+/** Measured from asset-list-template.pdf — Serial No | Assigned to | Asset Name | Accessories | Asset ID | QTY | Value */
 const LAYOUT = {
     table: {
         x: 56,
@@ -24,9 +26,11 @@ const LAYOUT = {
         firstRowTop: 788,
         defaultRowHeight: 22,
         bottomLimit: 155,
-        colX: [56, 88, 168, 253, 348, 418, 453, 539],
+        classicColX: [56, 88, 168, 253, 348, 418, 453, 539],
     },
 };
+
+const SERIAL_WEIGHT = 0.45;
 
 function employeeDisplayName(employee) {
     if (!employee) return '—';
@@ -38,6 +42,12 @@ function formatMoney(value) {
     const n = Number(value);
     if (!Number.isFinite(n)) return '0.00';
     return n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function resolveNestedName(ref) {
+    if (!ref) return '—';
+    if (typeof ref === 'object') return ref.name || '—';
+    return '—';
 }
 
 const CELL_PAD_X = 4;
@@ -151,27 +161,72 @@ function drawAccessoryListInCell(page, font, accessories, colStart, colEnd, rowT
     }
 }
 
-function rowHeightForAsset(row, font) {
-    const { colX, defaultRowHeight } = LAYOUT.table;
+function isClassicColumnSet(columnDefs) {
+    if (columnDefs.length !== ASSET_LIST_CLASSIC_COLUMN_KEYS.length) return false;
+    return columnDefs.every((col, i) => col.key === ASSET_LIST_CLASSIC_COLUMN_KEYS[i]);
+}
 
-    const slLines = 1;
-    const assignedLines = countWrappedLines(font, row.assignedTo, 8, colX[1], colX[2]);
-    const nameLines = countWrappedLines(font, row.name, 8, colX[2], colX[3]);
-    const accLines = countAccessoryListLines(font, row.accessories, colX[3], colX[4]);
-    const assetIdLines = countWrappedLines(font, row.assetId, 8, colX[4], colX[5]);
-    const qtyLines = countWrappedLines(font, String(row.quantity ?? 1), 8, colX[5], colX[6]);
-    const valueLines = countWrappedLines(font, formatMoney(row.totalValue), 8, colX[6], colX[7]);
+function buildColX(columnDefs) {
+    const { x, width, classicColX } = LAYOUT.table;
+    if (isClassicColumnSet(columnDefs)) {
+        return classicColX;
+    }
 
-    return Math.max(
-        defaultRowHeight,
-        cellHeightForLines(slLines, 8, defaultRowHeight),
-        cellHeightForLines(assignedLines, 8, defaultRowHeight),
-        cellHeightForLines(nameLines, 8, defaultRowHeight),
-        cellHeightForLines(accLines, 7, defaultRowHeight),
-        cellHeightForLines(assetIdLines, 8, defaultRowHeight),
-        cellHeightForLines(qtyLines, 8, defaultRowHeight),
-        cellHeightForLines(valueLines, 8, defaultRowHeight),
-    );
+    const weights = [SERIAL_WEIGHT, ...columnDefs.map((c) => c.weight)];
+    const totalWeight = weights.reduce((sum, w) => sum + w, 0);
+    const colX = [x];
+    let cursor = x;
+    for (let i = 0; i < weights.length; i += 1) {
+        cursor += (weights[i] / totalWeight) * width;
+        colX.push(cursor);
+    }
+    colX[colX.length - 1] = x + width;
+    return colX;
+}
+
+function cellValueForColumn(row, key) {
+    switch (key) {
+        case 'assignedTo':
+            return row.assignedTo || '—';
+        case 'assetType':
+            return row.assetType || '—';
+        case 'category':
+            return row.category || '—';
+        case 'assetName':
+            return row.name || '—';
+        case 'accessories':
+            return row.accessories;
+        case 'assetId':
+            return row.assetId || '—';
+        case 'qty':
+            return String(row.quantity ?? 1);
+        case 'value':
+            return formatMoney(row.totalValue);
+        default:
+            return '—';
+    }
+}
+
+function rowHeightForAsset(row, font, columnDefs, colX) {
+    const { defaultRowHeight } = LAYOUT.table;
+    const heights = [cellHeightForLines(1, 8, defaultRowHeight)];
+
+    columnDefs.forEach((col, i) => {
+        const colStart = colX[i + 1];
+        const colEnd = colX[i + 2];
+        if (col.key === 'accessories') {
+            heights.push(
+                cellHeightForLines(countAccessoryListLines(font, row.accessories, colStart, colEnd), 7, defaultRowHeight),
+            );
+        } else {
+            const text = cellValueForColumn(row, col.key);
+            heights.push(
+                cellHeightForLines(countWrappedLines(font, text, 8, colStart, colEnd), 8, defaultRowHeight),
+            );
+        }
+    });
+
+    return Math.max(...heights);
 }
 
 function drawLine(page, x1, y1, x2, y2, thickness = 0.75) {
@@ -208,25 +263,19 @@ function drawPageBackground(page, image) {
     });
 }
 
-function drawTableHeaderAt(page, fontBold, headerTop) {
-    const { x, width, headerHeight, colX } = LAYOUT.table;
+function drawTableHeaderAt(page, fontBold, headerTop, columnDefs, colX) {
+    const { headerHeight } = LAYOUT.table;
     const headerBottom = headerTop - headerHeight;
+    const tableX = colX[0];
+    const tableWidth = colX[colX.length - 1] - colX[0];
 
-    drawRectBorder(page, x, headerTop, width, headerHeight);
+    drawRectBorder(page, tableX, headerTop, tableWidth, headerHeight);
 
-    for (let i = 1; i <= 6; i += 1) {
+    for (let i = 1; i < colX.length - 1; i += 1) {
         drawLine(page, colX[i], headerTop, colX[i], headerBottom);
     }
 
-    const labels = [
-        { text: 'Serial No', col: 0 },
-        { text: 'Assigned to', col: 1 },
-        { text: 'Asset Name', col: 2 },
-        { text: 'Accessories', col: 3 },
-        { text: 'Asset ID', col: 4 },
-        { text: 'QTY', col: 5 },
-        { text: 'Value (AED)', col: 6 },
-    ];
+    const labels = [{ text: 'Serial No', col: 0 }, ...columnDefs.map((col, i) => ({ text: col.label, col: i + 1 }))];
 
     for (const label of labels) {
         drawWrappedTextInCell(
@@ -244,52 +293,76 @@ function drawTableHeaderAt(page, fontBold, headerTop) {
     return { top: headerTop, bottom: headerBottom, height: headerHeight, firstRowTop: headerBottom };
 }
 
-function drawAssetRow(page, font, row, rowTop, rowHeight) {
-    const { colX } = LAYOUT.table;
+function drawAssetRow(page, font, row, rowTop, rowHeight, columnDefs, colX) {
+    const tableWidth = colX[colX.length - 1] - colX[0];
+    drawRectBorder(page, colX[0], rowTop, tableWidth, rowHeight);
 
-    drawRectBorder(page, colX[0], rowTop, colX[colX.length - 1] - colX[0], rowHeight);
-
-    for (let i = 1; i <= 6; i += 1) {
+    for (let i = 1; i < colX.length - 1; i += 1) {
         drawLine(page, colX[i], rowTop, colX[i], rowTop - rowHeight);
     }
 
     drawWrappedTextInCell(page, font, String(row.index + 1), colX[0], colX[1], rowTop, rowHeight);
-    drawWrappedTextInCell(page, font, row.assignedTo || '—', colX[1], colX[2], rowTop, rowHeight, { align: 'left' });
-    drawWrappedTextInCell(page, font, row.name, colX[2], colX[3], rowTop, rowHeight, { align: 'left' });
-    drawAccessoryListInCell(page, font, row.accessories, colX[3], colX[4], rowTop, rowHeight);
-    drawWrappedTextInCell(page, font, row.assetId, colX[4], colX[5], rowTop, rowHeight);
-    drawWrappedTextInCell(page, font, String(row.quantity ?? 1), colX[5], colX[6], rowTop, rowHeight);
-    drawWrappedTextInCell(page, font, formatMoney(row.totalValue), colX[6], colX[7], rowTop, rowHeight);
+
+    columnDefs.forEach((col, i) => {
+        const colStart = colX[i + 1];
+        const colEnd = colX[i + 2];
+        if (col.key === 'accessories') {
+            drawAccessoryListInCell(page, font, row.accessories, colStart, colEnd, rowTop, rowHeight);
+            return;
+        }
+        const align = col.key === 'assignedTo' || col.key === 'assetName' || col.key === 'assetType' || col.key === 'category'
+            ? 'left'
+            : 'center';
+        drawWrappedTextInCell(page, font, cellValueForColumn(row, col.key), colStart, colEnd, rowTop, rowHeight, {
+            align,
+        });
+    });
 }
 
-function drawTotalRow(page, fontBold, rowTop, total) {
-    const { colX } = LAYOUT.table;
+function drawTotalRow(page, fontBold, rowTop, total, columnDefs, colX) {
     const rowHeight = 18;
     const tableWidth = colX[colX.length - 1] - colX[0];
+    const valueColIndex = columnDefs.findIndex((c) => c.key === 'value');
 
     drawRectBorder(page, colX[0], rowTop, tableWidth, rowHeight);
-    drawLine(page, colX[6], rowTop, colX[6], rowTop - rowHeight);
+
+    if (valueColIndex < 0) {
+        const totalLabel = `Total: ${formatMoney(total)}`;
+        const labelWidth = fontBold.widthOfTextAtSize(totalLabel, 8);
+        page.drawText(totalLabel, {
+            x: colX[colX.length - 1] - labelWidth - 8,
+            y: rowTop - rowHeight + 6,
+            size: 8,
+            font: fontBold,
+            color: BLACK,
+        });
+        return;
+    }
+
+    const valueColStart = colX[valueColIndex + 1];
+    const valueColEnd = colX[valueColIndex + 2];
+    drawLine(page, valueColStart, rowTop, valueColStart, rowTop - rowHeight);
 
     const totalLabel = 'Total';
     const labelWidth = fontBold.widthOfTextAtSize(totalLabel, 8);
     page.drawText(totalLabel, {
-        x: colX[6] - labelWidth - 8,
+        x: valueColStart - labelWidth - 8,
         y: rowTop - rowHeight + 6,
         size: 8,
         font: fontBold,
         color: BLACK,
     });
-    drawWrappedTextInCell(page, fontBold, formatMoney(total), colX[6], colX[7], rowTop, rowHeight);
+    drawWrappedTextInCell(page, fontBold, formatMoney(total), valueColStart, valueColEnd, rowTop, rowHeight);
 }
 
-function paginateRows(listRows, font) {
+function paginateRows(listRows, font, columnDefs, colX) {
     const pages = [];
     let current = [];
     let y = LAYOUT.table.firstRowTop;
 
     for (let i = 0; i < listRows.length; i += 1) {
         const row = { ...listRows[i], index: i };
-        const h = rowHeightForAsset(row, font);
+        const h = rowHeightForAsset(row, font, columnDefs, colX);
         const needsTotal = i === listRows.length - 1;
         const totalSpace = needsTotal ? 18 : 0;
         if (y - h - totalSpace < LAYOUT.table.bottomLimit) {
@@ -349,19 +422,22 @@ function buildAssetListPdfRows(assets, { fallbackAssignee = null } = {}) {
         return {
             ...baseRow,
             assignedTo: resolveAssetAssigneeName(asset) || fallbackName || '—',
+            assetType: resolveNestedName(asset?.typeId),
+            category: resolveNestedName(asset?.categoryId),
             index,
         };
     });
 }
 
-function renderAssetListPdf({ outputDoc, font, fontBold, bgImage, listRows }) {
+function renderAssetListPdf({ outputDoc, font, fontBold, bgImage, listRows, columnDefs }) {
+    const colX = buildColX(columnDefs);
     const total = listRows.reduce((sum, row) => sum + (Number(row.totalValue) || 0), 0);
-    const pages = paginateRows(listRows, font);
+    const pages = paginateRows(listRows, font, columnDefs, colX);
 
     pages.forEach((pageRows, pageIndex) => {
         const page = outputDoc.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
         drawPageBackground(page, bgImage);
-        drawTableHeaderAt(page, fontBold, LAYOUT.table.headerTop);
+        drawTableHeaderAt(page, fontBold, LAYOUT.table.headerTop, columnDefs, colX);
 
         if (pageRows.length === 0 && pageIndex === 0) {
             const rowTop = LAYOUT.table.firstRowTop;
@@ -372,6 +448,8 @@ function renderAssetListPdf({ outputDoc, font, fontBold, bgImage, listRows }) {
                 {
                     index: 0,
                     assignedTo: '—',
+                    assetType: '—',
+                    category: '—',
                     name: 'No assets assigned',
                     assetId: '—',
                     quantity: 0,
@@ -380,13 +458,15 @@ function renderAssetListPdf({ outputDoc, font, fontBold, bgImage, listRows }) {
                 },
                 rowTop,
                 rowHeight,
+                columnDefs,
+                colX,
             );
-            drawTotalRow(page, fontBold, rowTop - rowHeight, 0);
+            drawTotalRow(page, fontBold, rowTop - rowHeight, 0, columnDefs, colX);
             return;
         }
 
         pageRows.forEach(({ row, rowTop, rowHeight }) => {
-            drawAssetRow(page, font, row, rowTop, rowHeight);
+            drawAssetRow(page, font, row, rowTop, rowHeight, columnDefs, colX);
         });
 
         const isLastPage = pageIndex === pages.length - 1;
@@ -395,7 +475,7 @@ function renderAssetListPdf({ outputDoc, font, fontBold, bgImage, listRows }) {
             const totalTop = last
                 ? last.rowTop - last.rowHeight
                 : LAYOUT.table.firstRowTop - LAYOUT.table.defaultRowHeight;
-            drawTotalRow(page, fontBold, totalTop, total);
+            drawTotalRow(page, fontBold, totalTop, total, columnDefs, colX);
         }
     });
 
@@ -404,6 +484,8 @@ function renderAssetListPdf({ outputDoc, font, fontBold, bgImage, listRows }) {
 
 /**
  * Build ASSET LIST PDF: template background image + transparent overlay table (dynamic rows).
+ * @param {object} options
+ * @param {string[]|null} [options.columns] selected data column keys (Serial No always included)
  */
 export async function generateEmployeeAssetListFromTemplatePdf({
     employee,
@@ -411,6 +493,7 @@ export async function generateEmployeeAssetListFromTemplatePdf({
     headerOverride,
     groupByOwner = false,
     listTitle = 'Asset List',
+    columns = null,
 }) {
     try {
         const outputDoc = await PDFDocument.create();
@@ -424,8 +507,9 @@ export async function generateEmployeeAssetListFromTemplatePdf({
                 : employee;
 
         const listRows = buildAssetListPdfRows(assets, { fallbackAssignee });
+        const columnDefs = resolveAssetListExportColumns(columns);
 
-        renderAssetListPdf({ outputDoc, font, fontBold, bgImage, listRows });
+        renderAssetListPdf({ outputDoc, font, fontBold, bgImage, listRows, columnDefs });
 
         const pdfBytes = await outputDoc.save();
         return Buffer.from(pdfBytes);
@@ -434,3 +518,5 @@ export async function generateEmployeeAssetListFromTemplatePdf({
         return null;
     }
 }
+
+export { buildAssetListPdfRows, formatMoney };

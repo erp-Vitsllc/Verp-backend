@@ -1,6 +1,7 @@
 import { getCompleteEmployee } from '../../services/employeeService.js';
 import { formatAssetListDate } from '../../utils/buildEmployeeAssetListPdfHtml.js';
 import { generateEmployeeAssetListFromTemplatePdf } from '../../utils/generateEmployeeAssetListFromTemplatePdf.js';
+import { parseAssetListExportColumns } from '../../utils/assetListExportColumns.js';
 import {
     loadAssetsByIds,
     parseAssetIdsFromQuery,
@@ -9,6 +10,7 @@ import {
 /**
  * Download asset list PDF for Asset Management filtered lists.
  * Accepts explicit asset IDs so the PDF matches the list currently shown in the UI.
+ * Optional `columns` query selects which table fields to include.
  */
 export const downloadAssetListPdf = async (req, res) => {
     try {
@@ -28,6 +30,7 @@ export const downloadAssetListPdf = async (req, res) => {
             String(req.query?.groupByOwner || '')
                 .trim()
                 .toLowerCase() === 'true';
+        const columns = parseAssetListExportColumns(req.query?.columns);
         let pdfBuffer;
 
         if (groupByOwner) {
@@ -36,11 +39,16 @@ export const downloadAssetListPdf = async (req, res) => {
                 assets,
                 groupByOwner: true,
                 listTitle,
+                columns,
             });
         } else if (employeeId) {
             const employee = await getCompleteEmployee(employeeId);
             if (employee) {
-                pdfBuffer = await generateEmployeeAssetListFromTemplatePdf({ employee, assets });
+                pdfBuffer = await generateEmployeeAssetListFromTemplatePdf({
+                    employee,
+                    assets,
+                    columns,
+                });
             } else {
                 pdfBuffer = await generateEmployeeAssetListFromTemplatePdf({
                     employee: null,
@@ -50,6 +58,7 @@ export const downloadAssetListPdf = async (req, res) => {
                         hodName: '—',
                         date: formatAssetListDate(new Date()),
                     },
+                    columns,
                 });
             }
         } else {
@@ -61,6 +70,7 @@ export const downloadAssetListPdf = async (req, res) => {
                     hodName: '—',
                     date: formatAssetListDate(new Date()),
                 },
+                columns,
             });
         }
 

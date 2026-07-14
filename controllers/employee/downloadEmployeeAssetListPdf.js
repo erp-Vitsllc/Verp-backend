@@ -22,7 +22,7 @@ async function loadEmployeeHeldAssets(employeeObjectId) {
 }
 
 const ASSET_LIST_SELECT =
-    'name assetId assetValue quantity status assignedDate updatedAt accessories acceptanceStatus assignedTo assignedCompany assignedToType';
+    'name assetId assetValue quantity status assignedDate updatedAt accessories acceptanceStatus assignedTo assignedCompany assignedToType typeId categoryId';
 
 export async function loadAssetsByIds(assetIds) {
     const validIds = [...new Set((assetIds || []).map((id) => String(id).trim()))].filter((id) =>
@@ -38,6 +38,8 @@ export async function loadAssetsByIds(assetIds) {
             populate: { path: 'primaryReportee', select: 'firstName lastName employeeId' },
         })
         .populate('assignedCompany', 'name companyId nickName companyShortName')
+        .populate('typeId', 'name')
+        .populate('categoryId', 'name')
         .sort({ assignedDate: -1, updatedAt: -1 })
         .lean();
 }
