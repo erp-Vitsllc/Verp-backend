@@ -590,6 +590,110 @@ export const buildEmployeeDocumentMap = async (employeeIds) => {
     return map;
 };
 
+/**
+ * Rebuild pending employee document-expiry dashboard tasks for one employee (no emails).
+ * Drops rows outside ≤ today+10 (or overdue) after renew/edit.
+ */
+export const reconcileEmployeeDocumentExpiryDashboard = async (employeeMongoIdOrHumanId) => {
+    if (!employeeMongoIdOrHumanId) return;
+
+    const idStr = String(employeeMongoIdOrHumanId).trim();
+    let employee = await EmployeeBasic.findById(idStr)
+        .select("_id employeeId firstName lastName documents contractExpiryDate primaryReportee status profileStatus")
+        .lean()
+        .catch(() => null);
+
+    if (!employee) {
+        employee = await EmployeeBasic.findOne({ employeeId: idStr })
+            .select("_id employeeId firstName lastName documents contractExpiryDate primaryReportee status profileStatus")
+            .lean();
+    }
+    if (!employee) return;
+    return syncOneEmployeeExpiryDashboardTasks(employee);
+};
+
+const syncOneEmployeeExpiryDashboardTasks = async (employee) => {
+    if (!employee?._id || !isEmployeeActiveForNotifications(employee)) {
+        if (employee?._id) {
+            await removeObsoleteExpiryActions({
+                requestId: employee._id,
+                requestType: "Employee Document Expiry Reminder",
+                allowedExtra1Set: new Set(),
+            });
+        }
+        return;
+    }
+
+    const map = await buildEmployeeDocumentMap([employee.employeeId]);
+    const docs = [...(map.get(employee.employeeId) || [])];
+    (employee.documents || []).forEach((d, idx) => {
+        if (!d?.expiryDate || isArchivedOrStaleCompanyExpiryRow(d)) return;
+        docs.push({
+            key: `manual:${d?._id || idx}`,
+            label: buildEmployeeManualDocumentExpiryLabel(d),
+            expiryDate: d.expiryDate,
+            isCertificate: String(d?.context || "").toLowerCase() === "certificate",
+        });
+    });
+    if (employee?.contractExpiryDate) {
+        docs.push({
+            key: "contract-expiry",
+            label: "Contract Expiry",
+            expiryDate: employee.contractExpiryDate,
+        });
+    }
+
+    const activeTaskWindowExtra1 = new Set(
+        docs
+            .filter((doc) =>
+                isExpiryHrTaskDueForDoc(getDaysUntil(doc.expiryDate), {
+                    isCertificate: doc.isCertificate,
+                }),
+            )
+            .map((doc) => {
+                const expLabel = formatExpiryDateLabel(doc.expiryDate);
+                return `Expiry follow-up required: ${doc.label}${expLabel ? ` (Exp: ${expLabel})` : ""}`;
+            }),
+    );
+
+    await removeObsoleteExpiryActions({
+        requestId: employee._id,
+        requestType: "Employee Document Expiry Reminder",
+        allowedExtra1Set: activeTaskWindowExtra1,
+    });
+
+    const recipients = await getEmployeeRecipientBundle(employee);
+    await purgeNonHrExpiryTasks({
+        requestId: employee._id,
+        requestType: "Employee Document Expiry Reminder",
+        hrObjectId: recipients.hr?._id || null,
+    });
+
+    const subjectName =
+        `${employee.firstName || ""} ${employee.lastName || ""}`.trim() || employee.employeeId;
+
+    for (const doc of docs) {
+        const days = getDaysUntil(doc.expiryDate);
+        if (days == null) continue;
+        if (!isExpiryHrTaskDueForDoc(days, { isCertificate: doc.isCertificate }) || !recipients.hr?._id) {
+            continue;
+        }
+        const expLabel = formatExpiryDateLabel(doc.expiryDate);
+        const extra1 = `Expiry follow-up required: ${doc.label}${expLabel ? ` (Exp: ${expLabel})` : ""}`;
+        const extra2 = `${subjectName} (${employee.employeeId})`;
+        await ensureDashboardAction({
+            assignedTo: recipients.hr._id,
+            assignedToEmpId: recipients.hr.employeeId,
+            requestId: employee._id,
+            subjectEmployeeId: employee.employeeId,
+            subjectName,
+            extra1,
+            extra2,
+            requestType: "Employee Document Expiry Reminder",
+        });
+    }
+};
+
 const processEmployeeReminders = async () => {
     const employees = await EmployeeBasic.find({ 
         employeeId: { $ne: "VEGA-HR-0000" }, 

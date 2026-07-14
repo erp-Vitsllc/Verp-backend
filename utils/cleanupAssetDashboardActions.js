@@ -35,14 +35,21 @@ export const VEHICLE_DASHBOARD_INBOX_TYPES = [
     'Vehicle Inspection',
     'Vehicle Mortgage Close',
     'Vehicle Disposition Request',
+    'Vehicle Document Expiry Reminder',
     'Asset Approval',
     'Asset Assignment',
     'Asset Return',
 ];
 
-/** Tools / equipment Asset Management inbox — excludes fleet-only vehicle service workflow. */
-export const ASSET_TOOLS_INBOX_TYPES = ASSET_DASHBOARD_INBOX_TYPES.filter((t) => t !== 'Vehicle Service Request');
+/** Pure vehicle workflow types (never Tools). Shared Asset Approval/Assignment/Return stay in both type lists and are partitioned by fleet flag. */
+export const VEHICLE_ONLY_DASHBOARD_INBOX_TYPES = VEHICLE_DASHBOARD_INBOX_TYPES.filter(
+    (t) => !['Asset Approval', 'Asset Assignment', 'Asset Return'].includes(t),
+);
 
+/** Tools / equipment inbox — excludes every pure Vehicle* type (fleet shared types partitioned at query time). */
+export const ASSET_TOOLS_INBOX_TYPES = ASSET_DASHBOARD_INBOX_TYPES.filter(
+    (t) => !VEHICLE_ONLY_DASHBOARD_INBOX_TYPES.includes(t),
+);
 /**
  * Remove dashboard / bell notifications tied to a deleted asset:
  * - Rows with requestId = asset

@@ -233,6 +233,10 @@ import {
     scheduleManagementAdminDeletionEmail,
 } from '../utils/sendAdminDeletionNotificationEmails.js';
 import { isJwtSystemSuperUser } from '../utils/systemSuperUser.js';
+import {
+    buildAssigneeClauses,
+    resolveDashboardAssigneeContext,
+} from '../utils/resolveDashboardAssigneeContext.js';
 import { awaitAdminDeletionArchive } from '../utils/adminDeletionArchiveRun.js';
 import {
     cleanupDashboardActionsForDeletedAsset,
@@ -16658,15 +16662,17 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
         const currentUser = req.user;
         if (!currentUser) return res.status(401).json({ message: 'Unauthorized' });
 
-        const manager = await EmployeeBasic.findOne({
-            $or: [
-                ...(currentUser.employeeObjectId ? [{ _id: currentUser.employeeObjectId }] : []),
-                ...(currentUser.employeeId ? [{ employeeId: currentUser.employeeId }] : [])
-            ]
-        });
+        const ctx = await resolveDashboardAssigneeContext(req);
+        if (!ctx.ok) {
+            return res.status(ctx.status || 401).json({ message: ctx.message || 'Unauthorized' });
+        }
 
-        const relevantIds = [manager?._id, currentUser.employeeObjectId, currentUser?._id].filter(Boolean);
-        const targetEmployeeId = currentUser.employeeId || manager?.employeeId;
+        const manager = ctx.employee;
+        const relevantIds = ctx.relevantIds;
+        const targetEmployeeId = ctx.employeeIdCode;
+        // Role-aware fallbacks must belong to the employee whose inbox we are building
+        // (own session or team target) — never the manager's roles when viewing a report.
+        const roleUser = ctx.isTargeted ? (ctx.portalUser || currentUser) : currentUser;
 
         const scope = String(req.query.scope || '').trim().toLowerCase();
         let requestTypeFilter;
@@ -16684,21 +16690,18 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
         };
 
         // Inbox + badge: only actions assigned to this user (not company-wide queues for Admin / Asset Controller).
-        const assigneeClauses = [
-            ...(relevantIds.length ? [{ assignedTo: { $in: relevantIds } }] : []),
-            ...(targetEmployeeId ? [{ assignedToEmpId: targetEmployeeId }] : [])
-        ];
+        const assigneeClauses = buildAssigneeClauses(relevantIds, targetEmployeeId);
 
         // Role-aware fallback: a freshly-appointed HR (or AC) should see in-flight Asset Approvals
         // even when DashboardAction.assignedTo is still the previous role holder (until the boot
         // re-route runs). Match by role + fleet flag stored on extra3 (set at creation time).
         const [isHrRoleHolder, isAcRoleHolder, isAccountsRoleHolder, isManagementRoleHolder, isAdminOfficerHolder] =
             await Promise.all([
-            isUserActiveInFlowchart(currentUser, 'hr'),
-            isUserActiveInFlowchart(currentUser, 'assetcontroller'),
-            isUserActiveInFlowchart(currentUser, 'accounts'),
-            isUserInFlowchart(currentUser, 'management').catch(() => false),
-            isUserActiveInFlowchart(currentUser, 'admincontroller'),
+            isUserActiveInFlowchart(roleUser, 'hr'),
+            isUserActiveInFlowchart(roleUser, 'assetcontroller'),
+            isUserActiveInFlowchart(roleUser, 'accounts'),
+            isUserInFlowchart(roleUser, 'management').catch(() => false),
+            isUserActiveInFlowchart(roleUser, 'admincontroller'),
         ]);
         if (isHrRoleHolder) {
             assigneeClauses.push({
@@ -16750,9 +16753,9 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
         }
         match.$or = assigneeClauses;
 
-        const skipSync = ['1', 'true', 'yes'].includes(
-            String(req.query.skipSync || '').trim().toLowerCase(),
-        );
+        const skipSync =
+            ctx.isTargeted ||
+            ['1', 'true', 'yes'].includes(String(req.query.skipSync || '').trim().toLowerCase());
         if (!skipSync) {
             await syncPendingAssignmentDashboardRowsForUser(relevantIds, targetEmployeeId);
             await healStaleOilServicePendingDashboardActions();
@@ -17278,6 +17281,36 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
                 }
                 if (row.requestType === 'Asset Return') {
                     return isFleetVehicleInboxAsset(row.asset, null);
+                }
+                return true;
+            });
+        }
+
+        // Inverse of vehicle scope — Tools must never show Vehicle* or fleet shared rows.
+        if (scope === 'tools') {
+            items = items.filter((row) => {
+                const type = String(row.requestType || '').trim();
+                if (type.startsWith('Vehicle')) return false;
+                if (row.requestType === 'Asset Approval') {
+                    const plate = String(row.asset?.plateNumber || '').trim();
+                    if (plate) return false;
+                    try {
+                        const meta = typeof row.extra3 === 'string' ? JSON.parse(row.extra3) : row.extra3;
+                        return meta?.isFleetVehicle !== true;
+                    } catch {
+                        return true;
+                    }
+                }
+                if (row.requestType === 'Asset Assignment') {
+                    try {
+                        const meta = typeof row.extra3 === 'string' ? JSON.parse(row.extra3) : row.extra3;
+                        return !isFleetVehicleInboxAsset(row.asset, meta);
+                    } catch {
+                        return !isFleetVehicleInboxAsset(row.asset, null);
+                    }
+                }
+                if (row.requestType === 'Asset Return') {
+                    return !isFleetVehicleInboxAsset(row.asset, null);
                 }
                 return true;
             });

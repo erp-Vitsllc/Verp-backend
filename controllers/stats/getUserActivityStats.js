@@ -10,6 +10,7 @@ import CompanyWorkflow from "../../models/CompanyWorkflow.js";
 import { loadCompaniesForExpiryScanByIds } from "../../services/companyPartitionService.js";
 import { collectCompanyExpiryDocuments, buildEmployeeManualDocumentExpiryLabel, isArchivedEmployeeManualDoc } from "../../utils/companyExpiryScanUtils.js";
 import { getDaysUntil, isExpiryHrTaskDueForDoc } from "../../utils/documentExpiryReminderStages.js";
+import { buildEmployeeDocumentMap } from "../../utils/processDocumentExpiryReminders.js";
 import { calculateProfileCompletionBackend } from "../../utils/calculateProfileCompletionBackend.js";
 import { getCompleteEmployee } from "../../services/employeeService.js";
 import { isEmployeeActiveForNotifications } from "../../utils/applyEmployeeLeftUserStatus.js";
@@ -115,8 +116,17 @@ const buildCompanyLiveExpiryExtra1Set = (company = {}) => {
     return set;
 };
 
-const buildEmployeeLiveExpiryExtra1Set = (emp = {}) => {
+/** Extra1 labels for employee cards still within ≤10-day (or overdue) window. */
+const buildEmployeeLiveExpiryExtra1Set = (emp = {}, systemDocs = []) => {
     const labels = [];
+    (systemDocs || []).forEach((d) => {
+        if (!d?.expiryDate) return;
+        labels.push({
+            label: d.label,
+            expiryDate: d.expiryDate,
+            isCertificate: !!d.isCertificate,
+        });
+    });
     (emp?.documents || []).forEach((d) => {
         if (!d?.expiryDate || isArchivedEmployeeManualDoc(d)) return;
         labels.push({
@@ -136,8 +146,29 @@ const buildEmployeeLiveExpiryExtra1Set = (emp = {}) => {
     return set;
 };
 
-const EMPLOYEE_SYSTEM_EXPIRY_LABEL_RE =
-    /(passport|visa|emirates\s*id|labour\s*card|medical\s*insurance|driving\s*license|contract\s*expiry|certificate\s*[—–-])/i;
+const parseExpiryLabelToDate = (expLabel = "") => {
+    const raw = String(expLabel || "").trim();
+    if (!raw) return null;
+    const dmy = raw.match(/^(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{4})$/);
+    if (dmy) {
+        const d = new Date(Number(dmy[3]), Number(dmy[2]) - 1, Number(dmy[1]));
+        if (!Number.isNaN(d.getTime())) return d;
+    }
+    const parsed = new Date(raw);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+};
+
+const extractExpiryDateFromExtra1 = (extra1 = "") => {
+    const m = String(extra1 || "").match(/\(Exp:\s*([^)]+)\)/i);
+    return m?.[1] ? String(m[1]).trim() : "";
+};
+
+const isExpiryExtra1StillInWindow = (extra1 = "", { isCertificate = false } = {}) => {
+    const expDate = parseExpiryLabelToDate(extractExpiryDateFromExtra1(extra1));
+    if (!expDate) return true;
+    const days = getDaysUntil(expDate);
+    return isExpiryHrTaskDueForDoc(days, { isCertificate });
+};
 
 const filterStaleExpiryDashboardRows = async (items = []) => {
     if (!Array.isArray(items) || items.length === 0) return items;
@@ -152,16 +183,19 @@ const filterStaleExpiryDashboardRows = async (items = []) => {
             }
         });
 
-        const [companies, employees] = await Promise.all([
+        const employees = candidateEmployeeIds.size
+            ? await EmployeeBasic.find({ _id: { $in: [...candidateEmployeeIds] } })
+                  .select("_id employeeId documents contractExpiryDate status profileStatus")
+                  .lean()
+                  .maxTimeMS(6000)
+            : [];
+
+        const humanIds = employees.map((e) => e.employeeId).filter(Boolean);
+        const [companies, systemDocMap] = await Promise.all([
             candidateCompanyIds.size
                 ? loadCompaniesForExpiryScanByIds([...candidateCompanyIds])
                 : [],
-            candidateEmployeeIds.size
-                ? EmployeeBasic.find({ _id: { $in: [...candidateEmployeeIds] } })
-                      .select("_id documents contractExpiryDate status profileStatus")
-                      .lean()
-                      .maxTimeMS(6000)
-                : [],
+            humanIds.length ? buildEmployeeDocumentMap(humanIds) : new Map(),
         ]);
 
         const inactiveEmployeeIds = new Set(
@@ -174,21 +208,34 @@ const filterStaleExpiryDashboardRows = async (items = []) => {
             companies.map((c) => [String(c._id), buildCompanyLiveExpiryExtra1Set(c)]),
         );
         const employeeLabelSetById = new Map(
-            employees.map((e) => [String(e._id), buildEmployeeLiveExpiryExtra1Set(e)]),
+            employees.map((e) => [
+                String(e._id),
+                buildEmployeeLiveExpiryExtra1Set(e, systemDocMap.get(e.employeeId) || []),
+            ]),
         );
 
         return items.filter((it) => {
             const extra1 = String(it?.extra1 || "").trim();
             if (!extra1.toLowerCase().startsWith("expiry follow-up required:")) return true;
+
+            // Hard rule: Exp date on the row must still be ≤ today+10 (or overdue).
+            if (
+                it?.requestType === "Document Expiry Reminder" ||
+                it?.requestType === "Employee Document Expiry Reminder" ||
+                it?.requestType === "Vehicle Document Expiry Reminder"
+            ) {
+                const isCertificate = /certificate/i.test(extra1);
+                if (!isExpiryExtra1StillInWindow(extra1, { isCertificate })) return false;
+            }
+
             if (it?.requestType === "Document Expiry Reminder") {
                 const set = companyLabelSetById.get(String(it.requestId || ""));
                 if (!set) return true;
+                // After renew/edit, old Exp text is gone from live set even if still "expired"-looking.
                 return set.has(extra1);
             }
             if (it?.requestType === "Employee Document Expiry Reminder") {
                 if (inactiveEmployeeIds.has(String(it.requestId || ""))) return false;
-                // Keep system-card reminders; filter stale manual document reminders against active manual docs.
-                if (EMPLOYEE_SYSTEM_EXPIRY_LABEL_RE.test(extra1)) return true;
                 const set = employeeLabelSetById.get(String(it.requestId || ""));
                 if (!set) return true;
                 return set.has(extra1);
@@ -314,7 +361,7 @@ export const getUserActivityStats = async (req, res) => {
             targetUser = currentUser;
         } else {
             targetUser = await User.findOne({ employeeId: manager.employeeId })
-                .select({ _id: 1, employeeId: 1, name: 1 })
+                .select({ _id: 1, employeeId: 1, name: 1, role: 1, isAdmin: 1, employeeObjectId: 1 })
                 .lean()
                 .maxTimeMS(5000);
             if (!targetUser) {
@@ -323,12 +370,12 @@ export const getUserActivityStats = async (req, res) => {
             }
         }
 
-        // IDs that represent the user we are looking at
-        let relevantIds = [];
-        if (req.query.targetUserId) {
-            relevantIds = [manager?._id, targetUser?._id].filter(Boolean);
-        } else {
-            relevantIds = [manager?._id, currentUser.employeeObjectId, currentUser?._id].filter(Boolean);
+        // IDs that represent the employee whose inbox we are building (must be identical for self + team view).
+        let relevantIds = [manager?._id, targetUser?._id, targetUser?.employeeObjectId].filter(Boolean);
+        if (!req.query.targetUserId && currentUser.employeeObjectId) {
+            if (!relevantIds.some((id) => id && String(id) === String(currentUser.employeeObjectId))) {
+                relevantIds.push(currentUser.employeeObjectId);
+            }
         }
 
         // Fetch Designated Responsibilities from Company
@@ -359,11 +406,12 @@ export const getUserActivityStats = async (req, res) => {
         const dept = (manager.department || '').toLowerCase();
         const desig = (manager.designation || '').toLowerCase();
 
-        const isCEO = isDesignatedCEO || ((dept.includes('management') || dept.includes('administration') || dept.includes('board of directors')) &&
+        let isCEO = isDesignatedCEO || ((dept.includes('management') || dept.includes('administration') || dept.includes('board of directors')) &&
             ['ceo', 'c.e.o', 'c.e.o.', 'chief executive officer', 'director', 'managing director', 'general manager', 'gm', 'g.m', 'g.m.'].includes(desig));
 
-        const isHR = isDesignatedHR || (dept.includes('hr') || dept.includes('human resource'));
-        const isAccounts = isDesignatedAccounts || (dept.includes('finance') || dept.includes('account'));
+        // Department/designation gates — flowchart role holders are OR'd in below after HOD checks load.
+        let isHR = isDesignatedHR || (dept.includes('hr') || dept.includes('human resource'));
+        let isAccounts = isDesignatedAccounts || (dept.includes('finance') || dept.includes('account'));
         const isAssetController = isDesignatedAssetController;
 
         // 2. Find Reportees
@@ -411,38 +459,47 @@ export const getUserActivityStats = async (req, res) => {
         const dashboardOrConditions = [
             { assignedTo: { $in: dashboardAssigneeMongoIds } },
         ];
-        if (currentUser?.employeeId && String(currentUser.employeeId).trim() !== '') {
-            dashboardOrConditions.push({ assignedToEmpId: String(currentUser.employeeId).trim() });
-        }
+        // Only the SUBJECT employee's emp id — never the manager viewing them (that mixed queues).
         if (targetEmployeeId && String(targetEmployeeId).trim() !== '') {
-            dashboardOrConditions.push({ assignedToEmpId: targetEmployeeId });
+            dashboardOrConditions.push({ assignedToEmpId: String(targetEmployeeId).trim() });
         }
-        if (isAdmin) {
+        const subjectIsAdmin =
+            ['Admin', 'CEO', 'Director', 'General Manager'].includes(targetUser?.role) ||
+            targetUser?.isAdmin;
+        if (subjectIsAdmin) {
             dashboardOrConditions.push({ requestType: 'Responsibility Approval' });
         }
         if (isAssetController) {
             dashboardOrConditions.push({ requestType: { $in: allAssetTypes } });
         }
 
-        // Role-aware fallback so a freshly-appointed HR sees in-flight fleet Asset Approvals immediately
-        // (without waiting for the boot/flowchart re-route to rewrite DashboardAction.assignedTo).
+        // Role-aware fallbacks for the SUBJECT employee only (self login and team clone must match).
         const { isUserActiveInFlowchart, isUserInFlowchart } = await import("../../utils/getDepartmentHOD.js");
-        const isCurrentHrHolder = await isUserActiveInFlowchart(currentUser, 'hr').catch(() => false);
+        const subjectAuthUser = {
+            ...targetUser,
+            employeeId: targetUser?.employeeId || targetEmployeeId || manager?.employeeId,
+            employeeObjectId: targetUser?.employeeObjectId || manager?._id,
+        };
+        const isCurrentHrHolder = await isUserActiveInFlowchart(subjectAuthUser, 'hr').catch(() => false);
+        // Flowchart HR / Accounts must see pending Loan/Reward/Fine queues even when not in an HR/Accounts dept.
+        if (isCurrentHrHolder) isHR = true;
         if (isCurrentHrHolder) {
             dashboardOrConditions.push({
                 requestType: 'Asset Approval',
                 extra3: { $regex: '"isFleetVehicle"\\s*:\\s*true', $options: 'i' },
             });
         }
-        const isCurrentAcHolder = await isUserActiveInFlowchart(currentUser, 'assetcontroller').catch(() => false);
+        const isCurrentAcHolder = await isUserActiveInFlowchart(subjectAuthUser, 'assetcontroller').catch(() => false);
         if (isCurrentAcHolder) {
             dashboardOrConditions.push({
                 requestType: 'Asset Approval',
                 extra3: { $not: { $regex: '"isFleetVehicle"\\s*:\\s*true', $options: 'i' } },
             });
         }
-        const isCurrentAccountsHolder = await isUserActiveInFlowchart(currentUser, 'accounts').catch(() => false);
-        const isCurrentManagementHolder = await isUserInFlowchart(currentUser, 'management').catch(() => false);
+        const isCurrentAccountsHolder = await isUserActiveInFlowchart(subjectAuthUser, 'accounts').catch(() => false);
+        const isCurrentManagementHolder = await isUserInFlowchart(subjectAuthUser, 'management').catch(() => false);
+        if (isCurrentAccountsHolder) isAccounts = true;
+        if (isCurrentManagementHolder) isCEO = true;
 
         // Flowchart HR sees all in-flight company activations even if `assignedTo` still points at a prior HR holder.
         if (isCurrentHrHolder) {
@@ -518,12 +575,6 @@ export const getUserActivityStats = async (req, res) => {
         const assetApprovalRejectedOr = [{ assignedTo: { $in: dashboardAssigneeMongoIds } }];
         if (targetEmployeeId && String(targetEmployeeId).trim() !== '') {
             assetApprovalRejectedOr.push({ assignedToEmpId: String(targetEmployeeId).trim() });
-        }
-        if (currentUser?.employeeId && String(currentUser.employeeId).trim() !== '') {
-            const cid = String(currentUser.employeeId).trim();
-            if (!assetApprovalRejectedOr.some((c) => c.assignedToEmpId === cid)) {
-                assetApprovalRejectedOr.push({ assignedToEmpId: cid });
-            }
         }
 
         const dashboardSettled = await Promise.allSettled([
@@ -715,7 +766,7 @@ export const getUserActivityStats = async (req, res) => {
         ] = settledValues;
 
         const requestIdsForProfileDashLookup = new Set(pendingProfiles.map((p) => String(p._id)));
-        if (manager?._id && manager.profileApprovalStatus === "submitted" && !req.query.targetUserId) {
+        if (manager?._id && manager.profileApprovalStatus === "submitted") {
             requestIdsForProfileDashLookup.add(String(manager._id));
         }
 
@@ -1556,10 +1607,7 @@ export const getUserActivityStats = async (req, res) => {
                 ) ||
                 (targetEmployeeId &&
                     item.assignedToEmpId &&
-                    normEmpForAssignee(item.assignedToEmpId) === normEmpForAssignee(targetEmployeeId)) ||
-                (currentUser?.employeeId &&
-                    item.assignedToEmpId &&
-                    normEmpForAssignee(item.assignedToEmpId) === normEmpForAssignee(currentUser.employeeId));
+                    normEmpForAssignee(item.assignedToEmpId) === normEmpForAssignee(targetEmployeeId));
             const activityItem = {
                 id: reqIdStr,
                 actionId: item._id.toString(),

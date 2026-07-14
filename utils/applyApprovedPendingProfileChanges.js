@@ -400,4 +400,16 @@ export async function applyApprovedPendingProfileChanges(employeeId, basicDoc, c
 
     updated.markModified?.("documents");
     updated.markModified?.("oldDocuments");
+
+    try {
+        const { reconcileEmployeeDocumentExpiryDashboard } = await import(
+            "./processDocumentExpiryReminders.js"
+        );
+        await reconcileEmployeeDocumentExpiryDashboard(updated?._id || employeeId);
+    } catch (reconcileErr) {
+        console.warn(
+            "[applyApprovedPendingProfileChanges] reconcileEmployeeDocumentExpiryDashboard:",
+            reconcileErr?.message || reconcileErr,
+        );
+    }
 }

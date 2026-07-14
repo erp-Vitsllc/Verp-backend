@@ -378,6 +378,20 @@ export const updateLabourCardDetails = async (req, res) => {
         }
         const completeEmployee = await getCompleteEmployee(employeeId);
 
+        if (!skipLive) {
+            try {
+                const { reconcileEmployeeDocumentExpiryDashboard } = await import(
+                    "../../utils/processDocumentExpiryReminders.js"
+                );
+                await reconcileEmployeeDocumentExpiryDashboard(employeeBasic?._id || employeeId);
+            } catch (reconcileErr) {
+                console.warn(
+                    "[updateLabourCardDetails] reconcileEmployeeDocumentExpiryDashboard:",
+                    reconcileErr?.message || reconcileErr,
+                );
+            }
+        }
+
         scheduleEmployeeProfileFileChangeHrEmailForRequest({
             req,
             employeeId,

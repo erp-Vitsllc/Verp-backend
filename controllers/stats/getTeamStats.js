@@ -60,18 +60,40 @@ export const getTeamStats = async (req, res) => {
             }
         ]);
 
-        // If the hierarchy is empty (no reportees), just return 0s (unless we want to show just manager?)
-        // The table definitely shows the manager themselves if they are selected.
+        // Match Team Performance table: only employees with a portal User account.
+        const empIds = [
+            ...new Set(
+                [manager.employeeId, ...hierarchy.map((h) => h.employeeId)]
+                    .map((id) => String(id || "").trim())
+                    .filter(Boolean),
+            ),
+        ];
+        const usersWithAccounts = empIds.length
+            ? await User.find({
+                  employeeId: { $in: empIds },
+                  status: { $nin: ["Inactive", "Suspended"] },
+                  enablePortalAccess: { $ne: false },
+              })
+                  .select("employeeId")
+                  .lean()
+            : [];
+        const accountEmpIds = new Set(
+            usersWithAccounts.map((u) => String(u.employeeId || "").trim()).filter(Boolean),
+        );
 
-        let teamMembers = hierarchy;
+        const seenEmpIds = new Set();
+        const hierarchyWithAccounts = [];
+        for (const row of hierarchy) {
+            const empId = String(row.employeeId || "").trim();
+            if (!empId || !accountEmpIds.has(empId) || seenEmpIds.has(empId)) continue;
+            seenEmpIds.add(empId);
+            hierarchyWithAccounts.push(row);
+        }
 
-        // 3. Include the Manager in the "Team" list
-        // The frontend table logic (buildTree) often displays the root manager as the first row.
-        // The user says "wanna calculate all ok displayed there", which includes the top-level user.
-        // We act as if the manager is part of the list to iterate.
-        teamMembers = [
+        // Include the manager as the root row (same as the table).
+        const teamMembers = [
             { _id: manager._id, employeeId: manager.employeeId, primaryReportee: null },
-            ...hierarchy
+            ...hierarchyWithAccounts,
         ];
 
         const combinedStats = {

@@ -163,6 +163,18 @@ export const updateMedicalInsuranceDetails = async (req, res) => {
 
         const completeEmployee = await getCompleteEmployee(employeeId);
 
+        try {
+            const { reconcileEmployeeDocumentExpiryDashboard } = await import(
+                "../../utils/processDocumentExpiryReminders.js"
+            );
+            await reconcileEmployeeDocumentExpiryDashboard(employeeBasic?._id || employeeId);
+        } catch (reconcileErr) {
+            console.warn(
+                "[updateMedicalInsuranceDetails] reconcileEmployeeDocumentExpiryDashboard:",
+                reconcileErr?.message || reconcileErr,
+            );
+        }
+
         scheduleEmployeeProfileFileChangeHrEmailForRequest({
             req,
             employeeId,

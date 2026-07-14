@@ -2,6 +2,8 @@ import express from "express";
 import cors from "cors";
 import compression from "compression";
 import mongoose from "mongoose";
+import path from "path";
+import { fileURLToPath } from "url";
 // import { connectDB } from "./config/db.js"; // <-- Import DB connection
 import loginRoute from "./routes/loginRoutes.js"; // <-- Add routes
 import employeeRoute from "./routes/employeeRoutes.js"; // <-- Add employee routes
@@ -43,7 +45,11 @@ import { setupEmailSubjectTag } from "./utils/setupEmailSubjectTag.js";
 import { purgeExpiredAdminDeletionArchives } from "./services/adminDeletionArchiveService.js";
 import { rerouteAllPendingAssetCreationApprovals } from "./utils/assetApprovalHelpers.js";
 
-dotenv.config();
+// Always load VERP_backend/.env (not process.cwd()), so Zoho/Locator keys work
+// whether the server is started from repo root or from VERP_backend.
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+dotenv.config({ path: path.join(__dirname, ".env") });
 setupEmailSubjectTag();
 
 // Atlas SRV resolution on Windows can fail with system DNS; Google DNS is more reliable.

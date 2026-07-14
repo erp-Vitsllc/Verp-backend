@@ -1,34 +1,24 @@
 import DashboardAction from '../../models/DashboardAction.js';
-import EmployeeBasic from '../../models/EmployeeBasic.js';
 import Fine from '../../models/Fine.js';
+import {
+    buildAssigneeClauses,
+    resolveDashboardAssigneeContext,
+} from '../../utils/resolveDashboardAssigneeContext.js';
 
 const FINE_INBOX_TYPES = ['Fine', 'Group Fine Request'];
 
 /**
- * Pending fine dashboard actions assigned to the logged-in user.
+ * Pending fine dashboard actions for the logged-in user, or for ?targetUserId= (team view).
  * @route GET /api/Fine/dashboard/pending-inbox
  */
 export const getPendingFineDashboardInbox = async (req, res) => {
     try {
-        const currentUser = req.user;
-        if (!currentUser) return res.status(401).json({ message: 'Unauthorized' });
+        const ctx = await resolveDashboardAssigneeContext(req);
+        if (!ctx.ok) {
+            return res.status(ctx.status || 401).json({ message: ctx.message || 'Unauthorized' });
+        }
 
-        const manager = await EmployeeBasic.findOne({
-            $or: [
-                ...(currentUser.employeeObjectId ? [{ _id: currentUser.employeeObjectId }] : []),
-                ...(currentUser.employeeId ? [{ employeeId: currentUser.employeeId }] : []),
-            ],
-        })
-            .select('_id employeeId')
-            .lean();
-
-        const relevantIds = [manager?._id, currentUser.employeeObjectId, currentUser?._id].filter(Boolean);
-        const targetEmployeeId = currentUser.employeeId || manager?.employeeId;
-
-        const assigneeClauses = [
-            ...(relevantIds.length ? [{ assignedTo: { $in: relevantIds } }] : []),
-            ...(targetEmployeeId ? [{ assignedToEmpId: targetEmployeeId }] : []),
-        ];
+        const assigneeClauses = buildAssigneeClauses(ctx.relevantIds, ctx.employeeIdCode);
 
         if (assigneeClauses.length === 0) {
             return res.json({ count: 0, items: [] });

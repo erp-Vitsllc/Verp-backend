@@ -126,7 +126,7 @@ const generateGenericId = async (model, prefix, fieldName) => {
 };
 
 /** Match create-asset behaviour: resolve brand/type name to an AssetType, auto-creating when missing. */
-const resolveAssetTypeDocByName = async (typeName) => {
+const resolveAssetTypeDocByName = async (typeName, { allowAutoCreate = true } = {}) => {
     const trimmed = String(typeName || '').trim();
     if (!trimmed) return null;
 
@@ -138,7 +138,7 @@ const resolveAssetTypeDocByName = async (typeName) => {
             isActive: true,
         });
     }
-    if (!tDoc) {
+    if (!tDoc && allowAutoCreate) {
         const typeId = await generateGenericId(AssetType, 'asset-type-', 'typeId');
         tDoc = await AssetType.create({
             typeId,
@@ -147,6 +147,48 @@ const resolveAssetTypeDocByName = async (typeName) => {
         });
     }
     return tDoc;
+};
+
+const isFleetOrVehicleCatalogName = (name) => {
+    const n = String(name || '').trim().toLowerCase();
+    if (!n) return false;
+    return (
+        n.includes('vehicle') ||
+        n.includes('fleet') ||
+        n.includes('motor') ||
+        n === 'car' ||
+        n === 'cars' ||
+        n === 'van' ||
+        n === 'vans' ||
+        n === 'truck' ||
+        n === 'trucks' ||
+        n === 'pickup' ||
+        n === 'pickups'
+    );
+};
+
+const isAutoCreatedAssetTypeDoc = (t) =>
+    String(t?.description || '').trim().toLowerCase().startsWith('auto-created type:');
+
+/**
+ * Dedicated catalog type for fleet vehicles — brands live on AssetItem.vehicleBrand, not as tools AssetTypes.
+ */
+const ensureFleetVehicleCatalogType = async () => {
+    const FLEET_TYPE_NAME = 'Fleet Vehicle';
+    let t = await AssetType.findOne({ name: FLEET_TYPE_NAME, isActive: true });
+    if (t) return t;
+    const escaped = FLEET_TYPE_NAME.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    t = await AssetType.findOne({
+        name: { $regex: new RegExp(`^${escaped}$`, 'i') },
+        isActive: true,
+    });
+    if (t) return t;
+    const typeId = await generateGenericId(AssetType, 'asset-type-', 'typeId');
+    return AssetType.create({
+        typeId,
+        name: FLEET_TYPE_NAME,
+        description: 'System type for fleet vehicles (not a tools asset type)',
+    });
 };
 
 const UAE_PLATE_REGEX = /^([A-Z]{1,3})?\s?(\d{1,6})$/;
@@ -197,7 +239,7 @@ export const createAssetType = async (req, res) => {
             mode, category, type, name, assetValue, purchaseDate, quantity, warranty, warrantyYears, warrantyAttachment, invoiceNumber, imagePreview, description, invoiceFile, accessories,
             vehicleCode, plateNumber, plateEmirate, modelYear, currentKilometer, registrationExpiryDate,
             insuranceExpiryDate, oilChangeDate, gearOilDueDate, lastServiceDate, nextServiceDate,
-            warrantyEnabled, warrantyKm, warrantyExpiryDate,
+            warrantyEnabled, warrantyKm, warrantyExpiryDate, vehicleBrand,
             creationIntent
         } = req.body;
 
@@ -278,37 +320,53 @@ export const createAssetType = async (req, res) => {
 
         } else {
             // Asset Mode
-            if (!type || !name) {
-                return res.status(400).json({ message: 'Name and Type are required' });
+            if (!name) {
+                return res.status(400).json({ message: 'Name is required' });
             }
             if (!purchaseDate) {
                 return res.status(400).json({ message: 'Purchase Date is required' });
             }
 
-            // Find type or auto-create if missing
-            let t = await AssetType.findOne({ name: type, isActive: true });
-            if (!t) {
-                // Auto-create type if not found (e.g. for Car/Van/Pickup)
-                const typeId = await generateGenericId(AssetType, 'asset-type-', 'typeId');
-                t = await AssetType.create({
-                    typeId,
-                    name: type,
-                    description: `Auto-created type: ${type}`
-                });
-            }
+            // Fleet vehicles are detected primarily by plate — brand must not become a tools AssetType.
+            const fleetVehicleEarly = isFleetVehicleAssetFields({
+                plateNumber,
+                typeName: type,
+            });
 
             // Find category provided in request
             let catId = null;
+            let categoryDoc = null;
             if (category) {
-                const cat = await AssetCategory.findOne({ name: category, isActive: true });
-                if (cat) catId = cat._id;
+                categoryDoc = await AssetCategory.findOne({ name: category, isActive: true }).populate('typeId');
+                if (categoryDoc) catId = categoryDoc._id;
             }
 
             if (!catId) {
                 return res.status(400).json({ message: 'Valid Category is required for individual assets.' });
             }
 
-            const fleetVehicle = isFleetVehicleAssetFields({ plateNumber, typeName: type });
+            let t = null;
+            const brandFromBody = String(vehicleBrand || '').trim() || String(type || '').trim();
+
+            if (fleetVehicleEarly) {
+                // Brand → AssetItem.vehicleBrand only. Never create tools AssetTypes from "Toyota" etc.
+                t = await ensureFleetVehicleCatalogType();
+            } else {
+                if (!type) {
+                    return res.status(400).json({ message: 'Name and Type are required' });
+                }
+                // Find type or auto-create if missing (tools assets only)
+                t = await resolveAssetTypeDocByName(type, { allowAutoCreate: true });
+            }
+
+            if (!t) {
+                return res.status(400).json({ message: 'Valid Type is required for individual assets.' });
+            }
+
+            const fleetVehicle = isFleetVehicleAssetFields({
+                plateNumber,
+                typeName: fleetVehicleEarly ? 'vehicle' : type,
+            });
             const approverLabel = fleetVehicle ? 'HR' : creationApproverRoleLabel({ plateNumber, typeName: type });
             const creationApprover = fleetVehicle
                 ? null
@@ -370,6 +428,8 @@ export const createAssetType = async (req, res) => {
                 }
             }
 
+            const resolvedVehicleBrand = fleetVehicle ? brandFromBody : '';
+
             for (let i = 0; i < qty; i++) {
                 const currentAssetId = `${prefix}${String(startingNum + i).padStart(3, '0')}`;
 
@@ -414,11 +474,11 @@ export const createAssetType = async (req, res) => {
                     gearOilDueDate,
                     lastServiceDate,
                     nextServiceDate,
-                    ...(plateNumber && String(plateNumber).trim()
+                    ...(fleetVehicle
                         ? {
                             vehicleProfileActivationStatus: 'inactive',
                             vehicleDispositionStatus: 'active',
-                            vehicleBrand: String(type || '').trim(),
+                            vehicleBrand: resolvedVehicleBrand,
                         }
                         : {}),
                 };
@@ -582,10 +642,11 @@ export const getAssetTypes = async (req, res) => {
             }
 
             // We aggregate all 3 collections into a unified list for the frontend
-            const categories = await AssetCategory.find({ isActive: true }).populate('typeId');
-            const types = await AssetType.find({ isActive: true });
+            let categories = await AssetCategory.find({ isActive: true }).populate('typeId');
+            let types = await AssetType.find({ isActive: true });
 
             if (catalogOnly) {
+                // Vehicle add modal needs fleet categories; tools type/category management uses scope=tools.
                 const typeCategoryCounts = {};
                 categories.forEach((c) => {
                     if (c.typeId) {
@@ -673,6 +734,37 @@ export const getAssetTypes = async (req, res) => {
                     ]
                 })
                 .lean();
+
+            // Tools Type/Category tabs must not show fleet brands (Toyota…) or vehicle catalog rows.
+            if (toolsOnly) {
+                const toolsTypeIds = new Set(
+                    assets.map((a) => a.typeId?._id?.toString()).filter(Boolean),
+                );
+                categories = categories.filter((c) => !isFleetOrVehicleCatalogName(c.name));
+                const toolsCategoryParentIds = new Set(
+                    categories.map((c) => c.typeId?._id?.toString()).filter(Boolean),
+                );
+                const keepType = (t) => {
+                    const id = t._id.toString();
+                    if (toolsTypeIds.has(id) || toolsCategoryParentIds.has(id)) return true;
+                    const name = String(t.name || '').trim();
+                    if (/^fleet\s*vehicle$/i.test(name)) return false;
+                    if (isAutoCreatedAssetTypeDoc(t)) return false;
+                    if (isFleetOrVehicleCatalogName(name)) return false;
+                    return true;
+                };
+                const leakedAutoCreatedIds = types
+                    .filter((t) => !keepType(t) && isAutoCreatedAssetTypeDoc(t))
+                    .map((t) => t._id);
+                types = types.filter(keepType);
+                // Soft-deactivate brand rows that fleet create accidentally wrote into the tools catalog.
+                if (leakedAutoCreatedIds.length) {
+                    await AssetType.updateMany(
+                        { _id: { $in: leakedAutoCreatedIds } },
+                        { $set: { isActive: false } },
+                    ).catch(() => {});
+                }
+            }
 
             const flowAc = await getDepartmentHOD('assetcontroller');
             let designatedAssetController = null;
@@ -1455,11 +1547,12 @@ export const updateAssetItem = async (req, res) => {
         );
 
         if (isFleetVehicleAsset) {
-            const brandInput = String(updates.brand ?? updates.type ?? '').trim();
+            const brandInput = String(
+                updates.vehicleBrand ?? updates.brand ?? updates.type ?? '',
+            ).trim();
             if (brandInput) {
+                // Brand is a vehicle field only — never create/link tools AssetTypes from it.
                 asset.vehicleBrand = brandInput;
-                const brandTypeDoc = await resolveAssetTypeDocByName(brandInput);
-                if (brandTypeDoc) asset.typeId = brandTypeDoc._id;
             }
         }
 
@@ -1798,8 +1891,13 @@ export const updateAssetItem = async (req, res) => {
                     }
                 } else {
                     if (key === 'type' && typeof updates[key] === 'string' && updates[key].trim()) {
-                        const tDoc = await resolveAssetTypeDocByName(updates[key]);
-                        if (tDoc) asset.typeId = tDoc._id;
+                        // Tools assets may change type by name; fleet vehicles already skipped brand/type above.
+                        if (!isFleetVehicleAsset) {
+                            const tDoc = await resolveAssetTypeDocByName(updates[key]);
+                            if (tDoc) asset.typeId = tDoc._id;
+                        }
+                    } else if (key === 'vehicleBrand' && isFleetVehicleAsset) {
+                        asset.vehicleBrand = String(updates[key] || '').trim();
                     } else if (key === 'plateNumber' && updates[key]) {
                         asset[key] = normalizePlate(updates[key]);
                     } else if (key === 'plateEmirate') {
