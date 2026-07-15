@@ -645,8 +645,23 @@ const buildAssetActionApprovalHandoverAttachments = async (req, assets) => {
 const assigneeHasCompanyEmailOnRecord = (emp) =>
     !!(emp?.companyEmail && String(emp.companyEmail).trim().length > 0);
 
-const assigneeCanSelfAcknowledgeAssignment = (emp) =>
-    assigneeHasCompanyEmailOnRecord(emp) || emp?.enablePortalAccess === true;
+/**
+ * Can the assignee Accept in ERP themselves?
+ * Requires an Active User login with portal enabled — companyEmail alone is not enough
+ * (employees without a User profile cannot get inbox tasks; primary reportee must).
+ */
+const assigneeCanSelfAcknowledgeAssignment = async (emp) => {
+    if (!emp) return false;
+    if (emp.enablePortalAccess === false) return false;
+    const empId = emp.employeeId ? String(emp.employeeId).trim() : '';
+    if (!empId) return false;
+    const linkedUser = await User.findOne({ employeeId: empId, status: 'Active' })
+        .select('enablePortalAccess')
+        .lean()
+        .catch(() => null);
+    if (!linkedUser) return false;
+    return linkedUser.enablePortalAccess !== false;
+};
 
 /** After L&D is finalized: mark Lost and clear live assignment (history retains prior assignees). */
 const applyAssetLostFinalState = (asset) => {
@@ -783,9 +798,9 @@ const applyMainAssetLossDamageAccessoryDisposition = async (asset, fineData, req
  * When assigner === designated acceptor (e.g. AC is also HOD / primary reportee) and assignee cannot
  * self-acknowledge, skip the redundant pending step — asset is directly Assigned to the employee.
  */
-const resolveEmployeeAssignmentActors = (employeeToAssign, assignerEmpObjectId) => {
+const resolveEmployeeAssignmentActors = async (employeeToAssign, assignerEmpObjectId) => {
     const assigneeHasCompanyEmail = assigneeHasCompanyEmailOnRecord(employeeToAssign);
-    const assigneeCanSelfAcknowledge = assigneeCanSelfAcknowledgeAssignment(employeeToAssign);
+    const assigneeCanSelfAcknowledge = await assigneeCanSelfAcknowledgeAssignment(employeeToAssign);
     let pendingActionActorId = employeeToAssign._id;
     let actionRecipientDoc = employeeToAssign;
 
@@ -793,7 +808,7 @@ const resolveEmployeeAssignmentActors = (employeeToAssign, assignerEmpObjectId) 
         pendingActionActorId =
             employeeToAssign.primaryReportee._id || employeeToAssign.primaryReportee;
         const pr = employeeToAssign.primaryReportee;
-        if (pr && typeof pr === 'object' && pr.employeeId) {
+        if (pr && typeof pr === 'object' && (pr.employeeId || pr.firstName || pr._id)) {
             actionRecipientDoc = pr;
         }
     }
@@ -814,6 +829,82 @@ const resolveEmployeeAssignmentActors = (employeeToAssign, assignerEmpObjectId) 
         actionRecipientDoc,
         autoAcceptOnAssign,
     };
+};
+
+/**
+ * Re-route Pending "Asset Assignment" inbox tasks when the assignee has no ERP login
+ * so the primary reportee receives the Accept task (and badge/inbox stay correct).
+ */
+const healMisroutedAssignmentInboxTasks = async () => {
+    try {
+        const pending = await DashboardAction.find({
+            status: 'Pending',
+            requestType: 'Asset Assignment',
+        })
+            .select('_id requestId assignedTo')
+            .limit(100)
+            .lean();
+        if (!pending.length) return;
+
+        for (const da of pending) {
+            if (!da.requestId) continue;
+            const asset = await AssetItem.findById(da.requestId)
+                .select(
+                    'status acceptanceStatus pendingAction actionRequiredBy assignedToType assignedTo assignedBy plateNumber typeId pendingActionDetails',
+                )
+                .populate({
+                    path: 'assignedTo',
+                    select: 'employeeId firstName lastName companyEmail enablePortalAccess primaryReportee',
+                    populate: {
+                        path: 'primaryReportee',
+                        select: '_id firstName lastName employeeId',
+                    },
+                })
+                .lean();
+            if (!asset || !isAssetAssignmentAcknowledgmentPending(asset)) continue;
+            if (asset.assignedToType !== 'Employee' || !asset.assignedTo) continue;
+            // Skip fleet handover multi-stage rows (handled elsewhere).
+            if (getVehicleHandoverFlow(asset)?.stage) continue;
+
+            const resolved = await resolveEmployeeAssignmentActors(
+                asset.assignedTo,
+                asset.assignedBy,
+            );
+            if (resolved.autoAcceptOnAssign || !resolved.pendingActionActorId) continue;
+            const expectedId =
+                resolved.pendingActionActorId?._id?.toString?.() ||
+                resolved.pendingActionActorId?.toString?.() ||
+                '';
+            if (!expectedId) continue;
+
+            const currentActionAssignee =
+                da.assignedTo?._id?.toString?.() || da.assignedTo?.toString?.() || '';
+            const currentAr =
+                asset.actionRequiredBy?._id?.toString?.() ||
+                asset.actionRequiredBy?.toString?.() ||
+                '';
+            if (currentActionAssignee === expectedId && currentAr === expectedId) continue;
+
+            const healed = await EmployeeBasic.findById(expectedId)
+                .select('firstName lastName employeeId')
+                .lean();
+            await AssetItem.updateOne(
+                { _id: asset._id },
+                { $set: { actionRequiredBy: expectedId } },
+            );
+            await DashboardAction.updateOne(
+                { _id: da._id, status: 'Pending' },
+                {
+                    $set: {
+                        assignedTo: expectedId,
+                        ...(healed?.employeeId ? { assignedToEmpId: healed.employeeId } : {}),
+                    },
+                },
+            );
+        }
+    } catch {
+        /* non-fatal */
+    }
 };
 
 const notifyLeaveEosOwnerHod = async ({
@@ -4212,7 +4303,7 @@ export const getAssetItemDetail = async (req, res) => {
                         }
                     }
                 } else {
-                    const resolved = resolveEmployeeAssignmentActors(assigneeDoc, assignerRef);
+                    const resolved = await resolveEmployeeAssignmentActors(assigneeDoc, assignerRef);
                     if (!resolved.autoAcceptOnAssign && resolved.pendingActionActorId) {
                         expectedId =
                             resolved.pendingActionActorId?._id?.toString?.() ||
@@ -5306,20 +5397,28 @@ export const assignAssetItem = async (req, res) => {
                     wasFromPool: wasAssignedFromPool,
                     adminOfficer: adminOfficerForAssigner,
                 });
-                const standardActors = resolveEmployeeAssignmentActors(employeeToAssign, actingEmpObjectId);
+                const standardActors = await resolveEmployeeAssignmentActors(
+                    employeeToAssign,
+                    actingEmpObjectId,
+                );
                 resolvedActors = {
                     ...standardActors,
                     pendingActionActorId: fleetHandoverActor.actorId,
                     actionRecipientDoc: fleetHandoverActor.actorDoc,
-                    autoAcceptOnAssign: standardActors.autoAcceptOnAssign && fleetHandoverActor.assigneeCanSelfAcknowledge,
+                    autoAcceptOnAssign:
+                        standardActors.autoAcceptOnAssign &&
+                        fleetHandoverActor.assigneeCanSelfAcknowledge,
                 };
             } else {
-                resolvedActors = resolveEmployeeAssignmentActors(employeeToAssign, actingEmpObjectId);
+                resolvedActors = await resolveEmployeeAssignmentActors(
+                    employeeToAssign,
+                    actingEmpObjectId,
+                );
             }
             let actionRecipientDoc = resolvedActors.actionRecipientDoc;
 
             if (
-                !resolvedActors.assigneeHasCompanyEmail &&
+                !resolvedActors.assigneeCanSelfAcknowledge &&
                 employeeToAssign.primaryReportee &&
                 (!actionRecipientDoc?.employeeId ||
                     String(actionRecipientDoc._id || actionRecipientDoc) !==
@@ -5863,7 +5962,10 @@ export const bulkAssignAssetItems = async (req, res) => {
             return res.status(404).json({ message: 'Target employee not found' });
         }
 
-        const resolvedActors = resolveEmployeeAssignmentActors(employeeToAssign, req.user.employeeObjectId);
+        const resolvedActors = await resolveEmployeeAssignmentActors(
+            employeeToAssign,
+            req.user.employeeObjectId,
+        );
         const pendingActionActorId = resolvedActors.pendingActionActorId;
         const autoAcceptOnAssign = resolvedActors.autoAcceptOnAssign;
 
@@ -12274,7 +12376,7 @@ export const transferAssigneeAsset = async (req, res) => {
         const newAssignee = await loadEmployeeWithReportee(toEmployeeId);
         if (!newAssignee) return res.status(404).json({ message: 'Target employee not found.' });
 
-        const resolvedActors = resolveEmployeeAssignmentActors(newAssignee, actingEmpObjectId);
+        const resolvedActors = await resolveEmployeeAssignmentActors(newAssignee, actingEmpObjectId);
         if (resolvedActors.autoAcceptOnAssign) {
             return res.status(400).json({
                 message: 'Cannot transfer to an employee who cannot self-acknowledge without a company email delegate.',
@@ -13265,7 +13367,10 @@ export const handleAssetActionApproval = async (req, res) => {
             }
 
             const previousAssignee = asset.assignedTo;
-            const resolvedActors = resolveEmployeeAssignmentActors(employeeToAssign, req.user.employeeObjectId);
+            const resolvedActors = await resolveEmployeeAssignmentActors(
+                employeeToAssign,
+                req.user.employeeObjectId,
+            );
 
             asset.pendingAction = null;
             asset.pendingActionDetails = null;
@@ -16682,6 +16787,11 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
             requestTypeFilter = { $in: ASSET_TOOLS_INBOX_TYPES };
         } else {
             requestTypeFilter = { $in: ASSET_DASHBOARD_INBOX_TYPES };
+        }
+
+        // Tools / all: move stuck Accept tasks off employees with no ERP User onto primary reportee.
+        if (scope !== 'vehicle') {
+            await healMisroutedAssignmentInboxTasks();
         }
 
         const match = {
