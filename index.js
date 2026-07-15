@@ -35,6 +35,7 @@ import { processParkingAssets } from "./utils/processParkingAssets.js";
 import { processTemporaryAssignments } from "./utils/processTemporaryAssignments.js";
 import { processAccidentAssets } from "./utils/processAccidentAssets.js";
 import { processDocumentExpiryReminders } from "./utils/processDocumentExpiryReminders.js";
+import { processUtilityBillPaymentDayReminders } from "./utils/processUtilityBillPaymentDayReminders.js";
 import { processVehicleServiceHoldReminders } from "./utils/processVehicleServiceHoldReminders.js";
 import { processVehicleServiceScheduledPhase } from "./utils/processVehicleServiceScheduledPhase.js";
 import { processOilServiceOverdue, processOilServiceStartDateActivation, processOilServiceDueAutoCreate } from "./utils/oilServiceWorkflow.js";
@@ -95,6 +96,18 @@ setInterval(() => { processAccidentAssets(); }, 24 * 60 * 60 * 1000);
 // Run company/employee/vehicle document expiry reminders (30/20/10/0 day emails + HR tasks).
 setTimeout(() => { processDocumentExpiryReminders(); }, 90 * 1000);
 setInterval(() => { processDocumentExpiryReminders(); }, 24 * 60 * 60 * 1000);
+
+// Utility bill monthly payment-day reminders (T-10 / T-5 / due day → HR email + bell).
+setTimeout(() => {
+    processUtilityBillPaymentDayReminders().catch((e) =>
+        console.error('[UtilityBillPaymentDayReminders] startup failed:', e?.message || e),
+    );
+}, 110 * 1000);
+setInterval(() => {
+    processUtilityBillPaymentDayReminders().catch((e) =>
+        console.error('[UtilityBillPaymentDayReminders] scheduled run failed:', e?.message || e),
+    );
+}, 24 * 60 * 60 * 1000);
 
 // Birthday wishes for active employees (personal email only).
 setTimeout(() => {

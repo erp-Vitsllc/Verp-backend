@@ -15,7 +15,17 @@ const paymentSchema = new mongoose.Schema(
         paymentType: {
             type: String,
             required: true,
-            enum: ['Salary', 'Loan', 'Advance', 'Reward', 'Fine', 'Reimbursement', 'Bonus', 'Other'],
+            enum: [
+                'Salary',
+                'Loan',
+                'Advance',
+                'Reward',
+                'Fine',
+                'UtilityBill',
+                'Reimbursement',
+                'Bonus',
+                'Other',
+            ],
             default: 'Other'
         },
         paidBy: {
@@ -52,7 +62,7 @@ const paymentSchema = new mongoose.Schema(
         },
         relatedEntityType: {
             type: String,
-            enum: ['Loan', 'Reward', 'Fine', 'Salary', null],
+            enum: ['Loan', 'Reward', 'Fine', 'Salary', 'UtilityBill', null],
             default: null
         },
         relatedEntityId: {

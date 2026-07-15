@@ -12,6 +12,7 @@ export const getPayments = async (req, res) => {
             startDate,
             endDate,
             employeeId,
+            paidBy,
             relatedEntityType,
             relatedEntityId,
             referenceId
@@ -31,7 +32,25 @@ export const getPayments = async (req, res) => {
 
         if (status) query.status = status;
         if (paymentType) query.paymentType = paymentType;
-        if (employeeId) query.paidBy = employeeId;
+
+        // paidBy / employeeId may be Mongo _id or business employeeId (e.g. VEGA-HR-0000)
+        const paidByKey = String(paidBy || employeeId || '').trim();
+        if (paidByKey) {
+            let employee = null;
+            if (/^[a-fA-F0-9]{24}$/.test(paidByKey)) {
+                employee = await EmployeeBasic.findById(paidByKey).select('_id').lean();
+            }
+            if (!employee) {
+                employee = await EmployeeBasic.findOne({ employeeId: paidByKey })
+                    .select('_id')
+                    .lean();
+            }
+            if (employee?._id) {
+                query.paidBy = employee._id;
+            } else {
+                query.paidBy = paidByKey;
+            }
+        }
         
         // Filter by related entity (for fine/loan/advance)
         if (relatedEntityType) query.relatedEntityType = relatedEntityType;

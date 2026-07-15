@@ -27,12 +27,14 @@ async function resolveRecipient(person) {
 }
 
 /**
- * Email HR (pending) or requester (approved / rejected) for utility bill payment.
+ * Utility bill workflow emails (Accounts / HR / Pay / requester updates).
+ * kind: pending_accounts | pending_hr | pending_pay | approved | rejected | paid
  */
 export async function sendUtilityBillPaymentEmail({
     recipient,
     bill,
-    kind = 'pending', // pending | approved | rejected
+    kind = 'pending_accounts',
+    batchMeta = null,
 }) {
     try {
         const transporter = createTransport();
@@ -44,30 +46,45 @@ export async function sendUtilityBillPaymentEmail({
         }
 
         const frontendUrl = emailFrontendUrl();
-        const detailsPath = `/HRM/Asset/UtilityBills/details/${encodeURIComponent(bill.entryId)}?billId=${encodeURIComponent(String(bill._id))}`;
-        const buttonUrl = `${frontendUrl}${detailsPath}`;
+        const path =
+            batchMeta?.reviewPath ||
+            (bill.batchId
+                ? `/HRM/Asset/UtilityBills?batchId=${encodeURIComponent(String(bill.batchId))}&review=1`
+                : `/HRM/Asset/UtilityBills/details/${encodeURIComponent(bill.entryId)}?billId=${encodeURIComponent(String(bill._id))}`);
+        const buttonUrl = `${frontendUrl}${path}`;
         const amountTxt = `AED ${Number(bill.amount || 0).toLocaleString(undefined, {
             minimumFractionDigits: 2,
             maximumFractionDigits: 2,
         })}`;
+        const countTxt = batchMeta?.billCount ? `${batchMeta.billCount} account(s)` : '1 account';
 
         const titles = {
-            pending: 'Utility Bill Payment — HR Approval Required',
-            approved: 'Utility Bill Payment Approved',
-            rejected: 'Utility Bill Payment Rejected',
+            pending_accounts: 'Utility Bill — Accounts Approval Required',
+            pending_hr: 'Utility Bill — HR Approval Required',
+            pending_pay: 'Utility Bill — Ready to Pay',
+            approved: 'Utility Bill Approved',
+            rejected: 'Utility Bill Rejected',
+            paid: 'Utility Bill Paid',
+            pending: 'Utility Bill — Approval Required',
         };
         const colors = {
-            pending: '#0d9488',
+            pending_accounts: '#0d9488',
+            pending_hr: '#2563eb',
+            pending_pay: '#d97706',
             approved: '#16a34a',
             rejected: '#dc2626',
+            paid: '#16a34a',
+            pending: '#0d9488',
         };
-
-        const paymentByLabel =
-            bill.paymentBy === 'employee_balance'
-                ? 'Balance pay by employee'
-                : bill.paymentBy === 'company'
-                  ? 'Pay by company'
-                  : '—';
+        const bodies = {
+            pending_accounts: 'New utility bills were submitted and need Accounts review/approval.',
+            pending_hr: 'Accounts approved these utility bills. HR review/approval is required.',
+            pending_pay: 'HR approved these utility bills. Please open the batch and Pay the selected amounts.',
+            approved: 'Your utility bill batch was approved and is awaiting Accounts payment.',
+            rejected: 'Your utility bill batch was rejected.',
+            paid: 'Your utility bill batch has been marked Paid by Accounts.',
+            pending: 'A utility bill requires your approval.',
+        };
 
         const html = `
             <div style="font-family: Segoe UI, Tahoma, sans-serif; color: #1e293b; max-width: 600px; margin: 0 auto; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden;">
@@ -76,24 +93,16 @@ export async function sendUtilityBillPaymentEmail({
                 </div>
                 <div style="padding:28px;">
                     <p>Hello <strong>${to.firstName || ''} ${to.lastName || ''}</strong>,</p>
-                    <p style="margin:12px 0 20px;">
-                        ${
-                            kind === 'pending'
-                                ? 'A utility bill payment exceeding the monthly rental requires your approval.'
-                                : kind === 'approved'
-                                  ? 'Your utility bill payment request was approved.'
-                                  : 'Your utility bill payment request was rejected and the bill was removed.'
-                        }
-                    </p>
+                    <p style="margin:12px 0 20px;">${bodies[kind] || bodies.pending}</p>
                     <div style="background:#f8fafc; border:1px solid #f1f5f9; border-radius:10px; padding:18px;">
                         <p style="margin:0 0 8px;"><strong>Type:</strong> ${bill.utilityType || '—'}</p>
-                        <p style="margin:0 0 8px;"><strong>Amount:</strong> ${amountTxt}</p>
-                        <p style="margin:0 0 8px;"><strong>Monthly rental:</strong> AED ${Number(bill.monthlyRental || 0).toLocaleString()}</p>
-                        <p style="margin:0;"><strong>Payment by:</strong> ${paymentByLabel}</p>
+                        <p style="margin:0 0 8px;"><strong>Month:</strong> ${bill.billMonth || '—'}</p>
+                        <p style="margin:0 0 8px;"><strong>Accounts:</strong> ${countTxt}</p>
+                        <p style="margin:0;"><strong>Total amount:</strong> ${amountTxt}</p>
                     </div>
                     <div style="text-align:center; margin-top:28px;">
                         <a href="${buttonUrl}" style="background:${colors[kind] || colors.pending}; color:#fff; padding:12px 28px; text-decoration:none; border-radius:8px; font-weight:700; display:inline-block;">
-                            Open Utility Details
+                            Open Utility Bills
                         </a>
                     </div>
                 </div>

@@ -8,18 +8,53 @@ const utilityBillPaymentSchema = new mongoose.Schema(
         monthlyRental: { type: Number, default: 0, min: 0 },
         billMonth: { type: String, default: '' },
         notes: { type: String, default: '' },
-        /** company = full bill by company; employee_balance = company covers monthly, employee pays excess */
+        accountNo: { type: String, default: '' },
+        differenceAmount: { type: Number, default: 0 },
+        attachment: {
+            name: { type: String, default: '' },
+            mime: { type: String, default: '' },
+            dataUrl: { type: String, default: '' },
+        },
+        /** Groups rows submitted together in one Add Bills Submit. */
+        batchId: {
+            type: mongoose.Schema.Types.ObjectId,
+            default: null,
+            index: true,
+        },
+        /** Display: pending {name} accounts | pending {name} hr */
+        pendingWithName: { type: String, default: '' },
+        pendingWithRole: {
+            type: String,
+            enum: ['accounts', 'hr', ''],
+            default: '',
+        },
+        /** company | employee | employee_and_company | employee_balance (legacy) */
         paymentBy: {
             type: String,
-            enum: ['company', 'employee_balance'],
+            enum: ['company', 'employee', 'employee_and_company', 'employee_balance'],
             default: undefined,
         },
+        /** Selected party names for Pay By (UI dropdowns) */
+        payByCompanyId: { type: String, default: '' },
+        payByCompanyName: { type: String, default: '' },
+        payByEmployeeId: { type: String, default: '' },
+        payByEmployeeName: { type: String, default: '' },
+        /** Totals owed (match TOTAL bar): company / employee pay */
         companyPayAmount: { type: Number, default: 0 },
         employeePayAmount: { type: Number, default: 0 },
+        /** Pay-by difference shares (under/split UI); not the totals */
+        companyDiffAmount: { type: Number, default: null },
+        employeeDiffAmount: { type: Number, default: null },
         status: {
             type: String,
-            enum: ['Approved', 'Pending HR', 'Rejected'],
-            default: 'Approved',
+            enum: [
+                'Pending Accounts',
+                'Pending HR',
+                'Approved',
+                'Paid',
+                'Rejected',
+            ],
+            default: 'Pending Accounts',
             index: true,
         },
         requestedBy: {
@@ -28,6 +63,24 @@ const utilityBillPaymentSchema = new mongoose.Schema(
             default: null,
         },
         requestedByName: { type: String, default: '' },
+        accountsApprovedBy: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'EmployeeBasic',
+            default: null,
+        },
+        accountsApprovedAt: { type: Date, default: null },
+        hrApprovedBy: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'EmployeeBasic',
+            default: null,
+        },
+        hrApprovedAt: { type: Date, default: null },
+        paidBy: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'EmployeeBasic',
+            default: null,
+        },
+        paidAt: { type: Date, default: null },
         actionedBy: {
             type: mongoose.Schema.Types.ObjectId,
             ref: 'EmployeeBasic',
@@ -40,5 +93,6 @@ const utilityBillPaymentSchema = new mongoose.Schema(
 );
 
 utilityBillPaymentSchema.index({ entryId: 1, createdAt: -1 });
+utilityBillPaymentSchema.index({ batchId: 1, status: 1 });
 
 export default mongoose.model('UtilityBillPayment', utilityBillPaymentSchema);

@@ -1,20 +1,44 @@
+import mongoose from 'mongoose';
 import UtilityBillPayment from '../../models/UtilityBillPayment.js';
 import EmployeeBasic from '../../models/EmployeeBasic.js';
+import DashboardAction from '../../models/DashboardAction.js';
 import { getDepartmentHOD } from '../../utils/getDepartmentHOD.js';
 import { syncDashboardAction } from '../../utils/syncDashboard.js';
 import { sendUtilityBillPaymentEmail } from '../../utils/sendUtilityBillPaymentEmail.js';
 
 const REQUEST_TYPE = 'Utility Bill Payment';
 
-function computePaySplit(amount, monthlyRental, paymentBy) {
+function empDisplayName(emp) {
+    if (!emp) return '';
+    return `${emp.firstName || ''} ${emp.lastName || ''}`.trim() || emp.employeeId || 'User';
+}
+
+function computePaySplit(amount, monthlyRental, paymentBy, existingCompany = 0, existingEmployee = 0) {
     const amt = Math.max(0, Number(amount) || 0);
     const monthly = Math.max(0, Number(monthlyRental) || 0);
-    if (paymentBy === 'employee_balance') {
+    if (paymentBy === 'employee_and_company') {
+        return {
+            companyPayAmount: Number(existingCompany) || 0,
+            employeePayAmount: Number(existingEmployee) || 0,
+        };
+    }
+    if (paymentBy === 'employee_balance' || paymentBy === 'employee') {
         const companyPayAmount = Math.min(amt, monthly);
         const employeePayAmount = Math.max(0, amt - monthly);
         return { companyPayAmount, employeePayAmount };
     }
     return { companyPayAmount: amt, employeePayAmount: 0 };
+}
+
+function attachmentPayload(attachment) {
+    if (attachment?.name && attachment?.dataUrl) {
+        return {
+            name: String(attachment.name).slice(0, 240),
+            mime: String(attachment.mime || '').slice(0, 120),
+            dataUrl: String(attachment.dataUrl),
+        };
+    }
+    return { name: '', mime: '', dataUrl: '' };
 }
 
 async function resolveRequesterEmployee(user) {
@@ -30,227 +54,1232 @@ async function resolveRequesterEmployee(user) {
 }
 
 function requesterDisplayName(emp, user) {
-    if (emp) return `${emp.firstName || ''} ${emp.lastName || ''}`.trim() || emp.employeeId || 'User';
+    if (emp) return empDisplayName(emp);
     return user?.name || 'User';
+}
+
+function reviewPath(batchId, utilityType = '', billMonth = '') {
+    const q = new URLSearchParams({
+        batchId: String(batchId),
+        review: '1',
+    });
+    if (utilityType) q.set('type', String(utilityType));
+    if (billMonth) q.set('billMonth', String(billMonth));
+    return `/HRM/Asset/UtilityBills?${q.toString()}`;
+}
+
+function statusLabel(status, pendingWithName = '') {
+    if (status === 'Pending Accounts') {
+        return `pending ${pendingWithName || 'Accounts'} accounts`;
+    }
+    if (status === 'Pending HR') {
+        return `pending ${pendingWithName || 'HR'} hr`;
+    }
+    // Approved by HR/Accounts workflow but Accounts has not paid yet
+    if (status === 'Approved') return 'not paid';
+    if (status === 'Paid') return 'paid';
+    if (status === 'Rejected') return 'rejected';
+    return String(status || '');
+}
+
+function decorateBill(bill) {
+    if (!bill) return bill;
+    const o = typeof bill.toObject === 'function' ? bill.toObject() : { ...bill };
+    o.statusLabel = statusLabel(o.status, o.pendingWithName);
+    o.reviewPath = o.batchId
+        ? reviewPath(o.batchId, o.utilityType, o.billMonth)
+        : `/HRM/Asset/UtilityBills/details/${encodeURIComponent(o.entryId)}?billId=${encodeURIComponent(String(o._id))}`;
+    return o;
+}
+
+/** Pay By party labels selected in UI (company / employee name dropdowns). */
+function payByPartyFromRow(row = {}) {
+    return {
+        payByCompanyId: String(row.payByCompanyId || '').trim(),
+        payByCompanyName: String(row.payByCompanyName || '').trim(),
+        payByEmployeeId: String(row.payByEmployeeId || '').trim(),
+        payByEmployeeName: String(row.payByEmployeeName || '').trim(),
+    };
+}
+
+/** True when both refs point to the same employee (ObjectId or lean doc). */
+function isSameEmployee(a, b) {
+    if (!a || !b) return false;
+    const idA = a._id != null ? a._id : a;
+    const idB = b._id != null ? b._id : b;
+    if (!idA || !idB) return false;
+    return String(idA) === String(idB);
+}
+
+/**
+ * Resolve next workflow stage when actor equals flowchart Accounts/HR.
+ * Skips self-approval: submitter===Accounts → HR; actor===HR → Approved (pay); etc.
+ * Never auto-marks Paid — Accounts must still click Pay.
+ */
+function resolveStageAfterActor({ actor, accounts, hr, from = 'submit' }) {
+    const actorIsAccounts = isSameEmployee(actor, accounts);
+    const actorIsHr = isSameEmployee(actor, hr);
+    const accountsIsHr = isSameEmployee(accounts, hr);
+
+    if (from === 'submit') {
+        if (actorIsAccounts) {
+            // Skip Accounts approval
+            if (actorIsHr || accountsIsHr) {
+                // Also HR (same person) → ready for Accounts pay
+                return { status: 'Approved', pendingRole: 'accounts', skipped: ['accounts', 'hr'] };
+            }
+            return { status: 'Pending HR', pendingRole: 'hr', skipped: ['accounts'] };
+        }
+        return { status: 'Pending Accounts', pendingRole: 'accounts', skipped: [] };
+    }
+
+    if (from === 'accounts_approve') {
+        // Accounts just approved; next is HR — skip if same person
+        if (actorIsHr || accountsIsHr) {
+            return { status: 'Approved', pendingRole: 'accounts', skipped: ['hr'] };
+        }
+        return { status: 'Pending HR', pendingRole: 'hr', skipped: [] };
+    }
+
+    // hr_approve → always Approved (awaiting Accounts pay); pay is never auto-skipped
+    return { status: 'Approved', pendingRole: 'accounts', skipped: [] };
+}
+
+function applyPaySplitToBills(bills, modeFallback = '') {
+    const allowedPayBy = new Set([
+        'company',
+        'employee',
+        'employee_and_company',
+        'employee_balance',
+    ]);
+    let mode = String(modeFallback || bills[0]?.paymentBy || '').trim();
+    if (!allowedPayBy.has(mode)) {
+        mode = bills.every((b) => allowedPayBy.has(String(b.paymentBy || '')))
+            ? String(bills[0].paymentBy)
+            : '';
+    }
+    if (!mode) {
+        return { ok: false, message: 'Pay by is required (company, employee, or employee and company).' };
+    }
+    for (const bill of bills) {
+        const billMode = allowedPayBy.has(String(bill.paymentBy || ''))
+            ? String(bill.paymentBy)
+            : mode;
+        bill.paymentBy = billMode === 'employee_balance' ? 'employee' : billMode;
+
+        // Keep difference shares already set at submit / Accounts-HR edits (do not overwrite with full actual).
+        const company = Number(bill.companyPayAmount);
+        const employee = Number(bill.employeePayAmount);
+        if (Number.isFinite(company) || Number.isFinite(employee)) {
+            bill.companyPayAmount = Number.isFinite(company) ? company : 0;
+            bill.employeePayAmount = Number.isFinite(employee) ? employee : 0;
+            continue;
+        }
+
+        const split = computePaySplit(
+            bill.amount,
+            bill.monthlyRental,
+            bill.paymentBy,
+            bill.companyPayAmount,
+            bill.employeePayAmount,
+        );
+        bill.companyPayAmount = split.companyPayAmount;
+        bill.employeePayAmount = split.employeePayAmount;
+    }
+    return { ok: true, mode: bills[0]?.paymentBy || mode };
+}
+
+async function isActorAccountsOrAdmin(actor, reqUser) {
+    const accounts = await getDepartmentHOD('accounts');
+    const role = String(reqUser?.role || reqUser?.userType || '').toLowerCase();
+    const isAdminUser = role.includes('admin') || role.includes('super');
+    const isAccounts =
+        Boolean(accounts?._id && actor?._id && String(accounts._id) === String(actor._id));
+    return { accounts, isAccounts, isAdminUser, allowed: isAccounts || isAdminUser };
+}
+
+async function isActorHrOrAdmin(actor, reqUser) {
+    const hr = await getDepartmentHOD('hr');
+    const role = String(reqUser?.role || reqUser?.userType || '').toLowerCase();
+    const isAdminUser = role.includes('admin') || role.includes('super');
+    const isHr = Boolean(hr?._id && actor?._id && String(hr._id) === String(actor._id));
+    return { hr, isHr, isAdminUser, allowed: isHr || isAdminUser };
+}
+
+async function syncBatchDashboard({
+    batchId,
+    bills,
+    assignedTo,
+    status = 'Pending',
+    actionedBy = null,
+    comment = '',
+    extra2 = '',
+    subjectEmployee = null,
+    requestedByName = '',
+}) {
+    const first = bills[0];
+    const total = bills.reduce((s, b) => s + (Number(b.amount) || 0), 0);
+    const utilityType = first?.utilityType || 'Utility';
+    const billMonth = first?.billMonth || '';
+    const path = reviewPath(batchId, utilityType, billMonth);
+
+    // Complete any existing pending inbox rows for this batch so the previous
+    // Accounts/HR actor's notification/task goes away after they act.
+    await DashboardAction.updateMany(
+        { requestId: batchId, requestType: REQUEST_TYPE, status: 'Pending' },
+        {
+            status: status === 'Rejected' ? 'Rejected' : 'Approved',
+            actionedDate: new Date(),
+            actionedBy: actionedBy || null,
+            comment: comment || '',
+        },
+    );
+
+    // Next assignee gets a fresh Pending task (skip if final / no assignee).
+    if (status !== 'Pending' || !assignedTo) {
+        return;
+    }
+
+    await syncDashboardAction({
+        requestId: batchId,
+        requestType: REQUEST_TYPE,
+        status: 'Pending',
+        assignedTo,
+        actionedBy,
+        comment,
+        subjectEmployee,
+        requestedByName: requestedByName || first?.requestedByName || '',
+        extra1: `${utilityType} ${billMonth || ''} — ${bills.length} bill(s) · ${total.toLocaleString()} AED`.trim(),
+        extra2: extra2 || statusLabel(first?.status, first?.pendingWithName),
+        extra3: JSON.stringify({
+            batchId: String(batchId),
+            utilityType,
+            billMonth,
+            billCount: bills.length,
+            detailsPath: path,
+            reviewPath: path,
+        }),
+    });
 }
 
 export async function listUtilityBillPayments(req, res) {
     try {
-        const { entryId } = req.query;
-        if (!entryId) {
-            return res.status(400).json({ message: 'entryId is required' });
+        const { entryId, batchId, utilityType, entryIds } = req.query;
+        const actor = await resolveRequesterEmployee(req.user);
+        const accountsGate = await isActorAccountsOrAdmin(actor, req.user);
+        const hrGate = await isActorHrOrAdmin(actor, req.user);
+
+        const withPermissions = (bill) => {
+            const decorated = decorateBill(bill);
+            const canApproveReject =
+                (bill.status === 'Pending Accounts' && accountsGate.allowed) ||
+                (bill.status === 'Pending HR' && hrGate.allowed);
+            // Pay only after approve → not paid; Accounts flowchart user (or admin)
+            const canPay = bill.status === 'Approved' && accountsGate.allowed;
+            return { ...decorated, canApproveReject, canPay };
+        };
+
+        if (batchId) {
+            const bills = await UtilityBillPayment.find({ batchId: String(batchId) })
+                .sort({ createdAt: 1 })
+                .lean();
+            return res.status(200).json({ bills: bills.map(withPermissions) });
         }
-        const bills = await UtilityBillPayment.find({ entryId: String(entryId) })
-            .sort({ createdAt: -1 })
-            .lean();
-        return res.status(200).json({ bills });
+
+        const filter = {};
+        if (entryId) {
+            filter.entryId = String(entryId);
+        } else if (entryIds) {
+            const ids = String(entryIds)
+                .split(',')
+                .map((s) => s.trim())
+                .filter(Boolean);
+            if (!ids.length) {
+                return res.status(400).json({ message: 'entryIds is empty' });
+            }
+            filter.entryId = { $in: ids };
+        } else if (utilityType) {
+            filter.utilityType = String(utilityType).trim();
+        } else {
+            return res.status(400).json({
+                message: 'entryId, entryIds, utilityType, or batchId is required',
+            });
+        }
+
+        const bills = await UtilityBillPayment.find(filter).sort({ createdAt: -1 }).lean();
+        return res.status(200).json({ bills: bills.map(withPermissions) });
     } catch (err) {
         return res.status(500).json({ message: err.message || 'Failed to load bills' });
     }
 }
 
-export async function createUtilityBillPayment(req, res) {
+export async function getUtilityBillBatch(req, res) {
     try {
-        const {
-            entryId,
-            utilityType,
-            amount,
-            monthlyRental = 0,
-            billMonth = '',
-            notes = '',
-            sendForHr = false,
-        } = req.body || {};
-
-        if (!entryId || !utilityType) {
-            return res.status(400).json({ message: 'entryId and utilityType are required' });
-        }
-        const amt = Number(amount);
-        if (!Number.isFinite(amt) || amt < 0) {
-            return res.status(400).json({ message: 'Valid amount is required' });
+        const { batchId } = req.params;
+        if (!mongoose.Types.ObjectId.isValid(batchId)) {
+            return res.status(400).json({ message: 'Invalid batchId' });
         }
 
-        const monthly = Math.max(0, Number(monthlyRental) || 0);
-        const needsHr = Boolean(sendForHr) || amt > monthly;
+        let bills = await UtilityBillPayment.find({ batchId })
+            .sort({ createdAt: 1 })
+            .lean();
+
+        // Inbox/links sometimes pass a single bill _id — resolve its batch (or return that bill alone).
+        if (!bills.length) {
+            const single = await UtilityBillPayment.findById(batchId).lean();
+            if (single?.batchId) {
+                bills = await UtilityBillPayment.find({ batchId: single.batchId })
+                    .sort({ createdAt: 1 })
+                    .lean();
+            } else if (single) {
+                bills = [single];
+            }
+        }
+
+        if (!bills.length) {
+            return res.status(404).json({ message: 'Batch not found' });
+        }
+
+        const actor = await resolveRequesterEmployee(req.user);
+        const accountsGate = await isActorAccountsOrAdmin(actor, req.user);
+        const hrGate = await isActorHrOrAdmin(actor, req.user);
+
+        // Prefer a stage this user can act on (mixed-status batches after partial approve)
+        const focus =
+            bills.find((b) => b.status === 'Pending Accounts' && accountsGate.allowed) ||
+            bills.find((b) => b.status === 'Pending HR' && hrGate.allowed) ||
+            bills.find((b) => b.status === 'Approved' && accountsGate.allowed) ||
+            bills.find((b) => b.status === 'Pending Accounts') ||
+            bills.find((b) => b.status === 'Pending HR') ||
+            bills.find((b) => b.status === 'Approved') ||
+            bills[0];
+
+        const stageStatus = focus.status;
+        const canEditAccounts = stageStatus === 'Pending Accounts' && accountsGate.allowed;
+        const canEditHr = stageStatus === 'Pending HR' && hrGate.allowed;
+        const canEdit = Boolean(canEditAccounts || canEditHr);
+        // Approved = not paid; only Accounts may see / use Pay (never auto-paid on approve)
+        const canPay = stageStatus === 'Approved' && accountsGate.allowed;
+        const canApproveReject = canEdit;
+
+        const resolvedBatchId = String(focus.batchId || batchId);
+        return res.status(200).json({
+            batchId: resolvedBatchId,
+            utilityType: focus.utilityType,
+            billMonth: focus.billMonth,
+            status: stageStatus,
+            statusLabel: statusLabel(stageStatus, focus.pendingWithName),
+            pendingWithName: focus.pendingWithName,
+            pendingWithRole: focus.pendingWithRole,
+            /** Edit/approve only for the flowchart user the batch is pending with */
+            canEdit,
+            canApproveReject,
+            canPay,
+            actorIsAccounts: Boolean(accountsGate.isAccounts || accountsGate.isAdminUser),
+            actorIsHr: Boolean(hrGate.isHr || hrGate.isAdminUser),
+            bills: bills.map(decorateBill),
+            reviewPath: reviewPath(resolvedBatchId, focus.utilityType, focus.billMonth),
+        });
+    } catch (err) {
+        console.error('[getUtilityBillBatch]', err);
+        return res.status(500).json({ message: err.message || 'Failed to load batch' });
+    }
+}
+
+/**
+ * Submit → Accounts → HR → not paid (Pay).
+ * If submitter is the flowchart Accounts person, skip Accounts and go to HR.
+ * If submitter is also HR (or Accounts===HR), skip to Approved (awaiting Pay).
+ */
+export async function createUtilityBillBatch(req, res) {
+    try {
+        const { utilityType, billMonth = '', notes = '', rows = [] } = req.body || {};
+        if (!utilityType || !Array.isArray(rows) || !rows.length) {
+            return res.status(400).json({ message: 'utilityType and rows are required' });
+        }
+
+        const accounts = await getDepartmentHOD('accounts');
+        if (!accounts?._id) {
+            return res.status(400).json({
+                message: 'Accounts responsible person is not configured in Flowchart.',
+            });
+        }
+        const hr = await getDepartmentHOD('hr');
+        if (!hr?._id) {
+            return res.status(400).json({
+                message: 'HR responsible person is not configured in Flowchart.',
+            });
+        }
 
         const requester = await resolveRequesterEmployee(req.user);
         const requestedByName = requesterDisplayName(requester, req.user);
+        const batchId = new mongoose.Types.ObjectId();
+        const accountsName = empDisplayName(accounts);
+        const hrName = empDisplayName(hr);
+        const now = new Date();
 
-        if (needsHr) {
-            const hr = await getDepartmentHOD('hr');
-            if (!hr?._id) {
-                return res.status(400).json({
-                    message: 'HR responsible person is not configured in Flowchart.',
-                });
+        const stage = resolveStageAfterActor({
+            actor: requester,
+            accounts,
+            hr,
+            from: 'submit',
+        });
+
+        let pendingWithName = accountsName;
+        let pendingWithRole = 'accounts';
+        if (stage.status === 'Pending HR') {
+            pendingWithName = hrName;
+            pendingWithRole = 'hr';
+        } else if (stage.status === 'Approved') {
+            pendingWithName = accountsName;
+            pendingWithRole = 'accounts';
+        }
+
+        const docs = [];
+        for (const row of rows) {
+            const entryId = row.entryId;
+            const amt = Number(row.actualAmount ?? row.amount);
+            if (!entryId || !Number.isFinite(amt) || amt < 0) {
+                return res.status(400).json({ message: 'Each row needs entryId and a valid amount.' });
             }
+            const monthly = Math.max(0, Number(row.contractAmount ?? row.monthlyRental) || 0);
+            const diff =
+                Number.isFinite(Number(row.difference ?? row.differenceAmount))
+                    ? Number(row.difference ?? row.differenceAmount)
+                    : monthly - amt;
+            const payBy = String(row.payBy || '').trim();
+            const underDiff = Math.max(0, monthly - amt);
+            const overage = Math.max(0, amt - monthly);
+            let companyDiff = Number(row.companyDiffAmount);
+            let employeeDiff = Number(row.employeeDiffAmount);
+            if (!Number.isFinite(companyDiff) || !Number.isFinite(employeeDiff)) {
+                if (payBy === 'company') {
+                    companyDiff = underDiff;
+                    employeeDiff = 0;
+                } else if (payBy === 'employee' || payBy === 'employee_balance') {
+                    companyDiff = 0;
+                    employeeDiff = underDiff;
+                } else {
+                    companyDiff = 0;
+                    employeeDiff = 0;
+                }
+            }
+            // Prefer TOTAL company/employee pay amounts from the client (TOTAL bar)
+            let companyAmt = Number(row.companyPayAmount);
+            let employeeAmt = Number(row.employeePayAmount);
+            if (!Number.isFinite(companyAmt) || !Number.isFinite(employeeAmt)) {
+                const employeeOverage =
+                    payBy === 'employee' || payBy === 'employee_balance' || payBy === 'employee_and_company'
+                        ? overage
+                        : 0;
+                companyAmt = Math.max(0, amt + companyDiff - employeeOverage);
+                employeeAmt = Math.max(0, employeeDiff + employeeOverage);
+            }
+            const paymentByStored =
+                payBy === 'company' || payBy === 'employee' || payBy === 'employee_and_company'
+                    ? payBy
+                    : undefined;
 
-            // Payment by is set only when HR approves — not at submit time.
-            const bill = await UtilityBillPayment.create({
+            const doc = {
                 entryId: String(entryId),
                 utilityType: String(utilityType).trim(),
                 amount: amt,
                 monthlyRental: monthly,
                 billMonth: String(billMonth || ''),
                 notes: String(notes || ''),
-                companyPayAmount: 0,
-                employeePayAmount: 0,
-                status: 'Pending HR',
+                accountNo: String(row.accountNo || ''),
+                differenceAmount: diff,
+                attachment: attachmentPayload(row.attachment),
+                batchId,
+                status: stage.status,
+                pendingWithName,
+                pendingWithRole,
+                companyPayAmount: companyAmt,
+                employeePayAmount: employeeAmt,
+                companyDiffAmount: companyDiff,
+                employeeDiffAmount: employeeDiff,
+                ...payByPartyFromRow(row),
                 requestedBy: requester?._id || null,
                 requestedByName,
-            });
+            };
+            // Omit unset paymentBy — mongoose enum rejects explicit `undefined`/`''`.
+            if (paymentByStored) doc.paymentBy = paymentByStored;
 
-            const detailsPath = `/HRM/Asset/UtilityBills/details/${encodeURIComponent(String(entryId))}?billId=${encodeURIComponent(String(bill._id))}`;
+            // Record auto-skipped approvals when submitter is that role
+            if (stage.skipped.includes('accounts')) {
+                doc.accountsApprovedBy = requester?._id || null;
+                doc.accountsApprovedAt = now;
+                doc.comment = 'Accounts step skipped (submitter is Accounts)';
+            }
+            if (stage.skipped.includes('hr')) {
+                doc.hrApprovedBy = requester?._id || null;
+                doc.hrApprovedAt = now;
+                doc.comment = stage.skipped.includes('accounts')
+                    ? 'Accounts & HR skipped (submitter is both) — awaiting Pay'
+                    : 'HR step skipped (submitter is HR) — awaiting Pay';
+            }
 
-            await syncDashboardAction({
-                requestId: bill._id,
-                requestType: REQUEST_TYPE,
-                status: 'Pending',
-                assignedTo: hr._id,
-                subjectEmployee: requester || null,
-                requestedByName,
-                extra1: `${utilityType} bill — ${amt.toLocaleString()} AED`,
-                extra2: 'Awaiting HR approval',
-                extra3: JSON.stringify({
-                    entryId: String(entryId),
-                    billId: String(bill._id),
-                    utilityType,
-                    detailsPath,
-                }),
-            });
-
-            await sendUtilityBillPaymentEmail({ recipient: hr, bill, kind: 'pending' });
-
-            return res.status(201).json({ bill, sentToHr: true });
+            docs.push(doc);
         }
 
-        const bill = await UtilityBillPayment.create({
-            entryId: String(entryId),
-            utilityType: String(utilityType).trim(),
-            amount: amt,
-            monthlyRental: monthly,
-            billMonth: String(billMonth || ''),
-            notes: String(notes || ''),
-            paymentBy: 'company',
-            companyPayAmount: amt,
-            employeePayAmount: 0,
-            status: 'Approved',
-            requestedBy: requester?._id || null,
-            requestedByName,
-            actionedAt: new Date(),
-        });
+        // Ensure pay split ready when landing on Approved
+        if (stage.status === 'Approved') {
+            const splitCheck = applyPaySplitToBills(docs, docs[0]?.paymentBy);
+            if (!splitCheck.ok) {
+                return res.status(400).json({ message: splitCheck.message });
+            }
+        }
 
-        return res.status(201).json({ bill, sentToHr: false });
+        const bills = await UtilityBillPayment.insertMany(docs);
+        const leanBills = bills.map((b) => b.toObject());
+        const path = reviewPath(batchId, utilityType, billMonth);
+        const totalAmount = leanBills.reduce((s, b) => s + Number(b.amount || 0), 0);
+
+        if (stage.status === 'Pending Accounts') {
+            await syncBatchDashboard({
+                batchId,
+                bills: leanBills,
+                assignedTo: accounts._id,
+                status: 'Pending',
+                subjectEmployee: requester,
+                requestedByName,
+                extra2: statusLabel('Pending Accounts', accountsName),
+            });
+            await sendUtilityBillPaymentEmail({
+                recipient: accounts,
+                bill: { ...leanBills[0], amount: totalAmount },
+                kind: 'pending_accounts',
+                batchMeta: { batchId: String(batchId), billCount: leanBills.length, reviewPath: path },
+            });
+        } else if (stage.status === 'Pending HR') {
+            await syncBatchDashboard({
+                batchId,
+                bills: leanBills,
+                assignedTo: hr._id,
+                status: 'Pending',
+                subjectEmployee: requester,
+                requestedByName,
+                extra2: statusLabel('Pending HR', hrName),
+            });
+            await sendUtilityBillPaymentEmail({
+                recipient: hr,
+                bill: { ...leanBills[0], amount: totalAmount },
+                kind: 'pending_hr',
+                batchMeta: { batchId: String(batchId), billCount: leanBills.length, reviewPath: path },
+            });
+        } else {
+            // Approved — awaiting Accounts pay
+            await syncBatchDashboard({
+                batchId,
+                bills: leanBills,
+                assignedTo: accounts._id,
+                status: 'Pending',
+                subjectEmployee: requester,
+                requestedByName,
+                extra2: 'not paid — awaiting Accounts payment',
+            });
+            await sendUtilityBillPaymentEmail({
+                recipient: accounts,
+                bill: { ...leanBills[0], amount: totalAmount },
+                kind: 'pending_pay',
+                batchMeta: { batchId: String(batchId), billCount: leanBills.length, reviewPath: path },
+            });
+        }
+
+        return res.status(201).json({
+            batchId: String(batchId),
+            bills: leanBills.map(decorateBill),
+            status: stage.status,
+            statusLabel:
+                stage.status === 'Approved'
+                    ? 'not paid'
+                    : statusLabel(stage.status, pendingWithName),
+            reviewPath: path,
+            sentToAccounts: stage.status === 'Pending Accounts',
+            skippedStages: stage.skipped,
+        });
     } catch (err) {
-        console.error('[createUtilityBillPayment]', err);
-        return res.status(500).json({ message: err.message || 'Failed to create bill' });
+        console.error('[createUtilityBillBatch]', err);
+        return res.status(500).json({ message: err.message || 'Failed to submit bills' });
     }
 }
 
-export async function respondUtilityBillPayment(req, res) {
+/** @deprecated single-row create — routes to batch of one */
+export async function createUtilityBillPayment(req, res) {
+    const body = req.body || {};
+    req.body = {
+        utilityType: body.utilityType,
+        billMonth: body.billMonth,
+        notes: body.notes,
+        rows: [
+            {
+                entryId: body.entryId,
+                actualAmount: body.amount,
+                contractAmount: body.monthlyRental,
+                accountNo: body.accountNo,
+                differenceAmount: body.differenceAmount,
+                attachment: body.attachment,
+            },
+        ],
+    };
+    return createUtilityBillBatch(req, res);
+}
+
+function applyRowEdits(bills, rowUpdates = []) {
+    if (!Array.isArray(rowUpdates) || !rowUpdates.length) return;
+    const byId = new Map(rowUpdates.map((r) => [String(r.billId || r._id || ''), r]));
+    for (const bill of bills) {
+        const patch = byId.get(String(bill._id));
+        if (!patch) continue;
+        if (patch.actualAmount != null || patch.amount != null) {
+            const amt = Number(patch.actualAmount ?? patch.amount);
+            if (Number.isFinite(amt) && amt >= 0) bill.amount = amt;
+        }
+        if (patch.contractAmount != null || patch.monthlyRental != null) {
+            const m = Number(patch.contractAmount ?? patch.monthlyRental);
+            if (Number.isFinite(m) && m >= 0) bill.monthlyRental = m;
+        }
+        if (patch.accountNo != null) bill.accountNo = String(patch.accountNo);
+        if (patch.difference != null || patch.differenceAmount != null) {
+            const d = Number(patch.difference ?? patch.differenceAmount);
+            if (Number.isFinite(d)) bill.differenceAmount = d;
+        } else {
+            // Contract − Actual = Difference
+            bill.differenceAmount = Number(bill.monthlyRental || 0) - Number(bill.amount || 0);
+        }
+        if (patch.attachment) {
+            bill.attachment = attachmentPayload(patch.attachment);
+        }
+        const payBy = String(patch.payBy || patch.paymentBy || '').trim();
+        if (
+            payBy === 'company' ||
+            payBy === 'employee' ||
+            payBy === 'employee_and_company' ||
+            payBy === 'employee_balance'
+        ) {
+            bill.paymentBy = payBy === 'employee_balance' ? 'employee' : payBy;
+        }
+        if (patch.payByCompanyId != null) bill.payByCompanyId = String(patch.payByCompanyId || '');
+        if (patch.payByCompanyName != null) {
+            bill.payByCompanyName = String(patch.payByCompanyName || '');
+        }
+        if (patch.payByEmployeeId != null) {
+            bill.payByEmployeeId = String(patch.payByEmployeeId || '');
+        }
+        if (patch.payByEmployeeName != null) {
+            bill.payByEmployeeName = String(patch.payByEmployeeName || '');
+        }
+        // Diff shares for Pay By UI
+        if (patch.companyDiffAmount != null) {
+            const c = Number(patch.companyDiffAmount);
+            if (Number.isFinite(c)) bill.companyDiffAmount = c;
+        }
+        if (patch.employeeDiffAmount != null) {
+            const e = Number(patch.employeeDiffAmount);
+            if (Number.isFinite(e)) bill.employeeDiffAmount = e;
+        }
+        // Totals (TOTAL bar) — never overwrite totals with diff shares
+        if (patch.companyPayAmount != null) {
+            const c = Number(patch.companyPayAmount);
+            if (Number.isFinite(c)) bill.companyPayAmount = c;
+        }
+        if (patch.employeePayAmount != null) {
+            const e = Number(patch.employeePayAmount);
+            if (Number.isFinite(e)) bill.employeePayAmount = e;
+        }
+    }
+}
+
+/**
+ * Resolve bills to act on from selected review rows.
+ * - Existing selected billIds
+ * - Newly checked accounts (entryId without billId) are inserted into the batch
+ * - Unchecked existing bills stay at their current stage (not rejected/approved)
+ */
+async function resolveSelectedBillsForRespond({
+    batchId,
+    allBills,
+    rows,
+    stageStatus,
+    allowCreate = true,
+}) {
+    const template = allBills[0];
+    if (!Array.isArray(rows) || !rows.length) {
+        return allBills.filter((b) => b.status === stageStatus);
+    }
+
+    const selectedWithId = rows.filter((r) => r.billId || r._id);
+    const selectedNew = allowCreate
+        ? rows.filter((r) => !r.billId && !r._id && r.entryId)
+        : [];
+    const idSet = new Set(selectedWithId.map((r) => String(r.billId || r._id)));
+
+    const existing = allBills.filter(
+        (b) => b.status === stageStatus && idSet.has(String(b._id)),
+    );
+
+    const created = [];
+    for (const row of selectedNew) {
+        const amt = Number(row.actualAmount ?? row.amount);
+        if (!Number.isFinite(amt) || amt < 0) {
+            throw new Error(`Invalid actual amount for account ${row.accountNo || row.entryId}.`);
+        }
+        const monthly = Math.max(0, Number(row.contractAmount ?? row.monthlyRental) || 0);
+        const diff =
+            Number.isFinite(Number(row.difference ?? row.differenceAmount))
+                ? Number(row.difference ?? row.differenceAmount)
+                : monthly - amt;
+        const payBy = String(row.payBy || row.paymentBy || '').trim();
+        const underDiff = Math.max(0, monthly - amt);
+        const overage = Math.max(0, amt - monthly);
+        let companyDiff = Number(row.companyDiffAmount);
+        let employeeDiff = Number(row.employeeDiffAmount);
+        if (!Number.isFinite(companyDiff) || !Number.isFinite(employeeDiff)) {
+            if (payBy === 'company') {
+                companyDiff = underDiff;
+                employeeDiff = 0;
+            } else if (payBy === 'employee' || payBy === 'employee_balance') {
+                companyDiff = 0;
+                employeeDiff = underDiff;
+            } else {
+                companyDiff = 0;
+                employeeDiff = 0;
+            }
+        }
+        let companyAmt = Number(row.companyPayAmount);
+        let employeeAmt = Number(row.employeePayAmount);
+        if (!Number.isFinite(companyAmt) || !Number.isFinite(employeeAmt)) {
+            const employeeOverage =
+                payBy === 'employee' || payBy === 'employee_balance' || payBy === 'employee_and_company'
+                    ? overage
+                    : 0;
+            companyAmt = Math.max(0, amt + companyDiff - employeeOverage);
+            employeeAmt = Math.max(0, employeeDiff + employeeOverage);
+        }
+        const doc = {
+            entryId: String(row.entryId),
+            utilityType: template.utilityType,
+            amount: amt,
+            monthlyRental: monthly,
+            billMonth: template.billMonth || '',
+            notes: template.notes || '',
+            accountNo: String(row.accountNo || ''),
+            differenceAmount: diff,
+            attachment: attachmentPayload(row.attachment),
+            batchId: template.batchId,
+            status: stageStatus,
+            pendingWithName: template.pendingWithName || '',
+            pendingWithRole: template.pendingWithRole || '',
+            companyPayAmount: companyAmt,
+            employeePayAmount: employeeAmt,
+            companyDiffAmount: companyDiff,
+            employeeDiffAmount: employeeDiff,
+            ...payByPartyFromRow(row),
+            requestedBy: template.requestedBy || null,
+            requestedByName: template.requestedByName || '',
+        };
+        if (
+            payBy === 'company' ||
+            payBy === 'employee' ||
+            payBy === 'employee_and_company' ||
+            payBy === 'employee_balance'
+        ) {
+            doc.paymentBy = payBy === 'employee_balance' ? 'employee' : payBy;
+        }
+        created.push(await UtilityBillPayment.create(doc));
+    }
+
+    const selected = [...existing, ...created];
+    if (!selected.length) {
+        throw new Error('Select at least one account.');
+    }
+    return selected;
+}
+
+/**
+ * Accounts approve → Pending HR; HR approve → Approved (Accounts can Pay).
+ */
+export async function respondUtilityBillBatch(req, res) {
     try {
-        const { id } = req.params;
-        const { decision, comment = '', paymentBy = null } = req.body || {};
+        const { batchId } = req.params;
+        const { decision, comment = '', paymentBy = null, rows = [] } = req.body || {};
         const action = String(decision || '').toLowerCase();
         if (!['approve', 'reject'].includes(action)) {
             return res.status(400).json({ message: 'decision must be approve or reject' });
         }
+        if (!mongoose.Types.ObjectId.isValid(batchId)) {
+            return res.status(400).json({ message: 'Invalid batchId' });
+        }
 
-        const bill = await UtilityBillPayment.findById(id);
-        if (!bill) return res.status(404).json({ message: 'Bill not found' });
-        if (bill.status !== 'Pending HR') {
-            return res.status(400).json({ message: 'This bill is not awaiting HR approval.' });
+        const allBills = await UtilityBillPayment.find({ batchId });
+        if (!allBills.length) return res.status(404).json({ message: 'Batch not found' });
+
+        const stageStatus = allBills.find((b) =>
+            ['Pending Accounts', 'Pending HR'].includes(b.status),
+        )?.status;
+        if (!stageStatus) {
+            return res.status(400).json({
+                message: `Batch is not awaiting approval (current: ${allBills[0].status}).`,
+            });
+        }
+
+        let bills;
+        try {
+            bills = await resolveSelectedBillsForRespond({
+                batchId,
+                allBills,
+                rows,
+                stageStatus,
+                allowCreate: action === 'approve',
+            });
+        } catch (selErr) {
+            return res.status(400).json({ message: selErr.message || 'Invalid selection.' });
         }
 
         const actor = await resolveRequesterEmployee(req.user);
-        const hr = await getDepartmentHOD('hr');
-        const role = String(req.user?.role || req.user?.userType || '').toLowerCase();
-        const isAdminUser = role.includes('admin') || role.includes('super');
-        const isHrUser = Boolean(hr?._id && actor?._id && String(hr._id) === String(actor._id));
-
-        if (!isHrUser && !isAdminUser) {
-            return res.status(403).json({ message: 'Only HR can respond to this request.' });
-        }
-
-        const requester = bill.requestedBy
-            ? await EmployeeBasic.findById(bill.requestedBy)
+        const requester = allBills[0].requestedBy
+            ? await EmployeeBasic.findById(allBills[0].requestedBy)
                   .select('firstName lastName companyEmail workEmail personalEmail email employeeId')
                   .lean()
             : null;
 
-        if (action === 'reject') {
-            await syncDashboardAction({
-                requestId: bill._id,
-                requestType: REQUEST_TYPE,
-                status: 'Rejected',
-                assignedTo: hr?._id || actor?._id,
-                actionedBy: actor?._id || req.user?._id,
-                comment: comment || 'Rejected by HR',
-                requestedByName: bill.requestedByName,
-                extra1: `${bill.utilityType} bill rejected`,
-                extra2: comment || 'Rejected — bill deleted',
-                subjectEmployee: requester,
-            });
+        if (stageStatus === 'Pending Accounts') {
+            const gate = await isActorAccountsOrAdmin(actor, req.user);
+            if (!gate.allowed) {
+                return res.status(403).json({ message: 'Only Accounts can respond at this stage.' });
+            }
 
-            const snapshot = bill.toObject();
-            await UtilityBillPayment.findByIdAndDelete(bill._id);
-
-            if (requester) {
-                await sendUtilityBillPaymentEmail({
-                    recipient: requester,
-                    bill: snapshot,
-                    kind: 'rejected',
+            if (action === 'reject') {
+                for (const bill of bills) {
+                    bill.status = 'Rejected';
+                    bill.pendingWithName = '';
+                    bill.pendingWithRole = '';
+                    bill.actionedBy = actor?._id || null;
+                    bill.actionedAt = new Date();
+                    bill.comment = comment || 'Rejected by Accounts';
+                    await bill.save();
+                }
+                const remaining = await UtilityBillPayment.countDocuments({
+                    batchId,
+                    status: 'Pending Accounts',
+                });
+                await syncBatchDashboard({
+                    batchId,
+                    bills: bills.map((b) => b.toObject()),
+                    assignedTo: gate.accounts?._id || actor?._id,
+                    status: remaining > 0 ? 'Pending' : 'Rejected',
+                    actionedBy: actor?._id || req.user?._id,
+                    comment: comment || 'Rejected by Accounts',
+                    subjectEmployee: requester,
+                    requestedByName: allBills[0].requestedByName,
+                    extra2: remaining > 0 ? statusLabel('Pending Accounts', empDisplayName(gate.accounts)) : 'rejected',
+                });
+                if (requester && remaining === 0) {
+                    await sendUtilityBillPaymentEmail({
+                        recipient: requester,
+                        bill: bills[0].toObject(),
+                        kind: 'rejected',
+                        batchMeta: { batchId: String(batchId), billCount: bills.length },
+                    });
+                }
+                return res.status(200).json({
+                    batchId,
+                    status: remaining > 0 ? 'Pending Accounts' : 'Rejected',
+                    statusLabel: remaining > 0 ? statusLabel('Pending Accounts', empDisplayName(gate.accounts)) : 'rejected',
+                    bills: bills.map((b) => decorateBill(b.toObject())),
                 });
             }
 
-            return res.status(200).json({ deleted: true, billId: id });
-        }
+            applyRowEdits(bills, rows);
+            const hr = await getDepartmentHOD('hr');
+            if (!hr?._id) {
+                return res.status(400).json({
+                    message: 'HR responsible person is not configured in Flowchart.',
+                });
+            }
+            const hrName = empDisplayName(hr);
+            const next = resolveStageAfterActor({
+                actor: actor || gate.accounts,
+                accounts: gate.accounts,
+                hr,
+                from: 'accounts_approve',
+            });
+            const now = new Date();
+            const path = reviewPath(batchId, bills[0].utilityType, bills[0].billMonth);
+            const totalAmount = bills.reduce((s, b) => s + Number(b.amount || 0), 0);
+            const accountsName = empDisplayName(gate.accounts);
 
-        const mode = String(paymentBy || '').trim();
-        if (mode !== 'company' && mode !== 'employee_balance') {
-            return res.status(400).json({
-                message: 'Payment by is required (pay by company or balance pay by employee).',
+            if (next.status === 'Approved') {
+                // Accounts person is also HR — both approval stages done → not paid
+                const splitCheck = applyPaySplitToBills(bills, paymentBy);
+                if (!splitCheck.ok) {
+                    return res.status(400).json({ message: splitCheck.message });
+                }
+                for (const bill of bills) {
+                    bill.status = 'Approved';
+                    bill.pendingWithName = accountsName;
+                    bill.pendingWithRole = 'accounts';
+                    bill.accountsApprovedBy = actor?._id || null;
+                    bill.accountsApprovedAt = now;
+                    bill.hrApprovedBy = actor?._id || null;
+                    bill.hrApprovedAt = now;
+                    bill.actionedBy = actor?._id || null;
+                    bill.actionedAt = now;
+                    bill.comment =
+                        comment ||
+                        'Approved by Accounts — HR skipped (same person) — awaiting Pay';
+                    await bill.save();
+                }
+
+                const remainingAccounts = await UtilityBillPayment.countDocuments({
+                    batchId,
+                    status: 'Pending Accounts',
+                });
+
+                await syncBatchDashboard({
+                    batchId,
+                    bills: bills.map((b) => b.toObject()),
+                    assignedTo:
+                        remainingAccounts > 0 ? gate.accounts._id : gate.accounts._id,
+                    status: 'Pending',
+                    actionedBy: actor?._id || req.user?._id,
+                    comment: comment || 'Accounts & HR approved (same user) — ready to pay',
+                    subjectEmployee: requester,
+                    requestedByName: allBills[0].requestedByName,
+                    extra2:
+                        remainingAccounts > 0
+                            ? statusLabel('Pending Accounts', accountsName)
+                            : 'not paid — awaiting Accounts payment',
+                });
+
+                await sendUtilityBillPaymentEmail({
+                    recipient: gate.accounts,
+                    bill: { ...bills[0].toObject(), amount: totalAmount },
+                    kind: 'pending_pay',
+                    batchMeta: {
+                        batchId: String(batchId),
+                        billCount: bills.length,
+                        reviewPath: path,
+                    },
+                });
+
+                if (requester && !isSameEmployee(requester, gate.accounts)) {
+                    await sendUtilityBillPaymentEmail({
+                        recipient: requester,
+                        bill: bills[0].toObject(),
+                        kind: 'approved',
+                        batchMeta: { batchId: String(batchId), billCount: bills.length },
+                    });
+                }
+
+                return res.status(200).json({
+                    batchId,
+                    status: 'Approved',
+                    statusLabel: 'not paid',
+                    skippedStages: next.skipped,
+                    bills: bills.map((b) => decorateBill(b.toObject())),
+                });
+            }
+
+            for (const bill of bills) {
+                bill.status = 'Pending HR';
+                bill.pendingWithName = hrName;
+                bill.pendingWithRole = 'hr';
+                bill.accountsApprovedBy = actor?._id || null;
+                bill.accountsApprovedAt = now;
+                bill.actionedBy = actor?._id || null;
+                bill.actionedAt = now;
+                bill.comment = comment || '';
+                await bill.save();
+            }
+
+            const remainingAccounts = await UtilityBillPayment.countDocuments({
+                batchId,
+                status: 'Pending Accounts',
+            });
+
+            await syncBatchDashboard({
+                batchId,
+                bills: bills.map((b) => b.toObject()),
+                assignedTo: remainingAccounts > 0 ? gate.accounts._id : hr._id,
+                status: 'Pending',
+                actionedBy: actor?._id || req.user?._id,
+                comment: comment || 'Approved by Accounts — sent to HR',
+                subjectEmployee: requester,
+                requestedByName: allBills[0].requestedByName,
+                extra2:
+                    remainingAccounts > 0
+                        ? statusLabel('Pending Accounts', accountsName)
+                        : statusLabel('Pending HR', hrName),
+            });
+
+            await sendUtilityBillPaymentEmail({
+                recipient: hr,
+                bill: {
+                    ...bills[0].toObject(),
+                    amount: totalAmount,
+                },
+                kind: 'pending_hr',
+                batchMeta: {
+                    batchId: String(batchId),
+                    billCount: bills.length,
+                    reviewPath: path,
+                },
+            });
+
+            return res.status(200).json({
+                batchId,
+                status: remainingAccounts > 0 ? 'Pending Accounts' : 'Pending HR',
+                statusLabel:
+                    remainingAccounts > 0
+                        ? statusLabel('Pending Accounts', accountsName)
+                        : statusLabel('Pending HR', hrName),
+                bills: bills.map((b) => decorateBill(b.toObject())),
             });
         }
-        const split = computePaySplit(bill.amount, bill.monthlyRental, mode);
-        bill.paymentBy = mode;
-        bill.companyPayAmount = split.companyPayAmount;
-        bill.employeePayAmount = split.employeePayAmount;
-        bill.status = 'Approved';
-        bill.actionedBy = actor?._id || null;
-        bill.actionedAt = new Date();
-        bill.comment = comment || '';
-        await bill.save();
 
-        await syncDashboardAction({
-            requestId: bill._id,
-            requestType: REQUEST_TYPE,
-            status: 'Approved',
-            assignedTo: hr?._id || actor?._id,
-            actionedBy: actor?._id || req.user?._id,
-            comment: comment || 'Approved by HR',
-            requestedByName: bill.requestedByName,
-            extra1: `${bill.utilityType} bill approved`,
-            extra2: 'Completed',
-            subjectEmployee: requester,
-            extra3: JSON.stringify({
-                entryId: bill.entryId,
-                billId: String(bill._id),
-                utilityType: bill.utilityType,
-                detailsPath: `/HRM/Asset/UtilityBills/details/${encodeURIComponent(bill.entryId)}?billId=${encodeURIComponent(String(bill._id))}`,
-            }),
+        // Pending HR
+        const gate = await isActorHrOrAdmin(actor, req.user);
+        if (!gate.allowed) {
+            return res.status(403).json({ message: 'Only HR can respond at this stage.' });
+        }
+
+        if (action === 'reject') {
+            for (const bill of bills) {
+                bill.status = 'Rejected';
+                bill.pendingWithName = '';
+                bill.pendingWithRole = '';
+                bill.actionedBy = actor?._id || null;
+                bill.actionedAt = new Date();
+                bill.comment = comment || 'Rejected by HR';
+                await bill.save();
+            }
+            const remainingHr = await UtilityBillPayment.countDocuments({
+                batchId,
+                status: 'Pending HR',
+            });
+            await syncBatchDashboard({
+                batchId,
+                bills: bills.map((b) => b.toObject()),
+                assignedTo: gate.hr?._id || actor?._id,
+                status: remainingHr > 0 ? 'Pending' : 'Rejected',
+                actionedBy: actor?._id || req.user?._id,
+                comment: comment || 'Rejected by HR',
+                subjectEmployee: requester,
+                requestedByName: allBills[0].requestedByName,
+                extra2:
+                    remainingHr > 0
+                        ? statusLabel('Pending HR', empDisplayName(gate.hr))
+                        : 'rejected',
+            });
+            if (requester && remainingHr === 0) {
+                await sendUtilityBillPaymentEmail({
+                    recipient: requester,
+                    bill: bills[0].toObject(),
+                    kind: 'rejected',
+                    batchMeta: { batchId: String(batchId), billCount: bills.length },
+                });
+            }
+            return res.status(200).json({
+                batchId,
+                status: remainingHr > 0 ? 'Pending HR' : 'Rejected',
+                statusLabel:
+                    remainingHr > 0
+                        ? statusLabel('Pending HR', empDisplayName(gate.hr))
+                        : 'rejected',
+                bills: bills.map((b) => decorateBill(b.toObject())),
+            });
+        }
+
+        applyRowEdits(bills, rows);
+        const splitCheck = applyPaySplitToBills(bills, paymentBy);
+        if (!splitCheck.ok) {
+            return res.status(400).json({ message: splitCheck.message });
+        }
+
+        const accounts = await getDepartmentHOD('accounts');
+        if (!accounts?._id) {
+            return res.status(400).json({
+                message: 'Accounts responsible person is not configured in Flowchart.',
+            });
+        }
+        const accountsNameHr = empDisplayName(accounts);
+        const nowHr = new Date();
+
+        for (const bill of bills) {
+            bill.status = 'Approved';
+            bill.pendingWithName = accountsNameHr;
+            bill.pendingWithRole = 'accounts';
+            bill.hrApprovedBy = actor?._id || null;
+            bill.hrApprovedAt = nowHr;
+            bill.actionedBy = actor?._id || null;
+            bill.actionedAt = nowHr;
+            bill.comment = comment || '';
+            await bill.save();
+        }
+
+        const remainingHr = await UtilityBillPayment.countDocuments({
+            batchId,
+            status: 'Pending HR',
         });
 
-        if (requester) {
+        await syncBatchDashboard({
+            batchId,
+            bills: bills.map((b) => b.toObject()),
+            assignedTo: remainingHr > 0 ? gate.hr._id : accounts._id,
+            status: 'Pending',
+            actionedBy: actor?._id || req.user?._id,
+            comment: comment || 'Approved by HR — ready to pay',
+            subjectEmployee: requester,
+            requestedByName: allBills[0].requestedByName,
+            extra2:
+                remainingHr > 0
+                    ? statusLabel('Pending HR', empDisplayName(gate.hr))
+                    : 'not paid — awaiting Accounts payment',
+        });
+
+        await sendUtilityBillPaymentEmail({
+            recipient: accounts,
+            bill: {
+                ...bills[0].toObject(),
+                amount: bills.reduce((s, b) => s + Number(b.amount || 0), 0),
+            },
+            kind: 'pending_pay',
+            batchMeta: {
+                batchId: String(batchId),
+                billCount: bills.length,
+                reviewPath: reviewPath(batchId, bills[0].utilityType, bills[0].billMonth),
+            },
+        });
+
+        if (requester && !isSameEmployee(requester, actor)) {
             await sendUtilityBillPaymentEmail({
                 recipient: requester,
-                bill,
+                bill: bills[0].toObject(),
                 kind: 'approved',
+                batchMeta: { batchId: String(batchId), billCount: bills.length },
             });
         }
 
-        return res.status(200).json({ bill });
+        return res.status(200).json({
+            batchId,
+            status: 'Approved',
+            statusLabel: 'not paid',
+            bills: bills.map((b) => decorateBill(b.toObject())),
+        });
     } catch (err) {
-        console.error('[respondUtilityBillPayment]', err);
+        console.error('[respondUtilityBillBatch]', err);
         return res.status(500).json({ message: err.message || 'Failed to respond' });
+    }
+}
+
+/** Legacy single-bill respond — wraps batch when batchId present. */
+export async function respondUtilityBillPayment(req, res) {
+    try {
+        const bill = await UtilityBillPayment.findById(req.params.id);
+        if (!bill) return res.status(404).json({ message: 'Bill not found' });
+        if (bill.batchId) {
+            req.params.batchId = String(bill.batchId);
+            return respondUtilityBillBatch(req, res);
+        }
+        // Legacy orphan Pending HR bills without batch
+        req.params.batchId = String(bill._id);
+        bill.batchId = bill._id;
+        await bill.save();
+        return respondUtilityBillBatch(req, res);
+    } catch (err) {
+        return res.status(500).json({ message: err.message || 'Failed to respond' });
+    }
+}
+
+/**
+ * Accounts Pay — mark selected/approved bills Paid.
+ */
+export async function payUtilityBillBatch(req, res) {
+    try {
+        const { batchId } = req.params;
+        const { billIds = [] } = req.body || {};
+        if (!mongoose.Types.ObjectId.isValid(batchId)) {
+            return res.status(400).json({ message: 'Invalid batchId' });
+        }
+
+        const actor = await resolveRequesterEmployee(req.user);
+        const gate = await isActorAccountsOrAdmin(actor, req.user);
+        if (!gate.allowed) {
+            return res.status(403).json({ message: 'Only Accounts can mark bills as paid.' });
+        }
+
+        const filter = { batchId, status: 'Approved' };
+        if (Array.isArray(billIds) && billIds.length) {
+            filter._id = { $in: billIds };
+        }
+        const bills = await UtilityBillPayment.find(filter);
+        if (!bills.length) {
+            return res.status(400).json({ message: 'No approved bills selected to pay.' });
+        }
+
+        for (const bill of bills) {
+            bill.status = 'Paid';
+            bill.pendingWithName = '';
+            bill.pendingWithRole = '';
+            bill.paidBy = actor?._id || null;
+            bill.paidAt = new Date();
+            bill.actionedBy = actor?._id || null;
+            bill.actionedAt = new Date();
+            await bill.save();
+        }
+
+        const remaining = await UtilityBillPayment.countDocuments({
+            batchId,
+            status: 'Approved',
+        });
+        const allInBatch = await UtilityBillPayment.find({ batchId }).lean();
+
+        if (remaining === 0) {
+            await syncBatchDashboard({
+                batchId,
+                bills: allInBatch,
+                assignedTo: gate.accounts?._id || actor?._id,
+                status: 'Approved',
+                actionedBy: actor?._id || req.user?._id,
+                comment: 'Paid by Accounts',
+                subjectEmployee: null,
+                requestedByName: allInBatch[0]?.requestedByName || '',
+                extra2: 'paid',
+            });
+        }
+
+        const requester = allInBatch[0]?.requestedBy
+            ? await EmployeeBasic.findById(allInBatch[0].requestedBy)
+                  .select('firstName lastName companyEmail workEmail personalEmail email employeeId')
+                  .lean()
+            : null;
+        // Don't block the pay response on SMTP — hanging mail was freezing Accounts Pay Now
+        if (requester) {
+            sendUtilityBillPaymentEmail({
+                recipient: requester,
+                bill: {
+                    ...bills[0].toObject(),
+                    amount: bills.reduce((s, b) => s + Number(b.amount || 0), 0),
+                    status: 'Paid',
+                },
+                kind: 'paid',
+                batchMeta: { batchId: String(batchId), billCount: bills.length },
+            }).catch((mailErr) =>
+                console.error('[payUtilityBillBatch] email failed:', mailErr?.message || mailErr),
+            );
+        }
+
+        return res.status(200).json({
+            batchId,
+            paidCount: bills.length,
+            remainingApproved: remaining,
+            bills: bills.map((b) => decorateBill(b.toObject())),
+            statusLabel: remaining === 0 ? 'paid' : 'not paid',
+        });
+    } catch (err) {
+        console.error('[payUtilityBillBatch]', err);
+        return res.status(500).json({ message: err.message || 'Failed to pay bills' });
     }
 }
 
@@ -258,7 +1287,7 @@ export async function getUtilityBillPayment(req, res) {
     try {
         const bill = await UtilityBillPayment.findById(req.params.id).lean();
         if (!bill) return res.status(404).json({ message: 'Bill not found' });
-        return res.status(200).json({ bill });
+        return res.status(200).json({ bill: decorateBill(bill) });
     } catch (err) {
         return res.status(500).json({ message: err.message || 'Failed to load bill' });
     }

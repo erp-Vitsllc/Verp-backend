@@ -26,6 +26,7 @@ export const ASSET_DASHBOARD_INBOX_TYPES = [
     'Vehicle Mortgage Close',
     'Vehicle Disposition Request',
     'Utility Bill Payment',
+    'Utility Bill Payment Reminder',
 ];
 
 /** Fleet vehicle dashboard bell / vehicle-scope pending inbox. */
