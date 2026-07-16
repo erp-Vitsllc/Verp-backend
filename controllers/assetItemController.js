@@ -16829,6 +16829,7 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
             assigneeClauses.push({ requestType: 'Vehicle Profile Activation' });
             assigneeClauses.push({ requestType: 'Vehicle Profile Edit' });
             assigneeClauses.push({ requestType: 'Vehicle Mortgage Close' });
+            assigneeClauses.push({ requestType: 'Utility Entry Status Change' });
             assigneeClauses.push({
                 requestType: 'Asset Assignment',
                 extra3: {

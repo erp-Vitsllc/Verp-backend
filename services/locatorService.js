@@ -195,7 +195,8 @@ export async function fetchLatestPositions({ allowStale = false } = {}) {
     }
 
     try {
-        assertRateLimit('latest-positions', 12, 60 * 1000);
+        // Locator docs: max 3 requests/minute for /v1/position/latest
+        assertRateLimit('latest-positions', 3, 60 * 1000);
     } catch (error) {
         if (allowStale && latestPositionsCache.data) {
             return latestPositionsCache.data;

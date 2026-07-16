@@ -96,9 +96,19 @@ export const getEmployeeById = async (req, res) => {
                 })
             );
 
-            // All workflow statuses — profile Rewards tab shows pending through paid (not approved-only).
+            // Profile Rewards: Approved / Paid / Not Paid only — hide Draft & Pending workflow.
             const rewards = await Reward.find({
                 employeeId: employee.employeeId,
+                rewardStatus: {
+                    $in: [
+                        'Approved',
+                        'Approved (Paid)',
+                        'Approved (Not Paid)',
+                        'Paid',
+                        'Completed',
+                        'Active',
+                    ],
+                },
             }).sort({ createdAt: -1 }).lean();
 
             // Fetch Approved Loans and Advances

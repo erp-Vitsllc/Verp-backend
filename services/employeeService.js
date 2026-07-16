@@ -65,9 +65,9 @@ export const getCompleteEmployee = async (id) => {
             // It's an ObjectId
             employeeBasic = await EmployeeBasic.findById(id, null, queryOptions)
                 .select('-documents.document.data -trainingDetails.certificate.data')
-                .populate('reportingAuthority', 'firstName lastName employeeId email workEmail companyEmail')
-                .populate('primaryReportee', 'firstName lastName employeeId email workEmail companyEmail')
-                .populate('secondaryReportee', 'firstName lastName employeeId email workEmail companyEmail')
+                .populate('reportingAuthority', 'firstName lastName employeeId email workEmail companyEmail designation department role')
+                .populate('primaryReportee', 'firstName lastName employeeId email workEmail companyEmail designation department role')
+                .populate('secondaryReportee', 'firstName lastName employeeId email workEmail companyEmail designation department role')
                 .populate('company', 'name companyId logo')
                 .lean();
         } else {
@@ -75,9 +75,9 @@ export const getCompleteEmployee = async (id) => {
             // Try exact match first
             employeeBasic = await EmployeeBasic.findOne({ employeeId: id }, null, queryOptions)
                 .select('-documents.document.data -trainingDetails.certificate.data')
-                .populate('reportingAuthority', 'firstName lastName employeeId email workEmail companyEmail')
-                .populate('primaryReportee', 'firstName lastName employeeId email workEmail companyEmail')
-                .populate('secondaryReportee', 'firstName lastName employeeId email workEmail companyEmail')
+                .populate('reportingAuthority', 'firstName lastName employeeId email workEmail companyEmail designation department role')
+                .populate('primaryReportee', 'firstName lastName employeeId email workEmail companyEmail designation department role')
+                .populate('secondaryReportee', 'firstName lastName employeeId email workEmail companyEmail designation department role')
                 .populate('company', 'name companyId logo')
                 .lean();
 
@@ -89,9 +89,9 @@ export const getCompleteEmployee = async (id) => {
                     queryOptions
                 )
                     .select('-documents.document.data -trainingDetails.certificate.data')
-                    .populate('reportingAuthority', 'firstName lastName employeeId email workEmail companyEmail')
-                    .populate('primaryReportee', 'firstName lastName employeeId email workEmail companyEmail')
-                    .populate('secondaryReportee', 'firstName lastName employeeId email workEmail companyEmail')
+                    .populate('reportingAuthority', 'firstName lastName employeeId email workEmail companyEmail designation department role')
+                    .populate('primaryReportee', 'firstName lastName employeeId email workEmail companyEmail designation department role')
+                    .populate('secondaryReportee', 'firstName lastName employeeId email workEmail companyEmail designation department role')
                     .populate('company', 'name companyId logo')
                     .lean();
             }
@@ -102,9 +102,9 @@ export const getCompleteEmployee = async (id) => {
                 console.log(`[getCompleteEmployee] ID ${id} not found. Retrying with legacy mapping: ${legacyId}`);
                 employeeBasic = await EmployeeBasic.findOne({ employeeId: legacyId }, null, queryOptions)
                     .select('-documents.document.data -trainingDetails.certificate.data')
-                    .populate('reportingAuthority', 'firstName lastName employeeId email workEmail companyEmail')
-                    .populate('primaryReportee', 'firstName lastName employeeId email workEmail companyEmail')
-                    .populate('secondaryReportee', 'firstName lastName employeeId email workEmail companyEmail')
+                    .populate('reportingAuthority', 'firstName lastName employeeId email workEmail companyEmail designation department role')
+                    .populate('primaryReportee', 'firstName lastName employeeId email workEmail companyEmail designation department role')
+                    .populate('secondaryReportee', 'firstName lastName employeeId email workEmail companyEmail designation department role')
                     .populate('company', 'name companyId logo')
                     .lean();
             }

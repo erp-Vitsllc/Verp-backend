@@ -28,7 +28,7 @@ async function resolveRecipient(person) {
 
 /**
  * Utility bill workflow emails (Accounts / HR / Pay / requester updates).
- * kind: pending_accounts | pending_hr | pending_pay | approved | rejected | paid
+ * kind: pending_accounts | pending_hr | pending_pay | approved | rejected | paid | partially_paid
  */
 export async function sendUtilityBillPaymentEmail({
     recipient,
@@ -57,6 +57,8 @@ export async function sendUtilityBillPaymentEmail({
             maximumFractionDigits: 2,
         })}`;
         const countTxt = batchMeta?.billCount ? `${batchMeta.billCount} account(s)` : '1 account';
+        const remainingTxt =
+            batchMeta?.remaining != null ? ` (${batchMeta.remaining} still pending pay)` : '';
 
         const titles = {
             pending_accounts: 'Utility Bill — Accounts Approval Required',
@@ -65,6 +67,7 @@ export async function sendUtilityBillPaymentEmail({
             approved: 'Utility Bill Approved',
             rejected: 'Utility Bill Rejected',
             paid: 'Utility Bill Paid',
+            partially_paid: 'Utility Bill — Partially Paid',
             pending: 'Utility Bill — Approval Required',
         };
         const colors = {
@@ -74,6 +77,7 @@ export async function sendUtilityBillPaymentEmail({
             approved: '#16a34a',
             rejected: '#dc2626',
             paid: '#16a34a',
+            partially_paid: '#d97706',
             pending: '#0d9488',
         };
         const bodies = {
@@ -83,6 +87,7 @@ export async function sendUtilityBillPaymentEmail({
             approved: 'Your utility bill batch was approved and is awaiting Accounts payment.',
             rejected: 'Your utility bill batch was rejected.',
             paid: 'Your utility bill batch has been marked Paid by Accounts.',
+            partially_paid: `Accounts paid some bills in this batch${remainingTxt}. Remaining bills are still awaiting payment.`,
             pending: 'A utility bill requires your approval.',
         };
 

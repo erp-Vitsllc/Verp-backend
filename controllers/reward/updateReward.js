@@ -719,7 +719,7 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
                     (parseFloat(reward.amount || 0) > 0);
 
                 try {
-                    // Emails: reward target (TO); reportee, creator, management, accounts, all@vegadigital.ae (CC)
+                    // Emails: reward target (TO); reportee, creator, management, accounts, HR, all@vegadigital.ae (CC)
                     const employeeForEmail = await EmployeeBasic.findOne({ employeeId: reward.employeeId })
                         .select('firstName lastName email companyEmail primaryReportee')
                         .populate('primaryReportee', 'firstName lastName email companyEmail')
@@ -744,7 +744,7 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
                             if (creatorEmail) ccEmails.add(creatorEmail);
                         }
 
-                        // Always CC company-wide + Accounts flowchart HOD
+                        // Always CC company-wide + Accounts / HR / Management flowchart HODs
                         ccEmails.add('all@vegadigital.ae');
 
                         try {
@@ -759,6 +759,13 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
                             addEmployeeEmailToSet(ccEmails, accountsHOD);
                         } catch (e) {
                             console.warn("[UpdateReward] Could not fetch Accounts HOD email for CC", e.message);
+                        }
+
+                        try {
+                            const hrHOD = await getDepartmentHOD('hr', hodContext);
+                            addEmployeeEmailToSet(ccEmails, hrHOD);
+                        } catch (e) {
+                            console.warn("[UpdateReward] Could not fetch HR HOD email for CC", e.message);
                         }
 
                         // Avoid duplicating TO addresses in CC

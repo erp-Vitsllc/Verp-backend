@@ -27,6 +27,7 @@ export const ASSET_DASHBOARD_INBOX_TYPES = [
     'Vehicle Disposition Request',
     'Utility Bill Payment',
     'Utility Bill Payment Reminder',
+    'Utility Entry Status Change',
 ];
 
 /** Fleet vehicle dashboard bell / vehicle-scope pending inbox. */

@@ -299,11 +299,13 @@ async function startServer() {
                 console.error('[LocatorSnapshot] startup capture failed:', e?.message || e),
             );
         }, 45 * 1000);
+        // Poll latest positions every 2 min (within Locator's 3 req/min limit) so daily
+        // running-km / idle charts get continuous totalDistance snapshots.
         setInterval(() => {
             recordLocatorSnapshotsFromLatest().catch((e) =>
                 console.error('[LocatorSnapshot] scheduled capture failed:', e?.message || e),
             );
-        }, 15 * 60 * 1000);
+        }, 2 * 60 * 1000);
     });
 }
 

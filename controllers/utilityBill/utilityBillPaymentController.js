@@ -362,13 +362,25 @@ export async function getUtilityBillBatch(req, res) {
         const canPay = stageStatus === 'Approved' && accountsGate.allowed;
         const canApproveReject = canEdit;
 
+        const paidCount = bills.filter((b) => b.status === 'Paid').length;
+        const approvedCount = bills.filter((b) => b.status === 'Approved').length;
+        let batchStatusLabel = statusLabel(stageStatus, focus.pendingWithName);
+        if (paidCount > 0 && approvedCount > 0) {
+            batchStatusLabel = 'partially paid';
+        } else if (paidCount > 0 && approvedCount === 0 && canPay === false) {
+            const stillPending = bills.some((b) =>
+                ['Pending Accounts', 'Pending HR'].includes(String(b.status)),
+            );
+            if (!stillPending) batchStatusLabel = 'paid';
+        }
+
         const resolvedBatchId = String(focus.batchId || batchId);
         return res.status(200).json({
             batchId: resolvedBatchId,
             utilityType: focus.utilityType,
             billMonth: focus.billMonth,
             status: stageStatus,
-            statusLabel: statusLabel(stageStatus, focus.pendingWithName),
+            statusLabel: batchStatusLabel,
             pendingWithName: focus.pendingWithName,
             pendingWithRole: focus.pendingWithRole,
             /** Edit/approve only for the flowchart user the batch is pending with */
@@ -1234,8 +1246,10 @@ export async function payUtilityBillBatch(req, res) {
             status: 'Approved',
         });
         const allInBatch = await UtilityBillPayment.find({ batchId }).lean();
+        const remainingBills = allInBatch.filter((b) => b.status === 'Approved');
 
         if (remaining === 0) {
+            // Fully paid — clear Accounts notification
             await syncBatchDashboard({
                 batchId,
                 bills: allInBatch,
@@ -1246,6 +1260,19 @@ export async function payUtilityBillBatch(req, res) {
                 subjectEmployee: null,
                 requestedByName: allInBatch[0]?.requestedByName || '',
                 extra2: 'paid',
+            });
+        } else {
+            // Partially paid — keep Accounts notification for unchecked/remaining bills
+            await syncBatchDashboard({
+                batchId,
+                bills: remainingBills.length ? remainingBills : allInBatch,
+                assignedTo: gate.accounts?._id || actor?._id,
+                status: 'Pending',
+                actionedBy: actor?._id || req.user?._id,
+                comment: 'Partially paid by Accounts — remaining bills still pending',
+                subjectEmployee: null,
+                requestedByName: allInBatch[0]?.requestedByName || '',
+                extra2: 'partially paid',
             });
         }
 
@@ -1261,10 +1288,10 @@ export async function payUtilityBillBatch(req, res) {
                 bill: {
                     ...bills[0].toObject(),
                     amount: bills.reduce((s, b) => s + Number(b.amount || 0), 0),
-                    status: 'Paid',
+                    status: remaining === 0 ? 'Paid' : 'Approved',
                 },
-                kind: 'paid',
-                batchMeta: { batchId: String(batchId), billCount: bills.length },
+                kind: remaining === 0 ? 'paid' : 'partially_paid',
+                batchMeta: { batchId: String(batchId), billCount: bills.length, remaining },
             }).catch((mailErr) =>
                 console.error('[payUtilityBillBatch] email failed:', mailErr?.message || mailErr),
             );
@@ -1275,7 +1302,7 @@ export async function payUtilityBillBatch(req, res) {
             paidCount: bills.length,
             remainingApproved: remaining,
             bills: bills.map((b) => decorateBill(b.toObject())),
-            statusLabel: remaining === 0 ? 'paid' : 'not paid',
+            statusLabel: remaining === 0 ? 'paid' : 'partially paid',
         });
     } catch (err) {
         console.error('[payUtilityBillBatch]', err);
