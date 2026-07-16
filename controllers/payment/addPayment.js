@@ -72,12 +72,27 @@ export const addPayment = async (req, res) => {
         if (typeof paidBy === 'string') {
             // Try to find by employeeId first
             employee = await EmployeeBasic.findOne({ employeeId: paidBy });
-            if (!employee) {
+            if (!employee && /^[0-9a-fA-F]{24}$/.test(paidBy)) {
                 // Try as ObjectId
                 employee = await EmployeeBasic.findById(paidBy);
             }
-        } else {
+        } else if (paidBy && /^[0-9a-fA-F]{24}$/.test(String(paidBy))) {
             employee = await EmployeeBasic.findById(paidBy);
+        }
+
+        // Auto-create company placeholder employee profile if it's 'VEGA-HR-0000' or 'VEGA_INTERNAL'
+        if (!employee && (paidBy === 'VEGA-HR-0000' || paidBy === 'VEGA_INTERNAL')) {
+            employee = new EmployeeBasic({
+                employeeId: paidBy,
+                firstName: 'Vega Digital IT Solutions',
+                lastName: '(Company)',
+                email: `${paidBy.toLowerCase()}@internal.vega`,
+                dateOfJoining: new Date(),
+                status: 'Permanent',
+                profileApprovalStatus: 'active',
+                profileStatus: 'active'
+            });
+            await employee.save();
         }
 
         if (!employee) {
