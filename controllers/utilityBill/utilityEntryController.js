@@ -1,6 +1,10 @@
 import UtilityEntry from '../../models/UtilityEntry.js';
 import UtilityConfig from '../../models/UtilityConfig.js';
 import UtilityBillPaymentDay from '../../models/UtilityBillPaymentDay.js';
+import {
+    cascadeDeleteUtilityEntry,
+    isUtilityAdminSuperUser,
+} from '../../utils/utilityBillAdminDelete.js';
 
 function escapeRegex(s) {
     return String(s || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -198,5 +202,24 @@ export async function updateUtilityEntry(req, res) {
     } catch (err) {
         console.error('[updateUtilityEntry]', err);
         return res.status(500).json({ message: err?.message || 'Failed to update entry' });
+    }
+}
+
+/** DELETE /api/UtilityBill/entries/:id — admin / super user only */
+export async function deleteUtilityEntry(req, res) {
+    try {
+        if (!isUtilityAdminSuperUser(req)) {
+            return res.status(403).json({ message: 'Only admin can delete utility records.' });
+        }
+        const result = await cascadeDeleteUtilityEntry(req.params.id);
+        if (!result.ok) {
+            return res.status(result.message === 'Entry not found.' ? 404 : 400).json({
+                message: result.message || 'Failed to delete entry',
+            });
+        }
+        return res.json(result);
+    } catch (err) {
+        console.error('[deleteUtilityEntry]', err);
+        return res.status(500).json({ message: err?.message || 'Failed to delete entry' });
     }
 }

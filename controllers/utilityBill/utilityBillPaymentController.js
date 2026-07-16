@@ -5,6 +5,10 @@ import DashboardAction from '../../models/DashboardAction.js';
 import { getDepartmentHOD } from '../../utils/getDepartmentHOD.js';
 import { syncDashboardAction } from '../../utils/syncDashboard.js';
 import { sendUtilityBillPaymentEmail } from '../../utils/sendUtilityBillPaymentEmail.js';
+import {
+    cascadeDeleteUtilityBill,
+    isUtilityAdminSuperUser,
+} from '../../utils/utilityBillAdminDelete.js';
 
 const REQUEST_TYPE = 'Utility Bill Payment';
 
@@ -1317,5 +1321,24 @@ export async function getUtilityBillPayment(req, res) {
         return res.status(200).json({ bill: decorateBill(bill) });
     } catch (err) {
         return res.status(500).json({ message: err.message || 'Failed to load bill' });
+    }
+}
+
+/** DELETE /api/UtilityBill/:id — admin / super user only */
+export async function deleteUtilityBillPayment(req, res) {
+    try {
+        if (!isUtilityAdminSuperUser(req)) {
+            return res.status(403).json({ message: 'Only admin can delete utility bills.' });
+        }
+        const result = await cascadeDeleteUtilityBill(req.params.id);
+        if (!result.ok) {
+            return res.status(result.message === 'Bill not found.' ? 404 : 400).json({
+                message: result.message || 'Failed to delete bill',
+            });
+        }
+        return res.json(result);
+    } catch (err) {
+        console.error('[deleteUtilityBillPayment]', err);
+        return res.status(500).json({ message: err?.message || 'Failed to delete bill' });
     }
 }

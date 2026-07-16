@@ -2,6 +2,10 @@ import UtilityTypeCatalog from '../../models/UtilityTypeCatalog.js';
 import UtilityProvider from '../../models/UtilityProvider.js';
 import UtilityConfig from '../../models/UtilityConfig.js';
 import UtilityEntry from '../../models/UtilityEntry.js';
+import {
+    cascadeDeleteEntriesByType,
+    isUtilityAdminSuperUser,
+} from '../../utils/utilityBillAdminDelete.js';
 
 const DEFAULT_PROVIDERS = ['Etisalat', 'Du'];
 
@@ -14,13 +18,7 @@ function nameRegex(name) {
 }
 
 function isAdminLike(req) {
-    const role = String(req.user?.role || req.user?.userType || '').toLowerCase();
-    return (
-        role.includes('admin') ||
-        role.includes('super') ||
-        req.user?.isAdmin === true ||
-        req.user?.isAdmin === 'true'
-    );
+    return isUtilityAdminSuperUser(req);
 }
 
 function userId(req) {
@@ -113,15 +111,14 @@ export async function removeUtilityTypeName(req, res) {
 
         const inConfig = await UtilityConfig.findOne({ type: nameRegex(name) }).lean();
         if (inConfig) {
-            return res.status(400).json({
-                message: `“${name}” is in use as a utility tab and cannot be removed.`,
-            });
-        }
-        const inEntry = await UtilityEntry.findOne({ type: nameRegex(name) }).lean();
-        if (inEntry) {
-            return res.status(400).json({
-                message: `“${name}” has records and cannot be removed.`,
-            });
+            // Force: cascade entries + remove the utility tab config, then drop catalog name.
+            await cascadeDeleteEntriesByType(name);
+            await UtilityConfig.deleteOne({ _id: inConfig._id });
+        } else {
+            const inEntry = await UtilityEntry.findOne({ type: nameRegex(name) }).lean();
+            if (inEntry) {
+                await cascadeDeleteEntriesByType(name);
+            }
         }
 
         await UtilityTypeCatalog.findOneAndUpdate(
@@ -192,16 +189,7 @@ export async function removeUtilityProvider(req, res) {
         const name = String(req.params?.name || '').trim();
         if (!name) return res.status(400).json({ message: 'Provider name is required.' });
 
-        const inUse = await UtilityEntry.findOne({
-            'values.provider': nameRegex(name),
-        }).lean();
-        if (inUse) {
-            return res.status(400).json({
-                message: `“${name}” is in use and cannot be removed.`,
-                providers: await listProviderNames(),
-            });
-        }
-
+        // Admin may remove from dropdown even when referenced on existing records.
         await UtilityProvider.findOneAndUpdate({ name: nameRegex(name) }, { active: false });
         return res.json({ ok: true, providers: await listProviderNames() });
     } catch (err) {
@@ -282,19 +270,21 @@ export async function upsertUtilityConfig(req, res) {
 /** DELETE /api/UtilityBill/configs/:id */
 export async function deleteUtilityConfig(req, res) {
     try {
+        if (!isAdminLike(req)) {
+            return res.status(403).json({ message: 'Only admin can delete utility tabs.' });
+        }
         const id = String(req.params?.id || '').trim();
         const doc = await UtilityConfig.findById(id);
         if (!doc) return res.status(404).json({ message: 'Utility not found.' });
 
         const entryCount = await UtilityEntry.countDocuments({ type: nameRegex(doc.type) });
         if (entryCount > 0) {
-            return res.status(400).json({
-                message: `“${doc.type}” has records, so Delete is disabled until those records are removed.`,
-            });
+            // Admin may force-delete the tab and cascade all related records.
+            await cascadeDeleteEntriesByType(doc.type);
         }
 
         await UtilityConfig.deleteOne({ _id: doc._id });
-        return res.json({ ok: true });
+        return res.json({ ok: true, deletedEntries: entryCount });
     } catch (err) {
         console.error('[deleteUtilityConfig]', err);
         return res.status(500).json({ message: err?.message || 'Failed to delete utility' });

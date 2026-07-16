@@ -9,6 +9,7 @@ import {
     payUtilityBillBatch,
     getUtilityBillPayment,
     getUtilityBillBatch,
+    deleteUtilityBillPayment,
 } from '../controllers/utilityBill/utilityBillPaymentController.js';
 import {
     upsertUtilityBillPaymentDay,
@@ -36,6 +37,7 @@ import {
     getUtilityEntry,
     createUtilityEntry,
     updateUtilityEntry,
+    deleteUtilityEntry,
 } from '../controllers/utilityBill/utilityEntryController.js';
 
 const router = express.Router();
@@ -58,6 +60,7 @@ router.get('/entries', listUtilityEntries);
 router.post('/entries', createUtilityEntry);
 router.get('/entries/:id', getUtilityEntry);
 router.put('/entries/:id', updateUtilityEntry);
+router.delete('/entries/:id', deleteUtilityEntry);
 
 router.get('/', listUtilityBillPayments);
 router.post('/payment-day', upsertUtilityBillPaymentDay);
@@ -74,6 +77,7 @@ router.put('/batch/:batchId/respond', respondUtilityBillBatch);
 router.put('/batch/:batchId/pay', payUtilityBillBatch);
 router.post('/', createUtilityBillPayment);
 router.get('/:id', getUtilityBillPayment);
+router.delete('/:id', deleteUtilityBillPayment);
 router.put('/:id/respond', respondUtilityBillPayment);
 
 export default router;
