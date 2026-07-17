@@ -896,3 +896,55 @@ export async function ensureLocatorErpVehicle({
     if (dirty) await asset.save();
     return asset;
 }
+
+/**
+ * For each live Locator position: match/create/patch the ERP vehicle and sync odometer.
+ * Used by fleet dashboard (and can be reused by list) so every GPS load keeps DB aligned.
+ */
+export async function reconcileLocatorPositionsToErp(positions = [], { createdBy } = {}) {
+    const summary = {
+        processed: 0,
+        created: 0,
+        linked: 0,
+        odometerUpdated: 0,
+        failed: 0,
+    };
+
+    for (const position of positions || []) {
+        const deviceId = position?.deviceId;
+        if (deviceId == null || deviceId === '') continue;
+
+        const deviceName = String(position?.deviceName || position?.name || '').trim();
+
+        try {
+            const existing = await findErpVehicleForLocatorLink({ deviceId, deviceName });
+            const asset = await ensureLocatorErpVehicle({
+                deviceId,
+                deviceName: deviceName || `Locator ${deviceId}`,
+                createdBy,
+            });
+
+            summary.processed += 1;
+            if (!existing) summary.created += 1;
+            else if (Number(existing.locatorDeviceId) !== Number(deviceId)) summary.linked += 1;
+
+            const km = toOdometerKm(position);
+            if (km != null && Number.isFinite(km) && km >= 0) {
+                const current = Number(asset.currentKilometer);
+                if (!Number.isFinite(current) || current !== km) {
+                    asset.currentKilometer = km;
+                    await asset.save();
+                    summary.odometerUpdated += 1;
+                }
+            }
+        } catch (error) {
+            summary.failed += 1;
+            console.warn(
+                `[LocatorReconcile] device ${deviceId}:`,
+                error?.message || error,
+            );
+        }
+    }
+
+    return summary;
+}

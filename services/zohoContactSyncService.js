@@ -9,10 +9,16 @@ import {
 import {
     fetchCustomers,
     fetchVendors,
+    fetchVendorsChunk,
     getZohoOrganizationId,
 } from './zohoService.js';
 
 const BULK_UPSERT_BATCH_SIZE = 500;
+const DEFAULT_CHUNK_LIMIT = 400;
+const SESSION_TTL_MS = 15 * 60 * 1000;
+
+/** @type {Map<string, { ids: Set<string>, timer: NodeJS.Timeout }>} */
+const vendorChunkSessions = new Map();
 
 async function runBulkUpserts(Model, bulkOps) {
     if (!bulkOps.length) return;
@@ -129,6 +135,83 @@ export async function syncZohoVendorsFromApi() {
     };
 }
 
+export async function syncZohoVendorsChunk(query = {}) {
+    const startPage = Math.max(1, Number(query.zohoPage || query.startPage) || 1);
+    const maxRows = Math.max(
+        1,
+        Math.min(1000, Number(query.chunkLimit || query.maxRows) || DEFAULT_CHUNK_LIMIT),
+    );
+    const syncToken = String(query.syncToken || '').trim();
+    const organizationId = getZohoOrganizationId();
+    const chunk = await fetchVendorsChunk({ startPage, maxRows });
+    const syncedAt = new Date();
+
+    const sessionKey = syncToken ? `vendors:${syncToken}` : '';
+    let session = sessionKey ? vendorChunkSessions.get(sessionKey) : null;
+    if (sessionKey && !session) {
+        session = { ids: new Set(), timer: null };
+        vendorChunkSessions.set(sessionKey, session);
+    }
+    if (session) {
+        if (session.timer) clearTimeout(session.timer);
+        session.timer = setTimeout(() => vendorChunkSessions.delete(sessionKey), SESSION_TTL_MS);
+    }
+
+    const syncedIds = [];
+    const bulkOps = [];
+    const apiRows = [];
+
+    for (const contact of chunk.rows || []) {
+        const doc = mapZohoVendorToDoc(contact, organizationId, syncedAt);
+        if (!doc) continue;
+
+        syncedIds.push(doc.zohoContactId);
+        session?.ids.add(doc.zohoContactId);
+        apiRows.push(toZohoVendorApiShape(doc));
+        bulkOps.push({
+            updateOne: {
+                filter: { organizationId, zohoContactId: doc.zohoContactId },
+                update: { $set: doc },
+                upsert: true,
+            },
+        });
+    }
+
+    await runBulkUpserts(ZohoVendor, bulkOps);
+
+    let deactivated = 0;
+    if (!chunk.hasMore && session && session.ids.size > 0) {
+        const result = await ZohoVendor.updateMany(
+            {
+                organizationId,
+                isActive: true,
+                zohoContactId: { $nin: [...session.ids] },
+            },
+            {
+                $set: {
+                    isActive: false,
+                    lastSyncedAt: syncedAt,
+                },
+            },
+        );
+        deactivated = result.modifiedCount || 0;
+        if (session.timer) clearTimeout(session.timer);
+        vendorChunkSessions.delete(sessionKey);
+    }
+
+    return {
+        organizationId,
+        data: apiRows.filter(Boolean),
+        upserted: syncedIds.length,
+        deactivated,
+        syncedAt,
+        hasMore: Boolean(chunk.hasMore),
+        nextZohoPage: chunk.nextPage,
+        zohoPage: startPage,
+        chunkLimit: maxRows,
+    };
+}
+
 export async function syncZohoContactsFromApi({ type = 'all' } = {}) {
     const normalizedType = String(type || 'all').trim().toLowerCase();
     const result = {
@@ -209,6 +292,10 @@ export function shouldSyncOnRead(req) {
     return getExplicitSyncPreference(req) === true;
 }
 
+/**
+ * Sync when sync=true/1, skip when sync=false/0,
+ * otherwise sync only if the local cache is empty.
+ */
 export function shouldSyncContactsOnRead(req, cachedCount = 0) {
     const preference = getExplicitSyncPreference(req);
     if (preference === true) return true;

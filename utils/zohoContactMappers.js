@@ -68,6 +68,8 @@ export function toZohoCustomerApiShape(doc) {
 export function toZohoVendorApiShape(doc) {
     if (!doc) return null;
 
+    const raw = doc.zohoRaw && typeof doc.zohoRaw === 'object' ? doc.zohoRaw : {};
+
     return {
         contact_id: doc.zohoContactId,
         vendor_id: doc.zohoVendorId || doc.zohoContactId,
@@ -79,5 +81,10 @@ export function toZohoVendorApiShape(doc) {
         mobile: doc.mobile,
         outstanding_payable_amount: doc.outstandingPayableAmount,
         currency_code: doc.currencyCode,
+        location_id: String(raw.location_id || '').trim(),
+        location_name: String(raw.location_name || raw.branch_name || '').trim(),
+        payment_terms: raw.payment_terms,
+        payment_terms_label: String(raw.payment_terms_label || '').trim(),
+        place_of_contact: String(raw.place_of_contact || '').trim(),
     };
 }

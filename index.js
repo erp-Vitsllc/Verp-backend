@@ -235,8 +235,15 @@ app.use((req, res, next) => {
 });
 
 // Request timeout middleware - catch hanging requests
+// Zoho purchase syncs (expenses/bills/payments/vendors) can exceed 60s on first load.
 app.use((req, res, next) => {
-    req.setTimeout(60000, () => {
+    const path = String(req.originalUrl || req.url || '');
+    const isZohoSyncRoute = /^\/api\/zoho\/(expenses|bills|vendorpayments|vendors|customers|sync)/i.test(
+        path.split('?')[0],
+    );
+    const timeoutMs = isZohoSyncRoute ? 300000 : 60000;
+
+    req.setTimeout(timeoutMs, () => {
         if (!res.headersSent) {
             res.status(504).json({ message: 'Request timeout' });
         }

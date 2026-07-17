@@ -184,10 +184,12 @@ async function getValidToken({ force = false } = {}) {
 const LATEST_POSITIONS_CACHE_MS = 25 * 1000;
 let latestPositionsCache = { at: 0, data: null };
 
-export async function fetchLatestPositions({ allowStale = false } = {}) {
+export async function fetchLatestPositions({ allowStale = false, force = false } = {}) {
     assertLocatorConfig();
 
+    // Dashboard / reconcile paths pass force=true so each load hits Locator live API.
     if (
+        !force &&
         latestPositionsCache.data &&
         Date.now() - latestPositionsCache.at < LATEST_POSITIONS_CACHE_MS
     ) {
@@ -226,6 +228,9 @@ export async function fetchLatestPositions({ allowStale = false } = {}) {
         if (status === 401 || status === 403) {
             token = await getValidToken({ force: true });
             response = await requestLatest(token);
+        } else if (status === 429 && latestPositionsCache.data) {
+            // Locator throttled us (max 3/min). Serve last known positions instead of failing.
+            return { ...latestPositionsCache.data, stale: true, rateLimited: true };
         } else {
             throw error;
         }

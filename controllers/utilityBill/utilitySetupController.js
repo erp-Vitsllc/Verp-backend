@@ -6,6 +6,7 @@ import {
     cascadeDeleteEntriesByType,
     isUtilityAdminSuperUser,
 } from '../../utils/utilityBillAdminDelete.js';
+import { listZohoVendorsFromDb } from '../../services/zohoContactSyncService.js';
 
 const DEFAULT_PROVIDERS = ['Etisalat', 'Du'];
 
@@ -55,6 +56,53 @@ async function ensureDefaultProviders() {
             await UtilityProvider.create({ name, active: true });
         }
     }
+}
+
+async function loadZohoVendorNames() {
+    try {
+        const { data } = await listZohoVendorsFromDb({ activeOnly: true });
+        const names = [];
+        (Array.isArray(data) ? data : []).forEach((vendor) => {
+            const name = String(
+                vendor?.contact_name || vendor?.vendor_name || vendor?.company_name || '',
+            ).trim();
+            if (name) names.push(name);
+        });
+        return names;
+    } catch (error) {
+        console.warn('[UtilityProviders] Zoho vendor list unavailable:', error?.message || error);
+        return [];
+    }
+}
+
+function uniqueSortedNames(names = []) {
+    const byKey = new Map();
+    names.forEach((name) => {
+        const trimmed = String(name || '').trim();
+        if (!trimmed) return;
+        const key = trimmed.toLowerCase();
+        if (!byKey.has(key)) byKey.set(key, trimmed);
+    });
+    return Array.from(byKey.values()).sort((a, b) => a.localeCompare(b));
+}
+
+/**
+ * Select provider = only active providers admin added.
+ * Add provider vendor list = full Zoho vendor names (never reduced by delete).
+ */
+async function buildProviderLists() {
+    await ensureDefaultProviders();
+
+    const [activeRows, vendorNames] = await Promise.all([
+        UtilityProvider.find({ active: true }).select('name').lean(),
+        loadZohoVendorNames(),
+    ]);
+
+    const providers = uniqueSortedNames(activeRows.map((row) => row.name));
+    // Always the full vendor list — delete only affects `providers`, never this list.
+    const vendorOptions = uniqueSortedNames(vendorNames);
+
+    return { providers, vendorOptions };
 }
 
 /** GET /api/UtilityBill/types */
@@ -143,12 +191,8 @@ async function listTypeNames() {
 /** GET /api/UtilityBill/providers */
 export async function listUtilityProviders(req, res) {
     try {
-        await ensureDefaultProviders();
-        const rows = await UtilityProvider.find({ active: true })
-            .sort({ name: 1 })
-            .select('name')
-            .lean();
-        return res.json({ providers: rows.map((r) => r.name) });
+        const { providers, hiddenProviders } = await buildProviderLists();
+        return res.json({ providers, hiddenProviders });
     } catch (err) {
         console.error('[listUtilityProviders]', err);
         return res.status(500).json({ message: err?.message || 'Failed to load providers' });
@@ -170,10 +214,12 @@ export async function addUtilityProvider(req, res) {
                 existing.active = true;
                 await existing.save();
             }
-            return res.json({ ok: true, providers: await listProviderNames() });
+            const lists = await buildProviderLists();
+            return res.json({ ok: true, ...lists });
         }
         await UtilityProvider.create({ name, active: true, createdBy: userId(req) });
-        return res.status(201).json({ ok: true, providers: await listProviderNames() });
+        const lists = await buildProviderLists();
+        return res.status(201).json({ ok: true, ...lists });
     } catch (err) {
         console.error('[addUtilityProvider]', err);
         return res.status(500).json({ message: err?.message || 'Failed to add provider' });
@@ -189,9 +235,21 @@ export async function removeUtilityProvider(req, res) {
         const name = String(req.params?.name || '').trim();
         if (!name) return res.status(400).json({ message: 'Provider name is required.' });
 
-        // Admin may remove from dropdown even when referenced on existing records.
-        await UtilityProvider.findOneAndUpdate({ name: nameRegex(name) }, { active: false });
-        return res.json({ ok: true, providers: await listProviderNames() });
+        // Soft-remove from Select provider only. Vendor / Add provider list is never deleted.
+        const existing = await UtilityProvider.findOne({ name: nameRegex(name) });
+        if (existing) {
+            existing.active = false;
+            await existing.save();
+        } else {
+            await UtilityProvider.create({
+                name,
+                active: false,
+                createdBy: userId(req),
+            });
+        }
+
+        const lists = await buildProviderLists();
+        return res.json({ ok: true, ...lists });
     } catch (err) {
         console.error('[removeUtilityProvider]', err);
         return res.status(500).json({ message: err?.message || 'Failed to remove provider' });
@@ -199,12 +257,8 @@ export async function removeUtilityProvider(req, res) {
 }
 
 async function listProviderNames() {
-    await ensureDefaultProviders();
-    const rows = await UtilityProvider.find({ active: true })
-        .sort({ name: 1 })
-        .select('name')
-        .lean();
-    return rows.map((r) => r.name);
+    const { providers } = await buildProviderLists();
+    return providers;
 }
 
 /** GET /api/UtilityBill/configs */

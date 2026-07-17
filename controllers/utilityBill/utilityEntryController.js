@@ -5,6 +5,7 @@ import {
     cascadeDeleteUtilityEntry,
     isUtilityAdminSuperUser,
 } from '../../utils/utilityBillAdminDelete.js';
+import { sendUtilityAssignmentEmail } from '../../utils/sendUtilityAssignmentEmail.js';
 
 function escapeRegex(s) {
     return String(s || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -170,6 +171,8 @@ export async function updateUtilityEntry(req, res) {
         if (!doc) return res.status(404).json({ message: 'Entry not found.' });
 
         const body = req.body || {};
+        const prevAssignedToId = String(doc.assignedToId || '').trim();
+        const prevAssignedToType = String(doc.assignedToType || '').trim();
 
         if (body.type != null) doc.type = String(body.type).trim() || doc.type;
         if (body.values != null && typeof body.values === 'object') {
@@ -198,7 +201,28 @@ export async function updateUtilityEntry(req, res) {
         await doc.save();
         await syncPaymentDay(doc);
 
-        return res.json({ ok: true, entry: mapEntry(doc) });
+        const mapped = mapEntry(doc);
+        const nextAssignedToId = String(mapped.assignedToId || '').trim();
+        const nextAssignedToType = String(mapped.assignedToType || '').trim();
+        const assignmentChanged =
+            nextAssignedToId &&
+            (nextAssignedToId !== prevAssignedToId ||
+                nextAssignedToType !== prevAssignedToType);
+
+        if (assignmentChanged) {
+            const isReassign = Boolean(prevAssignedToId);
+            sendUtilityAssignmentEmail({
+                entry: mapped,
+                assignedToType: nextAssignedToType || 'Employee',
+                assignedToId: nextAssignedToId,
+                assignedToName: mapped.assignedTo || '',
+                isReassign,
+            }).catch((e) =>
+                console.error('[updateUtilityEntry] assignment email', e?.message || e),
+            );
+        }
+
+        return res.json({ ok: true, entry: mapped });
     } catch (err) {
         console.error('[updateUtilityEntry]', err);
         return res.status(500).json({ message: err?.message || 'Failed to update entry' });

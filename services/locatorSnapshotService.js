@@ -1,6 +1,7 @@
 import LocatorGpsSnapshot from '../models/LocatorGpsSnapshot.js';
 import AssetItem from '../models/AssetItem.js';
 import { fetchLatestPositions, isLocatorConfigured } from './locatorService.js';
+import { reconcileLocatorPositionsToErp } from './locatorVehicleListService.js';
 
 const SNAPSHOT_MIN_INTERVAL_MS = 2 * 60 * 1000;
 const lastSnapshotAtByDevice = new Map();
@@ -998,16 +999,30 @@ export async function buildLocatorFleetDashboard() {
 
     let positions = [];
     let snapshotWarning = null;
+    let reconcileSummary = null;
+    let reconcileWarning = null;
+    let positionsStale = false;
 
     try {
+        // Pull current GPS on each load. A short shared cache keeps us under Locator's
+        // 3 requests/minute limit; allowStale returns last positions if throttled.
         const latest = await fetchLatestPositions({ allowStale: true });
         positions = latest.positions || [];
+        positionsStale = Boolean(latest.stale);
     } catch (error) {
         return {
             configured: true,
             connected: false,
             message: error?.message || 'Failed to load Locator positions',
         };
+    }
+
+    try {
+        // Match / create / patch ERP vehicles against live GPS on every dashboard render.
+        reconcileSummary = await reconcileLocatorPositionsToErp(positions);
+    } catch (error) {
+        reconcileWarning = error?.message || 'Failed to sync Locator devices with ERP vehicles';
+        console.warn('[LocatorFleetDashboard] Reconcile failed:', reconcileWarning);
     }
 
     try {
@@ -1034,7 +1049,11 @@ export async function buildLocatorFleetDashboard() {
         configured: true,
         connected: true,
         generatedAt: now.toISOString(),
+        positionsSource: positionsStale ? 'cached' : 'live',
+        positionsStale,
         snapshotWarning,
+        reconcileSummary,
+        reconcileWarning,
         trackingFrom,
         trackingDaysWithData,
         vehicleCount: positions.length,

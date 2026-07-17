@@ -12,6 +12,7 @@ import {
     findOwnerRow,
 } from "../../services/companyPartitionService.js";
 import { scheduleCompanyCardDeletedNotification } from "../../utils/cardDeleteNotificationHelper.js";
+import { archiveSupersededCompanyDocuments } from "../../utils/archiveCompanyDocument.js";
 import { archiveSupersededCompanyOwners } from "../../utils/archiveCompanyOwners.js";
 import { syncDashboardAction } from "../../utils/syncDashboard.js";
 import { sendResponsibilityApprovalEmail } from "../../utils/sendResponsibilityApprovalEmail.js";

@@ -1,7 +1,6 @@
 import {
     listZohoVendorsFromDb,
-    shouldSyncContactsOnRead,
-    syncZohoVendorsFromApi,
+    syncZohoVendorsChunk,
 } from '../../services/zohoContactSyncService.js';
 
 function mapZohoErrorStatus(message) {
@@ -10,24 +9,57 @@ function mapZohoErrorStatus(message) {
 
 export const getZohoVendors = async (req, res) => {
     try {
-        let syncStats = null;
-        let { data, meta } = await listZohoVendorsFromDb();
+        const wantsChunkSync =
+            String(req.query?.sync || '').trim() === 'true' ||
+            String(req.query?.sync || '').trim() === '1' ||
+            Boolean(req.query?.zohoPage) ||
+            Boolean(req.query?.syncToken);
 
-        if (shouldSyncContactsOnRead(req, data.length)) {
-            syncStats = await syncZohoVendorsFromApi();
-            ({ data, meta } = await listZohoVendorsFromDb());
+        if (!wantsChunkSync) {
+            const { data, meta } = await listZohoVendorsFromDb();
+            return res.status(200).json({
+                success: true,
+                data,
+                meta,
+            });
         }
+
+        const { sync: _sync, ...query } = req.query || {};
+        const chunk = await syncZohoVendorsChunk(query);
 
         return res.status(200).json({
             success: true,
-            data,
+            data: chunk.data,
             meta: {
-                ...meta,
-                sync: syncStats,
+                count: chunk.data.length,
+                upserted: chunk.upserted,
+                deactivated: chunk.deactivated,
+                hasMore: chunk.hasMore,
+                nextZohoPage: chunk.nextZohoPage,
+                zohoPage: chunk.zohoPage,
+                chunkLimit: chunk.chunkLimit,
+                syncedAt: chunk.syncedAt,
+                source: 'zoho-chunk',
             },
         });
     } catch (error) {
         console.error('[ZohoVendors] Failed:', error?.message || error);
+
+        try {
+            const cached = await listZohoVendorsFromDb();
+            if (cached.data.length) {
+                return res.status(200).json({
+                    success: true,
+                    data: cached.data,
+                    meta: {
+                        ...cached.meta,
+                        syncError: error?.message || 'Zoho vendor sync failed',
+                    },
+                });
+            }
+        } catch {
+            // fall through
+        }
 
         const message = error?.message || 'Failed to fetch vendors from Zoho Books';
 
