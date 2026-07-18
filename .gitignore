@@ -5,7 +5,6 @@
 
 # Dependencies
 node_modules/
-package-lock.json
 
 # Environment variables
 .env
@@ -41,11 +40,16 @@ build/
 tmp/
 temp/
 *.tmp
+all_users.txt
+collections.txt
+s3_buckets_list.txt
+check_asset_temp.cjs
+purge_controllers.js
+backfillOwnership.js
 
-# Zoho OAuth tokens (local file store — never commit)
+# local security scan dumps
+*snyk*
+parse_snyk.js
+
+# Zoho OAuth tokens 
 data/zoho-tokens.json
-
-
-
-
-"node_modules/" 
