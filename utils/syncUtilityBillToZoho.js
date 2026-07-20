@@ -255,11 +255,16 @@ async function syncApprovedUtilityBillToZohoInner(billDoc) {
 
         return { ok: true, zohoBillId };
     } catch (err) {
-        const message = err?.message || 'Failed to create Zoho bill';
+        let message = err?.message || 'Failed to create Zoho bill';
         console.error('[UtilityBillZoho] Failed:', message);
         // Stale vendor id from wrong org / deleted contact — clear and keep error for retry.
         if (/vendor|contact|invalid/i.test(message) && billDoc.zohoVendorId) {
             billDoc.zohoVendorId = '';
+        }
+        // Zoho's generic auth message — usually OAuth scope / user role / wrong org token.
+        if (/not authorized to perform this operation/i.test(message)) {
+            message =
+                'Zoho refused to create the bill (not authorized). Reconnect Zoho for the correct org (Accounts → Zoho) with a user who can create Bills, then Retry Zoho sync.';
         }
         billDoc.zohoSyncError = message;
         await billDoc.save();
