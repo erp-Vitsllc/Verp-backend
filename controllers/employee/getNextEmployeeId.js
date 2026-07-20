@@ -3,7 +3,12 @@ import Company from '../../models/Company.js';
 import EmployeeContact from '../../models/EmployeeContact.js';
 import { resolveEmployeeIdPrefixFromCompany } from '../../utils/employeeIdPrefix.js';
 
-// Get next sequential Employee ID (prefix from company; number +1 under that prefix)
+/**
+ * Next Employee ID:
+ * - Prefix VEGA-HR- / NNIT-HR- from company name
+ * - Serial number is global across VEGA + NNIT (max existing + 1)
+ *   e.g. VEGA-HR-00010 exists → next NNIT hire is NNIT-HR-00011
+ */
 export const getNextEmployeeId = async (req, res) => {
     try {
         const { companyId } = req.query;
@@ -16,17 +21,17 @@ export const getNextEmployeeId = async (req, res) => {
             }
         }
 
-        // Fetch all IDs matching the prefix to find the truly largest numeric value
-        const regex = new RegExp(`^${prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$')}\\d+$`, 'i');
+        // Serial is shared: scan both VEGA-HR-#### and NNIT-HR-#### (ignore company placeholders like …0000)
+        const serialRegex = /^(VEGA|NNIT)-HR-(\d+)$/i;
 
         const [employees, contacts] = await Promise.all([
             EmployeeBasic.find({
-                employeeId: { $regex: regex },
+                employeeId: { $regex: /^(VEGA|NNIT)-HR-\d+$/i },
             })
                 .select('employeeId')
                 .lean(),
             EmployeeContact.find({
-                employeeId: { $regex: regex },
+                employeeId: { $regex: /^(VEGA|NNIT)-HR-\d+$/i },
             })
                 .select('employeeId')
                 .lean(),
@@ -36,12 +41,12 @@ export const getNextEmployeeId = async (req, res) => {
         const allIds = [...employees, ...contacts];
 
         allIds.forEach((emp) => {
-            const match = String(emp.employeeId || '').match(/\d+$/);
-            if (match) {
-                const num = parseInt(match[0], 10);
-                if (!Number.isNaN(num) && num > maxIdNumber) {
-                    maxIdNumber = num;
-                }
+            const match = String(emp.employeeId || '').match(serialRegex);
+            if (!match) return;
+            const num = parseInt(match[2], 10);
+            // Skip placeholder company party IDs (…0000)
+            if (!Number.isNaN(num) && num > 0 && num > maxIdNumber) {
+                maxIdNumber = num;
             }
         });
 
@@ -51,6 +56,7 @@ export const getNextEmployeeId = async (req, res) => {
         return res.status(200).json({
             nextEmployeeId: nextId,
             prefix,
+            nextSerial: nextIdNumber,
         });
     } catch (error) {
         console.error('Error generating next employee ID:', error);

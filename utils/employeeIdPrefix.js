@@ -17,9 +17,12 @@ export function resolveEmployeeIdPrefixFromCompany(company) {
 
     if (
         name.includes('nnit') ||
+        name.includes('neuron nexus') ||
         name.includes('neoron nexus') ||
+        (name.includes('neuron') && name.includes('nexus')) ||
         (name.includes('neoron') && name.includes('nexus')) ||
-        (name.includes('neoron') && name.includes('information technology'))
+        (name.includes('neoron') && name.includes('information technology')) ||
+        (name.includes('neuron') && name.includes('information technology'))
     ) {
         return 'NNIT-HR-';
     }
