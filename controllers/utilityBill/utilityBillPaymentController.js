@@ -14,6 +14,7 @@ import {
     utilityBillDateFromMonth,
     resolveZohoVendorIdByProvider,
 } from '../../utils/syncUtilityBillToZoho.js';
+import { upsertUtilityBalancePartyExpensesFromBills } from '../../utils/upsertUtilityBalancePartyExpense.js';
 
 const REQUEST_TYPE = 'Utility Bill Payment';
 
@@ -609,6 +610,17 @@ export async function createUtilityBillBatch(req, res) {
         let zohoSync = null;
         if (stage.status === 'Approved') {
             zohoSync = await syncApprovedUtilityBillsToZoho(bills);
+            try {
+                await upsertUtilityBalancePartyExpensesFromBills(
+                    bills,
+                    requester?._id || req.user?._id || null,
+                );
+            } catch (balanceErr) {
+                console.warn(
+                    '[createUtilityBillBatch] PartyExpense balance upsert failed:',
+                    balanceErr?.message || balanceErr,
+                );
+            }
         }
         const leanBills = bills.map((b) => b.toObject());
         const path = reviewPath(batchId, utilityType, billMonth);
@@ -1012,6 +1024,17 @@ export async function respondUtilityBillBatch(req, res) {
                 }
 
                 const zohoSync = await syncApprovedUtilityBillsToZoho(bills);
+                try {
+                    await upsertUtilityBalancePartyExpensesFromBills(
+                        bills,
+                        actor?._id || req.user?._id || null,
+                    );
+                } catch (balanceErr) {
+                    console.warn(
+                        '[respondUtilityBillBatch] PartyExpense balance upsert failed:',
+                        balanceErr?.message || balanceErr,
+                    );
+                }
 
                 const remainingAccounts = await UtilityBillPayment.countDocuments({
                     batchId,
@@ -1202,6 +1225,17 @@ export async function respondUtilityBillBatch(req, res) {
         }
 
         const zohoSync = await syncApprovedUtilityBillsToZoho(bills);
+        try {
+            await upsertUtilityBalancePartyExpensesFromBills(
+                bills,
+                actor?._id || req.user?._id || null,
+            );
+        } catch (balanceErr) {
+            console.warn(
+                '[respondUtilityBillBatch] PartyExpense balance upsert failed:',
+                balanceErr?.message || balanceErr,
+            );
+        }
 
         const remainingHr = await UtilityBillPayment.countDocuments({
             batchId,
@@ -1420,6 +1454,18 @@ export async function syncUtilityBillBatchToZoho(req, res) {
         const zohoSync = await syncApprovedUtilityBillsToZoho(bills);
         const failed = (zohoSync || []).filter((r) => r && r.ok === false && !r.skipped);
         const created = (zohoSync || []).filter((r) => r && r.ok && !r.skipped);
+
+        try {
+            await upsertUtilityBalancePartyExpensesFromBills(
+                bills,
+                req.user?.employeeObjectId || req.user?._id || null,
+            );
+        } catch (balanceErr) {
+            console.warn(
+                '[syncUtilityBillBatchToZoho] PartyExpense balance upsert failed:',
+                balanceErr?.message || balanceErr,
+            );
+        }
 
         const refreshed = await UtilityBillPayment.find({
             batchId,

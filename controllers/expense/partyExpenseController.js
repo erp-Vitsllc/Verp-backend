@@ -3,6 +3,7 @@ import UtilityBillPayment from '../../models/UtilityBillPayment.js';
 import {
     recordPartyExpensePaidFromZoho,
 } from '../../utils/recordPartyExpenseFromZohoPayment.js';
+import { employeeIdQueryVariants } from '../../utils/upsertUtilityBalancePartyExpense.js';
 
 const COMPANY_PARTY_ID = 'VEGA-HR-0000';
 
@@ -92,8 +93,15 @@ export async function listPartyExpenses(req, res) {
             return res.status(400).json({ message: 'employeeId or companyId is required.' });
         }
 
+        const employeeVariants = employeeId
+            ? await employeeIdQueryVariants(employeeId)
+            : [];
+
         const expenseFilter = employeeId
-            ? { partyType: 'employee', employeeId }
+            ? {
+                  partyType: 'employee',
+                  employeeId: { $in: employeeVariants.length ? employeeVariants : [employeeId] },
+              }
             : {
                   partyType: 'company',
                   $or: [{ companyId }, { employeeId: COMPANY_PARTY_ID }],
@@ -108,7 +116,9 @@ export async function listPartyExpenses(req, res) {
                 .lean(),
             employeeId
                 ? UtilityBillPayment.find({
-                      payByEmployeeId: employeeId,
+                      payByEmployeeId: {
+                          $in: employeeVariants.length ? employeeVariants : [employeeId],
+                      },
                       status: { $in: ['Approved', 'Paid'] },
                   })
                       .sort({ createdAt: -1 })

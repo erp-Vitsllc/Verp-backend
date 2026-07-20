@@ -185,3 +185,33 @@ export async function syncLoanPaymentToZoho({
         debitDescription: `${typeLabel} expense`,
     });
 }
+
+/**
+ * Utility employee over-contract balance payout → Zoho journal
+ * (Debit expense · Credit Paid Through) on VEGA or NNIT.
+ */
+export async function syncUtilityEmployeePaymentToZoho({
+    payment,
+    employee,
+    utilityBill = null,
+    organizationId = '',
+    expenseAccountId = '',
+    expenseAccountName = '',
+    paidThroughAccountId = '',
+    paidThroughAccountName = '',
+} = {}) {
+    const accountNo = clean(utilityBill?.accountNo);
+    const billMonth = clean(utilityBill?.billMonth);
+    return syncStaffPayoutToZoho({
+        payment,
+        employee,
+        organizationId,
+        expenseAccountId,
+        expenseAccountName,
+        paidThroughAccountId,
+        paidThroughAccountName,
+        reference: clean(utilityBill?.billNumber || utilityBill?._id || payment?.referenceId),
+        notes: `Utility balance · Acc ${accountNo} · ${billMonth}`.trim(),
+        debitDescription: 'Utility balance expense',
+    });
+}

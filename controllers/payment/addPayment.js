@@ -3,6 +3,7 @@ import EmployeeBasic from "../../models/EmployeeBasic.js";
 import Fine from "../../models/Fine.js";
 import Loan from "../../models/Loan.js";
 import Reward from "../../models/Reward.js";
+import UtilityBillPayment from "../../models/UtilityBillPayment.js";
 import { getDepartmentHOD, isUserInFlowchart } from "../../utils/getDepartmentHOD.js";
 import { syncDashboardAction } from "../../utils/syncDashboard.js";
 import { sendPaymentApprovalEmail } from "../../utils/sendPaymentApprovalEmail.js";
@@ -390,6 +391,86 @@ export const addPayment = async (req, res) => {
                             await payment.save();
                         }
                     }
+                }
+            } else if (relatedEntityType === 'UtilityBill') {
+                let utilityBill = null;
+                if (relatedEntityId) {
+                    utilityBill = await UtilityBillPayment.findById(relatedEntityId);
+                }
+
+                const paidThroughId = String(
+                    paidThroughAccountId || payment.paidThroughAccountId || '',
+                ).trim();
+                const expenseId = String(
+                    expenseAccountId || payment.expenseAccountId || '',
+                ).trim();
+
+                let zohoResult = { ok: false };
+                if (paidThroughId && expenseId) {
+                    try {
+                        const { syncUtilityEmployeePaymentToZoho } = await import(
+                            '../../utils/syncRewardPaymentToZoho.js'
+                        );
+                        zohoResult = await syncUtilityEmployeePaymentToZoho({
+                            payment,
+                            employee,
+                            utilityBill,
+                            organizationId: zohoOrganizationId || payment.zohoOrganizationId,
+                            expenseAccountId: expenseId,
+                            expenseAccountName: expenseAccountName || payment.expenseAccountName,
+                            paidThroughAccountId: paidThroughId,
+                            paidThroughAccountName:
+                                paidThroughAccountName || payment.paidThroughAccountName,
+                        });
+
+                        if (zohoResult.ok) {
+                            payment.zohoJournalId = zohoResult.journalId || '';
+                            payment.zohoOrganizationId =
+                                zohoResult.organizationId || payment.zohoOrganizationId;
+                            payment.zohoSyncError = '';
+                            await payment.save();
+                        } else {
+                            payment.zohoSyncError = zohoResult.message || 'Zoho sync failed';
+                            await payment.save();
+                            console.warn(
+                                '[AddPayment] Utility balance Zoho sync:',
+                                zohoResult.message,
+                            );
+                        }
+                    } catch (zohoErr) {
+                        console.error(
+                            '[AddPayment] Utility balance Zoho sync error:',
+                            zohoErr?.message || zohoErr,
+                        );
+                        payment.zohoSyncError = zohoErr?.message || 'Zoho sync failed';
+                        await payment.save();
+                    }
+                }
+
+                try {
+                    const { markUtilityBalancePartyExpensePaid } = await import(
+                        '../../utils/upsertUtilityBalancePartyExpense.js'
+                    );
+                    await markUtilityBalancePartyExpensePaid({
+                        utilityBillId: String(
+                            utilityBill?._id || relatedEntityId || '',
+                        ).trim(),
+                        employeeId: employee?.employeeId || paidBy,
+                        amount: payment.amount,
+                        payment,
+                        zohoResult: zohoResult.ok ? zohoResult : {},
+                        expenseAccountId: expenseId,
+                        expenseAccountName: expenseAccountName || payment.expenseAccountName,
+                        paidThroughAccountId: paidThroughId,
+                        paidThroughAccountName:
+                            paidThroughAccountName || payment.paidThroughAccountName,
+                        userId: req.user?._id || null,
+                    });
+                } catch (expenseErr) {
+                    console.warn(
+                        '[AddPayment] Utility party expense mark-paid failed:',
+                        expenseErr?.message || expenseErr,
+                    );
                 }
             }
         }

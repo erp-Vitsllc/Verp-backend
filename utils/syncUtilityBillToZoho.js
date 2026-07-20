@@ -28,12 +28,16 @@ export function utilityBillDateFromMonth(billMonth, paymentDay = 16) {
     return `${month}-${String(day).padStart(2, '0')}`;
 }
 
-/** Prefer exact / whole-word vendor match before loose substring (avoids "Du" → "Dubai …"). */
-export async function resolveZohoVendorIdByProvider(providerName) {
+/**
+ * Prefer exact / whole-word vendor match before loose substring (avoids "Du" → "Dubai …").
+ * Pass organizationId (or run inside withZohoOrganization) so VEGA/NNIT vendor caches stay separate.
+ */
+export async function resolveZohoVendorIdByProvider(providerName, organizationIdArg = '') {
     const name = String(providerName || '').trim();
     if (!name) return '';
 
-    const organizationId = getZohoOrganizationId();
+    const organizationId =
+        String(organizationIdArg || '').trim() || getZohoOrganizationId();
     const exact = new RegExp(`^${escapeRegex(name)}$`, 'i');
     const word = new RegExp(`(^|[^a-z0-9])${escapeRegex(name)}([^a-z0-9]|$)`, 'i');
 
@@ -121,10 +125,21 @@ async function resolveOrganizationIdForUtilityBill(billDoc) {
     const fromBill = String(billDoc?.zohoOrganizationId || '').trim();
     if (fromBill) return fromBill;
 
-    const employeeRef =
-        billDoc?.payByEmployeeId || billDoc?.requestedBy || billDoc?.actionedBy || null;
+    // Prefer Pay By company → Zoho org (VEGA / NNIT), then employee company.
+    const companyRef = String(billDoc?.payByCompanyId || '').trim();
+    if (companyRef && /^[0-9a-fA-F]{24}$/.test(companyRef)) {
+        const fromCompany = await resolveZohoOrganizationIdForCompany(companyRef);
+        if (fromCompany) return fromCompany;
+    }
+
+    const employeeRef = String(
+        billDoc?.payByEmployeeId || billDoc?.requestedBy || billDoc?.actionedBy || '',
+    ).trim();
     if (employeeRef) {
-        const emp = await EmployeeBasic.findById(employeeRef).select('company').lean();
+        const empQuery = /^[0-9a-fA-F]{24}$/.test(employeeRef)
+            ? { _id: employeeRef }
+            : { employeeId: employeeRef };
+        const emp = await EmployeeBasic.findOne(empQuery).select('company').lean();
         if (emp?.company) {
             return resolveZohoOrganizationIdForCompany(emp.company);
         }
@@ -190,10 +205,11 @@ async function syncApprovedUtilityBillToZohoInner(billDoc) {
         return { ok: false, message: billDoc.zohoSyncError };
     }
 
+    const activeOrgId = getZohoOrganizationId();
     let vendorId = String(billDoc.zohoVendorId || '').trim();
     if (!vendorId) {
         try {
-            vendorId = await resolveZohoVendorIdByProvider(provider);
+            vendorId = await resolveZohoVendorIdByProvider(provider, activeOrgId);
             if (vendorId) billDoc.zohoVendorId = vendorId;
         } catch (err) {
             billDoc.zohoSyncError = err?.message || 'Failed to resolve Zoho vendor.';
