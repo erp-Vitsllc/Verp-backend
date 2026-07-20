@@ -11,6 +11,8 @@ const zohoExpenseSchema = new mongoose.Schema(
         customerName: { type: String, default: '' },
         referenceNumber: { type: String, default: '' },
         status: { type: String, default: '' },
+        locationName: { type: String, default: '' },
+        description: { type: String, default: '' },
         total: { type: Number, default: 0 },
         currencyCode: { type: String, default: 'AED' },
         isActive: { type: Boolean, default: true },
@@ -25,6 +27,8 @@ const zohoExpenseSchema = new mongoose.Schema(
 
 zohoExpenseSchema.index({ organizationId: 1, zohoExpenseId: 1 }, { unique: true });
 zohoExpenseSchema.index({ organizationId: 1, isActive: 1, date: -1 });
+zohoExpenseSchema.index({ organizationId: 1, isActive: 1, vendorName: 1 });
+zohoExpenseSchema.index({ organizationId: 1, isActive: 1, accountName: 1 });
 
 const ZohoExpense = mongoose.model('ZohoExpense', zohoExpenseSchema);
 

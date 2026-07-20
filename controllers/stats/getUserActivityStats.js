@@ -549,6 +549,7 @@ export const getUserActivityStats = async (req, res) => {
             'Vehicle Inspection',
             'Vehicle Mortgage Close',
             'Vehicle Disposition Request',
+            'Vehicle Delete Request',
         ]);
         const normEmpForAssignee = (s) => (s || '').toString().trim().toLowerCase();
         const dashboardRowAssignedToViewer = (item) => {
@@ -645,6 +646,7 @@ export const getUserActivityStats = async (req, res) => {
                         'Vehicle Profile Activation',
                         'Vehicle Profile Edit',
                         'Vehicle Mortgage Close',
+                        'Vehicle Delete Request',
                     ].includes(item.requestType)
                 ) {
                     return true;

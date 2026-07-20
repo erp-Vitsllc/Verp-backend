@@ -53,6 +53,14 @@ const companySchema = new mongoose.Schema(
 
         createdBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
 
+        /**
+         * Zoho Books organization_id for this ERP company (multi-Zoho).
+         * When empty, ZOHO_ORGANIZATION_ID from env is used.
+         */
+        zohoOrganizationId: { type: String, default: "", trim: true, index: true },
+        /** Optional label shown in Accounts (e.g. "Vega Books", "NNIT Books"). */
+        zohoOrganizationLabel: { type: String, default: "", trim: true },
+
         /** @see scripts/migrateCompanyPartitions.js */
         dataPartitionVersion: { type: Number, default: 0 },
     },

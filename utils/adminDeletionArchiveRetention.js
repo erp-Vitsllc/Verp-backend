@@ -1,10 +1,7 @@
 import AdminDeletionArchive from '../models/AdminDeletionArchive.js';
 import { ADMIN_DELETION_ARCHIVE_RETENTION_DAYS } from '../constants/adminDeletionArchiveConstants.js';
 import { countDeletionAttachments } from './listDeletionAttachmentRefs.js';
-import {
-    deletePreservedDeletionAttachments,
-    deleteDeletionSnapshotSourceAttachments,
-} from './preserveDeletionAttachments.js';
+import { deletePreservedDeletionAttachments } from './preserveDeletionAttachments.js';
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
@@ -80,10 +77,9 @@ export async function purgeExpiredAdminDeletionArchives() {
     if (!expired.length) return 0;
 
     for (const row of expired) {
-        await deletePreservedDeletionAttachments(row.preservedAttachments);
-        if (row.snapshot && row.snapshot.purged !== true) {
-            await deleteDeletionSnapshotSourceAttachments(row.snapshot);
-        }
+        // Auto-retention: drop recovery copies only. Never delete original company/employee
+        // object keys — those may still be live or in Old Documents after a false dispose.
+        await deletePreservedDeletionAttachments(row.preservedAttachments, { deleteOriginals: false });
     }
 
     const purgeTime = new Date();

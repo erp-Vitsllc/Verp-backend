@@ -27,6 +27,11 @@ export const addPayment = async (req, res) => {
             remarks,
             attachment,
             paymentSource,
+            zohoOrganizationId = '',
+            paidThroughAccountId = '',
+            paidThroughAccountName = '',
+            expenseAccountId = '',
+            expenseAccountName = '',
         } = req.body;
         
         // CHECK IF CREATOR IS ACCOUNTS PERSON
@@ -122,14 +127,19 @@ export const addPayment = async (req, res) => {
             createdBy: req.user._id,
             remarks: remarks || '',
             paymentSource: normalizedSource,
-            attachment: attachment || null
+            attachment: attachment || null,
+            zohoOrganizationId: String(zohoOrganizationId || '').trim(),
+            paidThroughAccountId: String(paidThroughAccountId || '').trim(),
+            paidThroughAccountName: String(paidThroughAccountName || '').trim(),
+            expenseAccountId: String(expenseAccountId || '').trim(),
+            expenseAccountName: String(expenseAccountName || '').trim(),
         });
 
         await payment.save();
 
         // Update fine/loan status after payment is created (but don't reduce the total amount)
         // Total amount should remain constant - only track payments separately
-        if (relatedEntityType && relatedEntityId && status === 'Completed') {
+        if (relatedEntityType && relatedEntityId && payment.status === 'Completed') {
             if (relatedEntityType === 'Fine') {
                 // Find fine by _id or fineId (referenceId)
                 let fine = await Fine.findById(relatedEntityId);
@@ -240,6 +250,80 @@ export const addPayment = async (req, res) => {
                     }
                     
                     await loan.save();
+
+                    const paidThroughId = String(paidThroughAccountId || payment.paidThroughAccountId || '').trim();
+                    const expenseId = String(expenseAccountId || payment.expenseAccountId || '').trim();
+                    let zohoResult = { ok: false };
+                    if (paidThroughId && expenseId) {
+                        try {
+                            const { syncLoanPaymentToZoho } = await import(
+                                '../../utils/syncRewardPaymentToZoho.js'
+                            );
+                            zohoResult = await syncLoanPaymentToZoho({
+                                payment,
+                                loan,
+                                employee,
+                                organizationId: zohoOrganizationId || payment.zohoOrganizationId,
+                                expenseAccountId: expenseId,
+                                expenseAccountName: expenseAccountName || payment.expenseAccountName,
+                                paidThroughAccountId: paidThroughId,
+                                paidThroughAccountName:
+                                    paidThroughAccountName || payment.paidThroughAccountName,
+                            });
+
+                            if (zohoResult.ok) {
+                                payment.zohoJournalId = zohoResult.journalId || '';
+                                payment.zohoOrganizationId =
+                                    zohoResult.organizationId || payment.zohoOrganizationId;
+                                payment.zohoSyncError = '';
+                                await payment.save();
+
+                                loan.zohoJournalId = zohoResult.journalId || loan.zohoJournalId;
+                                loan.zohoOrganizationId =
+                                    zohoResult.organizationId || loan.zohoOrganizationId;
+                                loan.paidThroughAccountId = paidThroughId;
+                                loan.paidThroughAccountName =
+                                    paidThroughAccountName || payment.paidThroughAccountName;
+                                loan.expenseAccountId = expenseId;
+                                loan.expenseAccountName =
+                                    expenseAccountName || payment.expenseAccountName;
+                                loan.zohoSyncedAt = new Date();
+                                loan.zohoSyncError = '';
+                                await loan.save();
+                            } else {
+                                payment.zohoSyncError = zohoResult.message || 'Zoho sync failed';
+                                await payment.save();
+                                loan.zohoSyncError = zohoResult.message || 'Zoho sync failed';
+                                await loan.save();
+                                console.warn('[AddPayment] Loan Zoho sync:', zohoResult.message);
+                            }
+                        } catch (zohoErr) {
+                            console.error(
+                                '[AddPayment] Loan Zoho sync error:',
+                                zohoErr?.message || zohoErr,
+                            );
+                            payment.zohoSyncError = zohoErr?.message || 'Zoho sync failed';
+                            await payment.save();
+                        }
+                    }
+
+                    try {
+                        const { upsertLoanPartyExpenseFromPayment } = await import(
+                            '../../utils/upsertLoanPartyExpenseFromPayment.js'
+                        );
+                        await upsertLoanPartyExpenseFromPayment({
+                            loan,
+                            payment,
+                            employee,
+                            zohoResult: zohoResult.ok ? zohoResult : {},
+                            userId: req.user?._id || null,
+                        });
+                    } catch (expenseErr) {
+                        console.warn(
+                            '[AddPayment] Loan party expense failed:',
+                            expenseErr?.message || expenseErr,
+                        );
+                    }
                 }
             } else if (relatedEntityType === 'Reward') {
                 let reward = await Reward.findById(relatedEntityId);
@@ -251,6 +335,61 @@ export const addPayment = async (req, res) => {
                 if (reward) {
                     const { applyRewardPaymentTotals } = await import('../../utils/rewardPaymentStatus.js');
                     await applyRewardPaymentTotals(reward);
+
+                    const paidThroughId = String(paidThroughAccountId || payment.paidThroughAccountId || '').trim();
+                    const expenseId = String(expenseAccountId || payment.expenseAccountId || '').trim();
+                    if (paidThroughId && expenseId) {
+                        try {
+                            const { syncRewardPaymentToZoho } = await import(
+                                '../../utils/syncRewardPaymentToZoho.js'
+                            );
+                            const zohoResult = await syncRewardPaymentToZoho({
+                                payment,
+                                reward,
+                                employee,
+                                organizationId: zohoOrganizationId || payment.zohoOrganizationId,
+                                expenseAccountId: expenseId,
+                                expenseAccountName: expenseAccountName || payment.expenseAccountName,
+                                paidThroughAccountId: paidThroughId,
+                                paidThroughAccountName:
+                                    paidThroughAccountName || payment.paidThroughAccountName,
+                            });
+
+                            if (zohoResult.ok) {
+                                payment.zohoJournalId = zohoResult.journalId || '';
+                                payment.zohoOrganizationId =
+                                    zohoResult.organizationId || payment.zohoOrganizationId;
+                                payment.zohoSyncError = '';
+                                await payment.save();
+
+                                reward.zohoJournalId = zohoResult.journalId || reward.zohoJournalId;
+                                reward.zohoOrganizationId =
+                                    zohoResult.organizationId || reward.zohoOrganizationId;
+                                reward.paidThroughAccountId = paidThroughId;
+                                reward.paidThroughAccountName =
+                                    paidThroughAccountName || payment.paidThroughAccountName;
+                                reward.expenseAccountId = expenseId;
+                                reward.expenseAccountName =
+                                    expenseAccountName || payment.expenseAccountName;
+                                reward.zohoSyncedAt = new Date();
+                                reward.zohoSyncError = '';
+                                await reward.save();
+                            } else {
+                                payment.zohoSyncError = zohoResult.message || 'Zoho sync failed';
+                                await payment.save();
+                                reward.zohoSyncError = zohoResult.message || 'Zoho sync failed';
+                                await reward.save();
+                                console.warn('[AddPayment] Reward Zoho sync:', zohoResult.message);
+                            }
+                        } catch (zohoErr) {
+                            console.error(
+                                '[AddPayment] Reward Zoho sync error:',
+                                zohoErr?.message || zohoErr,
+                            );
+                            payment.zohoSyncError = zohoErr?.message || 'Zoho sync failed';
+                            await payment.save();
+                        }
+                    }
                 }
             }
         }

@@ -22,9 +22,8 @@ export function resolveProfileAttachmentKey(attachment) {
 /**
  * Dispose a profile attachment that is no longer referenced by live profile data.
  *
- * Files are always retained in storage until an admin permanently deletes the record.
- * Activated profile removals are archived for management review; non-activated profiles
- * also keep files in storage (no immediate S3 purge).
+ * Files are retained in Wasabi. Management may get a Deleted Records entry for review,
+ * but automated / purge flows must not delete original object keys (live + Old Documents).
  */
 export async function disposeRemovedProfileAttachment(
     req,

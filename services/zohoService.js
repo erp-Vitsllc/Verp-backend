@@ -5,14 +5,20 @@ import {
     issueOAuthState,
     validateOAuthState,
 } from '../utils/zohoTokenStore.js';
+import { getZohoOrgContext } from '../utils/zohoOrgContext.js';
 
 const TOKEN_EXPIRY_BUFFER_MS = 5 * 60 * 1000;
 const DEFAULT_OAUTH_SCOPE = [
     'ZohoBooks.contacts.READ',
+    'ZohoBooks.contacts.CREATE',
     'ZohoBooks.vendorpayments.READ',
     'ZohoBooks.vendorpayments.CREATE',
+    'ZohoBooks.vendorpayments.UPDATE',
     'ZohoBooks.bills.READ',
+    'ZohoBooks.bills.CREATE',
+    'ZohoBooks.bills.UPDATE',
     'ZohoBooks.expenses.READ',
+    'ZohoBooks.expenses.CREATE',
     'ZohoBooks.accountants.READ',
     'ZohoBooks.settings.READ',
 ].join(',');
@@ -23,6 +29,7 @@ export function getZohoConfig() {
         clientSecret: process.env.ZOHO_CLIENT_SECRET || '',
         redirectUri: process.env.ZOHO_REDIRECT_URI || '',
         organizationId: process.env.ZOHO_ORGANIZATION_ID || '',
+        nnitOrganizationId: process.env.ZOHO_ORGANIZATION_ID_NNIT || '',
         oauthScope: process.env.ZOHO_OAUTH_SCOPE || DEFAULT_OAUTH_SCOPE,
         accountsBaseUrl: (process.env.ZOHO_ACCOUNTS_BASE_URL || 'https://accounts.zoho.com').replace(
             /\/$/,
@@ -35,10 +42,20 @@ export function getZohoConfig() {
     };
 }
 
+/**
+ * Active Zoho Books organization id:
+ * 1) request/async context (withZohoOrganization / multi-org)
+ * 2) ZOHO_ORGANIZATION_ID env (default / first Zoho)
+ */
 export function getZohoOrganizationId() {
+    const fromContext = String(getZohoOrgContext()?.organizationId || '').trim();
+    if (fromContext) return fromContext;
+
     const organizationId = String(getZohoConfig().organizationId || '').trim();
     if (!organizationId) {
-        throw new Error('Zoho Books organization is not configured. Set ZOHO_ORGANIZATION_ID.');
+        throw new Error(
+            'Zoho Books organization is not configured. Set ZOHO_ORGANIZATION_ID or pass organizationId/companyId.',
+        );
     }
     return organizationId;
 }
@@ -53,9 +70,8 @@ function assertOAuthConfig(config) {
 
 function assertBooksConfig(config) {
     assertOAuthConfig(config);
-    if (!config.organizationId) {
-        throw new Error('Zoho Books organization is not configured. Set ZOHO_ORGANIZATION_ID.');
-    }
+    // Org may come from AsyncLocalStorage instead of env.
+    getZohoOrganizationId();
 }
 
 function buildTokenPayload(tokenResponse, existing = {}) {
@@ -96,11 +112,18 @@ function resolveTokenExpiry(stored) {
     return 0;
 }
 
-export async function buildAuthorizationUrl() {
+export async function buildAuthorizationUrl({ organizationId = '' } = {}) {
     const config = getZohoConfig();
     assertOAuthConfig(config);
 
-    const state = issueOAuthState();
+    const orgId = String(organizationId || '').trim() || String(config.organizationId || '').trim();
+    if (!orgId) {
+        throw new Error(
+            'organizationId is required to connect Zoho (pass organizationId or set ZOHO_ORGANIZATION_ID).',
+        );
+    }
+
+    const state = issueOAuthState({ organizationId: orgId });
     const params = new URLSearchParams({
         scope: config.oauthScope,
         client_id: config.clientId,
@@ -115,6 +138,7 @@ export async function buildAuthorizationUrl() {
         authorizationUrl: `${config.accountsBaseUrl}/oauth/v2/auth?${params.toString()}`,
         state,
         scope: config.oauthScope,
+        organizationId: orgId,
     };
 }
 
@@ -125,9 +149,11 @@ export async function validateOAuthCallbackState(state) {
         throw new Error('Missing OAuth state parameter');
     }
 
-    if (!validateOAuthState(receivedState)) {
+    const validated = validateOAuthState(receivedState);
+    if (!validated?.ok) {
         throw new Error('Invalid or expired OAuth state parameter');
     }
+    return validated;
 }
 
 async function requestTokens(params, config) {
@@ -153,7 +179,16 @@ export async function exchangeAuthorizationCode(code, { state } = {}) {
         throw new Error('Authorization code is required');
     }
 
-    await validateOAuthCallbackState(state);
+    const validated = await validateOAuthCallbackState(state);
+    const organizationId =
+        String(validated.organizationId || '').trim() ||
+        String(config.organizationId || '').trim();
+
+    if (!organizationId) {
+        throw new Error(
+            'OAuth state did not include organizationId. Reconnect with ?organizationId=…',
+        );
+    }
 
     const tokenResponse = await requestTokens(
         {
@@ -166,7 +201,7 @@ export async function exchangeAuthorizationCode(code, { state } = {}) {
         config,
     );
 
-    const existing = (await readZohoTokens()) || {};
+    const existing = (await readZohoTokens(organizationId)) || {};
     const payload = buildTokenPayload(
         {
             ...tokenResponse,
@@ -174,6 +209,7 @@ export async function exchangeAuthorizationCode(code, { state } = {}) {
         },
         existing,
     );
+    payload.organization_id = organizationId;
 
     if (!payload.refresh_token) {
         throw new Error(
@@ -181,13 +217,14 @@ export async function exchangeAuthorizationCode(code, { state } = {}) {
         );
     }
 
-    await writeZohoTokens(payload);
+    await writeZohoTokens(payload, organizationId);
     return payload;
 }
 
-async function refreshAccessToken(refreshToken) {
+async function refreshAccessToken(refreshToken, organizationId) {
     const config = getZohoConfig();
     assertOAuthConfig(config);
+    const orgId = String(organizationId || '').trim() || getZohoOrganizationId();
 
     const tokenResponse = await requestTokens(
         {
@@ -199,7 +236,7 @@ async function refreshAccessToken(refreshToken) {
         config,
     );
 
-    const existing = (await readZohoTokens()) || {};
+    const existing = (await readZohoTokens(orgId)) || {};
     const payload = buildTokenPayload(
         {
             ...tokenResponse,
@@ -207,18 +244,22 @@ async function refreshAccessToken(refreshToken) {
         },
         existing,
     );
+    payload.organization_id = orgId;
 
-    await writeZohoTokens(payload);
+    await writeZohoTokens(payload, orgId);
     return payload.access_token;
 }
 
 export async function getAccessToken() {
     const config = getZohoConfig();
     assertOAuthConfig(config);
+    const organizationId = getZohoOrganizationId();
 
-    const stored = await readZohoTokens();
+    const stored = await readZohoTokens(organizationId);
     if (!stored?.refresh_token && !stored?.access_token) {
-        throw new Error('Zoho is not connected. Complete OAuth authorization via /api/zoho/callback first.');
+        throw new Error(
+            `Zoho is not connected for organization ${organizationId}. Complete OAuth via /api/zoho/auth-url?organizationId=${organizationId}`,
+        );
     }
 
     const expiresAt = resolveTokenExpiry(stored);
@@ -233,7 +274,7 @@ export async function getAccessToken() {
         throw new Error('Zoho refresh_token is missing. Re-authorize Zoho Books integration.');
     }
 
-    return refreshAccessToken(stored.refresh_token);
+    return refreshAccessToken(stored.refresh_token, organizationId);
 }
 
 function extractZohoContactPage(data, kind) {
@@ -246,24 +287,26 @@ function extractZohoContactPage(data, kind) {
 async function getBooksRequestContext() {
     const config = getZohoConfig();
     assertBooksConfig(config);
+    const organizationId = getZohoOrganizationId();
 
-    const stored = (await readZohoTokens()) || {};
+    const stored = (await readZohoTokens(organizationId)) || {};
     return {
         config,
+        organizationId,
         booksApiBase: resolveBooksApiBase(config, stored),
         accessToken: await getAccessToken(),
     };
 }
 
 async function requestZohoBooks(pathname, { method = 'get', params = {}, data, timeout = 30000 } = {}) {
-    const { config, booksApiBase, accessToken } = await getBooksRequestContext();
+    const { organizationId, booksApiBase, accessToken } = await getBooksRequestContext();
 
     try {
         const response = await axios({
             method,
             url: `${booksApiBase}${pathname}`,
             params: {
-                organization_id: config.organizationId,
+                organization_id: organizationId,
                 ...params,
             },
             data,
@@ -369,8 +412,9 @@ async function fetchAllZohoBooksRows(pathname, key, options = {}) {
 export async function fetchVendors() {
     const config = getZohoConfig();
     assertBooksConfig(config);
+    const organizationId = getZohoOrganizationId();
 
-    const stored = (await readZohoTokens()) || {};
+    const stored = (await readZohoTokens(organizationId)) || {};
     const booksApiBase = resolveBooksApiBase(config, stored);
     const accessToken = await getAccessToken();
     const vendors = [];
@@ -382,7 +426,7 @@ export async function fetchVendors() {
         try {
             response = await axios.get(`${booksApiBase}/vendors`, {
                 params: {
-                    organization_id: config.organizationId,
+                    organization_id: organizationId,
                     page,
                     per_page: 200,
                 },
@@ -415,11 +459,36 @@ export async function fetchVendors() {
     return vendors;
 }
 
+/**
+ * List Zoho Books organizations available to the connected OAuth user
+ * (VEGA + NNIT under the same Zoho login).
+ */
+export async function fetchZohoOrganizations() {
+    try {
+        const data = await requestZohoBooks('/organizations', {
+            timeout: 30000,
+        });
+        const rows = Array.isArray(data?.organizations) ? data.organizations : [];
+        return rows
+            .map((row) => ({
+                organizationId: String(row?.organization_id || row?.organizationId || '').trim(),
+                name: String(row?.name || '').trim(),
+                isDefault: Boolean(row?.is_default_org),
+                isActive: row?.is_org_active !== false && row?.isOrgActive !== false,
+            }))
+            .filter((row) => row.organizationId);
+    } catch (error) {
+        console.warn('[ZohoOrganizations] Failed:', error?.message || error);
+        return [];
+    }
+}
+
 export async function fetchCustomers() {
     const config = getZohoConfig();
     assertBooksConfig(config);
+    const organizationId = getZohoOrganizationId();
 
-    const stored = (await readZohoTokens()) || {};
+    const stored = (await readZohoTokens(organizationId)) || {};
     const booksApiBase = resolveBooksApiBase(config, stored);
     const accessToken = await getAccessToken();
     const customers = [];
@@ -431,7 +500,7 @@ export async function fetchCustomers() {
         try {
             response = await axios.get(`${booksApiBase}/customers`, {
                 params: {
-                    organization_id: config.organizationId,
+                    organization_id: organizationId,
                     page,
                     per_page: 200,
                 },
@@ -511,6 +580,165 @@ export async function createVendorPayment(payload = {}) {
     return response.vendorpayment || response;
 }
 
+/**
+ * Create a balanced Zoho manual journal (debit + credit against Chart of Accounts).
+ * OAuth: ZohoBooks.accountants.CREATE
+ */
+export async function createZohoJournal(payload = {}) {
+    const response = await requestZohoBooks('/journals', {
+        method: 'post',
+        data: payload,
+        timeout: 30000,
+    });
+    return response.journal || response;
+}
+
+/**
+ * Zoho general-ledger lines for a vendor payment (debit + credit).
+ * GET /transactions/{transaction_id}/journals?entity_type=vendor_payment
+ */
+export async function fetchTransactionJournalView(transactionId, { entityType = 'vendor_payment' } = {}) {
+    const id = String(transactionId || '').trim();
+    if (!id) return null;
+
+    const data = await requestZohoBooks(`/transactions/${encodeURIComponent(id)}/journals`, {
+        params: {
+            entity_type: entityType,
+        },
+        timeout: 20000,
+    });
+    return data;
+}
+
+export async function fetchVendorPaymentById(paymentId) {
+    const id = String(paymentId || '').trim();
+    if (!id) return null;
+
+    const data = await requestZohoBooks(`/vendorpayments/${encodeURIComponent(id)}`, {
+        timeout: 30000,
+    });
+
+    return data.vendorpayment || data.payment || null;
+}
+
+export async function updateVendorPayment(paymentId, payload = {}) {
+    const id = String(paymentId || '').trim();
+    if (!id) throw new Error('Payment id is required.');
+
+    const response = await requestZohoBooks(`/vendorpayments/${encodeURIComponent(id)}`, {
+        method: 'put',
+        data: payload,
+        timeout: 30000,
+    });
+
+    return response.vendorpayment || response.payment || response;
+}
+
+/**
+ * Download Zoho Books vendor payment PDF (accept=pdf / Accept: application/pdf).
+ * Throws if Zoho does not return a PDF for this resource.
+ */
+export async function fetchVendorPaymentPdf(paymentId) {
+    const id = String(paymentId || '').trim();
+    if (!id) {
+        throw new Error('Payment id is required.');
+    }
+
+    const { organizationId, booksApiBase, accessToken } = await getBooksRequestContext();
+
+    const response = await axios({
+        method: 'get',
+        url: `${booksApiBase}/vendorpayments/${encodeURIComponent(id)}`,
+        params: {
+            organization_id: organizationId,
+            accept: 'pdf',
+        },
+        headers: {
+            Authorization: `Zoho-oauthtoken ${accessToken}`,
+            Accept: 'application/pdf',
+        },
+        responseType: 'arraybuffer',
+        timeout: 60000,
+        validateStatus: () => true,
+    });
+
+    const contentType = String(response.headers?.['content-type'] || '').toLowerCase();
+    const buffer = Buffer.from(response.data || []);
+
+    if (response.status >= 400 || !contentType.includes('pdf')) {
+        let message = 'Zoho did not return a PDF for this payment.';
+        try {
+            const asText = buffer.toString('utf8');
+            const parsed = JSON.parse(asText);
+            if (parsed?.message) message = parsed.message;
+        } catch {
+            /* keep default */
+        }
+        throw new Error(message);
+    }
+
+    const disposition = String(response.headers?.['content-disposition'] || '');
+    const match = disposition.match(/filename\*?=(?:UTF-8''|")?([^\";]+)/i);
+    const rawName = match?.[1] ? decodeURIComponent(match[1].replace(/"/g, '')) : '';
+    const filename = rawName || `Payment-${id}.pdf`;
+
+    return { buffer, filename, contentType: 'application/pdf' };
+}
+
+export async function createBill(payload = {}) {
+    const response = await requestZohoBooks('/bills', {
+        method: 'post',
+        data: payload,
+        timeout: 30000,
+    });
+
+    return response.bill || response;
+}
+
+export async function fetchBillById(billId) {
+    const id = String(billId || '').trim();
+    if (!id) return null;
+
+    const data = await requestZohoBooks(`/bills/${encodeURIComponent(id)}`, {
+        timeout: 30000,
+    });
+
+    return data.bill || null;
+}
+
+export async function updateBill(billId, payload = {}) {
+    const id = String(billId || '').trim();
+    if (!id) throw new Error('Bill id is required.');
+
+    const response = await requestZohoBooks(`/bills/${encodeURIComponent(id)}`, {
+        method: 'put',
+        data: payload,
+        timeout: 30000,
+    });
+
+    return response.bill || response;
+}
+
+export async function createExpense(payload = {}) {
+    const response = await requestZohoBooks('/expenses', {
+        method: 'post',
+        data: payload,
+        timeout: 30000,
+    });
+
+    return response.expense || response;
+}
+
+export async function createVendor(payload = {}) {
+    const response = await requestZohoBooks('/contacts', {
+        method: 'post',
+        data: payload,
+        timeout: 30000,
+    });
+
+    return response.contact || response;
+}
+
 export async function fetchVendorBills({ vendorId } = {}) {
     const params = {
         status: 'unpaid',
@@ -556,15 +784,18 @@ export async function fetchBills(query = {}) {
 function isOpenVendorExpense(expense) {
     if (!expense || typeof expense !== 'object') return false;
 
-    const status = String(expense.status || '').toLowerCase();
-    if (['reimbursed', 'invoiced', 'void'].includes(status)) return false;
+    const status = String(expense.status || '').toLowerCase().replace(/\s+/g, '_');
+    if (['reimbursed', 'invoiced', 'void', 'deleted'].includes(status)) return false;
 
     const balance = Number(expense.balance);
-    if (Number.isFinite(balance) && balance > 0) return true;
+    if (Number.isFinite(balance)) {
+        return balance > 0;
+    }
 
     const total = Number(expense.total ?? expense.bcy_total ?? expense.amount) || 0;
     if (total <= 0) return false;
 
+    // Zoho often omits balance on open/unbilled expenses — still payable against the vendor.
     return Boolean(String(expense.vendor_id || '').trim());
 }
 
@@ -573,13 +804,28 @@ export async function fetchVendorExpenses({ vendorId } = {}) {
     if (!id) return [];
 
     try {
-        // All expenses for this vendor (every Zoho page).
-        const expenses = await fetchAllZohoBooksRows('/expenses', 'expenses', {
-            params: {
-                vendor_id: id,
-            },
-            timeout: 60000,
-        });
+        // Prefer unbilled/open expenses; fall back to all vendor expenses if filter unsupported.
+        let expenses = [];
+        try {
+            expenses = await fetchAllZohoBooksRows('/expenses', 'expenses', {
+                params: {
+                    vendor_id: id,
+                    filter_by: 'Status.Unbilled',
+                },
+                timeout: 60000,
+            });
+        } catch {
+            expenses = [];
+        }
+
+        if (!expenses.length) {
+            expenses = await fetchAllZohoBooksRows('/expenses', 'expenses', {
+                params: {
+                    vendor_id: id,
+                },
+                timeout: 60000,
+            });
+        }
 
         return expenses.filter(isOpenVendorExpense);
     } catch (error) {
@@ -690,8 +936,9 @@ export async function fetchVendorPaymentsChunk(params = {}, { startPage = 1, max
 export async function fetchVendorsChunk({ startPage = 1, maxRows = 400 } = {}) {
     const config = getZohoConfig();
     assertBooksConfig(config);
+    const organizationId = getZohoOrganizationId();
 
-    const stored = (await readZohoTokens()) || {};
+    const stored = (await readZohoTokens(organizationId)) || {};
     const booksApiBase = resolveBooksApiBase(config, stored);
     const accessToken = await getAccessToken();
     const vendors = [];
@@ -704,7 +951,7 @@ export async function fetchVendorsChunk({ startPage = 1, maxRows = 400 } = {}) {
         try {
             response = await axios.get(`${booksApiBase}/vendors`, {
                 params: {
-                    organization_id: config.organizationId,
+                    organization_id: organizationId,
                     page,
                     per_page: 200,
                 },
@@ -745,18 +992,70 @@ export async function fetchVendorsChunk({ startPage = 1, maxRows = 400 } = {}) {
     };
 }
 
+/**
+ * Full Zoho Chart of Accounts for Payments Made → Paid Through.
+ * Returns every active account (VEGA / NNIT org-scoped via request context).
+ */
 export async function fetchPaymentAccounts() {
     const accounts = await fetchAllZohoBooksRows('/chartofaccounts', 'chartofaccounts', {
         params: {
             filter_by: 'AccountType.Active',
         },
-        maxPages: 3,
-        timeout: 45000,
+        maxPages: 10,
+        timeout: 60000,
+    });
+
+    const byId = new Map();
+    accounts.forEach((account) => {
+        const id = String(account?.account_id || account?.id || '').trim();
+        if (!id) return;
+        // Skip soft-deleted / inactive rows if Zoho still returns them.
+        const status = String(account?.status || account?.is_active || '')
+            .toLowerCase()
+            .trim();
+        if (status === 'inactive' || status === 'false' || account?.is_active === false) {
+            return;
+        }
+        byId.set(id, account);
+    });
+
+    const rows = [...byId.values()].sort((a, b) => {
+        const typeA = String(a.account_type_formatted || a.account_type || '').toLowerCase();
+        const typeB = String(b.account_type_formatted || b.account_type || '').toLowerCase();
+        if (typeA !== typeB) return typeA.localeCompare(typeB);
+        const nameA = String(a.account_name || a.name || '').toLowerCase();
+        const nameB = String(b.account_name || b.name || '').toLowerCase();
+        return nameA.localeCompare(nameB);
+    });
+
+    if (!rows.length) {
+        console.warn('[ZohoPaymentAccounts] Chart of Accounts returned 0 active accounts');
+    } else {
+        console.log(`[ZohoPaymentAccounts] Loaded ${rows.length} Chart of Accounts row(s)`);
+    }
+
+    return rows;
+}
+
+/** Expense / COGS / asset accounts used on Zoho bill line items. */
+export async function fetchBillExpenseAccounts() {
+    const accounts = await fetchAllZohoBooksRows('/chartofaccounts', 'chartofaccounts', {
+        params: {
+            filter_by: 'AccountType.Active',
+        },
+        maxPages: 2,
+        timeout: 25000,
     });
 
     return accounts.filter((account) => {
         const type = String(account?.account_type || account?.account_type_formatted || '').toLowerCase();
-        return /cash|bank|credit card|undeposited/.test(type);
+        // Exclude payment / liability accounts that belong on Payments Made, not bill lines.
+        if (/cash|bank|credit card|undeposited|accounts payable|accounts receivable/.test(type)) {
+            return false;
+        }
+        return /expense|cost of goods|costofgoods|fixed asset|other asset|other current asset|stock|inventory/.test(
+            type,
+        );
     });
 }
 
@@ -769,6 +1068,58 @@ export async function fetchVendorContact(vendorId) {
     });
 
     return data.contact || null;
+}
+
+export async function fetchVendorComments(vendorId) {
+    const id = String(vendorId || '').trim();
+    if (!id) return [];
+
+    const data = await requestZohoBooks(`/contacts/${encodeURIComponent(id)}/comments`, {
+        timeout: 30000,
+    });
+
+    return Array.isArray(data.contact_comments) ? data.contact_comments : [];
+}
+
+export async function createVendorComment(vendorId, description) {
+    const id = String(vendorId || '').trim();
+    const text = String(description || '').trim();
+    if (!id) throw new Error('Vendor id is required.');
+    if (!text) throw new Error('Comment text is required.');
+
+    const data = await requestZohoBooks(`/contacts/${encodeURIComponent(id)}/comments`, {
+        method: 'post',
+        data: { description: text },
+        timeout: 30000,
+    });
+
+    return data.contact_comment || data.comment || data;
+}
+
+export async function fetchBillComments(billId) {
+    const id = String(billId || '').trim();
+    if (!id) return [];
+
+    const data = await requestZohoBooks(`/bills/${encodeURIComponent(id)}/comments`, {
+        timeout: 30000,
+    });
+
+    return Array.isArray(data.comments) ? data.comments : [];
+}
+
+export async function createBillComment(billId, description) {
+    const id = String(billId || '').trim();
+    const text = String(description || '').trim();
+    if (!id) throw new Error('Bill id is required.');
+    if (!text) throw new Error('Comment text is required.');
+
+    const data = await requestZohoBooks(`/bills/${encodeURIComponent(id)}/comments`, {
+        method: 'post',
+        data: { description: text },
+        timeout: 30000,
+    });
+
+    return data.comment || data;
 }
 
 function collectLocationsFromRows(rows = []) {
@@ -1001,8 +1352,8 @@ export async function fetchNextVendorPaymentNumber() {
     let best = { prefix: '', number: 0, width: 1 };
     let page = 1;
     let hasMore = true;
-    // Cap pages so the Record Payment modal stays responsive.
-    const MAX_PAGES = 10;
+    // Cap to 1 page — enough for next # hint; keeps New Bill / Payment modals fast.
+    const MAX_PAGES = 1;
 
     while (hasMore && page <= MAX_PAGES) {
         const data = await requestZohoBooks('/vendorpayments', {
@@ -1011,12 +1362,48 @@ export async function fetchNextVendorPaymentNumber() {
                 per_page: 200,
                 sort_column: 'date',
             },
-            timeout: 30000,
+            timeout: 20000,
         });
 
         const pageRows = Array.isArray(data?.vendorpayments) ? data.vendorpayments : [];
         pageRows.forEach((payment) => {
             const parts = parsePaymentNumberParts(payment?.payment_number);
+            if (parts.number > best.number) {
+                best = parts;
+            }
+        });
+
+        hasMore = Boolean(data.page_context?.has_more_page) && pageRows.length > 0;
+        page += 1;
+    }
+
+    const nextNumber = best.number + 1;
+    return `${best.prefix}${String(nextNumber).padStart(best.width, '0')}`;
+}
+
+/**
+ * Derive the next Zoho Bill # from recent bills (same approach as payment numbers).
+ */
+export async function fetchNextBillNumber() {
+    let best = { prefix: '', number: 0, width: 1 };
+    let page = 1;
+    let hasMore = true;
+    // Cap to 1 page so New Bill modal opens quickly.
+    const MAX_PAGES = 1;
+
+    while (hasMore && page <= MAX_PAGES) {
+        const data = await requestZohoBooks('/bills', {
+            params: {
+                page,
+                per_page: 200,
+                sort_column: 'date',
+            },
+            timeout: 20000,
+        });
+
+        const pageRows = Array.isArray(data?.bills) ? data.bills : [];
+        pageRows.forEach((bill) => {
+            const parts = parsePaymentNumberParts(bill?.bill_number);
             if (parts.number > best.number) {
                 best = parts;
             }

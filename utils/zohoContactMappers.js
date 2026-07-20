@@ -42,6 +42,11 @@ export function mapZohoVendorToDoc(contact, organizationId, syncedAt = new Date(
         mobile: String(contact.mobile || '').trim(),
         outstandingPayableAmount: Number(contact.outstanding_payable_amount) || 0,
         currencyCode: String(contact.currency_code || 'AED').trim() || 'AED',
+        locationId: String(contact.location_id || '').trim(),
+        locationName: String(contact.location_name || contact.branch_name || '').trim(),
+        paymentTerms: contact.payment_terms,
+        paymentTermsLabel: String(contact.payment_terms_label || '').trim(),
+        placeOfContact: String(contact.place_of_contact || '').trim(),
         isActive: true,
         lastSyncedAt: syncedAt,
         zohoRaw: contact,
@@ -68,8 +73,6 @@ export function toZohoCustomerApiShape(doc) {
 export function toZohoVendorApiShape(doc) {
     if (!doc) return null;
 
-    const raw = doc.zohoRaw && typeof doc.zohoRaw === 'object' ? doc.zohoRaw : {};
-
     return {
         contact_id: doc.zohoContactId,
         vendor_id: doc.zohoVendorId || doc.zohoContactId,
@@ -81,10 +84,10 @@ export function toZohoVendorApiShape(doc) {
         mobile: doc.mobile,
         outstanding_payable_amount: doc.outstandingPayableAmount,
         currency_code: doc.currencyCode,
-        location_id: String(raw.location_id || '').trim(),
-        location_name: String(raw.location_name || raw.branch_name || '').trim(),
-        payment_terms: raw.payment_terms,
-        payment_terms_label: String(raw.payment_terms_label || '').trim(),
-        place_of_contact: String(raw.place_of_contact || '').trim(),
+        location_id: String(doc.locationId || '').trim(),
+        location_name: String(doc.locationName || '').trim(),
+        payment_terms: doc.paymentTerms,
+        payment_terms_label: String(doc.paymentTermsLabel || '').trim(),
+        place_of_contact: String(doc.placeOfContact || '').trim(),
     };
 }

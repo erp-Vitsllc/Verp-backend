@@ -6,6 +6,7 @@ import {
     toZohoCustomerApiShape,
     toZohoVendorApiShape,
 } from '../utils/zohoContactMappers.js';
+import { runLeanListQuery } from '../utils/zohoListQuery.js';
 import {
     fetchCustomers,
     fetchVendors,
@@ -17,7 +18,7 @@ const BULK_UPSERT_BATCH_SIZE = 500;
 const DEFAULT_CHUNK_LIMIT = 400;
 const SESSION_TTL_MS = 15 * 60 * 1000;
 
-/** @type {Map<string, { ids: Set<string>, timer: NodeJS.Timeout }>} */
+/** @type {Map<string, { ids: Set<string>, startedAt: Date, timer: NodeJS.Timeout }>} */
 const vendorChunkSessions = new Map();
 
 async function runBulkUpserts(Model, bulkOps) {
@@ -55,7 +56,7 @@ async function upsertZohoCustomers(contacts, organizationId, syncedAt) {
             {
                 organizationId,
                 isActive: true,
-                zohoContactId: { $nin: syncedIds },
+                lastSyncedAt: { $lt: syncedAt },
             },
             {
                 $set: {
@@ -96,7 +97,7 @@ async function upsertZohoVendors(contacts, organizationId, syncedAt) {
             {
                 organizationId,
                 isActive: true,
-                zohoContactId: { $nin: syncedIds },
+                lastSyncedAt: { $lt: syncedAt },
             },
             {
                 $set: {
@@ -146,15 +147,15 @@ export async function syncZohoVendorsChunk(query = {}) {
     const chunk = await fetchVendorsChunk({ startPage, maxRows });
     const syncedAt = new Date();
 
-    const sessionKey = syncToken ? `vendors:${syncToken}` : '';
-    let session = sessionKey ? vendorChunkSessions.get(sessionKey) : null;
-    if (sessionKey && !session) {
-        session = { ids: new Set(), timer: null };
-        vendorChunkSessions.set(sessionKey, session);
+    const key = syncToken ? `vendors:${syncToken}` : '';
+    let session = key ? vendorChunkSessions.get(key) : null;
+    if (key && !session) {
+        session = { ids: new Set(), startedAt: syncedAt, timer: null };
+        vendorChunkSessions.set(key, session);
     }
     if (session) {
         if (session.timer) clearTimeout(session.timer);
-        session.timer = setTimeout(() => vendorChunkSessions.delete(sessionKey), SESSION_TTL_MS);
+        session.timer = setTimeout(() => vendorChunkSessions.delete(key), SESSION_TTL_MS);
     }
 
     const syncedIds = [];
@@ -180,12 +181,16 @@ export async function syncZohoVendorsChunk(query = {}) {
     await runBulkUpserts(ZohoVendor, bulkOps);
 
     let deactivated = 0;
-    if (!chunk.hasMore && session && session.ids.size > 0) {
+    if (!chunk.hasMore && session?.startedAt) {
         const result = await ZohoVendor.updateMany(
             {
                 organizationId,
                 isActive: true,
-                zohoContactId: { $nin: [...session.ids] },
+                $or: [
+                    { lastSyncedAt: { $lt: session.startedAt } },
+                    { lastSyncedAt: null },
+                    { lastSyncedAt: { $exists: false } },
+                ],
             },
             {
                 $set: {
@@ -196,7 +201,7 @@ export async function syncZohoVendorsChunk(query = {}) {
         );
         deactivated = result.modifiedCount || 0;
         if (session.timer) clearTimeout(session.timer);
-        vendorChunkSessions.delete(sessionKey);
+        vendorChunkSessions.delete(key);
     }
 
     return {
@@ -236,12 +241,12 @@ export async function syncZohoContactsFromApi({ type = 'all' } = {}) {
 
 export async function listZohoCustomersFromDb({ activeOnly = true } = {}) {
     const organizationId = getZohoOrganizationId();
-    const query = { organizationId };
+    const filter = { organizationId };
     if (activeOnly) {
-        query.isActive = true;
+        filter.isActive = true;
     }
 
-    const docs = await ZohoCustomer.find(query).sort({ contactName: 1 }).lean();
+    const docs = await ZohoCustomer.find(filter).select('-zohoRaw').sort({ contactName: 1 }).lean();
     const syncedAt = docs.reduce((latest, doc) => {
         const value = doc.lastSyncedAt ? new Date(doc.lastSyncedAt).getTime() : 0;
         return value > latest ? value : latest;
@@ -257,27 +262,24 @@ export async function listZohoCustomersFromDb({ activeOnly = true } = {}) {
     };
 }
 
-export async function listZohoVendorsFromDb({ activeOnly = true } = {}) {
+export async function listZohoVendorsFromDb({ activeOnly = true, query = {} } = {}) {
     const organizationId = getZohoOrganizationId();
-    const query = { organizationId };
-    if (activeOnly) {
-        query.isActive = true;
-    }
-
-    const docs = await ZohoVendor.find(query).sort({ contactName: 1 }).lean();
-    const syncedAt = docs.reduce((latest, doc) => {
-        const value = doc.lastSyncedAt ? new Date(doc.lastSyncedAt).getTime() : 0;
-        return value > latest ? value : latest;
-    }, 0);
-
-    return {
-        data: docs.map(toZohoVendorApiShape).filter(Boolean),
-        meta: {
-            count: docs.length,
-            syncedAt: syncedAt ? new Date(syncedAt).toISOString() : null,
-            source: 'database',
+    return runLeanListQuery({
+        Model: ZohoVendor,
+        organizationId,
+        activeOnly,
+        query,
+        searchFields: ['contactName', 'companyName', 'email', 'phone', 'mobile'],
+        sortMap: {
+            name: 'contactName',
+            companyName: 'companyName',
+            email: 'email',
+            workPhone: 'phone',
+            payables: 'outstandingPayableAmount',
         },
-    };
+        defaultSort: { contactName: 1 },
+        toApiShape: toZohoVendorApiShape,
+    });
 }
 
 export function getExplicitSyncPreference(req) {

@@ -8,7 +8,7 @@ import {
 export const getZohoBills = async (req, res) => {
     try {
         if (!shouldSyncPurchasesOnRead(req)) {
-            const { data, meta } = await listZohoBillsFromDb();
+            const { data, meta } = await listZohoBillsFromDb({ query: req.query || {} });
             return res.status(200).json({ success: true, data, meta });
         }
 
@@ -34,7 +34,7 @@ export const getZohoBills = async (req, res) => {
         console.error('[ZohoBills] Failed:', error?.message || error);
 
         try {
-            const cached = await listZohoBillsFromDb();
+            const cached = await listZohoBillsFromDb({ query: req.query || {} });
             if (cached.data.length) {
                 return res.status(200).json({
                     success: true,

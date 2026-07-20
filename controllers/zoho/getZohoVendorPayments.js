@@ -8,7 +8,7 @@ import {
 export const getZohoVendorPayments = async (req, res) => {
     try {
         if (!shouldSyncPurchasesOnRead(req)) {
-            const { data, meta } = await listZohoVendorPaymentsFromDb();
+            const { data, meta } = await listZohoVendorPaymentsFromDb({ query: req.query || {} });
             return res.status(200).json({ success: true, data, meta });
         }
 
@@ -34,7 +34,7 @@ export const getZohoVendorPayments = async (req, res) => {
         console.error('[ZohoVendorPayments] Failed:', error?.message || error);
 
         try {
-            const cached = await listZohoVendorPaymentsFromDb();
+            const cached = await listZohoVendorPaymentsFromDb({ query: req.query || {} });
             if (cached.data.length) {
                 return res.status(200).json({
                     success: true,

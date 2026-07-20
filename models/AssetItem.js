@@ -587,6 +587,18 @@ const assetItemSchema = new mongoose.Schema({
         type: mongoose.Schema.Types.Mixed,
         default: null,
     },
+    /** Active fleet vehicle delete: requester → HR approve → hard delete. Inactive deletes skip this. */
+    vehicleDeleteStatus: {
+        type: String,
+        enum: ['none', 'pending_hr'],
+        default: 'none',
+    },
+    vehicleDeleteSubmittedAt: { type: Date, default: null },
+    vehicleDeleteSubmittedBy: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'EmployeeBasic',
+        default: null,
+    },
     /** Sold / Total loss: requester → HR → Accounts + Management (parallel) → company email → disposition applied. */
     vehicleDispositionWorkflow: {
         targetStatus: { type: String, enum: ['sold', 'total loss'], default: null },

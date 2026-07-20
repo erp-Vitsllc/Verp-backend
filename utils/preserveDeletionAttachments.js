@@ -152,32 +152,37 @@ export async function preserveDeletionAttachments(archiveId, snapshot) {
     return preserved;
 }
 
-export async function deletePreservedDeletionAttachments(preservedAttachments = []) {
-    const seenOriginals = new Set();
+/**
+ * Delete recovery copies under admin-deletion-archive/.
+ * Original company/employee object keys are NEVER removed here by default —
+ * live cards and Old Documents may still reference them.
+ *
+ * @param {object[]} preservedAttachments
+ * @param {{ deleteOriginals?: boolean }} [options] - deleteOriginals is intentionally unused /
+ *   forced off: originals must not be auto-wiped from production storage.
+ */
+export async function deletePreservedDeletionAttachments(
+    preservedAttachments = [],
+    { deleteOriginals: _deleteOriginals = false } = {},
+) {
     for (const item of preservedAttachments) {
-        if (item?.storageKey && !item.unavailable) {
-            await deleteDocumentFromS3(item.storageKey);
+        const archiveKey = normalizeS3Key(item?.storageKey);
+        if (
+            item?.unavailable ||
+            !archiveKey ||
+            !archiveKey.startsWith('admin-deletion-archive/')
+        ) {
+            continue;
         }
-        const orig = normalizeS3Key(item?.originalKey);
-        if (orig && !orig.startsWith('admin-deletion-archive/') && !seenOriginals.has(orig)) {
-            seenOriginals.add(orig);
-            await deleteDocumentFromS3(orig);
-        }
+        await deleteDocumentFromS3(archiveKey);
     }
 }
 
 /**
- * Remove original uploaded files referenced in the archive snapshot.
- * Called only on permanent purge (Deleted Records) or 60-day retention — not on live admin delete.
+ * Intentionally a no-op for production safety.
+ * Snapshot source keys may still be on live profiles or Old Documents.
+ * Callers that need bucket cleanup must do it as a separate, audited ops task.
  */
-export async function deleteDeletionSnapshotSourceAttachments(snapshot) {
-    const refs = listDeletionAttachmentRefs(snapshot);
-    const seen = new Set();
-    for (const ref of refs) {
-        for (const key of storageKeyCandidates(ref)) {
-            if (!key || key.startsWith('admin-deletion-archive/') || seen.has(key)) continue;
-            seen.add(key);
-            await deleteDocumentFromS3(key);
-        }
-    }
+export async function deleteDeletionSnapshotSourceAttachments(_snapshot) {
+    return;
 }

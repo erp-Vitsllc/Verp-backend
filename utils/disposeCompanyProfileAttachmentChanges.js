@@ -22,7 +22,11 @@ const attachmentChanged = (beforeValue, afterValue) => {
     const beforeKey = normalizeAttachmentKeyForCompare(beforeValue);
     const afterKey = normalizeAttachmentKeyForCompare(afterValue);
     if (!beforeKey) return false;
-    if (!afterKey) return true;
+    // Explicit clear only — do not treat unparseable signed URLs as removals
+    // (that falsely scheduled originals for 60-day S3 purge while still on the live card).
+    if (!afterKey) {
+        return afterValue == null || afterValue === '';
+    }
     return beforeKey !== afterKey;
 };
 
@@ -35,6 +39,12 @@ const disposeScalarField = async (req, company, beforeCompany, updateData, field
     const beforeValue = beforeCompany?.[field];
     const afterValue = updateData[field];
     if (!attachmentChanged(beforeValue, afterValue)) return;
+
+    // Replacement with a new file: keep the previous object in storage.
+    // Renew already moves history into Old Documents — do not put live replacements
+    // into Deleted Records (that previously led to Wasabi originals being wiped).
+    const afterKey = normalizeAttachmentKeyForCompare(afterValue);
+    if (afterKey) return;
 
     const isActivationSection = COMPANY_ACTIVATION_PROGRESS_KEYS.has(sectionKey);
     const isInformative = isInformativeCompanySectionKey(sectionKey);

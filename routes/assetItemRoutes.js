@@ -52,6 +52,15 @@ import {
     approveVehicleMortgageClose,
     rejectVehicleMortgageClose,
 } from '../controllers/vehicleMortgageCloseController.js';
+import {
+    requestVehicleDelete,
+    approveVehicleDelete,
+    rejectVehicleDelete,
+    userHasVehicleDeletePermission,
+    isReqHr,
+    isReqAdmin,
+} from '../controllers/vehicleDeleteController.js';
+import AssetItem from '../models/AssetItem.js';
 import { protect } from '../middleware/authMiddleware.js';
 import { downloadAssetListPdf } from '../controllers/asset/downloadAssetListPdf.js';
 import { downloadAssetListExcel } from '../controllers/asset/downloadAssetListExcel.js';
@@ -268,6 +277,34 @@ const requireAssetControllerOrAdmin = async (req, res, next) => {
 
         return res.status(403).json({
             message: 'Access denied. Only the Designated Asset Controller or the assigned employee can perform this operation.'
+        });
+    } catch (error) {
+        next(error);
+    }
+};
+
+/** Fleet vehicle delete: inactive = delete permission; active hard-delete = HR/admin (others use request endpoint). */
+const requireVehicleDeleteAccess = async (req, res, next) => {
+    try {
+        const isAdminUser = await isAdminForAssetRoutes(req.user);
+        const isAssetControllerUser = await isDesignatedAssetController(req.user);
+        if (isAdminUser || isAssetControllerUser) return next();
+        if (await isReqHr(req.user)) return next();
+        if (await userHasVehicleDeletePermission(req.user)) return next();
+
+        const { id } = req.params;
+        if (id) {
+            const asset = await AssetItem.findById(id).select('createdBy status plateNumber vehicleProfileActivationStatus typeId').populate('typeId', 'name');
+            const currentUserId = req.user?._id?.toString();
+            const creatorMayManageCreation =
+                asset &&
+                asset.createdBy?.toString() === currentUserId &&
+                ['Draft', 'Pending', 'Rejected', 'Submitted for Approval'].includes(asset.status);
+            if (creatorMayManageCreation) return next();
+        }
+
+        return res.status(403).json({
+            message: 'Access denied. You need vehicle delete permission (or HR for active vehicles).',
         });
     } catch (error) {
         next(error);
@@ -822,6 +859,9 @@ router.post('/:id/reject-vehicle-inspection', protect, rejectVehicleInspection);
 router.post('/:id/submit-vehicle-mortgage-close', protect, submitVehicleMortgageClose);
 router.post('/:id/approve-vehicle-mortgage-close', protect, approveVehicleMortgageClose);
 router.post('/:id/reject-vehicle-mortgage-close', protect, rejectVehicleMortgageClose);
+router.post('/:id/request-vehicle-delete', protect, requireVehicleDeleteAccess, requestVehicleDelete);
+router.post('/:id/approve-vehicle-delete', protect, approveVehicleDelete);
+router.post('/:id/reject-vehicle-delete', protect, rejectVehicleDelete);
 router.post('/:id/submit-vehicle-disposition-request', protect, submitVehicleDispositionRequest);
 router.post('/:id/respond-vehicle-disposition-hr', protect, respondVehicleDispositionHr);
 router.post('/:id/submit-vehicle-disposition-finance', protect, submitVehicleDispositionFinance);
@@ -888,7 +928,7 @@ router.delete('/:id/images/:imageId', protect, requireAssetControllerOrAdmin, de
 
 router.route('/:id')
     .put(protect, requireAssetControllerOrAdmin, updateAssetItem)
-    .delete(protect, requireAssetControllerOrAdmin, deleteAssetItem);
+    .delete(protect, requireVehicleDeleteAccess, deleteAssetItem);
 
 router.put('/:id/end-of-life', protect, requireAssetFullAccess, endOfLifeAsset);
 router.put('/bulk/request-action', protect, requireAssetFullAccess, bulkRequestAssetAction);

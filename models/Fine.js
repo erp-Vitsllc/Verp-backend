@@ -300,6 +300,26 @@ const fineSchema = new mongoose.Schema(
             },
             addedAt: { type: Date, default: Date.now },
         }],
+        /** Zoho Books vendor bill (created on management approval). */
+        zohoVendorId: { type: String, default: '' },
+        zohoVendorName: { type: String, default: '' },
+        expenseAccountId: { type: String, default: '' },
+        expenseAccountName: { type: String, default: '' },
+        zohoBillId: { type: String, default: '', index: true },
+        billNumber: { type: String, default: '' },
+        billDate: { type: String, default: '' },
+        zohoOrganizationId: { type: String, default: '' },
+        zohoSyncedAt: { type: Date, default: null },
+        zohoSyncError: { type: String, default: '' },
+        vendorBillStatus: {
+            type: String,
+            enum: ['Pending', 'Paid'],
+            default: 'Pending',
+            index: true,
+        },
+        zohoVendorPaymentId: { type: String, default: '' },
+        zohoVendorPaymentNumber: { type: String, default: '' },
+        vendorBillPaidAt: { type: Date, default: null },
         /** Full log of every approval PDF generation (initial + each HR / edit regeneration). */
         approvalAttachmentHistory: [{
             label: { type: String, default: '' },

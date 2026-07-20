@@ -146,6 +146,15 @@ const loanSchema = new mongoose.Schema({
             default: 'management-approval',
         },
     }],
+    /** Zoho Books posting when Accounts pays loan/advance */
+    zohoOrganizationId: { type: String, default: '' },
+    paidThroughAccountId: { type: String, default: '' },
+    paidThroughAccountName: { type: String, default: '' },
+    expenseAccountId: { type: String, default: '' },
+    expenseAccountName: { type: String, default: '' },
+    zohoJournalId: { type: String, default: '' },
+    zohoSyncedAt: { type: Date, default: null },
+    zohoSyncError: { type: String, default: '' },
 }, { timestamps: true });
 
 const Loan = mongoose.model("Loan", loanSchema);

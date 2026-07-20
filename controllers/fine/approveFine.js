@@ -206,12 +206,46 @@ export const approveFine = async (req, res) => {
         else if (currentStatus === 'Pending Authorization' || currentStatus === 'Pending Management' ||
             (currentStatus === 'Pending' && fine.workflow?.some(w => w.status === 'Pending' && (w.role === 'Management' || w.role === 'CEO')))) {
             if (await canActOnFine()) {
+                const {
+                    zohoVendorId = '',
+                    zohoVendorName = '',
+                    expenseAccountId = '',
+                    expenseAccountName = '',
+                    zohoOrganizationId = '',
+                    billNumber = '',
+                    billDate = '',
+                } = req.body || {};
+
+                const vendorId = String(zohoVendorId || '').trim();
+                const accountId = String(expenseAccountId || '').trim();
+                if (!vendorId || !accountId) {
+                    return res.status(400).json({
+                        message:
+                            'Management approval requires a Zoho vendor and expense account (Chart of Accounts).',
+                    });
+                }
+
+                const syncResults = [];
                 // Update ALL siblings
                 for (const f of fines) {
                     const { snapshotDeductionScheduleOnApproval } = await import('../../utils/fineDeductionScheduleSnapshot.js');
                     const { syncFinePartyPayableAmounts } = await import('../../utils/finePayableAmount.js');
                     snapshotDeductionScheduleOnApproval(f);
                     syncFinePartyPayableAmounts(f);
+
+                    f.zohoVendorId = vendorId;
+                    f.zohoVendorName = String(zohoVendorName || '').trim();
+                    f.expenseAccountId = accountId;
+                    f.expenseAccountName = String(expenseAccountName || '').trim();
+                    if (String(zohoOrganizationId || '').trim()) {
+                        f.zohoOrganizationId = String(zohoOrganizationId).trim();
+                    }
+                    if (String(billNumber || '').trim()) {
+                        f.billNumber = String(billNumber).trim();
+                    }
+                    if (String(billDate || '').trim()) {
+                        f.billDate = String(billDate).trim();
+                    }
 
                     f.fineStatus = 'Approved';
                     f.approvedBy = req.user._id;
@@ -232,6 +266,15 @@ export const approveFine = async (req, res) => {
                     else { if (!f.workflow) f.workflow = []; f.workflow.push({ role: 'Management', assignedTo: req.user._id, status: 'Approved', assignedAt: new Date(), actionedAt: new Date() }); }
 
                     await f.save();
+
+                    const { syncApprovedFineToZoho } = await import('../../utils/syncApprovedFineToZoho.js');
+                    syncResults.push(await syncApprovedFineToZoho(f));
+                }
+
+                modified = true;
+                Object.assign(fine, fines[0].toObject?.() ? fines[0].toObject() : fines[0]);
+                if (syncResults.some((r) => r && r.ok === false && !r.skipped)) {
+                    console.warn('[ApproveFine] Zoho bill sync issues:', syncResults);
                 }
 
                 // Update Asset Status if Loss & Damage — only for the main asset case.

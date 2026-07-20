@@ -428,6 +428,26 @@ export const createAssetType = async (req, res) => {
                 }
             }
 
+            let invoiceS3Key = invoiceFile || null;
+            if (invoiceFile && String(invoiceFile).startsWith('data:')) {
+                try {
+                    const uploadResult = await uploadDocumentToS3(invoiceFile, 'asset-invoices');
+                    invoiceS3Key = uploadResult.publicId;
+                } catch (error) {
+                    try {
+                        invoiceS3Key = await persistStoredAttachmentValue(invoiceFile, 'asset-invoices');
+                    } catch {
+                        invoiceS3Key = invoiceFile;
+                    }
+                }
+            } else if (invoiceFile) {
+                try {
+                    invoiceS3Key = await persistStoredAttachmentValue(invoiceFile, 'asset-invoices');
+                } catch {
+                    invoiceS3Key = invoiceFile;
+                }
+            }
+
             const resolvedVehicleBrand = fleetVehicle ? brandFromBody : '';
 
             for (let i = 0; i < qty; i++) {
@@ -458,7 +478,7 @@ export const createAssetType = async (req, res) => {
                     invoiceNumber,
                     imagePreview: imageS3Key,
                     photo: imageS3Key,
-                    invoiceFile,
+                    invoiceFile: invoiceS3Key,
                     accessories: formattedAccessories,
                     status: initialStatus,
                     actionRequiredBy: actionRequiredBy,
@@ -496,11 +516,15 @@ export const createAssetType = async (req, res) => {
                     assetId: newAsset._id,
                     action: 'Created',
                     performedBy: req.user.employeeObjectId,
+                    comments: invoiceS3Key
+                        ? 'Vehicle created with invoice attachment.'
+                        : undefined,
+                    file: invoiceS3Key || null,
                     details: {
                         purchaseDate: purchaseDate || null,
                         invoiceNumber: invoiceNumber || null,
-                        invoiceFile: invoiceFile || null,
-                        invoiceStatus: invoiceFile ? 'Received' : 'Pending',
+                        invoiceFile: invoiceS3Key || null,
+                        invoiceStatus: invoiceS3Key ? 'Received' : 'Pending',
                         assetName: name,
                         assetValue: Number(assetValue),
                         createdBy: req.user.name || 'System User',
@@ -1889,6 +1913,18 @@ export const updateAssetItem = async (req, res) => {
                     } catch (error) {
                         asset[key] = updates[key];
                     }
+                } else if (key === 'invoiceFile' && updates[key]) {
+                    const rawInvoice = String(updates[key] || '');
+                    if (rawInvoice.startsWith('data:')) {
+                        try {
+                            const uploadResult = await uploadDocumentToS3(rawInvoice, 'asset-invoices');
+                            asset.invoiceFile = uploadResult.publicId;
+                        } catch (error) {
+                            asset.invoiceFile = await persistStoredAttachmentValue(rawInvoice, 'asset-invoices');
+                        }
+                    } else {
+                        asset.invoiceFile = await persistStoredAttachmentValue(rawInvoice, 'asset-invoices');
+                    }
                 } else {
                     if (key === 'type' && typeof updates[key] === 'string' && updates[key].trim()) {
                         // Tools assets may change type by name; fleet vehicles already skipped brand/type above.
@@ -1902,7 +1938,7 @@ export const updateAssetItem = async (req, res) => {
                         asset[key] = normalizePlate(updates[key]);
                     } else if (key === 'plateEmirate') {
                         asset[key] = sanitizePlateEmirate(updates[key]);
-                    } else if (key !== 'type') {
+                    } else if (key !== 'type' && key !== 'invoiceFile') {
                         asset[key] = updates[key];
                     }
                 }
@@ -1959,14 +1995,24 @@ export const updateAssetItem = async (req, res) => {
             }
         }
 
-        // Log to history
+        // Log to history (include invoice attachment on the activity log when present)
         try {
+            const invoiceWasUpdated = Object.prototype.hasOwnProperty.call(updates, 'invoiceFile') && !!updates.invoiceFile;
+            const historyComments = invoiceWasUpdated
+                ? 'Basic details updated and invoice attachment saved.'
+                : 'Asset details updated via Edit modal.';
             await AssetHistory.create({
                 assetId: asset._id,
                 action: 'Update',
                 performedBy: req.user.employeeObjectId || req.user._id,
-                comments: 'Asset details updated via Edit modal.',
-                details: asset.toObject()
+                comments: historyComments,
+                file: invoiceWasUpdated ? (asset.invoiceFile || null) : null,
+                details: {
+                    invoiceAttached: Boolean(asset.invoiceFile),
+                    invoiceUpdated: invoiceWasUpdated,
+                    invoiceFile: invoiceWasUpdated ? (asset.invoiceFile || null) : undefined,
+                    invoiceNumber: asset.invoiceNumber || null,
+                },
             });
         } catch (historyErr) {
         }

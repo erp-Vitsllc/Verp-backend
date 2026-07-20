@@ -53,3 +53,4 @@ parse_snyk.js
 
 # Zoho OAuth tokens 
 data/zoho-tokens.json
+data/zoho-tokens-*.json

@@ -88,6 +88,19 @@ const utilityBillPaymentSchema = new mongoose.Schema(
         },
         actionedAt: { type: Date, default: null },
         comment: { type: String, default: '' },
+        /** Zoho Books mapping (filled on add; bill created in Zoho when HR approves). */
+        provider: { type: String, default: '' },
+        billNumber: { type: String, default: '' },
+        billDate: { type: String, default: '' },
+        paymentDay: { type: Number, default: null },
+        expenseAccountId: { type: String, default: '' },
+        expenseAccountName: { type: String, default: '' },
+        zohoVendorId: { type: String, default: '' },
+        zohoBillId: { type: String, default: '', index: true },
+        /** Which Zoho Books org this bill was synced to (multi-Zoho). */
+        zohoOrganizationId: { type: String, default: '', index: true },
+        zohoSyncedAt: { type: Date, default: null },
+        zohoSyncError: { type: String, default: '' },
     },
     { timestamps: true },
 );

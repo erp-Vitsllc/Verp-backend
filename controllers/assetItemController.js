@@ -16682,27 +16682,61 @@ export const deleteAssetItem = async (req, res) => {
     try {
         const { id } = req.params;
 
-        const asset = await AssetItem.findById(id);
+        const asset = await AssetItem.findById(id).populate('typeId', 'name');
         if (!asset) {
             return res.status(404).json({ message: 'Asset not found' });
         }
 
-        // Middleware requireAssetControllerOrAdmin already handles authorization:
-        // 1. Admin/Controller: Always authorized
-        // 2. Creator: Only if Status is Draft/Pending
+        const {
+            canHardDeleteFleetVehicle,
+            performVehicleHardDelete,
+            userHasVehicleDeletePermission,
+            isReqAdmin,
+        } = await import('./vehicleDeleteController.js');
+        const { isFleetVehicleAsset } = await import('../utils/assetApprovalHelpers.js');
 
+        if (isFleetVehicleAsset(asset)) {
+            const gate = await canHardDeleteFleetVehicle(req, asset);
+            if (!gate.ok) {
+                if (gate.reason === 'needs_hr_approval') {
+                    return res.status(403).json({
+                        message:
+                            'Active vehicles require HR approval to delete. Submit a delete request instead.',
+                        needsHrApproval: true,
+                        useRequestDelete: true,
+                    });
+                }
+                return res.status(403).json({
+                    message: 'You do not have permission to delete this vehicle.',
+                });
+            }
+            try {
+                const result = await performVehicleHardDelete(req, asset);
+                return res.status(200).json(result);
+            } catch (err) {
+                return res.status(err.statusCode || 500).json({
+                    message: err.message || 'Server Error',
+                    ...(err.accessoriesCount != null ? { accessoriesCount: err.accessoriesCount } : {}),
+                });
+            }
+        }
+
+        // Non-fleet (tools) assets — keep prior admin/controller path.
         const isAdminUser = await isReqUserAdmin(req.user);
-        const isFleetVehicle =
-            String(asset.plateNumber || '').trim() !== '' ||
-            String(asset.vehicleProfileActivationStatus || '').trim() !== '';
-        if (
-            isAdminUser &&
-            isFleetVehicle &&
-            String(asset.vehicleProfileActivationStatus || '').toLowerCase() !== 'active'
-        ) {
-            return res.status(400).json({
-                message: 'Vehicles can only be deleted by admin when the profile is active.',
-            });
+        const hasDelete =
+            (await userHasVehicleDeletePermission(req.user)) || (await isReqAdmin(req.user));
+        if (!isAdminUser && !hasDelete) {
+            // Creator of draft may still delete via middleware; allow if Draft
+            const creatorId = asset.createdBy?.toString();
+            const userId = req.user?._id?.toString();
+            const creatorMay =
+                creatorId &&
+                userId &&
+                creatorId === userId &&
+                ['Draft', 'Pending', 'Rejected', 'Submitted for Approval'].includes(asset.status);
+            if (!creatorMay) {
+                return res.status(403).json({ message: 'Access denied.' });
+            }
         }
 
         const {
@@ -16829,6 +16863,7 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
             assigneeClauses.push({ requestType: 'Vehicle Profile Activation' });
             assigneeClauses.push({ requestType: 'Vehicle Profile Edit' });
             assigneeClauses.push({ requestType: 'Vehicle Mortgage Close' });
+            assigneeClauses.push({ requestType: 'Vehicle Delete Request' });
             assigneeClauses.push({ requestType: 'Utility Entry Status Change' });
             assigneeClauses.push({
                 requestType: 'Asset Assignment',

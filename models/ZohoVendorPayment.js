@@ -11,7 +11,10 @@ const zohoVendorPaymentSchema = new mongoose.Schema(
         vendorName: { type: String, default: '' },
         billNumbers: { type: String, default: '' },
         paymentMode: { type: String, default: '' },
+        paidThroughAccountId: { type: String, default: '' },
+        paidThroughAccountName: { type: String, default: '' },
         status: { type: String, default: '' },
+        locationName: { type: String, default: '' },
         amount: { type: Number, default: 0 },
         balance: { type: Number, default: 0 },
         currencyCode: { type: String, default: 'AED' },
@@ -27,6 +30,8 @@ const zohoVendorPaymentSchema = new mongoose.Schema(
 
 zohoVendorPaymentSchema.index({ organizationId: 1, zohoPaymentId: 1 }, { unique: true });
 zohoVendorPaymentSchema.index({ organizationId: 1, isActive: 1, date: -1 });
+zohoVendorPaymentSchema.index({ organizationId: 1, isActive: 1, vendorName: 1 });
+zohoVendorPaymentSchema.index({ organizationId: 1, isActive: 1, paymentNumber: 1 });
 
 const ZohoVendorPayment = mongoose.model('ZohoVendorPayment', zohoVendorPaymentSchema);
 

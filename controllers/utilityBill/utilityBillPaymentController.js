@@ -9,6 +9,11 @@ import {
     cascadeDeleteUtilityBill,
     isUtilityAdminSuperUser,
 } from '../../utils/utilityBillAdminDelete.js';
+import {
+    syncApprovedUtilityBillsToZoho,
+    utilityBillDateFromMonth,
+    resolveZohoVendorIdByProvider,
+} from '../../utils/syncUtilityBillToZoho.js';
 
 const REQUEST_TYPE = 'Utility Bill Payment';
 
@@ -496,6 +501,53 @@ export async function createUtilityBillBatch(req, res) {
                     ? payBy
                     : undefined;
 
+            const provider = String(row.provider || '').trim();
+            const billNumber = String(row.billNumber || '').trim();
+            const expenseAccountId = String(row.expenseAccountId || '').trim();
+            const expenseAccountName = String(row.expenseAccountName || '').trim();
+            const paymentDayRaw = Number(row.paymentDay ?? row.paymentDate);
+            const paymentDay =
+                Number.isInteger(paymentDayRaw) && paymentDayRaw >= 1 && paymentDayRaw <= 31
+                    ? paymentDayRaw
+                    : null;
+            const billDate =
+                String(row.billDate || '').trim() ||
+                utilityBillDateFromMonth(billMonth, paymentDay ?? 16);
+
+            if (!billNumber) {
+                return res.status(400).json({
+                    message: `Bill number is required for account ${row.accountNo || entryId}.`,
+                });
+            }
+            if (!expenseAccountId) {
+                return res.status(400).json({
+                    message: 'Expense account is required to create the Zoho bill after HR approval.',
+                });
+            }
+            if (!provider) {
+                return res.status(400).json({
+                    message: `Provider is required for account ${row.accountNo || entryId} (maps to Zoho vendor).`,
+                });
+            }
+            if (!billDate) {
+                return res.status(400).json({
+                    message:
+                        'Bill date could not be built. Set Payment Day (1–31) on the utility entry and bill month.',
+                });
+            }
+
+            let zohoVendorId = String(row.zohoVendorId || '').trim();
+            if (!zohoVendorId) {
+                try {
+                    zohoVendorId = await resolveZohoVendorIdByProvider(provider);
+                } catch (vendorErr) {
+                    console.warn(
+                        '[createUtilityBillBatch] Zoho vendor lookup failed:',
+                        vendorErr?.message || vendorErr,
+                    );
+                }
+            }
+
             const doc = {
                 entryId: String(entryId),
                 utilityType: String(utilityType).trim(),
@@ -514,6 +566,13 @@ export async function createUtilityBillBatch(req, res) {
                 employeePayAmount: employeeAmt,
                 companyDiffAmount: companyDiff,
                 employeeDiffAmount: employeeDiff,
+                provider,
+                billNumber,
+                billDate,
+                paymentDay,
+                expenseAccountId,
+                expenseAccountName,
+                zohoVendorId,
                 ...payByPartyFromRow(row),
                 requestedBy: requester?._id || null,
                 requestedByName,
@@ -547,6 +606,10 @@ export async function createUtilityBillBatch(req, res) {
         }
 
         const bills = await UtilityBillPayment.insertMany(docs);
+        let zohoSync = null;
+        if (stage.status === 'Approved') {
+            zohoSync = await syncApprovedUtilityBillsToZoho(bills);
+        }
         const leanBills = bills.map((b) => b.toObject());
         const path = reviewPath(batchId, utilityType, billMonth);
         const totalAmount = leanBills.reduce((s, b) => s + Number(b.amount || 0), 0);
@@ -613,6 +676,7 @@ export async function createUtilityBillBatch(req, res) {
             reviewPath: path,
             sentToAccounts: stage.status === 'Pending Accounts',
             skippedStages: stage.skipped,
+            zohoSync,
         });
     } catch (err) {
         console.error('[createUtilityBillBatch]', err);
@@ -947,6 +1011,8 @@ export async function respondUtilityBillBatch(req, res) {
                     await bill.save();
                 }
 
+                const zohoSync = await syncApprovedUtilityBillsToZoho(bills);
+
                 const remainingAccounts = await UtilityBillPayment.countDocuments({
                     batchId,
                     status: 'Pending Accounts',
@@ -994,6 +1060,7 @@ export async function respondUtilityBillBatch(req, res) {
                     statusLabel: 'not paid',
                     skippedStages: next.skipped,
                     bills: bills.map((b) => decorateBill(b.toObject())),
+                    zohoSync,
                 });
             }
 
@@ -1134,6 +1201,8 @@ export async function respondUtilityBillBatch(req, res) {
             await bill.save();
         }
 
+        const zohoSync = await syncApprovedUtilityBillsToZoho(bills);
+
         const remainingHr = await UtilityBillPayment.countDocuments({
             batchId,
             status: 'Pending HR',
@@ -1182,6 +1251,7 @@ export async function respondUtilityBillBatch(req, res) {
             status: 'Approved',
             statusLabel: 'not paid',
             bills: bills.map((b) => decorateBill(b.toObject())),
+            zohoSync,
         });
     } catch (err) {
         console.error('[respondUtilityBillBatch]', err);

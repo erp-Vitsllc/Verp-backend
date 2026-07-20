@@ -12,7 +12,6 @@ import { signDeletionAttachmentUrls } from '../utils/signDeletionAttachmentUrls.
 import {
     preserveDeletionAttachments,
     deletePreservedDeletionAttachments,
-    deleteDeletionSnapshotSourceAttachments,
 } from '../utils/preserveDeletionAttachments.js';
 import mongoose from 'mongoose';
 import { restoreArchivedRecord } from './adminDeletionRestoreService.js';
@@ -208,14 +207,10 @@ export async function purgeArchiveById(id, req) {
     if (archive.status === 'purged') throw new Error('Record already permanently deleted.');
 
     const snapshotBeforePurge = archive.snapshot;
-    await deletePreservedDeletionAttachments(archive.preservedAttachments);
-    if (
-        archive.status === 'pending' &&
-        snapshotBeforePurge &&
-        snapshotBeforePurge.purged !== true
-    ) {
-        await deleteDeletionSnapshotSourceAttachments(snapshotBeforePurge);
-    }
+    // Only remove recovery copies under admin-deletion-archive/. Never wipe original
+    // live document keys from Wasabi (company/employee attachments are production-critical).
+    await deletePreservedDeletionAttachments(archive.preservedAttachments, { deleteOriginals: false });
+    void snapshotBeforePurge;
 
     archive.status = 'purged';
     archive.purgedAt = new Date();

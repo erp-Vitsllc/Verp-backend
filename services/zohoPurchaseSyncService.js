@@ -9,6 +9,7 @@ import {
     toZohoExpenseApiShape,
     toZohoVendorPaymentApiShape,
 } from '../utils/zohoPurchaseMappers.js';
+import { runLeanListQuery } from '../utils/zohoListQuery.js';
 import {
     fetchBillsChunk,
     fetchExpensesChunk,
@@ -21,7 +22,7 @@ const BULK_UPSERT_BATCH_SIZE = 500;
 const DEFAULT_CHUNK_LIMIT = 400;
 const SESSION_TTL_MS = 15 * 60 * 1000;
 
-/** @type {Map<string, { ids: Set<string>, timer: NodeJS.Timeout }>} */
+/** @type {Map<string, { ids: Set<string>, startedAt: Date, timer: NodeJS.Timeout }>} */
 const chunkSessions = new Map();
 
 async function runBulkUpserts(Model, bulkOps) {
@@ -33,27 +34,20 @@ async function runBulkUpserts(Model, bulkOps) {
     }
 }
 
-function latestSyncedAt(docs) {
-    return docs.reduce((latest, doc) => {
-        const value = doc.lastSyncedAt ? new Date(doc.lastSyncedAt).getTime() : 0;
-        return value > latest ? value : latest;
-    }, 0);
-}
-
 function sessionKey(entity, syncToken) {
     return `${entity}:${String(syncToken || '').trim()}`;
 }
 
-function getChunkSession(entity, syncToken) {
+function getChunkSession(entity, syncToken, syncedAt) {
     const token = String(syncToken || '').trim();
     if (!token) {
-        return { ids: new Set(), timer: null };
+        return { ids: new Set(), startedAt: syncedAt, timer: null };
     }
 
     const key = sessionKey(entity, token);
     let session = chunkSessions.get(key);
     if (!session) {
-        session = { ids: new Set(), timer: null };
+        session = { ids: new Set(), startedAt: syncedAt, timer: null };
         chunkSessions.set(key, session);
     }
     if (session.timer) clearTimeout(session.timer);
@@ -87,7 +81,7 @@ async function upsertChunkRows({
     syncToken,
     hasMore,
 }) {
-    const session = getChunkSession(entity, syncToken);
+    const session = getChunkSession(entity, syncToken, syncedAt);
     const syncedIds = [];
     const bulkOps = [];
     const apiRows = [];
@@ -112,12 +106,17 @@ async function upsertChunkRows({
     await runBulkUpserts(Model, bulkOps);
 
     let deactivated = 0;
-    if (!hasMore && syncToken && session.ids.size > 0) {
+    // Prefer lastSyncedAt cutoff over giant $nin — much faster on large orgs
+    if (!hasMore && syncToken && session.startedAt) {
         const result = await Model.updateMany(
             {
                 organizationId,
                 isActive: true,
-                [idField]: { $nin: [...session.ids] },
+                $or: [
+                    { lastSyncedAt: { $lt: session.startedAt } },
+                    { lastSyncedAt: null },
+                    { lastSyncedAt: { $exists: false } },
+                ],
             },
             {
                 $set: {
@@ -237,63 +236,127 @@ export async function upsertZohoVendorPaymentFromApi(payment) {
     return doc;
 }
 
-export async function listZohoExpensesFromDb({ activeOnly = true } = {}) {
+export async function upsertZohoBillFromApi(bill) {
     const organizationId = getZohoOrganizationId();
-    const query = { organizationId };
-    if (activeOnly) query.isActive = true;
+    const syncedAt = new Date();
+    const doc = mapZohoBillToDoc(bill, organizationId, syncedAt);
+    if (!doc) return null;
 
-    const docs = await ZohoExpense.find(query).sort({ date: -1, createdAt: -1 }).lean();
-    const syncedAt = latestSyncedAt(docs);
+    await ZohoBill.findOneAndUpdate(
+        { organizationId, zohoBillId: doc.zohoBillId },
+        { $set: doc },
+        { upsert: true, new: true },
+    );
 
-    return {
-        data: docs.map(toZohoExpenseApiShape).filter(Boolean),
-        meta: {
-            count: docs.length,
-            syncedAt: syncedAt ? new Date(syncedAt).toISOString() : null,
-            source: 'database',
-        },
-    };
+    return doc;
 }
 
-export async function listZohoBillsFromDb({ activeOnly = true } = {}) {
+const PURCHASE_SEARCH = {
+    expenses: [
+        'accountName',
+        'vendorName',
+        'customerName',
+        'referenceNumber',
+        'status',
+        'locationName',
+        'description',
+    ],
+    bills: ['billNumber', 'referenceNumber', 'vendorName', 'status', 'locationName'],
+    payments: [
+        'paymentNumber',
+        'referenceNumber',
+        'vendorName',
+        'billNumbers',
+        'paymentMode',
+        'status',
+        'locationName',
+    ],
+};
+
+const PURCHASE_SORT = {
+    expenses: {
+        date: 'date',
+        accountName: 'accountName',
+        vendorName: 'vendorName',
+        customerName: 'customerName',
+        referenceNumber: 'referenceNumber',
+        status: 'status',
+        location: 'locationName',
+        amount: 'total',
+        amountValue: 'total',
+    },
+    bills: {
+        date: 'date',
+        billNumber: 'billNumber',
+        referenceNumber: 'referenceNumber',
+        vendorName: 'vendorName',
+        status: 'status',
+        dueDate: 'dueDate',
+        location: 'locationName',
+        amount: 'total',
+        amountValue: 'total',
+        balanceAmount: 'balance',
+        balanceValue: 'balance',
+    },
+    payments: {
+        date: 'date',
+        paymentNumber: 'paymentNumber',
+        referenceNumber: 'referenceNumber',
+        vendorName: 'vendorName',
+        billNumber: 'billNumbers',
+        mode: 'paymentMode',
+        status: 'status',
+        location: 'locationName',
+        amount: 'amount',
+        amountValue: 'amount',
+        unusedAmount: 'balance',
+        unusedAmountValue: 'balance',
+    },
+};
+
+export async function listZohoExpensesFromDb({ activeOnly = true, query = {} } = {}) {
     const organizationId = getZohoOrganizationId();
-    const query = { organizationId };
-    if (activeOnly) query.isActive = true;
-
-    const docs = await ZohoBill.find(query).sort({ date: -1, createdAt: -1 }).lean();
-    const syncedAt = latestSyncedAt(docs);
-
-    return {
-        data: docs.map(toZohoBillApiShape).filter(Boolean),
-        meta: {
-            count: docs.length,
-            syncedAt: syncedAt ? new Date(syncedAt).toISOString() : null,
-            source: 'database',
-        },
-    };
+    return runLeanListQuery({
+        Model: ZohoExpense,
+        organizationId,
+        activeOnly,
+        query,
+        searchFields: PURCHASE_SEARCH.expenses,
+        sortMap: PURCHASE_SORT.expenses,
+        defaultSort: { date: -1 },
+        toApiShape: toZohoExpenseApiShape,
+    });
 }
 
-export async function listZohoVendorPaymentsFromDb({ activeOnly = true } = {}) {
+export async function listZohoBillsFromDb({ activeOnly = true, query = {} } = {}) {
     const organizationId = getZohoOrganizationId();
-    const query = { organizationId };
-    if (activeOnly) query.isActive = true;
-
-    const docs = await ZohoVendorPayment.find(query).sort({ date: -1, createdAt: -1 }).lean();
-    const syncedAt = latestSyncedAt(docs);
-
-    return {
-        data: docs.map(toZohoVendorPaymentApiShape).filter(Boolean),
-        meta: {
-            count: docs.length,
-            syncedAt: syncedAt ? new Date(syncedAt).toISOString() : null,
-            source: 'database',
-        },
-    };
+    return runLeanListQuery({
+        Model: ZohoBill,
+        organizationId,
+        activeOnly,
+        query,
+        searchFields: PURCHASE_SEARCH.bills,
+        sortMap: PURCHASE_SORT.bills,
+        defaultSort: { date: -1 },
+        toApiShape: toZohoBillApiShape,
+    });
 }
 
-/** Sync on every list load unless sync=false is passed (e.g. dropdowns). */
+export async function listZohoVendorPaymentsFromDb({ activeOnly = true, query = {} } = {}) {
+    const organizationId = getZohoOrganizationId();
+    return runLeanListQuery({
+        Model: ZohoVendorPayment,
+        organizationId,
+        activeOnly,
+        query,
+        searchFields: PURCHASE_SEARCH.payments,
+        sortMap: PURCHASE_SORT.payments,
+        defaultSort: { date: -1 },
+        toApiShape: toZohoVendorPaymentApiShape,
+    });
+}
+
+/** Sync only when sync=true is passed. Default is local DB (fast). */
 export function shouldSyncPurchasesOnRead(req) {
-    const preference = getExplicitSyncPreference(req);
-    if (preference === false) return false;
-    return true;
+    return getExplicitSyncPreference(req) === true;
 }

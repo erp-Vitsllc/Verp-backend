@@ -88,6 +88,15 @@ const paymentSchema = new mongoose.Schema(
             enum: ['Salary', 'End of Benefits', 'Cash', null],
             default: null,
         },
+        /** Zoho Books org / COA posting for cash reward (and similar) payouts */
+        zohoOrganizationId: { type: String, default: '' },
+        paidThroughAccountId: { type: String, default: '' },
+        paidThroughAccountName: { type: String, default: '' },
+        expenseAccountId: { type: String, default: '' },
+        expenseAccountName: { type: String, default: '' },
+        zohoJournalId: { type: String, default: '' },
+        zohoExpenseId: { type: String, default: '' },
+        zohoSyncError: { type: String, default: '' },
         attachment: {
             url: { type: String },
             publicId: { type: String },

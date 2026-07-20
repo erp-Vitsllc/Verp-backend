@@ -16,7 +16,7 @@ export const getZohoVendors = async (req, res) => {
             Boolean(req.query?.syncToken);
 
         if (!wantsChunkSync) {
-            const { data, meta } = await listZohoVendorsFromDb();
+            const { data, meta } = await listZohoVendorsFromDb({ query: req.query || {} });
             return res.status(200).json({
                 success: true,
                 data,
@@ -46,7 +46,7 @@ export const getZohoVendors = async (req, res) => {
         console.error('[ZohoVendors] Failed:', error?.message || error);
 
         try {
-            const cached = await listZohoVendorsFromDb();
+            const cached = await listZohoVendorsFromDb({ query: req.query || {} });
             if (cached.data.length) {
                 return res.status(200).json({
                     success: true,

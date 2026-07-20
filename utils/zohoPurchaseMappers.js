@@ -8,6 +8,29 @@ function numberValue(value) {
     return Number.isFinite(number) ? number : 0;
 }
 
+function resolveLocationName(row) {
+    return cleanText(row?.location_name || row?.branch_name || row?.place_of_supply);
+}
+
+/** Zoho vendor payment status for ERP list/detail — prefer Paid over Applied. */
+export function normalizeVendorPaymentStatus(payment) {
+    const raw = cleanText(payment?.status);
+    const balance = numberValue(payment?.balance);
+    const lower = raw.toLowerCase();
+
+    if (lower.includes('void')) return 'Void';
+    if (lower.includes('draft')) return 'Draft';
+    if (lower.includes('pending')) return 'Pending Approval';
+    if (lower.includes('reject')) return 'Approval Rejected';
+    if (lower.includes('partial')) return 'Partially Paid';
+    if (lower.includes('paid') || lower.includes('applied') || lower.includes('approved')) {
+        return 'Paid';
+    }
+    if (raw) return raw;
+    if (balance > 0) return 'Partially Paid';
+    return 'Paid';
+}
+
 export function mapZohoExpenseToDoc(expense, organizationId, syncedAt = new Date()) {
     const zohoExpenseId = cleanText(expense?.expense_id || expense?.id);
     if (!zohoExpenseId) return null;
@@ -22,6 +45,8 @@ export function mapZohoExpenseToDoc(expense, organizationId, syncedAt = new Date
         customerName: cleanText(expense.customer_name),
         referenceNumber: cleanText(expense.reference_number),
         status: cleanText(expense.status),
+        locationName: resolveLocationName(expense),
+        description: cleanText(expense.description),
         total: numberValue(expense.total ?? expense.bcy_total ?? expense.amount),
         currencyCode: cleanText(expense.currency_code, 'AED') || 'AED',
         isActive: true,
@@ -44,6 +69,7 @@ export function mapZohoBillToDoc(bill, organizationId, syncedAt = new Date()) {
         vendorName: cleanText(bill.vendor_name),
         status: cleanText(bill.status),
         dueDate: cleanText(bill.due_date),
+        locationName: resolveLocationName(bill),
         total: numberValue(bill.total),
         balance: numberValue(bill.balance),
         currencyCode: cleanText(bill.currency_code, 'AED') || 'AED',
@@ -69,7 +95,14 @@ export function mapZohoVendorPaymentToDoc(payment, organizationId, syncedAt = ne
         vendorName: cleanText(payment.vendor_name),
         billNumbers: cleanText(payment.bill_numbers || payment.bill_number),
         paymentMode: cleanText(payment.payment_mode),
-        status: cleanText(payment.status),
+        paidThroughAccountId: cleanText(
+            payment.paid_through_account_id || payment.account_id,
+        ),
+        paidThroughAccountName: cleanText(
+            payment.paid_through_account_name || payment.account_name,
+        ),
+        status: normalizeVendorPaymentStatus(payment),
+        locationName: resolveLocationName(payment),
         amount: numberValue(payment.amount),
         balance: numberValue(payment.balance),
         currencyCode: cleanText(payment.currency_code || payment.currencyCode, 'AED') || 'AED',
@@ -79,12 +112,9 @@ export function mapZohoVendorPaymentToDoc(payment, organizationId, syncedAt = ne
     };
 }
 
-/** Prefer full Zoho payload so frontend mappers stay unchanged. */
+/** Lean list/detail shape — never spreads zohoRaw (keeps payloads small). */
 export function toZohoExpenseApiShape(doc) {
     if (!doc) return null;
-    if (doc.zohoRaw && typeof doc.zohoRaw === 'object') {
-        return { ...doc.zohoRaw };
-    }
 
     return {
         expense_id: doc.zohoExpenseId,
@@ -95,6 +125,8 @@ export function toZohoExpenseApiShape(doc) {
         customer_name: doc.customerName,
         reference_number: doc.referenceNumber,
         status: doc.status,
+        location_name: doc.locationName || '',
+        description: doc.description || '',
         total: doc.total,
         currency_code: doc.currencyCode,
     };
@@ -102,9 +134,6 @@ export function toZohoExpenseApiShape(doc) {
 
 export function toZohoBillApiShape(doc) {
     if (!doc) return null;
-    if (doc.zohoRaw && typeof doc.zohoRaw === 'object') {
-        return { ...doc.zohoRaw };
-    }
 
     return {
         bill_id: doc.zohoBillId,
@@ -115,6 +144,7 @@ export function toZohoBillApiShape(doc) {
         vendor_name: doc.vendorName,
         status: doc.status,
         due_date: doc.dueDate,
+        location_name: doc.locationName || '',
         total: doc.total,
         balance: doc.balance,
         currency_code: doc.currencyCode,
@@ -123,9 +153,6 @@ export function toZohoBillApiShape(doc) {
 
 export function toZohoVendorPaymentApiShape(doc) {
     if (!doc) return null;
-    if (doc.zohoRaw && typeof doc.zohoRaw === 'object') {
-        return { ...doc.zohoRaw };
-    }
 
     return {
         payment_id: doc.zohoPaymentId,
@@ -136,7 +163,10 @@ export function toZohoVendorPaymentApiShape(doc) {
         vendor_name: doc.vendorName,
         bill_numbers: doc.billNumbers,
         payment_mode: doc.paymentMode,
-        status: doc.status,
+        paid_through_account_id: doc.paidThroughAccountId || '',
+        paid_through_account_name: doc.paidThroughAccountName || '',
+        status: doc.status || 'Paid',
+        location_name: doc.locationName || '',
         amount: doc.amount,
         balance: doc.balance,
         currency_code: doc.currencyCode,

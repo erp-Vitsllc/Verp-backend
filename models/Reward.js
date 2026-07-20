@@ -161,7 +161,16 @@ const rewardSchema = new mongoose.Schema(
             assignedAt: { type: Date, default: Date.now },
             actionedAt: { type: Date },
             comment: { type: String }
-        }]
+        }],
+        /** Zoho Books posting when Accounts pays cash/gift reward */
+        zohoOrganizationId: { type: String, default: '' },
+        paidThroughAccountId: { type: String, default: '' },
+        paidThroughAccountName: { type: String, default: '' },
+        expenseAccountId: { type: String, default: '' },
+        expenseAccountName: { type: String, default: '' },
+        zohoJournalId: { type: String, default: '' },
+        zohoSyncedAt: { type: Date, default: null },
+        zohoSyncError: { type: String, default: '' },
     },
     { timestamps: true }
 );

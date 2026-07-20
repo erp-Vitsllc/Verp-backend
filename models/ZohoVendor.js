@@ -12,6 +12,11 @@ const zohoVendorSchema = new mongoose.Schema(
         mobile: { type: String, default: '' },
         outstandingPayableAmount: { type: Number, default: 0 },
         currencyCode: { type: String, default: 'AED' },
+        locationId: { type: String, default: '' },
+        locationName: { type: String, default: '' },
+        paymentTerms: { type: mongoose.Schema.Types.Mixed, default: null },
+        paymentTermsLabel: { type: String, default: '' },
+        placeOfContact: { type: String, default: '' },
         isActive: { type: Boolean, default: true },
         lastSyncedAt: { type: Date },
         zohoRaw: { type: mongoose.Schema.Types.Mixed, default: null },
@@ -24,6 +29,8 @@ const zohoVendorSchema = new mongoose.Schema(
 
 zohoVendorSchema.index({ organizationId: 1, zohoContactId: 1 }, { unique: true });
 zohoVendorSchema.index({ organizationId: 1, isActive: 1, contactName: 1 });
+zohoVendorSchema.index({ organizationId: 1, isActive: 1, companyName: 1 });
+zohoVendorSchema.index({ organizationId: 1, isActive: 1, email: 1 });
 
 const ZohoVendor = mongoose.model('ZohoVendor', zohoVendorSchema);
 

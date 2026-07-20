@@ -11,6 +11,7 @@ const zohoBillSchema = new mongoose.Schema(
         vendorName: { type: String, default: '' },
         status: { type: String, default: '' },
         dueDate: { type: String, default: '' },
+        locationName: { type: String, default: '' },
         total: { type: Number, default: 0 },
         balance: { type: Number, default: 0 },
         currencyCode: { type: String, default: 'AED' },
@@ -26,6 +27,8 @@ const zohoBillSchema = new mongoose.Schema(
 
 zohoBillSchema.index({ organizationId: 1, zohoBillId: 1 }, { unique: true });
 zohoBillSchema.index({ organizationId: 1, isActive: 1, date: -1 });
+zohoBillSchema.index({ organizationId: 1, isActive: 1, vendorName: 1 });
+zohoBillSchema.index({ organizationId: 1, isActive: 1, billNumber: 1 });
 
 const ZohoBill = mongoose.model('ZohoBill', zohoBillSchema);
 
