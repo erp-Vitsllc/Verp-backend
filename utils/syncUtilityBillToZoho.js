@@ -1,4 +1,5 @@
 import ZohoVendor from '../models/ZohoVendor.js';
+import UtilityEntry from '../models/UtilityEntry.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import { createBill, getZohoOrganizationId } from '../services/zohoService.js';
 import { upsertZohoBillFromApi } from '../services/zohoPurchaseSyncService.js';
@@ -27,21 +28,93 @@ export function utilityBillDateFromMonth(billMonth, paymentDay = 16) {
     return `${month}-${String(day).padStart(2, '0')}`;
 }
 
+/** Prefer exact / whole-word vendor match before loose substring (avoids "Du" → "Dubai …"). */
 export async function resolveZohoVendorIdByProvider(providerName) {
     const name = String(providerName || '').trim();
     if (!name) return '';
 
     const organizationId = getZohoOrganizationId();
     const exact = new RegExp(`^${escapeRegex(name)}$`, 'i');
-    const doc = await ZohoVendor.findOne({
-        organizationId,
-        isActive: true,
+    const word = new RegExp(`(^|[^a-z0-9])${escapeRegex(name)}([^a-z0-9]|$)`, 'i');
+
+    const select = 'zohoContactId zohoVendorId contactName companyName';
+    const baseFilter = { organizationId, isActive: true };
+
+    let doc = await ZohoVendor.findOne({
+        ...baseFilter,
         $or: [{ contactName: exact }, { companyName: exact }],
     })
-        .select('zohoContactId zohoVendorId')
+        .select(select)
         .lean();
 
+    if (!doc) {
+        doc = await ZohoVendor.findOne({
+            ...baseFilter,
+            $or: [{ contactName: word }, { companyName: word }],
+        })
+            .select(select)
+            .lean();
+    }
+
+    if (!doc && name.length >= 4) {
+        const contains = new RegExp(escapeRegex(name), 'i');
+        doc = await ZohoVendor.findOne({
+            ...baseFilter,
+            $or: [{ contactName: contains }, { companyName: contains }],
+        })
+            .select(select)
+            .lean();
+    }
+
+    if (!doc) {
+        const needle = name.toLowerCase();
+        const candidates = await ZohoVendor.find(baseFilter).select(select).limit(500).lean();
+        doc =
+            candidates.find((row) => {
+                const contact = String(row.contactName || '').toLowerCase();
+                const company = String(row.companyName || '').toLowerCase();
+                return (
+                    (contact && contact === needle) ||
+                    (company && company === needle) ||
+                    (contact && needle.length >= 4 && contact.includes(needle)) ||
+                    (company && needle.length >= 4 && company.includes(needle))
+                );
+            }) || null;
+    }
+
     return String(doc?.zohoContactId || doc?.zohoVendorId || '').trim();
+}
+
+async function backfillUtilityBillZohoFields(billDoc) {
+    const entryId = String(billDoc?.entryId || '').trim();
+    let entry = null;
+    if (entryId) {
+        entry = await UtilityEntry.findById(entryId).lean();
+    }
+    const values = entry?.values && typeof entry.values === 'object' ? entry.values : {};
+
+    if (!String(billDoc.provider || '').trim()) {
+        const fromEntry = String(values.provider || '').trim();
+        if (fromEntry) billDoc.provider = fromEntry;
+    }
+    if (!String(billDoc.accountNo || '').trim()) {
+        const fromEntry = String(values.accountNumber || values.accountNo || '').trim();
+        if (fromEntry) billDoc.accountNo = fromEntry;
+    }
+    if (!Number.isInteger(billDoc.paymentDay) || billDoc.paymentDay < 1) {
+        const dayRaw = Number(values.paymentDay ?? values.paymentDate);
+        if (Number.isInteger(dayRaw) && dayRaw >= 1 && dayRaw <= 31) {
+            billDoc.paymentDay = dayRaw;
+        }
+    }
+    if (!String(billDoc.billNumber || '').trim()) {
+        const account = String(billDoc.accountNo || values.accountNumber || 'NA').trim();
+        const month = String(billDoc.billMonth || '').trim() || 'NA';
+        billDoc.billNumber = `UB-${account}-${month}`.slice(0, 50);
+    }
+    if (!String(billDoc.billDate || '').trim()) {
+        billDoc.billDate = utilityBillDateFromMonth(billDoc.billMonth, billDoc.paymentDay ?? 16);
+    }
 }
 
 async function resolveOrganizationIdForUtilityBill(billDoc) {
@@ -78,6 +151,15 @@ export async function syncApprovedUtilityBillToZoho(billDoc) {
 }
 
 async function syncApprovedUtilityBillToZohoInner(billDoc) {
+    try {
+        await backfillUtilityBillZohoFields(billDoc);
+    } catch (backfillErr) {
+        console.warn(
+            '[UtilityBillZoho] Entry backfill failed:',
+            backfillErr?.message || backfillErr,
+        );
+    }
+
     const amount = Number(billDoc.amount);
     const billNumber = String(billDoc.billNumber || '').trim();
     const billDate =
@@ -97,7 +179,8 @@ async function syncApprovedUtilityBillToZohoInner(billDoc) {
         return { ok: false, message: billDoc.zohoSyncError };
     }
     if (!expenseAccountId) {
-        billDoc.zohoSyncError = 'Expense account is required for Zoho.';
+        billDoc.zohoSyncError =
+            'Expense account is required for Zoho. Re-submit the bill with an expense Chart of Accounts line, then Retry Zoho sync.';
         await billDoc.save();
         return { ok: false, message: billDoc.zohoSyncError };
     }
@@ -120,7 +203,7 @@ async function syncApprovedUtilityBillToZohoInner(billDoc) {
     }
 
     if (!vendorId) {
-        billDoc.zohoSyncError = `No Zoho vendor matched provider "${provider || '—'}". Sync Vendors then retry.`;
+        billDoc.zohoSyncError = `No Zoho vendor matched provider "${provider || '—'}". Sync Vendors in Accounts, then retry Zoho sync.`;
         await billDoc.save();
         return { ok: false, message: billDoc.zohoSyncError };
     }
@@ -174,6 +257,10 @@ async function syncApprovedUtilityBillToZohoInner(billDoc) {
     } catch (err) {
         const message = err?.message || 'Failed to create Zoho bill';
         console.error('[UtilityBillZoho] Failed:', message);
+        // Stale vendor id from wrong org / deleted contact — clear and keep error for retry.
+        if (/vendor|contact|invalid/i.test(message) && billDoc.zohoVendorId) {
+            billDoc.zohoVendorId = '';
+        }
         billDoc.zohoSyncError = message;
         await billDoc.save();
         return { ok: false, message };

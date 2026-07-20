@@ -1394,6 +1394,55 @@ export async function getUtilityBillPayment(req, res) {
     }
 }
 
+/**
+ * Retry Zoho Books bill create for Approved (not paid) rows in a batch.
+ * Use when HR approved but Zoho sync failed (missing vendor / COA / API error).
+ */
+export async function syncUtilityBillBatchToZoho(req, res) {
+    try {
+        const { batchId } = req.params;
+        const bills = await UtilityBillPayment.find({
+            batchId,
+            status: { $in: ['Approved', 'Paid'] },
+        });
+        if (!bills.length) {
+            return res.status(404).json({ message: 'No approved bills found for this batch.' });
+        }
+
+        // Re-resolve vendor when missing or prior sync failed on vendor match.
+        for (const bill of bills) {
+            if (bill.zohoBillId) continue;
+            if (!String(bill.zohoVendorId || '').trim() || /vendor/i.test(bill.zohoSyncError || '')) {
+                bill.zohoVendorId = '';
+            }
+        }
+
+        const zohoSync = await syncApprovedUtilityBillsToZoho(bills);
+        const failed = (zohoSync || []).filter((r) => r && r.ok === false && !r.skipped);
+        const created = (zohoSync || []).filter((r) => r && r.ok && !r.skipped);
+
+        const refreshed = await UtilityBillPayment.find({
+            batchId,
+            status: { $in: ['Approved', 'Paid'] },
+        }).lean();
+
+        return res.status(200).json({
+            batchId,
+            zohoSync,
+            createdCount: created.length,
+            failedCount: failed.length,
+            bills: refreshed.map((b) => decorateBill(b)),
+            message:
+                failed.length > 0
+                    ? `${created.length} synced; ${failed.length} failed. Check zohoSyncError on each bill.`
+                    : `${created.length || (zohoSync || []).filter((r) => r?.skipped).length} bill(s) ready in Zoho.`,
+        });
+    } catch (err) {
+        console.error('[syncUtilityBillBatchToZoho]', err);
+        return res.status(500).json({ message: err.message || 'Failed to sync bills to Zoho' });
+    }
+}
+
 /** DELETE /api/UtilityBill/:id — admin / super user only */
 export async function deleteUtilityBillPayment(req, res) {
     try {

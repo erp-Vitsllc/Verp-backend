@@ -9,6 +9,7 @@ import {
     payUtilityBillBatch,
     getUtilityBillPayment,
     getUtilityBillBatch,
+    syncUtilityBillBatchToZoho,
     deleteUtilityBillPayment,
 } from '../controllers/utilityBill/utilityBillPaymentController.js';
 import {
@@ -75,6 +76,7 @@ router.post('/batch', createUtilityBillBatch);
 router.get('/batch/:batchId', getUtilityBillBatch);
 router.put('/batch/:batchId/respond', respondUtilityBillBatch);
 router.put('/batch/:batchId/pay', payUtilityBillBatch);
+router.post('/batch/:batchId/sync-zoho', syncUtilityBillBatchToZoho);
 router.post('/', createUtilityBillPayment);
 router.get('/:id', getUtilityBillPayment);
 router.delete('/:id', deleteUtilityBillPayment);
