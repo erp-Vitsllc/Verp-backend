@@ -295,11 +295,24 @@ async function getBooksRequestContext() {
         organizationId,
         booksApiBase: resolveBooksApiBase(config, stored),
         accessToken: await getAccessToken(),
+        grantedScope: String(stored.scope || ''),
     };
 }
 
 async function requestZohoBooks(pathname, { method = 'get', params = {}, data, timeout = 30000 } = {}) {
-    const { organizationId, booksApiBase, accessToken } = await getBooksRequestContext();
+    const { organizationId, booksApiBase, accessToken, grantedScope } =
+        await getBooksRequestContext();
+
+    const isWrite = String(method).toLowerCase() !== 'get';
+    if (isWrite) {
+        console.log(
+            `[ZohoBooks →] ${String(method).toUpperCase()} ${booksApiBase}${pathname}`,
+            `org=${organizationId}`,
+            `token=…${String(accessToken).slice(-8)}`,
+            `granted_scope=${grantedScope || '(not stored)'}`,
+        );
+        if (data) console.log('[ZohoBooks →] payload:', JSON.stringify(data, null, 2));
+    }
 
     try {
         const response = await axios({
@@ -319,12 +332,36 @@ async function requestZohoBooks(pathname, { method = 'get', params = {}, data, t
 
         const body = response.data || {};
         if (Number(body.code) !== 0) {
+            console.error(
+                `[ZohoBooks ✗] ${String(method).toUpperCase()} ${pathname} org=${organizationId}`,
+                `HTTP ${response.status} zoho_code=${body.code}:`,
+                JSON.stringify(body),
+            );
             throw new Error(body.message || 'Zoho Books request failed');
         }
 
+        if (isWrite) {
+            console.log(
+                `[ZohoBooks ✓] ${String(method).toUpperCase()} ${pathname} org=${organizationId} zoho_code=${body.code} message="${body.message || ''}"`,
+            );
+        }
         return body;
     } catch (error) {
-        const zohoMessage = error?.response?.data?.message;
+        const zohoStatus = error?.response?.status;
+        const zohoBody = error?.response?.data;
+        const zohoMessage = zohoBody?.message;
+        if (zohoStatus || zohoBody) {
+            console.error(
+                `[ZohoBooks ✗] ${String(method).toUpperCase()} ${pathname} org=${organizationId}`,
+                `HTTP ${zohoStatus ?? '?'} zoho_code=${zohoBody?.code ?? '?'}:`,
+                typeof zohoBody === 'object' ? JSON.stringify(zohoBody) : String(zohoBody ?? ''),
+            );
+        } else if (isWrite) {
+            console.error(
+                `[ZohoBooks ✗] ${String(method).toUpperCase()} ${pathname} org=${organizationId} (no Zoho response):`,
+                error?.message || error,
+            );
+        }
         throw new Error(zohoMessage || error?.message || 'Zoho Books request failed');
     }
 }
@@ -695,6 +732,70 @@ export async function createBill(payload = {}) {
     return response.bill || response;
 }
 
+/** Submit a Draft bill into the Zoho approval flow (orgs with bill approval enabled). */
+export async function submitBillForApproval(billId) {
+    const id = String(billId || '').trim();
+    if (!id) throw new Error('Bill id is required.');
+
+    return requestZohoBooks(`/bills/${encodeURIComponent(id)}/submit`, {
+        method: 'post',
+        timeout: 30000,
+    });
+}
+
+/** Approve a submitted bill in Zoho (orgs with bill approval enabled). */
+export async function approveBill(billId) {
+    const id = String(billId || '').trim();
+    if (!id) throw new Error('Bill id is required.');
+
+    return requestZohoBooks(`/bills/${encodeURIComponent(id)}/approve`, {
+        method: 'post',
+        timeout: 30000,
+    });
+}
+
+/**
+ * Move an API-created bill out of Draft so Accounts can pay it in Zoho.
+ * Orgs with bill approval enabled reject status/open (code 21025) until the
+ * bill is submitted + approved — do that automatically, then retry open.
+ */
+export async function markBillAsOpen(billId) {
+    const id = String(billId || '').trim();
+    if (!id) throw new Error('Bill id is required.');
+
+    try {
+        return await requestZohoBooks(`/bills/${encodeURIComponent(id)}/status/open`, {
+            method: 'post',
+            timeout: 30000,
+        });
+    } catch (error) {
+        if (!/has not been approved/i.test(String(error?.message || ''))) {
+            throw error;
+        }
+
+        try {
+            await submitBillForApproval(id);
+        } catch (submitErr) {
+            // Already submitted / not needed — continue to approve.
+            console.warn('[ZohoBooks] Bill submit skipped:', submitErr?.message || submitErr);
+        }
+        await approveBill(id);
+
+        try {
+            return await requestZohoBooks(`/bills/${encodeURIComponent(id)}/status/open`, {
+                method: 'post',
+                timeout: 30000,
+            });
+        } catch (openErr) {
+            // Some orgs treat approved bills as open already.
+            if (/already|approved/i.test(String(openErr?.message || ''))) {
+                return { code: 0, message: 'Bill approved in Zoho.' };
+            }
+            throw openErr;
+        }
+    }
+}
+
 export async function fetchBillById(billId) {
     const id = String(billId || '').trim();
     if (!id) return null;
@@ -996,6 +1097,19 @@ export async function fetchVendorsChunk({ startPage = 1, maxRows = 400 } = {}) {
  * Full Zoho Chart of Accounts for Payments Made → Paid Through.
  * Returns every active account (VEGA / NNIT org-scoped via request context).
  */
+/** Account types Zoho itself offers as "Paid Through" on vendor payments (plus payables for employee credit journals). */
+const PAID_THROUGH_ACCOUNT_TYPES = new Set([
+    'bank',
+    'cash',
+    'credit_card',
+    'payment_clearing',
+    'other_current_asset',
+    'other_current_liability',
+    'other_liability',
+    'accounts_payable',
+    'equity',
+]);
+
 export async function fetchPaymentAccounts() {
     const accounts = await fetchAllZohoBooksRows('/chartofaccounts', 'chartofaccounts', {
         params: {
@@ -1014,6 +1128,14 @@ export async function fetchPaymentAccounts() {
             .toLowerCase()
             .trim();
         if (status === 'inactive' || status === 'false' || account?.is_active === false) {
+            return;
+        }
+        // Only payment-capable accounts — exclude fixed assets / expense / income rows.
+        const accountType = String(account?.account_type || '')
+            .toLowerCase()
+            .replace(/\s+/g, '_')
+            .trim();
+        if (accountType && !PAID_THROUGH_ACCOUNT_TYPES.has(accountType)) {
             return;
         }
         byId.set(id, account);

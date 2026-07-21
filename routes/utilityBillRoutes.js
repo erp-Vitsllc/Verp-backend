@@ -26,6 +26,7 @@ import {
     listUtilityTypeNames,
     addUtilityTypeName,
     removeUtilityTypeName,
+    renameUtilityTypeName,
     listUtilityProviders,
     addUtilityProvider,
     removeUtilityProvider,
@@ -47,6 +48,7 @@ router.use(protect);
 
 router.get('/types', listUtilityTypeNames);
 router.post('/types', addUtilityTypeName);
+router.put('/types/:name', renameUtilityTypeName);
 router.delete('/types/:name', removeUtilityTypeName);
 
 router.get('/providers', listUtilityProviders);

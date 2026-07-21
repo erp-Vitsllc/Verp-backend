@@ -1,12 +1,138 @@
-import { createVendorPayment, fetchBillById, updateVendorPayment } from '../../services/zohoService.js';
+import {
+    createVendorPayment,
+    createZohoJournal,
+    fetchBillById,
+    fetchPaymentAccounts,
+    updateVendorPayment,
+} from '../../services/zohoService.js';
 import {
     upsertZohoBillFromApi,
     upsertZohoVendorPaymentFromApi,
 } from '../../services/zohoPurchaseSyncService.js';
 import { mapZohoErrorStatus, toFiniteAmount } from './zohoVendorPaymentUtils.js';
 import { recordPartyExpensesFromVendorPaymentBody } from '../../utils/recordPartyExpenseFromZohoPayment.js';
+import { getZohoOrgContext, withZohoOrganization } from '../../utils/zohoOrgContext.js';
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+function normName(value) {
+    return String(value || '').trim().toLowerCase();
+}
+
+function findAccountByName(accounts = [], name = '') {
+    const needle = normName(name);
+    if (!needle) return null;
+    const list = Array.isArray(accounts) ? accounts : [];
+
+    const exact = list.find((a) => normName(a.account_name || a.name) === needle);
+    if (exact) return exact;
+
+    return (
+        list.find((a) => {
+            const accName = normName(a.account_name || a.name);
+            return accName && (accName.includes(needle) || needle.includes(accName));
+        }) || null
+    );
+}
+
+/**
+ * Paid Through picked from the OTHER Zoho org (e.g. NNIT employee account on a VEGA bill).
+ * Zoho cannot post a payment through a foreign-org account, so:
+ *  - the vendor payment uses a same-named account in the payment org, and
+ *  - a journal in the other org credits the selected (employee) account there.
+ */
+async function resolveCrossOrgPaidThrough(body = {}, payload = {}) {
+    const crossOrgId = String(
+        body.paid_through_organization_id || body.paidThroughOrganizationId || '',
+    ).trim();
+    if (!crossOrgId) return null;
+
+    const activeOrgId = String(
+        getZohoOrgContext()?.organizationId || process.env.ZOHO_ORGANIZATION_ID || '',
+    ).trim();
+    if (!activeOrgId || crossOrgId === activeOrgId) return null;
+
+    const crossAccountId = payload.paid_through_account_id;
+    const crossAccountName = String(
+        body.paid_through_account_name || body.paidThroughAccountName || '',
+    ).trim();
+    const crossBrand =
+        String(body.paid_through_org_brand || '').trim() || 'the other organization';
+    const paymentBrand = String(body.payment_org_brand || '').trim() || 'this organization';
+
+    const accounts = await fetchPaymentAccounts();
+    const match = findAccountByName(accounts, crossAccountName);
+    if (!match) {
+        const err = new Error(
+            `Paid Through "${crossAccountName || crossAccountId}" is a ${crossBrand} account. ` +
+                `Zoho cannot pay a ${paymentBrand} bill through it. Create an account with the ` +
+                `same name in the ${paymentBrand} Chart of Accounts, or pick a ${paymentBrand} account.`,
+        );
+        err.statusCode = 400;
+        throw err;
+    }
+
+    payload.paid_through_account_id = String(match.account_id || match.id || '').trim();
+
+    return {
+        crossOrgId,
+        crossAccountId,
+        crossAccountName,
+        crossBrand,
+        paymentBrand,
+        paymentAccountId: payload.paid_through_account_id,
+        paymentAccountName: String(match.account_name || match.name || '').trim(),
+    };
+}
+
+/** Journal in the other org: credit the employee's account, debit intercompany/payment-org account. */
+async function postCrossOrgCreditJournal({ cross, payload, zohoPayment = {} }) {
+    return withZohoOrganization(cross.crossOrgId, async () => {
+        const accounts = await fetchPaymentAccounts();
+        const debit =
+            findAccountByName(accounts, cross.paymentBrand) ||
+            accounts.find((a) =>
+                /intercompany|inter[\s-]?company/i.test(String(a.account_name || a.name || '')),
+            );
+        if (!debit) {
+            return {
+                skipped: true,
+                reason: `No "${cross.paymentBrand}" or intercompany account found in ${cross.crossBrand} Chart of Accounts to balance the journal.`,
+            };
+        }
+
+        const reference = String(
+            zohoPayment.payment_number || zohoPayment.payment_no || payload.reference_number || '',
+        ).trim();
+        const journal = await createZohoJournal({
+            journal_date: payload.date,
+            reference_number: reference || undefined,
+            notes:
+                `Paid through ${cross.crossAccountName} for ${cross.paymentBrand} vendor payment` +
+                (reference ? ` ${reference}` : ''),
+            line_items: [
+                {
+                    account_id: String(debit.account_id || debit.id || '').trim(),
+                    amount: payload.amount,
+                    debit_or_credit: 'debit',
+                    description: `${cross.paymentBrand} intercompany`,
+                },
+                {
+                    account_id: cross.crossAccountId,
+                    amount: payload.amount,
+                    debit_or_credit: 'credit',
+                    description: cross.crossAccountName || 'Paid Through (employee)',
+                },
+            ],
+        });
+
+        return {
+            skipped: false,
+            journalId: String(journal?.journal_id || journal?.journalId || journal?.id || '').trim(),
+            debitAccountName: String(debit.account_name || debit.name || '').trim(),
+        };
+    });
+}
 
 function cleanBills(bills, paymentAmount) {
     if (!Array.isArray(bills)) return [];
@@ -150,6 +276,7 @@ export const postZohoVendorPayment = async (req, res) => {
     try {
         const payload = buildPaymentPayload(req.body || {});
         const isDraft = payload.is_draft === true;
+        const crossOrgPaidThrough = await resolveCrossOrgPaidThrough(req.body || {}, payload);
 
         let data;
         try {
@@ -188,6 +315,28 @@ export const postZohoVendorPayment = async (req, res) => {
                 '[ZohoVendorPaymentCreate] Zoho create ok; local DB upsert failed:',
                 syncError?.message || syncError,
             );
+        }
+
+        // Cross-org Paid Through: credit the selected account inside the other org
+        // (shows in that employee's account there), balanced by an intercompany debit.
+        let crossOrgJournalNote = '';
+        if (!isDraft && crossOrgPaidThrough) {
+            try {
+                const journalResult = await postCrossOrgCreditJournal({
+                    cross: crossOrgPaidThrough,
+                    payload,
+                    zohoPayment: data && typeof data === 'object' ? data : {},
+                });
+                crossOrgJournalNote = journalResult.skipped
+                    ? ` Credit journal in ${crossOrgPaidThrough.crossBrand} was skipped: ${journalResult.reason}`
+                    : ` A credit journal was posted in ${crossOrgPaidThrough.crossBrand} against ${crossOrgPaidThrough.crossAccountName}.`;
+            } catch (journalErr) {
+                console.warn(
+                    '[ZohoVendorPaymentCreate] Cross-org credit journal failed:',
+                    journalErr?.message || journalErr,
+                );
+                crossOrgJournalNote = ` Credit journal in ${crossOrgPaidThrough.crossBrand} failed: ${journalErr?.message || journalErr}`;
+            }
         }
 
         // Draft payments do not settle bills / expenses yet.
@@ -254,9 +403,11 @@ export const postZohoVendorPayment = async (req, res) => {
             data,
             isDraft,
             partyExpenses: partyExpenseResults,
-            message: isDraft
-                ? 'Payment made has been saved as draft in Zoho Books.'
-                : 'Payment made recorded as paid in Zoho. Related Expenses marked Paid with debit/credit ledger.',
+            message:
+                (isDraft
+                    ? 'Payment made has been saved as draft in Zoho Books.'
+                    : 'Payment made recorded as paid in Zoho. Related Expenses marked Paid with debit/credit ledger.') +
+                crossOrgJournalNote,
         });
     } catch (error) {
         console.error('[ZohoVendorPaymentCreate] Failed:', error?.message || error);
@@ -265,10 +416,12 @@ export const postZohoVendorPayment = async (req, res) => {
         const isValidationError =
             /required|greater than|YYYY-MM-DD|cannot be greater/i.test(message);
 
-        return res.status(isValidationError ? 400 : mapZohoErrorStatus(message)).json({
-            success: false,
-            message,
-        });
+        return res
+            .status(error?.statusCode || (isValidationError ? 400 : mapZohoErrorStatus(message)))
+            .json({
+                success: false,
+                message,
+            });
     }
 };
 
@@ -281,6 +434,8 @@ export const putZohoVendorPayment = async (req, res) => {
 
         const payload = buildPaymentPayload(req.body || {});
         const isDraft = payload.is_draft === true;
+        // Swap foreign-org Paid Through for the same-named payment-org account (no new journal on edit).
+        await resolveCrossOrgPaidThrough(req.body || {}, payload);
         const data = await updateVendorPayment(paymentId, payload);
 
         try {
@@ -375,9 +530,11 @@ export const putZohoVendorPayment = async (req, res) => {
         const isValidationError =
             /required|greater than|YYYY-MM-DD|cannot be greater/i.test(message);
 
-        return res.status(isValidationError ? 400 : mapZohoErrorStatus(message)).json({
-            success: false,
-            message,
-        });
+        return res
+            .status(error?.statusCode || (isValidationError ? 400 : mapZohoErrorStatus(message)))
+            .json({
+                success: false,
+                message,
+            });
     }
 };

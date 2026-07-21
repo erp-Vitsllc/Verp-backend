@@ -101,6 +101,17 @@ async function loadVendorPayables(vendorId) {
 export const getZohoVendorPaymentSupport = async (req, res) => {
     try {
         const vendorId = String(req.query?.vendorId || '').trim();
+        const accountsOnly = String(req.query?.accountsOnly || '').toLowerCase() === 'true';
+
+        // Cheap path for cross-org Paid Through dropdown: only the Chart of Accounts.
+        if (accountsOnly) {
+            const accounts = await fetchPaymentAccounts();
+            return res.status(200).json({
+                success: true,
+                data: { accounts },
+                meta: { accountCount: accounts.length },
+            });
+        }
         const [accounts, payables, locations, paymentModes, vendorContact, nextPaymentNumber] =
             await Promise.all([
                 fetchPaymentAccounts(),

@@ -1,7 +1,7 @@
 import ZohoVendor from '../models/ZohoVendor.js';
 import UtilityEntry from '../models/UtilityEntry.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
-import { createBill, getZohoOrganizationId } from '../services/zohoService.js';
+import { createBill, markBillAsOpen, fetchBillById, getZohoOrganizationId } from '../services/zohoService.js';
 import { upsertZohoBillFromApi } from '../services/zohoPurchaseSyncService.js';
 import { withZohoOrganization } from './zohoOrgContext.js';
 import { resolveZohoOrganizationIdForCompany } from './resolveZohoOrganization.js';
@@ -149,23 +149,63 @@ async function resolveOrganizationIdForUtilityBill(billDoc) {
 }
 
 /**
- * Create the utility row as a Zoho Books bill after HR approval.
+ * Create the utility row as a Zoho Books bill after HR Draft / Approve.
+ * @param {object} billDoc
+ * @param {{ markAsOpen?: boolean }} [options] — false = leave Zoho Draft (not payable); true = Open.
  * Does not throw — stores zohoSyncError on the bill document when Zoho fails.
  */
-export async function syncApprovedUtilityBillToZoho(billDoc) {
+export async function syncApprovedUtilityBillToZoho(billDoc, { markAsOpen = true } = {}) {
     if (!billDoc) return { ok: false, message: 'Bill missing' };
-
-    if (billDoc.zohoBillId) {
-        return { ok: true, skipped: true, zohoBillId: billDoc.zohoBillId };
-    }
 
     const organizationId = await resolveOrganizationIdForUtilityBill(billDoc);
     return withZohoOrganization(organizationId, () =>
-        syncApprovedUtilityBillToZohoInner(billDoc),
+        syncApprovedUtilityBillToZohoInner(billDoc, { markAsOpen }),
     );
 }
 
-async function syncApprovedUtilityBillToZohoInner(billDoc) {
+async function openExistingZohoBill(billDoc) {
+    const zohoBillId = String(billDoc.zohoBillId || '').trim();
+    if (!zohoBillId) return { ok: false, message: 'No Zoho bill id' };
+
+    try {
+        await markBillAsOpen(zohoBillId);
+        let zohoBillForUpsert = null;
+        try {
+            zohoBillForUpsert = await fetchBillById(zohoBillId);
+        } catch {
+            zohoBillForUpsert = null;
+        }
+        if (zohoBillForUpsert) {
+            try {
+                await upsertZohoBillFromApi(zohoBillForUpsert);
+            } catch {
+                /* ignore local cache */
+            }
+        }
+        billDoc.zohoBillStatus = 'open';
+        billDoc.zohoSyncedAt = new Date();
+        billDoc.zohoSyncError = '';
+        await billDoc.save();
+        console.log(`[UtilityBillZoho] Bill ${zohoBillId} marked as Open in Zoho.`);
+        return { ok: true, zohoBillId, opened: true };
+    } catch (err) {
+        const message = err?.message || 'Failed to mark Zoho bill as Open';
+        billDoc.zohoSyncError = message;
+        await billDoc.save();
+        return { ok: false, message };
+    }
+}
+
+async function syncApprovedUtilityBillToZohoInner(billDoc, { markAsOpen = true } = {}) {
+    const existingId = String(billDoc.zohoBillId || '').trim();
+    if (existingId) {
+        const current = String(billDoc.zohoBillStatus || '').toLowerCase();
+        if (markAsOpen && current !== 'open') {
+            return openExistingZohoBill(billDoc);
+        }
+        return { ok: true, skipped: true, zohoBillId: existingId };
+    }
+
     try {
         await backfillUtilityBillZohoFields(billDoc);
     } catch (backfillErr) {
@@ -230,6 +270,21 @@ async function syncApprovedUtilityBillToZohoInner(billDoc) {
         billDoc.billMonth ? String(billDoc.billMonth) : '',
     ].filter(Boolean);
 
+    console.log(
+        '[UtilityBillZoho] Creating Zoho bill:',
+        JSON.stringify({
+            erpBillId: String(billDoc._id),
+            zohoOrg: activeOrgId,
+            vendorId,
+            provider,
+            billNumber,
+            billDate,
+            expenseAccountId,
+            amount,
+            markAsOpen: Boolean(markAsOpen),
+        }),
+    );
+
     try {
         const zohoBill = await createBill({
             vendor_id: vendorId,
@@ -248,8 +303,49 @@ async function syncApprovedUtilityBillToZohoInner(billDoc) {
         });
 
         const zohoBillId = String(zohoBill?.bill_id || zohoBill?.billId || '').trim();
+
+        // API creates Draft by default. Approve → Open so Accounts can pay; Draft stays Draft.
+        let zohoBillForUpsert = zohoBill;
+        let zohoStatus = 'draft';
+        if (zohoBillId && markAsOpen) {
+            try {
+                await markBillAsOpen(zohoBillId);
+                zohoBillForUpsert = (await fetchBillById(zohoBillId)) || zohoBill;
+                zohoStatus = 'open';
+                console.log(`[UtilityBillZoho] Bill ${zohoBillId} marked as Open in Zoho.`);
+            } catch (openErr) {
+                const openMsg = openErr?.message || 'Could not mark Zoho bill as Open';
+                console.warn('[UtilityBillZoho] Bill created but still Draft:', openMsg);
+                billDoc.billDate = billDate;
+                billDoc.zohoVendorId = vendorId;
+                billDoc.zohoBillId = zohoBillId;
+                billDoc.zohoBillStatus = 'draft';
+                try {
+                    billDoc.zohoOrganizationId = getZohoOrganizationId();
+                } catch {
+                    /* ignore */
+                }
+                billDoc.zohoSyncedAt = new Date();
+                billDoc.zohoSyncError = openMsg;
+                await billDoc.save();
+                try {
+                    await upsertZohoBillFromApi(zohoBill);
+                } catch {
+                    /* ignore */
+                }
+                return {
+                    ok: false,
+                    message: `Zoho bill created as Draft but not Open: ${openMsg}`,
+                    zohoBillId,
+                    zohoBillStatus: 'draft',
+                };
+            }
+        } else if (zohoBillId) {
+            console.log(`[UtilityBillZoho] Bill ${zohoBillId} left as Draft in Zoho (not payable yet).`);
+        }
+
         try {
-            await upsertZohoBillFromApi(zohoBill);
+            await upsertZohoBillFromApi(zohoBillForUpsert);
         } catch (upsertErr) {
             console.warn(
                 '[UtilityBillZoho] Zoho create ok; ERP ZohoBill upsert failed:',
@@ -260,6 +356,7 @@ async function syncApprovedUtilityBillToZohoInner(billDoc) {
         billDoc.billDate = billDate;
         billDoc.zohoVendorId = vendorId;
         billDoc.zohoBillId = zohoBillId;
+        billDoc.zohoBillStatus = zohoStatus;
         try {
             billDoc.zohoOrganizationId = getZohoOrganizationId();
         } catch {
@@ -269,7 +366,7 @@ async function syncApprovedUtilityBillToZohoInner(billDoc) {
         billDoc.zohoSyncError = '';
         await billDoc.save();
 
-        return { ok: true, zohoBillId };
+        return { ok: true, zohoBillId, zohoBillStatus: zohoStatus };
     } catch (err) {
         let message = err?.message || 'Failed to create Zoho bill';
         console.error('[UtilityBillZoho] Failed:', message);
@@ -288,10 +385,10 @@ async function syncApprovedUtilityBillToZohoInner(billDoc) {
     }
 }
 
-export async function syncApprovedUtilityBillsToZoho(bills = []) {
+export async function syncApprovedUtilityBillsToZoho(bills = [], options = {}) {
     const results = [];
     for (const bill of bills) {
-        results.push(await syncApprovedUtilityBillToZoho(bill));
+        results.push(await syncApprovedUtilityBillToZoho(bill, options));
     }
     return results;
 }

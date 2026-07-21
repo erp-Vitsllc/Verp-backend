@@ -2,6 +2,9 @@ import UtilityTypeCatalog from '../../models/UtilityTypeCatalog.js';
 import UtilityProvider from '../../models/UtilityProvider.js';
 import UtilityConfig from '../../models/UtilityConfig.js';
 import UtilityEntry from '../../models/UtilityEntry.js';
+import UtilityBillPayment from '../../models/UtilityBillPayment.js';
+import UtilityBillPaymentDay from '../../models/UtilityBillPaymentDay.js';
+import UtilityEntryStatusChange from '../../models/UtilityEntryStatusChange.js';
 import {
     cascadeDeleteEntriesByType,
     isUtilityAdminSuperUser,
@@ -177,6 +180,71 @@ export async function removeUtilityTypeName(req, res) {
     } catch (err) {
         console.error('[removeUtilityTypeName]', err);
         return res.status(500).json({ message: err?.message || 'Failed to remove type' });
+    }
+}
+
+/** PUT /api/UtilityBill/types/:name — rename a utility type (admin). Cascades to configs/entries/bills. */
+export async function renameUtilityTypeName(req, res) {
+    try {
+        if (!isAdminLike(req)) {
+            return res.status(403).json({ message: 'Only admin can rename utility types.' });
+        }
+        const oldName = String(req.params?.name || '').trim();
+        const newName = String(req.body?.name || req.body?.newName || '').trim();
+        if (!oldName) return res.status(400).json({ message: 'Current type name is required.' });
+        if (!newName) return res.status(400).json({ message: 'New type name is required.' });
+        if (oldName.toLowerCase() === newName.toLowerCase() && oldName !== newName) {
+            // Case-only rename — still update stored spelling.
+        } else if (oldName.toLowerCase() === newName.toLowerCase()) {
+            return res.json({ ok: true, name: oldName, types: await listTypeNames() });
+        }
+
+        const clash = await UtilityTypeCatalog.findOne({
+            name: nameRegex(newName),
+            active: true,
+        }).lean();
+        if (clash && String(clash.name).toLowerCase() !== oldName.toLowerCase()) {
+            return res.status(400).json({ message: `Type “${clash.name}” already exists.` });
+        }
+
+        const catalog = await UtilityTypeCatalog.findOne({ name: nameRegex(oldName) });
+        if (!catalog || !catalog.active) {
+            return res.status(404).json({ message: `Type “${oldName}” was not found.` });
+        }
+
+        // Soft-deactivate any inactive row that already holds the new name (unique index).
+        const inactiveClash = await UtilityTypeCatalog.findOne({
+            name: nameRegex(newName),
+            active: false,
+        });
+        if (inactiveClash) {
+            await UtilityTypeCatalog.deleteOne({ _id: inactiveClash._id });
+        }
+
+        catalog.name = newName;
+        await catalog.save();
+
+        await Promise.all([
+            UtilityConfig.updateMany({ type: nameRegex(oldName) }, { $set: { type: newName } }),
+            UtilityEntry.updateMany({ type: nameRegex(oldName) }, { $set: { type: newName } }),
+            UtilityBillPayment.updateMany(
+                { utilityType: nameRegex(oldName) },
+                { $set: { utilityType: newName } },
+            ),
+            UtilityBillPaymentDay.updateMany(
+                { utilityType: nameRegex(oldName) },
+                { $set: { utilityType: newName } },
+            ),
+            UtilityEntryStatusChange.updateMany(
+                { utilityType: nameRegex(oldName) },
+                { $set: { utilityType: newName } },
+            ),
+        ]);
+
+        return res.json({ ok: true, name: newName, types: await listTypeNames() });
+    } catch (err) {
+        console.error('[renameUtilityTypeName]', err);
+        return res.status(500).json({ message: err?.message || 'Failed to rename type' });
     }
 }
 

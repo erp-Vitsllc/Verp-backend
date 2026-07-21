@@ -97,6 +97,12 @@ const utilityBillPaymentSchema = new mongoose.Schema(
         expenseAccountName: { type: String, default: '' },
         zohoVendorId: { type: String, default: '' },
         zohoBillId: { type: String, default: '', index: true },
+        /** draft = created in Zoho but not payable; open = Accounts can pay in Payments Made */
+        zohoBillStatus: {
+            type: String,
+            enum: ['', 'draft', 'open'],
+            default: '',
+        },
         /** Which Zoho Books org this bill was synced to (multi-Zoho). */
         zohoOrganizationId: { type: String, default: '', index: true },
         zohoSyncedAt: { type: Date, default: null },
