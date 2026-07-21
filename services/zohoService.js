@@ -1097,19 +1097,6 @@ export async function fetchVendorsChunk({ startPage = 1, maxRows = 400 } = {}) {
  * Full Zoho Chart of Accounts for Payments Made → Paid Through.
  * Returns every active account (VEGA / NNIT org-scoped via request context).
  */
-/** Account types Zoho itself offers as "Paid Through" on vendor payments (plus payables for employee credit journals). */
-const PAID_THROUGH_ACCOUNT_TYPES = new Set([
-    'bank',
-    'cash',
-    'credit_card',
-    'payment_clearing',
-    'other_current_asset',
-    'other_current_liability',
-    'other_liability',
-    'accounts_payable',
-    'equity',
-]);
-
 export async function fetchPaymentAccounts() {
     const accounts = await fetchAllZohoBooksRows('/chartofaccounts', 'chartofaccounts', {
         params: {
@@ -1130,14 +1117,8 @@ export async function fetchPaymentAccounts() {
         if (status === 'inactive' || status === 'false' || account?.is_active === false) {
             return;
         }
-        // Only payment-capable accounts — exclude fixed assets / expense / income rows.
-        const accountType = String(account?.account_type || '')
-            .toLowerCase()
-            .replace(/\s+/g, '_')
-            .trim();
-        if (accountType && !PAID_THROUGH_ACCOUNT_TYPES.has(accountType)) {
-            return;
-        }
+        // Full Chart of Accounts — Zoho validates the type on payment save
+        // ("Involved account types are not applicable" for e.g. fixed assets).
         byId.set(id, account);
     });
 
