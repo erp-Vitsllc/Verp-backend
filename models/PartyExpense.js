@@ -87,6 +87,10 @@ const partyExpenseSchema = new mongoose.Schema(
 
         paidThroughAccountId: { type: String, default: '' },
         paidThroughAccountName: { type: String, default: '' },
+        /** Party Salary Payable COA selected by employee/company account code. */
+        partyAccountId: { type: String, default: '' },
+        partyAccountName: { type: String, default: '' },
+        partyAccountCode: { type: String, default: '' },
         paymentMode: { type: String, default: '' },
         paidAt: { type: Date, default: null },
 

@@ -225,7 +225,13 @@ export async function upsertZohoVendorPaymentFromApi(payment) {
     const organizationId = getZohoOrganizationId();
     const syncedAt = new Date();
     const doc = mapZohoVendorPaymentToDoc(payment, organizationId, syncedAt);
-    if (!doc) return null;
+    if (!doc) {
+        console.warn(
+            '[ZohoPurchaseSync] Vendor payment upsert skipped — no payment_id in payload. Keys:',
+            payment && typeof payment === 'object' ? Object.keys(payment).join(', ') : typeof payment,
+        );
+        return null;
+    }
 
     await ZohoVendorPayment.findOneAndUpdate(
         { organizationId, zohoPaymentId: doc.zohoPaymentId },

@@ -516,6 +516,9 @@ export async function createUtilityBillBatch(req, res) {
             const billNumber = String(row.billNumber || '').trim();
             const expenseAccountId = String(row.expenseAccountId || '').trim();
             const expenseAccountName = String(row.expenseAccountName || '').trim();
+            const partyAccountId = String(row.partyAccountId || '').trim();
+            const partyAccountName = String(row.partyAccountName || '').trim();
+            const partyAccountCode = String(row.partyAccountCode || '').trim();
             const paymentDayRaw = Number(row.paymentDay ?? row.paymentDate);
             const paymentDay =
                 Number.isInteger(paymentDayRaw) && paymentDayRaw >= 1 && paymentDayRaw <= 31
@@ -533,6 +536,11 @@ export async function createUtilityBillBatch(req, res) {
             if (!expenseAccountId) {
                 return res.status(400).json({
                     message: 'Expense account is required to create the Zoho bill after HR approval.',
+                });
+            }
+            if (Math.abs(diff) > 0.009 && !partyAccountId) {
+                return res.status(400).json({
+                    message: `Difference account is required for account ${row.accountNo || entryId}.`,
                 });
             }
             if (!provider) {
@@ -583,6 +591,9 @@ export async function createUtilityBillBatch(req, res) {
                 paymentDay,
                 expenseAccountId,
                 expenseAccountName,
+                partyAccountId,
+                partyAccountName,
+                partyAccountCode,
                 zohoVendorId,
                 ...payByPartyFromRow(row),
                 requestedBy: requester?._id || null,
@@ -788,6 +799,21 @@ function applyRowEdits(bills, rowUpdates = []) {
         if (patch.employeePayAmount != null) {
             const e = Number(patch.employeePayAmount);
             if (Number.isFinite(e)) bill.employeePayAmount = e;
+        }
+        if (patch.expenseAccountId != null) {
+            bill.expenseAccountId = String(patch.expenseAccountId || '');
+        }
+        if (patch.expenseAccountName != null) {
+            bill.expenseAccountName = String(patch.expenseAccountName || '');
+        }
+        if (patch.partyAccountId != null) {
+            bill.partyAccountId = String(patch.partyAccountId || '');
+        }
+        if (patch.partyAccountName != null) {
+            bill.partyAccountName = String(patch.partyAccountName || '');
+        }
+        if (patch.partyAccountCode != null) {
+            bill.partyAccountCode = String(patch.partyAccountCode || '');
         }
     }
 }
@@ -1302,6 +1328,19 @@ export async function respondUtilityBillBatch(req, res) {
                 zohoFailed[0]?.message ||
                 stillDraft[0]?.zohoSyncError ||
                 'Zoho bill is still Draft. Fix Zoho access, then Approve again to mark Open.';
+            // Still post Difference Debit (Account 2) when possible — independent of vendor bill Open.
+            let differenceSync = [];
+            try {
+                differenceSync = await upsertUtilityBalancePartyExpensesFromBills(
+                    bills,
+                    actor?._id || req.user?._id || null,
+                );
+            } catch (balanceErr) {
+                console.warn(
+                    '[respondUtilityBillBatch] Difference Debit while Zoho blocked:',
+                    balanceErr?.message || balanceErr,
+                );
+            }
             await syncBatchDashboard({
                 batchId,
                 bills: bills.map((b) => b.toObject()),
@@ -1319,6 +1358,7 @@ export async function respondUtilityBillBatch(req, res) {
                 statusLabel: `${statusLabel('Pending HR', empDisplayName(gate.hr))} · Zoho not Open`,
                 message: firstMsg,
                 zohoSync,
+                differenceSync,
                 bills: bills.map((b) => decorateBill(b.toObject())),
             });
         }
@@ -1335,8 +1375,9 @@ export async function respondUtilityBillBatch(req, res) {
             await bill.save();
         }
 
+        let differenceSync = [];
         try {
-            await upsertUtilityBalancePartyExpensesFromBills(
+            differenceSync = await upsertUtilityBalancePartyExpensesFromBills(
                 bills,
                 actor?._id || req.user?._id || null,
             );
@@ -1346,6 +1387,13 @@ export async function respondUtilityBillBatch(req, res) {
                 balanceErr?.message || balanceErr,
             );
         }
+
+        const differenceJournalFailed = (differenceSync || []).filter(
+            (r) => r && r.ok === false && r.message,
+        );
+        const differenceJournalMsg = differenceJournalFailed[0]?.message
+            ? String(differenceJournalFailed[0].message)
+            : '';
 
         const remainingHr = await UtilityBillPayment.countDocuments({
             batchId,
@@ -1390,6 +1438,11 @@ export async function respondUtilityBillBatch(req, res) {
             });
         }
 
+        // Reload so zohoSyncError / zohoDifferenceJournalId are current for the client.
+        const freshBills = await UtilityBillPayment.find({
+            _id: { $in: bills.map((b) => b._id) },
+        });
+
         return res.status(200).json({
             batchId,
             status: remainingHr > 0 ? 'Pending HR' : 'Approved',
@@ -1397,8 +1450,13 @@ export async function respondUtilityBillBatch(req, res) {
                 remainingHr > 0
                     ? statusLabel('Pending HR', empDisplayName(gate.hr))
                     : 'not paid',
-            bills: bills.map((b) => decorateBill(b.toObject())),
+            bills: freshBills.map((b) => decorateBill(b.toObject())),
             zohoSync,
+            differenceSync,
+            differenceJournalFailed: differenceJournalFailed.length > 0,
+            message: differenceJournalMsg
+                ? `Bill approved in Zoho, but Chart of Accounts Difference Debit failed: ${differenceJournalMsg}`
+                : undefined,
         });
     } catch (err) {
         console.error('[respondUtilityBillBatch]', err);

@@ -10,7 +10,10 @@ import {
     upsertZohoVendorPaymentFromApi,
 } from '../../services/zohoPurchaseSyncService.js';
 import { mapZohoErrorStatus, toFiniteAmount } from './zohoVendorPaymentUtils.js';
-import { recordPartyExpensesFromVendorPaymentBody } from '../../utils/recordPartyExpenseFromZohoPayment.js';
+import {
+    recordPartyExpensesFromVendorPaymentBody,
+    settleUtilityDifferenceViaJournal,
+} from '../../utils/recordPartyExpenseFromZohoPayment.js';
 import { getZohoOrgContext, withZohoOrganization } from '../../utils/zohoOrgContext.js';
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -34,6 +37,12 @@ function findAccountByName(accounts = [], name = '') {
         }) || null
     );
 }
+
+/**
+ * Paid Through may be any active Chart of Accounts row Zoho accepts
+ * (bank/cash OR liability like "Salary payable - …" for employee difference settle).
+ * Do not block account types here — Zoho is the source of truth.
+ */
 
 /**
  * Paid Through picked from the OTHER Zoho org (e.g. NNIT employee account on a VEGA bill).
@@ -274,9 +283,42 @@ async function refreshAppliedBills(bills = []) {
 
 export const postZohoVendorPayment = async (req, res) => {
     try {
-        const payload = buildPaymentPayload(req.body || {});
+        const body = req.body || {};
+        const mode = String(body.mode || body.utilityPayMode || '')
+            .trim()
+            .toLowerCase();
+        const isDifferenceSettle = mode === 'difference' || mode === 'balance';
+        const asDraft =
+            body.is_draft === true ||
+            body.isDraft === true ||
+            String(body.status || '').toLowerCase() === 'draft';
+
+        // Difference settle: AED Journal Credit on Salary payable — never Vendor Payment on
+        // a foreign-currency bill (that converted 50 GBP → 245.49 AED Credit).
+        if (isDifferenceSettle && !asDraft) {
+            const settle = await settleUtilityDifferenceViaJournal({
+                body,
+                userId: req.user?._id || null,
+            });
+            return res.status(201).json({
+                success: true,
+                data: {
+                    journal_id: settle.journalId,
+                    amount: settle.amount,
+                    paid_through_account_id: settle.partyAccountId,
+                    paid_through_account_name: settle.partyAccountName,
+                    status: 'paid',
+                    settle_type: 'difference_journal',
+                },
+                isDraft: false,
+                partyExpenses: settle.partyExpenseResults,
+                message: `Difference settled: Credit AED ${Number(settle.amount).toFixed(2)} to ${settle.partyAccountName} (Journal).`,
+            });
+        }
+
+        const payload = buildPaymentPayload(body);
         const isDraft = payload.is_draft === true;
-        const crossOrgPaidThrough = await resolveCrossOrgPaidThrough(req.body || {}, payload);
+        const crossOrgPaidThrough = await resolveCrossOrgPaidThrough(body, payload);
 
         let data;
         try {

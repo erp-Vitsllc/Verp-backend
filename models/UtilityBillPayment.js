@@ -95,6 +95,10 @@ const utilityBillPaymentSchema = new mongoose.Schema(
         paymentDay: { type: Number, default: null },
         expenseAccountId: { type: String, default: '' },
         expenseAccountName: { type: String, default: '' },
+        /** Salary Payable / party COA matched by account_code to employeeId or companyId. */
+        partyAccountId: { type: String, default: '' },
+        partyAccountName: { type: String, default: '' },
+        partyAccountCode: { type: String, default: '' },
         zohoVendorId: { type: String, default: '' },
         zohoBillId: { type: String, default: '', index: true },
         /** draft = created in Zoho but not payable; open = Accounts can pay in Payments Made */
@@ -107,6 +111,14 @@ const utilityBillPaymentSchema = new mongoose.Schema(
         zohoOrganizationId: { type: String, default: '', index: true },
         zohoSyncedAt: { type: Date, default: null },
         zohoSyncError: { type: String, default: '' },
+        /** Set when the ERP bill PDF/image was uploaded to the Zoho bill. */
+        zohoAttachmentSyncedAt: { type: Date, default: null },
+        zohoAttachmentName: { type: String, default: '' },
+        /**
+         * Zoho manual journal posted on HR approve when Difference ≠ 0:
+         * Debit partyAccount (difference pay) · Credit expenseAccount (to vendor).
+         */
+        zohoDifferenceJournalId: { type: String, default: '' },
     },
     { timestamps: true },
 );

@@ -1,11 +1,10 @@
 import PartyExpense from '../../models/PartyExpense.js';
 import UtilityBillPayment from '../../models/UtilityBillPayment.js';
+import Company from '../../models/Company.js';
 import {
     recordPartyExpensePaidFromZoho,
 } from '../../utils/recordPartyExpenseFromZohoPayment.js';
 import { employeeIdQueryVariants } from '../../utils/upsertUtilityBalancePartyExpense.js';
-
-const COMPANY_PARTY_ID = 'VEGA-HR-0000';
 
 function clean(value, fallback = '') {
     const text = String(value ?? '').trim();
@@ -38,6 +37,7 @@ function resolveBalanceShare(bill, { forEmployee = false } = {}) {
         ? Number(bill.differenceAmount)
         : contract - actual;
     const overContract = Math.max(0, -signedDiff, Math.abs(Math.min(0, signedDiff)));
+    if (overContract <= 0) return 0;
     // Prefer explicit diff shares from submit / review.
     const empDiff = Number(bill?.employeeDiffAmount);
     const coDiff = Number(bill?.companyDiffAmount);
@@ -96,6 +96,18 @@ export async function listPartyExpenses(req, res) {
         const employeeVariants = employeeId
             ? await employeeIdQueryVariants(employeeId)
             : [];
+        const companyVariants = companyId
+            ? await (async () => {
+                  const ids = new Set([companyId]);
+                  const query = /^[0-9a-fA-F]{24}$/.test(companyId)
+                      ? { _id: companyId }
+                      : { companyId };
+                  const company = await Company.findOne(query).select('_id companyId').lean();
+                  if (company?._id) ids.add(String(company._id));
+                  if (company?.companyId) ids.add(String(company.companyId));
+                  return [...ids];
+              })()
+            : [];
 
         const expenseFilter = employeeId
             ? {
@@ -104,7 +116,7 @@ export async function listPartyExpenses(req, res) {
               }
             : {
                   partyType: 'company',
-                  $or: [{ companyId }, { employeeId: COMPANY_PARTY_ID }],
+                  companyId: { $in: companyVariants.length ? companyVariants : [companyId] },
               };
 
         const [stored, bills] = await Promise.all([
@@ -124,12 +136,10 @@ export async function listPartyExpenses(req, res) {
                       .sort({ createdAt: -1 })
                       .lean()
                 : UtilityBillPayment.find({
-                      $or: [
-                          { payByCompanyId: companyId },
-                          {
-                              paymentBy: { $in: ['company', 'employee_and_company'] },
-                          },
-                      ],
+                      payByCompanyId: {
+                          $in: companyVariants.length ? companyVariants : [companyId],
+                      },
+                      paymentBy: { $in: ['company', 'employee_and_company'] },
                       status: { $in: ['Approved', 'Paid'] },
                   })
                       .sort({ createdAt: -1 })
@@ -185,6 +195,9 @@ export async function listPartyExpenses(req, res) {
                 zohoJournalId: clean(expense?.zohoJournalId),
                 paidThroughAccountId: clean(expense?.paidThroughAccountId),
                 paidThroughAccountName: clean(expense?.paidThroughAccountName),
+                partyAccountId: clean(bill.partyAccountId),
+                partyAccountName: clean(bill.partyAccountName),
+                partyAccountCode: clean(bill.partyAccountCode),
                 paymentMode: clean(expense?.paymentMode),
                 paidAt: expense?.paidAt || null,
                 ledger: Array.isArray(expense?.ledger) ? expense.ledger : [],
@@ -226,6 +239,9 @@ export async function listPartyExpenses(req, res) {
                     zohoJournalId: clean(expense.zohoJournalId),
                     paidThroughAccountId: clean(expense.paidThroughAccountId),
                     paidThroughAccountName: clean(expense.paidThroughAccountName),
+                    partyAccountId: clean(expense.partyAccountId),
+                    partyAccountName: clean(expense.partyAccountName),
+                    partyAccountCode: clean(expense.partyAccountCode),
                     paymentMode: clean(expense.paymentMode),
                     paidAt: expense.paidAt || null,
                     ledger: Array.isArray(expense.ledger) ? expense.ledger : [],
@@ -304,6 +320,9 @@ export async function listPartyExpenses(req, res) {
                 zohoJournalId: clean(expense.zohoJournalId),
                 paidThroughAccountId: clean(expense.paidThroughAccountId),
                 paidThroughAccountName: clean(expense.paidThroughAccountName),
+                partyAccountId: clean(expense.partyAccountId),
+                partyAccountName: clean(expense.partyAccountName),
+                partyAccountCode: clean(expense.partyAccountCode),
                 paymentMode: clean(expense.paymentMode),
                 paidAt: expense.paidAt || null,
                 ledger: Array.isArray(expense.ledger) ? expense.ledger : [],

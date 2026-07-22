@@ -11,6 +11,7 @@ const TOKEN_EXPIRY_BUFFER_MS = 5 * 60 * 1000;
 const DEFAULT_OAUTH_SCOPE = [
     'ZohoBooks.contacts.READ',
     'ZohoBooks.contacts.CREATE',
+    'ZohoBooks.contacts.UPDATE',
     'ZohoBooks.vendorpayments.READ',
     'ZohoBooks.vendorpayments.CREATE',
     'ZohoBooks.vendorpayments.UPDATE',
@@ -20,6 +21,7 @@ const DEFAULT_OAUTH_SCOPE = [
     'ZohoBooks.expenses.READ',
     'ZohoBooks.expenses.CREATE',
     'ZohoBooks.accountants.READ',
+    'ZohoBooks.accountants.CREATE',
     'ZohoBooks.settings.READ',
 ].join(',');
 
@@ -614,7 +616,8 @@ export async function createVendorPayment(payload = {}) {
         timeout: 30000,
     });
 
-    return response.vendorpayment || response;
+    // Zoho returns the created record as "vendorpayment" or "payment" depending on org/version.
+    return response.vendorpayment || response.payment || response;
 }
 
 /**
@@ -622,12 +625,22 @@ export async function createVendorPayment(payload = {}) {
  * OAuth: ZohoBooks.accountants.CREATE
  */
 export async function createZohoJournal(payload = {}) {
-    const response = await requestZohoBooks('/journals', {
-        method: 'post',
-        data: payload,
-        timeout: 30000,
-    });
-    return response.journal || response;
+    try {
+        const response = await requestZohoBooks('/journals', {
+            method: 'post',
+            data: payload,
+            timeout: 30000,
+        });
+        return response.journal || response;
+    } catch (err) {
+        const msg = String(err?.message || '');
+        if (/scope|permission|not authorized|access denied|oauth/i.test(msg)) {
+            throw new Error(
+                `${msg} Re-connect Zoho Books with ZohoBooks.accountants.CREATE (Chart of Accounts journals).`,
+            );
+        }
+        throw err;
+    }
 }
 
 /**
@@ -730,6 +743,83 @@ export async function createBill(payload = {}) {
     });
 
     return response.bill || response;
+}
+
+/**
+ * Upload a file to an existing Zoho Books bill.
+ * POST /bills/{bill_id}/attachment (multipart field name: attachment).
+ * Allowed: gif, png, jpeg, jpg, bmp, pdf.
+ */
+export async function uploadBillAttachment(
+    billId,
+    { buffer, filename = 'attachment.pdf', mimeType = 'application/pdf' } = {},
+) {
+    const id = String(billId || '').trim();
+    if (!id) throw new Error('Bill id is required.');
+    if (!Buffer.isBuffer(buffer) || buffer.length === 0) {
+        throw new Error('Attachment file is empty.');
+    }
+
+    const safeName = String(filename || 'attachment.pdf')
+        .replace(/[\\"\r\n]/g, '_')
+        .trim()
+        .slice(0, 200) || 'attachment.pdf';
+    const contentType = String(mimeType || 'application/pdf').trim() || 'application/pdf';
+    const boundary = `----ZohoBillAttachment${Date.now()}${Math.random().toString(36).slice(2)}`;
+    const preamble = Buffer.from(
+        `--${boundary}\r\n` +
+            `Content-Disposition: form-data; name="attachment"; filename="${safeName}"\r\n` +
+            `Content-Type: ${contentType}\r\n\r\n`,
+        'utf8',
+    );
+    const epilogue = Buffer.from(`\r\n--${boundary}--\r\n`, 'utf8');
+    const body = Buffer.concat([preamble, buffer, epilogue]);
+
+    const { organizationId, booksApiBase, accessToken } = await getBooksRequestContext();
+    const pathname = `/bills/${encodeURIComponent(id)}/attachment`;
+
+    console.log(
+        `[ZohoBooks →] POST ${booksApiBase}${pathname}`,
+        `org=${organizationId}`,
+        `file=${safeName}`,
+        `bytes=${buffer.length}`,
+    );
+
+    try {
+        const response = await axios({
+            method: 'post',
+            url: `${booksApiBase}${pathname}`,
+            params: { organization_id: organizationId },
+            data: body,
+            headers: {
+                Authorization: `Zoho-oauthtoken ${accessToken}`,
+                'Content-Type': `multipart/form-data; boundary=${boundary}`,
+                'Content-Length': body.length,
+            },
+            timeout: 90000,
+            maxBodyLength: Infinity,
+            maxContentLength: Infinity,
+        });
+
+        const responseBody = response.data || {};
+        if (Number(responseBody.code) !== 0) {
+            throw new Error(responseBody.message || 'Zoho bill attachment upload failed');
+        }
+
+        console.log(
+            `[ZohoBooks ✓] POST ${pathname} org=${organizationId} attachment="${safeName}"`,
+        );
+        return responseBody;
+    } catch (error) {
+        const zohoMessage = error?.response?.data?.message || error?.message;
+        console.error(
+            `[ZohoBooks ✗] POST ${pathname} org=${organizationId}:`,
+            typeof error?.response?.data === 'object'
+                ? JSON.stringify(error.response.data)
+                : String(zohoMessage || error),
+        );
+        throw new Error(zohoMessage || 'Zoho bill attachment upload failed');
+    }
 }
 
 /** Submit a Draft bill into the Zoho approval flow (orgs with bill approval enabled). */
@@ -1146,19 +1236,15 @@ export async function fetchBillExpenseAccounts() {
         params: {
             filter_by: 'AccountType.Active',
         },
-        maxPages: 2,
+        maxPages: 5,
         timeout: 25000,
     });
 
+    // Match Zoho Books' own bill-line account dropdown: every active account except
+    // payment accounts (cash / bank / cards) and system AP / AR controls.
     return accounts.filter((account) => {
         const type = String(account?.account_type || account?.account_type_formatted || '').toLowerCase();
-        // Exclude payment / liability accounts that belong on Payments Made, not bill lines.
-        if (/cash|bank|credit card|undeposited|accounts payable|accounts receivable/.test(type)) {
-            return false;
-        }
-        return /expense|cost of goods|costofgoods|fixed asset|other asset|other current asset|stock|inventory/.test(
-            type,
-        );
+        return !/cash|bank|credit card|undeposited|accounts payable|accounts receivable/.test(type);
     });
 }
 
@@ -1170,6 +1256,30 @@ export async function fetchVendorContact(vendorId) {
         timeout: 30000,
     });
 
+    return data.contact || null;
+}
+
+/** Org currencies (GET /settings/currencies) — used to look up the AED currency_id. */
+export async function fetchZohoCurrencies() {
+    const data = await requestZohoBooks('/settings/currencies', { timeout: 30000 });
+    return Array.isArray(data.currencies) ? data.currencies : [];
+}
+
+/**
+ * Change a contact's currency (PUT /contacts/{id}).
+ * Zoho rejects this when the contact already has transactions in the old currency.
+ */
+export async function updateContactCurrency(contactId, currencyId) {
+    const id = String(contactId || '').trim();
+    const currency = String(currencyId || '').trim();
+    if (!id) throw new Error('Contact id is required.');
+    if (!currency) throw new Error('Currency id is required.');
+
+    const data = await requestZohoBooks(`/contacts/${encodeURIComponent(id)}`, {
+        method: 'put',
+        data: { currency_id: currency },
+        timeout: 30000,
+    });
     return data.contact || null;
 }
 

@@ -1,4 +1,5 @@
 import PartyExpense from '../models/PartyExpense.js';
+import UtilityBillPayment from '../models/UtilityBillPayment.js';
 import {
     createZohoJournal,
     fetchPaymentAccounts,
@@ -24,32 +25,8 @@ function normalizePayBy(value) {
     return '';
 }
 
-function findCreditAccount(accounts = [], { employeeName = '', companyName = '' } = {}) {
-    const needle = clean(employeeName || companyName).toLowerCase();
-    const list = Array.isArray(accounts) ? accounts : [];
-
-    const byName = needle
-        ? list.find((a) => clean(a.account_name || a.name).toLowerCase().includes(needle))
-        : null;
-    if (byName) {
-        return {
-            id: clean(byName.account_id || byName.id),
-            name: clean(byName.account_name || byName.name),
-        };
-    }
-
-    const payable = list.find((a) => {
-        const type = clean(a.account_type || a.account_type_formatted).toLowerCase();
-        const name = clean(a.account_name || a.name).toLowerCase();
-        return /accounts payable|other current liability|liability/.test(type) || /payable/.test(name);
-    });
-    if (payable) {
-        return {
-            id: clean(payable.account_id || payable.id),
-            name: clean(payable.account_name || payable.name, 'Accounts Payable'),
-        };
-    }
-    return { id: '', name: needle ? `Payable — ${needle}` : 'Accounts Payable' };
+function accountCode(account) {
+    return clean(account?.account_code || account?.accountCode || account?.code);
 }
 
 /** Map Zoho journal / journal-view lines → locked local ledger rows. */
@@ -120,51 +97,6 @@ export async function fetchZohoPaymentLedgerLines(zohoPaymentId) {
     return null;
 }
 
-async function tryPostZohoJournal({
-    date,
-    amount,
-    debitAccountId,
-    debitAccountName,
-    creditAccountId,
-    creditAccountName,
-    reference,
-    notes,
-}) {
-    if (!debitAccountId || !creditAccountId || debitAccountId === creditAccountId) {
-        return { journalId: '', lines: [], skipped: true };
-    }
-    try {
-        const journal = await createZohoJournal({
-            journal_date: date,
-            reference_number: reference || undefined,
-            notes: notes || 'Party expense (Payments Made)',
-            line_items: [
-                {
-                    account_id: debitAccountId,
-                    amount,
-                    debit_or_credit: 'debit',
-                    description: debitAccountName || 'Debit',
-                },
-                {
-                    account_id: creditAccountId,
-                    amount,
-                    debit_or_credit: 'credit',
-                    description: creditAccountName || 'Credit',
-                },
-            ],
-        });
-        const lines = ledgerFromZohoLines(journal?.line_items || [], amount);
-        return {
-            journalId: clean(journal?.journal_id || journal?.journalId || journal?.id),
-            lines,
-            skipped: false,
-        };
-    } catch (err) {
-        console.warn('[PartyExpense] Zoho journal failed:', err?.message || err);
-        return { journalId: '', lines: [], skipped: true, error: err?.message || String(err) };
-    }
-}
-
 function appendLockedLedger(doc, lines = []) {
     if (!Array.isArray(doc.ledger)) doc.ledger = [];
     for (const line of lines) {
@@ -226,8 +158,6 @@ export async function recordPartyExpensePaidFromZoho({
     }
 
     const utilityBillId = clean(body.utilityBillId);
-    const date =
-        clean(body.date || zohoPayment.date) || new Date().toISOString().slice(0, 10);
     const zohoPaymentId = clean(
         body.zohoPaymentId ||
             body.payment_id ||
@@ -240,79 +170,60 @@ export async function recordPartyExpensePaidFromZoho({
         body.zohoPaymentNumber || zohoPayment.payment_number || zohoPayment.payment_no,
     );
 
-    // 1) Prefer Zoho payment's own debit/credit (journal view).
-    let zohoLedger = zohoPaymentId ? await fetchZohoPaymentLedgerLines(zohoPaymentId) : null;
+    const utilityBill = utilityBillId
+        ? await UtilityBillPayment.findById(utilityBillId)
+              .select(
+                  'partyAccountId partyAccountName partyAccountCode expenseAccountId expenseAccountName',
+              )
+              .lean()
+        : null;
+    let partyAccountId = clean(body.partyAccountId || utilityBill?.partyAccountId);
+    let partyAccountName = clean(body.partyAccountName || utilityBill?.partyAccountName);
+    const partyAccountCode = clean(
+        body.partyAccountCode ||
+            utilityBill?.partyAccountCode ||
+            (isCompany ? companyId : employeeId),
+    );
 
-    // 2) Else build / post a balancing journal and use those lines.
-    let creditAccount = {
-        id: clean(body.creditAccountId),
-        name: clean(body.creditAccountName),
-    };
-    if (!zohoLedger?.lines?.length && !creditAccount.id) {
-        try {
-            const accounts = await fetchPaymentAccounts();
-            creditAccount = findCreditAccount(accounts, {
-                employeeName: isCompany ? companyName : employeeName,
-                companyName,
-            });
-        } catch (err) {
-            console.warn('[PartyExpense] COA load for credit failed:', err?.message || err);
-            creditAccount = {
-                id: '',
-                name: isCompany
-                    ? `Payable — ${companyName}`
-                    : `Payable — ${employeeName || employeeId}`,
-            };
-        }
+    // Never fall back to display-name matching: account_code is the party identity.
+    if (!partyAccountId && partyAccountCode) {
+        const accounts = await fetchPaymentAccounts();
+        const match = accounts.find(
+            (row) => accountCode(row).toLowerCase() === partyAccountCode.toLowerCase(),
+        );
+        partyAccountId = clean(match?.account_id || match?.id);
+        partyAccountName = clean(match?.account_name || match?.name);
+    }
+    if (!partyAccountId) {
+        throw new Error(
+            `No Zoho Chart of Accounts row matches account code "${partyAccountCode || (isCompany ? companyId : employeeId)}".`,
+        );
     }
 
-    let journalResult = { journalId: '', lines: [], skipped: true };
-    if (!zohoLedger?.lines?.length) {
-        // Zoho vendor payment: AP debit + Paid Through credit is the natural pair.
-        // User-facing Expenses ledger: show Paid Through as credit after pay, AP/payable as debit.
-        const debitAccountId = creditAccount.id || paidThroughAccountId;
-        const debitAccountName =
-            creditAccount.name ||
-            (isCompany ? `Payable — ${companyName}` : `Payable — ${employeeName || employeeId}`);
-        const creditAccountId = paidThroughAccountId;
-        const creditAccountName = paidThroughAccountName;
+    const settleJournalAlreadyPosted = Boolean(clean(body.zohoJournalId || zohoPayment.journal_id));
+    const settlingViaSalaryPayable = partyAccountId === paidThroughAccountId;
 
-        journalResult = await tryPostZohoJournal({
-            date,
+    // Payments Made settle: Debit Paid Through · Credit Acc2 (clears HR Approve Debit).
+    const ledgerLines = [
+        {
+            side: 'debit',
+            accountId: paidThroughAccountId,
+            accountName: paidThroughAccountName,
             amount,
-            debitAccountId,
-            debitAccountName,
-            creditAccountId,
-            creditAccountName,
-            reference: clean(body.referenceNumber || zohoPaymentNumber || utilityBillId),
-            notes: clean(body.description || body.notes),
-        });
-
-        if (!journalResult.lines?.length) {
-            journalResult.lines = [
-                {
-                    side: 'debit',
-                    accountId: debitAccountId,
-                    accountName: debitAccountName,
-                    amount,
-                    notes: 'Debit (Accounts Payable / party)',
-                    locked: true,
-                    createdAt: new Date(),
-                },
-                {
-                    side: 'credit',
-                    accountId: creditAccountId,
-                    accountName: creditAccountName,
-                    amount,
-                    notes: 'Credit (Paid Through) — no deletion',
-                    locked: true,
-                    createdAt: new Date(),
-                },
-            ];
-        }
-    }
-
-    const ledgerLines = zohoLedger?.lines?.length ? zohoLedger.lines : journalResult.lines;
+            notes: 'Debit (Paid Through)',
+            locked: true,
+            createdAt: new Date(),
+        },
+        {
+            side: 'credit',
+            accountId: partyAccountId,
+            accountName: partyAccountName || partyAccountCode,
+            amount,
+            notes: `Credit Acc2 (${partyAccountCode || 'salary payable'})`,
+            locked: true,
+            createdAt: new Date(),
+        },
+    ];
 
     const filter = utilityBillId
         ? {
@@ -343,6 +254,53 @@ export async function recordPartyExpensePaidFromZoho({
         });
     }
 
+    // Settle journal already posted by settleUtilityDifferenceViaJournal — do not reclassify.
+    let reclassificationJournalId = clean(doc.zohoJournalId || body.zohoJournalId);
+    const expenseAccountId = clean(utilityBill?.expenseAccountId);
+    if (
+        !settleJournalAlreadyPosted &&
+        !settlingViaSalaryPayable &&
+        !reclassificationJournalId &&
+        expenseAccountId &&
+        expenseAccountId !== partyAccountId
+    ) {
+        try {
+            const journal = await createZohoJournal({
+                journal_date:
+                    clean(body.date || zohoPayment.date) ||
+                    new Date().toISOString().slice(0, 10),
+                reference_number: clean(
+                    body.referenceNumber || zohoPaymentNumber || utilityBillId,
+                ) || undefined,
+                notes: `Utility deduction reclassification · ${partyAccountCode}`,
+                line_items: [
+                    {
+                        account_id: partyAccountId,
+                        amount,
+                        debit_or_credit: 'debit',
+                        description: `Party account ${partyAccountCode}`,
+                    },
+                    {
+                        account_id: expenseAccountId,
+                        amount,
+                        debit_or_credit: 'credit',
+                        description:
+                            clean(utilityBill?.expenseAccountName) ||
+                            'Utility expense reclassification',
+                    },
+                ],
+            });
+            reclassificationJournalId = clean(
+                journal?.journal_id || journal?.journalId || journal?.id,
+            );
+        } catch (err) {
+            console.warn(
+                '[PartyExpense] Zoho party-account reclassification failed:',
+                err?.message || err,
+            );
+        }
+    }
+
     appendLockedLedger(doc, ledgerLines);
 
     // Balance payment only — status Paid after Zoho Save as Paid on the difference/balance.
@@ -363,9 +321,12 @@ export async function recordPartyExpensePaidFromZoho({
     doc.zohoPaymentNumber = zohoPaymentNumber || doc.zohoPaymentNumber;
     doc.zohoOrganizationId = zohoOrganizationId || doc.zohoOrganizationId;
     doc.zohoJournalId =
-        clean(zohoLedger?.journalId || journalResult.journalId) || doc.zohoJournalId;
+        reclassificationJournalId || clean(body.zohoJournalId, doc.zohoJournalId);
     doc.paidThroughAccountId = paidThroughAccountId;
     doc.paidThroughAccountName = paidThroughAccountName;
+    doc.partyAccountId = partyAccountId;
+    doc.partyAccountName = partyAccountName;
+    doc.partyAccountCode = partyAccountCode;
     doc.paymentMode = clean(body.paymentMode || zohoPayment.payment_mode || doc.paymentMode);
     doc.paidAt = new Date();
     doc.erpPaymentId = clean(body.erpPaymentId || doc.erpPaymentId);
@@ -377,7 +338,11 @@ export async function recordPartyExpensePaidFromZoho({
 
     return {
         expense: doc.toObject(),
-        ledgerSource: zohoLedger?.source || (journalResult.skipped ? 'local' : 'zoho_journal'),
+        ledgerSource: settlingViaSalaryPayable
+            ? 'salary_payable_paid_through'
+            : reclassificationJournalId
+              ? 'zoho_reclassification'
+              : 'party_account_code',
         journalId: doc.zohoJournalId,
     };
 }
@@ -425,10 +390,12 @@ export async function recordPartyExpensesFromVendorPaymentBody({
         paymentMode: clean(body.payment_mode || body.paymentMode || zohoPayment.payment_mode),
         notes: clean(body.description || body.notes),
         description: clean(body.description || body.notes),
+        referenceNumber: clean(body.reference_number || body.referenceNumber),
         currencyCode: clean(body.currency_code || zohoPayment.currency_code, 'AED'),
         utilityType: clean(body.utilityType),
         billMonth: clean(body.billMonth),
         utilityBatchId: clean(body.utilityBatchId),
+        zohoJournalId: clean(zohoPayment.journal_id || body.zohoJournalId),
     };
 
     const results = [];
@@ -446,4 +413,166 @@ export async function recordPartyExpensesFromVendorPaymentBody({
         }
     }
     return results;
+}
+
+/**
+ * Difference settle in AED via Journal — NOT vendor payment on the (often GBP) bill.
+ *
+ * After HR Approve (Acc2 Debit · Acc1 Credit), Payments Made posts:
+ *   Debit  = Paid Through (cash/bank/selected account)
+ *   Credit = Acc2 Salary payable (clears the approve Debit)
+ */
+export async function settleUtilityDifferenceViaJournal({
+    body = {},
+    userId = null,
+} = {}) {
+    const amount = money(body.amount);
+    if (amount <= 0) {
+        throw Object.assign(new Error('Payment amount must be greater than zero.'), {
+            statusCode: 400,
+        });
+    }
+
+    const list = Array.isArray(body.party_expenses)
+        ? body.party_expenses
+        : Array.isArray(body.partyExpenses)
+          ? body.partyExpenses
+          : [];
+    const first = list[0] || {};
+    const utilityBillId = clean(first.utilityBillId || body.utilityBillId);
+
+    const utilityBill = utilityBillId
+        ? await UtilityBillPayment.findById(utilityBillId)
+              .select(
+                  'partyAccountId partyAccountName partyAccountCode expenseAccountId expenseAccountName zohoOrganizationId billNumber accountNo utilityType billMonth',
+              )
+              .lean()
+        : null;
+
+    let partyAccountId = clean(first.partyAccountId || utilityBill?.partyAccountId);
+    let partyAccountName = clean(
+        first.partyAccountName || utilityBill?.partyAccountName,
+        'Salary payable',
+    );
+    const partyAccountCode = clean(
+        first.partyAccountCode || utilityBill?.partyAccountCode,
+    );
+
+    const paidThroughAccountId = clean(
+        body.paid_through_account_id || body.paidThroughAccountId,
+    );
+    const paidThroughAccountName = clean(
+        body.paid_through_account_name || body.paidThroughAccountName,
+        'Paid Through',
+    );
+
+    if (!partyAccountId) {
+        throw Object.assign(
+            new Error(
+                'Employee salary payable account is missing. Re-open the utility bill and retry.',
+            ),
+            { statusCode: 400 },
+        );
+    }
+    if (!paidThroughAccountId) {
+        throw Object.assign(new Error('Paid Through account is required.'), { statusCode: 400 });
+    }
+    // Debit Paid Through · Credit Acc2 — accounts must differ.
+    if (paidThroughAccountId === partyAccountId) {
+        throw Object.assign(
+            new Error(
+                `Paid Through cannot be the same as Acc2 (${partyAccountName || 'Salary payable'}). ` +
+                    'Pick Cash / Bank (or another account) — Payments Made Debits Paid Through and Credits Acc2.',
+            ),
+            { statusCode: 400 },
+        );
+    }
+
+    const journalDate =
+        clean(body.date) || new Date().toISOString().slice(0, 10);
+    const reference = clean(
+        body.reference_number ||
+            body.referenceNumber ||
+            utilityBill?.billNumber ||
+            utilityBill?.accountNo ||
+            utilityBillId,
+    );
+
+    const journal = await createZohoJournal({
+        journal_date: journalDate,
+        reference_number: reference || undefined,
+        notes:
+            clean(body.description || body.notes) ||
+            `Utility difference settle · ${clean(utilityBill?.utilityType)} ${clean(utilityBill?.billMonth)} · Debit ${paidThroughAccountName} · Credit ${partyAccountName}`,
+        line_items: [
+            {
+                account_id: paidThroughAccountId,
+                amount,
+                debit_or_credit: 'debit',
+                description: paidThroughAccountName || 'Paid Through',
+            },
+            {
+                account_id: partyAccountId,
+                amount,
+                debit_or_credit: 'credit',
+                description: partyAccountName || partyAccountCode || 'Salary payable (Acc2)',
+            },
+        ],
+    });
+
+    const journalId = clean(journal?.journal_id || journal?.journalId || journal?.id);
+    if (!journalId) {
+        throw new Error('Zoho journal created but no journal id returned.');
+    }
+
+    const zohoPaymentStub = {
+        journal_id: journalId,
+        payment_id: journalId,
+        payment_number: reference || journalId,
+        date: journalDate,
+        paid_through_account_id: paidThroughAccountId,
+        paid_through_account_name: paidThroughAccountName,
+        currency_code: 'AED',
+    };
+
+    const partyExpenseResults = await recordPartyExpensesFromVendorPaymentBody({
+        body: {
+            ...body,
+            mode: 'difference',
+            paid_through_account_id: paidThroughAccountId,
+            paid_through_account_name: paidThroughAccountName,
+            zohoJournalId: journalId,
+            party_expenses: list.length
+                ? list.map((row) => ({
+                      ...row,
+                      partyAccountId: row.partyAccountId || partyAccountId,
+                      partyAccountName: row.partyAccountName || partyAccountName,
+                      partyAccountCode: row.partyAccountCode || partyAccountCode,
+                  }))
+                : [
+                      {
+                          ...first,
+                          partyAccountId,
+                          partyAccountName,
+                          partyAccountCode,
+                          amount,
+                          utilityBillId,
+                      },
+                  ],
+        },
+        zohoPayment: zohoPaymentStub,
+        userId,
+    });
+
+    return {
+        journalId,
+        journal,
+        settleViaSalaryPayable: false,
+        partyAccountId,
+        partyAccountName,
+        debitAccountId: paidThroughAccountId,
+        debitAccountName: paidThroughAccountName,
+        amount,
+        partyExpenseResults,
+    };
 }
