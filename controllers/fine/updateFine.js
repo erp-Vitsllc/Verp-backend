@@ -313,14 +313,31 @@ export const updateFine = async (req, res) => {
             }
         }
 
-        // Handle service charge distribution for group fines BEFORE the loop
-        let serviceChargePerParty = 0;
-        if (fines.length > 1) {
-            const partiesCount = fines.length;
-            const totalServiceCharge = parseFloat(
-                updates.serviceCharge !== undefined ? updates.serviceCharge : fine.serviceCharge
-            ) || 0;
-            serviceChargePerParty = partiesCount > 0 ? (totalServiceCharge / partiesCount) : 0;
+        // Handle service charge distribution for group fines BEFORE the loop.
+        // Form sends TOTAL group SC. Each sibling already stores its per-party share —
+        // never take fines[0].serviceCharge and divide again (corrupts amounts on schedule edits).
+        let serviceChargePerParty = null;
+        const amountFieldsChanging = ['fineAmount', 'employeeAmount', 'companyAmount', 'serviceCharge', 'employees']
+            .some((k) => updates[k] !== undefined);
+
+        if (fines.length > 1 && updates.serviceCharge !== undefined) {
+            const incomingSc = parseFloat(updates.serviceCharge) || 0;
+            const currentScSum = fines.reduce(
+                (sum, row) => sum + (parseFloat(row.serviceCharge) || 0),
+                0,
+            );
+            const avgExisting = currentScSum / fines.length;
+            // Incoming looks like already-per-party share → keep it; otherwise treat as group total
+            if (
+                incomingSc > 0 &&
+                currentScSum > 0 &&
+                Math.abs(incomingSc - avgExisting) <= 0.05 &&
+                Math.abs(incomingSc - currentScSum) > 0.05
+            ) {
+                serviceChargePerParty = incomingSc;
+            } else {
+                serviceChargePerParty = incomingSc / fines.length;
+            }
         }
 
         const splitAmountKeys = new Set(['fineAmount', 'employeeAmount', 'companyAmount', 'serviceCharge', 'employees']);
@@ -349,7 +366,8 @@ export const updateFine = async (req, res) => {
 
         // 3. Apply updates only for allowed fields (Loop all for bulk update)
         for (const f of fines) {
-            if (scheduleFieldsAreChanging(f, updates)) {
+            const scheduleChanging = scheduleFieldsAreChanging(f, updates);
+            if (scheduleChanging) {
                 preserveOriginalDeductionScheduleBeforeEdit(f);
                 f.scheduleChangeForHistory = {
                     fromMonth: f.monthStart || '',
@@ -363,12 +381,12 @@ export const updateFine = async (req, res) => {
                 ? updates.employees.find(e => e.employeeId === targetEmployeeId)
                 : null;
 
-            const scParty = fines.length > 1
+            const scParty = serviceChargePerParty != null
                 ? serviceChargePerParty
-                : (parseFloat(updates.serviceCharge ?? f.serviceCharge) || 0);
+                : (parseFloat(f.serviceCharge) || 0);
 
             // Split Employee & Company fines: each DB row gets only its party's amounts from the modal
-            if (empUpdate && fines.length > 1) {
+            if (amountFieldsChanging && empUpdate && fines.length > 1) {
                 const rowBase = parseFloat(empUpdate.employeeAmount);
                 const rowTotal = parseFloat(empUpdate.individualAmount ?? empUpdate.fineAmount);
                 const base = Number.isFinite(rowBase)
@@ -434,7 +452,7 @@ export const updateFine = async (req, res) => {
                             f[key] = parseFloat(empUpdate[key]);
                         } else if (key === 'serviceCharge') {
                             // For group fines, distribute service charge equally among all parties
-                            if (fines.length > 1) {
+                            if (fines.length > 1 && serviceChargePerParty != null) {
                                 f.serviceCharge = serviceChargePerParty;
                             } else {
                                 f.serviceCharge = parseFloat(updates[key]) || 0;
@@ -471,7 +489,9 @@ export const updateFine = async (req, res) => {
                 }
             });
 
-            if (!(empUpdate && fines.length > 1)) {
+            // Only recalculate payable totals when amount fields are actually changing
+            // (schedule-only edits on approved group fines must not rewrite amounts)
+            if (amountFieldsChanging && !(empUpdate && fines.length > 1)) {
             // Recalculate totalFineAmount from components (employeeAmount + companyAmount + serviceCharge)
             const empAmt = parseFloat(f.employeeAmount) || 0;
             const compAmt = parseFloat(f.companyAmount) || 0;
@@ -481,9 +501,7 @@ export const updateFine = async (req, res) => {
             
             // Sync individualAmount within the specific record for consistency
             if (f.assignedEmployees && f.assignedEmployees.length > 0) {
-                const serviceChargeForThisEmployee = fines.length > 1
-                    ? serviceChargePerParty
-                    : servCharge;
+                const serviceChargeForThisEmployee = scParty;
                 f.assignedEmployees[0].individualAmount = empAmt + compAmt + serviceChargeForThisEmployee;
                 
                 if (f.assignedEmployees[0].employeeId === 'VEGA-HR-0000' && updates.companyName) {
@@ -497,9 +515,11 @@ export const updateFine = async (req, res) => {
             }
             }
 
-            if (['Approved', 'Active', 'Paid', 'Completed'].includes(f.fineStatus)) {
+            if (amountFieldsChanging && ['Approved', 'Active', 'Paid', 'Completed'].includes(f.fineStatus)) {
                 const { syncFinePartyPayableAmounts } = await import('../../utils/finePayableAmount.js');
                 syncFinePartyPayableAmounts(f);
+                snapshotDeductionScheduleOnApproval(f);
+            } else if (['Approved', 'Active', 'Paid', 'Completed'].includes(f.fineStatus) && scheduleChanging) {
                 snapshotDeductionScheduleOnApproval(f);
             }
 
