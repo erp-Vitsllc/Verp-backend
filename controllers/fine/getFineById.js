@@ -218,6 +218,16 @@ export const getFineById = async (req, res) => {
             fine.serviceCharge = totalServiceCharge.toFixed(2); // Total service charge for the group
             // Calculate totalFineAmount from components: employeeAmount + companyAmount + serviceCharge
             fine.totalFineAmount = (totalEmpAmt + totalCompAmt + totalServiceCharge).toFixed(2);
+
+            // Prefer any sibling's Accounts vendor / Fine Source for Management billing
+            for (const rf of relatedFines) {
+                if (!fine.fineSource && rf.fineSource) fine.fineSource = rf.fineSource;
+                if (!fine.zohoVendorId && rf.zohoVendorId) fine.zohoVendorId = rf.zohoVendorId;
+                if (!fine.zohoVendorName && rf.zohoVendorName) fine.zohoVendorName = rf.zohoVendorName;
+                if (!fine.zohoOrganizationId && rf.zohoOrganizationId) {
+                    fine.zohoOrganizationId = rf.zohoOrganizationId;
+                }
+            }
         } else if (relatedFines.length === 1 && !fine) {
             fine = relatedFines[0];
             // Ensure totalFineAmount is set for single fines too

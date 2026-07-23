@@ -260,13 +260,49 @@ export const approveFine = async (req, res) => {
                     billDate = '',
                 } = req.body || {};
 
-                const vendorId = String(zohoVendorId || fine.zohoVendorId || '').trim();
+                let vendorId = String(zohoVendorId || fine.zohoVendorId || '').trim();
+                const vendorNameHint = String(
+                    zohoVendorName || fine.zohoVendorName || fine.fineSource || '',
+                ).trim();
+
+                // Accounts set Fine Source / Vendor name — resolve Zoho contact id if missing
+                if (!vendorId && vendorNameHint) {
+                    try {
+                        const { fetchVendors } = await import('../../services/zohoService.js');
+                        const { withZohoOrganization } = await import('../../utils/zohoOrgContext.js');
+                        const orgId = String(
+                            zohoOrganizationId || fine.zohoOrganizationId || '',
+                        ).trim();
+                        const vendors = orgId
+                            ? await withZohoOrganization(orgId, () => fetchVendors())
+                            : await fetchVendors();
+                        const hint = vendorNameHint.toLowerCase();
+                        const match = (Array.isArray(vendors) ? vendors : []).find((v) => {
+                            const name = String(
+                                v.contact_name || v.vendor_name || v.company_name || '',
+                            )
+                                .trim()
+                                .toLowerCase();
+                            return name === hint || name.includes(hint) || hint.includes(name);
+                        });
+                        vendorId = String(
+                            match?.contact_id || match?.vendor_id || match?.id || '',
+                        ).trim();
+                    } catch (lookupErr) {
+                        console.warn(
+                            '[approveFine] Vendor lookup by Fine Source failed:',
+                            lookupErr?.message || lookupErr,
+                        );
+                    }
+                }
+
                 const accountId = String(expenseAccountId || fine.expenseAccountId || '').trim();
                 const allPartiesHavePayable = fines.every((f) => String(f.expenseAccountId || '').trim());
                 if (!vendorId) {
                     return res.status(400).json({
-                        message:
-                            'Management approval requires a Zoho vendor. Set Vendor (Fine Source) in Accounts on the Group Fine Parties card first.',
+                        message: vendorNameHint
+                            ? `Vendor "${vendorNameHint}" is set (Accounts), but no matching Zoho Books vendor was found.`
+                            : 'Management approval requires a Zoho vendor. Set Vendor (Fine Source) in Accounts on the Group Fine Parties card first.',
                     });
                 }
                 if (!accountId && !allPartiesHavePayable) {
