@@ -280,8 +280,12 @@ export const approveFine = async (req, res) => {
                             String(s || '')
                                 .trim()
                                 .toLowerCase()
+                                .replace(/\u00a0/g, ' ')
                                 .replace(/\s+/g, ' ')
-                                .replace(/\s*&\s*/g, ' & ');
+                                .replace(/\s*&\s*/g, ' and ')
+                                .replace(/[^a-z0-9\u0600-\u06FF\s]/g, ' ')
+                                .replace(/\s+/g, ' ')
+                                .trim();
                         const hint = normalize(vendorNameHint);
                         const list = Array.isArray(vendors) ? vendors : [];
                         let match = list.find((v) => {
