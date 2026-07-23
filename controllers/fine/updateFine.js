@@ -201,6 +201,26 @@ export const updateFine = async (req, res) => {
             attachment: updates.attachment ?? fine.attachment,
             attachments: updates.attachments ?? fine.attachments,
         };
+
+        // Group / sibling edits often send companyAmount 0 — recover from party rows or sibling docs
+        if (
+            String(mergedVehicleFine.responsibleFor || '').trim() === 'Employee & Company' &&
+            (parseFloat(mergedVehicleFine.companyAmount) || 0) < 0.01
+        ) {
+            const fromEmployees = (Array.isArray(mergedVehicleFine.employees)
+                ? mergedVehicleFine.employees
+                : []
+            ).find((e) => e?.employeeId === 'VEGA-HR-0000');
+            const fromSibling = fines.find((f) =>
+                f.assignedEmployees?.some((e) => e.employeeId === 'VEGA-HR-0000'),
+            );
+            const recovered =
+                parseFloat(fromEmployees?.employeeAmount) ||
+                parseFloat(fromSibling?.employeeAmount) ||
+                0;
+            if (recovered >= 0.01) mergedVehicleFine.companyAmount = recovered;
+        }
+
         if (isVehicleFinePayload(mergedVehicleFine)) {
             const strictSubmit =
                 updates.resubmit === true ||

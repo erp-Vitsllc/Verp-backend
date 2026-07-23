@@ -91,13 +91,40 @@ export function validateVehicleFinePayload(body, options = {}) {
     }
 
     if (responsibleFor === 'Employee & Company') {
-        const empAmt = parseMoney(body.employeeAmount);
-        const compAmt = parseMoney(body.companyAmount);
+        let empAmt = parseMoney(body.employeeAmount);
+        let compAmt = parseMoney(body.companyAmount);
+
+        // Recover from party rows when top-level amounts are missing/zero (common on group siblings)
+        const employees = Array.isArray(body.employees) ? body.employees : [];
+        const companyRow = employees.find((e) => e?.employeeId === 'VEGA-HR-0000');
+        const empRows = employees.filter(
+            (e) => e?.employeeId && e.employeeId !== 'VEGA-HR-0000' && e.employeeId !== 'VEGA_INTERNAL',
+        );
+        if ((compAmt === null || compAmt < LIMITS.minFineAmount) && companyRow) {
+            const fromBase = parseMoney(companyRow.employeeAmount);
+            const fromPayable = parseMoney(companyRow.individualAmount ?? companyRow.fineAmount);
+            if (fromBase !== null && fromBase >= LIMITS.minFineAmount) compAmt = fromBase;
+            else if (fromPayable !== null && serviceCharge > 0 && fromPayable > serviceCharge) {
+                // Payable stored — approximate base by stripping an equal SC share
+                const parties = Math.max(2, empRows.length + 1);
+                compAmt = Math.max(0, fromPayable - serviceCharge / parties);
+            } else if (fromPayable !== null) {
+                compAmt = fromPayable;
+            }
+        }
+        if ((empAmt === null || empAmt < LIMITS.minFineAmount) && empRows.length > 0) {
+            const sumBase = empRows.reduce((s, e) => s + (parseMoney(e.employeeAmount) || 0), 0);
+            if (sumBase >= LIMITS.minFineAmount) empAmt = sumBase;
+        }
+
         if (!isDraft) {
             if (empAmt === null || empAmt < LIMITS.minFineAmount) errors.employeeAmount = 'Invalid employee amount';
             if (compAmt === null || compAmt < LIMITS.minFineAmount) errors.companyAmount = 'Invalid company amount';
             if (total !== null && empAmt !== null && compAmt !== null) {
-                if (Math.abs(empAmt + compAmt + serviceCharge - total) > 0.01) {
+                const asBasesPlusSc = Math.abs(empAmt + compAmt + serviceCharge - total) <= 0.02;
+                const asBasesOnly = Math.abs(empAmt + compAmt - Math.max(0, total - serviceCharge)) <= 0.02;
+                const asPayables = Math.abs(empAmt + compAmt - total) <= 0.02;
+                if (!asBasesPlusSc && !asBasesOnly && !asPayables) {
                     errors.amountMismatch = 'Split amounts must equal total fine amount';
                 }
             }
