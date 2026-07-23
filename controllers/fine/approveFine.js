@@ -276,15 +276,32 @@ export const approveFine = async (req, res) => {
                         const vendors = orgId
                             ? await withZohoOrganization(orgId, () => fetchVendors())
                             : await fetchVendors();
-                        const hint = vendorNameHint.toLowerCase();
-                        const match = (Array.isArray(vendors) ? vendors : []).find((v) => {
-                            const name = String(
-                                v.contact_name || v.vendor_name || v.company_name || '',
-                            )
+                        const normalize = (s) =>
+                            String(s || '')
                                 .trim()
-                                .toLowerCase();
-                            return name === hint || name.includes(hint) || hint.includes(name);
+                                .toLowerCase()
+                                .replace(/\s+/g, ' ')
+                                .replace(/\s*&\s*/g, ' & ');
+                        const hint = normalize(vendorNameHint);
+                        const list = Array.isArray(vendors) ? vendors : [];
+                        let match = list.find((v) => {
+                            const names = [
+                                v.contact_name,
+                                v.vendor_name,
+                                v.company_name,
+                            ].map(normalize).filter(Boolean);
+                            return names.some((n) => n === hint);
                         });
+                        if (!match) {
+                            match = list.find((v) => {
+                                const names = [
+                                    v.contact_name,
+                                    v.vendor_name,
+                                    v.company_name,
+                                ].map(normalize).filter(Boolean);
+                                return names.some((n) => n.includes(hint) || hint.includes(n));
+                            });
+                        }
                         vendorId = String(
                             match?.contact_id || match?.vendor_id || match?.id || '',
                         ).trim();
