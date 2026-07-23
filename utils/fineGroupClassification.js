@@ -89,6 +89,8 @@ export function synthesizeSingleRecordGroupFineView(fine) {
         return {
             ...e,
             fineId: fine.fineId,
+            // Parent Fine document id (not assignedEmployees subdocument _id)
+            fineRecordId: fine._id,
             fineStatus: fine.fineStatus,
             employeeAmount: base,
             fineAmount: base,

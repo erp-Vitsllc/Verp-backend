@@ -102,15 +102,7 @@ export function validateVehicleFinePayload(body, options = {}) {
         );
         if ((compAmt === null || compAmt < LIMITS.minFineAmount) && companyRow) {
             const fromBase = parseMoney(companyRow.employeeAmount);
-            const fromPayable = parseMoney(companyRow.individualAmount ?? companyRow.fineAmount);
             if (fromBase !== null && fromBase >= LIMITS.minFineAmount) compAmt = fromBase;
-            else if (fromPayable !== null && serviceCharge > 0 && fromPayable > serviceCharge) {
-                // Payable stored — approximate base by stripping an equal SC share
-                const parties = Math.max(2, empRows.length + 1);
-                compAmt = Math.max(0, fromPayable - serviceCharge / parties);
-            } else if (fromPayable !== null) {
-                compAmt = fromPayable;
-            }
         }
         if ((empAmt === null || empAmt < LIMITS.minFineAmount) && empRows.length > 0) {
             const sumBase = empRows.reduce((s, e) => s + (parseMoney(e.employeeAmount) || 0), 0);
@@ -120,11 +112,43 @@ export function validateVehicleFinePayload(body, options = {}) {
         if (!isDraft) {
             if (empAmt === null || empAmt < LIMITS.minFineAmount) errors.employeeAmount = 'Invalid employee amount';
             if (compAmt === null || compAmt < LIMITS.minFineAmount) errors.companyAmount = 'Invalid company amount';
+
             if (total !== null && empAmt !== null && compAmt !== null) {
-                const asBasesPlusSc = Math.abs(empAmt + compAmt + serviceCharge - total) <= 0.02;
-                const asBasesOnly = Math.abs(empAmt + compAmt - Math.max(0, total - serviceCharge)) <= 0.02;
-                const asPayables = Math.abs(empAmt + compAmt - total) <= 0.02;
-                if (!asBasesPlusSc && !asBasesOnly && !asPayables) {
+                const parties = Math.max(2, empRows.length + (companyRow ? 1 : 0));
+                const scShare = serviceCharge > 0 ? serviceCharge / parties : 0;
+                const sum = empAmt + compAmt;
+                const baseTotal = Math.max(0, total - serviceCharge);
+
+                // Accept: bases+SC, bases-only, or payables (already include SC share)
+                const asBasesPlusSc = Math.abs(sum + serviceCharge - total) <= 0.05;
+                const asBasesOnly = Math.abs(sum - baseTotal) <= 0.05;
+                const asPayables = Math.abs(sum - total) <= 0.05;
+                // Payables mistakenly treated as bases — strip equal SC shares
+                const stripped = Math.abs(sum - serviceCharge - baseTotal) <= 0.05
+                    || Math.abs((empAmt - scShare) + (compAmt - scShare) + serviceCharge - total) <= 0.05;
+
+                // Prefer party-row payable totals when present (most accurate for group saves)
+                let partyPayablesOk = false;
+                if (employees.length > 0) {
+                    const payableSum = employees.reduce((s, e) => {
+                        const p =
+                            parseMoney(e.individualAmount) ??
+                            parseMoney(e.fineAmount) ??
+                            parseMoney(e.employeeAmount) ??
+                            0;
+                        return s + p;
+                    }, 0);
+                    const baseSum = employees.reduce(
+                        (s, e) => s + (parseMoney(e.employeeAmount) || 0),
+                        0,
+                    );
+                    partyPayablesOk =
+                        Math.abs(payableSum - total) <= 0.05 ||
+                        Math.abs(baseSum + serviceCharge - total) <= 0.05 ||
+                        Math.abs(baseSum - baseTotal) <= 0.05;
+                }
+
+                if (!asBasesPlusSc && !asBasesOnly && !asPayables && !stripped && !partyPayablesOk) {
                     errors.amountMismatch = 'Split amounts must equal total fine amount';
                 }
             }

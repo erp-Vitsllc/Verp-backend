@@ -182,6 +182,23 @@ export const updateFine = async (req, res) => {
             'expenseAccountId', 'expenseAccountName', 'payableConfirmed', 'zohoVendorId', 'zohoVendorName', 'zohoOrganizationId',
         ];
 
+        const pickText = (updateVal, existingVal) => {
+            const next = updateVal !== undefined && updateVal !== null ? String(updateVal).trim() : '';
+            if (next) return next;
+            const prev = existingVal !== undefined && existingVal !== null ? String(existingVal).trim() : '';
+            return prev || next;
+        };
+
+        // Don't wipe existing description / companyDescription with blank strings from edit forms
+        if (updates.description !== undefined && !String(updates.description || '').trim()) {
+            if (String(fine.description || '').trim()) delete updates.description;
+            else updates.description = '';
+        }
+        if (updates.companyDescription !== undefined && !String(updates.companyDescription || '').trim()) {
+            if (String(fine.companyDescription || '').trim()) delete updates.companyDescription;
+            else updates.companyDescription = '';
+        }
+
         const mergedVehicleFine = {
             fineType: updates.fineType ?? fine.fineType,
             subCategory: updates.subCategory ?? fine.subCategory,
@@ -193,14 +210,28 @@ export const updateFine = async (req, res) => {
             responsibleFor: updates.responsibleFor ?? fine.responsibleFor,
             employeeAmount: updates.employeeAmount ?? fine.employeeAmount,
             companyAmount: updates.companyAmount ?? fine.companyAmount,
-            description: updates.description ?? fine.description,
-            companyDescription: updates.companyDescription ?? fine.companyDescription,
+            // Keep existing text when client sends blank (edit forms often clear these)
+            description: pickText(updates.description, fine.description),
+            companyDescription: pickText(updates.companyDescription, fine.companyDescription),
             company: updates.company ?? fine.company,
             payableDuration: updates.payableDuration ?? fine.payableDuration,
             monthStart: updates.monthStart ?? fine.monthStart,
             attachment: updates.attachment ?? fine.attachment,
             attachments: updates.attachments ?? fine.attachments,
         };
+
+        // Normalize split: if emp+comp look like payables (sum ≈ grand total), convert to bases for storage checks
+        {
+            const rf = String(mergedVehicleFine.responsibleFor || '').trim();
+            const sc = parseFloat(mergedVehicleFine.serviceCharge) || 0;
+            const total = parseFloat(mergedVehicleFine.fineAmount) || 0;
+            let emp = parseFloat(mergedVehicleFine.employeeAmount) || 0;
+            let comp = parseFloat(mergedVehicleFine.companyAmount) || 0;
+            if (rf === 'Employee & Company' && sc > 0 && total > 0 && Math.abs(emp + comp - total) <= 0.05) {
+                mergedVehicleFine.employeeAmount = Math.max(0, emp - sc / 2);
+                mergedVehicleFine.companyAmount = Math.max(0, comp - sc / 2);
+            }
+        }
 
         // Group / sibling edits often send companyAmount 0 — recover from party rows or sibling docs
         if (
