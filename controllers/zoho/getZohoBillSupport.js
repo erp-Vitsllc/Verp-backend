@@ -1,28 +1,36 @@
 import {
     fetchBillExpenseAccounts,
+    fetchPaymentAccounts,
     fetchLocations,
 } from '../../services/zohoService.js';
 import { mapZohoErrorStatus } from './zohoVendorPaymentUtils.js';
 
 const CACHE_TTL_MS = 5 * 60 * 1000;
-let supportCache = null;
+/** Separate caches: bill-line filtered vs full Chart of Accounts */
+const supportCacheByKey = new Map();
 
 export const getZohoBillSupport = async (req, res) => {
     try {
+        const wantsFullAccounts =
+            String(req.query?.fullAccounts || '').trim() === 'true' ||
+            String(req.query?.fullAccounts || '').trim() === '1';
+        const cacheKey = wantsFullAccounts ? 'full' : 'bill';
+
         const now = Date.now();
-        if (supportCache && now - supportCache.at < CACHE_TTL_MS) {
+        const cached = supportCacheByKey.get(cacheKey);
+        if (cached && now - cached.at < CACHE_TTL_MS) {
             return res.status(200).json({
                 success: true,
-                data: supportCache.data,
+                data: cached.data,
                 meta: {
-                    ...supportCache.meta,
+                    ...cached.meta,
                     cached: true,
                 },
             });
         }
 
         const [accounts, locations] = await Promise.all([
-            fetchBillExpenseAccounts(),
+            wantsFullAccounts ? fetchPaymentAccounts() : fetchBillExpenseAccounts(),
             fetchLocations(),
         ]);
 
@@ -35,9 +43,10 @@ export const getZohoBillSupport = async (req, res) => {
             locationCount: locations.length,
             source: 'zoho',
             cached: false,
+            fullAccounts: wantsFullAccounts,
         };
 
-        supportCache = { at: now, data, meta };
+        supportCacheByKey.set(cacheKey, { at: now, data, meta });
 
         return res.status(200).json({
             success: true,
@@ -47,12 +56,18 @@ export const getZohoBillSupport = async (req, res) => {
     } catch (error) {
         console.error('[ZohoBillSupport] Failed:', error?.message || error);
 
-        if (supportCache?.data) {
+        const wantsFullAccounts =
+            String(req.query?.fullAccounts || '').trim() === 'true' ||
+            String(req.query?.fullAccounts || '').trim() === '1';
+        const cacheKey = wantsFullAccounts ? 'full' : 'bill';
+        const cached = supportCacheByKey.get(cacheKey);
+
+        if (cached?.data) {
             return res.status(200).json({
                 success: true,
-                data: supportCache.data,
+                data: cached.data,
                 meta: {
-                    ...supportCache.meta,
+                    ...cached.meta,
                     cached: true,
                     syncError: error?.message || 'Zoho bill support failed',
                 },
