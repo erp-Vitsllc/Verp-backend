@@ -203,23 +203,23 @@ export async function recordPartyExpensePaidFromZoho({
     const settleJournalAlreadyPosted = Boolean(clean(body.zohoJournalId || zohoPayment.journal_id));
     const settlingViaSalaryPayable = partyAccountId === paidThroughAccountId;
 
-    // Payments Made settle: Debit Paid Through · Credit Acc2 (clears HR Approve Debit).
+    // Payments Made settle: Debit Acc2 · Credit Paid Through (Paid Through is Credit).
     const ledgerLines = [
         {
             side: 'debit',
-            accountId: paidThroughAccountId,
-            accountName: paidThroughAccountName,
+            accountId: partyAccountId,
+            accountName: partyAccountName || partyAccountCode,
             amount,
-            notes: 'Debit (Paid Through)',
+            notes: `Debit Acc2 (${partyAccountCode || 'salary payable'})`,
             locked: true,
             createdAt: new Date(),
         },
         {
             side: 'credit',
-            accountId: partyAccountId,
-            accountName: partyAccountName || partyAccountCode,
+            accountId: paidThroughAccountId,
+            accountName: paidThroughAccountName,
             amount,
-            notes: `Credit Acc2 (${partyAccountCode || 'salary payable'})`,
+            notes: 'Credit (Paid Through)',
             locked: true,
             createdAt: new Date(),
         },
@@ -418,9 +418,9 @@ export async function recordPartyExpensesFromVendorPaymentBody({
 /**
  * Difference settle in AED via Journal — NOT vendor payment on the (often GBP) bill.
  *
- * After HR Approve (Acc2 Debit · Acc1 Credit), Payments Made posts:
- *   Debit  = Paid Through (cash/bank/selected account)
- *   Credit = Acc2 Salary payable (clears the approve Debit)
+ * After HR Approve (Acc2 Credit · Acc1 Debit Diff), Accounts pay posts:
+ *   Debit  = Acc2 (clears Acc2 Credit)
+ *   Credit = Paid Through (Cash/Bank)  ← Paid Through is Credit
  */
 export async function settleUtilityDifferenceViaJournal({
     body = {},
@@ -477,12 +477,12 @@ export async function settleUtilityDifferenceViaJournal({
     if (!paidThroughAccountId) {
         throw Object.assign(new Error('Paid Through account is required.'), { statusCode: 400 });
     }
-    // Debit Paid Through · Credit Acc2 — accounts must differ.
+    // Debit Acc2 · Credit Paid Through — accounts must differ.
     if (paidThroughAccountId === partyAccountId) {
         throw Object.assign(
             new Error(
                 `Paid Through cannot be the same as Acc2 (${partyAccountName || 'Salary payable'}). ` +
-                    'Pick Cash / Bank (or another account) — Payments Made Debits Paid Through and Credits Acc2.',
+                    'Pick Cash / Bank — Accounts pay Credits Paid Through and Debits Acc2.',
             ),
             { statusCode: 400 },
         );
@@ -498,24 +498,25 @@ export async function settleUtilityDifferenceViaJournal({
             utilityBillId,
     );
 
+    // Accounts pay: Paid Through = Credit · Acc2 = Debit (clears Acc2 Credit from HR Approve)
     const journal = await createZohoJournal({
         journal_date: journalDate,
         reference_number: reference || undefined,
         notes:
             clean(body.description || body.notes) ||
-            `Utility difference settle · ${clean(utilityBill?.utilityType)} ${clean(utilityBill?.billMonth)} · Debit ${paidThroughAccountName} · Credit ${partyAccountName}`,
+            `Utility difference settle · ${clean(utilityBill?.utilityType)} ${clean(utilityBill?.billMonth)} · Debit ${partyAccountName} · Credit ${paidThroughAccountName}`,
         line_items: [
-            {
-                account_id: paidThroughAccountId,
-                amount,
-                debit_or_credit: 'debit',
-                description: paidThroughAccountName || 'Paid Through',
-            },
             {
                 account_id: partyAccountId,
                 amount,
-                debit_or_credit: 'credit',
+                debit_or_credit: 'debit',
                 description: partyAccountName || partyAccountCode || 'Salary payable (Acc2)',
+            },
+            {
+                account_id: paidThroughAccountId,
+                amount,
+                debit_or_credit: 'credit',
+                description: paidThroughAccountName || 'Paid Through',
             },
         ],
     });

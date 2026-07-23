@@ -72,7 +72,7 @@ export async function employeeIdQueryVariants(employeeId) {
  * Absolute difference |Contract − Actual|.
  * Only non-zero difference creates payable + Account 2 debit.
  */
-function differenceBalanceAmount(bill) {
+export function differenceBalanceAmount(bill) {
     const fromField = Number(bill?.differenceAmount);
     if (Number.isFinite(fromField) && Math.abs(fromField) > 0.009) {
         return money(Math.abs(fromField));
@@ -89,6 +89,115 @@ function differenceBalanceAmount(bill) {
     return abs > 0.009 ? money(abs) : 0;
 }
 
+/**
+ * HR Approve → Zoho Bill Chart of Accounts lines.
+ * Prefer custom zohoLineItems from Add more (sum = Actual).
+ * All lines post inside ONE Zoho bill as line_items (not separate bills).
+ * Fallback: Acc1 Debit = Actual.
+ * Acc2 Credit is NOT on the bill — posted by difference journal when Diff ≠ 0.
+ */
+export function buildUtilityBillZohoLineItems(bill) {
+    const expenseAccountId = clean(bill?.expenseAccountId);
+    const actual = money(bill?.amount);
+    const diff = differenceBalanceAmount(bill);
+
+    const descParts = [
+        bill?.utilityType ? String(bill.utilityType) : '',
+        bill?.accountNo ? `Acc ${bill.accountNo}` : '',
+        bill?.billMonth ? String(bill.billMonth) : '',
+    ].filter(Boolean);
+    const base = descParts.join(' · ');
+
+    const custom = Array.isArray(bill?.zohoLineItems) ? bill.zohoLineItems : [];
+    const customLines = custom
+        .map((line, index) => {
+            const accountId = clean(line?.accountId || line?.account_id);
+            const qtyRaw = Number(line?.quantity);
+            const quantity = Number.isFinite(qtyRaw) && qtyRaw > 0 ? qtyRaw : 1;
+            const amount = money(line?.amount);
+            const rateFromField = money(line?.rate);
+            const rate =
+                rateFromField > 0
+                    ? rateFromField
+                    : quantity > 0
+                      ? money(amount / quantity)
+                      : amount;
+            if (!accountId || amount <= 0) return null;
+            return {
+                index,
+                account_id: accountId,
+                accountId,
+                accountName: clean(line?.accountName),
+                quantity,
+                rate,
+                amount,
+                item: clean(line?.item || line?.description),
+                description:
+                    clean(line?.description || line?.item) ||
+                    `${base} · ${amount.toFixed(2)}`.trim(),
+                zohoBillId: clean(line?.zohoBillId),
+            };
+        })
+        .filter(Boolean);
+
+    if (customLines.length) {
+        const customTotal = money(customLines.reduce((sum, line) => sum + line.amount, 0));
+        if (Math.abs(customTotal - actual) > 0.05) {
+            console.warn(
+                `[UtilityBillZoho] Line items total ${customTotal} ≠ Actual ${actual}`,
+            );
+        }
+        return { actual, diff, lineItems: customLines };
+    }
+
+    if (!expenseAccountId || actual <= 0) {
+        return { lineItems: [], actual, diff };
+    }
+
+    return {
+        actual,
+        diff,
+        lineItems: [
+            {
+                index: 0,
+                account_id: expenseAccountId,
+                accountId: expenseAccountId,
+                accountName: clean(bill?.expenseAccountName),
+                quantity: 1,
+                rate: actual,
+                amount: actual,
+                item: base,
+                description:
+                    `${base} · Actual ${actual.toFixed(2)} · Acc1`.trim() ||
+                    `Actual ${actual.toFixed(2)} · Acc1`,
+                zohoBillId: clean(bill?.zohoBillId),
+            },
+        ],
+    };
+}
+
+/** Unique Zoho bill # per item row (Zoho requires unique bill numbers). */
+export function zohoBillNumberForItemRow(baseBillNumber, index, total) {
+    const base = clean(baseBillNumber);
+    if (!base) return '';
+    if (total <= 1) return base;
+    return `${base}-${index + 1}`;
+}
+
+export function collectUtilityZohoBillIds(bill) {
+    const ids = [];
+    const push = (value) => {
+        const id = clean(value);
+        if (id && !ids.includes(id)) ids.push(id);
+    };
+    push(bill?.zohoBillId);
+    (Array.isArray(bill?.zohoBillIds) ? bill.zohoBillIds : []).forEach(push);
+    (Array.isArray(bill?.zohoLineItems) ? bill.zohoLineItems : []).forEach((line) =>
+        push(line?.zohoBillId),
+    );
+    return ids;
+}
+
 async function resolveBusinessCompanyId(payByCompanyId) {
     const raw = clean(payByCompanyId);
     if (!raw) return '';
@@ -98,60 +207,71 @@ async function resolveBusinessCompanyId(payByCompanyId) {
 }
 
 /**
- * Chart of Accounts on HR Approve (difference only):
- *   Acc2 (balance / salary payable)  → Debit
- *   Acc1 (to vendor / expense)       → Credit
- * Never Debit both.
+ * HR Approve Chart of Accounts (when Difference ≠ 0 only):
+ *   Acc2 (balance) → Credit Difference  (cleared later when Accounts pays)
+ *   Acc1 (expense) → Debit  Difference  (with Acc1 Debit Actual already on Zoho Bill)
+ *
+ * After HR Approve:
+ *   Acc1 Debit Actual (bill) + Acc1 Debit Diff (journal, if Diff≠0)
+ *   Acc2 Credit Diff (journal, if Diff≠0 only)
  */
 export async function postDifferenceDebitJournalToZoho(bill, amount) {
     const partyAccountId = clean(bill?.partyAccountId);
     const expenseAccountId = clean(bill?.expenseAccountId);
     const existingJournalId = clean(bill?.zohoDifferenceJournalId);
+    const diffAmount = money(amount) > 0 ? money(amount) : differenceBalanceAmount(bill);
 
     if (existingJournalId) {
         return { ok: true, skipped: true, journalId: existingJournalId };
     }
-    if (amount <= 0 || !partyAccountId) {
-        return { ok: false, skipped: true, message: 'No difference account to debit.' };
+    // Acc2 entry only when Difference ≠ 0
+    if (diffAmount <= 0.009 || !partyAccountId) {
+        return {
+            ok: true,
+            skipped: true,
+            message: 'No Acc2 entry — Difference is 0 or Acc2 missing.',
+        };
     }
     if (!expenseAccountId) {
         return {
             ok: false,
-            message: 'Expense account (to vendor) is required to post the difference debit journal.',
+            message: 'Acc1 (expense) is required to balance Acc2 journal.',
         };
     }
     if (partyAccountId === expenseAccountId) {
         return {
             ok: false,
-            message: 'Difference account and vendor account must be different Chart of Accounts rows.',
+            message: 'Acc1 and Acc2 must be different Chart of Accounts rows.',
         };
     }
 
     const orgId = clean(bill?.zohoOrganizationId) || getZohoOrganizationId();
     const journalDate = zohoJournalDate(bill);
     const reference = clean(bill?.billNumber || bill?.accountNo || bill?._id);
+    const actual = money(bill?.amount);
 
     try {
         const journal = await withZohoOrganization(orgId, () =>
             createZohoJournal({
                 journal_date: journalDate,
                 reference_number: reference || undefined,
-                notes: `Utility difference debit · ${clean(bill?.utilityType)} ${clean(bill?.billMonth)} · Acc ${clean(bill?.accountNo)}`,
+                notes: `Utility Acc2 Credit · Diff ${diffAmount.toFixed(2)} · Acc1 Actual ${actual.toFixed(2)} · ${clean(bill?.utilityType)} ${clean(bill?.billMonth)} · Acc ${clean(bill?.accountNo)}`,
                 line_items: [
                     {
-                        account_id: partyAccountId,
-                        amount,
+                        account_id: expenseAccountId,
+                        amount: diffAmount,
                         debit_or_credit: 'debit',
                         description:
-                            clean(bill?.partyAccountName, bill?.partyAccountCode) ||
-                            'Difference pay account',
+                            clean(bill?.expenseAccountName) ||
+                            `Acc1 Debit · Diff ${diffAmount.toFixed(2)} (Actual ${actual.toFixed(2)} on bill)`,
                     },
                     {
-                        account_id: expenseAccountId,
-                        amount,
+                        account_id: partyAccountId,
+                        amount: diffAmount,
                         debit_or_credit: 'credit',
                         description:
-                            clean(bill?.expenseAccountName) || 'Utility expense (to vendor)',
+                            clean(bill?.partyAccountName, bill?.partyAccountCode) ||
+                            `Acc2 Credit · Diff ${diffAmount.toFixed(2)}`,
                     },
                 ],
             }),
@@ -167,15 +287,15 @@ export async function postDifferenceDebitJournalToZoho(bill, amount) {
             await bill.save();
         }
 
-        return { ok: true, journalId, organizationId: orgId };
+        return { ok: true, journalId, organizationId: orgId, amount: diffAmount };
     } catch (err) {
-        const message = err?.message || 'Failed to post difference debit journal to Zoho.';
+        const message = err?.message || 'Failed to post Acc2 Credit journal to Zoho.';
         console.error('[UtilityDifferenceZoho]', message);
         if (bill && typeof bill.save === 'function') {
             const prev = clean(bill.zohoSyncError);
             bill.zohoSyncError = prev
-                ? `${prev} · Difference Debit failed: ${message}`
-                : `Difference Debit failed: ${message}`;
+                ? `${prev} · Acc2 Credit failed: ${message}`
+                : `Acc2 Credit failed: ${message}`;
             try {
                 await bill.save();
             } catch {
@@ -189,7 +309,7 @@ export async function postDifferenceDebitJournalToZoho(bill, amount) {
 /**
  * After HR approve: if Difference ≠ 0 only —
  * 1) upsert Not Paid PartyExpense on payable party (employee/company profile)
- * 2) post Chart of Accounts Debit on Account 2 (difference pay here)
+ * 2) Acc2 Credit (Difference) on Chart of Accounts — cleared when Accounts pay Credits Paid Through
  */
 export async function upsertUtilityBalancePartyExpensesFromBills(bills = [], userId = null) {
     const results = [];
@@ -228,24 +348,29 @@ export async function upsertUtilityBalancePartyExpensesFromBills(bills = [], use
             continue;
         }
 
-        // Chart of Accounts Debit on difference account (Account 2) at HR approve.
+        // Chart of Accounts: Acc2 Credit Difference (cleared on Accounts pay with Paid Through Credit).
         const journalResult = await postDifferenceDebitJournalToZoho(bill, amount);
         if (!journalResult.ok && !journalResult.skipped) {
             console.warn(
-                '[UtilityDifferenceZoho] Journal failed for bill',
+                '[UtilityDifferenceZoho] Acc2 Credit failed for bill',
                 utilityBillId,
                 journalResult.message,
             );
-        } else if (journalResult.ok) {
+        } else if (journalResult.ok && !journalResult.skipped) {
             console.log(
-                '[UtilityDifferenceZoho] Debit posted:',
+                '[UtilityDifferenceZoho] Acc2 Credit posted:',
                 JSON.stringify({
                     utilityBillId,
                     amount,
                     journalId: journalResult.journalId,
                     partyAccountId: clean(bill.partyAccountId),
-                    skipped: Boolean(journalResult.skipped),
                 }),
+            );
+        } else if (journalResult.skipped) {
+            console.log(
+                '[UtilityDifferenceZoho] Acc2 skipped:',
+                journalResult.message || 'Diff=0 or already posted',
+                { utilityBillId, amount },
             );
         }
 
@@ -311,38 +436,38 @@ export async function upsertUtilityBalancePartyExpensesFromBills(bills = [], use
             `Difference amount · ${clean(bill.utilityType)} ${clean(bill.billMonth)} · Acc ${clean(bill.accountNo)}`,
         );
 
-        const debitAccountId = clean(bill.partyAccountId);
-        const creditAccountId = clean(bill.expenseAccountId);
+        const creditAccountId = clean(bill.partyAccountId); // Acc2 Credit on approve
+        const debitAccountId = clean(bill.expenseAccountId); // Acc1 Debit Diff
         const already =
-            debitAccountId &&
+            creditAccountId &&
             (doc.ledger || []).some(
                 (line) =>
-                    line.side === 'debit' &&
-                    clean(line.accountId) === debitAccountId &&
+                    line.side === 'credit' &&
+                    clean(line.accountId) === creditAccountId &&
                     money(line.amount) === amount,
             );
-        if (debitAccountId && !already) {
-            // Acc2 (balance) Debit · Acc1 (to vendor) Credit — never both Debit.
-            doc.ledger.push({
-                side: 'debit',
-                accountId: debitAccountId,
-                accountName: clean(bill.partyAccountName, bill.partyAccountCode),
-                amount,
-                notes: `Debit Acc2 balance (${clean(bill.partyAccountCode, isCompany ? businessCompanyId : businessEmployeeId)})`,
-                locked: true,
-                createdAt: new Date(),
-            });
-            if (creditAccountId && creditAccountId !== debitAccountId) {
+        if (creditAccountId && !already) {
+            // Acc1 Debit Diff · Acc2 Credit Diff (Acc1 Actual Debit is on Zoho Bill)
+            if (debitAccountId && debitAccountId !== creditAccountId) {
                 doc.ledger.push({
-                    side: 'credit',
-                    accountId: creditAccountId,
+                    side: 'debit',
+                    accountId: debitAccountId,
                     accountName: clean(bill.expenseAccountName, 'Account 1'),
                     amount,
-                    notes: `Credit Acc1 (to vendor) · difference ${amount}`,
+                    notes: `Debit Acc1 · difference ${amount}`,
                     locked: true,
                     createdAt: new Date(),
                 });
             }
+            doc.ledger.push({
+                side: 'credit',
+                accountId: creditAccountId,
+                accountName: clean(bill.partyAccountName, bill.partyAccountCode),
+                amount,
+                notes: `Credit Acc2 balance (${clean(bill.partyAccountCode, isCompany ? businessCompanyId : businessEmployeeId)})`,
+                locked: true,
+                createdAt: new Date(),
+            });
         }
         await doc.save();
         const journalFailed = !journalResult.ok && !journalResult.skipped;

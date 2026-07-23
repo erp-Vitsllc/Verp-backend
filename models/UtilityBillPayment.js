@@ -95,12 +95,39 @@ const utilityBillPaymentSchema = new mongoose.Schema(
         paymentDay: { type: Number, default: null },
         expenseAccountId: { type: String, default: '' },
         expenseAccountName: { type: String, default: '' },
+        /**
+         * Optional Zoho bill line items from Add more (Items · Account · Qty · Amount).
+         * Sum of amounts must equal Actual; used on HR Approve → Zoho Bill.
+         */
+        zohoLineItems: {
+            type: [
+                {
+                    item: { type: String, default: '' },
+                    description: { type: String, default: '' },
+                    accountId: { type: String, default: '' },
+                    accountName: { type: String, default: '' },
+                    quantity: { type: Number, default: 1 },
+                    amount: { type: Number, default: 0 },
+                    rate: { type: Number, default: 0 },
+                    /** Payable to — employee on this item line (Acc2 / difference party). */
+                    payByEmployeeId: { type: String, default: '' },
+                    payByEmployeeName: { type: String, default: '' },
+                    payByCompanyId: { type: String, default: '' },
+                    payByCompanyName: { type: String, default: '' },
+                    /** Each item row creates its own Zoho bill. */
+                    zohoBillId: { type: String, default: '' },
+                },
+            ],
+            default: [],
+        },
         /** Salary Payable / party COA matched by account_code to employeeId or companyId. */
         partyAccountId: { type: String, default: '' },
         partyAccountName: { type: String, default: '' },
         partyAccountCode: { type: String, default: '' },
         zohoVendorId: { type: String, default: '' },
         zohoBillId: { type: String, default: '', index: true },
+        /** All Zoho bill ids when Add more created multiple item rows (1 row → 1 Zoho bill). */
+        zohoBillIds: { type: [String], default: [] },
         /** draft = created in Zoho but not payable; open = Accounts can pay in Payments Made */
         zohoBillStatus: {
             type: String,

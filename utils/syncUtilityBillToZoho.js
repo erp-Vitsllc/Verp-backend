@@ -1,12 +1,10 @@
 import ZohoVendor from '../models/ZohoVendor.js';
 import UtilityEntry from '../models/UtilityEntry.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
-import Company from '../models/Company.js';
 import {
     createBill,
     markBillAsOpen,
     fetchBillById,
-    fetchPaymentAccounts,
     fetchZohoCurrencies,
     getZohoOrganizationId,
     uploadBillAttachment,
@@ -14,6 +12,18 @@ import {
 import { upsertZohoBillFromApi } from '../services/zohoPurchaseSyncService.js';
 import { withZohoOrganization } from './zohoOrgContext.js';
 import { resolveZohoOrganizationIdForCompany } from './resolveZohoOrganization.js';
+import { buildUtilityBillZohoLineItems, collectUtilityZohoBillIds } from './upsertUtilityBalancePartyExpense.js';
+
+function utilityZohoBillExtras(billDoc, line, lineIndex, parentBillNumber) {
+    return {
+        utilityBillPaymentId: String(billDoc?._id || ''),
+        utilityParentBillNumber: String(parentBillNumber || billDoc?.billNumber || ''),
+        utilityLineIndex: lineIndex,
+        utilityDebitAccountId: String(line?.account_id || line?.accountId || ''),
+        utilityDebitAccountName: String(line?.accountName || ''),
+        utilityItemDescription: String(line?.description || line?.item || ''),
+    };
+}
 
 function escapeRegex(value) {
     return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -264,17 +274,12 @@ async function resolveOrganizationIdForUtilityBill(billDoc) {
     return getZohoOrganizationId();
 }
 
-function zohoAccountCode(account) {
-    return String(
-        account?.account_code ||
-            account?.accountCode ||
-            account?.code ||
-            '',
-    ).trim();
-}
-
+/**
+ * Acc2 (difference party COA) — only when already chosen on the bill.
+ * Do not match Company/Employee id (e.g. EST-001) to Zoho account_code.
+ * Zoho bill debit always uses the Account from Add more / line prices.
+ */
 async function resolveUtilityPartyAccount(billDoc) {
-    // Prefer account chosen on Add Bills (difference pay account).
     const selectedId = String(billDoc?.partyAccountId || '').trim();
     if (selectedId) {
         return {
@@ -285,63 +290,13 @@ async function resolveUtilityPartyAccount(billDoc) {
         };
     }
 
-    const paymentBy = String(billDoc?.paymentBy || '').trim().toLowerCase();
-    let partyCode = '';
-
-    if (paymentBy === 'employee' || paymentBy === 'employee_balance') {
-        const employeeRef = String(billDoc?.payByEmployeeId || '').trim();
-        if (employeeRef) {
-            const query = /^[0-9a-fA-F]{24}$/.test(employeeRef)
-                ? { _id: employeeRef }
-                : { employeeId: employeeRef };
-            const employee = await EmployeeBasic.findOne(query).select('employeeId').lean();
-            partyCode = String(employee?.employeeId || employeeRef).trim();
-        }
-    } else if (paymentBy === 'company') {
-        const companyRef = String(billDoc?.payByCompanyId || '').trim();
-        const companyQuery = /^[0-9a-fA-F]{24}$/.test(companyRef)
-            ? { _id: companyRef }
-            : {
-                  $or: [
-                      { companyId: companyRef },
-                      ...(billDoc?.payByCompanyName
-                          ? [{ name: String(billDoc.payByCompanyName).trim() }]
-                          : []),
-                  ],
-              };
-        const company = companyRef
-            ? await Company.findOne(companyQuery).select('companyId').lean()
-            : null;
-        partyCode = String(company?.companyId || companyRef).trim();
-    }
-
-    if (!partyCode) {
-        return { ok: false, message: 'Contract Paid By party id is required.' };
-    }
-
-    const accounts = await fetchPaymentAccounts();
-    const codeMatches = accounts.filter(
-        (account) => zohoAccountCode(account).toLowerCase() === partyCode.toLowerCase(),
-    );
-    const account =
-        codeMatches.find((row) =>
-            /salary\s*payable/i.test(
-                `${row?.account_name || row?.name || ''} ${row?.account_type_formatted || row?.account_type || ''}`,
-            ),
-        ) || codeMatches[0];
-
-    if (!account) {
-        return {
-            ok: false,
-            message: `No Zoho Salary Payable account has account code "${partyCode}". Create or update that Chart of Accounts row, then approve again.`,
-        };
-    }
-
+    // Never block approve on employeeId/companyId account_code lookup.
     return {
         ok: true,
-        id: String(account.account_id || account.id || '').trim(),
-        name: String(account.account_name || account.name || '').trim(),
-        code: zohoAccountCode(account) || partyCode,
+        skipped: true,
+        id: '',
+        name: '',
+        code: '',
     };
 }
 
@@ -361,34 +316,45 @@ export async function syncApprovedUtilityBillToZoho(billDoc, { markAsOpen = true
 }
 
 async function openExistingZohoBill(billDoc) {
-    const zohoBillId = String(billDoc.zohoBillId || '').trim();
-    if (!zohoBillId) return { ok: false, message: 'No Zoho bill id' };
+    const zohoBillIds = collectUtilityZohoBillIds(billDoc);
+    if (!zohoBillIds.length) return { ok: false, message: 'No Zoho bill id' };
 
     try {
-        await markBillAsOpen(zohoBillId);
-        let zohoBillForUpsert = null;
-        try {
-            zohoBillForUpsert = await fetchBillById(zohoBillId);
-        } catch {
-            zohoBillForUpsert = null;
-        }
-        if (zohoBillForUpsert) {
+        let lastAttach = { ok: true, skipped: true };
+        for (const zohoBillId of zohoBillIds) {
+            await markBillAsOpen(zohoBillId);
+            let zohoBillForUpsert = null;
             try {
-                await upsertZohoBillFromApi(zohoBillForUpsert);
+                zohoBillForUpsert = await fetchBillById(zohoBillId);
             } catch {
-                /* ignore local cache */
+                zohoBillForUpsert = null;
             }
+            if (zohoBillForUpsert) {
+                try {
+                    await upsertZohoBillFromApi(zohoBillForUpsert);
+                } catch {
+                    /* ignore local cache */
+                }
+            }
+            lastAttach = await syncUtilityBillAttachmentToZoho(billDoc, zohoBillId);
         }
         billDoc.zohoBillStatus = 'open';
         billDoc.zohoSyncedAt = new Date();
         billDoc.zohoSyncError = '';
-        const attachResult = await syncUtilityBillAttachmentToZoho(billDoc, zohoBillId);
-        if (!attachResult.ok && attachResult.message) {
-            billDoc.zohoSyncError = `Zoho bill Open; attachment not uploaded: ${attachResult.message}`;
+        if (!lastAttach.ok && lastAttach.message) {
+            billDoc.zohoSyncError = `Zoho bill(s) Open; attachment not uploaded: ${lastAttach.message}`;
         }
         await billDoc.save();
-        console.log(`[UtilityBillZoho] Bill ${zohoBillId} marked as Open in Zoho.`);
-        return { ok: true, zohoBillId, opened: true, attachment: attachResult };
+        console.log(
+            `[UtilityBillZoho] Opened ${zohoBillIds.length} Zoho bill(s): ${zohoBillIds.join(', ')}`,
+        );
+        return {
+            ok: true,
+            zohoBillId: zohoBillIds[0],
+            zohoBillIds,
+            opened: true,
+            attachment: lastAttach,
+        };
     } catch (err) {
         const message = err?.message || 'Failed to mark Zoho bill as Open';
         billDoc.zohoSyncError = message;
@@ -403,26 +369,32 @@ async function syncApprovedUtilityBillToZohoInner(billDoc, { markAsOpen = true }
         partyAccount = await resolveUtilityPartyAccount(billDoc);
     } catch (err) {
         partyAccount = {
-            ok: false,
-            message: err?.message || 'Failed to resolve the Contract Paid By Chart of Accounts row.',
+            ok: true,
+            skipped: true,
+            id: '',
+            name: '',
+            code: '',
+            message: err?.message || '',
         };
     }
-    if (!partyAccount.ok || !partyAccount.id) {
-        billDoc.zohoSyncError = partyAccount.message;
-        await billDoc.save();
-        return { ok: false, message: billDoc.zohoSyncError };
+    // Acc2 is optional. Zoho bill debit uses Add more Account (line prices), not Salary Payable by code.
+    if (partyAccount?.id) {
+        billDoc.partyAccountId = partyAccount.id;
+        billDoc.partyAccountName = partyAccount.name || billDoc.partyAccountName || '';
+        billDoc.partyAccountCode = partyAccount.code || billDoc.partyAccountCode || '';
     }
-    billDoc.partyAccountId = partyAccount.id;
-    billDoc.partyAccountName = partyAccount.name;
-    billDoc.partyAccountCode = partyAccount.code;
 
-    const existingId = String(billDoc.zohoBillId || '').trim();
-    if (existingId) {
+    const existingIds = collectUtilityZohoBillIds(billDoc);
+    // One ERP utility row → one Zoho bill (all Add-more lines are line_items inside it).
+    if (existingIds.length > 0) {
         const current = String(billDoc.zohoBillStatus || '').toLowerCase();
         if (markAsOpen && current !== 'open') {
             return openExistingZohoBill(billDoc);
         }
-        const attachResult = await syncUtilityBillAttachmentToZoho(billDoc, existingId);
+        const attachResult = await syncUtilityBillAttachmentToZoho(
+            billDoc,
+            existingIds[0],
+        );
         if (!attachResult.ok && attachResult.message) {
             billDoc.zohoSyncError = `Attachment not uploaded: ${attachResult.message}`;
         }
@@ -430,7 +402,8 @@ async function syncApprovedUtilityBillToZohoInner(billDoc, { markAsOpen = true }
         return {
             ok: true,
             skipped: true,
-            zohoBillId: existingId,
+            zohoBillId: existingIds[0],
+            zohoBillIds: existingIds,
             attachment: attachResult,
         };
     }
@@ -449,7 +422,6 @@ async function syncApprovedUtilityBillToZohoInner(billDoc, { markAsOpen = true }
     const billDate =
         String(billDoc.billDate || '').trim() ||
         utilityBillDateFromMonth(billDoc.billMonth, billDoc.paymentDay);
-    const expenseAccountId = String(billDoc.expenseAccountId || '').trim();
     const provider = String(billDoc.provider || '').trim();
 
     if (!billNumber) {
@@ -462,16 +434,24 @@ async function syncApprovedUtilityBillToZohoInner(billDoc, { markAsOpen = true }
         await billDoc.save();
         return { ok: false, message: billDoc.zohoSyncError };
     }
-    if (!expenseAccountId) {
-        billDoc.zohoSyncError =
-            'Expense account is required for Zoho. Re-submit the bill with an expense Chart of Accounts line, then Retry Zoho sync.';
-        await billDoc.save();
-        return { ok: false, message: billDoc.zohoSyncError };
-    }
     if (!Number.isFinite(amount) || amount <= 0) {
         billDoc.zohoSyncError = 'Actual amount must be greater than zero for Zoho.';
         await billDoc.save();
         return { ok: false, message: billDoc.zohoSyncError };
+    }
+
+    const { lineItems, actual, diff } = buildUtilityBillZohoLineItems(billDoc);
+    if (!lineItems.length) {
+        billDoc.zohoSyncError =
+            'Item account(s) and Actual amount are required for Zoho bill(s). Use Add more to set Accounts.';
+        await billDoc.save();
+        return { ok: false, message: billDoc.zohoSyncError };
+    }
+
+    // Keep parent Acc1 as first line account for difference journal / legacy fields.
+    if (!String(billDoc.expenseAccountId || '').trim() && lineItems[0]?.account_id) {
+        billDoc.expenseAccountId = lineItems[0].account_id;
+        billDoc.expenseAccountName = lineItems[0].accountName || billDoc.expenseAccountName || '';
     }
 
     const activeOrgId = getZohoOrganizationId();
@@ -501,14 +481,8 @@ async function syncApprovedUtilityBillToZohoInner(billDoc, { markAsOpen = true }
         return { ok: false, message: billDoc.zohoSyncError };
     }
 
-    const descriptionParts = [
-        billDoc.utilityType ? String(billDoc.utilityType) : '',
-        billDoc.accountNo ? `Acc ${billDoc.accountNo}` : '',
-        billDoc.billMonth ? String(billDoc.billMonth) : '',
-    ].filter(Boolean);
-
     console.log(
-        '[UtilityBillZoho] Creating Zoho bill:',
+        '[UtilityBillZoho] Creating one Zoho bill with line items:',
         JSON.stringify({
             erpBillId: String(billDoc._id),
             zohoOrg: activeOrgId,
@@ -516,65 +490,96 @@ async function syncApprovedUtilityBillToZohoInner(billDoc, { markAsOpen = true }
             provider,
             billNumber,
             billDate,
-            expenseAccountId,
-            debitPartyAccountId: partyAccount.id,
-            debitPartyAccountCode: partyAccount.code,
-            amount,
-            currencyId: currencyResult.currencyId,
+            actual,
+            difference: diff,
+            lineCount: lineItems.length,
             markAsOpen: Boolean(markAsOpen),
+            lineItems: lineItems.map((line) => ({
+                account_id: line.account_id,
+                quantity: line.quantity,
+                rate: line.rate,
+                amount: line.amount,
+                description: line.description,
+            })),
         }),
     );
 
     try {
+        let zohoStatus = 'draft';
+        let lastAttach = { ok: true, skipped: true };
+        const lineDocs = Array.isArray(billDoc.zohoLineItems)
+            ? billDoc.zohoLineItems.map((line) =>
+                  typeof line?.toObject === 'function' ? line.toObject() : { ...line },
+              )
+            : [];
+
         const zohoBill = await createBill({
             vendor_id: vendorId,
             bill_number: billNumber,
             date: billDate,
             reference_number: String(billDoc.accountNo || '').trim() || undefined,
-            notes: String(billDoc.notes || '').trim() || undefined,
+            notes:
+                String(billDoc.notes || '').trim() ||
+                `Utility Actual ${Number(actual).toFixed(2)}${
+                    lineItems.length > 1 ? ` · ${lineItems.length} lines` : ''
+                }${diff > 0.009 ? ` · Diff ${Number(diff).toFixed(2)}` : ''}` ||
+                undefined,
             currency_id: currencyResult.currencyId,
             exchange_rate: 1,
-            line_items: [
-                {
-                    account_id: expenseAccountId,
-                    quantity: 1,
-                    rate: Number(amount.toFixed(2)),
-                    description: descriptionParts.join(' · ') || undefined,
-                },
-            ],
+            // One Zoho bill containing every Add-more row as a line item (like standard Zoho bills).
+            line_items: lineItems.map((line) => ({
+                account_id: line.account_id,
+                quantity: line.quantity,
+                rate: line.rate,
+                description: line.description,
+            })),
         });
 
         const zohoBillId = String(zohoBill?.bill_id || zohoBill?.billId || '').trim();
+        if (!zohoBillId) {
+            throw new Error('Zoho did not return a bill id.');
+        }
 
-        // API creates Draft by default. Approve → Open so Accounts can pay; Draft stays Draft.
+        for (let i = 0; i < lineDocs.length; i++) {
+            lineDocs[i].zohoBillId = zohoBillId;
+        }
+        if (Array.isArray(billDoc.zohoLineItems)) {
+            billDoc.zohoLineItems.forEach((line) => {
+                if (line && typeof line === 'object') line.zohoBillId = zohoBillId;
+            });
+        }
+
         let zohoBillForUpsert = zohoBill;
-        let zohoStatus = 'draft';
-        if (zohoBillId && markAsOpen) {
+        if (markAsOpen) {
             try {
                 await markBillAsOpen(zohoBillId);
                 zohoBillForUpsert = (await fetchBillById(zohoBillId)) || zohoBill;
                 zohoStatus = 'open';
-                console.log(`[UtilityBillZoho] Bill ${zohoBillId} marked as Open in Zoho.`);
             } catch (openErr) {
                 const openMsg = openErr?.message || 'Could not mark Zoho bill as Open';
                 console.warn('[UtilityBillZoho] Bill created but still Draft:', openMsg);
+                zohoStatus = 'draft';
                 billDoc.billDate = billDate;
                 billDoc.zohoVendorId = vendorId;
                 billDoc.zohoBillId = zohoBillId;
-                billDoc.zohoBillStatus = 'draft';
+                billDoc.zohoBillIds = [zohoBillId];
+                if (lineDocs.length) billDoc.zohoLineItems = lineDocs;
                 try {
                     billDoc.zohoOrganizationId = getZohoOrganizationId();
                 } catch {
                     /* ignore */
                 }
                 billDoc.zohoSyncedAt = new Date();
-                const attachResult = await syncUtilityBillAttachmentToZoho(billDoc, zohoBillId);
-                billDoc.zohoSyncError = attachResult.ok
+                lastAttach = await syncUtilityBillAttachmentToZoho(billDoc, zohoBillId);
+                billDoc.zohoSyncError = lastAttach.ok
                     ? openMsg
-                    : `${openMsg}; attachment: ${attachResult.message || 'upload failed'}`;
+                    : `${openMsg}; attachment: ${lastAttach.message || 'upload failed'}`;
                 await billDoc.save();
                 try {
-                    await upsertZohoBillFromApi(zohoBill);
+                    await upsertZohoBillFromApi(
+                        zohoBill,
+                        utilityZohoBillExtras(billDoc, lineItems[0], 0, billNumber),
+                    );
                 } catch {
                     /* ignore */
                 }
@@ -582,16 +587,18 @@ async function syncApprovedUtilityBillToZohoInner(billDoc, { markAsOpen = true }
                     ok: false,
                     message: `Zoho bill created as Draft but not Open: ${openMsg}`,
                     zohoBillId,
+                    zohoBillIds: [zohoBillId],
                     zohoBillStatus: 'draft',
-                    attachment: attachResult,
+                    attachment: lastAttach,
                 };
             }
-        } else if (zohoBillId) {
-            console.log(`[UtilityBillZoho] Bill ${zohoBillId} left as Draft in Zoho (not payable yet).`);
         }
 
         try {
-            await upsertZohoBillFromApi(zohoBillForUpsert);
+            await upsertZohoBillFromApi(
+                zohoBillForUpsert,
+                utilityZohoBillExtras(billDoc, lineItems[0], 0, billNumber),
+            );
         } catch (upsertErr) {
             console.warn(
                 '[UtilityBillZoho] Zoho create ok; ERP ZohoBill upsert failed:',
@@ -599,9 +606,15 @@ async function syncApprovedUtilityBillToZohoInner(billDoc, { markAsOpen = true }
             );
         }
 
+        lastAttach = await syncUtilityBillAttachmentToZoho(billDoc, zohoBillId);
+
         billDoc.billDate = billDate;
         billDoc.zohoVendorId = vendorId;
         billDoc.zohoBillId = zohoBillId;
+        billDoc.zohoBillIds = [zohoBillId];
+        if (lineDocs.length) {
+            billDoc.zohoLineItems = lineDocs;
+        }
         billDoc.zohoBillStatus = zohoStatus;
         try {
             billDoc.zohoOrganizationId = getZohoOrganizationId();
@@ -610,19 +623,19 @@ async function syncApprovedUtilityBillToZohoInner(billDoc, { markAsOpen = true }
         }
         billDoc.zohoSyncedAt = new Date();
         billDoc.zohoSyncError = '';
-        const attachResult = zohoBillId
-            ? await syncUtilityBillAttachmentToZoho(billDoc, zohoBillId)
-            : { ok: true, skipped: true };
-        if (!attachResult.ok && attachResult.message) {
-            billDoc.zohoSyncError = `Zoho bill synced; attachment not uploaded: ${attachResult.message}`;
+        if (!lastAttach.ok && lastAttach.message) {
+            billDoc.zohoSyncError = `Zoho bill synced; attachment not uploaded: ${lastAttach.message}`;
         }
         await billDoc.save();
+
+        console.log(`[UtilityBillZoho] Created Zoho bill ${zohoBillId} with ${lineItems.length} line(s)`);
 
         return {
             ok: true,
             zohoBillId,
+            zohoBillIds: [zohoBillId],
             zohoBillStatus: zohoStatus,
-            attachment: attachResult,
+            attachment: lastAttach,
         };
     } catch (err) {
         let message = err?.message || 'Failed to create Zoho bill';

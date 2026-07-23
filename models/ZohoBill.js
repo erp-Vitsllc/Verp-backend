@@ -18,6 +18,13 @@ const zohoBillSchema = new mongoose.Schema(
         isActive: { type: Boolean, default: true },
         lastSyncedAt: { type: Date },
         zohoRaw: { type: mongoose.Schema.Types.Mixed, default: null },
+        /** Utility Add-more: each item row → one Zoho bill (Debit that account). */
+        utilityBillPaymentId: { type: String, default: '', index: true },
+        utilityParentBillNumber: { type: String, default: '', index: true },
+        utilityLineIndex: { type: Number, default: null },
+        utilityDebitAccountId: { type: String, default: '' },
+        utilityDebitAccountName: { type: String, default: '' },
+        utilityItemDescription: { type: String, default: '' },
     },
     {
         timestamps: true,

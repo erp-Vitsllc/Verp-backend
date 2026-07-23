@@ -242,19 +242,47 @@ export async function upsertZohoVendorPaymentFromApi(payment) {
     return doc;
 }
 
-export async function upsertZohoBillFromApi(bill) {
+export async function upsertZohoBillFromApi(bill, extras = {}) {
     const organizationId = getZohoOrganizationId();
     const syncedAt = new Date();
     const doc = mapZohoBillToDoc(bill, organizationId, syncedAt);
     if (!doc) return null;
 
+    const utilityExtras = {};
+    if (extras && typeof extras === 'object') {
+        if (extras.utilityBillPaymentId != null) {
+            utilityExtras.utilityBillPaymentId = String(extras.utilityBillPaymentId || '');
+        }
+        if (extras.utilityParentBillNumber != null) {
+            utilityExtras.utilityParentBillNumber = String(
+                extras.utilityParentBillNumber || '',
+            );
+        }
+        if (extras.utilityLineIndex != null && extras.utilityLineIndex !== '') {
+            utilityExtras.utilityLineIndex = Number(extras.utilityLineIndex);
+        }
+        if (extras.utilityDebitAccountId != null) {
+            utilityExtras.utilityDebitAccountId = String(extras.utilityDebitAccountId || '');
+        }
+        if (extras.utilityDebitAccountName != null) {
+            utilityExtras.utilityDebitAccountName = String(
+                extras.utilityDebitAccountName || '',
+            );
+        }
+        if (extras.utilityItemDescription != null) {
+            utilityExtras.utilityItemDescription = String(
+                extras.utilityItemDescription || '',
+            );
+        }
+    }
+
     await ZohoBill.findOneAndUpdate(
         { organizationId, zohoBillId: doc.zohoBillId },
-        { $set: doc },
+        { $set: { ...doc, ...utilityExtras } },
         { upsert: true, new: true },
     );
 
-    return doc;
+    return { ...doc, ...utilityExtras };
 }
 
 const PURCHASE_SEARCH = {

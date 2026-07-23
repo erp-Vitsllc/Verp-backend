@@ -148,6 +148,15 @@ export function toZohoBillApiShape(doc) {
         total: doc.total,
         balance: doc.balance,
         currency_code: doc.currencyCode,
+        utility_bill_payment_id: doc.utilityBillPaymentId || '',
+        utility_parent_bill_number: doc.utilityParentBillNumber || '',
+        utility_line_index:
+            doc.utilityLineIndex == null || doc.utilityLineIndex === ''
+                ? null
+                : Number(doc.utilityLineIndex),
+        utility_debit_account_id: doc.utilityDebitAccountId || '',
+        utility_debit_account_name: doc.utilityDebitAccountName || '',
+        utility_item_description: doc.utilityItemDescription || '',
     };
 }
 

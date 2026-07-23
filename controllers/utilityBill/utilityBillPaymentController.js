@@ -216,6 +216,21 @@ async function isActorHrOrAdmin(actor, reqUser) {
     return { hr, isHr, isAdminUser, allowed: isHr || isAdminUser };
 }
 
+/**
+ * Same focus rules as getUtilityBillBatch — prefer the stage this actor can act on
+ * so Accounts isn't blocked with "Only HR…" when Pending Accounts rows still exist.
+ */
+function resolveBatchStageStatus(bills = [], accountsGate, hrGate) {
+    const list = Array.isArray(bills) ? bills : [];
+    const focus =
+        list.find((b) => b.status === 'Pending Accounts' && accountsGate?.allowed) ||
+        list.find((b) => b.status === 'Pending HR' && hrGate?.allowed) ||
+        list.find((b) => b.status === 'Pending Accounts') ||
+        list.find((b) => b.status === 'Pending HR') ||
+        list[0];
+    return focus?.status || '';
+}
+
 async function syncBatchDashboard({
     batchId,
     bills,
@@ -519,6 +534,54 @@ export async function createUtilityBillBatch(req, res) {
             const partyAccountId = String(row.partyAccountId || '').trim();
             const partyAccountName = String(row.partyAccountName || '').trim();
             const partyAccountCode = String(row.partyAccountCode || '').trim();
+            const rawLineItems = Array.isArray(row.lineItems)
+                ? row.lineItems
+                : Array.isArray(row.zohoLineItems)
+                  ? row.zohoLineItems
+                  : [];
+            const zohoLineItems = rawLineItems
+                .map((line) => {
+                    const accountId = String(line?.accountId || line?.account_id || '').trim();
+                    const amount = Number(line?.amount);
+                    const qtyRaw = Number(line?.quantity);
+                    const quantity =
+                        Number.isFinite(qtyRaw) && qtyRaw > 0 ? qtyRaw : 1;
+                    const rateRaw = Number(line?.rate);
+                    const rate =
+                        Number.isFinite(rateRaw) && rateRaw > 0
+                            ? rateRaw
+                            : quantity > 0 && Number.isFinite(amount)
+                              ? Number((amount / quantity).toFixed(2))
+                              : Number.isFinite(amount)
+                                ? amount
+                                : 0;
+                    if (!accountId || !Number.isFinite(amount) || amount <= 0) return null;
+                    return {
+                        item: String(line?.item || line?.description || '').trim(),
+                        description: String(
+                            line?.description || line?.item || '',
+                        ).trim(),
+                        accountId,
+                        accountName: String(line?.accountName || '').trim(),
+                        quantity,
+                        amount: Number(amount.toFixed(2)),
+                        rate: Number(rate.toFixed(2)),
+                        payByEmployeeId: String(line?.payByEmployeeId || '').trim(),
+                        payByEmployeeName: String(line?.payByEmployeeName || '').trim(),
+                        payByCompanyId: String(line?.payByCompanyId || '').trim(),
+                        payByCompanyName: String(line?.payByCompanyName || '').trim(),
+                        zohoBillId: String(line?.zohoBillId || '').trim(),
+                    };
+                })
+                .filter(Boolean);
+            if (zohoLineItems.length) {
+                const linesTotal = zohoLineItems.reduce((sum, line) => sum + line.amount, 0);
+                if (Math.abs(linesTotal - amt) > 0.05) {
+                    return res.status(400).json({
+                        message: `Item line amounts for account ${row.accountNo || entryId} must equal Actual (${amt}).`,
+                    });
+                }
+            }
             const paymentDayRaw = Number(row.paymentDay ?? row.paymentDate);
             const paymentDay =
                 Number.isInteger(paymentDayRaw) && paymentDayRaw >= 1 && paymentDayRaw <= 31
@@ -538,11 +601,7 @@ export async function createUtilityBillBatch(req, res) {
                     message: 'Expense account is required to create the Zoho bill after HR approval.',
                 });
             }
-            if (Math.abs(diff) > 0.009 && !partyAccountId) {
-                return res.status(400).json({
-                    message: `Difference account is required for account ${row.accountNo || entryId}.`,
-                });
-            }
+            // Difference Acc2 is optional. Zoho bill debit uses Account from Add more / line prices.
             if (!provider) {
                 return res.status(400).json({
                     message: `Provider is required for account ${row.accountNo || entryId} (maps to Zoho vendor).`,
@@ -594,6 +653,7 @@ export async function createUtilityBillBatch(req, res) {
                 partyAccountId,
                 partyAccountName,
                 partyAccountCode,
+                zohoLineItems,
                 zohoVendorId,
                 ...payByPartyFromRow(row),
                 requestedBy: requester?._id || null,
@@ -942,10 +1002,16 @@ export async function respondUtilityBillBatch(req, res) {
         const allBills = await UtilityBillPayment.find({ batchId });
         if (!allBills.length) return res.status(404).json({ message: 'Batch not found' });
 
-        const stageStatus = allBills.find((b) =>
-            ['Pending Accounts', 'Pending HR'].includes(b.status),
-        )?.status;
-        if (!stageStatus) {
+        const actor = await resolveRequesterEmployee(req.user);
+        const accountsGateEarly = await isActorAccountsOrAdmin(actor, req.user);
+        const hrGateEarly = await isActorHrOrAdmin(actor, req.user);
+
+        const stageStatus = resolveBatchStageStatus(
+            allBills,
+            accountsGateEarly,
+            hrGateEarly,
+        );
+        if (!['Pending Accounts', 'Pending HR'].includes(stageStatus)) {
             return res.status(400).json({
                 message: `Batch is not awaiting approval (current: ${allBills[0].status}).`,
             });
@@ -970,7 +1036,6 @@ export async function respondUtilityBillBatch(req, res) {
             });
         }
 
-        const actor = await resolveRequesterEmployee(req.user);
         const requester = allBills[0].requestedBy
             ? await EmployeeBasic.findById(allBills[0].requestedBy)
                   .select('firstName lastName companyEmail workEmail personalEmail email employeeId')
@@ -978,9 +1043,11 @@ export async function respondUtilityBillBatch(req, res) {
             : null;
 
         if (stageStatus === 'Pending Accounts') {
-            const gate = await isActorAccountsOrAdmin(actor, req.user);
+            const gate = accountsGateEarly;
             if (!gate.allowed) {
-                return res.status(403).json({ message: 'Only Accounts can respond at this stage.' });
+                return res.status(403).json({
+                    message: `Only Accounts (${empDisplayName(gate.accounts) || 'flowchart Accounts'}) can respond at this stage.`,
+                });
             }
 
             if (action === 'reject') {
@@ -1209,9 +1276,12 @@ export async function respondUtilityBillBatch(req, res) {
         }
 
         // Pending HR
-        const gate = await isActorHrOrAdmin(actor, req.user);
+        const gate = hrGateEarly;
         if (!gate.allowed) {
-            return res.status(403).json({ message: 'Only HR can respond at this stage.' });
+            const hrName = empDisplayName(gate.hr) || 'HR';
+            return res.status(403).json({
+                message: `Only HR (${hrName}) can respond at this stage. Accounts already finished — open this from the HR login / HR pending inbox.`,
+            });
         }
 
         if (action === 'draft') {
