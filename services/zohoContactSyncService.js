@@ -16,10 +16,6 @@ import {
 
 const BULK_UPSERT_BATCH_SIZE = 500;
 const DEFAULT_CHUNK_LIMIT = 400;
-const SESSION_TTL_MS = 15 * 60 * 1000;
-
-/** @type {Map<string, { ids: Set<string>, startedAt: Date, timer: NodeJS.Timeout }>} */
-const vendorChunkSessions = new Map();
 
 async function runBulkUpserts(Model, bulkOps) {
     if (!bulkOps.length) return;
@@ -42,7 +38,7 @@ async function upsertZohoCustomers(contacts, organizationId, syncedAt) {
         bulkOps.push({
             updateOne: {
                 filter: { organizationId, zohoContactId: doc.zohoContactId },
-                update: { $set: doc },
+                update: { $set: { ...doc, isActive: true } },
                 upsert: true,
             },
         });
@@ -50,25 +46,16 @@ async function upsertZohoCustomers(contacts, organizationId, syncedAt) {
 
     await runBulkUpserts(ZohoCustomer, bulkOps);
 
-    let deactivated = 0;
-    if (syncedIds.length > 0) {
-        const result = await ZohoCustomer.updateMany(
-            {
-                organizationId,
-                isActive: true,
-                lastSyncedAt: { $lt: syncedAt },
-            },
-            {
-                $set: {
-                    isActive: false,
-                    lastSyncedAt: syncedAt,
-                },
-            },
-        );
-        deactivated = result.modifiedCount || 0;
-    }
+    const result = await ZohoCustomer.deleteMany({
+        organizationId,
+        zohoContactId: { $nin: syncedIds },
+    });
 
-    return { upserted: syncedIds.length, deactivated, syncedAt };
+    return {
+        upserted: syncedIds.length,
+        deactivated: result.deletedCount || 0,
+        syncedAt,
+    };
 }
 
 async function upsertZohoVendors(contacts, organizationId, syncedAt) {
@@ -83,7 +70,7 @@ async function upsertZohoVendors(contacts, organizationId, syncedAt) {
         bulkOps.push({
             updateOne: {
                 filter: { organizationId, zohoContactId: doc.zohoContactId },
-                update: { $set: doc },
+                update: { $set: { ...doc, isActive: true } },
                 upsert: true,
             },
         });
@@ -91,25 +78,16 @@ async function upsertZohoVendors(contacts, organizationId, syncedAt) {
 
     await runBulkUpserts(ZohoVendor, bulkOps);
 
-    let deactivated = 0;
-    if (syncedIds.length > 0) {
-        const result = await ZohoVendor.updateMany(
-            {
-                organizationId,
-                isActive: true,
-                lastSyncedAt: { $lt: syncedAt },
-            },
-            {
-                $set: {
-                    isActive: false,
-                    lastSyncedAt: syncedAt,
-                },
-            },
-        );
-        deactivated = result.modifiedCount || 0;
-    }
+    const result = await ZohoVendor.deleteMany({
+        organizationId,
+        zohoContactId: { $nin: syncedIds },
+    });
 
-    return { upserted: syncedIds.length, deactivated, syncedAt };
+    return {
+        upserted: syncedIds.length,
+        deactivated: result.deletedCount || 0,
+        syncedAt,
+    };
 }
 
 export async function syncZohoCustomersFromApi() {
@@ -147,17 +125,6 @@ export async function syncZohoVendorsChunk(query = {}) {
     const chunk = await fetchVendorsChunk({ startPage, maxRows });
     const syncedAt = new Date();
 
-    const key = syncToken ? `vendors:${syncToken}` : '';
-    let session = key ? vendorChunkSessions.get(key) : null;
-    if (key && !session) {
-        session = { ids: new Set(), startedAt: syncedAt, timer: null };
-        vendorChunkSessions.set(key, session);
-    }
-    if (session) {
-        if (session.timer) clearTimeout(session.timer);
-        session.timer = setTimeout(() => vendorChunkSessions.delete(key), SESSION_TTL_MS);
-    }
-
     const syncedIds = [];
     const bulkOps = [];
     const apiRows = [];
@@ -167,12 +134,14 @@ export async function syncZohoVendorsChunk(query = {}) {
         if (!doc) continue;
 
         syncedIds.push(doc.zohoContactId);
-        session?.ids.add(doc.zohoContactId);
         apiRows.push(toZohoVendorApiShape(doc));
+        const updateDoc = syncToken
+            ? { ...doc, lastSyncToken: syncToken, isActive: true }
+            : { ...doc, isActive: true };
         bulkOps.push({
             updateOne: {
                 filter: { organizationId, zohoContactId: doc.zohoContactId },
-                update: { $set: doc },
+                update: { $set: updateDoc },
                 upsert: true,
             },
         });
@@ -180,28 +149,26 @@ export async function syncZohoVendorsChunk(query = {}) {
 
     await runBulkUpserts(ZohoVendor, bulkOps);
 
-    let deactivated = 0;
-    if (!chunk.hasMore && session?.startedAt) {
-        const result = await ZohoVendor.updateMany(
-            {
-                organizationId,
-                isActive: true,
-                $or: [
-                    { lastSyncedAt: { $lt: session.startedAt } },
-                    { lastSyncedAt: null },
-                    { lastSyncedAt: { $exists: false } },
-                ],
-            },
-            {
-                $set: {
-                    isActive: false,
-                    lastSyncedAt: syncedAt,
-                },
-            },
+    if (syncToken && syncedIds.length) {
+        await ZohoVendor.updateMany(
+            { organizationId, zohoContactId: { $in: syncedIds } },
+            { $set: { lastSyncToken: syncToken, isActive: true, lastSyncedAt: syncedAt } },
         );
-        deactivated = result.modifiedCount || 0;
-        if (session.timer) clearTimeout(session.timer);
-        vendorChunkSessions.delete(key);
+    }
+
+    let deactivated = 0;
+    // Final Refresh chunk: remove vendors Zoho no longer has so ERP DB === Zoho.
+    if (!chunk.hasMore && syncToken) {
+        const result = await ZohoVendor.deleteMany({
+            organizationId,
+            $nor: [{ lastSyncToken: syncToken }],
+        });
+        deactivated = result.deletedCount || 0;
+        if (deactivated > 0) {
+            console.log(
+                `[ZohoSync] vendors: removed ${deactivated} local row(s) not in Zoho (org=${organizationId})`,
+            );
+        }
     }
 
     return {

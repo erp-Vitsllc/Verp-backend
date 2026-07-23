@@ -19,6 +19,8 @@ const zohoVendorSchema = new mongoose.Schema(
         placeOfContact: { type: String, default: '' },
         isActive: { type: Boolean, default: true },
         lastSyncedAt: { type: Date },
+        /** Set on each Refresh chunk; rows without the final token are pruned. */
+        lastSyncToken: { type: String, default: '', index: true },
         zohoRaw: { type: mongoose.Schema.Types.Mixed, default: null },
     },
     {

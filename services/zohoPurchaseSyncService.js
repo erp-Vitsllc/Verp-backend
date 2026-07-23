@@ -20,10 +20,6 @@ import { getExplicitSyncPreference } from './zohoContactSyncService.js';
 
 const BULK_UPSERT_BATCH_SIZE = 500;
 const DEFAULT_CHUNK_LIMIT = 400;
-const SESSION_TTL_MS = 15 * 60 * 1000;
-
-/** @type {Map<string, { ids: Set<string>, startedAt: Date, timer: NodeJS.Timeout }>} */
-const chunkSessions = new Map();
 
 async function runBulkUpserts(Model, bulkOps) {
     if (!bulkOps.length) return;
@@ -34,34 +30,6 @@ async function runBulkUpserts(Model, bulkOps) {
     }
 }
 
-function sessionKey(entity, syncToken) {
-    return `${entity}:${String(syncToken || '').trim()}`;
-}
-
-function getChunkSession(entity, syncToken, syncedAt) {
-    const token = String(syncToken || '').trim();
-    if (!token) {
-        return { ids: new Set(), startedAt: syncedAt, timer: null };
-    }
-
-    const key = sessionKey(entity, token);
-    let session = chunkSessions.get(key);
-    if (!session) {
-        session = { ids: new Set(), startedAt: syncedAt, timer: null };
-        chunkSessions.set(key, session);
-    }
-    if (session.timer) clearTimeout(session.timer);
-    session.timer = setTimeout(() => chunkSessions.delete(key), SESSION_TTL_MS);
-    return session;
-}
-
-function clearChunkSession(entity, syncToken) {
-    const key = sessionKey(entity, syncToken);
-    const session = chunkSessions.get(key);
-    if (session?.timer) clearTimeout(session.timer);
-    chunkSessions.delete(key);
-}
-
 function parseChunkOptions(query = {}) {
     const startPage = Math.max(1, Number(query.zohoPage || query.startPage) || 1);
     const maxRows = Math.max(1, Math.min(1000, Number(query.chunkLimit || query.maxRows) || DEFAULT_CHUNK_LIMIT));
@@ -69,6 +37,10 @@ function parseChunkOptions(query = {}) {
     return { startPage, maxRows, syncToken };
 }
 
+/**
+ * Upsert a Zoho chunk. When Refresh finishes (hasMore=false + syncToken),
+ * delete local rows Zoho did not return so ERP DB === Zoho for that org.
+ */
 async function upsertChunkRows({
     Model,
     rows,
@@ -77,11 +49,11 @@ async function upsertChunkRows({
     mapToDoc,
     idField,
     toApiShape,
-    entity,
     syncToken,
     hasMore,
+    entity = 'rows',
 }) {
-    const session = getChunkSession(entity, syncToken, syncedAt);
+    const token = String(syncToken || '').trim();
     const syncedIds = [];
     const bulkOps = [];
     const apiRows = [];
@@ -92,12 +64,17 @@ async function upsertChunkRows({
 
         const id = doc[idField];
         syncedIds.push(id);
-        session.ids.add(id);
         apiRows.push(toApiShape(doc));
         bulkOps.push({
             updateOne: {
                 filter: { organizationId, [idField]: id },
-                update: { $set: doc },
+                update: {
+                    $set: {
+                        ...doc,
+                        isActive: true,
+                        ...(token ? { lastSyncToken: token } : {}),
+                    },
+                },
                 upsert: true,
             },
         });
@@ -105,28 +82,27 @@ async function upsertChunkRows({
 
     await runBulkUpserts(Model, bulkOps);
 
-    let deactivated = 0;
-    // Prefer lastSyncedAt cutoff over giant $nin — much faster on large orgs
-    if (!hasMore && syncToken && session.startedAt) {
-        const result = await Model.updateMany(
-            {
-                organizationId,
-                isActive: true,
-                $or: [
-                    { lastSyncedAt: { $lt: session.startedAt } },
-                    { lastSyncedAt: null },
-                    { lastSyncedAt: { $exists: false } },
-                ],
-            },
-            {
-                $set: {
-                    isActive: false,
-                    lastSyncedAt: syncedAt,
-                },
-            },
+    // Guarantee token stamp even if bulkWrite casting drops unknown paths.
+    if (token && syncedIds.length) {
+        await Model.updateMany(
+            { organizationId, [idField]: { $in: syncedIds } },
+            { $set: { lastSyncToken: token, isActive: true, lastSyncedAt: syncedAt } },
         );
-        deactivated = result.modifiedCount || 0;
-        clearChunkSession(entity, syncToken);
+    }
+
+    let deactivated = 0;
+    if (!hasMore && token) {
+        // Keep only rows stamped by this Refresh — delete everything else for the org.
+        const result = await Model.deleteMany({
+            organizationId,
+            $nor: [{ lastSyncToken: token }],
+        });
+        deactivated = result.deletedCount || 0;
+        if (deactivated > 0) {
+            console.log(
+                `[ZohoSync] ${entity}: removed ${deactivated} local row(s) not in Zoho (org=${organizationId})`,
+            );
+        }
     }
 
     return {
@@ -150,9 +126,9 @@ export async function syncZohoExpensesChunk(query = {}) {
         mapToDoc: mapZohoExpenseToDoc,
         idField: 'zohoExpenseId',
         toApiShape: toZohoExpenseApiShape,
-        entity: 'expenses',
         syncToken,
         hasMore: chunk.hasMore,
+        entity: 'expenses',
     });
 
     return {
@@ -178,9 +154,9 @@ export async function syncZohoBillsChunk(query = {}) {
         mapToDoc: mapZohoBillToDoc,
         idField: 'zohoBillId',
         toApiShape: toZohoBillApiShape,
-        entity: 'bills',
         syncToken,
         hasMore: chunk.hasMore,
+        entity: 'bills',
     });
 
     return {
@@ -206,9 +182,9 @@ export async function syncZohoVendorPaymentsChunk(query = {}) {
         mapToDoc: mapZohoVendorPaymentToDoc,
         idField: 'zohoPaymentId',
         toApiShape: toZohoVendorPaymentApiShape,
-        entity: 'vendorPayments',
         syncToken,
         hasMore: chunk.hasMore,
+        entity: 'vendorPayments',
     });
 
     return {
