@@ -6,22 +6,26 @@ import { getManagementHOD } from "../../utils/getManagementHOD.js";
 import { isUserAdministrator } from "../../services/permissionService.js";
 import { synthesizeSingleRecordGroupFineView } from "../../utils/fineGroupClassification.js";
 
-/** Per-party service charge (split rows store half; group view sums full SC on parent). */
+/** Per-party service charge (sibling rows store their share; group view has full SC on parent). */
 function partyServiceShare(fine, entry = {}) {
     const perRecord = parseFloat(entry.serviceCharge ?? 0) || 0;
     if (perRecord > 0) return perRecord;
 
     const total = parseFloat(fine.serviceCharge || 0) || 0;
+    if (total <= 0) return 0;
+
     const rf = (fine.responsibleFor || 'Employee').trim();
-    if (rf !== 'Employee & Company' || total <= 0) return total;
+    const partyCount = (fine.assignedEmployees || []).filter(
+        (ae) => ae?.employeeId && ae.employeeId !== 'PENDING',
+    ).length;
 
-    if (fine.isGroupView) return total / 2;
+    if (rf === 'Company') return total;
+    if (rf !== 'Employee & Company') return total;
 
-    const comp = parseFloat(fine.companyAmount || 0) || 0;
-    const hasVega = fine.assignedEmployees?.some((e) => e.employeeId === 'VEGA-HR-0000');
-    if (hasVega || comp > 0) return total / 2;
+    if (!fine.isGroupView && partyCount <= 1) return total;
 
-    return total;
+    const n = Math.max(partyCount, 2);
+    return total / n;
 }
 
 /** Fix legacy L&D saves where base was stored as (wrongGrand − serviceCharge). */

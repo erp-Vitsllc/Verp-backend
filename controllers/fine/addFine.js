@@ -353,13 +353,14 @@ export const addFine = async (req, res) => {
                 // Service charge: Divide equally among all parties
                 const individualServiceCharge = serviceChargePerParty;
                 
-                // Individual total = use frontend value if provided (individualAmount or fineAmount), else calculate
-                // When we used fineAmount as base fallback (assignedEmployees format), fineAmount is base-only - use calculated total
+                // Payable = party base + equal SC share. Prefer calculated; never store less than base+SC.
                 const usedFineAmountAsBaseFallback = !isCompanyRecord && (empData.employeeAmount === undefined || empData.employeeAmount === null || empData.employeeAmount === '') && (empData.fineAmount !== undefined && empData.fineAmount !== null && empData.fineAmount !== '');
+                const calculatedTotal = individualEmpAmount + individualCompAmount + individualServiceCharge;
                 const individualAmountFromData = empData.individualAmount ?? empData.fineAmount;
-                const totalFineAmountPerPerson = (!usedFineAmountAsBaseFallback && individualAmountFromData !== undefined && individualAmountFromData !== null && individualAmountFromData !== '') ? 
-                    parseFloat(individualAmountFromData) : 
-                    (individualEmpAmount + individualCompAmount + individualServiceCharge);
+                const fromFrontend = (!usedFineAmountAsBaseFallback && individualAmountFromData !== undefined && individualAmountFromData !== null && individualAmountFromData !== '')
+                    ? (parseFloat(individualAmountFromData) || 0)
+                    : 0;
+                const totalFineAmountPerPerson = Number(Math.max(calculatedTotal, fromFrontend).toFixed(2));
 
                 const finePayload = {
                     fineId: uniqueFineId,

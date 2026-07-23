@@ -38,6 +38,12 @@ function resolveFineBillLineAmount(fineDoc) {
         party?.employeeId === 'VEGA-HR-0000' ||
         party?.employeeId === 'VEGA_INTERNAL';
 
+    // Authoritative on split siblings: employeeAmount (party base) + this record's serviceCharge
+    const empAmt = Number(fineDoc.employeeAmount || 0) || 0;
+    const compAmt = Number(fineDoc.companyAmount || 0) || 0;
+    const servCharge = Number(fineDoc.serviceCharge || 0) || 0;
+    const fromParts = empAmt + compAmt + servCharge;
+
     let payable = 0;
     if (isCompany) {
         payable = resolveCompanyFinePayableAmount(fineDoc, party);
@@ -46,16 +52,12 @@ function resolveFineBillLineAmount(fineDoc) {
         payable = empId ? resolveEmployeeFinePayableAmount(fineDoc, empId) : 0;
     }
 
-    if (payable > 0) return Number(payable.toFixed(2));
+    const individual = Number(party?.individualAmount || 0) || 0;
+    const storedTotal = Number(fineDoc.totalFineAmount || fineDoc.fineAmount || 0) || 0;
 
-    const empAmt = Number(fineDoc.employeeAmount || 0) || 0;
-    const compAmt = Number(fineDoc.companyAmount || 0) || 0;
-    const servCharge = Number(fineDoc.serviceCharge || 0) || 0;
-    const fromParts = empAmt + compAmt + servCharge;
-    if (fromParts > 0) return Number(fromParts.toFixed(2));
-
-    const total = Number(fineDoc.totalFineAmount || fineDoc.fineAmount || 0);
-    return Number.isFinite(total) && total > 0 ? Number(total.toFixed(2)) : 0;
+    // Never under-bill vs base + SC (fixes company lines stuck at old understated individualAmount)
+    const amount = Math.max(fromParts, payable, individual, storedTotal, 0);
+    return Number(amount.toFixed(2));
 }
 
 function buildLineItemFromFine(fineDoc) {
