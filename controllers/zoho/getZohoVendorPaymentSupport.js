@@ -103,13 +103,16 @@ export const getZohoVendorPaymentSupport = async (req, res) => {
         const vendorId = String(req.query?.vendorId || '').trim();
         const accountsOnly = String(req.query?.accountsOnly || '').toLowerCase() === 'true';
 
-        // Cheap path for cross-org Paid Through dropdown: only the Chart of Accounts.
+        // Cheap path for cross-org Paid Through / Fine Payable dropdown: full Chart of Accounts.
         if (accountsOnly) {
-            const accounts = await fetchPaymentAccounts();
+            const includeInactive =
+                String(req.query?.includeInactive || '').toLowerCase() === 'true' ||
+                String(req.query?.includeInactive || '').trim() === '1';
+            const accounts = await fetchPaymentAccounts({ includeInactive });
             return res.status(200).json({
                 success: true,
                 data: { accounts },
-                meta: { accountCount: accounts.length },
+                meta: { accountCount: accounts.length, includeInactive },
             });
         }
         const [accounts, payables, locations, paymentModes, vendorContact, nextPaymentNumber] =

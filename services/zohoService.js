@@ -1184,31 +1184,64 @@ export async function fetchVendorsChunk({ startPage = 1, maxRows = 400 } = {}) {
 }
 
 /**
- * Full Zoho Chart of Accounts for Payments Made → Paid Through.
- * Returns every active account (VEGA / NNIT org-scoped via request context).
+ * Full Zoho Chart of Accounts (every account Zoho returns for the org).
+ * Used by Payments Made Paid Through and Fine Payable dropdowns.
+ *
+ * Zoho quirks (verified against Books API):
+ * - `AccountType.All` omits most expense/income accounts (e.g. "Vehicle Fines").
+ * - `AccountType.Active` / unfiltered list can also miss expense accounts that
+ *   still appear under `AccountType.Expense`. Merge type filters + Active/Inactive.
+ *
+ * @param {{ includeInactive?: boolean }} [options]
  */
-export async function fetchPaymentAccounts() {
-    const accounts = await fetchAllZohoBooksRows('/chartofaccounts', 'chartofaccounts', {
-        params: {
-            filter_by: 'AccountType.Active',
-        },
-        maxPages: 10,
-        timeout: 60000,
-    });
+export async function fetchPaymentAccounts(options = {}) {
+    const includeInactive = Boolean(options.includeInactive);
+
+    const fetchByFilter = async (filterBy) => {
+        try {
+            return await fetchAllZohoBooksRows('/chartofaccounts', 'chartofaccounts', {
+                params: filterBy ? { filter_by: filterBy } : {},
+                maxPages: Infinity,
+                timeout: 90000,
+            });
+        } catch (err) {
+            console.warn(
+                `[ZohoPaymentAccounts] CoA fetch failed (${filterBy || 'no filter'}):`,
+                err?.message || err,
+            );
+            return [];
+        }
+    };
+
+    // Never rely on AccountType.All — it is incomplete in Zoho Books.
+    const filters = [
+        'AccountType.Active',
+        'AccountType.Asset',
+        'AccountType.Liability',
+        'AccountType.Equity',
+        'AccountType.Income',
+        'AccountType.Expense',
+        null, // unfiltered page (often matches Active, but cheap insurance)
+    ];
+    if (includeInactive) {
+        filters.push('AccountType.Inactive');
+    }
+
+    const pages = await Promise.all(filters.map((f) => fetchByFilter(f)));
+    let accounts = pages.flat();
 
     const byId = new Map();
     accounts.forEach((account) => {
         const id = String(account?.account_id || account?.id || '').trim();
         if (!id) return;
-        // Skip soft-deleted / inactive rows if Zoho still returns them.
-        const status = String(account?.status || account?.is_active || '')
-            .toLowerCase()
-            .trim();
-        if (status === 'inactive' || status === 'false' || account?.is_active === false) {
-            return;
+        if (!includeInactive) {
+            const status = String(account?.status || account?.is_active || '')
+                .toLowerCase()
+                .trim();
+            if (status === 'inactive' || status === 'false' || account?.is_active === false) {
+                return;
+            }
         }
-        // Full Chart of Accounts — Zoho validates the type on payment save
-        // ("Involved account types are not applicable" for e.g. fixed assets).
         byId.set(id, account);
     });
 
@@ -1222,9 +1255,16 @@ export async function fetchPaymentAccounts() {
     });
 
     if (!rows.length) {
-        console.warn('[ZohoPaymentAccounts] Chart of Accounts returned 0 active accounts');
+        console.warn('[ZohoPaymentAccounts] Chart of Accounts returned 0 accounts');
     } else {
-        console.log(`[ZohoPaymentAccounts] Loaded ${rows.length} Chart of Accounts row(s)`);
+        const fineHits = rows.filter((a) =>
+            /fine/i.test(`${a.account_name || ''} ${a.account_code || ''}`),
+        ).length;
+        console.log(
+            `[ZohoPaymentAccounts] Loaded ${rows.length} Chart of Accounts row(s)` +
+                (includeInactive ? ' (incl. inactive)' : '') +
+                (fineHits ? `, ${fineHits} name-match "fine"` : ''),
+        );
     }
 
     return rows;
