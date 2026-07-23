@@ -166,7 +166,8 @@ export function validateVehicleFinePayload(body, options = {}) {
 
     const needsCompany = responsibleFor === 'Company' || responsibleFor === 'Employee & Company';
     if (needsCompany && !isDraft && !companyId) errors.company = 'Company is required';
-    if (needsCompany && !isDraft) {
+    // Same as create modal: require when company pays (including Draft)
+    if (needsCompany) {
         const compDesc = String(body.companyDescription || '');
         if (!isMeaningfulText(compDesc, LIMITS.minCompanyDescriptionLength)) {
             errors.companyDescription = 'Company description is required';
