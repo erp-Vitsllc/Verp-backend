@@ -185,6 +185,20 @@ export const addFine = async (req, res) => {
                     errors: vehicleCheck.errors,
                 });
             }
+        } else {
+            const hasAttachment = Boolean(
+                commonData.attachment?.data ||
+                commonData.attachment?.url ||
+                commonData.attachment?.publicId ||
+                (Array.isArray(commonData.attachments) &&
+                    commonData.attachments.some((item) => item?.data || item?.url || item?.publicId))
+            );
+            if (!hasAttachment) {
+                return res.status(400).json({
+                    message: 'Attachment is required',
+                    errors: { attachment: 'Attachment is required' },
+                });
+            }
         }
 
         // VALIDATION: Check if HR HOD is assigned in Flowchart (required for all fines)
@@ -367,6 +381,7 @@ export const addFine = async (req, res) => {
                     serviceCharge: individualServiceCharge, // Store service charge share (divided equally among employees)
 
                     description: commonData.description || '',
+                    companyDescription: commonData.companyDescription || '',
                     awardedDate: commonData.awardedDate ? new Date(commonData.awardedDate) : new Date(),
                     remarks: commonData.remarks || '',
                     attachment: attachmentData,
@@ -389,6 +404,7 @@ export const addFine = async (req, res) => {
                     payableDuration: parseInt(empData.payableDuration || commonData.payableDuration) || null,
                     monthStart: commonData.monthStart || '',
                     sourceOfIncome: commonData.sourceOfIncome || 'Salary',
+                    fineSource: commonData.fineSource || '',
                     assetDepreciationAmount: parseFloat(commonData.assetDepreciationAmount) || 0,
                     assetPurchaseDate: commonData.assetPurchaseDate || '',
                     createdBy: req.user._id
@@ -488,6 +504,7 @@ export const addFine = async (req, res) => {
             fineStatus,
             fineAmount,
             description,
+            companyDescription,
             awardedDate,
             remarks,
             attachment,
@@ -506,6 +523,7 @@ export const addFine = async (req, res) => {
             serviceCharge,
             payableDuration,
             monthStart,
+            fineSource,
             sourceOfIncome,
             assetDepreciationAmount,
             assetPurchaseDate,
@@ -583,6 +601,7 @@ export const addFine = async (req, res) => {
             fineAmount: totalFineAmount, // Total = base fine + service charge
             totalFineAmount: totalFineAmount, // Store total fine amount (employeeAmount + companyAmount + serviceCharge)
             description: description || '',
+            companyDescription: companyDescription || '',
             awardedDate: awardedDate ? new Date(awardedDate) : new Date(),
             remarks: remarks || '',
             attachment: attachmentData,
@@ -610,6 +629,7 @@ export const addFine = async (req, res) => {
             serviceCharge: serviceChargeAmount, // Store exact service charge
             payableDuration: parseInt(payableDuration) || null,
             monthStart: monthStart || '',
+            fineSource: fineSource || '',
             sourceOfIncome: sourceOfIncome || 'Salary',
             assetDepreciationAmount: parseFloat(assetDepreciationAmount) || 0,
             assetPurchaseDate: assetPurchaseDate || '',

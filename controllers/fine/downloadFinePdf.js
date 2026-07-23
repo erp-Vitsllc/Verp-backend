@@ -1,6 +1,7 @@
 import Fine from "../../models/Fine.js";
 import { resolveFrontendBaseUrl, emailFrontendUrl } from '../../utils/resolveFrontendBaseUrl.js';
 import { isUsernameSystemSuperUser } from "../../utils/systemSuperUser.js";
+import { generatePdf } from '../../utils/generatePdf.js';
 
 /**
  * Download Fine Form PDF

@@ -162,6 +162,11 @@ const fineSchema = new mongoose.Schema(
             enum: ['Salary', 'End of Service', null],
             default: 'Salary',
         },
+        /** Vendor (Zoho Books) the fine originated from. */
+        fineSource: {
+            type: String,
+            default: '',
+        },
         assetDepreciationAmount: {
             type: Number,
             default: 0,
@@ -175,6 +180,10 @@ const fineSchema = new mongoose.Schema(
             default: 0
         },
         description: {
+            type: String,
+            default: ''
+        },
+        companyDescription: {
             type: String,
             default: ''
         },
@@ -305,6 +314,8 @@ const fineSchema = new mongoose.Schema(
         zohoVendorName: { type: String, default: '' },
         expenseAccountId: { type: String, default: '' },
         expenseAccountName: { type: String, default: '' },
+        /** Accounts marked this party row Payable as complete (tick). */
+        payableConfirmed: { type: Boolean, default: false },
         zohoBillId: { type: String, default: '', index: true },
         billNumber: { type: String, default: '' },
         billDate: { type: String, default: '' },

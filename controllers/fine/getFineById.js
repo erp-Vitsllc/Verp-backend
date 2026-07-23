@@ -166,12 +166,17 @@ export const getFineById = async (req, res) => {
                         return {
                             ...e,
                             fineId: rf.fineId,
+                            fineRecordId: rf._id,
                             fineStatus: rf.fineStatus,
                             individualAmount: individualAmt,
-                            fineAmount: baseAmount,
+                            // Display / payable total always includes this party's service charge
+                            fineAmount: individualAmt,
                             employeeAmount: baseAmount,
                             serviceCharge: sc,
-                            payableDuration: rf.payableDuration || e.payableDuration
+                            payableDuration: rf.payableDuration || e.payableDuration,
+                            expenseAccountId: rf.expenseAccountId || e.expenseAccountId || '',
+                            expenseAccountName: rf.expenseAccountName || e.expenseAccountName || '',
+                            payableConfirmed: Boolean(rf.payableConfirmed),
                         };
                     });
                     allAssigned.push(...enriched);

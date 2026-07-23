@@ -1,6 +1,5 @@
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import { buildFineFormSummary } from './buildFineFormSummary.js';
-import { isLossDamageFineType } from './buildAssetLossFineEmailFields.js';
 import { isAssetLossFineReportApplicable } from './sendAssetLossFineReportEmail.js';
 import { loadFineRecordForAssetLossPdf } from './loadFineRecordForAssetLossPdf.js';
 import { generateAssetLossFineReportPdf } from './generateAssetLossFineReportPdf.js';
@@ -80,17 +79,14 @@ export async function generateFineApprovedReportPdfBuffer(fine, { employeeId } =
         });
     }
 
-    if (isLossDamageFineType(fineForPdf)) {
-        return generateFineApprovedPdf({
-            fine: fineForPdf,
-            assigned,
-            formSummary,
-            employeeName: displayEmployeeName,
-            hodName,
-            hrEmployee: stakeholders.hrHOD,
-            accountsEmployee: stakeholders.accountsHOD,
-        });
-    }
-
-    return null;
+    // Vehicle / other fines — same approved letterhead PDF used after Management approval
+    return generateFineApprovedPdf({
+        fine: fineForPdf,
+        assigned,
+        formSummary,
+        employeeName: displayEmployeeName,
+        hodName,
+        hrEmployee: stakeholders.hrHOD,
+        accountsEmployee: stakeholders.accountsHOD,
+    });
 }

@@ -176,9 +176,10 @@ export const updateFine = async (req, res) => {
             'attachment', 'attachments', 'category', 'subCategory', 'vehicleId', 'assetId', 'assetName',
             'projectId', 'projectName', 'engineerName', 'responsibleFor',
             'fineAmount', 'employeeAmount', 'companyAmount', 'serviceCharge', 'payableDuration', 'monthStart',
-            'sourceOfIncome', 'assetDepreciationAmount', 'assetPurchaseDate',
+            'sourceOfIncome', 'fineSource', 'assetDepreciationAmount', 'assetPurchaseDate',
             'employees', 'totalEmployeeFineAmount', 'company', 'companyName', 'companyDescription',
             'excludedAccessoryIds', 'breakdownItems',
+            'expenseAccountId', 'expenseAccountName', 'payableConfirmed', 'zohoVendorId', 'zohoVendorName', 'zohoOrganizationId',
         ];
 
         const mergedVehicleFine = {
@@ -324,6 +325,28 @@ export const updateFine = async (req, res) => {
 
         const splitAmountKeys = new Set(['fineAmount', 'employeeAmount', 'companyAmount', 'serviceCharge', 'employees']);
 
+        // Per-party Chart of Accounts (Accounts stage) — apply only to matching sibling rows
+        if (Array.isArray(updates.partyPayables) && updates.partyPayables.length > 0) {
+            for (const party of updates.partyPayables) {
+                if (!party) continue;
+                const match = fines.find(
+                    (f) =>
+                        (party.fineRecordId && String(f._id) === String(party.fineRecordId)) ||
+                        (party.fineId && String(f.fineId) === String(party.fineId)),
+                );
+                if (!match) continue;
+                if (party.expenseAccountId !== undefined) {
+                    match.expenseAccountId = String(party.expenseAccountId || '').trim();
+                }
+                if (party.expenseAccountName !== undefined) {
+                    match.expenseAccountName = String(party.expenseAccountName || '').trim();
+                }
+                if (party.payableConfirmed !== undefined) {
+                    match.payableConfirmed = Boolean(party.payableConfirmed);
+                }
+            }
+        }
+
         // 3. Apply updates only for allowed fields (Loop all for bulk update)
         for (const f of fines) {
             if (scheduleFieldsAreChanging(f, updates)) {
@@ -373,6 +396,14 @@ export const updateFine = async (req, res) => {
 
             allowedUpdates.forEach(key => {
                 if (updates[key] !== undefined) {
+                    // partyPayables already applied per sibling — do not overwrite all rows
+                    if (
+                        Array.isArray(updates.partyPayables) &&
+                        updates.partyPayables.length > 0 &&
+                        (key === 'expenseAccountId' || key === 'expenseAccountName' || key === 'payableConfirmed')
+                    ) {
+                        return;
+                    }
                     if (empUpdate && fines.length > 1 && splitAmountKeys.has(key)) {
                         return;
                     }

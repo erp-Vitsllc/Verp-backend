@@ -44,19 +44,28 @@ export function resolveEmployeeFinePayableAmount(fine, employeeId) {
     );
     if (!entry) return 0;
 
+    const rowBase = resolveRowBaseAmount(fine, entry, false);
+    const sc = resolvePartyServiceShare(fine, entry, false);
+    const expected = Number((rowBase + sc).toFixed(2));
+
     if (entry.individualAmount != null && entry.individualAmount !== '') {
         const stored = parseFloat(entry.individualAmount) || 0;
-        if (stored > 0) return stored;
+        if (stored > 0) {
+            // Stored total missing service charge → top up
+            if (sc > 0 && rowBase > 0 && stored < expected - 0.01) return expected;
+            return stored;
+        }
     }
     if (entry.fineAmount != null && entry.fineAmount !== '') {
         const stored = parseFloat(entry.fineAmount) || 0;
-        if (stored > 0) return stored;
+        if (stored > 0) {
+            if (sc > 0 && rowBase > 0 && stored < expected - 0.01) return expected;
+            if (sc > 0 && Math.abs(stored - rowBase) < 0.01) return expected;
+            return stored;
+        }
     }
 
-    const rowBase = resolveRowBaseAmount(fine, entry, false);
-    if (rowBase > 0) {
-        return rowBase + resolvePartyServiceShare(fine, entry, false);
-    }
+    if (expected > 0) return expected;
 
     const companyAmount = parseFloat(fine.companyAmount || 0) || 0;
     const fineAmount = parseFloat(fine.fineAmount || fine.totalFineAmount || 0) || 0;
@@ -65,6 +74,10 @@ export function resolveEmployeeFinePayableAmount(fine, employeeId) {
     );
 
     if (humanAssignees.length <= 1 && companyAmount === 0 && fineAmount > 0) {
+        const totalSc = parseFloat(fine.serviceCharge || 0) || 0;
+        if (totalSc > 0 && fineAmount < rowBase + totalSc - 0.01 && rowBase > 0) {
+            return Number((rowBase + totalSc).toFixed(2));
+        }
         return fineAmount;
     }
 
@@ -79,19 +92,27 @@ export function resolveCompanyFinePayableAmount(fine, companyEntry = null) {
         (fine.assignedEmployees || []).find(isCompanyParty) ||
         (fine.assignedEmployees || []).find((e) => e.employeeId === 'VEGA-HR-0000');
 
+    const rowBase = resolveRowBaseAmount(fine, entry, true);
+    const sc = resolvePartyServiceShare(fine, entry, true);
+    const expected = Number((rowBase + sc).toFixed(2));
+
     if (entry?.individualAmount != null && entry.individualAmount !== '') {
         const stored = parseFloat(entry.individualAmount) || 0;
-        if (stored > 0) return stored;
+        if (stored > 0) {
+            if (sc > 0 && rowBase > 0 && stored < expected - 0.01) return expected;
+            return stored;
+        }
     }
     if (entry?.fineAmount != null && entry.fineAmount !== '') {
         const stored = parseFloat(entry.fineAmount) || 0;
-        if (stored > 0) return stored;
+        if (stored > 0) {
+            if (sc > 0 && rowBase > 0 && stored < expected - 0.01) return expected;
+            if (sc > 0 && Math.abs(stored - rowBase) < 0.01) return expected;
+            return stored;
+        }
     }
 
-    const rowBase = resolveRowBaseAmount(fine, entry, true);
-    if (rowBase > 0) {
-        return rowBase + resolvePartyServiceShare(fine, entry, true);
-    }
+    if (expected > 0) return expected;
 
     const rf = (fine.responsibleFor || '').trim();
     if (rf === 'Company') {

@@ -139,7 +139,7 @@ export function validateVehicleFinePayload(body, options = {}) {
         (body.attachment && (body.attachment.data || body.attachment.url)) ||
         (Array.isArray(body.attachments) &&
             body.attachments.some((item) => item?.data || item?.url || item?.publicId));
-    if (!isDraft && !hasAttachment) errors.attachment = 'Supporting document is required';
+    if (!hasAttachment) errors.attachment = 'Supporting document is required';
 
     if (Object.keys(errors).length === 0) return { valid: true };
 

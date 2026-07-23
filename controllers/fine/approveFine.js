@@ -150,6 +150,45 @@ export const approveFine = async (req, res) => {
         else if (currentStatus === 'Pending Accounts' || currentStatus === 'Pending Finance' ||
             (currentStatus === 'Pending' && fine.workflow?.some(w => w.status === 'Pending' && w.role === 'Accounts'))) {
             if (await canActOnFine()) {
+                // Persist any party payables sent with the approve request
+                const partyPayables = Array.isArray(req.body?.partyPayables) ? req.body.partyPayables : [];
+                if (partyPayables.length > 0) {
+                    for (const party of partyPayables) {
+                        if (!party) continue;
+                        const match = fines.find(
+                            (f) =>
+                                (party.fineRecordId && String(f._id) === String(party.fineRecordId)) ||
+                                (party.fineId && String(f.fineId) === String(party.fineId)),
+                        );
+                        if (!match) continue;
+                        if (party.expenseAccountId !== undefined) {
+                            match.expenseAccountId = String(party.expenseAccountId || '').trim();
+                        }
+                        if (party.expenseAccountName !== undefined) {
+                            match.expenseAccountName = String(party.expenseAccountName || '').trim();
+                        }
+                        if (party.payableConfirmed !== undefined) {
+                            match.payableConfirmed = Boolean(party.payableConfirmed);
+                        } else if (match.expenseAccountId) {
+                            match.payableConfirmed = true;
+                        }
+                    }
+                }
+
+                // Every liable party must have Payable (Chart of Accounts) filled
+                const incomplete = fines.filter((f) => !String(f.expenseAccountId || '').trim());
+                if (incomplete.length > 0) {
+                    const labels = incomplete.map((f) => {
+                        const party = f.assignedEmployees?.[0];
+                        return party?.employeeName || f.companyName || f.fineId;
+                    });
+                    return res.status(400).json({
+                        message:
+                            `Accounts cannot approve until every party Payable is filled. Incomplete: ${labels.join(', ')}.`,
+                        missingPayables: labels,
+                    });
+                }
+
                 const realEmp = fine.assignedEmployees?.find(e => e.employeeId && e.employeeId !== 'VEGA-HR-0000');
                 const applicantId = realEmp?.employeeId || fine.assignedEmployees?.[0]?.employeeId;
 
@@ -193,6 +232,11 @@ export const approveFine = async (req, res) => {
                     f.accountsApprovedBy = req.user._id;
                     f.submittedTo = fine.submittedTo;
                     f.workflow = fine.workflow;
+                    // Keep a group-level default account from the first party for legacy single-line sync
+                    if (!f.expenseAccountId && fines[0]?.expenseAccountId) {
+                        f.expenseAccountId = fines[0].expenseAccountId;
+                        f.expenseAccountName = fines[0].expenseAccountName || '';
+                    }
                     await f.save();
                 }
 
@@ -216,12 +260,19 @@ export const approveFine = async (req, res) => {
                     billDate = '',
                 } = req.body || {};
 
-                const vendorId = String(zohoVendorId || '').trim();
-                const accountId = String(expenseAccountId || '').trim();
-                if (!vendorId || !accountId) {
+                const vendorId = String(zohoVendorId || fine.zohoVendorId || '').trim();
+                const accountId = String(expenseAccountId || fine.expenseAccountId || '').trim();
+                const allPartiesHavePayable = fines.every((f) => String(f.expenseAccountId || '').trim());
+                if (!vendorId) {
                     return res.status(400).json({
                         message:
-                            'Management approval requires a Zoho vendor and expense account (Chart of Accounts).',
+                            'Management approval requires a Zoho vendor. Set Vendor (Fine Source) in Accounts on the Group Fine Parties card first.',
+                    });
+                }
+                if (!accountId && !allPartiesHavePayable) {
+                    return res.status(400).json({
+                        message:
+                            'Management approval requires expense accounts: fill Payable (Chart of Accounts) for every party in Accounts first.',
                     });
                 }
 
@@ -234,9 +285,17 @@ export const approveFine = async (req, res) => {
                     syncFinePartyPayableAmounts(f);
 
                     f.zohoVendorId = vendorId;
-                    f.zohoVendorName = String(zohoVendorName || '').trim();
-                    f.expenseAccountId = accountId;
-                    f.expenseAccountName = String(expenseAccountName || '').trim();
+                    f.zohoVendorName = String(
+                        zohoVendorName || fine.zohoVendorName || fine.fineSource || '',
+                    ).trim();
+                    if (accountId) {
+                        // Only overwrite party payable when a default account is explicitly provided
+                        // and this sibling still has none
+                        if (!String(f.expenseAccountId || '').trim()) {
+                            f.expenseAccountId = accountId;
+                            f.expenseAccountName = String(expenseAccountName || '').trim();
+                        }
+                    }
                     if (String(zohoOrganizationId || '').trim()) {
                         f.zohoOrganizationId = String(zohoOrganizationId).trim();
                     }
@@ -266,10 +325,11 @@ export const approveFine = async (req, res) => {
                     else { if (!f.workflow) f.workflow = []; f.workflow.push({ role: 'Management', assignedTo: req.user._id, status: 'Approved', assignedAt: new Date(), actionedAt: new Date() }); }
 
                     await f.save();
-
-                    const { syncApprovedFineToZoho } = await import('../../utils/syncApprovedFineToZoho.js');
-                    syncResults.push(await syncApprovedFineToZoho(f));
                 }
+
+                // One Zoho bill for the group: vendor = Fine Source, line items = parties with Payable COA
+                const { syncApprovedFineToZoho } = await import('../../utils/syncApprovedFineToZoho.js');
+                syncResults.push(await syncApprovedFineToZoho(fines[0], fines));
 
                 modified = true;
                 Object.assign(fine, fines[0].toObject?.() ? fines[0].toObject() : fines[0]);
