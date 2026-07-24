@@ -276,53 +276,48 @@ export const updateReward = async (req, res) => {
 
                             let finalRecipients = [];
 
-                            // NEXT PERSON LOGIC: If the manager is the one submitting, move to next step
+                            // NEXT PERSON LOGIC: If the manager is the one submitting, move to Management next
                             if (reporteeUser._id.toString() === req.user?._id?.toString()) {
-                                console.log("[UpdateReward] Submitter is the Manager. Moving to next workflow step.");
+                                console.log("[UpdateReward] Submitter is the Manager. Moving to Management.");
 
                                 let nextTarget = null;
                                 let nextTargetRole = null;
 
-                                if (isCashOrGift) {
-                                    // Move to Accounts
-                                    const accountsHOD = await getDepartmentHOD('accounts', hodContext);
-                                    if (accountsHOD) {
-                                        const accountsUser = await User.findOne({ employeeId: accountsHOD.employeeId });
-                                        if (accountsUser) {
-                                            nextTarget = accountsUser;
-                                            nextTargetRole = 'Accounts';
-                                            finalRecipients.push({
-                                                email: accountsHOD.companyEmail || accountsHOD.email || accountsUser.companyEmail || accountsUser.email,
-                                                name: `${accountsHOD.firstName} ${accountsHOD.lastName}`,
-                                                role: 'Accounts HOD'
-                                            });
-                                        }
-                                    }
-                                }
-
-                                if (!nextTarget) {
-                                    // Move to Management
-                                    const managementHOD = await getManagementHOD(hodContext);
-                                    if (managementHOD) {
-                                        const managementUser = await User.findOne({ employeeId: managementHOD.employeeId });
-                                        if (managementUser) {
-                                            nextTarget = managementUser;
-                                            nextTargetRole = 'Management';
-                                            finalRecipients.push({
-                                                email: managementHOD.companyEmail || managementHOD.email || managementUser.companyEmail || managementUser.email,
-                                                name: `${managementHOD.firstName} ${managementHOD.lastName}`,
-                                                role: 'Management (Manager)'
-                                            });
-                                        }
+                                const managementHOD = await getManagementHOD(hodContext);
+                                if (managementHOD) {
+                                    const managementUser = await User.findOne({ employeeId: managementHOD.employeeId });
+                                    if (managementUser) {
+                                        nextTarget = managementUser;
+                                        nextTargetRole = 'Management';
+                                        finalRecipients.push({
+                                            email: managementHOD.companyEmail || managementHOD.email || managementUser.companyEmail || managementUser.email,
+                                            name: `${managementHOD.firstName} ${managementHOD.lastName}`,
+                                            role: 'Management (Manager)'
+                                        });
                                     }
                                 }
 
                                 if (nextTarget) {
                                     reward.submittedTo = nextTarget._id;
+                                    finalStatus = 'Pending Authorization';
                                     reward.workflow = [
                                         { role: 'Manager', assignedTo: req.user._id, status: 'Approved', assignedAt: new Date(), actionedAt: new Date() },
-                                        { role: nextTargetRole || 'Next', assignedTo: nextTarget._id, status: 'Pending', assignedAt: new Date() }
+                                        { role: nextTargetRole || 'Management', assignedTo: nextTarget._id, status: 'Pending', assignedAt: new Date() }
                                     ];
+                                    if (isCashOrGift) {
+                                        const accountsHOD = await getDepartmentHOD('accounts', hodContext);
+                                        if (accountsHOD) {
+                                            const accountsUser = await User.findOne({ employeeId: accountsHOD.employeeId });
+                                            if (accountsUser) {
+                                                reward.workflow.push({
+                                                    role: 'Accounts',
+                                                    assignedTo: accountsUser._id,
+                                                    status: 'Draft',
+                                                    assignedAt: new Date()
+                                                });
+                                            }
+                                        }
+                                    }
                                 } else {
                                     reward.submittedTo = reporteeUser._id;
                                     reward.workflow = [{ role: 'Manager', assignedTo: reporteeUser._id, status: 'Pending', assignedAt: new Date() }];
@@ -341,16 +336,7 @@ export const updateReward = async (req, res) => {
                                     role: 'Primary Reportee'
                                 });
 
-                                // Tracker steps wait as Draft until their turn (sequential bells)
-                                if (isCashOrGift) {
-                                    const accountsHOD = await getDepartmentHOD('accounts', hodContext);
-                                    if (accountsHOD) {
-                                        const accountsUser = await User.findOne({ employeeId: accountsHOD.employeeId });
-                                        if (accountsUser) {
-                                            reward.workflow.push({ role: 'Accounts', assignedTo: accountsUser._id, status: 'Draft', assignedAt: new Date() });
-                                        }
-                                    }
-                                }
+                                // Tracker steps wait as Draft until their turn (Management before Accounts)
                                 const managementHOD = await getManagementHOD(hodContext);
                                 if (managementHOD) {
                                     const managementUser = await User.findOne({ employeeId: managementHOD.employeeId });
@@ -361,6 +347,15 @@ export const updateReward = async (req, res) => {
                                             status: 'Draft',
                                             assignedAt: new Date()
                                         });
+                                    }
+                                }
+                                if (isCashOrGift) {
+                                    const accountsHOD = await getDepartmentHOD('accounts', hodContext);
+                                    if (accountsHOD) {
+                                        const accountsUser = await User.findOne({ employeeId: accountsHOD.employeeId });
+                                        if (accountsUser) {
+                                            reward.workflow.push({ role: 'Accounts', assignedTo: accountsUser._id, status: 'Draft', assignedAt: new Date() });
+                                        }
                                     }
                                 }
                             }
@@ -500,28 +495,51 @@ export const updateReward = async (req, res) => {
                     const currentStage = reward.approvalStatus || reward.rewardStatus;
                     console.log("[UpdateReward] Current Internal Stage:", currentStage);
 
-                    // LOGIC: Manager -> [Accounts (if Cash/Gift)] -> Management -> Approved
+                    // LOGIC: Manager -> Management -> [Accounts (if Cash/Gift)] -> Approved
                     const isCashOrGift = reward.rewardType === 'Cash Reward' || reward.rewardType === 'Gift Reward';
 
-                    // 1. Manager Step -> Accounts or Management
+                    // 1. Manager Step -> Management
                     if (currentStage === 'Pending' && isReporteeManager) {
+                        finalStatus = isManagement && !isCashOrGift ? 'Approved' : 'Pending Authorization';
+                    }
+                    // 2. Management Step -> Accounts (Cash/Gift) or Approved (Certificate)
+                    else if (currentStage === 'Pending Authorization' && isManagement) {
                         if (isCashOrGift) {
                             finalStatus = 'Pending Accounts';
                         } else {
-                            finalStatus = isManagement ? 'Approved' : 'Pending Authorization';
+                            finalStatus = 'Approved';
                         }
                     }
-                    // 2. Accounts Step -> Management
+                    // 3. Accounts Step -> Approved (Cash/Gift only)
                     else if (currentStage === 'Pending Accounts' && isAccounts) {
-                        finalStatus = isManagement ? 'Approved' : 'Pending Authorization';
-                    }
-                    // 3. Management Step -> Approved
-                    else if (currentStage === 'Pending Authorization' && isManagement) {
+                        if (!String(reward.expenseAccountId || '').trim()) {
+                            return res.status(400).json({
+                                message:
+                                    'Accounts cannot approve until Expense Account is set on the Reward Parties card.',
+                            });
+                        }
+                        if (!String(reward.paidThroughAccountId || '').trim()) {
+                            return res.status(400).json({
+                                message:
+                                    'Accounts cannot approve until Paid Through is set on the Reward Parties card.',
+                            });
+                        }
+                        if (
+                            String(reward.expenseAccountId).trim() ===
+                            String(reward.paidThroughAccountId).trim()
+                        ) {
+                            return res.status(400).json({
+                                message:
+                                    'Expense Account and Paid Through must be different Chart of Accounts.',
+                            });
+                        }
                         finalStatus = 'Approved';
                     }
-                    // Management Override
-                    else if (isManagement && reward.rewardStatus !== 'Rejected') {
+                    // Management Override (Certificate / non-cash only — Cash/Gift still need Accounts)
+                    else if (isManagement && reward.rewardStatus !== 'Rejected' && !isCashOrGift) {
                         finalStatus = 'Approved';
+                    } else if (isManagement && isCashOrGift && currentStage === 'Pending') {
+                        finalStatus = 'Pending Authorization';
                     }
                 }
                 console.log("[UpdateReward] Final ApproverDetails:", approverDetails ? "Set" : "NULL");
@@ -548,6 +566,37 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
             
             // Allow publicStatus to reflect the exact current progression stage
             let publicStatus = finalStatus;
+
+            // Cash/Gift Accounts approve: require Expense Account + Paid Through (Loan-style)
+            if (
+                nextInternalStage === 'Approved' &&
+                (reward.approvalStatus || reward.rewardStatus) === 'Pending Accounts' &&
+                (reward.rewardType === 'Cash Reward' ||
+                    reward.rewardType === 'Gift Reward' ||
+                    parseFloat(reward.amount || 0) > 0)
+            ) {
+                if (!String(reward.expenseAccountId || '').trim()) {
+                    return res.status(400).json({
+                        message:
+                            'Accounts cannot approve until Expense Account is set on the Reward Parties card.',
+                    });
+                }
+                if (!String(reward.paidThroughAccountId || '').trim()) {
+                    return res.status(400).json({
+                        message:
+                            'Accounts cannot approve until Paid Through is set on the Reward Parties card.',
+                    });
+                }
+                if (
+                    String(reward.expenseAccountId).trim() ===
+                    String(reward.paidThroughAccountId).trim()
+                ) {
+                    return res.status(400).json({
+                        message:
+                            'Expense Account and Paid Through must be different Chart of Accounts.',
+                    });
+                }
+            }
 
             reward.approvalStatus = nextInternalStage;
             reward.rewardStatus = publicStatus;
@@ -581,10 +630,18 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
                         reward.submittedTo = hodUser._id;
                         if (!reward.workflow) reward.workflow = [];
 
-                        const managerStep = reward.workflow.find(w => w.role === 'Manager' && w.status === 'Pending');
-                        if (managerStep) {
-                            managerStep.status = 'Approved';
-                            managerStep.actionedAt = new Date();
+                        // Mark prior pending step (Manager or Management) approved
+                        const priorPending = reward.workflow.find(
+                            (w) => w.status === 'Pending' && w.role !== 'Accounts'
+                        );
+                        if (priorPending) {
+                            priorPending.status = 'Approved';
+                            priorPending.actionedAt = new Date();
+                            if (priorPending.role === 'Manager') {
+                                reward.managerApprovedBy = approverDetails.id;
+                            } else if (priorPending.role === 'Management' || priorPending.role === 'CEO') {
+                                reward.approvedBy = reward.approvedBy || req.user?.id || null;
+                            }
                         }
 
                         let accountsStep = reward.workflow.find(w => w.role === 'Accounts');
@@ -624,7 +681,7 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
 
                         if (!reward.workflow) reward.workflow = [];
 
-                        // Find whatever step was pending (Manager or Accounts)
+                        // Find whatever step was pending (Manager — Accounts no longer precedes Management)
                         const currentPending = reward.workflow.find(w => w.status === 'Pending' && w.role !== 'Management');
                         if (currentPending) {
                             currentPending.status = 'Approved';
@@ -636,6 +693,7 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
                         if (managementStep) {
                             managementStep.status = 'Pending';
                             managementStep.assignedAt = new Date();
+                            managementStep.assignedTo = hodUser._id;
                         } else {
                             reward.workflow.push({
                                 role: 'Management',
@@ -648,8 +706,6 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
                         // Set persistent approver field
                         if (currentPending?.role === 'Manager') {
                             reward.managerApprovedBy = approverDetails.id;
-                        } else if (currentPending?.role === 'Accounts') {
-                            reward.accountsApprovedBy = approverDetails.id;
                         }
 
                         await sendHODAuthorizationEmail('Reward', reward, targetHOD, approverDetails);
@@ -668,7 +724,7 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
 
                 if (!reward.approvedDate) reward.approvedDate = new Date();
 
-                // Update Management Workflow to Approved
+                // Update Management / Accounts Workflow to Approved
                 if (reward.workflow?.length) {
 
                     console.log(
@@ -680,7 +736,7 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
                     }
 
                     const managementEntry = reward.workflow.find(w =>
-                        w.role === 'Management' &&
+                        (w.role === 'Management' || w.role === 'CEO') &&
                         w.status === 'Pending'
                     );
 
@@ -692,6 +748,15 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
                     if (managementEntry) {
                         managementEntry.status = 'Approved';
                         managementEntry.actionedAt = new Date();
+                    }
+
+                    const accountsEntry = reward.workflow.find(
+                        (w) => w.role === 'Accounts' && w.status === 'Pending'
+                    );
+                    if (accountsEntry) {
+                        accountsEntry.status = 'Approved';
+                        accountsEntry.actionedAt = new Date();
+                        reward.accountsApprovedBy = req.user?.id || reward.accountsApprovedBy || null;
                     }
 
                     // Explicitly ensure reward status is Approved
@@ -706,6 +771,52 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
                                 w.actionedAt = new Date();
                             }
                         });
+                    }
+                }
+
+                // Cash/Gift: post Zoho Expense on Accounts approve (reference + notes = reward description)
+                const isCashOrGiftZoho =
+                    reward.rewardType === 'Cash Reward' ||
+                    reward.rewardType === 'Gift Reward' ||
+                    (parseFloat(reward.amount || 0) > 0);
+                if (
+                    isCashOrGiftZoho &&
+                    currentStatus === 'Pending Accounts' &&
+                    !String(reward.zohoExpenseId || '').trim()
+                ) {
+                    try {
+                        const { syncRewardApprovalToZohoExpense } = await import(
+                            '../../utils/syncRewardPaymentToZoho.js'
+                        );
+                        const employeeForZoho = await EmployeeBasic.findOne({
+                            employeeId: reward.employeeId,
+                        })
+                            .select('employeeId company firstName lastName')
+                            .lean();
+                        const zohoResult = await syncRewardApprovalToZohoExpense({
+                            reward,
+                            employee: employeeForZoho,
+                        });
+                        if (zohoResult?.ok) {
+                            if (zohoResult.expenseId) {
+                                reward.zohoExpenseId = zohoResult.expenseId;
+                                reward.zohoExpenseNumber = zohoResult.expenseNumber || '';
+                                reward.zohoOrganizationId =
+                                    zohoResult.organizationId || reward.zohoOrganizationId || '';
+                                reward.zohoSyncedAt = new Date();
+                                reward.zohoSyncError = '';
+                            }
+                            console.log(
+                                '[UpdateReward] Zoho Expense on Accounts approve:',
+                                zohoResult.message || zohoResult.expenseId
+                            );
+                        } else {
+                            reward.zohoSyncError = zohoResult?.message || 'Zoho Expense sync failed';
+                            console.warn('[UpdateReward] Zoho Expense failed:', reward.zohoSyncError);
+                        }
+                    } catch (zohoErr) {
+                        reward.zohoSyncError = zohoErr?.message || 'Zoho Expense sync failed';
+                        console.error('[UpdateReward] Zoho Expense error:', zohoErr);
                     }
                 }
 

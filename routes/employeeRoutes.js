@@ -79,6 +79,7 @@ import { getLoanById } from "../controllers/employee/getLoanById.js";
 import { approveLoan } from "../controllers/employee/approveLoan.js";
 import { updateLoanDetails, updateLoanPartyPayable } from "../controllers/employee/updateLoanDetails.js";
 import { retryLoanZohoExpense } from "../controllers/employee/retryLoanZohoExpense.js";
+import { getPendingLoanDashboardInbox } from "../controllers/employee/getPendingLoanDashboardInbox.js";
 import { getLoanPdf } from "../controllers/employee/getLoanPdf.js";
 import { downloadLoanAcknowledgmentPdf } from "../controllers/employee/downloadLoanAcknowledgmentPdf.js";
 import { downloadEmployeeAssetListPdf } from "../controllers/employee/downloadEmployeeAssetListPdf.js";
@@ -296,6 +297,8 @@ router.post("/:id/probation/hr-finalize", checkPermission('hrm_employees_view_wo
 
 // Loan / Advance — Create Loan / Create Advance children (parent Loan is View-only)
 router.post("/request-loan", checkLoanOrAdvanceCreatePermission(), requestLoan);
+// Assignee-only pending inbox (same pattern as Reward / Fine / Assets bells)
+router.get("/loans/dashboard/pending-inbox", checkLoanViewPermission(), getPendingLoanDashboardInbox);
 // Approval — workflow validates actor inside the handler (parent Edit is disabled in the chart)
 router.put("/loans/:id/status", approveLoan);
 router.put("/loans/:id/party-payable", checkLoanViewPermission(), updateLoanPartyPayable);

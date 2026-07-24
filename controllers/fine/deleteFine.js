@@ -1,6 +1,7 @@
 import Fine from "../../models/Fine.js";
 import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
 import { awaitAdminDeletionArchive } from "../../utils/adminDeletionArchiveRun.js";
+import { clearDashboardActionsForRequest } from "../../utils/clearDashboardActionsForRequest.js";
 
 export const deleteFine = async (req, res) => {
     try {
@@ -24,6 +25,9 @@ export const deleteFine = async (req, res) => {
             deletedPayload: fineSnapshot,
         });
         await Fine.findByIdAndDelete(id);
+        await clearDashboardActionsForRequest(id, {
+            requestTypes: ['Fine', 'Group Fine Request'],
+        });
         return res.status(200).json({ message: "Fine record deleted successfully" });
     } catch (error) {
         console.error('Error deleting fine:', error);

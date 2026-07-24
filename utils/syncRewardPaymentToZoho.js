@@ -147,6 +147,16 @@ export async function syncRewardPaymentToZoho({
     paidThroughAccountId = '',
     paidThroughAccountName = '',
 } = {}) {
+    // Prefer Zoho Expense already posted at Accounts approve
+    if (clean(reward?.zohoExpenseId)) {
+        return {
+            ok: true,
+            skipped: true,
+            expenseId: clean(reward.zohoExpenseId),
+            message: 'Zoho Expense already posted at Accounts approval.',
+        };
+    }
+
     return syncStaffPayoutToZoho({
         payment,
         employee: employee || reward?.employeeId,
@@ -158,6 +168,53 @@ export async function syncRewardPaymentToZoho({
         reference: reward?.rewardId,
         notes: `Cash reward payment · ${reward?.title || ''} · ${reward?.employeeName || ''}`.trim(),
         debitDescription: 'Reward expense',
+    });
+}
+
+/**
+ * Cash/Gift Accounts approve → Zoho Books Expense.
+ * Reference# + Notes = reward description (same pattern as Loan).
+ */
+export async function syncRewardApprovalToZohoExpense({ reward, employee } = {}) {
+    if (!reward?._id) return { ok: false, message: 'Reward is required.' };
+
+    const description = clean(
+        reward.description ||
+            reward.title ||
+            reward.remarks ||
+            `Reward ${clean(reward.rewardId)} · ${clean(reward.employeeId)}`,
+    ).slice(0, 500);
+
+    const { syncLoanPaymentToZohoExpense } = await import('./syncLoanPaymentToZohoExpense.js');
+    return syncLoanPaymentToZohoExpense({
+        payment: {
+            amount: reward.amount,
+            paymentDate: reward.awardedDate || reward.approvedDate || new Date(),
+            notes: description,
+        },
+        loan: {
+            _id: reward._id,
+            loanId: reward.rewardId,
+            employeeId: reward.employeeId,
+            reason: description,
+            description,
+            amount: reward.amount,
+            expenseAccountId: reward.expenseAccountId,
+            expenseAccountName: reward.expenseAccountName,
+            paidThroughAccountId: reward.paidThroughAccountId,
+            paidThroughAccountName: reward.paidThroughAccountName,
+            zohoOrganizationId: reward.zohoOrganizationId,
+            zohoExpenseId: reward.zohoExpenseId,
+            appliedDate: reward.awardedDate || reward.createdAt,
+            attachment: reward.attachment,
+            type: 'Reward',
+        },
+        employee: employee || reward.employeeId,
+        organizationId: reward.zohoOrganizationId,
+        expenseAccountId: reward.expenseAccountId,
+        expenseAccountName: reward.expenseAccountName,
+        paidThroughAccountId: reward.paidThroughAccountId,
+        paidThroughAccountName: reward.paidThroughAccountName,
     });
 }
 

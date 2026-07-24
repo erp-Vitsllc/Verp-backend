@@ -375,8 +375,18 @@ export const addPayment = async (req, res) => {
                     const { applyRewardPaymentTotals } = await import('../../utils/rewardPaymentStatus.js');
                     await applyRewardPaymentTotals(reward);
 
-                    const paidThroughId = String(paidThroughAccountId || payment.paidThroughAccountId || '').trim();
-                    const expenseId = String(expenseAccountId || payment.expenseAccountId || '').trim();
+                    const paidThroughId = String(
+                        paidThroughAccountId ||
+                            payment.paidThroughAccountId ||
+                            reward.paidThroughAccountId ||
+                            '',
+                    ).trim();
+                    const expenseId = String(
+                        expenseAccountId ||
+                            payment.expenseAccountId ||
+                            reward.expenseAccountId ||
+                            '',
+                    ).trim();
                     if (paidThroughId && expenseId) {
                         try {
                             const { syncRewardPaymentToZoho } = await import(
@@ -386,31 +396,57 @@ export const addPayment = async (req, res) => {
                                 payment,
                                 reward,
                                 employee,
-                                organizationId: zohoOrganizationId || payment.zohoOrganizationId,
+                                organizationId:
+                                    zohoOrganizationId ||
+                                    payment.zohoOrganizationId ||
+                                    reward.zohoOrganizationId,
                                 expenseAccountId: expenseId,
-                                expenseAccountName: expenseAccountName || payment.expenseAccountName,
+                                expenseAccountName:
+                                    expenseAccountName ||
+                                    payment.expenseAccountName ||
+                                    reward.expenseAccountName,
                                 paidThroughAccountId: paidThroughId,
                                 paidThroughAccountName:
-                                    paidThroughAccountName || payment.paidThroughAccountName,
+                                    paidThroughAccountName ||
+                                    payment.paidThroughAccountName ||
+                                    reward.paidThroughAccountName,
                             });
 
                             if (zohoResult.ok) {
-                                payment.zohoJournalId = zohoResult.journalId || '';
+                                if (zohoResult.expenseId) {
+                                    payment.zohoExpenseId =
+                                        zohoResult.expenseId || payment.zohoExpenseId || '';
+                                }
+                                payment.zohoJournalId =
+                                    zohoResult.journalId || payment.zohoJournalId || '';
                                 payment.zohoOrganizationId =
                                     zohoResult.organizationId || payment.zohoOrganizationId;
                                 payment.zohoSyncError = '';
                                 await payment.save();
 
-                                reward.zohoJournalId = zohoResult.journalId || reward.zohoJournalId;
+                                if (zohoResult.expenseId) {
+                                    reward.zohoExpenseId =
+                                        zohoResult.expenseId || reward.zohoExpenseId || '';
+                                }
+                                if (zohoResult.journalId) {
+                                    reward.zohoJournalId =
+                                        zohoResult.journalId || reward.zohoJournalId;
+                                }
                                 reward.zohoOrganizationId =
                                     zohoResult.organizationId || reward.zohoOrganizationId;
                                 reward.paidThroughAccountId = paidThroughId;
                                 reward.paidThroughAccountName =
-                                    paidThroughAccountName || payment.paidThroughAccountName;
+                                    paidThroughAccountName ||
+                                    payment.paidThroughAccountName ||
+                                    reward.paidThroughAccountName;
                                 reward.expenseAccountId = expenseId;
                                 reward.expenseAccountName =
-                                    expenseAccountName || payment.expenseAccountName;
-                                reward.zohoSyncedAt = new Date();
+                                    expenseAccountName ||
+                                    payment.expenseAccountName ||
+                                    reward.expenseAccountName;
+                                if (!zohoResult.skipped) {
+                                    reward.zohoSyncedAt = new Date();
+                                }
                                 reward.zohoSyncError = '';
                                 await reward.save();
                             } else {

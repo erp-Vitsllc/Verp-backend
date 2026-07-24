@@ -1,6 +1,7 @@
 import Loan from "../../models/Loan.js";
 import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
 import { awaitAdminDeletionArchive } from "../../utils/adminDeletionArchiveRun.js";
+import { clearDashboardActionsForRequest } from "../../utils/clearDashboardActionsForRequest.js";
 
 export const deleteLoan = async (req, res) => {
     try {
@@ -24,6 +25,9 @@ export const deleteLoan = async (req, res) => {
             deletedPayload: loanSnapshot,
         });
         await Loan.findByIdAndDelete(id);
+        await clearDashboardActionsForRequest(id, {
+            requestTypes: ['Loan'],
+        });
 
         return res.status(200).json({
             message: `${loan.type} deleted successfully`

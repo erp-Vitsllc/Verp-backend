@@ -284,6 +284,20 @@ export const addReward = async (req, res) => {
 
                     const isCashOrGift = rewardType === 'Cash Reward' || rewardType === 'Gift Reward';
 
+                    // Management before Accounts (Cash/Gift Accounts stage is after Management)
+                    const managementHOD = await getManagementHOD(hodContext);
+                    if (managementHOD) {
+                        const managementUser = await User.findOne({ employeeId: managementHOD.employeeId });
+                        if (managementUser) {
+                            rewardData.workflow.push({
+                                role: 'Management',
+                                assignedTo: managementUser._id,
+                                status: 'Draft',
+                                assignedAt: new Date()
+                            });
+                        }
+                    }
+
                     if (isCashOrGift) {
                         const accountsHOD = await getDepartmentHOD('accounts', hodContext);
                         if (accountsHOD) {
@@ -296,19 +310,6 @@ export const addReward = async (req, res) => {
                                     assignedAt: new Date()
                                 });
                             }
-                        }
-                    }
-
-                    const managementHOD = await getManagementHOD(hodContext);
-                    if (managementHOD) {
-                        const managementUser = await User.findOne({ employeeId: managementHOD.employeeId });
-                        if (managementUser) {
-                            rewardData.workflow.push({
-                                role: 'Management',
-                                assignedTo: managementUser._id,
-                                status: 'Draft',
-                                assignedAt: new Date()
-                            });
                         }
                     }
 

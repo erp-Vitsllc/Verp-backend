@@ -1,6 +1,7 @@
 import Reward from "../../models/Reward.js";
 import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
 import { awaitAdminDeletionArchive } from "../../utils/adminDeletionArchiveRun.js";
+import { clearDashboardActionsForRequest } from "../../utils/clearDashboardActionsForRequest.js";
 
 export const deleteReward = async (req, res) => {
     try {
@@ -24,6 +25,9 @@ export const deleteReward = async (req, res) => {
             deletedPayload: rewardSnapshot,
         });
         await Reward.findByIdAndDelete(id);
+        await clearDashboardActionsForRequest(id, {
+            requestTypes: ['Reward'],
+        });
 
         return res.status(200).json({
             message: "Reward deleted successfully"
@@ -42,20 +46,3 @@ export const deleteReward = async (req, res) => {
         });
     }
 };
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

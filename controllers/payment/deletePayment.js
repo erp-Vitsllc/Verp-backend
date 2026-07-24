@@ -4,6 +4,7 @@ import {
     getManagementNotificationEmail,
 } from "../../utils/sendAdminDeletionNotificationEmails.js";
 import { awaitAdminDeletionArchive } from "../../utils/adminDeletionArchiveRun.js";
+import { clearDashboardActionsForRequest } from "../../utils/clearDashboardActionsForRequest.js";
 
 export const deletePayment = async (req, res) => {
     try {
@@ -42,6 +43,9 @@ export const deletePayment = async (req, res) => {
             deletedPayload: paymentSnapshot,
         });
         await Payment.findByIdAndDelete(id);
+        await clearDashboardActionsForRequest(id, {
+            requestTypes: ['Payment Approval'],
+        });
 
         res.status(200).json({
             success: true,
