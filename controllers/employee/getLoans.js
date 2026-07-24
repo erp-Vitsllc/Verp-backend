@@ -46,13 +46,26 @@ export const getLoans = async (req, res) => {
             // Based on model 'status' and 'approvalStatus' are both Pending/Approved/Rejected.
             // I'll return both.
             approvalStatus: loan.approvalStatus || loan.status, // Include approvalStatus for compatibility
-            applicationStatus: loan.approvalStatus || loan.status,
-            activeStatus: (loan.approvalStatus === 'Approved' || loan.status === 'Approved'
-                || loan.approvalStatus === 'Pending Payment to Employee'
-                || loan.status === 'Pending Payment to Employee'
-                || loan.approvalStatus === 'Paid' || loan.status === 'Paid')
-                ? ((loan.approvalStatus === 'Paid' || loan.status === 'Paid') ? 'Closed' : 'Open')
-                : (loan.approvalStatus === 'Rejected' || loan.status === 'Rejected') ? 'Closed' : 'Pending',
+            applicationStatus:
+                loan.approvalStatus === 'Paid' || loan.status === 'Paid'
+                    ? 'Approved'
+                    : loan.approvalStatus || loan.status,
+            activeStatus: (() => {
+                const st = loan.approvalStatus || loan.status;
+                const amount = Number(loan.amount) || 0;
+                const paid = Number(loan.paidAmount) || 0;
+                const fullyPaid =
+                    st === 'Paid' || (amount > 0 && paid >= amount - 0.01);
+                if (
+                    st === 'Approved' ||
+                    st === 'Pending Payment to Employee' ||
+                    st === 'Paid'
+                ) {
+                    return fullyPaid ? 'Closed' : 'Open';
+                }
+                if (st === 'Rejected') return 'Closed';
+                return 'Pending';
+            })(),
             createdAt: loan.createdAt
         }));
 

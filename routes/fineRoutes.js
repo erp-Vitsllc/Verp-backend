@@ -28,13 +28,19 @@ router.get("/:id", checkFineViewPermission(), getFineById);
 router.get("/:id/approved-report-pdf", checkFineViewPermission(), downloadFineApprovedReportPdf);
 router.get("/:id/pdf", checkFineViewPermission(), downloadFinePdf);
 
+// Workflow + Accounts (parent Fine View) — same pattern as Loan party-payable / status
+router.put("/:id/approve", checkFineViewPermission(), approveFine);
+router.put("/:id/reject", checkFineViewPermission(), (req, res) => {
+    req.body = { ...(req.body || {}), fineStatus: "Rejected" };
+    return updateFine(req, res);
+});
+router.put("/:id/status", checkFineViewPermission(), updateFine);
+router.put("/:id/party-payable", checkFineViewPermission(), updateFine);
+
 // Create / update / delete — Add Fine child (parent Fine is View-only in the chart)
 router.post("/", checkFineMutatePermission(), addFine);
 router.patch("/:id", checkFineMutatePermission(), updateFine);
 router.put("/:id", checkFineMutatePermission(), updateFine);
 router.delete("/:id", checkFineMutatePermission(), deleteFine);
-
-// Approval — workflow validates actor inside the handler
-router.put("/:id/approve", approveFine);
 
 export default router;

@@ -36,21 +36,29 @@ export const updateLoanDetails = async (req, res) => {
         const isApproved = isApprovedLoanStatus(loanStatus);
 
         // Accounts fills Expense Account + Paid Through on Loan/Adv Parties card.
+        // Editable twice: (1) Pending Accounts approve, (2) Pending Payment to Employee before pay/Zoho.
         // Also allow fix when Paid in ERP but Zoho Expense failed (no zohoExpenseId yet).
         if (partyPayableOnly) {
+            const hasZohoPosted = Boolean(String(loan.zohoExpenseId || '').trim());
             const canFixFailedZoho =
                 loanStatus === 'Paid' &&
-                !String(loan.zohoExpenseId || '').trim() &&
+                !hasZohoPosted &&
                 Boolean(String(loan.zohoSyncError || '').trim());
 
-            if (loanStatus !== 'Pending Accounts' && !canFixFailedZoho) {
+            const canEditAtAccounts = loanStatus === 'Pending Accounts';
+            const canEditAtPayToEmployee =
+                !hasZohoPosted &&
+                (loanStatus === 'Pending Payment to Employee' ||
+                    (loanStatus === 'Approved' &&
+                        Number(loan.amount || 0) - Number(loan.paidAmount || 0) > 0.01));
+
+            if (!canEditAtAccounts && !canEditAtPayToEmployee && !canFixFailedZoho) {
                 return res.status(403).json({
-                    message:
-                        loanStatus === 'Paid'
-                            ? String(loan.zohoExpenseId || '').trim()
-                                ? 'Accounts fields cannot be changed after Zoho Expense is posted.'
-                                : 'Accounts fields cannot be changed after the loan/advance is paid.'
-                            : 'Expense Account / Paid Through can only be set at the Accounts stage (after HR approval).',
+                    message: hasZohoPosted
+                        ? 'Accounts fields cannot be changed after Zoho Expense is posted.'
+                        : loanStatus === 'Paid'
+                          ? 'Accounts fields cannot be changed after the loan/advance is paid.'
+                          : 'Expense Account / Paid Through can only be edited at Accounts stage or Pay to Employee stage.',
                 });
             }
 

@@ -138,23 +138,92 @@ async function resolveAttachmentFile(attachment = {}) {
 }
 
 /**
- * Prefer the loan/advance application attachment (Zoho "Upload your Files"),
- * then payment receipt, then supporting / acknowledgment PDFs.
+ * Zoho Expense "Upload your Files" / receipts area.
+ * Order: system-generated form (acknowledgment / certificate) first, then
+ * user supporting docs, then payment receipt. Dedupes by publicId/url/name.
  */
-function collectLoanAttachmentCandidates(loan, payment) {
+function collectLoanAttachmentCandidates(loan, payment, extraAttachments = []) {
     const list = [];
-    const push = (att) => {
+    const seen = new Set();
+    const push = (att, nameOverride = '') => {
         if (!att || typeof att !== 'object') return;
         if (!att.url && !att.publicId && !att.data) return;
-        list.push(att);
+        const key = clean(att.publicId || att.url || att.name || JSON.stringify(Object.keys(att)));
+        if (key && seen.has(key)) return;
+        if (key) seen.add(key);
+        list.push(
+            nameOverride
+                ? { ...att, name: nameOverride || att.name }
+                : att,
+        );
     };
 
-    push(loan?.attachment);
-    push(payment?.attachment);
+    // System-generated Loan/Advance acknowledgment form
     const approvals = Array.isArray(loan?.approvalAttachments) ? loan.approvalAttachments : [];
-    for (const att of approvals.filter((a) => a?.source !== 'acknowledgment')) push(att);
-    for (const att of approvals.filter((a) => a?.source === 'acknowledgment')) push(att);
+    for (const att of approvals.filter((a) => a?.source === 'acknowledgment')) {
+        const typeSlug = loan?.type === 'Advance' ? 'Advance' : loan?.type === 'Reward' ? 'Reward' : 'Loan';
+        push(att, att.name || `${typeSlug}_Form_${clean(loan?.loanId || loan?._id)}.pdf`);
+    }
+
+    // Reward certificate (passed via extraAttachments or loan.certificateAttachment)
+    push(loan?.certificateAttachment, loan?.certificateAttachment?.name || `Certificate-${clean(loan?.loanId || '')}.pdf`);
+    for (const att of Array.isArray(extraAttachments) ? extraAttachments : []) {
+        push(att);
+    }
+
+    // User supporting upload on the loan/reward
+    push(loan?.attachment);
+    // Other approval supporting docs
+    for (const att of approvals.filter((a) => a?.source && a.source !== 'acknowledgment')) {
+        push(att);
+    }
+    // Payment receipt last
+    push(payment?.attachment);
+
     return list;
+}
+
+/**
+ * If Loan/Advance has no stored acknowledgment PDF yet, generate one in-memory
+ * so Zoho still receives the system form.
+ */
+async function ensureLoanSystemFormCandidate(loan, candidates) {
+    const isLoanOrAdvance = loan?.type === 'Loan' || loan?.type === 'Advance' || !loan?.type;
+    // Reward-shaped payloads use type: 'Reward' — skip form generation
+    if (loan?.type === 'Reward') return candidates;
+
+    const hasAck = candidates.some(
+        (a) =>
+            a?.source === 'acknowledgment' ||
+            /acknowledgment|acknowledgement|_form_/i.test(String(a?.name || a?.label || '')),
+    );
+    if (hasAck) return candidates;
+
+    if (!isLoanOrAdvance || !loan?._id) return candidates;
+
+    try {
+        const { getLoanAcknowledgmentPdfBuffer } = await import('./persistLoanApprovalAttachments.js');
+        const buffer = await getLoanAcknowledgmentPdfBuffer(loan);
+        if (buffer?.length > 500) {
+            const typeSlug = loan.type === 'Advance' ? 'Advance' : 'Loan';
+            const filename = `${typeSlug}_Form_${clean(loan.loanId || loan._id)}.pdf`;
+            return [
+                {
+                    name: filename,
+                    mimeType: 'application/pdf',
+                    data: `data:application/pdf;base64,${buffer.toString('base64')}`,
+                    source: 'acknowledgment',
+                },
+                ...candidates,
+            ];
+        }
+    } catch (err) {
+        console.warn(
+            '[LoanZohoExpense] Could not generate system form PDF for Zoho:',
+            err?.message || err,
+        );
+    }
+    return candidates;
 }
 
 async function resolveHeadOfficeLocationId() {
@@ -194,6 +263,8 @@ export async function syncLoanPaymentToZohoExpense({
     expenseAccountName = '',
     paidThroughAccountId = '',
     paidThroughAccountName = '',
+    /** Extra files for Zoho receipts (e.g. reward certificate PDF). */
+    extraAttachments = [],
 } = {}) {
     const typeLabel = loan?.type === 'Advance' ? 'Advance' : 'Loan';
     const amount = money(payment?.amount ?? loan?.amount);
@@ -288,23 +359,48 @@ export async function syncLoanPaymentToZohoExpense({
                 throw new Error('Zoho Expense created but expense_id was missing in response.');
             }
 
-            // Soft-fail attachment — expense row still succeeds
-            let attachmentResult = { ok: true, skipped: true };
-            const candidates = collectLoanAttachmentCandidates(loan, payment);
+            // Soft-fail attachments — expense row still succeeds.
+            // Upload ALL candidates (system form + user files + certificate) to Zoho receipts.
+            let attachmentResult = { ok: true, skipped: true, uploaded: [] };
+            let candidates = collectLoanAttachmentCandidates(loan, payment, extraAttachments);
+            candidates = await ensureLoanSystemFormCandidate(loan, candidates);
+
+            const uploadedNames = [];
+            const failedMessages = [];
             for (const candidate of candidates) {
                 const file = await resolveAttachmentFile(candidate);
                 if (!file) continue;
                 try {
                     await uploadExpenseAttachment(expenseId, file);
-                    attachmentResult = { ok: true, filename: file.filename };
-                    break;
+                    uploadedNames.push(file.filename);
+                    console.log(`[LoanZohoExpense] Attached to Zoho Expense: ${file.filename}`);
                 } catch (attachErr) {
-                    attachmentResult = {
-                        ok: false,
-                        message: attachErr?.message || 'Attachment upload failed',
-                    };
-                    console.warn('[LoanZohoExpense] Attachment failed:', attachmentResult.message);
+                    const msg = attachErr?.message || 'Attachment upload failed';
+                    failedMessages.push(`${file.filename}: ${msg}`);
+                    console.warn('[LoanZohoExpense] Attachment failed:', msg);
                 }
+            }
+
+            if (uploadedNames.length > 0) {
+                attachmentResult = {
+                    ok: failedMessages.length === 0,
+                    filename: uploadedNames[0],
+                    uploaded: uploadedNames,
+                    message:
+                        failedMessages.length > 0
+                            ? `Uploaded ${uploadedNames.length}; failed: ${failedMessages.join('; ')}`
+                            : undefined,
+                };
+            } else if (failedMessages.length > 0) {
+                attachmentResult = {
+                    ok: false,
+                    message: failedMessages.join('; '),
+                };
+            } else if (candidates.length > 0) {
+                attachmentResult = {
+                    ok: false,
+                    message: 'Attachment files could not be read for Zoho upload.',
+                };
             }
 
             try {
@@ -341,9 +437,12 @@ export async function syncLoanPaymentToZohoExpense({
             locationId: result.locationId,
             locationName: result.locationName,
             attachment: result.attachment,
-            message: result.attachment?.ok === false
-                ? `Zoho Expense created; attachment not uploaded: ${result.attachment.message}`
-                : 'Zoho Expense created.',
+            message:
+                result.attachment?.uploaded?.length > 0
+                    ? `Zoho Expense created with ${result.attachment.uploaded.length} attachment(s): ${result.attachment.uploaded.join(', ')}.`
+                    : result.attachment?.ok === false
+                      ? `Zoho Expense created; attachment not uploaded: ${result.attachment.message}`
+                      : 'Zoho Expense created.',
         };
     } catch (err) {
         let message = err?.message || 'Failed to create Zoho Expense for loan/advance';

@@ -775,6 +775,7 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
                 }
 
                 // Cash/Gift: post Zoho Expense on Accounts approve (reference + notes = reward description)
+                // Persist certificate PDF first so it can be uploaded to Zoho "Upload your Files".
                 const isCashOrGiftZoho =
                     reward.rewardType === 'Cash Reward' ||
                     reward.rewardType === 'Gift Reward' ||
@@ -785,6 +786,37 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
                     !String(reward.zohoExpenseId || '').trim()
                 ) {
                     try {
+                        let certificatePdfForZoho = req.body.certificatePdf || '';
+                        if (
+                            certificatePdfForZoho &&
+                            !(reward.certificateAttachment?.url || reward.certificateAttachment?.publicId)
+                        ) {
+                            try {
+                                let base64Data = String(certificatePdfForZoho);
+                                if (base64Data.includes(',')) base64Data = base64Data.split(',')[1];
+                                const certName = `Certificate-${reward.rewardId || reward._id}.pdf`;
+                                reward.certificateAttachment = await ensureAttachmentPersistedToS3(
+                                    {
+                                        data: `data:application/pdf;base64,${base64Data}`,
+                                        name: certName,
+                                        mimeType: 'application/pdf',
+                                    },
+                                    {
+                                        folder: 'rewards',
+                                        fileName: certName,
+                                    },
+                                );
+                                console.log(
+                                    '[UpdateReward] Certificate saved before Zoho Expense upload',
+                                );
+                            } catch (certStoreErr) {
+                                console.warn(
+                                    '[UpdateReward] Certificate pre-store for Zoho failed:',
+                                    certStoreErr?.message || certStoreErr,
+                                );
+                            }
+                        }
+
                         const { syncRewardApprovalToZohoExpense } = await import(
                             '../../utils/syncRewardPaymentToZoho.js'
                         );
@@ -796,6 +828,7 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
                         const zohoResult = await syncRewardApprovalToZohoExpense({
                             reward,
                             employee: employeeForZoho,
+                            certificatePdfBase64: certificatePdfForZoho,
                         });
                         if (zohoResult?.ok) {
                             if (zohoResult.expenseId) {
@@ -808,7 +841,8 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
                             }
                             console.log(
                                 '[UpdateReward] Zoho Expense on Accounts approve:',
-                                zohoResult.message || zohoResult.expenseId
+                                zohoResult.message || zohoResult.expenseId,
+                                zohoResult.attachment?.uploaded || zohoResult.attachment?.filename || '',
                             );
                         } else {
                             reward.zohoSyncError = zohoResult?.message || 'Zoho Expense sync failed';

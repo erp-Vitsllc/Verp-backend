@@ -10466,7 +10466,7 @@ export const deleteVehicleHandoverHistory = async (req, res) => {
 };
 
 const RECEIVER_ASSESSMENT_KEYS = [
-    { key: 'spareTyre', label: 'Spare type' },
+    { key: 'spareTyre', label: 'Spare Tyre' },
     { key: 'toolsKit', label: 'Tools Kit' },
     { key: 'scissorJack', label: 'Scissor Jack' },
     { key: 'firstAidKit', label: 'First Aid Kit' },

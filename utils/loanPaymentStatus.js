@@ -76,8 +76,8 @@ export async function syncLoanPaymentDueBell(loan, subjectEmployee, requestedByN
     const remaining = amount - parseFloat(loan.paidAmount || 0);
     if (remaining <= 0.01) return null;
 
-    // Ensure status is awaiting payment (new flow + legacy Approved)
-    if (!isLoanAwaitingEmployeePayment(loan.approvalStatus || loan.status)) {
+    // Ensure status is awaiting payment (new flow + legacy Approved with unpaid balance)
+    if (!isLoanAwaitingEmployeePayment(loan)) {
         loan.status = LOAN_PENDING_PAYMENT_STATUS;
         loan.approvalStatus = LOAN_PENDING_PAYMENT_STATUS;
     }
@@ -125,14 +125,15 @@ export async function syncLoanPaymentDueBell(loan, subjectEmployee, requestedByN
 }
 
 /**
- * When loan is fully disbursed: set Paid, complete workflow step, clear Accounts bell.
+ * When loan is fully disbursed: keep status Approved (not Paid), complete workflow step, clear Accounts bell.
  */
 export async function applyLoanFullyPaid(loan, { clearPayBell = true } = {}) {
     if (!loan) return null;
 
     markLoanPaidToEmployeeWorkflow(loan);
-    loan.status = 'Paid';
-    loan.approvalStatus = 'Paid';
+    // Final application status stays Approved — Paid to Employee workflow step tracks disbursement.
+    loan.status = 'Approved';
+    loan.approvalStatus = 'Approved';
     await loan.save();
 
     if (clearPayBell) {

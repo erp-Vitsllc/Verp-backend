@@ -121,9 +121,11 @@ function buildApproverSignaturesTable(signatureUrls, dates) {
         )
         .join('');
 
-    return `<div style="margin-top:20px;">
+    // One unbreakable box — Chromium otherwise splits header/date rows from signatures.
+    // page-break-before keeps the whole table together on page 2.
+    return `<div class="office-use-box">
     <p style="margin:0 0 2px 0;font-size:13px;font-weight:bold;">office use only :</p>
-    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;border:1px solid #000;margin-top:0;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" class="office-use-table">
         <tr>${labelRow}</tr>
         <tr>${dateRow}</tr>
         <tr>${sigRow}</tr>
@@ -195,6 +197,31 @@ export function buildLoanAcknowledgmentPdfHtml({
   }
   p { margin: 0 0 14px 0; text-align: justify; line-height: 1.65; font-size: 13px; color: #111; }
   ul { margin: 10px 0 14px 22px; padding: 0; font-size: 13px; line-height: 1.55; }
+
+  /* Keep office-use header + all 3 table rows as one block on page 2 */
+  .office-use-box {
+    margin-top: 20px;
+    page-break-before: always;
+    break-before: page;
+    page-break-inside: avoid !important;
+    break-inside: avoid !important;
+    display: inline-block;
+    width: 100%;
+    box-sizing: border-box;
+  }
+  .office-use-table {
+    border-collapse: collapse;
+    border: 1px solid #000;
+    margin-top: 0;
+    width: 100%;
+    page-break-inside: avoid !important;
+    break-inside: avoid !important;
+  }
+  .office-use-table tr,
+  .office-use-table td {
+    page-break-inside: avoid !important;
+    break-inside: avoid !important;
+  }
 </style>
 </head>
 <body style="margin:0;background:#fff;">

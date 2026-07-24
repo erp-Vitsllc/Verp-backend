@@ -174,8 +174,9 @@ export async function syncRewardPaymentToZoho({
 /**
  * Cash/Gift Accounts approve → Zoho Books Expense.
  * Reference# + Notes = reward description (same pattern as Loan).
+ * Attachments: reward certificate PDF + any supporting upload → Zoho receipts.
  */
-export async function syncRewardApprovalToZohoExpense({ reward, employee } = {}) {
+export async function syncRewardApprovalToZohoExpense({ reward, employee, certificatePdfBase64 = '' } = {}) {
     if (!reward?._id) return { ok: false, message: 'Reward is required.' };
 
     const description = clean(
@@ -184,6 +185,25 @@ export async function syncRewardApprovalToZohoExpense({ reward, employee } = {})
             reward.remarks ||
             `Reward ${clean(reward.rewardId)} · ${clean(reward.employeeId)}`,
     ).slice(0, 500);
+
+    const certName = `Certificate-${clean(reward.rewardId || reward._id)}.pdf`;
+    const extraAttachments = [];
+
+    if (reward.certificateAttachment && (reward.certificateAttachment.url || reward.certificateAttachment.publicId || reward.certificateAttachment.data)) {
+        extraAttachments.push({
+            ...reward.certificateAttachment,
+            name: reward.certificateAttachment.name || certName,
+            mimeType: reward.certificateAttachment.mimeType || 'application/pdf',
+        });
+    } else if (certificatePdfBase64) {
+        let base64 = String(certificatePdfBase64);
+        if (base64.includes(',')) base64 = base64.split(',')[1];
+        extraAttachments.push({
+            name: certName,
+            mimeType: 'application/pdf',
+            data: `data:application/pdf;base64,${base64}`,
+        });
+    }
 
     const { syncLoanPaymentToZohoExpense } = await import('./syncLoanPaymentToZohoExpense.js');
     return syncLoanPaymentToZohoExpense({
@@ -207,6 +227,7 @@ export async function syncRewardApprovalToZohoExpense({ reward, employee } = {})
             zohoExpenseId: reward.zohoExpenseId,
             appliedDate: reward.awardedDate || reward.createdAt,
             attachment: reward.attachment,
+            certificateAttachment: reward.certificateAttachment,
             type: 'Reward',
         },
         employee: employee || reward.employeeId,
@@ -215,6 +236,7 @@ export async function syncRewardApprovalToZohoExpense({ reward, employee } = {})
         expenseAccountName: reward.expenseAccountName,
         paidThroughAccountId: reward.paidThroughAccountId,
         paidThroughAccountName: reward.paidThroughAccountName,
+        extraAttachments,
     });
 }
 

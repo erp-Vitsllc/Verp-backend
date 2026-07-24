@@ -138,6 +138,18 @@ export const checkRewardMutatePermission = () =>
         "Access denied. Create Reward permission is required.",
     );
 
+/** Reward list/detail/workflow — parent View or Create Reward child. */
+export const checkRewardViewPermission = () =>
+    checkAnyModulePermission(
+        [
+            ["hrm_reward", "view"],
+            ["hrm_reward_create", "view"],
+            ["hrm_reward_create", "create"],
+            ["hrm_reward_create", "edit"],
+        ],
+        "Access denied. Reward view permission is required.",
+    );
+
 /**
  * Add Fine chart row (hrm_fine_add); parent hrm_fine is View-only.
  */

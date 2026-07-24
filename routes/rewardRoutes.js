@@ -10,6 +10,7 @@ import { protect } from "../middleware/authMiddleware.js";
 import {
     checkPermission,
     checkRewardMutatePermission,
+    checkRewardViewPermission,
 } from "../middleware/permissionMiddleware.js";
 
 const router = express.Router();
@@ -20,18 +21,22 @@ router.use(protect);
 // Must be registered before /:id
 router.get("/dashboard/pending-inbox", getPendingRewardDashboardInbox);
 
-// List / detail — parent Reward View
-router.get("/", checkPermission("hrm_reward", "view"), getRewards);
-router.get("/:id", checkPermission("hrm_reward", "view"), getRewardById);
+// List / detail — Reward View (or Create Reward child)
+router.get("/", checkRewardViewPermission(), getRewards);
+router.get("/:id", checkRewardViewPermission(), getRewardById);
 
-/** Accounts party fields — view permission (same pattern as Loan party-payable) */
+/** Accounts party fields — View (same pattern as Loan party-payable) */
 router.put(
     "/:id/party-payable",
-    checkPermission("hrm_reward", "view"),
+    checkRewardViewPermission(),
     updateRewardPartyPayable,
 );
 
-// Create / update / delete — Create Reward child (parent is View-only in the chart)
+/** Approve / reject / submit — View (workflow assignee gate is inside updateReward) */
+router.put("/:id/status", checkRewardViewPermission(), updateReward);
+router.patch("/:id/status", checkRewardViewPermission(), updateReward);
+
+// Create / content update / delete — Create Reward child (parent is View-only)
 router.post("/", checkRewardMutatePermission(), addReward);
 router.patch("/:id", checkRewardMutatePermission(), updateReward);
 router.put("/:id", checkRewardMutatePermission(), updateReward);
