@@ -107,7 +107,9 @@ export const getZohoVendorPaymentSupport = async (req, res) => {
         if (accountsOnly) {
             const includeInactive =
                 String(req.query?.includeInactive || '').toLowerCase() === 'true' ||
-                String(req.query?.includeInactive || '').trim() === '1';
+                String(req.query?.includeInactive || '').trim() === '1' ||
+                // default true: same complete CoA as Fine / Utility Bills
+                req.query?.includeInactive === undefined;
             const accounts = await fetchPaymentAccounts({ includeInactive });
             return res.status(200).json({
                 success: true,
@@ -117,7 +119,7 @@ export const getZohoVendorPaymentSupport = async (req, res) => {
         }
         const [accounts, payables, locations, paymentModes, vendorContact, nextPaymentNumber] =
             await Promise.all([
-                fetchPaymentAccounts(),
+                fetchPaymentAccounts({ includeInactive: true }),
                 vendorId
                     ? loadVendorPayables(vendorId)
                     : Promise.resolve({ bills: [], expenses: [], source: 'none' }),

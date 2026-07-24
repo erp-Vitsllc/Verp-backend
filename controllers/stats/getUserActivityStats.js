@@ -700,7 +700,18 @@ export const getUserActivityStats = async (req, res) => {
                     { submittedTo: { $in: relevantIds }, status: 'Pending' },
                     { submittedTo: null, employeeObjectId: { $in: relevantIds }, status: 'Pending' },
                     ...(isHR ? [{ approvalStatus: 'Pending HR', status: 'Pending' }] : []),
-                    ...(isAccounts ? [{ approvalStatus: 'Pending Accounts', status: 'Pending' }] : []),
+                    ...(isAccounts
+                        ? [
+                              { approvalStatus: 'Pending Accounts', status: 'Pending' },
+                              // After Management: awaiting Accounts disbursement
+                              {
+                                  approvalStatus: 'Pending Payment to Employee',
+                                  status: 'Pending Payment to Employee',
+                              },
+                              // Legacy: Approved before Pending Payment status existed
+                              { approvalStatus: 'Approved', status: 'Approved' },
+                          ]
+                        : []),
                     ...(isCEO ? [{ approvalStatus: 'Pending Authorization', status: 'Pending' }] : []),
                     ...(isAdmin ? [{ status: 'Pending' }] : [])
                 ]
@@ -1036,15 +1047,33 @@ export const getUserActivityStats = async (req, res) => {
 
         pendingLoans.forEach(l => {
             const reqIdStr = l._id.toString();
-            if (!seenRequests.has(reqIdStr)) {
-                activityList.push({
-                    id: l._id.toString(), type: l.type || 'Loan/Advance', requestedBy: l.createdBy?.name || l.employeeName || 'Employee',
-                    requestedDate: l.createdAt, actionedDate: null, status: 'Pending',
-                    extra1: `AED ${l.amount}`, extra2: `${l.duration} Months`, targetEmployeeId: l.employeeId,
-                    scope: 'inbox'
-                });
-                seenRequests.set(reqIdStr, 'Pending');
-            }
+            if (seenRequests.has(reqIdStr)) return;
+            const remaining =
+                parseFloat(l.amount || 0) - parseFloat(l.paidAmount || 0);
+            const status = String(l.approvalStatus || l.status || '');
+            const awaitingPay =
+                (status === 'Pending Payment to Employee' || status === 'Approved') &&
+                remaining > 0.01;
+            // Skip already-disbursed Approved leftovers
+            if (status === 'Approved' && remaining <= 0.01) return;
+
+            activityList.push({
+                id: l._id.toString(),
+                type: l.type || 'Loan/Advance',
+                requestedBy: l.createdBy?.name || l.employeeName || 'Employee',
+                requestedDate: l.createdAt,
+                actionedDate: null,
+                status: 'Pending',
+                extra1: awaitingPay
+                    ? `Pay to employee — ${l.type || 'Loan'} Approved`
+                    : `AED ${l.amount}`,
+                extra2: awaitingPay
+                    ? `AED ${Number(l.amount || 0).toLocaleString()}`
+                    : `${l.duration} Months`,
+                targetEmployeeId: l.employeeId,
+                scope: 'inbox',
+            });
+            seenRequests.set(reqIdStr, 'Pending');
         });
 
         pendingRewards.forEach(r => {

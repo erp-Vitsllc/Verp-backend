@@ -9,6 +9,7 @@ import { sendHODAuthorizationEmail } from "../../utils/sendHODAuthorizationEmail
 import { getDepartmentHOD } from "../../utils/getDepartmentHOD.js";
 import { getCompleteEmployee } from "../../services/employeeService.js";
 import { resolveEmployeeEmail, getFallbackEmailNote, addEmployeeEmailToSet } from "../../utils/resolveEmployeeEmail.js";
+import { LOAN_PENDING_PAYMENT_STATUS } from "../../utils/loanStatusConstants.js";
 
 export const approveLoan = async (req, res) => {
     try {
@@ -122,16 +123,13 @@ export const approveLoan = async (req, res) => {
             console.log(`[ApproveLoan] Draft -> Pending HR transition. Assigned to: ${hrHOD.employeeId}`);
         }
         else if (status === 'Approved') {
-            // APPROVAL LOGIC
-            if (isAdmin) {
-                publicStatus = 'Approved';
-                nextStage = 'Approved';
-            } else if (approverBasic) {
+            // APPROVAL LOGIC — Admin can act at any stage; only Management finalizes payment
+            if (approverBasic || isAdmin) {
 
                 // 1. HR STAGE (Pending OR Pending HR -> Pending Accounts)
                 if (currentStage === 'Pending' || currentStage === 'Pending HR') {
-                    const isHR = approverBasic.department && /human resource|hr|hrm/i.test(approverBasic.department) || (approverBasic.designation && /hr/i.test(approverBasic.designation));
-                    const isAssignedHR = loan.submittedTo && (String(loan.submittedTo) === String(requestingUserId) || String(loan.submittedTo) === String(approverBasic._id));
+                    const isHR = approverBasic?.department && /human resource|hr|hrm/i.test(approverBasic.department) || (approverBasic?.designation && /hr/i.test(approverBasic.designation));
+                    const isAssignedHR = loan.submittedTo && (String(loan.submittedTo) === String(requestingUserId) || String(loan.submittedTo) === String(approverBasic?._id));
 
                     if (isHR || isAssignedHR || isAdmin) {
                         // VALIDATION: Check if Accounts HOD is assigned before proceeding
@@ -145,7 +143,7 @@ export const approveLoan = async (req, res) => {
                         nextStage = 'Pending Accounts';
                         publicStatus = 'Pending'; // Keep visible status as Pending for Accounts
 
-                        loan.hrApprovedBy = approverBasic._id;
+                        loan.hrApprovedBy = approverBasic?._id || requestingUserId;
                         nextApprover = accountsHOD;
                         console.log('[Loan]', loan.loanId, 'HR Approved. Next Finance Approver:', nextApprover ? `${nextApprover.firstName} ${nextApprover.lastName}` : 'NOT FOUND');
                         emailSubject = "Loan Pending Finance Approval";
@@ -156,10 +154,32 @@ export const approveLoan = async (req, res) => {
                 }
                 // 3. ACCOUNTS STAGE (Pending Accounts -> Pending Authorization)
                 else if (currentStage === 'Pending Accounts') {
-                    const isFinance = approverBasic.department && /finance|accounts|payroll/i.test(approverBasic.department) || (approverBasic.designation && /account/i.test(approverBasic.designation));
-                    const isAssignedFinance = loan.submittedTo && (String(loan.submittedTo) === String(requestingUserId) || String(loan.submittedTo) === String(approverBasic._id));
+                    const isFinance = approverBasic?.department && /finance|accounts|payroll/i.test(approverBasic.department) || (approverBasic?.designation && /account/i.test(approverBasic.designation));
+                    const isAssignedFinance = loan.submittedTo && (String(loan.submittedTo) === String(requestingUserId) || String(loan.submittedTo) === String(approverBasic?._id));
 
                     if (isFinance || isAssignedFinance || isAdmin) {
+                        if (!String(loan.expenseAccountId || '').trim()) {
+                            return res.status(400).json({
+                                message:
+                                    'Accounts cannot approve until Expense Account is set on the Loan/Advance Parties card.',
+                            });
+                        }
+                        if (!String(loan.paidThroughAccountId || '').trim()) {
+                            return res.status(400).json({
+                                message:
+                                    'Accounts cannot approve until Paid Through is set on the Loan/Advance Parties card.',
+                            });
+                        }
+                        if (
+                            String(loan.expenseAccountId).trim() ===
+                            String(loan.paidThroughAccountId).trim()
+                        ) {
+                            return res.status(400).json({
+                                message:
+                                    'Expense Account and Paid Through must be different Chart of Accounts.',
+                            });
+                        }
+
                         // VALIDATION: Check if Management HOD is assigned before proceeding
                         const managementHOD = await getManagementHOD();
                         if (!managementHOD) {
@@ -171,7 +191,7 @@ export const approveLoan = async (req, res) => {
                         nextStage = 'Pending Authorization';
                         publicStatus = 'Pending'; // Keep visible status as Pending for CEO
 
-                        loan.accountsApprovedBy = approverBasic._id;
+                        loan.accountsApprovedBy = approverBasic?._id || requestingUserId;
                         nextApprover = managementHOD;
                         console.log('[Loan]', loan.loanId, 'Finance Approved. Next Management:', nextApprover ? `${nextApprover.firstName} ${nextApprover.lastName}` : 'NOT FOUND');
                         emailSubject = "Loan Pending Final Authorization";
@@ -180,15 +200,15 @@ export const approveLoan = async (req, res) => {
                         return res.status(403).json({ message: "Only Finance/Accounts can approve at this stage" });
                     }
                 }
-                // 4. Management STAGE (Pending Authorization -> Approved)
+                // 4. Management STAGE (Pending Authorization -> Pending Payment to Employee)
                 else if (currentStage === 'Pending Authorization') {
-                    const isMgtDept = approverBasic.department && /management|corporate|board|executive/i.test(approverBasic.department);
-                    const isMgtTitle = ['ceo', 'c.e.o', 'c.e.o.', 'chief executive officer', 'director', 'managing director', 'general manager', 'gm', 'g.m', 'g.m.'].includes(approverBasic.designation?.toLowerCase());
-                    const isAssignedMgt = loan.submittedTo && (String(loan.submittedTo) === String(requestingUserId) || String(loan.submittedTo) === String(approverBasic._id));
+                    const isMgtDept = approverBasic?.department && /management|corporate|board|executive/i.test(approverBasic.department);
+                    const isMgtTitle = ['ceo', 'c.e.o', 'c.e.o.', 'chief executive officer', 'director', 'managing director', 'general manager', 'gm', 'g.m', 'g.m.'].includes(approverBasic?.designation?.toLowerCase());
+                    const isAssignedMgt = loan.submittedTo && (String(loan.submittedTo) === String(requestingUserId) || String(loan.submittedTo) === String(approverBasic?._id));
 
                     if (isMgtTitle || isMgtDept || isAssignedMgt || isAdmin) {
-                        nextStage = 'Approved';
-                        publicStatus = 'Approved'; // Final Approval
+                        nextStage = LOAN_PENDING_PAYMENT_STATUS;
+                        publicStatus = LOAN_PENDING_PAYMENT_STATUS;
                     } else {
                         return res.status(403).json({ message: "Only Management can Authorize this loan" });
                     }
@@ -208,7 +228,7 @@ export const approveLoan = async (req, res) => {
         loan.status = publicStatus;
         loan.approvalStatus = nextStage;
 
-        if (finalStatus === 'Approved' && nextStage === 'Approved') {
+        if (finalStatus === 'Approved' && nextStage === LOAN_PENDING_PAYMENT_STATUS) {
             loan.approvedBy = approverBasic ? approverBasic._id : requestingUserId;
             loan.approvedDate = new Date();
         } else if (finalStatus === 'Rejected') {
@@ -308,8 +328,8 @@ export const approveLoan = async (req, res) => {
             }
         }
 
-        // Final Approval (Management) Update
-        if (nextStage === 'Approved') {
+        // Final Authorization (Management) → Pending Payment to Employee
+        if (nextStage === LOAN_PENDING_PAYMENT_STATUS) {
             const { snapshotLoanScheduleOnApproval } = await import('../../utils/loanDeductionScheduleSnapshot.js');
             snapshotLoanScheduleOnApproval(loan);
             if (loan.workflow) {
@@ -338,13 +358,19 @@ export const approveLoan = async (req, res) => {
         const applicant = await EmployeeBasic.findOne({ employeeId: loan.employeeId });
 
         // A. Resolve existing pending actions for this request
-        const isFinalStatus = finalStatus === 'Approved' || finalStatus === 'Rejected';
+        const isManagementAuthorized =
+            finalStatus === 'Approved' && nextStage === LOAN_PENDING_PAYMENT_STATUS;
+        const isFinalStatus = isManagementAuthorized || finalStatus === 'Rejected';
+        const needsAccountsDisbursement =
+            isManagementAuthorized &&
+            parseFloat(loan.amount || 0) - parseFloat(loan.paidAmount || 0) > 0.01;
+
         await syncDashboardAction({
             requestId: loan._id,
             requestType: 'Loan',
             // Specifically clear the acting user's task
             assignedTo: isFinalStatus ? null : req.user?._id,
-            status: isFinalStatus ? finalStatus : 'Approved',
+            status: isManagementAuthorized ? 'Approved' : (isFinalStatus ? finalStatus : 'Approved'),
             subjectEmployee: applicant,
             requestedByName: req.user.name
         });
@@ -361,6 +387,25 @@ export const approveLoan = async (req, res) => {
                 extra1: `AED ${loan.amount}`,
                 extra2: `${loan.duration} Months`
             });
+        }
+
+        // C. After Management approval — Accounts "Paid to Employee" task (dashboard / bar / sidebar)
+        let paymentDueAccountsHod = null;
+        if (needsAccountsDisbursement) {
+            try {
+                const { syncLoanPaymentDueBell } = await import('../../utils/loanPaymentStatus.js');
+                paymentDueAccountsHod = await syncLoanPaymentDueBell(
+                    loan,
+                    applicant,
+                    req.user?.name || '',
+                );
+                await loan.save();
+            } catch (payBellErr) {
+                console.error(
+                    '[ApproveLoan] Failed to sync Accounts pay-to-employee bell:',
+                    payBellErr?.message || payBellErr,
+                );
+            }
         }
 
         // Handle Notifications
@@ -497,8 +542,8 @@ export const approveLoan = async (req, res) => {
                 }
             }
 
-            // 2. Notify Employee on FULL Approval ONLY
-            if (finalStatus === 'Approved' && nextStage === 'Approved') {
+            // 2. Notify Employee on FULL Authorization (Pending Payment to Employee)
+            if (finalStatus === 'Approved' && nextStage === LOAN_PENDING_PAYMENT_STATUS) {
                 try {
                     const applicant = await EmployeeBasic.findOne({ employeeId: loan.employeeId }).populate('primaryReportee');
                     const creator = await User.findById(loan.createdBy);
@@ -580,6 +625,7 @@ export const approveLoan = async (req, res) => {
                                              </div>
 
                                              <p style="margin-top: 25px; color: #4b5563;">This acknowledgment has been shared with the Employee, HR, Accounts, and Management teams${loan.attachment?.url ? '. The original supporting documentation is also attached.' : '.'}</p>
+                                             <p style="color: #4b5563;">Accounts will process <strong>payment to the employee</strong> next.</p>
                                              <p>Best Regards,<br><strong>VeRP System</strong></p>
                                           </div>
                                       </div>
@@ -620,6 +666,73 @@ export const approveLoan = async (req, res) => {
                     }
                 } catch (emailErr) {
                     console.error("Employee Approval Email Error:", emailErr);
+                }
+
+                // Dedicated Accounts email: pay approved loan/advance to the employee
+                if (needsAccountsDisbursement) {
+                    try {
+                        const { resolveLoanAccountsHod } = await import('../../utils/loanPaymentStatus.js');
+                        const accountsHod =
+                            paymentDueAccountsHod ||
+                            (await resolveLoanAccountsHod(loan.employeeId));
+                        const accountsEmail =
+                            accountsHod?.companyEmail || accountsHod?.email || '';
+                        if (accountsEmail) {
+                            const typeSlug = loan.type === 'Advance' ? 'Advance' : 'Loan';
+                            const applicantName = applicant
+                                ? `${applicant.firstName || ''} ${applicant.lastName || ''}`.trim()
+                                : loan.applicantName || 'Employee';
+                            const payUrl = `${baseUrl}/HRM/LoanAndAdvance/${typeSlug}-${loan._id}`;
+                            await transporter.sendMail({
+                                from: `"VeRP Notification" <${emailUser}>`,
+                                to: accountsEmail,
+                                subject: `${typeSlug} Approved — Pay to Employee`,
+                                html: `
+                                    <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; color: #333; line-height: 1.6; max-width: 600px; margin: 0 auto; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden;">
+                                        <div style="background: linear-gradient(135deg, #0d9488 0%, #0f766e 100%); color: white; padding: 25px; text-align: center;">
+                                            <h2 style="margin: 0; font-size: 20px; font-weight: 800;">PAY TO EMPLOYEE</h2>
+                                            <p style="margin: 5px 0 0 0; opacity: 0.85; font-size: 14px;">Reference: ${loan.loanId || loan._id}</p>
+                                        </div>
+                                        <div style="padding: 30px; background-color: #ffffff;">
+                                            <p>Hello <strong>${accountsHod.firstName || 'Accounts'}</strong>,</p>
+                                            <p>Management has approved this <strong>${typeSlug}</strong>. Please process <strong>payment to the employee</strong>.</p>
+                                            <div style="background-color: #f0fdfa; padding: 25px; border-radius: 10px; border-left: 4px solid #0d9488; margin: 25px 0;">
+                                                <table style="width: 100%; border-collapse: collapse;">
+                                                    <tr>
+                                                        <td style="padding: 6px 0; color: #64748b; font-size: 13px; width: 40%;"><strong>Employee:</strong></td>
+                                                        <td style="padding: 6px 0; color: #1e293b; font-size: 14px; font-weight: 600;">${applicantName} (${loan.employeeId || '—'})</td>
+                                                    </tr>
+                                                    <tr>
+                                                        <td style="padding: 6px 0; color: #64748b; font-size: 13px;"><strong>Amount:</strong></td>
+                                                        <td style="padding: 6px 0; color: #0d9488; font-size: 16px; font-weight: 800;">AED ${Number(loan.amount).toLocaleString()}</td>
+                                                    </tr>
+                                                    <tr>
+                                                        <td style="padding: 6px 0; color: #64748b; font-size: 13px;"><strong>Type:</strong></td>
+                                                        <td style="padding: 6px 0; color: #1e293b; font-size: 14px;">${typeSlug}</td>
+                                                    </tr>
+                                                </table>
+                                            </div>
+                                            <p style="text-align: center; margin: 35px 0;">
+                                                <a href="${payUrl}" style="background-color: #0d9488; color: white; padding: 14px 35px; text-decoration: none; border-radius: 8px; font-weight: bold; display: inline-block;">Open &amp; Pay</a>
+                                            </p>
+                                        </div>
+                                    </div>
+                                `,
+                            });
+                            console.log(
+                                `[ApproveLoan] Pay-to-employee email sent to Accounts (${accountsEmail}).`,
+                            );
+                        } else {
+                            console.warn(
+                                '[ApproveLoan] Accounts HOD has no email for pay-to-employee notice.',
+                            );
+                        }
+                    } catch (payEmailErr) {
+                        console.error(
+                            '[ApproveLoan] Pay-to-employee Accounts email failed:',
+                            payEmailErr?.message || payEmailErr,
+                        );
+                    }
                 }
             }
             else if (finalStatus === 'Rejected') {

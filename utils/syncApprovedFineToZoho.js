@@ -1,7 +1,15 @@
-import { createBill, getZohoOrganizationId, markBillAsOpen, fetchBillById } from '../services/zohoService.js';
+import axios from 'axios';
+import {
+    createBill,
+    getZohoOrganizationId,
+    markBillAsOpen,
+    fetchBillById,
+    uploadBillAttachment,
+} from '../services/zohoService.js';
 import { upsertZohoBillFromApi } from '../services/zohoPurchaseSyncService.js';
 import { withZohoOrganization } from './zohoOrgContext.js';
 import { resolveZohoOrganizationIdForCompany } from './resolveZohoOrganization.js';
+import { downloadS3ObjectBytes } from './s3Upload.js';
 import {
     resolveCompanyFinePayableAmount,
     resolveEmployeeFinePayableAmount,
@@ -91,9 +99,175 @@ function buildLineItemFromFine(fineDoc) {
     };
 }
 
+/** Zoho bill attachments allow: gif, png, jpeg, jpg, bmp, pdf. */
+function ensureZohoSafeFilename(name, mimeType) {
+    let filename = String(name || '').trim() || 'fine-attachment.pdf';
+    if (/\.(pdf|png|jpe?g|gif|bmp)$/i.test(filename)) {
+        return filename.slice(0, 200);
+    }
+    const stem = filename.replace(/\.[^.]+$/, '').trim() || 'fine-attachment';
+    const ext =
+        /png/i.test(mimeType)
+            ? 'png'
+            : /jpe?g/i.test(mimeType)
+              ? 'jpg'
+              : /gif/i.test(mimeType)
+                ? 'gif'
+                : /bmp/i.test(mimeType)
+                  ? 'bmp'
+                  : 'pdf';
+    return `${stem}.${ext}`.slice(0, 200);
+}
+
+function bufferFromBase64(data) {
+    const raw = String(data || '').trim();
+    if (!raw) return null;
+    let base64 = raw;
+    let mimeType = '';
+    const dataMatch = raw.match(/^data:([^;,]+)?(?:;[^,]*)?;base64,(.+)$/is);
+    if (dataMatch) {
+        if (dataMatch[1]) mimeType = String(dataMatch[1]).trim();
+        base64 = dataMatch[2];
+    } else if (raw.includes(',')) {
+        base64 = raw.split(',').pop();
+    }
+    try {
+        const buffer = Buffer.from(String(base64 || '').replace(/\s/g, ''), 'base64');
+        if (!buffer.length) return null;
+        return { buffer, mimeType };
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * Collect candidate attachment objects from the fine group
+ * (primary `attachment`, then `attachments[]` on any sibling).
+ */
+function collectFineAttachmentCandidates(group = []) {
+    const candidates = [];
+    const seen = new Set();
+
+    const push = (att) => {
+        if (!att || typeof att !== 'object') return;
+        const key =
+            String(att.publicId || '').trim() ||
+            String(att.url || '').trim() ||
+            String(att.name || '').trim() ||
+            (att.data ? `data:${String(att.data).slice(0, 48)}` : '');
+        if (!key || seen.has(key)) return;
+        if (!att.publicId && !att.url && !att.data && !att.name) return;
+        seen.add(key);
+        candidates.push(att);
+    };
+
+    for (const f of group) {
+        push(f?.attachment);
+    }
+    for (const f of group) {
+        if (!Array.isArray(f?.attachments)) continue;
+        for (const item of f.attachments) push(item);
+    }
+    return candidates;
+}
+
+/**
+ * Resolve the Add Fine modal supporting file into a Zoho upload payload.
+ * Prefers S3 bytes, then inline base64, then HTTP URL download.
+ */
+async function resolveFineAttachmentFile(attachment = {}) {
+    const mimeHint = String(attachment?.mimeType || attachment?.mime || '').trim();
+    const nameHint = String(attachment?.name || '').trim();
+
+    let buffer = null;
+    let mimeType = mimeHint;
+
+    const s3Key = String(attachment?.publicId || attachment?.url || '').trim();
+    if (s3Key) {
+        buffer = await downloadS3ObjectBytes(s3Key);
+    }
+
+    if (!buffer?.length && attachment?.data) {
+        const parsed = bufferFromBase64(attachment.data);
+        if (parsed?.buffer?.length) {
+            buffer = parsed.buffer;
+            if (!mimeType && parsed.mimeType) mimeType = parsed.mimeType;
+        }
+    }
+
+    if (!buffer?.length && attachment?.url && /^https?:\/\//i.test(String(attachment.url))) {
+        try {
+            const response = await axios.get(String(attachment.url), {
+                responseType: 'arraybuffer',
+                timeout: 60000,
+                maxContentLength: 25 * 1024 * 1024,
+            });
+            buffer = Buffer.from(response.data);
+            if (!mimeType && response.headers?.['content-type']) {
+                mimeType = String(response.headers['content-type']).split(';')[0].trim();
+            }
+        } catch (err) {
+            console.warn(
+                '[FineZoho] Could not download attachment URL:',
+                err?.message || err,
+            );
+        }
+    }
+
+    if (!buffer?.length) return null;
+
+    const filename = ensureZohoSafeFilename(nameHint || 'fine-attachment.pdf', mimeType);
+    return {
+        buffer,
+        filename,
+        mimeType: mimeType || 'application/pdf',
+    };
+}
+
+/**
+ * Upload the fine supporting attachment onto the Zoho bill (one file — Zoho bill limit).
+ * Soft-fails: bill create/open still succeeds if upload fails.
+ */
+async function syncFineAttachmentToZoho(group, zohoBillId) {
+    const id = String(zohoBillId || '').trim();
+    if (!id) return { ok: true, skipped: true };
+    if (group.every((f) => f?.zohoAttachmentSyncedAt)) {
+        return { ok: true, skipped: true };
+    }
+
+    const candidates = collectFineAttachmentCandidates(group);
+    if (!candidates.length) return { ok: true, skipped: true };
+
+    let file = null;
+    for (const candidate of candidates) {
+        file = await resolveFineAttachmentFile(candidate);
+        if (file) break;
+    }
+    if (!file) return { ok: true, skipped: true };
+
+    try {
+        await uploadBillAttachment(id, file);
+        const syncedAt = new Date();
+        for (const f of group) {
+            f.zohoAttachmentSyncedAt = syncedAt;
+            f.zohoAttachmentName = file.filename;
+            await f.save();
+        }
+        console.log(
+            `[FineZoho] Attached ${file.filename} (${file.buffer.length} bytes) to Zoho bill ${id}`,
+        );
+        return { ok: true, filename: file.filename };
+    } catch (err) {
+        const message = err?.message || 'Failed to upload fine attachment to Zoho bill';
+        console.warn('[FineZoho] Attachment upload failed:', message);
+        return { ok: false, message };
+    }
+}
+
 /**
  * Create one Zoho Books bill for approved fine(s) after Management approval.
  * Group fines: a single bill — Vendor = Fine Source; Item Table rows = each party (Payable COA + amount).
+ * Also uploads the Add Fine supporting attachment onto that Zoho bill.
  */
 export async function syncApprovedFineToZoho(fineDoc, siblingFines = null) {
     if (!fineDoc) return { ok: false, message: 'Fine missing' };
@@ -103,7 +277,21 @@ export async function syncApprovedFineToZoho(fineDoc, siblingFines = null) {
         : [fineDoc];
 
     if (group.every((f) => f.zohoBillId)) {
-        return { ok: true, skipped: true, zohoBillId: group[0].zohoBillId };
+        const existingId = String(group[0].zohoBillId || '').trim();
+        const organizationId = await resolveOrganizationIdForFine(fineDoc);
+        const attachResult = await withZohoOrganization(organizationId, () =>
+            syncFineAttachmentToZoho(group, existingId),
+        );
+        return {
+            ok: true,
+            skipped: true,
+            zohoBillId: existingId,
+            attachment: attachResult,
+            warning:
+                attachResult?.ok === false
+                    ? attachResult.message
+                    : undefined,
+        };
     }
 
     const organizationId = await resolveOrganizationIdForFine(fineDoc);
@@ -213,12 +401,27 @@ async function syncApprovedFineToZohoInner(fineDoc, group) {
             await f.save();
         }
 
+        const attachResult = await syncFineAttachmentToZoho(group, zohoBillId);
+        if (attachResult?.ok === false && attachResult.message) {
+            const attachWarning = `Zoho bill synced; attachment not uploaded: ${attachResult.message}`;
+            for (const f of group) {
+                f.zohoSyncError = openWarning
+                    ? `${openWarning}; ${attachWarning}`
+                    : attachWarning;
+                await f.save();
+            }
+        }
+
         return {
             ok: true,
             zohoBillId,
             lineItemCount: lineItems.length,
             zohoStatus: openWarning ? 'draft' : 'open',
-            warning: openWarning || undefined,
+            attachment: attachResult,
+            warning:
+                openWarning ||
+                (attachResult?.ok === false ? attachResult.message : undefined) ||
+                undefined,
         };
     } catch (err) {
         const message = err?.message || 'Failed to create Zoho bill for fine';

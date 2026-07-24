@@ -52,12 +52,34 @@ const loanSchema = new mongoose.Schema({
     },
     status: {
         type: String,
-        enum: ['Draft', 'Pending', 'Pending HR', 'Pending Accounts', 'Pending Authorization', 'Approved', 'Rejected', 'Cancelled', 'Paid'],
+        enum: [
+            'Draft',
+            'Pending',
+            'Pending HR',
+            'Pending Accounts',
+            'Pending Authorization',
+            'Approved',
+            'Pending Payment to Employee',
+            'Rejected',
+            'Cancelled',
+            'Paid',
+        ],
         default: 'Draft'
     },
     approvalStatus: {
         type: String,
-        enum: ['Draft', 'Pending', 'Pending HR', 'Pending Accounts', 'Pending Authorization', 'Approved', 'Rejected', 'Cancelled', 'Paid'],
+        enum: [
+            'Draft',
+            'Pending',
+            'Pending HR',
+            'Pending Accounts',
+            'Pending Authorization',
+            'Approved',
+            'Pending Payment to Employee',
+            'Rejected',
+            'Cancelled',
+            'Paid',
+        ],
         default: 'Draft'
     },
     appliedDate: {
@@ -153,6 +175,8 @@ const loanSchema = new mongoose.Schema({
     expenseAccountId: { type: String, default: '' },
     expenseAccountName: { type: String, default: '' },
     zohoJournalId: { type: String, default: '' },
+    zohoExpenseId: { type: String, default: '' },
+    zohoExpenseNumber: { type: String, default: '' },
     zohoSyncedAt: { type: Date, default: null },
     zohoSyncError: { type: String, default: '' },
 }, { timestamps: true });

@@ -47,8 +47,12 @@ export const getLoans = async (req, res) => {
             // I'll return both.
             approvalStatus: loan.approvalStatus || loan.status, // Include approvalStatus for compatibility
             applicationStatus: loan.approvalStatus || loan.status,
-            activeStatus: (loan.approvalStatus === 'Approved' || loan.status === 'Approved') ? 'Open' :
-                (loan.approvalStatus === 'Rejected' || loan.status === 'Rejected') ? 'Closed' : 'Pending',
+            activeStatus: (loan.approvalStatus === 'Approved' || loan.status === 'Approved'
+                || loan.approvalStatus === 'Pending Payment to Employee'
+                || loan.status === 'Pending Payment to Employee'
+                || loan.approvalStatus === 'Paid' || loan.status === 'Paid')
+                ? ((loan.approvalStatus === 'Paid' || loan.status === 'Paid') ? 'Closed' : 'Open')
+                : (loan.approvalStatus === 'Rejected' || loan.status === 'Rejected') ? 'Closed' : 'Pending',
             createdAt: loan.createdAt
         }));
 

@@ -10,7 +10,20 @@ import {
 
 export const updateLoanDetails = async (req, res) => {
     const { id } = req.params;
-    const { type, amount, duration, reason, monthStart, status, scheduleOnlyEdit } = req.body;
+    const {
+        type,
+        amount,
+        duration,
+        reason,
+        monthStart,
+        status,
+        scheduleOnlyEdit,
+        partyPayableOnly,
+        expenseAccountId,
+        expenseAccountName,
+        paidThroughAccountId,
+        paidThroughAccountName,
+    } = req.body;
 
     try {
         const loan = await Loan.findById(id);
@@ -20,6 +33,44 @@ export const updateLoanDetails = async (req, res) => {
 
         const loanStatus = loan.approvalStatus || loan.status;
         const isApproved = isApprovedLoanStatus(loanStatus);
+
+        // Accounts fills Expense Account + Paid Through on Loan/Adv Parties card.
+        if (partyPayableOnly) {
+            if (loanStatus !== 'Pending Accounts') {
+                return res.status(403).json({
+                    message:
+                        loanStatus === 'Paid'
+                            ? 'Accounts fields cannot be changed after the loan/advance is paid.'
+                            : 'Expense Account / Paid Through can only be set at the Accounts stage (after HR approval).',
+                });
+            }
+
+            if (expenseAccountId !== undefined) {
+                loan.expenseAccountId = String(expenseAccountId || '').trim();
+            }
+            if (expenseAccountName !== undefined) {
+                loan.expenseAccountName = String(expenseAccountName || '').trim();
+            }
+            if (!loan.expenseAccountId) {
+                loan.expenseAccountName = '';
+            }
+
+            if (paidThroughAccountId !== undefined) {
+                loan.paidThroughAccountId = String(paidThroughAccountId || '').trim();
+            }
+            if (paidThroughAccountName !== undefined) {
+                loan.paidThroughAccountName = String(paidThroughAccountName || '').trim();
+            }
+            if (!loan.paidThroughAccountId) {
+                loan.paidThroughAccountName = '';
+            }
+
+            const savedLoan = await loan.save();
+            return res.status(200).json({
+                message: 'Party accounts updated successfully',
+                loan: savedLoan,
+            });
+        }
 
         if (isApproved) {
             if (!scheduleOnlyEdit) {
@@ -258,4 +309,13 @@ export const updateLoanDetails = async (req, res) => {
         }
         res.status(500).json({ message: "Failed to update loan details" });
     }
+};
+
+/** Accounts party payable only — uses loan view permission (not Create). */
+export const updateLoanPartyPayable = async (req, res) => {
+    req.body = {
+        ...(req.body || {}),
+        partyPayableOnly: true,
+    };
+    return updateLoanDetails(req, res);
 };

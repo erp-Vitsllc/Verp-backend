@@ -246,14 +246,24 @@ export const addPayment = async (req, res) => {
                     
                     // If fully paid (remaining amount is 0 or less), update loan status to 'Paid'
                     if (remainingAmount <= 0.01) { // Small tolerance for floating point
-                        loan.status = 'Paid';
-                        loan.approvalStatus = 'Paid';
+                        const { applyLoanFullyPaid } = await import('../../utils/loanPaymentStatus.js');
+                        await applyLoanFullyPaid(loan);
+                    } else {
+                        await loan.save();
                     }
-                    
-                    await loan.save();
 
-                    const paidThroughId = String(paidThroughAccountId || payment.paidThroughAccountId || '').trim();
-                    const expenseId = String(expenseAccountId || payment.expenseAccountId || '').trim();
+                    const paidThroughId = String(
+                        paidThroughAccountId ||
+                            payment.paidThroughAccountId ||
+                            loan.paidThroughAccountId ||
+                            '',
+                    ).trim();
+                    const expenseId = String(
+                        expenseAccountId ||
+                            payment.expenseAccountId ||
+                            loan.expenseAccountId ||
+                            '',
+                    ).trim();
                     let zohoResult = { ok: false };
                     if (paidThroughId && expenseId) {
                         try {
@@ -266,19 +276,35 @@ export const addPayment = async (req, res) => {
                                 employee,
                                 organizationId: zohoOrganizationId || payment.zohoOrganizationId,
                                 expenseAccountId: expenseId,
-                                expenseAccountName: expenseAccountName || payment.expenseAccountName,
+                                expenseAccountName:
+                                    expenseAccountName ||
+                                    payment.expenseAccountName ||
+                                    loan.expenseAccountName,
                                 paidThroughAccountId: paidThroughId,
                                 paidThroughAccountName:
-                                    paidThroughAccountName || payment.paidThroughAccountName,
+                                    paidThroughAccountName ||
+                                    payment.paidThroughAccountName ||
+                                    loan.paidThroughAccountName,
                             });
 
                             if (zohoResult.ok) {
-                                payment.zohoJournalId = zohoResult.journalId || '';
+                                payment.zohoExpenseId = zohoResult.expenseId || payment.zohoExpenseId || '';
+                                payment.zohoJournalId = zohoResult.journalId || payment.zohoJournalId || '';
                                 payment.zohoOrganizationId =
                                     zohoResult.organizationId || payment.zohoOrganizationId;
-                                payment.zohoSyncError = '';
+                                payment.zohoSyncError = zohoResult.message && !zohoResult.expenseId
+                                    ? zohoResult.message
+                                    : '';
+                                if (zohoResult.attachment?.ok === false) {
+                                    payment.zohoSyncError =
+                                        zohoResult.message ||
+                                        `Zoho Expense created; attachment failed: ${zohoResult.attachment.message}`;
+                                }
                                 await payment.save();
 
+                                loan.zohoExpenseId = zohoResult.expenseId || loan.zohoExpenseId;
+                                loan.zohoExpenseNumber =
+                                    zohoResult.expenseNumber || loan.zohoExpenseNumber || '';
                                 loan.zohoJournalId = zohoResult.journalId || loan.zohoJournalId;
                                 loan.zohoOrganizationId =
                                     zohoResult.organizationId || loan.zohoOrganizationId;
@@ -289,7 +315,10 @@ export const addPayment = async (req, res) => {
                                 loan.expenseAccountName =
                                     expenseAccountName || payment.expenseAccountName;
                                 loan.zohoSyncedAt = new Date();
-                                loan.zohoSyncError = '';
+                                loan.zohoSyncError =
+                                    zohoResult.attachment?.ok === false
+                                        ? zohoResult.message || ''
+                                        : '';
                                 await loan.save();
                             } else {
                                 payment.zohoSyncError = zohoResult.message || 'Zoho sync failed';

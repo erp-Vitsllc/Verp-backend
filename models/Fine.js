@@ -322,6 +322,9 @@ const fineSchema = new mongoose.Schema(
         zohoOrganizationId: { type: String, default: '' },
         zohoSyncedAt: { type: Date, default: null },
         zohoSyncError: { type: String, default: '' },
+        /** Set when the fine supporting attachment was uploaded onto the Zoho bill. */
+        zohoAttachmentSyncedAt: { type: Date, default: null },
+        zohoAttachmentName: { type: String, default: '' },
         vendorBillStatus: {
             type: String,
             enum: ['Pending', 'Paid'],

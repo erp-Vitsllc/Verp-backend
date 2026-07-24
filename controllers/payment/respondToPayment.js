@@ -111,10 +111,11 @@ export const respondToPayment = async (req, res) => {
                         loan.paidAmount = totalPaid;
 
                         if (parseFloat(loan.amount || 0) - totalPaid <= 0.01) {
-                            loan.status = 'Paid';
-                            loan.approvalStatus = 'Paid';
+                            const { applyLoanFullyPaid } = await import('../../utils/loanPaymentStatus.js');
+                            await applyLoanFullyPaid(loan);
+                        } else {
+                            await loan.save();
                         }
-                        await loan.save();
                     }
                 } else if (relatedEntityType === 'Reward') {
                     let reward = null;

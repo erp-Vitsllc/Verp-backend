@@ -822,6 +822,83 @@ export async function uploadBillAttachment(
     }
 }
 
+/**
+ * Upload a file to an existing Zoho Books expense.
+ * POST /expenses/{expense_id}/attachment (multipart field name: attachment).
+ * Allowed: gif, png, jpeg, jpg, bmp, pdf, xls, xlsx, doc, docx, txt, csv.
+ */
+export async function uploadExpenseAttachment(
+    expenseId,
+    { buffer, filename = 'attachment.pdf', mimeType = 'application/pdf' } = {},
+) {
+    const id = String(expenseId || '').trim();
+    if (!id) throw new Error('Expense id is required.');
+    if (!Buffer.isBuffer(buffer) || buffer.length === 0) {
+        throw new Error('Attachment file is empty.');
+    }
+
+    const safeName = String(filename || 'attachment.pdf')
+        .replace(/[\\"\r\n]/g, '_')
+        .trim()
+        .slice(0, 200) || 'attachment.pdf';
+    const contentType = String(mimeType || 'application/pdf').trim() || 'application/pdf';
+    const boundary = `----ZohoExpenseAttachment${Date.now()}${Math.random().toString(36).slice(2)}`;
+    const preamble = Buffer.from(
+        `--${boundary}\r\n` +
+            `Content-Disposition: form-data; name="attachment"; filename="${safeName}"\r\n` +
+            `Content-Type: ${contentType}\r\n\r\n`,
+        'utf8',
+    );
+    const epilogue = Buffer.from(`\r\n--${boundary}--\r\n`, 'utf8');
+    const body = Buffer.concat([preamble, buffer, epilogue]);
+
+    const { organizationId, booksApiBase, accessToken } = await getBooksRequestContext();
+    const pathname = `/expenses/${encodeURIComponent(id)}/attachment`;
+
+    console.log(
+        `[ZohoBooks →] POST ${booksApiBase}${pathname}`,
+        `org=${organizationId}`,
+        `file=${safeName}`,
+        `bytes=${buffer.length}`,
+    );
+
+    try {
+        const response = await axios({
+            method: 'post',
+            url: `${booksApiBase}${pathname}`,
+            params: { organization_id: organizationId },
+            data: body,
+            headers: {
+                Authorization: `Zoho-oauthtoken ${accessToken}`,
+                'Content-Type': `multipart/form-data; boundary=${boundary}`,
+                'Content-Length': body.length,
+            },
+            timeout: 90000,
+            maxBodyLength: Infinity,
+            maxContentLength: Infinity,
+        });
+
+        const responseBody = response.data || {};
+        if (Number(responseBody.code) !== 0) {
+            throw new Error(responseBody.message || 'Zoho expense attachment upload failed');
+        }
+
+        console.log(
+            `[ZohoBooks ✓] POST ${pathname} org=${organizationId} attachment="${safeName}"`,
+        );
+        return responseBody;
+    } catch (error) {
+        const zohoMessage = error?.response?.data?.message || error?.message;
+        console.error(
+            `[ZohoBooks ✗] POST ${pathname} org=${organizationId}:`,
+            typeof error?.response?.data === 'object'
+                ? JSON.stringify(error.response.data)
+                : String(zohoMessage || error),
+        );
+        throw new Error(zohoMessage || 'Zoho expense attachment upload failed');
+    }
+}
+
 /** Submit a Draft bill into the Zoho approval flow (orgs with bill approval enabled). */
 export async function submitBillForApproval(billId) {
     const id = String(billId || '').trim();
@@ -1270,18 +1347,15 @@ export async function fetchPaymentAccounts(options = {}) {
     return rows;
 }
 
-/** Expense / COGS / asset accounts used on Zoho bill line items. */
+/**
+ * Chart of Accounts for Bills / Utility Bills / Expenses / Payments.
+ * Same complete Zoho CoA source as Fine Payable & Payments Made (fetchPaymentAccounts).
+ * Keeps Zoho bill-line exclusions (cash/bank/AP/AR) so bill create does not break.
+ */
 export async function fetchBillExpenseAccounts() {
-    const accounts = await fetchAllZohoBooksRows('/chartofaccounts', 'chartofaccounts', {
-        params: {
-            filter_by: 'AccountType.Active',
-        },
-        maxPages: 5,
-        timeout: 25000,
-    });
+    const accounts = await fetchPaymentAccounts({ includeInactive: true });
 
-    // Match Zoho Books' own bill-line account dropdown: every active account except
-    // payment accounts (cash / bank / cards) and system AP / AR controls.
+    // Match Zoho Books' bill Item Table: full CoA except payment & control accounts.
     return accounts.filter((account) => {
         const type = String(account?.account_type || account?.account_type_formatted || '').toLowerCase();
         return !/cash|bank|credit card|undeposited|accounts payable|accounts receivable/.test(type);
@@ -1303,6 +1377,99 @@ export async function fetchVendorContact(vendorId) {
 export async function fetchZohoCurrencies() {
     const data = await requestZohoBooks('/settings/currencies', { timeout: 30000 });
     return Array.isArray(data.currencies) ? data.currencies : [];
+}
+
+/** Org taxes (GET /settings/taxes) — used by Record Expense. */
+export async function fetchZohoTaxes() {
+    try {
+        const data = await requestZohoBooks('/settings/taxes', { timeout: 30000 });
+        if (Array.isArray(data.taxes)) return data.taxes;
+        if (Array.isArray(data.tax)) return data.tax;
+        return [];
+    } catch (err) {
+        console.warn('[ZohoTaxes] Failed to load taxes:', err?.message || err);
+        return [];
+    }
+}
+
+/**
+ * Reporting tags + options for Associate Tags on expenses.
+ * GET /reportingtags then GET /reportingtags/{id}/options/all per active tag.
+ */
+export async function fetchZohoReportingTags() {
+    try {
+        const data = await requestZohoBooks('/reportingtags', { timeout: 30000 });
+        const tags = Array.isArray(data.reporting_tags) ? data.reporting_tags : [];
+        const activeTags = tags.filter(
+            (tag) => tag && tag.is_active !== false && tag.is_draft !== true,
+        );
+
+        const withOptions = await Promise.all(
+            activeTags.map(async (tag) => {
+                const tagId = String(tag.tag_id || tag.id || '').trim();
+                if (!tagId) return null;
+                try {
+                    const optData = await requestZohoBooks(
+                        `/reportingtags/${encodeURIComponent(tagId)}/options/all`,
+                        {
+                            params: { tag_id: tagId, show_untagged: false },
+                            timeout: 30000,
+                        },
+                    );
+                    const rawOptions = Array.isArray(optData.results)
+                        ? optData.results
+                        : Array.isArray(optData.options)
+                          ? optData.options
+                          : Array.isArray(optData.reporting_tag?.options)
+                            ? optData.reporting_tag.options
+                            : [];
+                    const options = rawOptions
+                        .map((opt) => {
+                            const optionId = String(
+                                opt?.option_id || opt?.tag_option_id || opt?.id || '',
+                            ).trim();
+                            if (!optionId || optionId === 'untagged') return null;
+                            if (opt?.is_active === false) return null;
+                            return {
+                                option_id: optionId,
+                                option_name: String(
+                                    opt?.option_name || opt?.tag_option_name || optionId,
+                                ).trim(),
+                                depth: Number(opt?.depth) || 0,
+                            };
+                        })
+                        .filter(Boolean);
+
+                    return {
+                        tag_id: tagId,
+                        tag_name: String(tag.tag_name || tag.name || tagId).trim(),
+                        is_mandatory: Boolean(tag.is_mandatory),
+                        tag_order: Number(tag.tag_order) || 0,
+                        options,
+                    };
+                } catch (err) {
+                    console.warn(
+                        `[ZohoReportingTags] Options failed for ${tagId}:`,
+                        err?.message || err,
+                    );
+                    return {
+                        tag_id: tagId,
+                        tag_name: String(tag.tag_name || tag.name || tagId).trim(),
+                        is_mandatory: Boolean(tag.is_mandatory),
+                        tag_order: Number(tag.tag_order) || 0,
+                        options: [],
+                    };
+                }
+            }),
+        );
+
+        return withOptions
+            .filter(Boolean)
+            .sort((a, b) => (a.tag_order || 0) - (b.tag_order || 0));
+    } catch (err) {
+        console.warn('[ZohoReportingTags] Failed to load tags:', err?.message || err);
+        return [];
+    }
 }
 
 /**

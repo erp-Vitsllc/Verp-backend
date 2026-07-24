@@ -6,7 +6,7 @@ import {
 import { mapZohoErrorStatus } from './zohoVendorPaymentUtils.js';
 
 const CACHE_TTL_MS = 5 * 60 * 1000;
-/** Separate caches: bill-line filtered vs full Chart of Accounts */
+/** v2 = complete CoA merge (same source as Fine / Payments Made) */
 const supportCacheByKey = new Map();
 
 export const getZohoBillSupport = async (req, res) => {
@@ -14,7 +14,8 @@ export const getZohoBillSupport = async (req, res) => {
         const wantsFullAccounts =
             String(req.query?.fullAccounts || '').trim() === 'true' ||
             String(req.query?.fullAccounts || '').trim() === '1';
-        const cacheKey = wantsFullAccounts ? 'full' : 'bill';
+        // full = every CoA row; default = bill-line safe (excludes cash/bank/AP/AR) from same source
+        const cacheKey = wantsFullAccounts ? 'full-v2' : 'bill-v2';
 
         const now = Date.now();
         const cached = supportCacheByKey.get(cacheKey);
@@ -30,7 +31,9 @@ export const getZohoBillSupport = async (req, res) => {
         }
 
         const [accounts, locations] = await Promise.all([
-            wantsFullAccounts ? fetchPaymentAccounts() : fetchBillExpenseAccounts(),
+            wantsFullAccounts
+                ? fetchPaymentAccounts({ includeInactive: true })
+                : fetchBillExpenseAccounts(),
             fetchLocations(),
         ]);
 
@@ -59,7 +62,7 @@ export const getZohoBillSupport = async (req, res) => {
         const wantsFullAccounts =
             String(req.query?.fullAccounts || '').trim() === 'true' ||
             String(req.query?.fullAccounts || '').trim() === '1';
-        const cacheKey = wantsFullAccounts ? 'full' : 'bill';
+        const cacheKey = wantsFullAccounts ? 'full-v2' : 'bill-v2';
         const cached = supportCacheByKey.get(cacheKey);
 
         if (cached?.data) {

@@ -77,7 +77,7 @@ import { requestLoan } from "../controllers/employee/requestLoan.js";
 import { getLoans } from "../controllers/employee/getLoans.js";
 import { getLoanById } from "../controllers/employee/getLoanById.js";
 import { approveLoan } from "../controllers/employee/approveLoan.js";
-import { updateLoanDetails } from "../controllers/employee/updateLoanDetails.js";
+import { updateLoanDetails, updateLoanPartyPayable } from "../controllers/employee/updateLoanDetails.js";
 import { getLoanPdf } from "../controllers/employee/getLoanPdf.js";
 import { downloadLoanAcknowledgmentPdf } from "../controllers/employee/downloadLoanAcknowledgmentPdf.js";
 import { downloadEmployeeAssetListPdf } from "../controllers/employee/downloadEmployeeAssetListPdf.js";
@@ -297,6 +297,7 @@ router.post("/:id/probation/hr-finalize", checkPermission('hrm_employees_view_wo
 router.post("/request-loan", checkLoanOrAdvanceCreatePermission(), requestLoan);
 // Approval — workflow validates actor inside the handler (parent Edit is disabled in the chart)
 router.put("/loans/:id/status", approveLoan);
+router.put("/loans/:id/party-payable", checkLoanViewPermission(), updateLoanPartyPayable);
 router.put("/loans/:id", checkLoanMutatePermission(), updateLoanDetails);
 router.get("/loans/:id/pdf", checkLoanViewPermission(), getLoanPdf);
 router.get("/loans/:id/acknowledgment-pdf", checkLoanViewPermission(), downloadLoanAcknowledgmentPdf);

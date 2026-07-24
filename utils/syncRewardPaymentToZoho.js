@@ -171,18 +171,17 @@ export async function syncLoanPaymentToZoho({
     paidThroughAccountId = '',
     paidThroughAccountName = '',
 } = {}) {
-    const typeLabel = loan?.type === 'Advance' ? 'Advance' : 'Loan';
-    return syncStaffPayoutToZoho({
+    // Accounts Paid → Zoho Books Expense (not journal)
+    const { syncLoanPaymentToZohoExpense } = await import('./syncLoanPaymentToZohoExpense.js');
+    return syncLoanPaymentToZohoExpense({
         payment,
-        employee: employee || loan?.employeeId,
+        loan,
+        employee,
         organizationId,
         expenseAccountId,
         expenseAccountName,
         paidThroughAccountId,
         paidThroughAccountName,
-        reference: loan?.loanId,
-        notes: `${typeLabel} payment · ${loan?.loanId || ''} · ${loan?.employeeId || ''}`.trim(),
-        debitDescription: `${typeLabel} expense`,
     });
 }
 
