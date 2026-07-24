@@ -36,12 +36,20 @@ export const updateLoanDetails = async (req, res) => {
         const isApproved = isApprovedLoanStatus(loanStatus);
 
         // Accounts fills Expense Account + Paid Through on Loan/Adv Parties card.
+        // Also allow fix when Paid in ERP but Zoho Expense failed (no zohoExpenseId yet).
         if (partyPayableOnly) {
-            if (loanStatus !== 'Pending Accounts') {
+            const canFixFailedZoho =
+                loanStatus === 'Paid' &&
+                !String(loan.zohoExpenseId || '').trim() &&
+                Boolean(String(loan.zohoSyncError || '').trim());
+
+            if (loanStatus !== 'Pending Accounts' && !canFixFailedZoho) {
                 return res.status(403).json({
                     message:
                         loanStatus === 'Paid'
-                            ? 'Accounts fields cannot be changed after the loan/advance is paid.'
+                            ? String(loan.zohoExpenseId || '').trim()
+                                ? 'Accounts fields cannot be changed after Zoho Expense is posted.'
+                                : 'Accounts fields cannot be changed after the loan/advance is paid.'
                             : 'Expense Account / Paid Through can only be set at the Accounts stage (after HR approval).',
                 });
             }

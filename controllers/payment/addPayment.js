@@ -334,8 +334,17 @@ export const addPayment = async (req, res) => {
                             );
                             payment.zohoSyncError = zohoErr?.message || 'Zoho sync failed';
                             await payment.save();
+                            loan.zohoSyncError = zohoErr?.message || 'Zoho sync failed';
+                            await loan.save();
+                            zohoResult = {
+                                ok: false,
+                                message: zohoErr?.message || 'Zoho sync failed',
+                            };
                         }
                     }
+
+                    // Stash for response message below
+                    req._loanZohoSyncResult = zohoResult;
 
                     try {
                         const { upsertLoanPartyExpenseFromPayment } = await import(
@@ -548,10 +557,30 @@ export const addPayment = async (req, res) => {
         await payment.populate('paidBy', 'employeeId firstName lastName');
         await payment.populate('createdBy', 'firstName lastName');
 
+        const loanZoho = req._loanZohoSyncResult;
+        let message = 'Payment created successfully';
+        if (loanZoho) {
+            if (loanZoho.ok && loanZoho.expenseId) {
+                message = loanZoho.message || 'Payment created and Zoho Expense posted.';
+            } else if (!loanZoho.ok) {
+                message =
+                    `Payment saved in ERP, but Zoho Expense failed: ${loanZoho.message || 'sync error'}. ` +
+                    'Fix Expense Account (must be an Expense type, not Cash/Bank) on Loan Parties, then Retry Zoho.';
+            }
+        }
+
         res.status(201).json({
             success: true,
-            message: 'Payment created successfully',
-            payment
+            message,
+            payment,
+            zohoSync: loanZoho
+                ? {
+                      ok: Boolean(loanZoho.ok),
+                      expenseId: loanZoho.expenseId || '',
+                      expenseNumber: loanZoho.expenseNumber || '',
+                      message: loanZoho.message || '',
+                  }
+                : undefined,
         });
     } catch (error) {
         console.error('Error creating payment:', error);

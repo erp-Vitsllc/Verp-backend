@@ -11,9 +11,9 @@ import { withZohoOrganization } from './zohoOrgContext.js';
 import { resolveZohoOrganizationIdForRewardEmployee } from './syncRewardPaymentToZoho.js';
 import { downloadS3ObjectBytes } from './s3Upload.js';
 
-const DEFAULT_LOCATION_NAME = 'VEGA DXB';
-const DEFAULT_TAX_TREATMENT = 'out_of_scope';
-const DEFAULT_TAX_TREATMENT_CODE = 'uae_others';
+const DEFAULT_LOCATION_NAME = 'Head Office';
+/** Zoho UAE UI label "Non VAT" → API `vat_not_registered`. */
+const DEFAULT_TAX_TREATMENT = 'vat_not_registered';
 const DEFAULT_PLACE_OF_SUPPLY = 'DU';
 const DEFAULT_CURRENCY = 'AED';
 
@@ -137,7 +137,11 @@ async function resolveAttachmentFile(attachment = {}) {
     };
 }
 
-function collectLoanAttachmentCandidates(loan) {
+/**
+ * Prefer the loan/advance application attachment (Zoho "Upload your Files"),
+ * then payment receipt, then supporting / acknowledgment PDFs.
+ */
+function collectLoanAttachmentCandidates(loan, payment) {
     const list = [];
     const push = (att) => {
         if (!att || typeof att !== 'object') return;
@@ -145,15 +149,15 @@ function collectLoanAttachmentCandidates(loan) {
         list.push(att);
     };
 
-    // ERP auto-created acknowledgment first, then supporting, then application attachment
-    const approvals = Array.isArray(loan?.approvalAttachments) ? loan.approvalAttachments : [];
-    for (const att of approvals.filter((a) => a?.source === 'acknowledgment')) push(att);
-    for (const att of approvals.filter((a) => a?.source !== 'acknowledgment')) push(att);
     push(loan?.attachment);
+    push(payment?.attachment);
+    const approvals = Array.isArray(loan?.approvalAttachments) ? loan.approvalAttachments : [];
+    for (const att of approvals.filter((a) => a?.source !== 'acknowledgment')) push(att);
+    for (const att of approvals.filter((a) => a?.source === 'acknowledgment')) push(att);
     return list;
 }
 
-async function resolveVegaDxbLocationId() {
+async function resolveHeadOfficeLocationId() {
     const wanted = clean(
         process.env.ZOHO_LOAN_EXPENSE_LOCATION_NAME || DEFAULT_LOCATION_NAME,
     ).toLowerCase();
@@ -166,7 +170,7 @@ async function resolveVegaDxbLocationId() {
                 .toLowerCase()
                 .includes(wanted),
         ) ||
-        rows.find((l) => /vega\s*dxb/i.test(clean(l?.location_name || l?.name))) ||
+        rows.find((l) => /head\s*office/i.test(clean(l?.location_name || l?.name))) ||
         rows.find((l) => l?.is_primary || l?.isPrimary) ||
         rows[0];
 
@@ -177,10 +181,9 @@ async function resolveVegaDxbLocationId() {
 }
 
 /**
- * When Accounts marks loan/advance Paid → create Zoho Books Expense row:
- * Location VEGA DXB · Date loan date · Expense Account / Paid Through from parties ·
- * Tax Treatment Out Of Scope · Reference/Notes = description · Serial Zoho auto ·
- * Attachment = ERP acknowledgment/application file.
+ * When Accounts marks loan/advance Paid → Zoho Books Expense matching Add Expense form:
+ * Location Head Office · Tax Exclusive · Tax Treatment Non VAT ·
+ * Reference# + Notes = loan description · Attachment = loan/advance file.
  */
 export async function syncLoanPaymentToZohoExpense({
     payment,
@@ -233,9 +236,11 @@ export async function syncLoanPaymentToZohoExpense({
         toDateKey(payment?.paymentDate) ||
         new Date().toISOString().slice(0, 10);
 
+    // Same text for Zoho Reference# and Notes (loan/advance description).
     const description = clean(
         loan.reason ||
-            payment?.description ||
+            loan.description ||
+            payment?.notes ||
             `${typeLabel} ${clean(loan.loanId)} · ${clean(loan.employeeId)}`,
     ).slice(0, 500);
 
@@ -243,7 +248,7 @@ export async function syncLoanPaymentToZohoExpense({
 
     try {
         const result = await withZohoOrganization(orgId, async () => {
-            const { locationId, locationName } = await resolveVegaDxbLocationId();
+            const { locationId, locationName } = await resolveHeadOfficeLocationId();
             if (!locationId) {
                 throw new Error(
                     `Zoho location "${DEFAULT_LOCATION_NAME}" was not found. Check Locations in Zoho Books.`,
@@ -252,9 +257,6 @@ export async function syncLoanPaymentToZohoExpense({
 
             const taxTreatment = clean(
                 process.env.ZOHO_LOAN_EXPENSE_TAX_TREATMENT || DEFAULT_TAX_TREATMENT,
-            );
-            const taxTreatmentCode = clean(
-                process.env.ZOHO_LOAN_EXPENSE_TAX_TREATMENT_CODE || DEFAULT_TAX_TREATMENT_CODE,
             );
             const placeOfSupply = clean(
                 process.env.ZOHO_LOAN_EXPENSE_PLACE_OF_SUPPLY || DEFAULT_PLACE_OF_SUPPLY,
@@ -266,18 +268,17 @@ export async function syncLoanPaymentToZohoExpense({
                 paid_through_account_id: creditId,
                 amount,
                 currency_code: DEFAULT_CURRENCY,
+                // Amount Is → Tax Exclusive (always)
                 is_inclusive_tax: false,
+                // Tax Treatment → Non VAT (always)
                 tax_treatment: taxTreatment,
                 place_of_supply: placeOfSupply,
+                // Location → Head Office (always)
                 location_id: locationId,
+                // Reference# + Notes → loan/advance description
                 reference_number: referenceNumber,
                 description,
             };
-
-            // Out Of Scope reason (UAE) — omit if empty / not applicable
-            if (taxTreatment === 'out_of_scope' && taxTreatmentCode) {
-                payload.tax_treatment_code = taxTreatmentCode;
-            }
 
             const expense = await createExpense(payload);
             const expenseId = clean(
@@ -289,7 +290,7 @@ export async function syncLoanPaymentToZohoExpense({
 
             // Soft-fail attachment — expense row still succeeds
             let attachmentResult = { ok: true, skipped: true };
-            const candidates = collectLoanAttachmentCandidates(loan);
+            const candidates = collectLoanAttachmentCandidates(loan, payment);
             for (const candidate of candidates) {
                 const file = await resolveAttachmentFile(candidate);
                 if (!file) continue;
@@ -345,7 +346,11 @@ export async function syncLoanPaymentToZohoExpense({
                 : 'Zoho Expense created.',
         };
     } catch (err) {
-        const message = err?.message || 'Failed to create Zoho Expense for loan/advance';
+        let message = err?.message || 'Failed to create Zoho Expense for loan/advance';
+        if (/valid expense account/i.test(message)) {
+            message =
+                'Please enter a valid expense account. Expense Account must be a Zoho Expense / P&L account — not Cash, Bank, or Petty Cash. Use Cash/Bank only in Paid Through.';
+        }
         console.error('[LoanZohoExpense]', message);
         return { ok: false, message, organizationId: orgId };
     }

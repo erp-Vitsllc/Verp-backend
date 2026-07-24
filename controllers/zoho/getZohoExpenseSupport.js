@@ -4,20 +4,29 @@ import {
     fetchLocations,
     fetchZohoTaxes,
     fetchZohoReportingTags,
+    getZohoOrganizationId,
 } from '../../services/zohoService.js';
 import { mapZohoErrorStatus } from './zohoVendorPaymentUtils.js';
 
 const CACHE_TTL_MS = 5 * 60 * 1000;
-let supportCache = null;
+/** @type {Map<string, { at: number, data: object, meta: object }>} */
+const supportCacheByOrg = new Map();
 
+/**
+ * Support data for Zoho Books → Expenses → Add Expense:
+ * - accounts → Expense Account dropdown (bill/expense CoA)
+ * - paidThroughAccounts → Paid Through dropdown
+ */
 export const getZohoExpenseSupport = async (req, res) => {
     try {
+        const organizationId = String(getZohoOrganizationId() || '').trim() || 'default';
         const now = Date.now();
-        if (supportCache && now - supportCache.at < CACHE_TTL_MS) {
+        const cached = supportCacheByOrg.get(organizationId);
+        if (cached && now - cached.at < CACHE_TTL_MS) {
             return res.status(200).json({
                 success: true,
-                data: supportCache.data,
-                meta: { ...supportCache.meta, cached: true },
+                data: cached.data,
+                meta: { ...cached.meta, cached: true, organizationId },
             });
         }
 
@@ -45,9 +54,10 @@ export const getZohoExpenseSupport = async (req, res) => {
             reportingTagCount: reportingTags.length,
             source: 'zoho',
             cached: false,
+            organizationId,
         };
 
-        supportCache = { at: now, data, meta };
+        supportCacheByOrg.set(organizationId, { at: now, data, meta });
 
         return res.status(200).json({
             success: true,
@@ -57,13 +67,16 @@ export const getZohoExpenseSupport = async (req, res) => {
     } catch (error) {
         console.error('[ZohoExpenseSupport] Failed:', error?.message || error);
 
-        if (supportCache?.data) {
+        const organizationId = String(getZohoOrganizationId() || '').trim() || 'default';
+        const cached = supportCacheByOrg.get(organizationId);
+        if (cached?.data) {
             return res.status(200).json({
                 success: true,
-                data: supportCache.data,
+                data: cached.data,
                 meta: {
-                    ...supportCache.meta,
+                    ...cached.meta,
                     cached: true,
+                    organizationId,
                     syncError: error?.message || 'Zoho expense support failed',
                 },
             });

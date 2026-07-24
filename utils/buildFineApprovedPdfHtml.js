@@ -30,14 +30,13 @@ export const FINE_APPROVED_PDF_SELECTOR = '#fine-approved-pdf[data-fine-approved
 
 const VALUE_COLOR = '#cc0000';
 const BORDER = '1px solid #000000';
-const NO_BORDER = 'none';
 const ACK_CELL_STYLE =
-    `padding:12px 14px;border:${NO_BORDER};font-size:11px;line-height:1.65;color:#000;background:transparent;` +
+    `padding:12px 14px;border:${BORDER};font-size:11px;line-height:1.65;color:#000;background:transparent;` +
     'word-wrap:break-word;overflow-wrap:break-word;white-space:normal;text-align:justify;hyphens:auto;';
 const TD_LABEL =
-    `padding:8px 10px;border:${NO_BORDER};font-weight:bold;font-size:12px;color:#000;background:transparent;`;
+    `padding:8px 10px;border:${BORDER};font-weight:bold;font-size:12px;color:#000;background:transparent;`;
 const TD_VAL =
-    `padding:8px 10px;border:${NO_BORDER};text-align:center;font-weight:bold;font-size:12px;color:${VALUE_COLOR};background:transparent;`;
+    `padding:8px 10px;border:${BORDER};text-align:center;font-weight:bold;font-size:12px;color:${VALUE_COLOR};background:transparent;`;
 
 function esc(text) {
     return String(text ?? '')
@@ -70,27 +69,15 @@ function sigBox(label, sig) {
     </td>`;
 }
 
-function buildSignatureTable(signatureUrls) {
-    return `
-    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;background:transparent;border:2px solid #000000;margin-top:16px;">
-        <tr>
-            ${sigBox('Employee signature', signatureUrls?.employee)}
-            ${sigBox('HOD Signature', signatureUrls?.hod)}
-            ${sigBox('HR Officer', signatureUrls?.hr)}
-            ${sigBox('Accounts', signatureUrls?.accounts)}
-        </tr>
-    </table>`;
-}
-
 function buildAssetLossFormTable(fields, signatureUrls, rawPayableAmount) {
     const ackHtml = buildAssetLossFineAcknowledgementHtml(fields.employeeName, rawPayableAmount, {
         valueColor: VALUE_COLOR,
     });
 
     return `
-    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;background:transparent;border:none;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;background:transparent;border:2px solid #000000;">
         <tr>
-            <td colspan="4" style="padding:12px;border:none;text-align:center;font-size:16px;font-weight:bold;background:transparent;">
+            <td colspan="4" style="padding:12px;border:${BORDER};text-align:center;font-size:16px;font-weight:bold;background:transparent;">
                 Asset Loss Fine Report
             </td>
         </tr>
@@ -157,8 +144,13 @@ function buildAssetLossFormTable(fields, signatureUrls, rawPayableAmount) {
                 ${ackHtml}
             </td>
         </tr>
-    </table>
-    ${buildSignatureTable(signatureUrls)}`;
+        <tr>
+            ${sigBox('Employee signatue', signatureUrls?.employee)}
+            ${sigBox('HOD Signature', signatureUrls?.hod)}
+            ${sigBox('HR Officer', signatureUrls?.hr)}
+            ${sigBox('Accounts', signatureUrls?.accounts)}
+        </tr>
+    </table>`;
 }
 
 function buildGenericFineFormTable(fine, employeeName, hodName, formSummary, signatureUrls) {
@@ -170,9 +162,9 @@ function buildGenericFineFormTable(fine, employeeName, hodName, formSummary, sig
     const status = fine?.fineStatus || fine?.status || '';
 
     return `
-    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;background:transparent;border:none;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;background:transparent;border:2px solid #000000;">
         <tr>
-            <td colspan="4" style="padding:12px;border:none;text-align:center;font-size:16px;font-weight:bold;background:transparent;">
+            <td colspan="4" style="padding:12px;border:${BORDER};text-align:center;font-size:16px;font-weight:bold;background:transparent;">
                 Fine Report
             </td>
         </tr>
@@ -202,8 +194,13 @@ function buildGenericFineFormTable(fine, employeeName, hodName, formSummary, sig
             <td style="${TD_LABEL}">Amount</td>
             <td colspan="3" style="${TD_VAL}">${esc(total !== '' ? `${formatMoney(total)} AED` : '')}</td>
         </tr>
-    </table>
-    ${buildSignatureTable(signatureUrls)}`;
+        <tr>
+            ${sigBox('Employee signatue', signatureUrls?.employee)}
+            ${sigBox('HOD Signature', signatureUrls?.hod)}
+            ${sigBox('HR Officer', signatureUrls?.hr)}
+            ${sigBox('Accounts', signatureUrls?.accounts)}
+        </tr>
+    </table>`;
 }
 
 /**

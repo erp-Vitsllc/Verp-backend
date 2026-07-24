@@ -497,8 +497,9 @@ export const getUserActivityStats = async (req, res) => {
             });
         }
         const isCurrentAccountsHolder = await isUserActiveInFlowchart(subjectAuthUser, 'accounts').catch(() => false);
+        const isCurrentFinanceHolder = await isUserActiveInFlowchart(subjectAuthUser, 'finance').catch(() => false);
         const isCurrentManagementHolder = await isUserInFlowchart(subjectAuthUser, 'management').catch(() => false);
-        if (isCurrentAccountsHolder) isAccounts = true;
+        if (isCurrentAccountsHolder || isCurrentFinanceHolder) isAccounts = true;
         if (isCurrentManagementHolder) isCEO = true;
 
         // Flowchart HR sees all in-flight company activations even if `assignedTo` still points at a prior HR holder.
@@ -698,6 +699,15 @@ export const getUserActivityStats = async (req, res) => {
             Loan.find({
                 $or: [
                     { submittedTo: { $in: relevantIds }, status: 'Pending' },
+                    // Accounts assignee after Management — status is no longer plain "Pending"
+                    {
+                        submittedTo: { $in: relevantIds },
+                        $or: [
+                            { approvalStatus: 'Pending Payment to Employee' },
+                            { status: 'Pending Payment to Employee' },
+                            { approvalStatus: 'Approved', status: 'Approved' },
+                        ],
+                    },
                     { submittedTo: null, employeeObjectId: { $in: relevantIds }, status: 'Pending' },
                     ...(isHR ? [{ approvalStatus: 'Pending HR', status: 'Pending' }] : []),
                     ...(isAccounts
