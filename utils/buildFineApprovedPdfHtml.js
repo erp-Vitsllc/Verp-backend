@@ -9,19 +9,35 @@ import {
 } from './buildAssetLossFineEmailFields.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const LETTERHEAD_PATH = path.join(__dirname, '../assets/email/fine-form-letterhead.png');
+
+/** Official VITS Abudhabi letterhead (rasterized from VITS-Letter-Head-Abudhabi.pdf). */
+const LETTERHEAD_PNG_PATH = path.join(
+    __dirname,
+    '../assets/letterhead/vits_letterhead_abudhabi.png',
+);
+/** Legacy fallback if the Abudhabi asset is missing. */
+const LEGACY_LETTERHEAD_PATH = path.join(__dirname, '../assets/email/fine-form-letterhead.png');
+
+/**
+ * Safe content insets — keep form clear of letterhead header/footer artwork.
+ * Matches frontend `src/pdf/vitsLetterhead/constants.js`.
+ */
+const SAFE_TOP = '36mm';
+const SAFE_BOTTOM = '52mm';
+const SAFE_X = '18mm';
 
 export const FINE_APPROVED_PDF_SELECTOR = '#fine-approved-pdf[data-fine-approved-ready="true"]';
 
 const VALUE_COLOR = '#cc0000';
 const BORDER = '1px solid #000000';
+const NO_BORDER = 'none';
 const ACK_CELL_STYLE =
-    `padding:12px 14px;border:${BORDER};font-size:11px;line-height:1.65;color:#000;background:rgba(255,255,255,0.25);` +
+    `padding:12px 14px;border:${NO_BORDER};font-size:11px;line-height:1.65;color:#000;background:transparent;` +
     'word-wrap:break-word;overflow-wrap:break-word;white-space:normal;text-align:justify;hyphens:auto;';
 const TD_LABEL =
-    `padding:8px 10px;border:${BORDER};font-weight:bold;font-size:12px;color:#000;background:rgba(255,255,255,0.25);`;
+    `padding:8px 10px;border:${NO_BORDER};font-weight:bold;font-size:12px;color:#000;background:transparent;`;
 const TD_VAL =
-    `padding:8px 10px;border:${BORDER};text-align:center;font-weight:bold;font-size:12px;color:${VALUE_COLOR};background:rgba(255,255,255,0.12);`;
+    `padding:8px 10px;border:${NO_BORDER};text-align:center;font-weight:bold;font-size:12px;color:${VALUE_COLOR};background:transparent;`;
 
 function esc(text) {
     return String(text ?? '')
@@ -32,9 +48,13 @@ function esc(text) {
 }
 
 function getLetterheadDataUrl() {
-    if (!fs.existsSync(LETTERHEAD_PATH)) return '';
-    const b64 = fs.readFileSync(LETTERHEAD_PATH).toString('base64');
-    return `data:image/png;base64,${b64}`;
+    const filePath = fs.existsSync(LETTERHEAD_PNG_PATH)
+        ? LETTERHEAD_PNG_PATH
+        : LEGACY_LETTERHEAD_PATH;
+    if (!fs.existsSync(filePath)) return '';
+    const b64 = fs.readFileSync(filePath).toString('base64');
+    const mime = filePath.toLowerCase().endsWith('.jpg') ? 'image/jpeg' : 'image/png';
+    return `data:${mime};base64,${b64}`;
 }
 
 function sigBox(label, sig) {
@@ -43,11 +63,23 @@ function sigBox(label, sig) {
     const img = url
         ? `<img src="${url}" alt="" style="max-height:52px;max-width:200px;object-fit:contain;display:block;margin:6px auto 0;" />`
         : `<div style="min-height:52px;margin-top:6px;border-bottom:1px solid #333;max-width:200px;margin-left:auto;margin-right:auto;"></div>`;
-    return `<td width="25%" valign="top" style="padding:8px;border:${BORDER};text-align:center;background:rgba(255,255,255,0.2);font-size:11px;">
+    return `<td width="25%" valign="top" style="padding:8px;border:${BORDER};text-align:center;background:transparent;font-size:11px;">
         <div style="font-weight:bold;margin-bottom:4px;">${esc(label)}</div>
         ${img}
         ${name ? `<div style="font-size:10px;margin-top:4px;color:#333;">${name}</div>` : ''}
     </td>`;
+}
+
+function buildSignatureTable(signatureUrls) {
+    return `
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;background:transparent;border:2px solid #000000;margin-top:16px;">
+        <tr>
+            ${sigBox('Employee signature', signatureUrls?.employee)}
+            ${sigBox('HOD Signature', signatureUrls?.hod)}
+            ${sigBox('HR Officer', signatureUrls?.hr)}
+            ${sigBox('Accounts', signatureUrls?.accounts)}
+        </tr>
+    </table>`;
 }
 
 function buildAssetLossFormTable(fields, signatureUrls, rawPayableAmount) {
@@ -56,9 +88,9 @@ function buildAssetLossFormTable(fields, signatureUrls, rawPayableAmount) {
     });
 
     return `
-    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;background:transparent;border:2px solid #000000;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;background:transparent;border:none;">
         <tr>
-            <td colspan="4" style="padding:12px;border:${BORDER};text-align:center;font-size:16px;font-weight:bold;background:rgba(255,255,255,0.3);">
+            <td colspan="4" style="padding:12px;border:none;text-align:center;font-size:16px;font-weight:bold;background:transparent;">
                 Asset Loss Fine Report
             </td>
         </tr>
@@ -125,17 +157,58 @@ function buildAssetLossFormTable(fields, signatureUrls, rawPayableAmount) {
                 ${ackHtml}
             </td>
         </tr>
+    </table>
+    ${buildSignatureTable(signatureUrls)}`;
+}
+
+function buildGenericFineFormTable(fine, employeeName, hodName, formSummary, signatureUrls) {
+    const fineId = fine?.fineId || '';
+    const fineType = fine?.fineType || '';
+    const reportDate = formSummary?.reportDate || formSummary?.date || '';
+    const description = fine?.description || fine?.companyDescription || fine?.reason || '';
+    const total = fine?.totalFineAmount ?? fine?.fineAmount ?? '';
+    const status = fine?.fineStatus || fine?.status || '';
+
+    return `
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;background:transparent;border:none;">
         <tr>
-            ${sigBox('Employee signatue', signatureUrls?.employee)}
-            ${sigBox('HOD Signature', signatureUrls?.hod)}
-            ${sigBox('HR Officer', signatureUrls?.hr)}
-            ${sigBox('Accounts', signatureUrls?.accounts)}
+            <td colspan="4" style="padding:12px;border:none;text-align:center;font-size:16px;font-weight:bold;background:transparent;">
+                Fine Report
+            </td>
         </tr>
-    </table>`;
+        <tr>
+            <td style="${TD_LABEL}">Fine No</td>
+            <td style="${TD_VAL}">${esc(fineId)}</td>
+            <td style="${TD_LABEL}">Date</td>
+            <td style="${TD_VAL}">${esc(reportDate)}</td>
+        </tr>
+        <tr>
+            <td style="${TD_LABEL}">Employee Name</td>
+            <td style="${TD_VAL}">${esc(employeeName)}</td>
+            <td style="${TD_LABEL}">HOD Name</td>
+            <td style="${TD_VAL}">${esc(hodName)}</td>
+        </tr>
+        <tr>
+            <td style="${TD_LABEL}">Fine Type</td>
+            <td style="${TD_VAL}">${esc(fineType)}</td>
+            <td style="${TD_LABEL}">Status</td>
+            <td style="${TD_VAL}">${esc(status)}</td>
+        </tr>
+        <tr>
+            <td style="${TD_LABEL}">Description</td>
+            <td colspan="3" style="${TD_VAL}">${esc(description)}</td>
+        </tr>
+        <tr>
+            <td style="${TD_LABEL}">Amount</td>
+            <td colspan="3" style="${TD_VAL}">${esc(total !== '' ? `${formatMoney(total)} AED` : '')}</td>
+        </tr>
+    </table>
+    ${buildSignatureTable(signatureUrls)}`;
 }
 
 /**
- * Full fine-approved PDF document with letterhead background and transparent form overlay.
+ * Full fine-approved PDF document with VITS Abudhabi letterhead background.
+ * Content sits in the safe inset so header/footer artwork is never overridden.
  */
 export function buildFineApprovedPdfHtml({
     fine,
@@ -146,9 +219,6 @@ export function buildFineApprovedPdfHtml({
     signatureUrls,
 }) {
     const bgUrl = getLetterheadDataUrl();
-    const bgStyle = bgUrl
-        ? `background-image:url(${JSON.stringify(bgUrl)});background-size:100% 100%;background-position:center;background-repeat:no-repeat;`
-        : '';
 
     let formHtml;
     if (isLossDamageFineType(fine)) {
@@ -160,23 +230,95 @@ export function buildFineApprovedPdfHtml({
         });
         formHtml = buildAssetLossFormTable(rawFields, signatureUrls, rawFields.yourFinePayment);
     } else {
-        formHtml = `<p style="font-family:Georgia,serif;padding:20px;">Fine #${esc(fine.fineId)} — ${esc(fine.fineType)}</p>`;
+        formHtml = buildGenericFineFormTable(
+            fine,
+            employeeName || assigned?.employeeName,
+            hodName || formSummary?.employeeStats?.hodName,
+            formSummary,
+            signatureUrls,
+        );
     }
+
+    const letterheadLayer = bgUrl
+        ? `<div class="vits-fine-letterhead" aria-hidden="true">
+             <img src="${esc(bgUrl)}" alt="" />
+           </div>`
+        : '';
 
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8"/>
-<title>Asset Loss Fine Report — ${esc(fine.fineId)}</title>
+<title>Fine Report — ${esc(fine.fineId)}</title>
 <style>
+  @page { size: A4 portrait; margin: 0; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: #ffffff;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  #fine-approved-pdf,
+  #fine-approved-pdf * {
+    box-sizing: border-box;
+  }
+  #fine-approved-pdf {
+    position: relative;
+    width: 210mm;
+    min-height: 297mm;
+    margin: 0 auto;
+    padding: ${SAFE_TOP} ${SAFE_X} ${SAFE_BOTTOM};
+    font-family: Georgia, 'Times New Roman', Times, serif;
+    color: #000;
+    line-height: 1.45;
+    background: #ffffff;
+    overflow: hidden;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  .vits-fine-letterhead {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    z-index: 0;
+    pointer-events: none;
+    overflow: hidden;
+  }
+  .vits-fine-letterhead img {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: fill;
+    object-position: center top;
+  }
+  .vits-fine-content {
+    position: relative;
+    z-index: 1;
+    width: 100%;
+  }
+  #fine-approved-pdf table,
+  #fine-approved-pdf th,
+  #fine-approved-pdf td {
+    background: transparent !important;
+    background-color: transparent !important;
+  }
   @media print {
-    body { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    html, body { margin: 0 !important; padding: 0 !important; }
+    #fine-approved-pdf {
+      box-shadow: none !important;
+      border: none !important;
+    }
   }
 </style>
 </head>
-<body style="margin:0;background:#fff;">
-<div id="fine-approved-pdf" data-fine-approved-ready="true" style="box-sizing:border-box;max-width:210mm;margin:0 auto;padding:138px 44px 128px 44px;font-family:Georgia,'Times New Roman',serif;color:#333;line-height:1.45;min-height:297mm;${bgStyle}-webkit-print-color-adjust:exact;print-color-adjust:exact;">
-  ${formHtml}
+<body>
+<div id="fine-approved-pdf" data-fine-approved-ready="true">
+  ${letterheadLayer}
+  <div class="vits-fine-content">
+    ${formHtml}
+  </div>
 </div>
 </body>
 </html>`;

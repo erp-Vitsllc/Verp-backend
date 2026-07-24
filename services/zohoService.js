@@ -1269,12 +1269,30 @@ export async function fetchVendorsChunk({ startPage = 1, maxRows = 400 } = {}) {
  * - `AccountType.Active` / unfiltered list can also miss expense accounts that
  *   still appear under `AccountType.Expense`. Merge type filters + Active/Inactive.
  *
+ * Rate-limit safe: cached per org, filters run sequentially (not 8× parallel).
+ *
+ * @param {{ includeInactive?: boolean }} [options]
+ */
+const paymentAccountsCache = new Map();
+const PAYMENT_ACCOUNTS_CACHE_TTL_MS = 10 * 60 * 1000;
+
+function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
  * @param {{ includeInactive?: boolean }} [options]
  */
 export async function fetchPaymentAccounts(options = {}) {
     const includeInactive = Boolean(options.includeInactive);
+    const organizationId = String(getZohoOrganizationId() || '').trim() || 'default';
+    const cacheKey = `${organizationId}:${includeInactive ? 'all' : 'active'}`;
+    const cached = paymentAccountsCache.get(cacheKey);
+    if (cached && Date.now() - cached.at < PAYMENT_ACCOUNTS_CACHE_TTL_MS && cached.rows?.length) {
+        return cached.rows;
+    }
 
-    const fetchByFilter = async (filterBy) => {
+    const fetchByFilter = async (filterBy, attempt = 1) => {
         try {
             return await fetchAllZohoBooksRows('/chartofaccounts', 'chartofaccounts', {
                 params: filterBy ? { filter_by: filterBy } : {},
@@ -1282,45 +1300,69 @@ export async function fetchPaymentAccounts(options = {}) {
                 timeout: 90000,
             });
         } catch (err) {
+            const message = String(err?.message || err);
+            const isRateLimited = /blocked|exceeded the maximum|code.?43|429/i.test(message);
+            if (isRateLimited && attempt < 3) {
+                const waitMs = attempt * 2500;
+                console.warn(
+                    `[ZohoPaymentAccounts] Rate limited (${filterBy || 'no filter'}); retry in ${waitMs}ms`,
+                );
+                await sleep(waitMs);
+                return fetchByFilter(filterBy, attempt + 1);
+            }
             console.warn(
                 `[ZohoPaymentAccounts] CoA fetch failed (${filterBy || 'no filter'}):`,
-                err?.message || err,
+                message,
             );
-            return [];
+            const error = new Error(message);
+            error.filterBy = filterBy || 'none';
+            throw error;
         }
     };
 
     // Never rely on AccountType.All — it is incomplete in Zoho Books.
+    // Sequential order: broad Active first, then Expense (often missing from Active), then rest.
     const filters = [
         'AccountType.Active',
+        'AccountType.Expense',
         'AccountType.Asset',
         'AccountType.Liability',
         'AccountType.Equity',
         'AccountType.Income',
-        'AccountType.Expense',
-        null, // unfiltered page (often matches Active, but cheap insurance)
     ];
     if (includeInactive) {
         filters.push('AccountType.Inactive');
     }
 
-    const pages = await Promise.all(filters.map((f) => fetchByFilter(f)));
-    let accounts = pages.flat();
-
     const byId = new Map();
-    accounts.forEach((account) => {
-        const id = String(account?.account_id || account?.id || '').trim();
-        if (!id) return;
-        if (!includeInactive) {
-            const status = String(account?.status || account?.is_active || '')
-                .toLowerCase()
-                .trim();
-            if (status === 'inactive' || status === 'false' || account?.is_active === false) {
-                return;
+    const errors = [];
+
+    for (let i = 0; i < filters.length; i += 1) {
+        const filterBy = filters[i];
+        try {
+            if (i > 0) await sleep(350);
+            const page = await fetchByFilter(filterBy);
+            (page || []).forEach((account) => {
+                const id = String(account?.account_id || account?.id || '').trim();
+                if (!id) return;
+                if (!includeInactive) {
+                    const status = String(account?.status || account?.is_active || '')
+                        .toLowerCase()
+                        .trim();
+                    if (status === 'inactive' || status === 'false' || account?.is_active === false) {
+                        return;
+                    }
+                }
+                byId.set(id, account);
+            });
+        } catch (err) {
+            errors.push(err);
+            // If Zoho rate-limits mid-merge, stop hammering — use what we have / cache.
+            if (/blocked|exceeded the maximum|code.?43|429/i.test(String(err?.message || ''))) {
+                break;
             }
         }
-        byId.set(id, account);
-    });
+    }
 
     const rows = [...byId.values()].sort((a, b) => {
         const typeA = String(a.account_type_formatted || a.account_type || '').toLowerCase();
@@ -1331,20 +1373,38 @@ export async function fetchPaymentAccounts(options = {}) {
         return nameA.localeCompare(nameB);
     });
 
-    if (!rows.length) {
-        console.warn('[ZohoPaymentAccounts] Chart of Accounts returned 0 accounts');
-    } else {
+    if (rows.length) {
+        paymentAccountsCache.set(cacheKey, { at: Date.now(), rows });
         const fineHits = rows.filter((a) =>
             /fine/i.test(`${a.account_name || ''} ${a.account_code || ''}`),
         ).length;
         console.log(
-            `[ZohoPaymentAccounts] Loaded ${rows.length} Chart of Accounts row(s)` +
+            `[ZohoPaymentAccounts] Loaded ${rows.length} Chart of Accounts row(s) org=${organizationId}` +
                 (includeInactive ? ' (incl. inactive)' : '') +
-                (fineHits ? `, ${fineHits} name-match "fine"` : ''),
+                (fineHits ? `, ${fineHits} name-match "fine"` : '') +
+                (errors.length ? ` (${errors.length} filter error(s))` : ''),
         );
+        return rows;
     }
 
-    return rows;
+    if (cached?.rows?.length) {
+        console.warn(
+            `[ZohoPaymentAccounts] Using stale cache (${cached.rows.length} rows) after empty fetch org=${organizationId}`,
+        );
+        return cached.rows;
+    }
+
+    const firstError = errors[0]?.message || 'Chart of Accounts returned 0 accounts';
+    console.warn(`[ZohoPaymentAccounts] Chart of Accounts returned 0 accounts org=${organizationId}:`, firstError);
+    const emptyError = new Error(
+        /blocked|exceeded the maximum|429/i.test(firstError)
+            ? 'Zoho rate limit reached — wait about a minute, then retry loading Chart of Accounts.'
+            : /invalid_code|not connected|refresh_token/i.test(firstError)
+              ? `Zoho is not connected for this organization. Re-authorize via Zoho connections (${organizationId}).`
+              : firstError,
+    );
+    emptyError.code = /blocked|429/i.test(firstError) ? 429 : 502;
+    throw emptyError;
 }
 
 /**

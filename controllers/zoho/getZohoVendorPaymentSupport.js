@@ -110,12 +110,35 @@ export const getZohoVendorPaymentSupport = async (req, res) => {
                 String(req.query?.includeInactive || '').trim() === '1' ||
                 // default true: same complete CoA as Fine / Utility Bills
                 req.query?.includeInactive === undefined;
-            const accounts = await fetchPaymentAccounts({ includeInactive });
-            return res.status(200).json({
-                success: true,
-                data: { accounts },
-                meta: { accountCount: accounts.length, includeInactive },
-            });
+            try {
+                const accounts = await fetchPaymentAccounts({ includeInactive });
+                return res.status(200).json({
+                    success: true,
+                    data: { accounts },
+                    meta: {
+                        accountCount: accounts.length,
+                        includeInactive,
+                        organizationId: getZohoOrganizationId(),
+                    },
+                });
+            } catch (accountsErr) {
+                const message =
+                    accountsErr?.message || 'Failed to load Zoho Chart of Accounts';
+                const status =
+                    Number(accountsErr?.code) === 429 || /rate limit|blocked|429/i.test(message)
+                        ? 429
+                        : mapZohoErrorStatus(message);
+                return res.status(status).json({
+                    success: false,
+                    message,
+                    data: { accounts: [] },
+                    meta: {
+                        accountCount: 0,
+                        includeInactive,
+                        organizationId: getZohoOrganizationId(),
+                    },
+                });
+            }
         }
         const [accounts, payables, locations, paymentModes, vendorContact, nextPaymentNumber] =
             await Promise.all([

@@ -398,6 +398,7 @@ export const generatePdfFromHtml = async (html, selector) => {
             });
 
             await page.waitForSelector(selector, { timeout: 30000 });
+            await waitForFontsAndImages(page, selector);
             await new Promise((resolve) => setTimeout(resolve, 500));
 
             await page.evaluate((sel) => {
@@ -406,9 +407,7 @@ export const generatePdfFromHtml = async (html, selector) => {
                     document.body.innerHTML = '';
                     document.body.appendChild(form);
                     document.body.style.backgroundColor = 'white';
-                    document.body.style.display = 'flex';
-                    document.body.style.justifyContent = 'center';
-                    document.body.style.alignItems = 'flex-start';
+                    document.body.style.display = 'block';
                     document.body.style.margin = '0';
                     document.body.style.padding = '0';
                     form.style.margin = '0';
@@ -416,26 +415,28 @@ export const generatePdfFromHtml = async (html, selector) => {
                 }
             }, selector);
 
-            await page.emulateMediaType('screen');
+            await page.emulateMediaType('print');
             await page.addStyleTag({
                 content: `
                 .print\\:hidden { display: none !important; }
                 * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+                html, body { margin: 0 !important; padding: 0 !important; }
                 body::-webkit-scrollbar { display: none; }
                 body { -ms-overflow-style: none; scrollbar-width: none; }
             `
             });
 
+            // Full-bleed A4 so VITS letterhead header/footer reach the page edges
             const pdfBuffer = await renderPdfWithFallback(page, {
                 format: 'A4',
                 landscape: false,
                 printBackground: true,
-                preferCSSPageSize: false,
+                preferCSSPageSize: true,
                 margin: {
-                    top: '10mm',
-                    right: '8mm',
-                    bottom: '10mm',
-                    left: '8mm'
+                    top: '0mm',
+                    right: '0mm',
+                    bottom: '0mm',
+                    left: '0mm'
                 }
             });
 

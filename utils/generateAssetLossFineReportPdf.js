@@ -1,9 +1,11 @@
+import { generateFineApprovedPdf } from './generateFineApprovedPdf.js';
 import { fillAssetLossFineReportPdfTemplate } from './fillAssetLossFineReportPdfTemplate.js';
 import { resolveAssetLossFineReportSignatures } from './resolveAssetLossFineReportSignatures.js';
 import { loadFineRecordForAssetLossPdf } from './loadFineRecordForAssetLossPdf.js';
 
 /**
- * Generates Asset Loss Fine Report PDF by filling the official template PDF (not HTML).
+ * Generates Asset Loss Fine Report PDF on VITS Abudhabi letterhead.
+ * Prefers HTML letterhead (safe header/footer insets); falls back to the filled template PDF.
  */
 export async function generateAssetLossFineReportPdf({
     fine,
@@ -16,6 +18,17 @@ export async function generateAssetLossFineReportPdf({
 }) {
     try {
         const fineDoc = await loadFineRecordForAssetLossPdf(fine, assigned?.employeeId);
+
+        const htmlPdf = await generateFineApprovedPdf({
+            fine: fineDoc,
+            assigned,
+            formSummary,
+            employeeName,
+            hodName,
+            hrEmployee,
+            accountsEmployee,
+        });
+        if (htmlPdf && htmlPdf.length > 500) return htmlPdf;
 
         const signatureUrls = await resolveAssetLossFineReportSignatures({
             assignedEmployeeId: assigned?.employeeId,
