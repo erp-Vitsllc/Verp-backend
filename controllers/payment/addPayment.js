@@ -201,8 +201,8 @@ export const addPayment = async (req, res) => {
                 } else {
                     console.error('[AddPayment] Fine not found:', { relatedEntityId, referenceId });
                 }
-            } else if (relatedEntityType === 'Loan') {
-                // Find loan by _id or loanId (referenceId)
+            } else if (relatedEntityType === 'Loan' || relatedEntityType === 'Advance') {
+                // Loan and Salary Advance share the same Loan model + Zoho Expense sync
                 let loan = await Loan.findById(relatedEntityId);
                 if (!loan && referenceId) {
                     loan = await Loan.findOne({ loanId: referenceId });
@@ -211,7 +211,7 @@ export const addPayment = async (req, res) => {
                 if (loan) {
                     // Calculate total paid from all payments (check both by _id and loanId)
                     const paymentQuery = {
-                        relatedEntityType: 'Loan',
+                        relatedEntityType: { $in: ['Loan', 'Advance'] },
                         status: 'Completed'
                     };
                     

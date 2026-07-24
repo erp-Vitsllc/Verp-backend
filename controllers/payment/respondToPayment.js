@@ -100,7 +100,7 @@ export const respondToPayment = async (req, res) => {
                     } else {
                         console.error('[RespondToPayment] Fine not found:', { relatedEntityId, referenceId });
                     }
-                } else if (relatedEntityType === 'Loan') {
+                } else if (relatedEntityType === 'Loan' || relatedEntityType === 'Advance') {
                     let loan = await Loan.findById(relatedEntityId) || await Loan.findOne({ loanId: referenceId });
                     if (loan) {
                         const allPayments = await Payment.find({

@@ -23,6 +23,7 @@ export const updateLoanDetails = async (req, res) => {
         expenseAccountName,
         paidThroughAccountId,
         paidThroughAccountName,
+        zohoOrganizationId,
     } = req.body;
 
     try {
@@ -43,6 +44,10 @@ export const updateLoanDetails = async (req, res) => {
                             ? 'Accounts fields cannot be changed after the loan/advance is paid.'
                             : 'Expense Account / Paid Through can only be set at the Accounts stage (after HR approval).',
                 });
+            }
+
+            if (zohoOrganizationId !== undefined) {
+                loan.zohoOrganizationId = String(zohoOrganizationId || '').trim();
             }
 
             if (expenseAccountId !== undefined) {

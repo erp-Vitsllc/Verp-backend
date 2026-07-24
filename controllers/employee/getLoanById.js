@@ -122,6 +122,17 @@ export const getLoanById = async (req, res) => {
             originalMonthStart: loan.originalMonthStart,
             originalDuration: loan.originalDuration,
             rejectionReason: loan.rejectionReason,
+            // Accounts party fields (Loan/Adv Parties card) — required for approve + Zoho payment
+            zohoOrganizationId: loan.zohoOrganizationId || '',
+            expenseAccountId: loan.expenseAccountId || '',
+            expenseAccountName: loan.expenseAccountName || '',
+            paidThroughAccountId: loan.paidThroughAccountId || '',
+            paidThroughAccountName: loan.paidThroughAccountName || '',
+            zohoJournalId: loan.zohoJournalId || '',
+            zohoExpenseId: loan.zohoExpenseId || '',
+            zohoExpenseNumber: loan.zohoExpenseNumber || '',
+            zohoSyncedAt: loan.zohoSyncedAt || null,
+            zohoSyncError: loan.zohoSyncError || '',
         };
 
         res.status(200).json(data);
