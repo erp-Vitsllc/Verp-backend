@@ -18,7 +18,7 @@ export function buildFleetVehicleMongoScope({ vehicleTypeIds = [] } = {}) {
             { plateEmirate: { $exists: true, $nin: [null, ''] } },
             { locatorDeviceId: { $ne: null } },
             { assetId: { $regex: new RegExp(`^${FLEET_VEHICLE_ASSET_ID_PREFIX}`, 'i') } },
-            { vehicleProfileActivationStatus: { $in: ['submitted', 'active', 'rejected'] } },
+            { vehicleProfileActivationStatus: { $in: ['pending_admin', 'submitted', 'active', 'rejected'] } },
             { vehicleDispositionStatus: { $in: ['sold', 'total loss'] } },
             { vehicleInspectionStatus: { $exists: true, $nin: [null, '', 'none'] } },
             ...(vehicleTypeIds.length ? [{ typeId: { $in: vehicleTypeIds } }] : []),

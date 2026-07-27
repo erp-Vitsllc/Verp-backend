@@ -497,11 +497,22 @@ const assetItemSchema = new mongoose.Schema({
             at: { type: Date, default: Date.now }
         }]
     },
-    /** Fleet vehicle: submit completed profile to HR (email + dashboard task). */
+    /**
+     * Fleet vehicle profile activation:
+     * inactive → pending_admin (other users) → submitted (HR) → active
+     * Admin Officer / Asset Controller / superuser skip pending_admin and go to submitted (HR).
+     * HR can activate directly from inactive.
+     */
     vehicleProfileActivationStatus: {
         type: String,
-        enum: ['none', 'inactive', 'submitted', 'active', 'rejected'],
+        enum: ['none', 'inactive', 'pending_admin', 'submitted', 'active', 'rejected'],
         default: 'inactive',
+    },
+    /** Who started the activation chain: employee | admin_or_super | hr — drives final emails. */
+    vehicleProfileActivationOrigin: {
+        type: String,
+        enum: ['none', 'employee', 'admin_or_super', 'hr'],
+        default: 'none',
     },
     vehicleProfileActivationSubmittedAt: { type: Date, default: null },
     vehicleProfileActivationSubmittedBy: {
@@ -514,7 +525,7 @@ const assetItemSchema = new mongoose.Schema({
         type: [String],
         default: [],
     },
-    /** Asset Controller partial review: unchecked sections return to submitter (mirrors HR profile hold). */
+    /** Partial review: unchecked sections return to submitter (admin tier or HR). */
     vehicleProfileActivationHold: {
         heldAt: { type: Date, default: null },
         unapprovedSections: { type: [String], default: [] },

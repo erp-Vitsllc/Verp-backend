@@ -24,6 +24,8 @@ export const HR_DASHBOARD_REQUEST_TYPES = [
     "Vehicle Document Expiry Reminder",
     "Company Document Not Renew",
     "Employee Document Not Renew",
+    // Vehicle handover assignment inbox (HR stage)
+    "Asset Assignment",
 ];
 
 const toObjectId = (value) => {
@@ -65,6 +67,7 @@ export async function reroutePendingHrResponsibilities({ oldHrEmpObjectId, newHr
         vehicleServicePendingHr: 0,
         vehicleProfileSubmitted: 0,
         fleetAssetApprovals: 0,
+        vehicleHandoverPendingHr: 0,
     };
 
     const dash = await DashboardAction.updateMany(
@@ -196,6 +199,18 @@ export async function reroutePendingHrResponsibilities({ oldHrEmpObjectId, newHr
     );
     counts.vehicleServicePendingHr = vehicleService.modifiedCount || 0;
 
+    // Pending vehicle handover at HR / management / HOD — move actionRequiredBy to new flowchart HR.
+    const vehicleHandover = await AssetItem.updateMany(
+        {
+            actionRequiredBy: oldId,
+            "pendingActionDetails.vehicleHandoverFlow.stage": {
+                $in: ["hr", "management", "hod"],
+            },
+        },
+        { $set: { actionRequiredBy: newId } },
+    );
+    counts.vehicleHandoverPendingHr = vehicleHandover.modifiedCount || 0;
+
     const vehicleProfile = await AssetItem.updateMany(
         { vehicleProfileActivationStatus: "submitted", actionRequiredBy: oldId },
         { $set: { actionRequiredBy: newId } },
@@ -211,6 +226,129 @@ export async function reroutePendingHrResponsibilities({ oldHrEmpObjectId, newHr
 
     console.log(
         `[reroutePendingHrResponsibilities] ${oldId} → ${newId}: ${JSON.stringify(counts)}`,
+    );
+
+    return { skipped: false, counts };
+}
+
+/**
+ * When Flowchart Admin Officer changes, move in-flight Admin Officer work
+ * (vehicle handover target stage, shop garage admin stage) to the new holder.
+ * Additive — does not alter existing HR reroute.
+ */
+export async function reroutePendingAdminOfficerResponsibilities({
+    oldAdminEmpObjectId,
+    newAdminEmployee,
+}) {
+    const oldId = toObjectId(oldAdminEmpObjectId);
+    const newId = toObjectId(newAdminEmployee?._id);
+    const newEmpId = String(newAdminEmployee?.employeeId || "").trim();
+
+    if (!oldId || !newId) {
+        return { skipped: true, reason: "missing_admin_ids" };
+    }
+    if (oldId.equals(newId)) {
+        return { skipped: true, reason: "same_admin_holder" };
+    }
+
+    const counts = {
+        dashboardActions: 0,
+        vehicleHandoverTarget: 0,
+        vehicleServiceAdmin: 0,
+        vehicleProfilePendingAdmin: 0,
+    };
+
+    const dash = await DashboardAction.updateMany(
+        {
+            assignedTo: oldId,
+            status: "Pending",
+            requestType: {
+                $in: ["Asset Assignment", "Vehicle Service Request", "Vehicle Profile Activation"],
+            },
+        },
+        { $set: { assignedTo: newId, ...(newEmpId ? { assignedToEmpId: newEmpId } : {}) } },
+    );
+    counts.dashboardActions = dash.modifiedCount || 0;
+
+    const handoverTarget = await AssetItem.updateMany(
+        {
+            actionRequiredBy: oldId,
+            "pendingActionDetails.vehicleHandoverFlow.stage": "target",
+        },
+        { $set: { actionRequiredBy: newId } },
+    );
+    counts.vehicleHandoverTarget = handoverTarget.modifiedCount || 0;
+
+    const serviceAdmin = await AssetItem.updateMany(
+        {
+            actionRequiredBy: oldId,
+            "activeServiceWorkflow.stage": {
+                $in: ["pending_admin", "admin_officer", "pending_admin_officer"],
+            },
+        },
+        { $set: { actionRequiredBy: newId } },
+    );
+    counts.vehicleServiceAdmin = serviceAdmin.modifiedCount || 0;
+
+    const vehicleProfileAdmin = await AssetItem.updateMany(
+        { vehicleProfileActivationStatus: "pending_admin", actionRequiredBy: oldId },
+        { $set: { actionRequiredBy: newId } },
+    );
+    counts.vehicleProfilePendingAdmin = vehicleProfileAdmin.modifiedCount || 0;
+
+    console.log(
+        `[reroutePendingAdminOfficerResponsibilities] ${oldId} → ${newId}: ${JSON.stringify(counts)}`,
+    );
+
+    return { skipped: false, counts };
+}
+
+/**
+ * When Flowchart Accounts changes, move pending Accounts approvals to the new holder.
+ */
+export async function reroutePendingAccountsResponsibilities({
+    oldAccountsEmpObjectId,
+    newAccountsEmployee,
+}) {
+    const oldId = toObjectId(oldAccountsEmpObjectId);
+    const newId = toObjectId(newAccountsEmployee?._id);
+    const newEmpId = String(newAccountsEmployee?.employeeId || "").trim();
+
+    if (!oldId || !newId) {
+        return { skipped: true, reason: "missing_accounts_ids" };
+    }
+    if (oldId.equals(newId)) {
+        return { skipped: true, reason: "same_accounts_holder" };
+    }
+
+    const counts = {
+        dashboardActions: 0,
+        vehicleServicePendingAccounts: 0,
+    };
+
+    const dash = await DashboardAction.updateMany(
+        {
+            assignedTo: oldId,
+            status: "Pending",
+            requestType: { $in: ["Vehicle Service Request", "Utility Bill Payment"] },
+        },
+        { $set: { assignedTo: newId, ...(newEmpId ? { assignedToEmpId: newEmpId } : {}) } },
+    );
+    counts.dashboardActions = dash.modifiedCount || 0;
+
+    const serviceAccounts = await AssetItem.updateMany(
+        {
+            actionRequiredBy: oldId,
+            "activeServiceWorkflow.stage": {
+                $in: ["pending_accounts", "accounts"],
+            },
+        },
+        { $set: { actionRequiredBy: newId } },
+    );
+    counts.vehicleServicePendingAccounts = serviceAccounts.modifiedCount || 0;
+
+    console.log(
+        `[reroutePendingAccountsResponsibilities] ${oldId} → ${newId}: ${JSON.stringify(counts)}`,
     );
 
     return { skipped: false, counts };

@@ -117,7 +117,7 @@ function normalizePhotoKey(photo) {
     return '';
 }
 
-function photosDiffer(previousPhoto, currentPhoto) {
+export function photosDiffer(previousPhoto, currentPhoto) {
     const prevKey = normalizePhotoKey(previousPhoto);
     const currKey = normalizePhotoKey(currentPhoto);
     if (!prevKey && !currKey) return false;
@@ -125,7 +125,7 @@ function photosDiffer(previousPhoto, currentPhoto) {
     return prevKey !== currKey;
 }
 
-function presentValueChanged(previousPresent, currentPresent) {
+export function presentValueChanged(previousPresent, currentPresent) {
     if (previousPresent === currentPresent) return false;
     return (
         (previousPresent === true || previousPresent === false) &&
@@ -296,6 +296,234 @@ async function buildStoredEntryFromAssessment(merged, historyId, changedByKey = 
 export async function syncVehicleAccessoriesListOnAssessmentComplete(historyRecord, mergedAssessment) {
     // Accessories list updates are deferred until HR approval — see applyPendingHandoverAccessoriesToVehicleList.
     return { deferred: true };
+}
+
+const BODY_CONDITION_KEYS_FOR_HR = [
+    'frontView',
+    'backView',
+    'frontRightCorner',
+    'backRightCorner',
+    'frontLeftCorner',
+    'backLeftCorner',
+    'frontRightDoor',
+    'backRightDoor',
+    'frontLeftDoor',
+    'backLeftDoor',
+    'frontInsideView',
+    'backInsideView',
+    'frontDashBoard',
+    'carTopView',
+];
+
+function resolveBodyConditionSource(historyEntry) {
+    const candidates = [
+        historyEntry?.details?.bodyConditionReport,
+        historyEntry?.details?.bodyCondition,
+        historyEntry?.bodyConditionReport,
+    ];
+    return candidates.find((item) => item && typeof item === 'object') || null;
+}
+
+function pickBodyConditionBlock(source, key) {
+    if (!source || typeof source !== 'object') {
+        return { comment: '', photo: null, photoSource: null };
+    }
+    const block = source[key];
+    if (!block || typeof block !== 'object') {
+        return {
+            comment: String(source[`${key}Comment`] || '').trim(),
+            photo: source[`${key}Photo`] ?? null,
+            photoSource: null,
+        };
+    }
+    return {
+        comment: String(block.comment ?? block.notes ?? '').trim(),
+        photo: block.photo ?? block.image ?? block.attachment ?? null,
+        photoSource:
+            block.photoSource === 'previous' || block.photoSource === 'new'
+                ? block.photoSource
+                : null,
+    };
+}
+
+function bodyConditionEntryHasData(entry) {
+    const source = resolveBodyConditionSource(entry);
+    if (!source) return false;
+    return BODY_CONDITION_KEYS_FOR_HR.some((key) => {
+        const block = pickBodyConditionBlock(source, key);
+        return Boolean(block.photo) || Boolean(block.comment);
+    });
+}
+
+function accessoryItemChangedVsBaseline(baseline, current) {
+    const currPresent =
+        current.present === true ? true : current.present === false ? false : current.photo ? true : null;
+    if (currPresent !== true && currPresent !== false) return false;
+
+    const basePresent =
+        baseline.present === true ? true : baseline.present === false ? false : baseline.photo ? true : null;
+    const hasBaseline = basePresent === true || basePresent === false || Boolean(baseline.photo);
+    if (!hasBaseline) return false;
+    if (basePresent !== currPresent) return true;
+    if (currPresent === true) {
+        return photosDiffer(baseline.photo, current.photo);
+    }
+    return false;
+}
+
+/**
+ * Build accessories baseline matching the assign-page CHANGED/OK badges:
+ * committed list entries (not live overlays), excluding the active handover's own snapshots.
+ */
+function buildCommittedAccessoriesBaseline(asset, currentHistoryId = '') {
+    const entries = Array.isArray(asset?.vehicleAccessoriesListEntries)
+        ? asset.vehicleAccessoriesListEntries
+        : [];
+    const currentId = String(currentHistoryId || '');
+    const ranked = [...entries].sort((a, b) => {
+        const diff = entryTimestamp(b) - entryTimestamp(a);
+        if (diff !== 0) return diff;
+        return String(b?._id || '').localeCompare(String(a?._id || ''));
+    });
+
+    // Oldest → newest so later committed rows overwrite earlier ones per key.
+    const chronological = [...ranked].reverse();
+    const blocksByKey = {};
+
+    for (const entry of chronological) {
+        const kind = String(entry?.kind || 'manual');
+        const sourceId = String(entry?.sourceHistoryId || '');
+        if (currentId && sourceId && sourceId === currentId) continue;
+        if (kind === 'replaced_live') continue;
+        if (kind === 'live_accessories') continue;
+        if (!storedEntryHasAssessmentData(entry)) continue;
+
+        for (const key of RECEIVER_ASSESSMENT_KEYS) {
+            const block = pickAssessmentBlock(entry, key);
+            if (block.present === true || block.present === false || block.photo) {
+                blocksByKey[key] = block;
+            }
+        }
+    }
+
+    return blocksByKey;
+}
+
+function accessoriesHaveHandoverChanges(historyRecord, asset, previousAssessmentEntry = null) {
+    const currentSource = resolveAssessmentSource(historyRecord);
+    if (!currentSource) return false;
+
+    const currentId = historyRecord?._id?.toString?.() || String(historyRecord?._id || '');
+    const listBaseline = buildCommittedAccessoriesBaseline(asset, currentId);
+    const previousSource = previousAssessmentEntry
+        ? resolveAssessmentSource(previousAssessmentEntry)
+        : null;
+
+    for (const key of RECEIVER_ASSESSMENT_KEYS) {
+        const current = pickAssessmentBlock(currentSource, key);
+        let baseline = listBaseline[key] || { present: null, photo: null };
+        const hasListBaseline =
+            baseline.present === true || baseline.present === false || Boolean(baseline.photo);
+        if (!hasListBaseline && previousSource) {
+            baseline = pickAssessmentBlock(previousSource, key);
+        }
+        if (accessoryItemChangedVsBaseline(baseline, current)) return true;
+    }
+    return false;
+}
+
+function bodyConditionHasHandoverChanges(historyRecord, previousBodyEntry = null) {
+    if (!previousBodyEntry || !bodyConditionEntryHasData(previousBodyEntry)) return false;
+
+    const currentSource = resolveBodyConditionSource(historyRecord);
+    const previousSource = resolveBodyConditionSource(previousBodyEntry);
+    if (!currentSource || !previousSource) return false;
+
+    for (const key of BODY_CONDITION_KEYS_FOR_HR) {
+        const current = pickBodyConditionBlock(currentSource, key);
+        const previous = pickBodyConditionBlock(previousSource, key);
+        const hasPreviousBaseline = Boolean(previous.photo) || Boolean(previous.comment);
+        if (!hasPreviousBaseline) continue;
+
+        if (current.photoSource === 'new') return true;
+        if (photosDiffer(previous.photo, current.photo)) return true;
+        if (previous.comment !== current.comment) return true;
+    }
+    return false;
+}
+
+async function findPreviousBodyConditionHistoryEntry(assetId, currentHistoryId) {
+    if (!assetId || !currentHistoryId) return null;
+
+    const current = await AssetHistory.findById(currentHistoryId).select('createdAt date').lean();
+    const beforeDate = current?.createdAt || current?.date;
+
+    const filter = {
+        assetId,
+        action: { $in: [...FLEET_HANDOVER_ACTIONS] },
+        _id: { $ne: currentHistoryId },
+    };
+    if (beforeDate) filter.createdAt = { $lt: beforeDate };
+
+    const rows = await AssetHistory.find(filter)
+        .sort({ createdAt: -1 })
+        .select('details bodyConditionReport action createdAt date')
+        .limit(40)
+        .lean();
+
+    for (const row of rows) {
+        if (bodyConditionEntryHasData(row)) return row;
+    }
+    return null;
+}
+
+async function findPreviousAssessmentHistoryEntry(assetId, currentHistoryId) {
+    if (!assetId || !currentHistoryId) return null;
+
+    const current = await AssetHistory.findById(currentHistoryId).select('createdAt date').lean();
+    const beforeDate = current?.createdAt || current?.date;
+
+    const filter = {
+        assetId,
+        action: { $in: [...FLEET_HANDOVER_ACTIONS] },
+        _id: { $ne: currentHistoryId },
+    };
+    if (beforeDate) filter.createdAt = { $lt: beforeDate };
+
+    const rows = await AssetHistory.find(filter)
+        .sort({ createdAt: -1 })
+        .select('details receiverAssessment action createdAt date')
+        .limit(40)
+        .lean();
+
+    for (const row of rows) {
+        if (resolveAssessmentSource(row)) return row;
+    }
+    return null;
+}
+
+/**
+ * HR approval is required only when accessories or body-condition images/presence
+ * differ from the previous/committed baseline. Identical reports skip HR.
+ */
+export async function handoverRequiresHrApproval(historyRecord, asset) {
+    if (!historyRecord || !asset) return true;
+
+    const currentId = historyRecord?._id?.toString?.() || String(historyRecord?._id || '');
+    const assetId = asset?._id || historyRecord?.assetId;
+
+    const [previousAssessment, previousBody] = await Promise.all([
+        findPreviousAssessmentHistoryEntry(assetId, currentId),
+        findPreviousBodyConditionHistoryEntry(assetId, currentId),
+    ]);
+
+    if (accessoriesHaveHandoverChanges(historyRecord, asset, previousAssessment)) {
+        return true;
+    }
+    if (bodyConditionHasHandoverChanges(historyRecord, previousBody)) {
+        return true;
+    }
+    return false;
 }
 
 function findLatestLiveAccessoriesEntry(asset) {

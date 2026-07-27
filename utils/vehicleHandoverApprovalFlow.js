@@ -12,6 +12,7 @@ import { sendAssetResponseEmail } from './sendAssetResponseEmail.js';
 import nodemailer from 'nodemailer';
 import { pickEffectiveEmail } from './resolveEmployeeEmail.js';
 import { normalizeS3Key } from './s3Upload.js';
+import { handoverRequiresHrApproval } from './vehicleAccessoriesListSync.js';
 
 export const HANDOVER_FLOW_STAGES = {
     TARGET: 'target',
@@ -116,6 +117,7 @@ const HANDOVER_HISTORY_IMMUTABLE_DETAIL_KEYS = [
     'handoverLifecycleStatus',
     'handoverTargetAcceptedAt',
     'handoverHrApprovedAt',
+    'hrApprovalSkipped',
     'firstInspection',
     'reinspection',
     'inspectionFormStatus',
@@ -1301,6 +1303,27 @@ export async function advanceFleetHandoverOnAccept({
                 });
             }
         }
+
+        // Reload history so comparison uses the latest saved accessories / body reports.
+        const latestHistory = historyId
+            ? await AssetHistory.findById(historyId).lean()
+            : historyRecord;
+        const requiresHr = await handoverRequiresHrApproval(latestHistory || historyRecord, item);
+
+        // No accessory/body differences vs previous → skip HR and finalize as approved.
+        if (!requiresHr) {
+            if (historyId) {
+                await markHandoverLifecycleOnHistory(historyId, HANDOVER_LIFECYCLE.ACCEPTED, {
+                    'details.hrApprovalSkipped': true,
+                });
+            }
+            if (item.pendingActionDetails?.vehicleHandoverFlow) {
+                delete item.pendingActionDetails.vehicleHandoverFlow;
+            }
+            item.actionRequiredBy = null;
+            return { finalize: true, historyId, hrSkipped: true };
+        }
+
         const hr = await resolveHrEmployee();
         if (!hr?._id) {
             return { error: 'HR approver is not configured in the flowchart.' };

@@ -41,6 +41,53 @@ function guessMimeFromName(name) {
     return 'application/pdf';
 }
 
+function sanitizeZohoBillNumber(value) {
+    return String(value || '')
+        .trim()
+        .replace(/[^\w-]/g, '-')
+        .replace(/-+/g, '-')
+        .replace(/^-|-$/g, '')
+        .slice(0, 45);
+}
+
+function garageBillPrefix(serviceTypeLabel = '') {
+    const label = String(serviceTypeLabel || '').trim().toLowerCase();
+    if (label.includes('tire')) return 'TIRE';
+    if (label.includes('mechanical') || label.includes('mech')) return 'MECH';
+    if (label.includes('body')) return 'BODY';
+    if (label.includes('accident')) return 'ACCD';
+    if (label.includes('oil')) return 'OIL';
+    if (label.includes('wash') || label.includes('car wash')) return 'WASH';
+    return 'VHCL';
+}
+
+/**
+ * VEGA org uses manual bill numbers (same as Fine / Utility).
+ * Omitting bill_number → Zoho: "Invalid value passed for bill_number".
+ */
+function buildGarageZohoBillNumber({ asset, service, serviceTypeLabel = '' } = {}) {
+    const prefix = garageBillPrefix(serviceTypeLabel || service?.serviceType);
+    const assetId = sanitizeZohoBillNumber(asset?.assetId || '');
+    const serviceKey = String(service?._id || '')
+        .replace(/[^a-zA-Z0-9]/g, '')
+        .slice(-8)
+        .toUpperCase();
+    const stamp = Date.now().toString(36).toUpperCase().slice(-4);
+
+    const candidates = [
+        assetId && serviceKey ? `${prefix}-${assetId}-${serviceKey}` : '',
+        assetId ? `${prefix}-${assetId}-${stamp}` : '',
+        serviceKey ? `${prefix}-${serviceKey}-${stamp}` : '',
+        `${prefix}-${stamp}${String(Date.now()).slice(-6)}`,
+    ];
+
+    for (const raw of candidates) {
+        const num = sanitizeZohoBillNumber(raw);
+        if (num) return num;
+    }
+    return sanitizeZohoBillNumber(`VHCL-${Date.now()}`) || `VHCL${Date.now()}`;
+}
+
 async function buildAttachmentFromService(service, remark) {
     // Prefer dedicated garage bill attachment — never overwrite Quote 1 (service.attachment).
     const key = String(
@@ -143,22 +190,53 @@ export async function syncVehicleGarageServiceToZoho({
                 .join(' · ')
                 .slice(0, 200);
 
-            const bill = await createBill({
+            const billNumber = buildGarageZohoBillNumber({
+                asset,
+                service,
+                serviceTypeLabel: label,
+            });
+            const referenceNumber =
+                sanitizeZohoBillNumber(assetId) ||
+                String(service._id || '')
+                    .replace(/[^a-zA-Z0-9-]/g, '')
+                    .slice(-20) ||
+                undefined;
+
+            const billPayload = {
                 vendor_id: vendorId,
+                bill_number: billNumber,
                 date: today,
                 due_date: today,
-                reference_number: String(service._id || '').slice(-20),
                 notes: description,
                 line_items: [
                     {
                         account_id: payAccountId,
-                        name: description || label,
-                        description,
+                        description: description || label,
                         quantity: 1,
                         rate: amount,
                     },
                 ],
-            });
+            };
+            if (referenceNumber) billPayload.reference_number = referenceNumber;
+
+            let bill;
+            try {
+                bill = await createBill(billPayload);
+            } catch (createErr) {
+                const msg = String(createErr?.message || createErr || '');
+                // Duplicate / series clash — retry once with a unique suffix.
+                if (/bill_number|already|exist|duplicate|unique/i.test(msg)) {
+                    const retryNumber = sanitizeZohoBillNumber(
+                        `${billNumber}-${Date.now().toString(36).toUpperCase().slice(-5)}`,
+                    );
+                    bill = await createBill({
+                        ...billPayload,
+                        bill_number: retryNumber || `${billNumber}-${Date.now()}`.slice(0, 45),
+                    });
+                } else {
+                    throw createErr;
+                }
+            }
 
             const billId = String(
                 bill?.bill_id || bill?.billId || bill?.id || '',

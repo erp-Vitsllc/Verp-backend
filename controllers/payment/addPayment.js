@@ -80,7 +80,18 @@ export const addPayment = async (req, res) => {
             String(relatedEntityType || '').trim() === 'Fine' &&
             Boolean(String(paidThroughAccountId || '').trim()) &&
             Boolean(String(expenseAccountId || '').trim());
-        if (normalizedSource === 'Cash' && !hasAttachment && !isFineCompanyZohoRefund) {
+        const isUtilityCompanyZohoRefund =
+            String(relatedEntityType || '').trim() === 'UtilityBill' &&
+            Boolean(String(paidThroughAccountId || '').trim()) &&
+            Boolean(String(expenseAccountId || '').trim()) &&
+            Boolean(String(taxTreatment || '').trim()) &&
+            Boolean(String(taxId || '').trim());
+        if (
+            normalizedSource === 'Cash' &&
+            !hasAttachment &&
+            !isFineCompanyZohoRefund &&
+            !isUtilityCompanyZohoRefund
+        ) {
             return res.status(400).json({
                 success: false,
                 message: 'Attachment is required when payment source is Cash',
@@ -577,26 +588,81 @@ export const addPayment = async (req, res) => {
                 let zohoResult = { ok: false };
                 if (paidThroughId && expenseId) {
                     try {
-                        const { syncUtilityEmployeePaymentToZoho } = await import(
-                            '../../utils/syncRewardPaymentToZoho.js'
-                        );
-                        zohoResult = await syncUtilityEmployeePaymentToZoho({
-                            payment,
-                            employee,
-                            utilityBill,
-                            organizationId: zohoOrganizationId || payment.zohoOrganizationId,
-                            expenseAccountId: expenseId,
-                            expenseAccountName: expenseAccountName || payment.expenseAccountName,
-                            paidThroughAccountId: paidThroughId,
-                            paidThroughAccountName:
-                                paidThroughAccountName || payment.paidThroughAccountName,
-                        });
+                        // Prefer Banking Expense Refund when tax fields are present (profile modal).
+                        // Fall back to legacy journal payout for older Payments UI paths.
+                        const hasExpenseRefundFields =
+                            Boolean(String(taxTreatment || '').trim()) &&
+                            Boolean(String(placeOfSupply || '').trim()) &&
+                            Boolean(String(taxId || '').trim());
+
+                        if (hasExpenseRefundFields) {
+                            const { syncUtilityDifferencePaymentToZoho } = await import(
+                                '../../utils/syncFineCompanyPaymentToZoho.js'
+                            );
+                            zohoResult = await syncUtilityDifferencePaymentToZoho({
+                                payment,
+                                utilityBill,
+                                employee,
+                                organizationId:
+                                    zohoOrganizationId || payment.zohoOrganizationId,
+                                expenseAccountId: expenseId,
+                                expenseAccountName:
+                                    expenseAccountName || payment.expenseAccountName,
+                                paidThroughAccountId: paidThroughId,
+                                paidThroughAccountName:
+                                    paidThroughAccountName || payment.paidThroughAccountName,
+                                locationId,
+                                taxTreatment,
+                                placeOfSupply,
+                                taxId,
+                                isInclusiveTax:
+                                    typeof isInclusiveTax === 'boolean' ? isInclusiveTax : true,
+                                paymentMode: paymentMode || receivedVia || 'Cash',
+                                vendorId,
+                                vendorName,
+                                attachments: Array.isArray(attachments)
+                                    ? attachments
+                                    : attachment
+                                      ? [attachment]
+                                      : [],
+                            });
+                        } else {
+                            const { syncUtilityEmployeePaymentToZoho } = await import(
+                                '../../utils/syncRewardPaymentToZoho.js'
+                            );
+                            zohoResult = await syncUtilityEmployeePaymentToZoho({
+                                payment,
+                                employee,
+                                utilityBill,
+                                organizationId:
+                                    zohoOrganizationId || payment.zohoOrganizationId,
+                                expenseAccountId: expenseId,
+                                expenseAccountName:
+                                    expenseAccountName || payment.expenseAccountName,
+                                paidThroughAccountId: paidThroughId,
+                                paidThroughAccountName:
+                                    paidThroughAccountName || payment.paidThroughAccountName,
+                            });
+                        }
 
                         if (zohoResult.ok) {
-                            payment.zohoJournalId = zohoResult.journalId || '';
+                            if (zohoResult.expenseId) {
+                                payment.zohoExpenseId =
+                                    zohoResult.expenseId || payment.zohoExpenseId || '';
+                            }
+                            if (zohoResult.journalId) {
+                                payment.zohoJournalId =
+                                    zohoResult.journalId || payment.zohoJournalId || '';
+                            }
                             payment.zohoOrganizationId =
                                 zohoResult.organizationId || payment.zohoOrganizationId;
                             payment.zohoSyncError = '';
+                            payment.paidThroughAccountId = paidThroughId;
+                            payment.paidThroughAccountName =
+                                paidThroughAccountName || payment.paidThroughAccountName;
+                            payment.expenseAccountId = expenseId;
+                            payment.expenseAccountName =
+                                expenseAccountName || payment.expenseAccountName;
                             await payment.save();
                         } else {
                             payment.zohoSyncError = zohoResult.message || 'Zoho sync failed';
@@ -606,6 +672,7 @@ export const addPayment = async (req, res) => {
                                 zohoResult.message,
                             );
                         }
+                        req._utilityZohoSyncResult = zohoResult;
                     } catch (zohoErr) {
                         console.error(
                             '[AddPayment] Utility balance Zoho sync error:',
@@ -613,6 +680,10 @@ export const addPayment = async (req, res) => {
                         );
                         payment.zohoSyncError = zohoErr?.message || 'Zoho sync failed';
                         await payment.save();
+                        req._utilityZohoSyncResult = {
+                            ok: false,
+                            message: zohoErr?.message || 'Zoho sync failed',
+                        };
                     }
                 }
 
@@ -690,21 +761,24 @@ export const addPayment = async (req, res) => {
 
         const loanZoho = req._loanZohoSyncResult;
         const fineZoho = req._fineZohoSyncResult;
-        const zohoSync = loanZoho || fineZoho;
+        const utilityZoho = req._utilityZohoSyncResult;
+        const zohoSync = loanZoho || fineZoho || utilityZoho;
         let message = 'Payment created successfully';
         if (zohoSync) {
             if (zohoSync.ok && zohoSync.expenseId) {
                 message =
                     zohoSync.message ||
-                    (fineZoho
+                    (fineZoho || utilityZoho
                         ? 'Payment created and Zoho Expense Refund posted.'
                         : 'Payment created and Zoho Expense posted.');
+            } else if (zohoSync.ok && zohoSync.journalId) {
+                message = zohoSync.message || 'Payment created and Zoho journal posted.';
             } else if (!zohoSync.ok) {
                 message = loanZoho
                     ? `Payment saved in ERP, but Zoho Expense failed: ${loanZoho.message || 'sync error'}. ` +
                       'Fix Expense Account (must be an Expense type, not Cash/Bank) on Loan Parties, then Retry Zoho.'
                     : `Payment saved in ERP, but Zoho Expense Refund failed: ${
-                          fineZoho?.message || 'sync error'
+                          fineZoho?.message || utilityZoho?.message || 'sync error'
                       }.`;
             }
         }
@@ -718,6 +792,7 @@ export const addPayment = async (req, res) => {
                       ok: Boolean(zohoSync.ok),
                       expenseId: zohoSync.expenseId || '',
                       expenseNumber: zohoSync.expenseNumber || '',
+                      journalId: zohoSync.journalId || '',
                       message: zohoSync.message || '',
                   }
                 : undefined,

@@ -549,10 +549,11 @@ export const addFine = async (req, res) => {
         }
 
         let employeeName = '';
+        let employee = null;
         if (employeeId === 'PENDING') {
             employeeName = 'Project Damage (Pending)';
         } else {
-            const employee = await EmployeeBasic.findOne({ employeeId })
+            employee = await EmployeeBasic.findOne({ employeeId })
                 .select('firstName lastName employeeId company primaryReportee')
                 .populate('company', 'name')
                 .lean();

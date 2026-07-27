@@ -133,6 +133,16 @@ router.get("/me", async (req, res) => {
 // Get loan eligible employees — needed when creating Loan/Advance
 router.get("/loan-eligible", checkLoanMutatePermission(), getLoanEligibleEmployees);
 
+// Loan / Advance create — keep beside other static paths (before GET /:id)
+router.post("/request-loan", checkLoanOrAdvanceCreatePermission(), requestLoan);
+// Browsers/tools sometimes probe with GET; do not fall through to getEmployeeById("request-loan")
+router.get("/request-loan", (req, res) => {
+    res.set("Allow", "POST");
+    return res.status(405).json({
+        message: "Use POST /api/Employee/request-loan to create a loan or advance.",
+    });
+});
+
 import { getDashboardStats } from "../controllers/stats/getDashboardStats.js";
 import { getUserActivityStats } from "../controllers/stats/getUserActivityStats.js";
 import { deleteDashboardAction } from "../controllers/stats/deleteDashboardAction.js";
@@ -295,8 +305,6 @@ router.post("/:id/probation/hod-confirm", checkPermission('hrm_employees_view_wo
 router.post("/:id/probation/employee-respond", employeeRespondProbationChange);
 router.post("/:id/probation/hr-finalize", checkPermission('hrm_employees_view_work', 'edit'), blockLeftUserWrites, finalizeProbationByHR);
 
-// Loan / Advance — Create Loan / Create Advance children (parent Loan is View-only)
-router.post("/request-loan", checkLoanOrAdvanceCreatePermission(), requestLoan);
 // Assignee-only pending inbox (same pattern as Reward / Fine / Assets bells)
 router.get("/loans/dashboard/pending-inbox", checkLoanViewPermission(), getPendingLoanDashboardInbox);
 // Approval — workflow validates actor inside the handler (parent Edit is disabled in the chart)

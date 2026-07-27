@@ -53,7 +53,7 @@ import {
     seedPreviousHandoverReportsOnHistory,
     stripUnconfirmedBodyConditionDetails,
 } from '../utils/vehicleHandoverEscalation.js';
-import { syncVehicleAccessoriesListOnAssessmentComplete, signVehicleAccessoriesListEntries, buildPendingAccessoriesChanges, applyPendingHandoverAccessoriesToVehicleList } from '../utils/vehicleAccessoriesListSync.js';
+import { syncVehicleAccessoriesListOnAssessmentComplete, signVehicleAccessoriesListEntries, buildPendingAccessoriesChanges, applyPendingHandoverAccessoriesToVehicleList, handoverRequiresHrApproval } from '../utils/vehicleAccessoriesListSync.js';
 import { sendAssetResponseEmail } from '../utils/sendAssetResponseEmail.js';
 import { sendAssetReassignmentEmail } from '../utils/sendAssetReassignmentEmail.js';
 import DashboardAction from '../models/DashboardAction.js';
@@ -6765,6 +6765,7 @@ export const respondToAssignment = async (req, res) => {
             typeName: item.typeId?.name,
         });
         const handoverFlow = getVehicleHandoverFlow(item);
+        let fleetHandoverHrSkipped = false;
         let isFleetHandoverAdminDelegate = false;
         if (fleetVehicleRespond && handoverFlow?.stage === 'target') {
             isFleetHandoverAdminDelegate = await userIsFlowchartAdminOfficer(req);
@@ -6891,6 +6892,23 @@ export const respondToAssignment = async (req, res) => {
                 });
             }
             if (action === 'Accept') {
+                // When accessories/body match previous, Accept finalizes (skips HR) — require signature first.
+                if (handoverFlow?.stage === 'target' && historyRecord) {
+                    const requiresHr = await handoverRequiresHrApproval(historyRecord, item);
+                    if (!requiresHr) {
+                        const assigneeSigCheck = await EmployeeBasic.findById(
+                            item.assignedTo._id || item.assignedTo,
+                        )
+                            .select('signature')
+                            .lean();
+                        if (!assigneeSigCheck?.signature?.url) {
+                            return res.status(403).json({
+                                message:
+                                    'The assigned employee must have a digital signature on their profile before this assignment can be accepted.',
+                            });
+                        }
+                    }
+                }
                 const advance = await advanceFleetHandoverOnAccept({
                     item,
                     historyRecord,
@@ -6900,6 +6918,9 @@ export const respondToAssignment = async (req, res) => {
                 });
                 if (advance.error) {
                     return res.status(400).json({ message: advance.error });
+                }
+                if (advance.hrSkipped) {
+                    fleetHandoverHrSkipped = true;
                 }
                 if (advance.advanced) {
                     if (handoverFlow?.stage === 'target') {
@@ -7195,7 +7216,7 @@ export const respondToAssignment = async (req, res) => {
                     handoverFlow.stage === 'management' ||
                     flowNow?.stage === 'hr' ||
                     flowNow?.stage === 'management';
-                if (hrStage) {
+                if (hrStage || fleetHandoverHrSkipped) {
                     const historyId = flowNow?.historyId || handoverFlow?.historyId;
                     if (historyId) {
                         const fineIdList = [
@@ -7216,7 +7237,11 @@ export const respondToAssignment = async (req, res) => {
                         if (uniqueFineIds.length > 0) {
                             handoverPatch['details.handoverFineIds'] = uniqueFineIds;
                         }
-                        handoverPatch['details.handoverHrApprovedAt'] = new Date();
+                        if (fleetHandoverHrSkipped) {
+                            handoverPatch['details.hrApprovalSkipped'] = true;
+                        } else {
+                            handoverPatch['details.handoverHrApprovedAt'] = new Date();
+                        }
                         await AssetHistory.updateOne({ _id: historyId }, { $set: handoverPatch }).catch(
                             () => null,
                         );
@@ -7583,7 +7608,9 @@ export const respondToAssignment = async (req, res) => {
 
             if (fleetVehicleRespond && fleetHandoverHistoryId) {
                 const wasHrHandoverApproval =
-                    handoverFlow?.stage === 'hr' || handoverFlow?.stage === 'management';
+                    handoverFlow?.stage === 'hr' ||
+                    handoverFlow?.stage === 'management' ||
+                    fleetHandoverHrSkipped;
                 acceptHistDoc = await updateFleetHandoverHistoryRecord({
                     historyId: fleetHandoverHistoryId,
                     action: 'Accepted',
@@ -7597,6 +7624,7 @@ export const respondToAssignment = async (req, res) => {
                         handoverLifecycleStatus: wasHrHandoverApproval
                             ? HANDOVER_LIFECYCLE.APPROVED
                             : HANDOVER_LIFECYCLE.ACCEPTED,
+                        ...(fleetHandoverHrSkipped ? { hrApprovalSkipped: true } : {}),
                     },
                 });
             } else {
@@ -9898,6 +9926,7 @@ const HANDOVER_LIST_DETAIL_KEYS = [
     'handoverLifecycleStatus',
     'handoverKind',
     'handoverHrApprovedAt',
+    'hrApprovalSkipped',
     'firstInspection',
     'reinspection',
     'receiverAssessmentCompleted',
@@ -11140,14 +11169,11 @@ export const deleteAssetDocument = async (req, res) => {
 
         const fleetVehicle = isFleetVehicleAssetFields({ plateNumber: asset.plateNumber });
         if (fleetVehicle) {
-            if (!isFleetVehicleProfileActive(asset)) {
+            // Inactive fleet profile: any authenticated user may delete cards/documents.
+            // Active fleet profile: portal Super User only (not Flowchart Admin Officer).
+            if (isFleetVehicleProfileActive(asset) && !isAdminUser) {
                 return res.status(403).json({
-                    message: 'Vehicle documents can only be deleted while the vehicle profile is active.',
-                });
-            }
-            if (!isAdminUser) {
-                return res.status(403).json({
-                    message: 'Only administrator can delete vehicle documents.',
+                    message: 'Only administrator can delete vehicle documents on an active profile.',
                 });
             }
         } else if (!isAdminUser && !hasAssetDeletePerm) {
@@ -11652,14 +11678,12 @@ export const addAssetService = async (req, res) => {
 
 // @desc    Delete a service record from an asset item
 // @route   DELETE /api/AssetItem/:id/service/:serviceId
-// @access  Private (Admin only)
+// @access  Private (inactive fleet: any auth user; active fleet / non-fleet: Super User)
 export const deleteAssetService = async (req, res) => {
     try {
         const isJwtAdmin = isJwtSystemSuperUser(req.user);
         const isSysAdmin = await isUserAdministrator(req.user?.id);
-        if (!isJwtAdmin && !isSysAdmin) {
-            return res.status(403).json({ message: 'Access denied. Only admin can delete service records.' });
-        }
+        const isAdminUser = isJwtAdmin || isSysAdmin;
 
         const { id, serviceId } = req.params;
         if (!id || !serviceId) {
@@ -11674,13 +11698,18 @@ export const deleteAssetService = async (req, res) => {
         const isFleetVehicle =
             String(asset.plateNumber || '').trim() !== '' ||
             String(asset.vehicleProfileActivationStatus || '').trim() !== '';
-        if (
-            isFleetVehicle &&
-            String(asset.vehicleProfileActivationStatus || '').toLowerCase() !== 'active'
-        ) {
-            return res.status(400).json({
-                message: 'Service records can only be deleted when the vehicle profile is active.',
-            });
+        const fleetProfileActive =
+            String(asset.vehicleProfileActivationStatus || '').toLowerCase() === 'active';
+
+        if (isFleetVehicle) {
+            // Inactive: any authenticated user. Active: portal Super User only.
+            if (fleetProfileActive && !isAdminUser) {
+                return res.status(403).json({
+                    message: 'Only administrator can delete service records on an active vehicle profile.',
+                });
+            }
+        } else if (!isAdminUser) {
+            return res.status(403).json({ message: 'Access denied. Only admin can delete service records.' });
         }
 
         const serviceSubdoc = asset.services?.id?.(serviceId);
@@ -11971,10 +12000,21 @@ export const submitOilServiceDetailsHandler = async (req, res) => {
             return res.status(403).json({ message: 'Access denied.' });
         }
 
-        const fresh = await submitOilServiceDetails(asset, serviceId, req.body?.serviceUpdates || req.body, req);
+        const result = await submitOilServiceDetails(
+            asset,
+            serviceId,
+            req.body?.serviceUpdates || req.body,
+            req,
+        );
+        const freshAsset = result?.asset || result;
+        const zohoBillSync = result?.zohoBillSync || null;
         return res.json({
-            message: 'Oil service completed. Vehicle status restored.',
-            asset: fresh,
+            message: zohoBillSync?.ok
+                ? `Oil service completed. ${zohoBillSync.message || 'Zoho bill created.'}`
+                : 'Oil service completed. Vehicle status restored.',
+            zohoBillOk: Boolean(zohoBillSync?.ok),
+            zohoBillMessage: zohoBillSync?.message || '',
+            asset: freshAsset,
         });
     } catch (error) {
         return res.status(400).json({ message: error.message || 'Could not submit service details' });
@@ -12182,6 +12222,31 @@ export const completeAccidentRepairHandler = async (req, res) => {
         });
     } catch (error) {
         return res.status(400).json({ message: error.message || 'Could not complete accident repair' });
+    }
+};
+
+/** Retry Zoho bill after Accounts approve when first sync failed (e.g. bill_number). */
+export const retryGarageZohoBillHandler = async (req, res) => {
+    try {
+        const { id, serviceId } = req.params;
+        const asset = await AssetItem.findById(id).populate('assignedTo', 'firstName lastName employeeId');
+        if (!asset) return res.status(404).json({ message: 'Asset not found' });
+
+        const { retryVehicleGarageZohoBill } = await import('../utils/retryVehicleGarageZohoBill.js');
+        const result = await retryVehicleGarageZohoBill(asset, serviceId, {
+            serviceTypeLabel: req.body?.serviceTypeLabel || '',
+        });
+        const fresh = await AssetItem.findById(asset._id).populate('assignedTo', 'firstName lastName employeeId');
+        return res.json({
+            message: result?.message || (result?.ok ? 'Zoho bill created.' : 'Zoho bill sync failed.'),
+            zohoBillOk: Boolean(result?.ok),
+            zohoBillId: result?.billId || '',
+            zohoBillNumber: result?.billNumber || '',
+            zohoBillMessage: result?.message || '',
+            asset: fresh,
+        });
+    } catch (error) {
+        return res.status(400).json({ message: error.message || 'Could not create Zoho garage bill' });
     }
 };
 

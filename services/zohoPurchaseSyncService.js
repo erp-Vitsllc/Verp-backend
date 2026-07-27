@@ -349,6 +349,7 @@ export async function listZohoBillsFromDb({ activeOnly = true, query = {} } = {}
         sortMap: PURCHASE_SORT.bills,
         defaultSort: { date: -1 },
         toApiShape: toZohoBillApiShape,
+        idField: 'zohoBillId',
     });
 }
 

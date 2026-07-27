@@ -94,17 +94,21 @@ function verbForAction(action) {
 function extractIdFromPath(path) {
     const p = String(path || '').split('?')[0];
     const parts = p.split('/').filter(Boolean);
-    // /api/Employee/EMP-001 or /api/Fine/64f...
+    // /api/Employee/EMP-001 or /api/Fine/64f... or /api/AssetItem/:id/...
     if (parts.length >= 3) {
         const candidate = parts[2];
-        if (candidate && !['access', 'tree', 'meta', 'items', 'list', 'stats'].includes(candidate.toLowerCase())) {
+        if (candidate && !['access', 'tree', 'meta', 'items', 'list', 'stats', 'bulk'].includes(candidate.toLowerCase())) {
             return candidate;
         }
     }
     return '';
 }
 
-function buildViewHref(rule, path, body) {
+function looksLikeObjectId(value) {
+    return /^[a-fA-F0-9]{24}$/.test(String(value || '').trim());
+}
+
+function buildViewHref(rule, path, body, entityId = '') {
     const id =
         body?.employee?.employeeId ||
         body?.employeeId ||
@@ -113,6 +117,7 @@ function buildViewHref(rule, path, body) {
         body?.company?._id ||
         body?.item?._id ||
         body?._id ||
+        entityId ||
         extractIdFromPath(path);
 
     if (rule.entityType === 'Employee' && id) return `/emp/${encodeURIComponent(String(id))}`;
@@ -120,6 +125,9 @@ function buildViewHref(rule, path, body) {
     if (rule.entityType === 'Reward' && id) return `/HRM/Reward`;
     if (rule.entityType === 'Company' && id) return `/Company/${encodeURIComponent(String(id))}`;
     if (rule.entityType === 'DeletedRecord' && id) return `/Settings/DeletedRecords?item=${encodeURIComponent(String(id))}`;
+    if (rule.entityType === 'Asset' && id) {
+        return `/HRM/Asset/Vehicle/details/${encodeURIComponent(String(id))}`;
+    }
     return rule.listHref || '';
 }
 
@@ -144,6 +152,43 @@ function humanLabel(entityType) {
         Record: 'record',
     };
     return map[entityType] || String(entityType || 'record').toLowerCase();
+}
+
+function pickAssetDisplayFromBody(body = {}) {
+    const assetId = String(
+        body?.assetId || body?.item?.assetId || body?.asset?.assetId || '',
+    ).trim();
+    const name = String(body?.name || body?.item?.name || body?.asset?.name || '').trim();
+    const plate = [body?.plateEmirate || body?.item?.plateEmirate, body?.plateNumber || body?.item?.plateNumber]
+        .filter(Boolean)
+        .join(' ')
+        .trim();
+    if (!assetId && !name && !plate) return '';
+    if (assetId && name) return `${assetId} · ${name}`;
+    if (assetId && plate) return `${assetId} · ${plate}`;
+    return assetId || name || plate;
+}
+
+async function resolveAssetDisplayLabel(entityId, body = {}) {
+    const fromBody = pickAssetDisplayFromBody(body);
+    if (fromBody) return fromBody;
+
+    const id = String(entityId || '').trim();
+    if (!id || !looksLikeObjectId(id)) return id;
+
+    try {
+        const AssetItem = (await import('../models/AssetItem.js')).default;
+        const asset = await AssetItem.findById(id)
+            .select('assetId name plateNumber plateEmirate')
+            .lean();
+        if (!asset) return id;
+        const plate = [asset.plateEmirate, asset.plateNumber].filter(Boolean).join(' ').trim();
+        if (asset.assetId && asset.name) return `${asset.assetId} · ${asset.name}`;
+        if (asset.assetId && plate) return `${asset.assetId} · ${plate}`;
+        return asset.assetId || asset.name || id;
+    } catch {
+        return id;
+    }
 }
 
 /**
@@ -172,43 +217,82 @@ export function activityAuditMiddleware(req, res, next) {
             ) {
                 const rule = resolveRule(path);
                 const action = actionFromMethod(req.method, path);
-                const entityId =
+                const pathAssetId =
+                    rule.entityType === 'Asset' ? extractIdFromPath(path) : '';
+                const rawEntityId =
                     body?.employee?.employeeId ||
                     body?.employeeId ||
                     body?.fine?._id ||
                     body?.reward?._id ||
                     body?.company?._id ||
                     body?.item?._id ||
-                    body?._id ||
+                    // AssetItem routes: prefer :id from URL (never history subdoc _id).
+                    (rule.entityType === 'Asset'
+                        ? pathAssetId || body?.asset?._id || body?._id
+                        : body?._id) ||
                     extractIdFromPath(path) ||
                     '';
 
-                const nameHint =
-                    [body?.employee?.firstName, body?.employee?.lastName].filter(Boolean).join(' ') ||
-                    body?.employee?.name ||
-                    body?.fine?.employeeName ||
-                    body?.reward?.title ||
-                    body?.company?.name ||
-                    body?.item?.name ||
-                    body?.message ||
-                    '';
+                // Prefer business id for assets (VEGA-VHCL-004), keep mongo id for links.
+                const mongoIdForAsset =
+                    rule.entityType === 'Asset'
+                        ? String(pathAssetId || body?.asset?._id || '').trim()
+                        : '';
 
-                const entityLabel = humanLabel(rule.entityType);
-                const verb = verbForAction(action);
-                const summary = nameHint && !String(nameHint).toLowerCase().includes('success')
-                    ? `${verb} ${entityLabel} ${String(nameHint).slice(0, 120)}`
-                    : `${verb} ${entityLabel}${entityId ? ` ${entityId}` : ''}`;
+                void (async () => {
+                    let nameHint =
+                        [body?.employee?.firstName, body?.employee?.lastName].filter(Boolean).join(' ') ||
+                        body?.employee?.name ||
+                        body?.fine?.employeeName ||
+                        body?.reward?.title ||
+                        body?.company?.name ||
+                        body?.item?.name ||
+                        '';
 
-                recordActivityAsync({
-                    req,
-                    module: rule.module,
-                    action,
-                    entityType: rule.entityType,
-                    entityId,
-                    summary,
-                    viewHref: buildViewHref(rule, path, body),
-                    metadata: { auto: true },
-                });
+                    let entityId = String(rawEntityId || '');
+                    let viewHref = buildViewHref(rule, path, body, mongoIdForAsset || entityId);
+
+                    if (rule.entityType === 'Asset') {
+                        const display = await resolveAssetDisplayLabel(
+                            mongoIdForAsset || entityId,
+                            body && typeof body === 'object' ? body : {},
+                        );
+                        if (display) nameHint = display;
+                        // Store human-readable id when available; keep mongo in metadata for linking.
+                        const businessId = String(
+                            body?.assetId || body?.item?.assetId || '',
+                        ).trim();
+                        if (businessId) entityId = businessId;
+                        else if (display && !looksLikeObjectId(display.split('·')[0].trim())) {
+                            entityId = display.split('·')[0].trim();
+                        }
+                        if (mongoIdForAsset) {
+                            viewHref = `/HRM/Asset/Vehicle/details/${encodeURIComponent(mongoIdForAsset)}`;
+                        }
+                    }
+
+                    const entityLabel = humanLabel(rule.entityType);
+                    const verb = verbForAction(action);
+                    const summary =
+                        nameHint && !String(nameHint).toLowerCase().includes('success')
+                            ? `${verb} ${entityLabel} ${String(nameHint).slice(0, 120)}`
+                            : `${verb} ${entityLabel}${entityId ? ` ${entityId}` : ''}`;
+
+                    recordActivityAsync({
+                        req,
+                        module: rule.module,
+                        action,
+                        entityType: rule.entityType,
+                        entityId,
+                        summary,
+                        viewHref,
+                        metadata: {
+                            auto: true,
+                            ...(mongoIdForAsset ? { assetMongoId: mongoIdForAsset } : {}),
+                            ...(nameHint ? { displayLabel: String(nameHint).slice(0, 160) } : {}),
+                        },
+                    });
+                })();
             }
         } catch (err) {
             console.error('[activityAuditMiddleware]', err?.message || err);

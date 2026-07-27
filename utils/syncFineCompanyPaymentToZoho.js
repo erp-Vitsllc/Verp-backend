@@ -108,15 +108,19 @@ async function resolveHeadOfficeLocationId(preferredLocationId = '') {
 }
 
 /**
- * Employee/company fine recovery → Zoho Books Banking Expense Refund (Money In):
+ * Employee/company recovery → Zoho Books Banking Expense Refund (Money In):
  * to_account = Bank · from_account = From Account (expense) ·
  * transaction_type = expense_refund · optional vendor + attachments.
+ *
+ * Used for Fine company share and Utility Bill difference recovery.
  */
-export async function syncFineCompanyPaymentToZoho({
+export async function syncExpenseRefundPaymentToZoho({
     payment,
-    fine,
     employee,
-    organizationId = '',
+    referenceLabel = '',
+    organizationHint = '',
+    requireEntityId = true,
+    entityId = '',
     expenseAccountId = '',
     expenseAccountName = '',
     paidThroughAccountId = '',
@@ -135,8 +139,11 @@ export async function syncFineCompanyPaymentToZoho({
     const fromAccountId = clean(expenseAccountId || payment?.expenseAccountId);
     const toAccountId = clean(paidThroughAccountId || payment?.paidThroughAccountId);
     const resolvedVendorId = clean(vendorId);
+    const label = clean(referenceLabel, clean(entityId, 'Refund'));
 
-    if (!fine?._id) return { ok: false, message: 'Fine is required.' };
+    if (requireEntityId && !clean(entityId)) {
+        return { ok: false, message: 'Related entity is required.' };
+    }
     if (amount <= 0) {
         return { ok: false, message: 'Payment amount is required for Zoho Expense Refund.' };
     }
@@ -164,9 +171,8 @@ export async function syncFineCompanyPaymentToZoho({
     }
 
     const orgId =
-        clean(organizationId) ||
+        clean(organizationHint) ||
         clean(payment?.zohoOrganizationId) ||
-        clean(fine?.zohoOrganizationId) ||
         (await resolveZohoOrganizationIdForRewardEmployee(employee));
 
     const date =
@@ -174,16 +180,14 @@ export async function syncFineCompanyPaymentToZoho({
         toDateKey(payment?.createdAt) ||
         new Date().toISOString().slice(0, 10);
 
-    const fineLabel = clean(fine.fineId || fine._id);
     const description = clean(
         payment?.description ||
-            `${FINE_COMPANY_LABEL} · Fine ${fineLabel} · ${clean(employee?.employeeId || '')}`,
+            `${FINE_COMPANY_LABEL} · ${label} · ${clean(employee?.employeeId || '')}`,
         FINE_COMPANY_LABEL,
     ).slice(0, 500);
     const referenceNumber = clean(
-        payment?.remarks?.match(/Ref:\s*([^\s·]+)/i)?.[1] ||
-            `${FINE_COMPANY_LABEL}-${fineLabel}`,
-        fineLabel,
+        payment?.remarks?.match(/Ref:\s*([^\s·]+)/i)?.[1] || `${FINE_COMPANY_LABEL}-${label}`,
+        label,
     ).slice(0, 100);
 
     try {
@@ -263,7 +267,7 @@ export async function syncFineCompanyPaymentToZoho({
                     uploaded.push(filename);
                 } catch (attachErr) {
                     failed.push(`${filename}: ${attachErr?.message || 'upload failed'}`);
-                    console.warn('[FineCompanyZoho] Attachment soft-fail:', attachErr?.message);
+                    console.warn('[ExpenseRefundZoho] Attachment soft-fail:', attachErr?.message);
                 }
             }
 
@@ -304,7 +308,7 @@ export async function syncFineCompanyPaymentToZoho({
             message,
         };
     } catch (err) {
-        let message = err?.message || 'Failed to create Zoho Expense Refund for fine company payment';
+        let message = err?.message || 'Failed to create Zoho Expense Refund';
         if (/valid expense account|from.?account/i.test(message)) {
             message =
                 'Please enter a valid From Account from Zoho Chart of Accounts. Bank must be a different Zoho Banking account.';
@@ -313,7 +317,114 @@ export async function syncFineCompanyPaymentToZoho({
             message =
                 'Zoho Banking create permission missing. Reconnect Zoho and accept ZohoBooks.banking.CREATE, then retry.';
         }
-        console.error('[FineCompanyZoho]', message);
+        console.error('[ExpenseRefundZoho]', message);
         return { ok: false, message, organizationId: orgId };
     }
+}
+
+/**
+ * Employee/company fine recovery → Zoho Books Banking Expense Refund (Money In).
+ */
+export async function syncFineCompanyPaymentToZoho({
+    payment,
+    fine,
+    employee,
+    organizationId = '',
+    expenseAccountId = '',
+    expenseAccountName = '',
+    paidThroughAccountId = '',
+    paidThroughAccountName = '',
+    locationId = '',
+    taxTreatment = '',
+    placeOfSupply = '',
+    taxId = '',
+    isInclusiveTax = true,
+    paymentMode = 'Cash',
+    vendorId = '',
+    vendorName = '',
+    attachments = [],
+} = {}) {
+    if (!fine?._id) return { ok: false, message: 'Fine is required.' };
+    const fineLabel = clean(fine.fineId || fine._id);
+    return syncExpenseRefundPaymentToZoho({
+        payment,
+        employee,
+        referenceLabel: `Fine ${fineLabel}`,
+        organizationHint:
+            clean(organizationId) ||
+            clean(payment?.zohoOrganizationId) ||
+            clean(fine?.zohoOrganizationId),
+        requireEntityId: true,
+        entityId: String(fine._id),
+        expenseAccountId,
+        expenseAccountName,
+        paidThroughAccountId,
+        paidThroughAccountName,
+        locationId,
+        taxTreatment,
+        placeOfSupply,
+        taxId,
+        isInclusiveTax,
+        paymentMode,
+        vendorId,
+        vendorName,
+        attachments,
+    });
+}
+
+/**
+ * Utility difference recovery → Zoho Books Banking Expense Refund (Money In).
+ */
+export async function syncUtilityDifferencePaymentToZoho({
+    payment,
+    utilityBill = null,
+    employee,
+    organizationId = '',
+    expenseAccountId = '',
+    expenseAccountName = '',
+    paidThroughAccountId = '',
+    paidThroughAccountName = '',
+    locationId = '',
+    taxTreatment = '',
+    placeOfSupply = '',
+    taxId = '',
+    isInclusiveTax = true,
+    paymentMode = 'Cash',
+    vendorId = '',
+    vendorName = '',
+    attachments = [],
+} = {}) {
+    const billId = clean(utilityBill?._id || payment?.relatedEntityId);
+    const accountNo = clean(utilityBill?.accountNo);
+    const billMonth = clean(utilityBill?.billMonth);
+    const utilityType = clean(utilityBill?.utilityType);
+    const referenceLabel = clean(
+        `Utility ${utilityType} ${billMonth} Acc ${accountNo || billId}`.trim(),
+        `Utility ${billId}`,
+    );
+
+    return syncExpenseRefundPaymentToZoho({
+        payment,
+        employee,
+        referenceLabel,
+        organizationHint:
+            clean(organizationId) ||
+            clean(payment?.zohoOrganizationId) ||
+            clean(utilityBill?.zohoOrganizationId),
+        requireEntityId: true,
+        entityId: billId,
+        expenseAccountId,
+        expenseAccountName,
+        paidThroughAccountId,
+        paidThroughAccountName,
+        locationId,
+        taxTreatment,
+        placeOfSupply,
+        taxId,
+        isInclusiveTax,
+        paymentMode,
+        vendorId: clean(vendorId) || clean(utilityBill?.zohoVendorId),
+        vendorName: clean(vendorName) || clean(utilityBill?.provider),
+        attachments,
+    });
 }

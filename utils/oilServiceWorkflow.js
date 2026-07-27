@@ -785,6 +785,28 @@ export async function submitOilServiceAssignment(asset, serviceId, req) {
         await asset.save();
     }
 
+    // Paid oil assignment: create Zoho Bill when Pay Account + amount are on the garage row.
+    try {
+        const liveService = asset.services?.id?.(serviceId);
+        const liveRemark = parseOilServiceRemark(liveService);
+        const amountMode = String(liveRemark.amountMode || '').toLowerCase();
+        const hasPayAccount = Boolean(
+            String(liveRemark.payAccountId || liveRemark.garagePayAccountId || '').trim(),
+        );
+        if (amountMode !== 'warranty' && hasPayAccount && liveService) {
+            const { syncVehicleGarageServiceToZoho } = await import('./syncVehicleGarageServiceToZoho.js');
+            await syncVehicleGarageServiceToZoho({
+                asset,
+                service: liveService,
+                serviceTypeLabel: 'Oil Service',
+            });
+            asset.markModified('services');
+            await asset.save();
+        }
+    } catch (zohoErr) {
+        console.warn('[OilService] Zoho bill on assignment failed:', zohoErr?.message || zohoErr);
+    }
+
     const populated = await AssetItem.findById(asset._id)
         .populate('assignedTo', 'firstName lastName employeeId companyEmail workEmail personalEmail email')
         .lean();
@@ -895,6 +917,30 @@ export async function submitOilServiceDetails(asset, serviceId, serviceUpdates, 
     asset.markModified('services');
     await asset.save();
 
+    // Paid oil jobs: Vendor = Garage, Pay Account, Amount → Zoho Bill (same as shop garage services).
+    let zohoBillSync = null;
+    try {
+        const completedService = asset.services.id(serviceId);
+        const completedRemark = parseOilServiceRemark(completedService);
+        const amountMode = String(completedRemark.amountMode || '').toLowerCase();
+        const hasPayAccount = Boolean(
+            String(completedRemark.payAccountId || completedRemark.garagePayAccountId || '').trim(),
+        );
+        if (amountMode !== 'warranty' && hasPayAccount) {
+            const { syncVehicleGarageServiceToZoho } = await import('./syncVehicleGarageServiceToZoho.js');
+            zohoBillSync = await syncVehicleGarageServiceToZoho({
+                asset,
+                service: completedService,
+                serviceTypeLabel: 'Oil Service',
+            });
+            asset.markModified('services');
+            await asset.save();
+        }
+    } catch (zohoErr) {
+        console.warn('[OilService] Zoho garage bill sync failed:', zohoErr?.message || zohoErr);
+        zohoBillSync = { ok: false, message: zohoErr?.message || 'Zoho bill sync failed' };
+    }
+
     const populated = await AssetItem.findById(asset._id)
         .populate('assignedTo', 'firstName lastName employeeId companyEmail workEmail personalEmail email')
         .lean();
@@ -914,7 +960,7 @@ export async function submitOilServiceDetails(asset, serviceId, serviceUpdates, 
         actionedBy: req.user?.employeeObjectId || req.user?._id || null,
     });
 
-    return populated;
+    return { asset: populated, zohoBillSync };
 }
 
 /**

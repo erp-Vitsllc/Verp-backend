@@ -14,7 +14,7 @@ import { isUserAdministrator } from "../services/permissionService.js";
 import { isJwtSystemSuperUser } from "../utils/systemSuperUser.js";
 import { resolveFlowchartHrEmployee } from "../utils/resolveFlowchartHrEmployee.js";
 import { rerouteAllPendingAssetCreationApprovals } from "../utils/assetApprovalHelpers.js";
-import { reroutePendingHrResponsibilities } from "../utils/reroutePendingHrResponsibilities.js";
+import { reroutePendingHrResponsibilities, reroutePendingAdminOfficerResponsibilities, reroutePendingAccountsResponsibilities } from "../utils/reroutePendingHrResponsibilities.js";
 import AssetHistory from "../models/AssetHistory.js";
 
 /**
@@ -564,6 +564,52 @@ export const respondToResponsibility = async (req, res) => {
             } catch (rerouteErr) {
                 console.error(
                     "[Flowchart] Failed to re-route pending HR responsibilities:",
+                    rerouteErr?.message || rerouteErr,
+                );
+            }
+        } else if (
+            action === "Approve" &&
+            (catNorm === "admincontroller" || catNorm === "assigneduser") &&
+            oldSnapshot?.empObjectId &&
+            responsibility.empObjectId
+        ) {
+            try {
+                const newAdmin = await EmployeeBasic.findById(responsibility.empObjectId)
+                    .select("_id employeeId firstName lastName")
+                    .lean();
+                const adminReroute = await reroutePendingAdminOfficerResponsibilities({
+                    oldAdminEmpObjectId: oldSnapshot.empObjectId,
+                    newAdminEmployee: newAdmin,
+                });
+                console.log(
+                    `[Flowchart] Admin Officer responsibility reroute after approve: ${JSON.stringify(adminReroute)}`,
+                );
+            } catch (rerouteErr) {
+                console.error(
+                    "[Flowchart] Failed to re-route pending Admin Officer responsibilities:",
+                    rerouteErr?.message || rerouteErr,
+                );
+            }
+        } else if (
+            action === "Approve" &&
+            catNorm === "accounts" &&
+            oldSnapshot?.empObjectId &&
+            responsibility.empObjectId
+        ) {
+            try {
+                const newAccounts = await EmployeeBasic.findById(responsibility.empObjectId)
+                    .select("_id employeeId firstName lastName")
+                    .lean();
+                const accountsReroute = await reroutePendingAccountsResponsibilities({
+                    oldAccountsEmpObjectId: oldSnapshot.empObjectId,
+                    newAccountsEmployee: newAccounts,
+                });
+                console.log(
+                    `[Flowchart] Accounts responsibility reroute after approve: ${JSON.stringify(accountsReroute)}`,
+                );
+            } catch (rerouteErr) {
+                console.error(
+                    "[Flowchart] Failed to re-route pending Accounts responsibilities:",
                     rerouteErr?.message || rerouteErr,
                 );
             }

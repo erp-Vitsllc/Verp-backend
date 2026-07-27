@@ -18,6 +18,18 @@ import {
 } from "../../utils/canViewerSeeEmployeePendingActivation.js";
 import { withdrawEmployeeActivationSubmissionIfQueueEmpty } from "../../utils/reconcileEmployeeActivationAfterEmptyQueue.js";
 
+/** Static Employee route segments that must never be treated as employee ids. */
+const RESERVED_EMPLOYEE_PATH_IDS = new Set([
+    'me',
+    'next-id',
+    'loan-eligible',
+    'request-loan',
+    'loans',
+    'reportee-options',
+    'driving-license-holders',
+    'dashboard',
+]);
+
 // Get single employee by ID
 export const getEmployeeById = async (req, res) => {
     try {
@@ -26,6 +38,10 @@ export const getEmployeeById = async (req, res) => {
         // Validate ID parameter
         if (!id || id.trim() === '') {
             return res.status(400).json({ message: "Employee ID is required" });
+        }
+
+        if (RESERVED_EMPLOYEE_PATH_IDS.has(String(id).trim().toLowerCase())) {
+            return res.status(404).json({ message: "Employee route not found" });
         }
 
         console.log(`[getEmployeeById] Fetching employee with ID: ${id}`);

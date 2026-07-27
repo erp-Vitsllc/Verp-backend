@@ -44,15 +44,28 @@ export async function runLeanListQuery({
     sortMap = {},
     defaultSort = { date: -1 },
     toApiShape,
+    /** Mongo field used when query.billIds / query.ids is present (e.g. zohoBillId). */
+    idField = '',
 }) {
     const { page, pageSize, search, sortBy, sortDir, paginate } = parseListQuery(query);
 
     const filter = { organizationId };
     if (activeOnly) filter.isActive = true;
 
-    const searchFilter = buildSearchFilter(search, searchFields);
-    if (searchFilter) {
-        Object.assign(filter, searchFilter);
+    const rawIds = String(query.billIds || query.ids || '').trim();
+    if (idField && rawIds) {
+        const ids = rawIds
+            .split(',')
+            .map((part) => String(part || '').trim())
+            .filter(Boolean);
+        if (ids.length) {
+            filter[idField] = { $in: ids };
+        }
+    } else {
+        const searchFilter = buildSearchFilter(search, searchFields);
+        if (searchFilter) {
+            Object.assign(filter, searchFilter);
+        }
     }
 
     const sortField = sortMap[sortBy];
