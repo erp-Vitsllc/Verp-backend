@@ -17,6 +17,7 @@ import EmployeeTraining from "../../models/EmployeeTraining.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { awaitAdminDeletionArchive } from "../../utils/adminDeletionArchiveRun.js";
 import { denyEmployeeCardDeleteUnlessAllowed } from "../../utils/employeeCardDeleteAccess.js";
+import { recordActivityAsync } from "../../utils/activityLog.js";
 
 // Delete employee
 export const deleteEmployee = async (req, res) => {
@@ -117,10 +118,23 @@ export const deleteEmployee = async (req, res) => {
             EmployeeTraining.findOne({ employeeId }).lean(),
         ]);
         // Archive + copy attachments before Mongo rows are removed (async email ran too late before).
+        const employeeDisplayName =
+            `${employee.firstName || ""} ${employee.lastName || ""}`.trim() || employeeId;
+        recordActivityAsync({
+            req,
+            module: "HRM",
+            action: "delete",
+            entityType: "Employee",
+            entityId: employeeId,
+            summary: `deleted employee ${employeeDisplayName}`,
+            viewHref: "/Settings/DeletedRecords",
+            metadata: { employeeId },
+        });
+
         await awaitAdminDeletionArchive(req, {
             moduleName: "Employee",
             recordId: employeeId,
-            details: `${employee.firstName || ""} ${employee.lastName || ""}`.trim() || employeeId,
+            details: employeeDisplayName,
             deletedPayload: {
                 complete: employeeSnapshot,
                 collections: {

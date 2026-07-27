@@ -3,6 +3,7 @@ import jwt from "jsonwebtoken";
 import User from "../models/User.js";
 import EmployeeBasic from "../models/EmployeeBasic.js";
 import { getUserPermissions } from "../services/permissionService.js";
+import { getClientIp, recordActivityAsync } from "../utils/activityLog.js";
 
 
 export const login = async (req, res) => {
@@ -177,7 +178,9 @@ export const login = async (req, res) => {
         const permissions = permissionData?.permissions || {};
 
         // Update last login
+        const loginIp = getClientIp(req);
         user.lastLogin = new Date();
+        user.lastLoginIp = loginIp || user.lastLoginIp || '';
         await user.save();
 
         // Long-lived JWT; session end is enforced by frontend idle logout (1 hour of inactivity).
@@ -193,6 +196,28 @@ export const login = async (req, res) => {
             const emp = await EmployeeBasic.findOne({ employeeId: user.employeeId }).select('_id');
             if (emp) employeeObjectId = emp._id;
         }
+
+        recordActivityAsync({
+            req,
+            module: 'Settings',
+            action: 'login',
+            entityType: 'User',
+            entityId: String(user._id),
+            summary: `logged in${loginIp ? ` from IP ${loginIp}` : ''}`,
+            viewHref: '/Settings/User',
+            ip: loginIp,
+            actor: {
+                userId: user._id,
+                name: user.name || user.username || 'User',
+                employeeId: user.employeeId || '',
+            },
+            metadata: {
+                actorName: user.name || user.username || '',
+                employeeId: user.employeeId || '',
+                username: user.username || '',
+                email: user.email || '',
+            },
+        });
 
         return res.status(200).json({
             message: "Login successful",

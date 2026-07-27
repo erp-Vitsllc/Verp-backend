@@ -223,21 +223,67 @@ export async function enrichHandoverWorkflowActorSignatures(recordObj, signFileU
     const stages = { ...workflow.stages };
     const stageKeys = ['assigner', 'target', 'hod', 'hr', 'management'];
 
+    const resolveActorEmployee = async (stage) => {
+        const actorId = String(stage?.actorId || '').trim();
+        if (actorId) {
+            const byId = await EmployeeBasic.findById(actorId).select('signature employeeId').lean();
+            if (byId) return byId;
+        }
+        const empCode = String(stage?.actorEmployeeId || '').trim();
+        if (!empCode) return null;
+        const escapeRegExp = (v) => String(v).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        return EmployeeBasic.findOne({
+            employeeId: {
+                $regex: new RegExp(`^${escapeRegExp(empCode).replace(/\s+/g, '\\s*')}$`, 'i'),
+            },
+        })
+            .select('signature employeeId')
+            .lean();
+    };
+
     await Promise.all(
         stageKeys.map(async (key) => {
             const stage = stages[key];
-            const actorId = stage?.actorId;
-            if (!stage || !actorId) return;
+            if (!stage) return;
 
             try {
-                const emp = await EmployeeBasic.findById(actorId).select('signature').lean();
+                const emp = await resolveActorEmployee(stage);
                 if (!emp?.signature) return;
 
-                const actorSignature = { ...emp.signature };
-                if (actorSignature.url && typeof signFileUrl === 'function') {
-                    actorSignature.url = await signFileUrl(actorSignature.url);
+                const raw = emp.signature;
+                const actorSignature = {
+                    ...(typeof raw === 'object' && raw ? raw : {}),
+                };
+                const keyOrUrl = String(
+                    actorSignature.publicId || actorSignature.url || actorSignature.path || '',
+                ).trim();
+                if (!keyOrUrl) return;
+
+                if (typeof signFileUrl === 'function') {
+                    const signed = await signFileUrl(keyOrUrl);
+                    if (signed) {
+                        actorSignature.url = signed;
+                        if (!actorSignature.publicId && !/^https?:\/\//i.test(keyOrUrl) && !keyOrUrl.startsWith('data:')) {
+                            actorSignature.publicId = keyOrUrl;
+                        }
+                    } else if (!actorSignature.url) {
+                        actorSignature.url = keyOrUrl.startsWith('http') || keyOrUrl.startsWith('data:')
+                            ? keyOrUrl
+                            : '';
+                    }
+                } else if (!actorSignature.url) {
+                    actorSignature.url = keyOrUrl;
                 }
-                stages[key] = { ...stage, actorSignature };
+
+                if (!actorSignature.url && !actorSignature.publicId && !actorSignature.data) return;
+
+                stages[key] = {
+                    ...stage,
+                    actorId: stage.actorId || emp._id?.toString?.() || '',
+                    actorEmployeeId:
+                        stage.actorEmployeeId || String(emp.employeeId || '').trim() || '',
+                    actorSignature,
+                };
             } catch {
                 /* non-fatal */
             }

@@ -22,12 +22,14 @@ import assetItemRoute from "./routes/assetItemRoutes.js"; // <-- Add asset item 
 import assetAccessoryCatalogRoute from "./routes/assetAccessoryCatalogRoutes.js";
 import flowchartRoute from "./routes/flowchartRoutes.js";
 import adminDeletionArchiveRoute from "./routes/adminDeletionArchiveRoutes.js"; // <-- Add flowchart routes
+import activityLogRoute from "./routes/activityLogRoutes.js";
 import storageRoute from "./routes/storageRoutes.js";
 import zohoRoute from "./routes/zohoRoutes.js";
 import locatorRoute from "./routes/locatorRoutes.js";
 import { startLocatorWebSocket } from "./services/locatorWebSocketService.js";
 import { recordLocatorSnapshotsFromLatest } from "./services/locatorSnapshotService.js";
 import { commonLimiter } from "./middleware/rateLimitMiddleware.js";
+import { activityAuditMiddleware } from "./middleware/activityAuditMiddleware.js";
 import { resolveFrontendBaseUrl, runWithRequestFrontendBaseUrl } from "./utils/resolveFrontendBaseUrl.js";
 import dotenv from "dotenv";
 import { connectDB } from "./config/db.js";
@@ -278,6 +280,9 @@ app.get("/api/health", (req, res) => {
     });
 });
 
+// Log successful mutating API calls (create / update / delete / approve) across the ERP.
+app.use(activityAuditMiddleware);
+
 // Routes
 app.use("/api/Login", loginRoute);
 app.use("/api/Employee", employeeRoute);
@@ -297,6 +302,7 @@ app.use("/api/AssetItem", assetItemRoute);
 app.use("/api/AssetAccessoryCatalog", assetAccessoryCatalogRoute);
 app.use("/api/Flowchart", flowchartRoute);
 app.use("/api/AdminDeletionArchive", adminDeletionArchiveRoute);
+app.use("/api/ActivityLog", activityLogRoute);
 app.use("/api/storage", storageRoute);
 app.use("/api/zoho", zohoRoute);
 app.use("/api/locator", locatorRoute);

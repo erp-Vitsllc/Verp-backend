@@ -10,6 +10,7 @@ import {
     validateEmployeeAddBody,
     assertActiveCompany,
 } from "../../utils/employeeAddValidation.js";
+import { recordActivityAsync } from "../../utils/activityLog.js";
 
 // Calculate age from date of birth
 const calculateAge = (dateOfBirth) => {
@@ -293,6 +294,23 @@ export const addEmployee = async (req, res) => {
         const isAdministrator = department && typeof department === 'string' && (department.toLowerCase() === 'administrator' || department.toLowerCase() === 'administration');
         // Get complete employee data for response
         const savedEmployee = await getCompleteEmployee(cleanedEmployeeId);
+
+        const employeeDisplayName = [firstName, lastName].filter(Boolean).join(' ').trim() || cleanedEmployeeId;
+        recordActivityAsync({
+            req,
+            module: 'HRM',
+            action: 'create',
+            entityType: 'Employee',
+            entityId: cleanedEmployeeId,
+            summary: `created employee ${employeeDisplayName}`,
+            viewHref: `/emp/${encodeURIComponent(cleanedEmployeeId)}`,
+            metadata: {
+                employeeId: cleanedEmployeeId,
+                department: department || '',
+                designation: designation || '',
+                isAdministrator: !!isAdministrator,
+            },
+        });
 
         return res.status(201).json({
             message: "Employee added successfully",

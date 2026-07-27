@@ -24,6 +24,7 @@ import {
     isArchiveExpired,
     purgeExpiredAdminDeletionArchives,
 } from '../utils/adminDeletionArchiveRetention.js';
+import { recordActivityAsync } from '../utils/activityLog.js';
 
 export { purgeExpiredAdminDeletionArchives, ADMIN_DELETION_ARCHIVE_RETENTION_DAYS };
 
@@ -68,6 +69,25 @@ export async function createAdminDeletionArchiveFromDeletion(req, opts = {}) {
         attachmentCount,
         preservedAttachments,
     });
+
+    // System-wide activity feed (skip if caller already logged a richer row)
+    if (req && !req._activityLogged) {
+        const title = doc.title || doc.moduleName || 'record';
+        recordActivityAsync({
+            req,
+            module: topModuleLabel(doc.topModule) || 'Settings',
+            action: 'delete',
+            entityType: doc.entityType || 'DeletedRecord',
+            entityId: doc.recordId || String(doc._id),
+            summary: `deleted ${title}${doc.subtitle ? ` (${doc.subtitle})` : ''}`,
+            viewHref: `/Settings/DeletedRecords?item=${encodeURIComponent(String(doc._id))}`,
+            metadata: {
+                archiveId: String(doc._id),
+                topModule: doc.topModule,
+                category: doc.category,
+            },
+        });
+    }
 
     return doc;
 }

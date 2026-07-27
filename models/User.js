@@ -41,6 +41,7 @@ const userSchema = new mongoose.Schema(
         enablePortalAccess: { type: Boolean, default: true },
         isAdmin: { type: Boolean, default: false }, // Admin users get all permissions automatically
         lastLogin: { type: Date, default: null },
+        lastLoginIp: { type: String, default: '' },
         passwordExpiryDate: { type: Date, default: null }, // Password expires in 180 days
         passwordHistory: [{ type: String }], // Array of hashed previous passwords
 
