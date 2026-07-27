@@ -72,7 +72,7 @@ import {
 } from '../utils/getDepartmentHOD.js';
 import { isUserAdministrator, hasPermission } from '../services/permissionService.js';
 import { isJwtSystemSuperUser } from '../utils/systemSuperUser.js';
-import { actorMayManageOilService } from '../utils/oilServiceWorkflow.js';
+import { actorMayManageOilService, actorMayCreateOrInitiateVehicleService } from '../utils/oilServiceWorkflow.js';
 
 const normEmp = (s) => (s || '').toString().toLowerCase().replace(/\s+/g, '');
 
@@ -500,8 +500,8 @@ const requireAssetFullAccess = async (req, res, next) => {
             }
         }
 
-        // Vehicle service create/draft/submit/garage: allow Admin Officer, Admin Controller, HR,
-        // Asset Controller, assignee, and assignee HOD (controller re-checks actorMayManageOilService).
+        // Vehicle service create / draft update / initiate (submit): any authenticated user.
+        // Later workflow stages still enforce role checks in their controllers.
         if (id) {
             const pathNoQuery = String(req.originalUrl || req.url || '').split('?')[0];
             if (isVehicleServiceMutationPath(pathNoQuery)) {
@@ -512,7 +512,25 @@ const requireAssetFullAccess = async (req, res, next) => {
                     .select('plateNumber typeId assignedTo')
                     .catch(() => null);
                 if (assetForService && isVehicleAssetLean(assetForService)) {
-                    const mayManage = await actorMayManageOilService(req.user, assetForService).catch(() => false);
+                    const method = String(req.method || '').toUpperCase();
+                    const isCreate =
+                        method === 'POST' &&
+                        (pathNoQuery.endsWith('/service') || /\/service$/.test(pathNoQuery));
+                    const isInitiate =
+                        method === 'POST' && /\/service\/[^/]+\/submit-request$/.test(pathNoQuery);
+                    // Exact draft update path only — not /garage, /complete, etc.
+                    const isPendingDraftUpdate =
+                        ['PUT', 'PATCH'].includes(method) &&
+                        /\/service\/[^/]+$/.test(pathNoQuery);
+                    if (isCreate || isInitiate || isPendingDraftUpdate) {
+                        const mayCreateOrInitiate = await actorMayCreateOrInitiateVehicleService(
+                            req.user,
+                        ).catch(() => false);
+                        if (mayCreateOrInitiate) return next();
+                    }
+                    const mayManage = await actorMayManageOilService(req.user, assetForService).catch(
+                        () => false,
+                    );
                     if (mayManage) return next();
                 }
             }

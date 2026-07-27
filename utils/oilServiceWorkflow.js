@@ -270,9 +270,12 @@ export async function userIsOilServiceHr(reqUser) {
 }
 
 /**
- * Who may create / draft / submit vehicle service requests:
+ * Who may create / draft / submit (initiate) vehicle service requests:
  * Super User, Admin Officer/Controller, Asset Controller, HR,
  * assigned employee, or that assignee's HOD (primaryReportee).
+ *
+ * Create + first Initiate are opened to any authenticated user via
+ * `actorMayCreateOrInitiateVehicleService` — do not use this for those gates.
  */
 export async function actorMayManageOilService(reqUser, asset) {
     if (await isReqUserSystemSuperUser(reqUser)) return true;
@@ -296,6 +299,21 @@ export async function actorMayManageOilService(reqUser, asset) {
 
     const hodId = toEmpIdString(assigneeDoc?.primaryReportee);
     return !!(hodId && hodId === currentEmpObjectId);
+}
+
+/**
+ * Create service + Initiate (submit pending/draft) — any authenticated ERP user.
+ * Later workflow stages still use actorMayManageOilService / stage assignees.
+ */
+export async function actorMayCreateOrInitiateVehicleService(reqUser) {
+    if (!reqUser) return false;
+    if (await isReqUserSystemSuperUser(reqUser)) return true;
+    return Boolean(
+        reqUser._id ||
+            reqUser.id ||
+            reqUser.employeeObjectId ||
+            reqUser.employeeId,
+    );
 }
 
 /** Tire change uses the same manual-request roles as oil service (no system auto-create). */

@@ -39,10 +39,34 @@ function insuranceAttachmentsForDoc(mainDoc, list) {
 
 function warrantyAttachmentsForDoc(mainDoc, list) {
     if (!mainDoc || normType(mainDoc.type) !== 'warranty') return [];
+    const primaryId = String(mainDoc._id || '').trim();
     const issueKey = dateKey(mainDoc.issueDate);
     const expiryKey = dateKey(mainDoc.expiryDate);
+
+    const parseParentId = (doc) => {
+        const raw = doc?.description;
+        if (raw == null || raw === '' || typeof raw !== 'string' || !raw.trim().startsWith('{')) {
+            return '';
+        }
+        try {
+            const parsed = JSON.parse(raw);
+            return String(parsed?.parentDocumentId || parsed?.warrantyDocId || '').trim();
+        } catch {
+            return '';
+        }
+    };
+
+    const linkedByParent = (list || []).filter((d) => {
+        if (normType(d.type) !== 'warranty attachment') return false;
+        const parentId = parseParentId(d);
+        return primaryId && parentId && parentId === primaryId;
+    });
+    if (linkedByParent.length) return linkedByParent;
+
     return (list || []).filter((d) => {
         if (normType(d.type) !== 'warranty attachment') return false;
+        const parentId = parseParentId(d);
+        if (parentId && primaryId && parentId !== primaryId) return false;
         return dateKey(d.issueDate) === issueKey && dateKey(d.expiryDate) === expiryKey;
     });
 }
@@ -117,7 +141,13 @@ export function collectVehicleRenewalDocumentGroup(asset, documentId) {
     }
     if (t === 'warranty' || t === 'warranty attachment') {
         const primary = t === 'warranty' ? doc : resolveParentDocument(doc, all) || doc;
-        return [primary, ...warrantyAttachmentsForDoc(primary, all)];
+        const primaryId = String(primary?._id || '').trim();
+        return [primary, ...warrantyAttachmentsForDoc(primary, all)].filter((d) => {
+            if (!d) return false;
+            const id = String(d._id || '').trim();
+            if (primaryId && id === primaryId) return true;
+            return normType(d.type) === 'warranty attachment';
+        });
     }
     if (t === 'permit' || t === 'permit attachment') {
         const primary = t === 'permit' ? doc : resolveParentDocument(doc, all) || doc;

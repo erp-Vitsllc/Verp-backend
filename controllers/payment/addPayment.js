@@ -33,6 +33,16 @@ export const addPayment = async (req, res) => {
             paidThroughAccountName = '',
             expenseAccountId = '',
             expenseAccountName = '',
+            locationId = '',
+            taxTreatment = '',
+            placeOfSupply = '',
+            taxId = '',
+            isInclusiveTax,
+            paymentMode = '',
+            receivedVia = '',
+            vendorId = '',
+            vendorName = '',
+            attachments = [],
         } = req.body;
         
         // CHECK IF CREATOR IS ACCOUNTS PERSON
@@ -66,7 +76,11 @@ export const addPayment = async (req, res) => {
         const hasAttachment =
             attachment &&
             (attachment.url || attachment.data || attachment.publicId || attachment.name);
-        if (normalizedSource === 'Cash' && !hasAttachment) {
+        const isFineCompanyZohoRefund =
+            String(relatedEntityType || '').trim() === 'Fine' &&
+            Boolean(String(paidThroughAccountId || '').trim()) &&
+            Boolean(String(expenseAccountId || '').trim());
+        if (normalizedSource === 'Cash' && !hasAttachment && !isFineCompanyZohoRefund) {
             return res.status(400).json({
                 success: false,
                 message: 'Attachment is required when payment source is Cash',
@@ -219,6 +233,22 @@ export const addPayment = async (req, res) => {
                                     paidThroughAccountId: paidThroughId,
                                     paidThroughAccountName:
                                         paidThroughAccountName || payment.paidThroughAccountName,
+                                    locationId,
+                                    taxTreatment,
+                                    placeOfSupply,
+                                    taxId,
+                                    isInclusiveTax:
+                                        typeof isInclusiveTax === 'boolean'
+                                            ? isInclusiveTax
+                                            : true,
+                                    paymentMode: paymentMode || receivedVia || 'Cash',
+                                    vendorId,
+                                    vendorName,
+                                    attachments: Array.isArray(attachments)
+                                        ? attachments
+                                        : attachment
+                                          ? [attachment]
+                                          : [],
                                 });
                                 if (zohoResult.ok) {
                                     payment.zohoExpenseId =
@@ -664,12 +694,16 @@ export const addPayment = async (req, res) => {
         let message = 'Payment created successfully';
         if (zohoSync) {
             if (zohoSync.ok && zohoSync.expenseId) {
-                message = zohoSync.message || 'Payment created and Zoho Expense posted.';
+                message =
+                    zohoSync.message ||
+                    (fineZoho
+                        ? 'Payment created and Zoho Expense Refund posted.'
+                        : 'Payment created and Zoho Expense posted.');
             } else if (!zohoSync.ok) {
                 message = loanZoho
                     ? `Payment saved in ERP, but Zoho Expense failed: ${loanZoho.message || 'sync error'}. ` +
                       'Fix Expense Account (must be an Expense type, not Cash/Bank) on Loan Parties, then Retry Zoho.'
-                    : `Payment saved in ERP, but Zoho banking / Chart of Accounts posting failed: ${
+                    : `Payment saved in ERP, but Zoho Expense Refund failed: ${
                           fineZoho?.message || 'sync error'
                       }.`;
             }

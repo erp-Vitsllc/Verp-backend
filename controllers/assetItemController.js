@@ -81,6 +81,7 @@ import { collectAssetDocumentIdsForDeletion } from '../utils/assetDocumentDeleti
 import {
     actorMayManageOilService,
     actorMayManageTireChangeRequest,
+    actorMayCreateOrInitiateVehicleService,
     appendOilServiceActivity,
     getRequesterName,
     submitOilServiceAssignment,
@@ -11297,19 +11298,17 @@ export const addAssetService = async (req, res) => {
                     message: 'Tire change requests must be created from the vehicle asset Service tab or Vehicle list.',
                 });
             }
-            const allowed = await actorMayManageTireChangeRequest(req.user, asset);
+            const allowed = await actorMayCreateOrInitiateVehicleService(req.user);
             if (!allowed) {
                 return res.status(403).json({
-                    message:
-                        'Access denied. Only Admin Officer/Controller, Asset Controller, HR, assigned user, or their HOD can create a tire change request.',
+                    message: 'Access denied. Sign in to create a tire change request.',
                 });
             }
         } else if (isCarWashRequest) {
-            const allowed = await actorMayManageCarWashRequest(req.user, asset);
+            const allowed = await actorMayCreateOrInitiateVehicleService(req.user);
             if (!allowed) {
                 return res.status(403).json({
-                    message:
-                        'Access denied. Only Admin Officer/Controller, Asset Controller, HR, assigned user, or their HOD can raise a car wash request.',
+                    message: 'Access denied. Sign in to raise a car wash request.',
                 });
             }
             let earlyCarWashRemark = {};
@@ -11338,14 +11337,14 @@ export const addAssetService = async (req, res) => {
                 });
             }
         } else if (isOilServiceBootstrap || isVehicleServiceTabBootstrap) {
-            const allowed = await actorMayManageOilServiceRequest(req.user, asset);
+            const allowed = await actorMayCreateOrInitiateVehicleService(req.user);
             if (!allowed) {
                 return res.status(403).json({
-                    message:
-                        'Access denied. Only Admin Officer/Controller, Asset Controller, HR, assigned user, or their HOD can raise this service request.',
+                    message: 'Access denied. Sign in to raise this service request.',
                 });
             }
         } else if (!isFleetVehicleServiceRequest && !actorFlags.canAct) {
+            // Non-vehicle / non-bootstrap service adds stay on the existing actor gate.
             return res.status(403).json({ message: 'Access denied. Only Asset Controller/Admin, assigner, assigned user, or (if assignee has no company email) primary reportee can add service records.' });
         }
 
@@ -11781,19 +11780,17 @@ export const updateAssetServiceDraft = async (req, res) => {
             isTireChangeServiceType(service.serviceType) &&
             ['draft', 'pending'].includes(String(remarkObj?.requestStatus || '').toLowerCase());
         if (isTireChangePending) {
-            const allowed = await actorMayManageTireChangeRequest(req.user, asset);
+            const allowed = await actorMayCreateOrInitiateVehicleService(req.user);
             if (!allowed) {
                 return res.status(403).json({
-                    message:
-                        'Access denied. Only Admin Officer/Controller, Asset Controller, HR, assigned user, or their HOD can update this tire change request.',
+                    message: 'Access denied. Sign in to update this tire change request.',
                 });
             }
         } else if (isOilServicePending || isVehicleServiceTabPending) {
-            const allowed = await actorMayManageOilServiceRequest(req.user, asset);
+            const allowed = await actorMayCreateOrInitiateVehicleService(req.user);
             if (!allowed) {
                 return res.status(403).json({
-                    message:
-                        'Access denied. Only Admin Officer/Controller, Asset Controller, HR, assigned user, or their HOD can update this service request.',
+                    message: 'Access denied. Sign in to update this service request.',
                 });
             }
         } else if (!actorFlags.canAct) {
@@ -11882,16 +11879,10 @@ export const submitAssetServiceDraft = async (req, res) => {
             return res.status(400).json({ message: 'Only pending service requests can be submitted.' });
         }
 
-        const allowed =
-            String(service.serviceType || '').trim() === 'Car Wash'
-                ? await actorMayManageCarWashRequest(req.user, asset)
-                : isTireChangeServiceType(service.serviceType)
-                  ? await actorMayManageTireChangeRequest(req.user, asset)
-                  : await actorMayManageOilServiceRequest(req.user, asset);
+        const allowed = await actorMayCreateOrInitiateVehicleService(req.user);
         if (!allowed) {
             return res.status(403).json({
-                message:
-                    'Access denied. Only Admin Officer/Controller, Asset Controller, HR, assigned user, or their HOD can submit this service request.',
+                message: 'Access denied. Sign in to submit (initiate) this service request.',
             });
         }
 

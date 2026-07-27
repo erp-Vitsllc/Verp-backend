@@ -11,6 +11,7 @@ import { getZohoBillById } from '../controllers/zoho/getZohoBillById.js';
 import { getZohoBillSupport } from '../controllers/zoho/getZohoBillSupport.js';
 import { getZohoExpenses } from '../controllers/zoho/getZohoExpenses.js';
 import { getZohoExpenseSupport } from '../controllers/zoho/getZohoExpenseSupport.js';
+import { getZohoBankAccounts } from '../controllers/zoho/getZohoBankAccounts.js';
 import { getZohoAuthUrl } from '../controllers/zoho/getZohoAuthUrl.js';
 import { getZohoConnections } from '../controllers/zoho/getZohoConnections.js';
 import { postZohoVendorPayment, putZohoVendorPayment } from '../controllers/zoho/postZohoVendorPayment.js';
@@ -63,6 +64,7 @@ router.post(
 router.post('/bills', postZohoBill);
 router.put('/bills/:billId', putZohoBill);
 router.get('/expenses/support', getZohoExpenseSupport);
+router.get('/bankaccounts', getZohoBankAccounts);
 router.get('/expenses', getZohoExpenses);
 router.post('/expenses', postZohoExpense);
 router.get('/vendorpayments', getZohoVendorPayments);

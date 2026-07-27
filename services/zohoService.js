@@ -23,6 +23,9 @@ const DEFAULT_OAUTH_SCOPE = [
     'ZohoBooks.accountants.READ',
     'ZohoBooks.accountants.CREATE',
     'ZohoBooks.settings.READ',
+    // Banking list + Expense Refund (Money In) bank transactions
+    'ZohoBooks.banking.READ',
+    'ZohoBooks.banking.CREATE',
 ].join(',');
 
 export function getZohoConfig() {
@@ -997,6 +1000,84 @@ export async function createExpense(payload = {}) {
     return response.expense || response;
 }
 
+/**
+ * Zoho Books → Banking → Add Transaction (e.g. Expense Refund / Money In).
+ * POST /banktransactions
+ */
+export async function createBankTransaction(payload = {}) {
+    const response = await requestZohoBooks('/banktransactions', {
+        method: 'post',
+        data: payload,
+        timeout: 30000,
+    });
+
+    return (
+        response.banktransaction ||
+        response.bank_transaction ||
+        response.transaction ||
+        response
+    );
+}
+
+/**
+ * Best-effort attachment upload for a Banking transaction (Expense Refund).
+ * POST /banktransactions/{id}/attachment — soft-fail if Zoho org does not support it.
+ */
+export async function uploadBankTransactionAttachment(
+    transactionId,
+    { buffer, filename = 'attachment.pdf', mimeType = 'application/pdf' } = {},
+) {
+    const id = String(transactionId || '').trim();
+    if (!id) throw new Error('Bank transaction id is required.');
+    if (!Buffer.isBuffer(buffer) || buffer.length === 0) {
+        throw new Error('Attachment file is empty.');
+    }
+
+    const safeName = String(filename || 'attachment.pdf')
+        .replace(/[\\"\r\n]/g, '_')
+        .trim()
+        .slice(0, 200) || 'attachment.pdf';
+    const contentType = String(mimeType || 'application/pdf').trim() || 'application/pdf';
+    const boundary = `----ZohoBankTxnAttachment${Date.now()}${Math.random().toString(36).slice(2)}`;
+    const preamble = Buffer.from(
+        `--${boundary}\r\n` +
+            `Content-Disposition: form-data; name="attachment"; filename="${safeName}"\r\n` +
+            `Content-Type: ${contentType}\r\n\r\n`,
+        'utf8',
+    );
+    const epilogue = Buffer.from(`\r\n--${boundary}--\r\n`, 'utf8');
+    const body = Buffer.concat([preamble, buffer, epilogue]);
+
+    const { organizationId, booksApiBase, accessToken } = await getBooksRequestContext();
+    const pathname = `/banktransactions/${encodeURIComponent(id)}/attachment`;
+
+    try {
+        const response = await axios({
+            method: 'post',
+            url: `${booksApiBase}${pathname}`,
+            params: { organization_id: organizationId },
+            data: body,
+            headers: {
+                Authorization: `Zoho-oauthtoken ${accessToken}`,
+                'Content-Type': `multipart/form-data; boundary=${boundary}`,
+                'Content-Length': body.length,
+            },
+            timeout: 90000,
+            maxBodyLength: Infinity,
+            maxContentLength: Infinity,
+        });
+
+        const responseBody = response.data || {};
+        if (Number(responseBody.code) !== 0 && responseBody.code != null) {
+            throw new Error(responseBody.message || 'Zoho bank transaction attachment upload failed');
+        }
+        return responseBody;
+    } catch (error) {
+        const zohoMessage = error?.response?.data?.message || error?.message;
+        throw new Error(zohoMessage || 'Zoho bank transaction attachment upload failed');
+    }
+}
+
 export async function createVendor(payload = {}) {
     const response = await requestZohoBooks('/contacts', {
         method: 'post',
@@ -1420,6 +1501,73 @@ export async function fetchBillExpenseAccounts() {
         const type = String(account?.account_type || account?.account_type_formatted || '').toLowerCase();
         return !/cash|bank|credit card|undeposited|accounts payable|accounts receivable/.test(type);
     });
+}
+
+/**
+ * Zoho Books → Banking list (bank / cash / credit card / payment clearing).
+ * Same accounts shown on Banking Overview — not the full Chart of Accounts.
+ */
+const bankAccountsCache = new Map();
+const BANK_ACCOUNTS_CACHE_TTL_MS = 10 * 60 * 1000;
+
+export async function fetchBankAccounts({ includeInactive = false } = {}) {
+    const organizationId = String(getZohoOrganizationId() || '').trim() || 'default';
+    const cacheKey = `${organizationId}:${includeInactive ? 'all' : 'active'}`;
+    const cached = bankAccountsCache.get(cacheKey);
+    if (cached && Date.now() - cached.at < BANK_ACCOUNTS_CACHE_TTL_MS && cached.rows?.length) {
+        return cached.rows;
+    }
+
+    const filters = includeInactive
+        ? ['Status.All', 'Status.Active', 'Status.Inactive']
+        : ['Status.Active', 'Status.All'];
+
+    const byId = new Map();
+    const authErrors = [];
+    for (const filterBy of filters) {
+        try {
+            const rows = await fetchAllZohoBooksRows('/bankaccounts', 'bankaccounts', {
+                params: { filter_by: filterBy, sort_column: 'account_name' },
+                maxPages: Infinity,
+                timeout: 90000,
+            });
+            for (const row of Array.isArray(rows) ? rows : []) {
+                const id = String(row?.account_id || row?.accountId || row?.id || '').trim();
+                if (!id) continue;
+                if (!byId.has(id)) byId.set(id, row);
+            }
+            if (byId.size > 0 && !includeInactive) break;
+        } catch (err) {
+            const message = String(err?.message || err);
+            console.warn(
+                `[ZohoBankAccounts] Fetch failed (${filterBy}):`,
+                message,
+            );
+            if (/not authorized|unauthorized|code.?57/i.test(message)) {
+                authErrors.push(message);
+            }
+        }
+    }
+
+    const rows = [...byId.values()].sort((a, b) =>
+        String(a?.account_name || a?.accountName || '').localeCompare(
+            String(b?.account_name || b?.accountName || ''),
+        ),
+    );
+
+    if (rows.length) {
+        bankAccountsCache.set(cacheKey, { at: Date.now(), rows });
+        return rows;
+    }
+
+    // Banking module is separate from Chart of Accounts — do not fall back to CoA.
+    if (authErrors.length) {
+        throw new Error(
+            'You are not authorized to perform this operation. Reconnect Zoho with ZohoBooks.banking.READ.',
+        );
+    }
+
+    return rows;
 }
 
 export async function fetchVendorContact(vendorId) {

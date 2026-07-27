@@ -1137,11 +1137,8 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
                     if (employeeForEmail) {
                         const recipientEmails = new Set();
 
-                        // Add Employee (Receiver)
-                        const empEmail = employeeForEmail.companyEmail || employeeForEmail.email;
-                        if (empEmail) recipientEmails.add(empEmail);
-
-                        // Add Manager Email
+                        // Target employee is NOT emailed on reject — only after final approval.
+                        // Notify manager, prior approvers, and requester only.
                         if (employeeForEmail.primaryReportee) {
                             const managerEmail = employeeForEmail.primaryReportee.companyEmail || employeeForEmail.primaryReportee.email;
                             if (managerEmail) recipientEmails.add(managerEmail);
@@ -1197,7 +1194,7 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
                                     subject: subject,
                                     html: html
                                 });
-                                console.log(`[UpdateReward] SUCCESS: Reward rejection email sent to ${Array.from(recipientEmails).length} recipients`);
+                                console.log(`[UpdateReward] SUCCESS: Reward rejection email sent to ${Array.from(recipientEmails).length} recipients (target employee excluded)`);
                             } else {
                                 console.error("[UpdateReward] ERROR: Missing EMAIL_USER or EMAIL_PASS for rejection email");
                             }
