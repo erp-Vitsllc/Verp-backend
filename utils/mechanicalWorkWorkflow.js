@@ -109,7 +109,7 @@ export async function notifyMechanicalWorkStakeholder({
         assignedTo: recipient._id,
         subjectEmployee: asset.assignedTo,
         requestedByName,
-        extra1: `${asset.assetId} â€” Mechanical Work`,
+        extra1: `${asset.assetId} — Mechanical Work`,
         extra2,
         extra3: mechanicalWorkDashboardMeta(asset, serviceRecordId),
     });
@@ -148,7 +148,7 @@ export async function advanceMechanicalWorkAfterHrApprove(asset, wf, actorName) 
         requestedByName: actorName,
         extra2: 'Update garage and service dates',
         stageLabel: 'Garage details required',
-        actionLabel: 'Mechanical work â€” garage update',
+        actionLabel: 'Mechanical work — garage update',
         detailLine: `${actorName} submitted mechanical work quotations for HR approval. Please open the Mechanical Work page, complete Garage / Service Details, and click Update Garage.`,
     });
 }
@@ -265,7 +265,7 @@ export async function submitMechanicalWorkGarage(asset, serviceId, serviceUpdate
         requestedByName: actorName,
         extra2: 'Approve garage and service dates',
         stageLabel: 'Accounts approval required',
-        actionLabel: 'Mechanical work â€” garage approval',
+        actionLabel: 'Mechanical work — garage approval',
         detailLine: `${actorName} updated garage details for a mechanical work. Please review and approve on the Mechanical Work page.`,
     });
 
@@ -360,7 +360,7 @@ export async function createMechanicalWorkEmployeeFines(asset, service, reqUser)
             employeeAmount: party.isCompany ? 0 : party.amount,
             companyAmount: party.isCompany ? party.amount : 0,
             serviceCharge: 0,
-            description: `Mechanical work service liability â€” ${asset.assetId || asset.name || 'Vehicle'} (${service._id})`,
+            description: `Mechanical work service liability — ${asset.assetId || asset.name || 'Vehicle'} (${service._id})`,
             awardedDate: new Date(),
             remarks: remark.serviceIssue || 'Mechanical work employee liability',
             category: 'Violation',
@@ -392,7 +392,7 @@ export async function createMechanicalWorkEmployeeFines(asset, service, reqUser)
                 subjectName: `Group Fine - ${created.length} ${created.length === 1 ? 'party' : 'parties'}`,
                 requestedByName: reqUser?.name || 'System',
                 extra1: 'Vehicle Fine',
-                extra2: `Mechanical work liability â€” AED ${created.reduce((s, f) => s + Number(f.fineAmount || 0), 0)}`,
+                extra2: `Mechanical work liability — AED ${created.reduce((s, f) => s + Number(f.fineAmount || 0), 0)}`,
             });
         }
     }
@@ -463,7 +463,7 @@ export async function completeMechanicalWorkService(asset, serviceId, serviceUpd
         comment: 'Mechanical work completed',
         subjectEmployee: asset.assignedTo,
         requestedByName: actorName,
-        extra1: `${asset.assetId} â€” Mechanical Work`,
+        extra1: `${asset.assetId} — Mechanical Work`,
         extra2: 'Completed',
         extra3: mechanicalWorkDashboardMeta(asset, serviceId),
     });
@@ -489,7 +489,7 @@ export async function notifyMechanicalWorkAccountsHoldToAdmin(asset, wf, holdRea
         requestedByName: actorName,
         extra2: `Accounts hold: ${holdReason || 'No reason'}`,
         stageLabel: 'Accounts placed request on hold',
-        actionLabel: 'Mechanical work â€” accounts hold',
+        actionLabel: 'Mechanical work — accounts hold',
         detailLine: `Accounts placed this mechanical work on hold${holdUntil ? ` until ${new Date(holdUntil).toLocaleDateString()}` : ''}. Reason: ${holdReason || 'No reason provided'}. You will receive a reminder every 2 days until Accounts acts.`,
     });
 

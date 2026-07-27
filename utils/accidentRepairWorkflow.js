@@ -106,7 +106,7 @@ export async function notifyAccidentRepairStakeholder({
         assignedTo: recipient._id,
         subjectEmployee: asset.assignedTo,
         requestedByName,
-        extra1: `${asset.assetId} â€” Accident Repair`,
+        extra1: `${asset.assetId} — Accident Repair`,
         extra2,
         extra3: accidentRepairDashboardMeta(asset, serviceRecordId),
     });
@@ -460,7 +460,7 @@ export async function completeAccidentRepairService(asset, serviceId, serviceUpd
         comment: 'Accident repair completed',
         subjectEmployee: asset.assignedTo,
         requestedByName: actorName,
-        extra1: `${asset.assetId} â€” Accident Repair`,
+        extra1: `${asset.assetId} — Accident Repair`,
         extra2: 'Completed',
         extra3: accidentRepairDashboardMeta(asset, serviceId),
     });

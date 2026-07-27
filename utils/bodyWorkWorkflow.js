@@ -109,7 +109,7 @@ export async function notifyBodyWorkStakeholder({
         assignedTo: recipient._id,
         subjectEmployee: asset.assignedTo,
         requestedByName,
-        extra1: `${asset.assetId} â€” Body Work`,
+        extra1: `${asset.assetId} — Body Work`,
         extra2,
         extra3: bodyWorkDashboardMeta(asset, serviceRecordId),
     });
@@ -148,7 +148,7 @@ export async function advanceBodyWorkAfterHrApprove(asset, wf, actorName) {
         requestedByName: actorName,
         extra2: 'Update garage and service dates',
         stageLabel: 'Garage details required',
-        actionLabel: 'Body work â€” garage update',
+        actionLabel: 'Body work — garage update',
         detailLine: `${actorName} submitted body work quotations for HR approval. Please open the Body Work page, complete Garage / Service Details, and click Update Garage.`,
     });
 }
@@ -265,7 +265,7 @@ export async function submitBodyWorkGarage(asset, serviceId, serviceUpdates, req
         requestedByName: actorName,
         extra2: 'Approve garage and service dates',
         stageLabel: 'Accounts approval required',
-        actionLabel: 'Body work â€” garage approval',
+        actionLabel: 'Body work — garage approval',
         detailLine: `${actorName} updated garage details for body work. Please review and approve on the Body Work page.`,
     });
 
@@ -360,7 +360,7 @@ export async function createBodyWorkEmployeeFines(asset, service, reqUser) {
             employeeAmount: party.isCompany ? 0 : party.amount,
             companyAmount: party.isCompany ? party.amount : 0,
             serviceCharge: 0,
-            description: `Body work service liability â€” ${asset.assetId || asset.name || 'Vehicle'} (${service._id})`,
+            description: `Body work service liability — ${asset.assetId || asset.name || 'Vehicle'} (${service._id})`,
             awardedDate: new Date(),
             remarks: remark.serviceIssue || 'Body work employee liability',
             category: 'Violation',
@@ -392,7 +392,7 @@ export async function createBodyWorkEmployeeFines(asset, service, reqUser) {
                 subjectName: `Group Fine - ${created.length} ${created.length === 1 ? 'party' : 'parties'}`,
                 requestedByName: reqUser?.name || 'System',
                 extra1: 'Vehicle Fine',
-                extra2: `Body work liability â€” AED ${created.reduce((s, f) => s + Number(f.fineAmount || 0), 0)}`,
+                extra2: `Body work liability — AED ${created.reduce((s, f) => s + Number(f.fineAmount || 0), 0)}`,
             });
         }
     }
@@ -463,7 +463,7 @@ export async function completeBodyWorkService(asset, serviceId, serviceUpdates, 
         comment: 'Body work completed',
         subjectEmployee: asset.assignedTo,
         requestedByName: actorName,
-        extra1: `${asset.assetId} â€” Body Work`,
+        extra1: `${asset.assetId} — Body Work`,
         extra2: 'Completed',
         extra3: bodyWorkDashboardMeta(asset, serviceId),
     });
@@ -489,7 +489,7 @@ export async function notifyBodyWorkAccountsHoldToAdmin(asset, wf, holdReason, a
         requestedByName: actorName,
         extra2: `Accounts hold: ${holdReason || 'No reason'}`,
         stageLabel: 'Accounts placed request on hold',
-        actionLabel: 'Body work â€” accounts hold',
+        actionLabel: 'Body work — accounts hold',
         detailLine: `Accounts placed this mechanical work on hold${holdUntil ? ` until ${new Date(holdUntil).toLocaleDateString()}` : ''}. Reason: ${holdReason || 'No reason provided'}. You will receive a reminder every 2 days until Accounts acts.`,
     });
 
