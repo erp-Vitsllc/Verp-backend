@@ -37,6 +37,7 @@ import { processTemporaryAssignments } from "./utils/processTemporaryAssignments
 import { processAccidentAssets } from "./utils/processAccidentAssets.js";
 import { processDocumentExpiryReminders } from "./utils/processDocumentExpiryReminders.js";
 import { processUtilityBillPaymentDayReminders } from "./utils/processUtilityBillPaymentDayReminders.js";
+import { processUtilityContractExpiryReminders } from "./utils/processUtilityContractExpiryReminders.js";
 import { processVehicleServiceHoldReminders } from "./utils/processVehicleServiceHoldReminders.js";
 import { processVehicleServiceScheduledPhase } from "./utils/processVehicleServiceScheduledPhase.js";
 import { processOilServiceOverdue, processOilServiceStartDateActivation, processOilServiceDueAutoCreate } from "./utils/oilServiceWorkflow.js";
@@ -107,6 +108,18 @@ setTimeout(() => {
 setInterval(() => {
     processUtilityBillPaymentDayReminders().catch((e) =>
         console.error('[UtilityBillPaymentDayReminders] scheduled run failed:', e?.message || e),
+    );
+}, 24 * 60 * 60 * 1000);
+
+// Utility contract end-date expiry (T-10 / T-5 / expiry day → HR email + bell).
+setTimeout(() => {
+    processUtilityContractExpiryReminders().catch((e) =>
+        console.error('[UtilityContractExpiryReminders] startup failed:', e?.message || e),
+    );
+}, 125 * 1000);
+setInterval(() => {
+    processUtilityContractExpiryReminders().catch((e) =>
+        console.error('[UtilityContractExpiryReminders] scheduled run failed:', e?.message || e),
     );
 }, 24 * 60 * 60 * 1000);
 

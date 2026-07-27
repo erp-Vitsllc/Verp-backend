@@ -4,7 +4,7 @@ import EmployeeBasic from '../../models/EmployeeBasic.js';
 import DashboardAction from '../../models/DashboardAction.js';
 import { getDepartmentHOD } from '../../utils/getDepartmentHOD.js';
 import { syncDashboardAction } from '../../utils/syncDashboard.js';
-import { sendUtilityBillPaymentEmail } from '../../utils/sendUtilityBillPaymentEmail.js';
+import { sendUtilityBillPaymentEmail, notifyUtilityBillZohoPayableParties } from '../../utils/sendUtilityBillPaymentEmail.js';
 import {
     cascadeDeleteUtilityBill,
     isUtilityAdminSuperUser,
@@ -14,7 +14,8 @@ import {
     utilityBillDateFromMonth,
     resolveZohoVendorIdByProvider,
 } from '../../utils/syncUtilityBillToZoho.js';
-import { upsertUtilityBalancePartyExpensesFromBills } from '../../utils/upsertUtilityBalancePartyExpense.js';
+import { upsertUtilityBalancePartyExpensesFromBills, employeeIdQueryVariants } from '../../utils/upsertUtilityBalancePartyExpense.js';
+import Company from '../../models/Company.js';
 
 const REQUEST_TYPE = 'Utility Bill Payment';
 
@@ -95,6 +96,21 @@ function statusLabel(status, pendingWithName = '') {
 function decorateBill(bill) {
     if (!bill) return bill;
     const o = typeof bill.toObject === 'function' ? bill.toObject() : { ...bill };
+    const accountsApprovedByName =
+        o.accountsApprovedBy && typeof o.accountsApprovedBy === 'object'
+            ? empDisplayName(o.accountsApprovedBy)
+            : '';
+    const hrApprovedByName =
+        o.hrApprovedBy && typeof o.hrApprovedBy === 'object'
+            ? empDisplayName(o.hrApprovedBy)
+            : '';
+    const actionedByName =
+        o.actionedBy && typeof o.actionedBy === 'object' ? empDisplayName(o.actionedBy) : '';
+
+    o.accountsApprovedByName = accountsApprovedByName;
+    o.hrApprovedByName = hrApprovedByName;
+    o.actionedByName = actionedByName;
+    o.approvedByName = hrApprovedByName || accountsApprovedByName || actionedByName;
     o.statusLabel = statusLabel(o.status, o.pendingWithName);
     o.reviewPath = o.batchId
         ? reviewPath(o.batchId, o.utilityType, o.billMonth)
@@ -123,20 +139,34 @@ function isSameEmployee(a, b) {
 
 /**
  * Resolve next workflow stage when actor equals flowchart Accounts/HR.
- * Skips self-approval: submitter===Accounts → HR; actor===HR → Approved (pay); etc.
+ * Skips self-approval: submitter===Accounts → HR (or Approved if no HR needed);
+ * actor===HR → Approved (pay); etc.
  * Never auto-marks Paid — Accounts must still click Pay.
+ *
+ * needsHr: when false (all bills difference ≈ 0), skip HR and go to Approved → Zoho.
  */
-function resolveStageAfterActor({ actor, accounts, hr, from = 'submit' }) {
+function resolveStageAfterActor({
+    actor,
+    accounts,
+    hr,
+    from = 'submit',
+    needsHr = true,
+}) {
     const actorIsAccounts = isSameEmployee(actor, accounts);
     const actorIsHr = isSameEmployee(actor, hr);
     const accountsIsHr = isSameEmployee(accounts, hr);
+    const hrRequired = needsHr !== false;
 
     if (from === 'submit') {
         if (actorIsAccounts) {
             // Skip Accounts approval
-            if (actorIsHr || accountsIsHr) {
-                // Also HR (same person) → ready for Accounts pay
-                return { status: 'Approved', pendingRole: 'accounts', skipped: ['accounts', 'hr'] };
+            if (!hrRequired || actorIsHr || accountsIsHr) {
+                // No HR needed, or submitter is also HR → ready for Accounts pay / Zoho
+                return {
+                    status: 'Approved',
+                    pendingRole: 'accounts',
+                    skipped: ['accounts', 'hr'],
+                };
             }
             return { status: 'Pending HR', pendingRole: 'hr', skipped: ['accounts'] };
         }
@@ -144,15 +174,48 @@ function resolveStageAfterActor({ actor, accounts, hr, from = 'submit' }) {
     }
 
     if (from === 'accounts_approve') {
-        // Accounts just approved; next is HR — skip if same person
-        if (actorIsHr || accountsIsHr) {
-            return { status: 'Approved', pendingRole: 'accounts', skipped: ['hr'] };
+        // Accounts just approved; next is HR only when difference requires it
+        if (!hrRequired || actorIsHr || accountsIsHr) {
+            return {
+                status: 'Approved',
+                pendingRole: 'accounts',
+                skipped: ['hr'],
+            };
         }
         return { status: 'Pending HR', pendingRole: 'hr', skipped: [] };
     }
 
     // hr_approve → always Approved (awaiting Accounts pay); pay is never auto-skipped
     return { status: 'Approved', pendingRole: 'accounts', skipped: [] };
+}
+
+/**
+ * HR approval is required when any bill has a non-zero difference
+ * (contract − actual). Zero-difference batches skip HR and go to Zoho after Accounts.
+ */
+function billHasHrDifference(billOrRow = {}) {
+    const monthly = Math.max(
+        0,
+        Number(
+            billOrRow.monthlyRental ??
+                billOrRow.contractAmount ??
+                billOrRow.contract ??
+                0,
+        ) || 0,
+    );
+    const amount = Number(
+        billOrRow.amount ?? billOrRow.actualAmount ?? billOrRow.actual ?? 0,
+    );
+    if (!Number.isFinite(amount)) return false;
+    const diffRaw = billOrRow.differenceAmount ?? billOrRow.difference;
+    const diff = Number.isFinite(Number(diffRaw))
+        ? Number(diffRaw)
+        : monthly - amount;
+    return Math.abs(diff) > 0.01;
+}
+
+function batchNeedsHrApproval(billsOrRows = []) {
+    return (billsOrRows || []).some((row) => billHasHrDifference(row));
 }
 
 function applyPaySplitToBills(bills, modeFallback = '') {
@@ -289,7 +352,8 @@ async function syncBatchDashboard({
 
 export async function listUtilityBillPayments(req, res) {
     try {
-        const { entryId, batchId, utilityType, entryIds } = req.query;
+        const { entryId, batchId, utilityType, entryIds, payByEmployeeId, payByCompanyId, employeeId, companyId } =
+            req.query;
         const actor = await resolveRequesterEmployee(req.user);
         const accountsGate = await isActorAccountsOrAdmin(actor, req.user);
         const hrGate = await isActorHrOrAdmin(actor, req.user);
@@ -312,6 +376,9 @@ export async function listUtilityBillPayments(req, res) {
         }
 
         const filter = {};
+        const partyEmployeeId = String(payByEmployeeId || employeeId || '').trim();
+        const partyCompanyId = String(payByCompanyId || companyId || '').trim();
+
         if (entryId) {
             filter.entryId = String(entryId);
         } else if (entryIds) {
@@ -325,13 +392,39 @@ export async function listUtilityBillPayments(req, res) {
             filter.entryId = { $in: ids };
         } else if (utilityType) {
             filter.utilityType = String(utilityType).trim();
+        } else if (partyEmployeeId) {
+            const variants = await employeeIdQueryVariants(partyEmployeeId);
+            const ids = variants.length ? variants : [partyEmployeeId];
+            filter.$or = [
+                { payByEmployeeId: { $in: ids } },
+                { 'zohoLineItems.payByEmployeeId': { $in: ids } },
+            ];
+        } else if (partyCompanyId) {
+            const ids = new Set([partyCompanyId]);
+            const query = /^[0-9a-fA-F]{24}$/.test(partyCompanyId)
+                ? { _id: partyCompanyId }
+                : { companyId: partyCompanyId };
+            const company = await Company.findOne(query).select('_id companyId').lean();
+            if (company?._id) ids.add(String(company._id));
+            if (company?.companyId) ids.add(String(company.companyId));
+            const list = [...ids];
+            filter.$or = [
+                { payByCompanyId: { $in: list } },
+                { 'zohoLineItems.payByCompanyId': { $in: list } },
+            ];
         } else {
             return res.status(400).json({
-                message: 'entryId, entryIds, utilityType, or batchId is required',
+                message:
+                    'entryId, entryIds, utilityType, batchId, payByEmployeeId, or payByCompanyId is required',
             });
         }
 
-        const bills = await UtilityBillPayment.find(filter).sort({ createdAt: -1 }).lean();
+        const bills = await UtilityBillPayment.find(filter)
+            .populate('accountsApprovedBy', 'firstName lastName employeeId')
+            .populate('hrApprovedBy', 'firstName lastName employeeId')
+            .populate('actionedBy', 'firstName lastName employeeId')
+            .sort({ createdAt: -1 })
+            .lean();
         return res.status(200).json({ bills: bills.map(withPermissions) });
     } catch (err) {
         return res.status(500).json({ message: err.message || 'Failed to load bills' });
@@ -434,9 +527,9 @@ export async function getUtilityBillBatch(req, res) {
 }
 
 /**
- * Submit → Accounts → HR → not paid (Pay).
- * If submitter is the flowchart Accounts person, skip Accounts and go to HR.
- * If submitter is also HR (or Accounts===HR), skip to Approved (awaiting Pay).
+ * Submit → Accounts → (HR only if |difference| > 0) → Zoho / not paid (Pay).
+ * If submitter is the flowchart Accounts person, skip Accounts.
+ * If no difference (or submitter is also HR), skip HR and create Zoho bill directly.
  */
 export async function createUtilityBillBatch(req, res) {
     try {
@@ -465,11 +558,13 @@ export async function createUtilityBillBatch(req, res) {
         const hrName = empDisplayName(hr);
         const now = new Date();
 
+        const needsHr = batchNeedsHrApproval(rows);
         const stage = resolveStageAfterActor({
             actor: requester,
             accounts,
             hr,
             from: 'submit',
+            needsHr,
         });
 
         let pendingWithName = accountsName;
@@ -556,6 +651,12 @@ export async function createUtilityBillBatch(req, res) {
                                 ? amount
                                 : 0;
                     if (!accountId || !Number.isFinite(amount) || amount <= 0) return null;
+                    const payByEmployeeId = String(line?.payByEmployeeId || '').trim();
+                    const payByCompanyId = String(line?.payByCompanyId || '').trim();
+                    let linePayBy = String(line?.payBy || '').trim();
+                    if (linePayBy !== 'company' && linePayBy !== 'employee') {
+                        linePayBy = payByEmployeeId ? 'employee' : payByCompanyId ? 'company' : '';
+                    }
                     return {
                         item: String(line?.item || line?.description || '').trim(),
                         description: String(
@@ -566,9 +667,10 @@ export async function createUtilityBillBatch(req, res) {
                         quantity,
                         amount: Number(amount.toFixed(2)),
                         rate: Number(rate.toFixed(2)),
-                        payByEmployeeId: String(line?.payByEmployeeId || '').trim(),
+                        payBy: linePayBy,
+                        payByEmployeeId,
                         payByEmployeeName: String(line?.payByEmployeeName || '').trim(),
-                        payByCompanyId: String(line?.payByCompanyId || '').trim(),
+                        payByCompanyId,
                         payByCompanyName: String(line?.payByCompanyName || '').trim(),
                         zohoBillId: String(line?.zohoBillId || '').trim(),
                     };
@@ -672,8 +774,12 @@ export async function createUtilityBillBatch(req, res) {
                 doc.hrApprovedBy = requester?._id || null;
                 doc.hrApprovedAt = now;
                 doc.comment = stage.skipped.includes('accounts')
-                    ? 'Accounts & HR skipped (submitter is both) — awaiting Pay'
-                    : 'HR step skipped (submitter is HR) — awaiting Pay';
+                    ? needsHr
+                        ? 'Accounts & HR skipped (submitter is both) — awaiting Pay'
+                        : 'Accounts skipped; HR skipped (no difference) — Zoho / awaiting Pay'
+                    : needsHr
+                      ? 'HR step skipped (submitter is HR) — awaiting Pay'
+                      : 'HR skipped (no difference) — Zoho / awaiting Pay';
             }
 
             docs.push(doc);
@@ -700,6 +806,27 @@ export async function createUtilityBillBatch(req, res) {
                 console.warn(
                     '[createUtilityBillBatch] PartyExpense balance upsert failed:',
                     balanceErr?.message || balanceErr,
+                );
+            }
+            const zohoOk = bills.some(
+                (b) =>
+                    String(b.zohoBillId || '').trim() ||
+                    String(b.zohoBillStatus || '').toLowerCase() === 'open',
+            );
+            if (zohoOk) {
+                // Notify Payable-to employees after Zoho entry (best-effort).
+                notifyUtilityBillZohoPayableParties({
+                    bills,
+                    batchMeta: {
+                        batchId: String(batchId),
+                        billCount: bills.length,
+                        reviewPath: reviewPath(batchId, utilityType, billMonth),
+                    },
+                }).catch((err) =>
+                    console.warn(
+                        '[createUtilityBillBatch] Zoho payable notify failed:',
+                        err?.message || err,
+                    ),
                 );
             }
         }
@@ -1051,13 +1178,20 @@ export async function respondUtilityBillBatch(req, res) {
             }
 
             if (action === 'reject') {
+                // Accounts reject → return to creator (final Rejected).
                 for (const bill of bills) {
                     bill.status = 'Rejected';
                     bill.pendingWithName = '';
                     bill.pendingWithRole = '';
+                    bill.accountsApprovedBy = null;
+                    bill.accountsApprovedAt = null;
+                    bill.hrApprovedBy = null;
+                    bill.hrApprovedAt = null;
                     bill.actionedBy = actor?._id || null;
                     bill.actionedAt = new Date();
-                    bill.comment = comment || 'Rejected by Accounts';
+                    bill.comment =
+                        comment ||
+                        'Rejected by Accounts — returned to creator for correction';
                     await bill.save();
                 }
                 const remaining = await UtilityBillPayment.countDocuments({
@@ -1067,26 +1201,41 @@ export async function respondUtilityBillBatch(req, res) {
                 await syncBatchDashboard({
                     batchId,
                     bills: bills.map((b) => b.toObject()),
-                    assignedTo: gate.accounts?._id || actor?._id,
+                    assignedTo: requester?._id || gate.accounts?._id || actor?._id,
                     status: remaining > 0 ? 'Pending' : 'Rejected',
                     actionedBy: actor?._id || req.user?._id,
-                    comment: comment || 'Rejected by Accounts',
+                    comment:
+                        comment ||
+                        'Rejected by Accounts — returned to creator for correction',
                     subjectEmployee: requester,
                     requestedByName: allBills[0].requestedByName,
-                    extra2: remaining > 0 ? statusLabel('Pending Accounts', empDisplayName(gate.accounts)) : 'rejected',
+                    extra2:
+                        remaining > 0
+                            ? statusLabel('Pending Accounts', empDisplayName(gate.accounts))
+                            : 'returned to creator',
                 });
                 if (requester && remaining === 0) {
                     await sendUtilityBillPaymentEmail({
                         recipient: requester,
                         bill: bills[0].toObject(),
-                        kind: 'rejected',
-                        batchMeta: { batchId: String(batchId), billCount: bills.length },
+                        kind: 'returned_creator',
+                        batchMeta: {
+                            batchId: String(batchId),
+                            billCount: bills.length,
+                            comment:
+                                comment ||
+                                'Rejected by Accounts — returned to you for correction',
+                        },
                     });
                 }
                 return res.status(200).json({
                     batchId,
                     status: remaining > 0 ? 'Pending Accounts' : 'Rejected',
-                    statusLabel: remaining > 0 ? statusLabel('Pending Accounts', empDisplayName(gate.accounts)) : 'rejected',
+                    statusLabel:
+                        remaining > 0
+                            ? statusLabel('Pending Accounts', empDisplayName(gate.accounts))
+                            : 'returned to creator',
+                    returnedTo: 'creator',
                     bills: bills.map((b) => decorateBill(b.toObject())),
                 });
             }
@@ -1104,6 +1253,7 @@ export async function respondUtilityBillBatch(req, res) {
                 accounts: gate.accounts,
                 hr,
                 from: 'accounts_approve',
+                needsHr: batchNeedsHrApproval(bills),
             });
             const now = new Date();
             const path = reviewPath(batchId, bills[0].utilityType, bills[0].billMonth);
@@ -1151,7 +1301,9 @@ export async function respondUtilityBillBatch(req, res) {
                     bill.actionedAt = now;
                     bill.comment =
                         comment ||
-                        'Approved by Accounts — HR skipped (same person) — awaiting Pay';
+                        (next.skipped.includes('hr') && !batchNeedsHrApproval(bills)
+                            ? 'Approved by Accounts — HR skipped (no difference) — awaiting Pay'
+                            : 'Approved by Accounts — HR skipped (same person) — awaiting Pay');
                     await bill.save();
                 }
 
@@ -1179,7 +1331,11 @@ export async function respondUtilityBillBatch(req, res) {
                         remainingAccounts > 0 ? gate.accounts._id : gate.accounts._id,
                     status: 'Pending',
                     actionedBy: actor?._id || req.user?._id,
-                    comment: comment || 'Accounts & HR approved (same user) — Zoho Open — ready to pay',
+                    comment:
+                        comment ||
+                        (!batchNeedsHrApproval(bills)
+                            ? 'Approved by Accounts — HR skipped (no difference) — Zoho Open — ready to pay'
+                            : 'Accounts & HR approved (same user) — Zoho Open — ready to pay'),
                     subjectEmployee: requester,
                     requestedByName: allBills[0].requestedByName,
                     extra2:
@@ -1198,6 +1354,20 @@ export async function respondUtilityBillBatch(req, res) {
                         reviewPath: path,
                     },
                 });
+
+                notifyUtilityBillZohoPayableParties({
+                    bills,
+                    batchMeta: {
+                        batchId: String(batchId),
+                        billCount: bills.length,
+                        reviewPath: path,
+                    },
+                }).catch((err) =>
+                    console.warn(
+                        '[respondUtilityBillBatch] Zoho payable notify failed:',
+                        err?.message || err,
+                    ),
+                );
 
                 if (requester && !isSameEmployee(requester, gate.accounts)) {
                     await sendUtilityBillPaymentEmail({
@@ -1325,48 +1495,84 @@ export async function respondUtilityBillBatch(req, res) {
         }
 
         if (action === 'reject') {
+            // HR reject → return to previous accepter (Accounts).
+            const accounts = await getDepartmentHOD('accounts');
+            if (!accounts?._id) {
+                return res.status(400).json({
+                    message: 'Accounts responsible person is not configured in Flowchart.',
+                });
+            }
+            const accountsName = empDisplayName(accounts);
+            const nowReject = new Date();
             for (const bill of bills) {
-                bill.status = 'Rejected';
-                bill.pendingWithName = '';
-                bill.pendingWithRole = '';
+                bill.status = 'Pending Accounts';
+                bill.pendingWithName = accountsName;
+                bill.pendingWithRole = 'accounts';
+                bill.accountsApprovedBy = null;
+                bill.accountsApprovedAt = null;
+                bill.hrApprovedBy = null;
+                bill.hrApprovedAt = null;
                 bill.actionedBy = actor?._id || null;
-                bill.actionedAt = new Date();
-                bill.comment = comment || 'Rejected by HR';
+                bill.actionedAt = nowReject;
+                bill.comment =
+                    comment || 'Rejected by HR — returned to Accounts for re-review';
                 await bill.save();
             }
             const remainingHr = await UtilityBillPayment.countDocuments({
                 batchId,
                 status: 'Pending HR',
             });
+            const path = reviewPath(batchId, bills[0].utilityType, bills[0].billMonth);
             await syncBatchDashboard({
                 batchId,
                 bills: bills.map((b) => b.toObject()),
-                assignedTo: gate.hr?._id || actor?._id,
-                status: remainingHr > 0 ? 'Pending' : 'Rejected',
+                assignedTo: accounts._id,
+                status: 'Pending',
                 actionedBy: actor?._id || req.user?._id,
-                comment: comment || 'Rejected by HR',
+                comment:
+                    comment || 'Rejected by HR — returned to Accounts for re-review',
                 subjectEmployee: requester,
                 requestedByName: allBills[0].requestedByName,
                 extra2:
                     remainingHr > 0
-                        ? statusLabel('Pending HR', empDisplayName(gate.hr))
-                        : 'rejected',
+                        ? `${statusLabel('Pending Accounts', accountsName)} · ${remainingHr} still with HR`
+                        : statusLabel('Pending Accounts', accountsName),
             });
-            if (requester && remainingHr === 0) {
+            await sendUtilityBillPaymentEmail({
+                recipient: accounts,
+                bill: bills[0].toObject(),
+                kind: 'returned_accounts',
+                batchMeta: {
+                    batchId: String(batchId),
+                    billCount: bills.length,
+                    reviewPath: path,
+                    comment:
+                        comment || 'Rejected by HR — returned to Accounts for re-review',
+                },
+            });
+            if (requester) {
                 await sendUtilityBillPaymentEmail({
                     recipient: requester,
                     bill: bills[0].toObject(),
-                    kind: 'rejected',
-                    batchMeta: { batchId: String(batchId), billCount: bills.length },
+                    kind: 'returned_accounts',
+                    batchMeta: {
+                        batchId: String(batchId),
+                        billCount: bills.length,
+                        reviewPath: path,
+                        comment:
+                            comment ||
+                            'HR rejected this batch — it was returned to Accounts',
+                    },
                 });
             }
             return res.status(200).json({
                 batchId,
-                status: remainingHr > 0 ? 'Pending HR' : 'Rejected',
+                status: remainingHr > 0 ? 'Pending HR' : 'Pending Accounts',
                 statusLabel:
                     remainingHr > 0
                         ? statusLabel('Pending HR', empDisplayName(gate.hr))
-                        : 'rejected',
+                        : statusLabel('Pending Accounts', accountsName),
+                returnedTo: 'accounts',
                 bills: bills.map((b) => decorateBill(b.toObject())),
             });
         }
@@ -1498,6 +1704,20 @@ export async function respondUtilityBillBatch(req, res) {
                 reviewPath: reviewPath(batchId, bills[0].utilityType, bills[0].billMonth),
             },
         });
+
+        notifyUtilityBillZohoPayableParties({
+            bills,
+            batchMeta: {
+                batchId: String(batchId),
+                billCount: bills.length,
+                reviewPath: reviewPath(batchId, bills[0].utilityType, bills[0].billMonth),
+            },
+        }).catch((err) =>
+            console.warn(
+                '[respondUtilityBillBatch] Zoho payable notify failed:',
+                err?.message || err,
+            ),
+        );
 
         if (requester && !isSameEmployee(requester, actor)) {
             await sendUtilityBillPaymentEmail({

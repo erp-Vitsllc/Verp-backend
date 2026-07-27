@@ -195,6 +195,71 @@ export const addPayment = async (req, res) => {
                             fine.fineStatus = 'Paid';
                             console.log('[AddPayment] Fine status updated to Paid:', fine.fineId);
                         }
+
+                        const paidThroughId = String(
+                            paidThroughAccountId || payment.paidThroughAccountId || '',
+                        ).trim();
+                        const expenseId = String(
+                            expenseAccountId || payment.expenseAccountId || '',
+                        ).trim();
+                        if (paidThroughId && expenseId) {
+                            try {
+                                const { syncFineCompanyPaymentToZoho } = await import(
+                                    '../../utils/syncFineCompanyPaymentToZoho.js'
+                                );
+                                const zohoResult = await syncFineCompanyPaymentToZoho({
+                                    payment,
+                                    fine,
+                                    employee,
+                                    organizationId:
+                                        zohoOrganizationId || payment.zohoOrganizationId,
+                                    expenseAccountId: expenseId,
+                                    expenseAccountName:
+                                        expenseAccountName || payment.expenseAccountName,
+                                    paidThroughAccountId: paidThroughId,
+                                    paidThroughAccountName:
+                                        paidThroughAccountName || payment.paidThroughAccountName,
+                                });
+                                if (zohoResult.ok) {
+                                    payment.zohoExpenseId =
+                                        zohoResult.expenseId || payment.zohoExpenseId || '';
+                                    payment.zohoOrganizationId =
+                                        zohoResult.organizationId || payment.zohoOrganizationId;
+                                    payment.zohoSyncError = '';
+                                    payment.paidThroughAccountId = paidThroughId;
+                                    payment.paidThroughAccountName =
+                                        paidThroughAccountName || payment.paidThroughAccountName;
+                                    payment.expenseAccountId = expenseId;
+                                    payment.expenseAccountName =
+                                        expenseAccountName || payment.expenseAccountName;
+                                    await payment.save();
+                                    if (zohoResult.organizationId) {
+                                        fine.zohoOrganizationId =
+                                            zohoResult.organizationId || fine.zohoOrganizationId;
+                                    }
+                                } else {
+                                    payment.zohoSyncError =
+                                        zohoResult.message || 'Zoho sync failed';
+                                    await payment.save();
+                                    console.warn(
+                                        '[AddPayment] Fine Zoho sync:',
+                                        zohoResult.message,
+                                    );
+                                }
+                                req._fineZohoSyncResult = zohoResult;
+                            } catch (zohoErr) {
+                                console.error(
+                                    '[AddPayment] Fine Zoho sync error:',
+                                    zohoErr?.message || zohoErr,
+                                );
+                                payment.zohoSyncError = zohoErr?.message || 'Zoho sync failed';
+                                await payment.save();
+                                req._fineZohoSyncResult = {
+                                    ok: false,
+                                    message: zohoErr?.message || 'Zoho sync failed',
+                                };
+                            }
+                        }
                         
                         await fine.save();
                     }
@@ -594,14 +659,19 @@ export const addPayment = async (req, res) => {
         await payment.populate('createdBy', 'firstName lastName');
 
         const loanZoho = req._loanZohoSyncResult;
+        const fineZoho = req._fineZohoSyncResult;
+        const zohoSync = loanZoho || fineZoho;
         let message = 'Payment created successfully';
-        if (loanZoho) {
-            if (loanZoho.ok && loanZoho.expenseId) {
-                message = loanZoho.message || 'Payment created and Zoho Expense posted.';
-            } else if (!loanZoho.ok) {
-                message =
-                    `Payment saved in ERP, but Zoho Expense failed: ${loanZoho.message || 'sync error'}. ` +
-                    'Fix Expense Account (must be an Expense type, not Cash/Bank) on Loan Parties, then Retry Zoho.';
+        if (zohoSync) {
+            if (zohoSync.ok && zohoSync.expenseId) {
+                message = zohoSync.message || 'Payment created and Zoho Expense posted.';
+            } else if (!zohoSync.ok) {
+                message = loanZoho
+                    ? `Payment saved in ERP, but Zoho Expense failed: ${loanZoho.message || 'sync error'}. ` +
+                      'Fix Expense Account (must be an Expense type, not Cash/Bank) on Loan Parties, then Retry Zoho.'
+                    : `Payment saved in ERP, but Zoho banking / Chart of Accounts posting failed: ${
+                          fineZoho?.message || 'sync error'
+                      }.`;
             }
         }
 
@@ -609,12 +679,12 @@ export const addPayment = async (req, res) => {
             success: true,
             message,
             payment,
-            zohoSync: loanZoho
+            zohoSync: zohoSync
                 ? {
-                      ok: Boolean(loanZoho.ok),
-                      expenseId: loanZoho.expenseId || '',
-                      expenseNumber: loanZoho.expenseNumber || '',
-                      message: loanZoho.message || '',
+                      ok: Boolean(zohoSync.ok),
+                      expenseId: zohoSync.expenseId || '',
+                      expenseNumber: zohoSync.expenseNumber || '',
+                      message: zohoSync.message || '',
                   }
                 : undefined,
         });

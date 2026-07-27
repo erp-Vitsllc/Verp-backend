@@ -1,7 +1,6 @@
 import DashboardAction from '../models/DashboardAction.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
-import { isReqUserSystemSuperUser } from './systemSuperUser.js';
-import { userIsOilServiceAdminOfficer } from './oilServiceWorkflow.js';
+import { actorMayManageOilService } from './oilServiceWorkflow.js';
 import { getDepartmentHOD } from './getDepartmentHOD.js';
 import { sendVehicleServiceWorkflowEmail } from './sendVehicleServiceWorkflowEmail.js';
 import { resolveEmployeeEmail } from './resolveEmployeeEmail.js';
@@ -93,13 +92,9 @@ function toIdString(v) {
     return null;
 }
 
+/** Same create/manage roles as other vehicle service types. */
 export async function actorMayManageCarWashRequest(reqUser, asset) {
-    if (await isReqUserSystemSuperUser(reqUser)) return true;
-    if (await userIsOilServiceAdminOfficer(reqUser)) return true;
-    const currentEmpObjectId = reqUser?.employeeObjectId?.toString?.() || null;
-    if (!currentEmpObjectId || !asset?.assignedTo) return false;
-    const assigneeId = toIdString(asset.assignedTo);
-    return !!(assigneeId && assigneeId === currentEmpObjectId);
+    return actorMayManageOilService(reqUser, asset);
 }
 
 export function carWashDetailsPath(vehicleId, serviceRecordId) {

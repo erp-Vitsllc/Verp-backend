@@ -1932,13 +1932,44 @@ export const updateAssetItem = async (req, res) => {
                             const tDoc = await resolveAssetTypeDocByName(updates[key]);
                             if (tDoc) asset.typeId = tDoc._id;
                         }
+                    } else if (key === 'category' && typeof updates[key] === 'string' && updates[key].trim()) {
+                        // AssetItem stores categoryId (ref), not a free-text category field — resolve by name.
+                        const catName = String(updates[key]).trim();
+                        let catDoc = await AssetCategory.findOne({ name: catName, isActive: true });
+                        if (!catDoc) {
+                            const escaped = catName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                            catDoc = await AssetCategory.findOne({
+                                name: { $regex: new RegExp(`^${escaped}$`, 'i') },
+                                isActive: true,
+                            });
+                        }
+                        if (catDoc) {
+                            asset.categoryId = catDoc._id;
+                            // Keep type in sync with the category parent when type was not also sent.
+                            if (catDoc.typeId && !Object.prototype.hasOwnProperty.call(updates, 'type')) {
+                                asset.typeId = catDoc.typeId;
+                            }
+                        }
                     } else if (key === 'vehicleBrand' && isFleetVehicleAsset) {
                         asset.vehicleBrand = String(updates[key] || '').trim();
                     } else if (key === 'plateNumber' && updates[key]) {
                         asset[key] = normalizePlate(updates[key]);
                     } else if (key === 'plateEmirate') {
                         asset[key] = sanitizePlateEmirate(updates[key]);
-                    } else if (key !== 'type' && key !== 'invoiceFile') {
+                    } else if (key === 'quantity') {
+                        asset.quantity = Math.max(1, Number(updates[key]) || 1);
+                    } else if (key === 'warrantyYears') {
+                        asset.warrantyYears = Math.max(0, Number(updates[key]) || 0);
+                    } else if (
+                        key !== 'type' &&
+                        key !== 'category' &&
+                        key !== 'invoiceFile' &&
+                        key !== 'mode' &&
+                        key !== 'creationIntent' &&
+                        key !== 'total' &&
+                        key !== 'assigned' &&
+                        key !== 'unassigned'
+                    ) {
                         asset[key] = updates[key];
                     }
                 }
@@ -1965,6 +1996,7 @@ export const updateAssetItem = async (req, res) => {
         await asset.save();
 
         await asset.populate('typeId', 'name imagePreview');
+        await asset.populate('categoryId', 'name imagePreview');
 
         try {
             if (detachedAccessoryRefsForCatalog?.length) {

@@ -11282,7 +11282,7 @@ export const addAssetService = async (req, res) => {
             if (req.body?.autoCreated || earlyRemark?.autoCreated) {
                 return res.status(403).json({
                     message:
-                        'Tire change requests cannot be auto-created by the system. Only Super User, Admin Officer, or assigned user can create them manually.',
+                        'Tire change requests cannot be auto-created by the system. Create them manually from the vehicle Service tab.',
                 });
             }
             if (!isDraft) {
@@ -11301,7 +11301,7 @@ export const addAssetService = async (req, res) => {
             if (!allowed) {
                 return res.status(403).json({
                     message:
-                        'Access denied. Only Super User, Admin Officer, or assigned user can create a tire change request.',
+                        'Access denied. Only Admin Officer/Controller, Asset Controller, HR, assigned user, or their HOD can create a tire change request.',
                 });
             }
         } else if (isCarWashRequest) {
@@ -11309,7 +11309,7 @@ export const addAssetService = async (req, res) => {
             if (!allowed) {
                 return res.status(403).json({
                     message:
-                        'Access denied. Only the Admin Officer or assigned user can raise a car wash request.',
+                        'Access denied. Only Admin Officer/Controller, Asset Controller, HR, assigned user, or their HOD can raise a car wash request.',
                 });
             }
             let earlyCarWashRemark = {};
@@ -11341,9 +11341,8 @@ export const addAssetService = async (req, res) => {
             const allowed = await actorMayManageOilServiceRequest(req.user, asset);
             if (!allowed) {
                 return res.status(403).json({
-                    message: isOilServiceBootstrap
-                        ? 'Access denied. Only admin or the assigned user can raise an oil service request.'
-                        : 'Access denied. Only admin or the assigned user can raise this service request.',
+                    message:
+                        'Access denied. Only Admin Officer/Controller, Asset Controller, HR, assigned user, or their HOD can raise this service request.',
                 });
             }
         } else if (!isFleetVehicleServiceRequest && !actorFlags.canAct) {
@@ -11786,16 +11785,15 @@ export const updateAssetServiceDraft = async (req, res) => {
             if (!allowed) {
                 return res.status(403).json({
                     message:
-                        'Access denied. Only Super User, Admin Officer, or assigned user can update this tire change request.',
+                        'Access denied. Only Admin Officer/Controller, Asset Controller, HR, assigned user, or their HOD can update this tire change request.',
                 });
             }
         } else if (isOilServicePending || isVehicleServiceTabPending) {
             const allowed = await actorMayManageOilServiceRequest(req.user, asset);
             if (!allowed) {
                 return res.status(403).json({
-                    message: isOilServicePending
-                        ? 'Access denied. Only admin or the assigned user can update this oil service request.'
-                        : 'Access denied. Only admin or the assigned user can update this service request.',
+                    message:
+                        'Access denied. Only Admin Officer/Controller, Asset Controller, HR, assigned user, or their HOD can update this service request.',
                 });
             }
         } else if (!actorFlags.canAct) {
@@ -11891,16 +11889,9 @@ export const submitAssetServiceDraft = async (req, res) => {
                   ? await actorMayManageTireChangeRequest(req.user, asset)
                   : await actorMayManageOilServiceRequest(req.user, asset);
         if (!allowed) {
-            const st = String(service.serviceType || '').trim();
             return res.status(403).json({
                 message:
-                    st === 'Car Wash'
-                        ? 'Access denied. Only Admin Officer or the assigned user can submit this car wash request.'
-                        : st === 'Oil Service'
-                          ? 'Access denied. Only Admin Officer or the assigned user can submit this oil service request.'
-                          : st === 'Tire Change'
-                            ? 'Access denied. Only Super User, Admin Officer, or assigned user can submit this tire change request.'
-                            : 'Access denied. Only Admin Officer or the assigned user can submit this service request.',
+                    'Access denied. Only Admin Officer/Controller, Asset Controller, HR, assigned user, or their HOD can submit this service request.',
             });
         }
 

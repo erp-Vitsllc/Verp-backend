@@ -72,8 +72,21 @@ import {
 } from '../utils/getDepartmentHOD.js';
 import { isUserAdministrator, hasPermission } from '../services/permissionService.js';
 import { isJwtSystemSuperUser } from '../utils/systemSuperUser.js';
+import { actorMayManageOilService } from '../utils/oilServiceWorkflow.js';
 
 const normEmp = (s) => (s || '').toString().toLowerCase().replace(/\s+/g, '');
+
+/** Vehicle service draft/update/submit/garage paths under /:id/service... */
+const isVehicleServiceMutationPath = (pathNoQuery = '') => {
+    const p = String(pathNoQuery || '');
+    if (!p.includes('/service')) return false;
+    if (p.includes('service-workflow')) return false;
+    return (
+        /\/service\/[^/]+/.test(p) ||
+        p.endsWith('/service') ||
+        /\/service$/.test(p.split('?')[0])
+    );
+};
 
 /**
  * Fleet vehicle assets (plate or vehicle-like category). Used to relax middleware so
@@ -484,6 +497,24 @@ const requireAssetFullAccess = async (req, res, next) => {
                     .select('plateNumber typeId')
                     .lean();
                 if (assetQuick && isVehicleAssetLean(assetQuick)) return next();
+            }
+        }
+
+        // Vehicle service create/draft/submit/garage: allow Admin Officer, Admin Controller, HR,
+        // Asset Controller, assignee, and assignee HOD (controller re-checks actorMayManageOilService).
+        if (id) {
+            const pathNoQuery = String(req.originalUrl || req.url || '').split('?')[0];
+            if (isVehicleServiceMutationPath(pathNoQuery)) {
+                const AssetItem = (await import('../models/AssetItem.js')).default;
+                const assetForService = await AssetItem.findById(id)
+                    .populate('typeId', 'name')
+                    .populate('assignedTo', 'primaryReportee')
+                    .select('plateNumber typeId assignedTo')
+                    .catch(() => null);
+                if (assetForService && isVehicleAssetLean(assetForService)) {
+                    const mayManage = await actorMayManageOilService(req.user, assetForService).catch(() => false);
+                    if (mayManage) return next();
+                }
             }
         }
 

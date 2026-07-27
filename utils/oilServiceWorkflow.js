@@ -228,39 +228,74 @@ export function parseOilServiceRemark(service) {
     }
 }
 
-/** Fleet Admin Officer (flowchart admincontroller) — not portal/root super admin. */
-export async function userIsOilServiceAdminOfficer(reqUser) {
-    if (!reqUser) return false;
-    let isAdminOfficer = false;
-    try {
-        isAdminOfficer = await isUserActiveInFlowchart(reqUser, 'admincontroller');
-    } catch {
-        isAdminOfficer = false;
-    }
-    const adminHod = await getDepartmentHOD('admincontroller');
-    if (adminHod?._id && reqUser?.employeeObjectId) {
-        if (adminHod._id.toString() === reqUser.employeeObjectId.toString()) isAdminOfficer = true;
-    }
-    if (!isAdminOfficer && adminHod?.employeeId && reqUser?.employeeId) {
-        if (normEmpId(adminHod.employeeId) === normEmpId(reqUser.employeeId)) isAdminOfficer = true;
-    }
-    return isAdminOfficer;
+function toEmpIdString(v) {
+    if (!v) return null;
+    if (typeof v === 'string') return v;
+    if (v._id) return v._id.toString();
+    if (v.toString) return v.toString();
+    return null;
 }
 
+async function userMatchesFlowchartRole(reqUser, departmentKey) {
+    if (!reqUser || !departmentKey) return false;
+    let inFlow = false;
+    try {
+        inFlow = await isUserActiveInFlowchart(reqUser, departmentKey);
+    } catch {
+        inFlow = false;
+    }
+    if (inFlow) return true;
+    const hod = await getDepartmentHOD(departmentKey);
+    if (!hod) return false;
+    if (hod._id && reqUser?.employeeObjectId) {
+        if (hod._id.toString() === reqUser.employeeObjectId.toString()) return true;
+    }
+    if (hod.employeeId && reqUser?.employeeId) {
+        if (normEmpId(hod.employeeId) === normEmpId(reqUser.employeeId)) return true;
+    }
+    return false;
+}
+
+/** Fleet Admin Officer / Admin Controller (flowchart admincontroller) — not portal/root super admin. */
+export async function userIsOilServiceAdminOfficer(reqUser) {
+    return userMatchesFlowchartRole(reqUser, 'admincontroller');
+}
+
+export async function userIsOilServiceAssetController(reqUser) {
+    return userMatchesFlowchartRole(reqUser, 'assetcontroller');
+}
+
+export async function userIsOilServiceHr(reqUser) {
+    return userMatchesFlowchartRole(reqUser, 'hr');
+}
+
+/**
+ * Who may create / draft / submit vehicle service requests:
+ * Super User, Admin Officer/Controller, Asset Controller, HR,
+ * assigned employee, or that assignee's HOD (primaryReportee).
+ */
 export async function actorMayManageOilService(reqUser, asset) {
     if (await isReqUserSystemSuperUser(reqUser)) return true;
     if (await userIsOilServiceAdminOfficer(reqUser)) return true;
+    if (await userIsOilServiceAssetController(reqUser)) return true;
+    if (await userIsOilServiceHr(reqUser)) return true;
+
     const currentEmpObjectId = reqUser?.employeeObjectId?.toString?.() || null;
     if (!currentEmpObjectId || !asset?.assignedTo) return false;
-    const toIdString = (v) => {
-        if (!v) return null;
-        if (typeof v === 'string') return v;
-        if (v._id) return v._id.toString();
-        if (v.toString) return v.toString();
-        return null;
-    };
-    const assigneeId = toIdString(asset.assignedTo);
-    return !!(assigneeId && assigneeId === currentEmpObjectId);
+
+    const assigneeId = toEmpIdString(asset.assignedTo);
+    if (assigneeId && assigneeId === currentEmpObjectId) return true;
+
+    let assigneeDoc =
+        typeof asset.assignedTo === 'object' && asset.assignedTo?.primaryReportee !== undefined
+            ? asset.assignedTo
+            : await EmployeeBasic.findById(assigneeId)
+                .select('primaryReportee')
+                .lean()
+                .catch(() => null);
+
+    const hodId = toEmpIdString(assigneeDoc?.primaryReportee);
+    return !!(hodId && hodId === currentEmpObjectId);
 }
 
 /** Tire change uses the same manual-request roles as oil service (no system auto-create). */

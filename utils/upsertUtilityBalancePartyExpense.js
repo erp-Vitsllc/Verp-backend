@@ -313,7 +313,56 @@ export async function postDifferenceDebitJournalToZoho(bill, amount) {
  */
 export async function upsertUtilityBalancePartyExpensesFromBills(bills = [], userId = null) {
     const results = [];
+    const expanded = [];
     for (const bill of bills || []) {
+        const plain =
+            bill && typeof bill.toObject === 'function' ? bill.toObject() : { ...(bill || {}) };
+        const paymentBy = clean(plain?.paymentBy).toLowerCase();
+        if (paymentBy === 'employee_and_company') {
+            const empDiff = money(plain?.employeeDiffAmount);
+            const coDiff = money(plain?.companyDiffAmount);
+            if (empDiff > 0.009) {
+                expanded.push({
+                    ...plain,
+                    paymentBy: 'employee',
+                    differenceAmount: empDiff,
+                    employeeDiffAmount: empDiff,
+                    companyDiffAmount: 0,
+                });
+            }
+            if (coDiff > 0.009) {
+                expanded.push({
+                    ...plain,
+                    paymentBy: 'company',
+                    differenceAmount: coDiff,
+                    companyDiffAmount: coDiff,
+                    employeeDiffAmount: 0,
+                });
+            }
+            if (empDiff <= 0.009 && coDiff <= 0.009) {
+                const fallback = differenceBalanceAmount(plain);
+                if (fallback > 0.009 && clean(plain?.payByEmployeeId)) {
+                    expanded.push({
+                        ...plain,
+                        paymentBy: 'employee',
+                        differenceAmount: fallback,
+                        employeeDiffAmount: fallback,
+                    });
+                } else if (fallback > 0.009) {
+                    expanded.push({
+                        ...plain,
+                        paymentBy: 'company',
+                        differenceAmount: fallback,
+                        companyDiffAmount: fallback,
+                    });
+                }
+            }
+            continue;
+        }
+        expanded.push(plain);
+    }
+
+    for (const bill of expanded) {
         const paymentBy = clean(bill?.paymentBy).toLowerCase();
         const isCompany = paymentBy === 'company';
         const isEmployee = paymentBy === 'employee' || paymentBy === 'employee_balance';

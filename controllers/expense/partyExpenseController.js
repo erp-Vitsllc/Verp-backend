@@ -38,29 +38,103 @@ function resolveBalanceShare(bill, { forEmployee = false } = {}) {
         : contract - actual;
     const overContract = Math.max(0, -signedDiff, Math.abs(Math.min(0, signedDiff)));
     if (overContract <= 0) return 0;
-    // Prefer explicit diff shares from submit / review.
     const empDiff = Number(bill?.employeeDiffAmount);
     const coDiff = Number(bill?.companyDiffAmount);
+    const payBy = clean(bill?.paymentBy).toLowerCase();
     if (forEmployee) {
         if (Number.isFinite(empDiff) && empDiff > 0) return money(empDiff);
-        const payBy = clean(bill?.paymentBy).toLowerCase();
         if (payBy === 'employee' || payBy === 'employee_balance') {
             return overContract > 0 ? overContract : money(bill?.employeePayAmount);
         }
         if (payBy === 'employee_and_company') {
-            return Number.isFinite(empDiff) ? money(empDiff) : money(bill?.employeePayAmount);
+            return Number.isFinite(empDiff) && empDiff > 0
+                ? money(empDiff)
+                : money(bill?.employeePayAmount) > 0
+                  ? Math.min(overContract, money(bill.employeePayAmount))
+                  : 0;
         }
         return 0;
     }
     if (Number.isFinite(coDiff) && coDiff > 0) return money(coDiff);
-    const payBy = clean(bill?.paymentBy).toLowerCase();
     if (payBy === 'company') {
         return overContract > 0 ? overContract : money(bill?.companyPayAmount);
     }
     if (payBy === 'employee_and_company') {
-        return Number.isFinite(coDiff) ? money(coDiff) : money(bill?.companyPayAmount);
+        return Number.isFinite(coDiff) && coDiff > 0
+            ? money(coDiff)
+            : money(bill?.companyPayAmount) > 0
+              ? Math.min(overContract, money(bill.companyPayAmount))
+              : 0;
     }
     return 0;
+}
+
+/** Party's Payable-to share from zoho line items (or bill-level totals). */
+function resolvePayableShare(bill, { forEmployee = false, partyVariants = [] } = {}) {
+    const variants = new Set((partyVariants || []).map((v) => String(v).trim()).filter(Boolean));
+    const lines = Array.isArray(bill?.zohoLineItems) ? bill.zohoLineItems : [];
+    let fromLines = 0;
+    let matchedLine = false;
+
+    lines.forEach((line) => {
+        const amt = money(line?.amount);
+        if (amt <= 0) return;
+        const empId = clean(line?.payByEmployeeId);
+        const coId = clean(line?.payByCompanyId);
+        const payBy = clean(line?.payBy).toLowerCase();
+        const isEmployeeLine =
+            payBy === 'employee' || Boolean(empId && payBy !== 'company');
+        const isCompanyLine =
+            !isEmployeeLine && (payBy === 'company' || Boolean(coId));
+
+        if (forEmployee) {
+            if (!isEmployeeLine) return;
+            if (variants.size && empId && !variants.has(empId)) return;
+            if (!empId && variants.size) return;
+            matchedLine = true;
+            fromLines += amt;
+            return;
+        }
+        if (!isCompanyLine) return;
+        if (variants.size && coId && !variants.has(coId)) return;
+        if (!coId && variants.size) return;
+        matchedLine = true;
+        fromLines += amt;
+    });
+
+    if (matchedLine) return fromLines;
+
+    if (forEmployee) {
+        const empId = clean(bill?.payByEmployeeId);
+        if (variants.size && empId && !variants.has(empId)) return 0;
+        return money(bill?.employeePayAmount);
+    }
+    const coId = clean(bill?.payByCompanyId);
+    if (variants.size && coId && !variants.has(coId)) return 0;
+    return money(bill?.companyPayAmount);
+}
+
+function billMatchesParty(bill, { employeeVariants = [], companyVariants = [] } = {}) {
+    const empSet = new Set(employeeVariants.map(String));
+    const coSet = new Set(companyVariants.map(String));
+    if (empSet.size) {
+        if (empSet.has(clean(bill?.payByEmployeeId))) return true;
+        return (Array.isArray(bill?.zohoLineItems) ? bill.zohoLineItems : []).some((line) =>
+            empSet.has(clean(line?.payByEmployeeId)),
+        );
+    }
+    if (coSet.size) {
+        if (coSet.has(clean(bill?.payByCompanyId))) return true;
+        return (Array.isArray(bill?.zohoLineItems) ? bill.zohoLineItems : []).some((line) => {
+            const payBy = clean(line?.payBy).toLowerCase();
+            const empId = clean(line?.payByEmployeeId);
+            const isEmployeeLine =
+                payBy === 'employee' || Boolean(empId && payBy !== 'company');
+            if (isEmployeeLine) return false;
+            return coSet.has(clean(line?.payByCompanyId));
+        });
+    }
+    return false;
 }
 
 function paymentHref(expense) {
@@ -119,32 +193,54 @@ export async function listPartyExpenses(req, res) {
                   companyId: { $in: companyVariants.length ? companyVariants : [companyId] },
               };
 
-        const [stored, bills] = await Promise.all([
+        const billPartyFilter = employeeId
+            ? {
+                  $or: [
+                      {
+                          payByEmployeeId: {
+                              $in: employeeVariants.length ? employeeVariants : [employeeId],
+                          },
+                      },
+                      {
+                          'zohoLineItems.payByEmployeeId': {
+                              $in: employeeVariants.length ? employeeVariants : [employeeId],
+                          },
+                      },
+                  ],
+                  status: { $in: ['Approved', 'Paid', 'Pending HR', 'Pending Accounts'] },
+              }
+            : {
+                  $or: [
+                      {
+                          payByCompanyId: {
+                              $in: companyVariants.length ? companyVariants : [companyId],
+                          },
+                      },
+                      {
+                          'zohoLineItems.payByCompanyId': {
+                              $in: companyVariants.length ? companyVariants : [companyId],
+                          },
+                      },
+                  ],
+                  status: { $in: ['Approved', 'Paid', 'Pending HR', 'Pending Accounts'] },
+              };
+
+        const [stored, billsRaw] = await Promise.all([
             PartyExpense.find({
                 ...expenseFilter,
                 kind: { $in: ['balance', 'other', 'fine', 'loan', 'advance'] },
             })
                 .sort({ updatedAt: -1 })
                 .lean(),
-            employeeId
-                ? UtilityBillPayment.find({
-                      payByEmployeeId: {
-                          $in: employeeVariants.length ? employeeVariants : [employeeId],
-                      },
-                      status: { $in: ['Approved', 'Paid'] },
-                  })
-                      .sort({ createdAt: -1 })
-                      .lean()
-                : UtilityBillPayment.find({
-                      payByCompanyId: {
-                          $in: companyVariants.length ? companyVariants : [companyId],
-                      },
-                      paymentBy: { $in: ['company', 'employee_and_company'] },
-                      status: { $in: ['Approved', 'Paid'] },
-                  })
-                      .sort({ createdAt: -1 })
-                      .lean(),
+            UtilityBillPayment.find(billPartyFilter).sort({ createdAt: -1 }).lean(),
         ]);
+
+        const bills = (billsRaw || []).filter((bill) =>
+            billMatchesParty(bill, {
+                employeeVariants: employeeId ? employeeVariants : [],
+                companyVariants: companyId ? companyVariants : [],
+            }),
+        );
 
         const byBillId = new Map(
             stored
@@ -154,31 +250,79 @@ export async function listPartyExpenses(req, res) {
 
         const rows = [];
         const seenBills = new Set();
+        const partyVariants = employeeId
+            ? employeeVariants.length
+                ? employeeVariants
+                : [employeeId]
+            : companyVariants.length
+              ? companyVariants
+              : [companyId];
 
         for (const bill of bills) {
             const billId = clean(bill._id);
             if (!billId) continue;
 
-            const amount = employeeId
+            const payableShare = resolvePayableShare(bill, {
+                forEmployee: Boolean(employeeId),
+                partyVariants,
+            });
+            const balanceShare = employeeId
                 ? resolveBalanceShare(bill, { forEmployee: true })
                 : resolveBalanceShare(bill, { forEmployee: false });
 
-            // No over-contract balance for this party → skip (vendor bill pay is separate).
-            if (amount <= 0) continue;
+            const expense = byBillId.get(billId);
+            const vendorPaid = clean(bill.status).toLowerCase() === 'paid';
+            const balancePaid = expense?.status === 'Paid';
+
+            if (payableShare > 0) {
+                rows.push({
+                    id: `share:${billId}`,
+                    partyType: employeeId ? 'employee' : 'company',
+                    kind: 'utility_share',
+                    status: vendorPaid ? 'Paid' : 'Not Paid',
+                    amount: payableShare,
+                    description:
+                        `Utility payable share · ${clean(bill.utilityType)} ${clean(bill.billMonth)} · Acc ${clean(bill.accountNo)}`.trim(),
+                    utilityBillId: billId,
+                    utilityBatchId: clean(bill.batchId || expense?.utilityBatchId),
+                    accountNo: clean(bill.accountNo || expense?.accountNo),
+                    utilityType: clean(bill.utilityType || expense?.utilityType),
+                    billMonth: clean(bill.billMonth || expense?.billMonth),
+                    entryId: clean(bill.entryId || expense?.entryId),
+                    zohoBillId: clean(bill.zohoBillId || expense?.zohoBillId),
+                    zohoPaymentId: clean(expense?.zohoPaymentId),
+                    zohoPaymentNumber: clean(expense?.zohoPaymentNumber),
+                    zohoOrganizationId: clean(expense?.zohoOrganizationId || bill.zohoOrganizationId),
+                    zohoJournalId: clean(expense?.zohoJournalId),
+                    paidThroughAccountId: clean(expense?.paidThroughAccountId),
+                    paidThroughAccountName: clean(expense?.paidThroughAccountName),
+                    partyAccountId: clean(bill.partyAccountId),
+                    partyAccountName: clean(bill.partyAccountName),
+                    partyAccountCode: clean(bill.partyAccountCode),
+                    paymentMode: clean(expense?.paymentMode),
+                    paidAt: vendorPaid ? bill.updatedAt || bill.createdAt || null : null,
+                    ledger: [],
+                    billLink: billHref(bill),
+                    paymentLink: '',
+                    canPay: false,
+                    employeeId: clean(expense?.employeeId || bill.payByEmployeeId || employeeId),
+                    employeeName: clean(expense?.employeeName || bill.payByEmployeeName),
+                    companyId: clean(expense?.companyId || bill.payByCompanyId || companyId),
+                    companyName: clean(expense?.companyName || bill.payByCompanyName),
+                });
+            }
+
+            // No over-contract balance for this party → skip balance row.
+            if (balanceShare <= 0) continue;
 
             seenBills.add(billId);
-            const expense = byBillId.get(billId);
-
-            // Balance stays Not Paid until Pay balance (difference) is Save as Paid in Zoho.
-            // Vendor bill status Paid must NOT flip this row.
-            const isPaid = expense?.status === 'Paid';
 
             rows.push({
                 id: expense?._id ? String(expense._id) : `balance:${billId}`,
                 partyType: employeeId ? 'employee' : 'company',
                 kind: 'balance',
-                status: isPaid ? 'Paid' : 'Not Paid',
-                amount: isPaid && expense?.amount > 0 ? money(expense.amount) : amount,
+                status: balancePaid ? 'Paid' : 'Not Paid',
+                amount: balancePaid && expense?.amount > 0 ? money(expense.amount) : balanceShare,
                 description:
                     expense?.description ||
                     `Balance (over contract) · ${clean(bill.utilityType)} ${clean(bill.billMonth)} · Acc ${clean(bill.accountNo)}`.trim(),
@@ -202,8 +346,8 @@ export async function listPartyExpenses(req, res) {
                 paidAt: expense?.paidAt || null,
                 ledger: Array.isArray(expense?.ledger) ? expense.ledger : [],
                 billLink: billHref(bill),
-                paymentLink: isPaid ? paymentHref(expense || {}) : '',
-                canPay: !isPaid,
+                paymentLink: balancePaid ? paymentHref(expense || {}) : '',
+                canPay: !balancePaid,
                 employeeId: clean(expense?.employeeId || bill.payByEmployeeId || employeeId),
                 employeeName: clean(expense?.employeeName || bill.payByEmployeeName),
                 companyId: clean(expense?.companyId || bill.payByCompanyId || companyId),

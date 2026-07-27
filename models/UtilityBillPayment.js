@@ -110,6 +110,11 @@ const utilityBillPaymentSchema = new mongoose.Schema(
                     amount: { type: Number, default: 0 },
                     rate: { type: Number, default: 0 },
                     /** Payable to — employee on this item line (Acc2 / difference party). */
+                    payBy: {
+                        type: String,
+                        enum: ['', 'company', 'employee'],
+                        default: '',
+                    },
                     payByEmployeeId: { type: String, default: '' },
                     payByEmployeeName: { type: String, default: '' },
                     payByCompanyId: { type: String, default: '' },

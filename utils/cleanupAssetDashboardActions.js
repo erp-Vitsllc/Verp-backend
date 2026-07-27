@@ -28,6 +28,7 @@ export const ASSET_DASHBOARD_INBOX_TYPES = [
     'Vehicle Delete Request',
     'Utility Bill Payment',
     'Utility Bill Payment Reminder',
+    'Utility Contract Expiry',
     'Utility Entry Status Change',
 ];
 
