@@ -243,6 +243,38 @@ export async function advanceShopServiceToScheduledAfterAccountsApprove(
         });
     }
 
+    // Create Zoho Bill: Vendor = Garage Name, Pay Account, Amount, Attachment.
+    let zohoBillSync = null;
+    try {
+        const { syncVehicleGarageServiceToZoho } = await import('./syncVehicleGarageServiceToZoho.js');
+        zohoBillSync = await syncVehicleGarageServiceToZoho({
+            asset,
+            service,
+            serviceTypeLabel,
+        });
+        // Re-parse in case sync wrote zohoBillId / error onto service.remark
+        if (service.remark) {
+            try {
+                Object.assign(remark, JSON.parse(service.remark));
+            } catch {
+                /* keep */
+            }
+        }
+        if (typeof appendActivity === 'function' && zohoBillSync) {
+            appendActivity(service, {
+                type: zohoBillSync.ok ? 'zoho_bill_created' : 'zoho_bill_failed',
+                byName: actorName,
+                note: zohoBillSync.message || (zohoBillSync.ok ? 'Zoho bill created' : 'Zoho bill failed'),
+            });
+        }
+    } catch (err) {
+        zohoBillSync = {
+            ok: false,
+            message: err?.message || 'Zoho bill sync failed',
+        };
+        console.error('[GarageZoho] accounts approve sync:', err);
+    }
+
     asset.activeServiceWorkflow = wf;
     asset.markModified('activeServiceWorkflow');
     asset.markModified('services');
@@ -267,7 +299,7 @@ export async function advanceShopServiceToScheduledAfterAccountsApprove(
         notify: true,
     });
 
-    return asset;
+    return { asset, zohoBillSync };
 }
 
 /**

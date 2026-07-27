@@ -325,6 +325,7 @@ export async function mergeWorkflowServiceRecord(asset, serviceRecordId, body) {
         bodyWorkImages,
         returnOtherDoc,
         newConditionImages,
+        garageBillAttachment,
     } = body;
 
     // Return-to-live files: workshop completion report vs shop invoice (legacy invoice key treated as completion when shopInvoice omitted).
@@ -461,6 +462,22 @@ export async function mergeWorkflowServiceRecord(asset, serviceRecordId, body) {
         } catch (error) {
             console.error('[mergeWorkflowServiceRecord] tireCondition upload:', error);
             throw new Error('Failed to upload tire condition file');
+        }
+    }
+    if (garageBillAttachment?.data) {
+        try {
+            const uploadResult = await uploadDocumentToS3(
+                garageBillAttachment.data,
+                'asset-service-attachments',
+                garageBillAttachment.name || `garage-bill-attachment-${Date.now()}.pdf`,
+            );
+            remarkMeta.garageAttachmentUrl = uploadResult.publicId;
+            remarkMeta.garageBillAttachmentUrl = uploadResult.publicId;
+            remarkMeta.garageAttachmentName =
+                garageBillAttachment.name || remarkMeta.garageAttachmentName || '';
+        } catch (error) {
+            console.error('[mergeWorkflowServiceRecord] garageBillAttachment upload:', error);
+            throw new Error('Failed to upload garage bill attachment');
         }
     }
     if (Array.isArray(bodyWorkImages) && bodyWorkImages.length) {
@@ -1376,13 +1393,25 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
             stage === STAGE.ACCOUNTS
         ) {
             persistWorkflowSnapshotToServiceSubdoc(asset);
-            await advanceTireChangeAfterAccountsApprove(asset, asset.activeServiceWorkflow, actorName);
+            const tireAccResult = await advanceTireChangeAfterAccountsApprove(
+                asset,
+                asset.activeServiceWorkflow,
+                actorName,
+            );
             const tireAccFresh = await AssetItem.findById(asset._id).populate(
                 'assignedTo',
                 'firstName lastName employeeId',
             );
+            const zohoBillSync = tireAccResult?.zohoBillSync || null;
             return res.json({
-                message: 'Accounts approved — service scheduled; vehicle will go on service on the start date',
+                message: zohoBillSync?.ok
+                    ? `Accounts approved — service scheduled. ${zohoBillSync.message || 'Zoho bill created.'}`
+                    : zohoBillSync?.message
+                      ? `Accounts approved — service scheduled. Zoho bill: ${zohoBillSync.message}`
+                      : 'Accounts approved — service scheduled; vehicle will go on service on the start date',
+                zohoBillMessage: zohoBillSync?.message || '',
+                zohoBillId: zohoBillSync?.billId || '',
+                zohoBillOk: Boolean(zohoBillSync?.ok),
                 asset: tireAccFresh,
             });
         }
@@ -1407,13 +1436,25 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
             stage === STAGE.ACCOUNTS
         ) {
             persistWorkflowSnapshotToServiceSubdoc(asset);
-            await advanceMechanicalWorkAfterAccountsApprove(asset, asset.activeServiceWorkflow, actorName);
+            const mechAccResult = await advanceMechanicalWorkAfterAccountsApprove(
+                asset,
+                asset.activeServiceWorkflow,
+                actorName,
+            );
             const mechAccFresh = await AssetItem.findById(asset._id).populate(
                 'assignedTo',
                 'firstName lastName employeeId',
             );
+            const zohoBillSync = mechAccResult?.zohoBillSync || null;
             return res.json({
-                message: 'Accounts approved — service scheduled; vehicle will go on service on the start date',
+                message: zohoBillSync?.ok
+                    ? `Accounts approved — service scheduled. ${zohoBillSync.message || 'Zoho bill created.'}`
+                    : zohoBillSync?.message
+                      ? `Accounts approved — service scheduled. Zoho bill: ${zohoBillSync.message}`
+                      : 'Accounts approved — service scheduled; vehicle will go on service on the start date',
+                zohoBillMessage: zohoBillSync?.message || '',
+                zohoBillId: zohoBillSync?.billId || '',
+                zohoBillOk: Boolean(zohoBillSync?.ok),
                 asset: mechAccFresh,
             });
         }
@@ -1438,13 +1479,25 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
             stage === STAGE.ACCOUNTS
         ) {
             persistWorkflowSnapshotToServiceSubdoc(asset);
-            await advanceBodyWorkAfterAccountsApprove(asset, asset.activeServiceWorkflow, actorName);
+            const bodyAccResult = await advanceBodyWorkAfterAccountsApprove(
+                asset,
+                asset.activeServiceWorkflow,
+                actorName,
+            );
             const bodyAccFresh = await AssetItem.findById(asset._id).populate(
                 'assignedTo',
                 'firstName lastName employeeId',
             );
+            const zohoBillSync = bodyAccResult?.zohoBillSync || null;
             return res.json({
-                message: 'Accounts approved — service scheduled; vehicle will go on service on the start date',
+                message: zohoBillSync?.ok
+                    ? `Accounts approved — service scheduled. ${zohoBillSync.message || 'Zoho bill created.'}`
+                    : zohoBillSync?.message
+                      ? `Accounts approved — service scheduled. Zoho bill: ${zohoBillSync.message}`
+                      : 'Accounts approved — service scheduled; vehicle will go on service on the start date',
+                zohoBillMessage: zohoBillSync?.message || '',
+                zohoBillId: zohoBillSync?.billId || '',
+                zohoBillOk: Boolean(zohoBillSync?.ok),
                 asset: bodyAccFresh,
             });
         }
@@ -1469,13 +1522,25 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
             stage === STAGE.ACCOUNTS
         ) {
             persistWorkflowSnapshotToServiceSubdoc(asset);
-            await advanceAccidentRepairAfterAccountsApprove(asset, asset.activeServiceWorkflow, actorName);
+            const accAccResult = await advanceAccidentRepairAfterAccountsApprove(
+                asset,
+                asset.activeServiceWorkflow,
+                actorName,
+            );
             const accAccFresh = await AssetItem.findById(asset._id).populate(
                 'assignedTo',
                 'firstName lastName employeeId',
             );
+            const zohoBillSync = accAccResult?.zohoBillSync || null;
             return res.json({
-                message: 'Accounts approved — service scheduled; vehicle will go on service on the start date',
+                message: zohoBillSync?.ok
+                    ? `Accounts approved — service scheduled. ${zohoBillSync.message || 'Zoho bill created.'}`
+                    : zohoBillSync?.message
+                      ? `Accounts approved — service scheduled. Zoho bill: ${zohoBillSync.message}`
+                      : 'Accounts approved — service scheduled; vehicle will go on service on the start date',
+                zohoBillMessage: zohoBillSync?.message || '',
+                zohoBillId: zohoBillSync?.billId || '',
+                zohoBillOk: Boolean(zohoBillSync?.ok),
                 asset: accAccFresh,
             });
         }

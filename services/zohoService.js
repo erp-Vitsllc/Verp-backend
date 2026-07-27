@@ -620,7 +620,32 @@ export async function createVendorPayment(payload = {}) {
     });
 
     // Zoho returns the created record as "vendorpayment" or "payment" depending on org/version.
-    return response.vendorpayment || response.payment || response;
+    // Some orgs only return top-level payment_id + message — normalize so local upsert works.
+    const nested = response?.vendorpayment || response?.payment;
+    const paymentId = String(
+        nested?.payment_id ||
+            nested?.vendorpayment_id ||
+            nested?.id ||
+            response?.payment_id ||
+            response?.vendorpayment_id ||
+            '',
+    ).trim();
+
+    if (nested && typeof nested === 'object') {
+        return {
+            ...nested,
+            payment_id: paymentId || nested.payment_id,
+        };
+    }
+
+    if (paymentId) {
+        return {
+            ...(response && typeof response === 'object' ? response : {}),
+            payment_id: paymentId,
+        };
+    }
+
+    return response;
 }
 
 /**

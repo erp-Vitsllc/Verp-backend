@@ -79,6 +79,27 @@ export function mapZohoBillToDoc(bill, organizationId, syncedAt = new Date()) {
     };
 }
 
+function resolveVendorPaymentBillNumbers(payment) {
+    const direct = cleanText(payment?.bill_numbers || payment?.bill_number);
+    if (direct) return direct;
+
+    const fromBills = Array.isArray(payment?.bills)
+        ? payment.bills
+              .map((bill) => cleanText(bill?.bill_number || bill?.billNumber || bill?.ref_number))
+              .filter(Boolean)
+        : [];
+    if (fromBills.length) return [...new Set(fromBills)].join(', ');
+
+    const fromApplied = Array.isArray(payment?.applied_bills)
+        ? payment.applied_bills
+              .map((bill) => cleanText(bill?.bill_number || bill?.billNumber))
+              .filter(Boolean)
+        : [];
+    if (fromApplied.length) return [...new Set(fromApplied)].join(', ');
+
+    return '';
+}
+
 export function mapZohoVendorPaymentToDoc(payment, organizationId, syncedAt = new Date()) {
     const zohoPaymentId = cleanText(
         payment?.payment_id || payment?.vendorpayment_id || payment?.id,
@@ -93,7 +114,7 @@ export function mapZohoVendorPaymentToDoc(payment, organizationId, syncedAt = ne
         referenceNumber: cleanText(payment.reference_number),
         vendorId: cleanText(payment.vendor_id),
         vendorName: cleanText(payment.vendor_name),
-        billNumbers: cleanText(payment.bill_numbers || payment.bill_number),
+        billNumbers: resolveVendorPaymentBillNumbers(payment),
         paymentMode: cleanText(payment.payment_mode),
         paidThroughAccountId: cleanText(
             payment.paid_through_account_id || payment.account_id,

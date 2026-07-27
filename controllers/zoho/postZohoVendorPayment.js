@@ -3,6 +3,7 @@ import {
     createZohoJournal,
     fetchBillById,
     fetchPaymentAccounts,
+    fetchVendorPaymentById,
     updateVendorPayment,
 } from '../../services/zohoService.js';
 import {
@@ -17,6 +18,118 @@ import {
 import { getZohoOrgContext, withZohoOrganization } from '../../utils/zohoOrgContext.js';
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+function extractZohoPaymentId(payment) {
+    if (!payment || typeof payment !== 'object') return '';
+    return String(
+        payment.payment_id || payment.vendorpayment_id || payment.id || '',
+    ).trim();
+}
+
+function collectBillNumberHints(body = {}, payload = {}) {
+    const hints = [];
+    const push = (value) => {
+        const text = String(value || '').trim();
+        if (text && !hints.includes(text)) hints.push(text);
+    };
+    for (const bill of [].concat(body.bills || [], payload.bills || [])) {
+        push(bill?.bill_number || bill?.billNumber);
+    }
+    push(body.reference_number || body.referenceNumber || payload.reference_number);
+    return hints;
+}
+
+/**
+ * Zoho create/update often returns a thin payload (or only payment_id).
+ * Bills still refresh to PAID; Payments Made list needs a full local upsert.
+ * Re-fetch + enrich bill numbers so the row appears and is searchable.
+ */
+async function hydrateVendorPaymentForLocalUpsert(rawPayment, { body = {}, payload = {}, isDraft = false } = {}) {
+    let payment = rawPayment && typeof rawPayment === 'object' ? { ...rawPayment } : {};
+    let paymentId = extractZohoPaymentId(payment);
+
+    if (paymentId) {
+        try {
+            const full = await fetchVendorPaymentById(paymentId);
+            if (full && typeof full === 'object') {
+                payment = {
+                    ...payment,
+                    ...full,
+                    payment_id: extractZohoPaymentId(full) || paymentId,
+                };
+            }
+        } catch (err) {
+            console.warn(
+                '[ZohoVendorPayment] fetchVendorPaymentById after save failed:',
+                err?.message || err,
+            );
+            payment.payment_id = payment.payment_id || paymentId;
+        }
+    }
+
+    if (!payment.vendor_id && payload.vendor_id) payment.vendor_id = payload.vendor_id;
+    if (!payment.vendor_name) {
+        payment.vendor_name = String(body.vendor_name || body.vendorName || '').trim();
+    }
+    if (!payment.reference_number && payload.reference_number) {
+        payment.reference_number = payload.reference_number;
+    }
+    if (!payment.date && payload.date) payment.date = payload.date;
+    if (payment.amount == null && payload.amount != null) payment.amount = payload.amount;
+    if (!payment.payment_mode && payload.payment_mode) {
+        payment.payment_mode = payload.payment_mode;
+    }
+    if (!payment.paid_through_account_id && payload.paid_through_account_id) {
+        payment.paid_through_account_id = payload.paid_through_account_id;
+    }
+    if (!payment.paid_through_account_name) {
+        payment.paid_through_account_name = String(
+            body.paid_through_account_name || body.paidThroughAccountName || '',
+        ).trim();
+    }
+
+    payment.status =
+        payment.status || payment.status_formatted || (isDraft ? 'draft' : 'paid');
+
+    let billNumbers = String(payment.bill_numbers || payment.bill_number || '').trim();
+    if (!billNumbers && Array.isArray(payment.bills) && payment.bills.length) {
+        billNumbers = payment.bills
+            .map((bill) => String(bill?.bill_number || bill?.billNumber || '').trim())
+            .filter(Boolean)
+            .join(', ');
+    }
+    if (!billNumbers) {
+        const hints = collectBillNumberHints(body, payload);
+        if (hints.length) billNumbers = hints.join(', ');
+    }
+    if (!billNumbers && Array.isArray(payload.bills) && payload.bills.length) {
+        const numbers = [];
+        for (const bill of payload.bills) {
+            const billId = String(bill?.bill_id || bill?.billId || '').trim();
+            if (!billId) continue;
+            try {
+                const zohoBill = await fetchBillById(billId);
+                const num = String(
+                    zohoBill?.bill_number || zohoBill?.reference_number || '',
+                ).trim();
+                if (num && !numbers.includes(num)) numbers.push(num);
+            } catch {
+                /* ignore single-bill lookup */
+            }
+        }
+        if (numbers.length) billNumbers = numbers.join(', ');
+    }
+    if (billNumbers) payment.bill_numbers = billNumbers;
+
+    if (!extractZohoPaymentId(payment)) {
+        console.warn(
+            '[ZohoVendorPayment] No payment_id after hydrate — Payments Made row may be missing. Keys:',
+            Object.keys(payment).join(', ') || '(empty)',
+        );
+    }
+
+    return payment;
+}
 
 function normName(value) {
     return String(value || '').trim().toLowerCase();
@@ -340,18 +453,20 @@ export const postZohoVendorPayment = async (req, res) => {
             throw createError;
         }
 
+        let syncedPayment = data;
         try {
-            // Prefer Zoho response status; fall back to requested draft/paid intent.
-            const synced = data && typeof data === 'object'
-                ? {
-                      ...data,
-                      status:
-                          data.status ||
-                          data.status_formatted ||
-                          (isDraft ? 'draft' : 'paid'),
-                  }
-                : data;
-            await upsertZohoVendorPaymentFromApi(synced);
+            syncedPayment = await hydrateVendorPaymentForLocalUpsert(data, {
+                body,
+                payload,
+                isDraft,
+            });
+            const upserted = await upsertZohoVendorPaymentFromApi(syncedPayment);
+            if (!upserted) {
+                console.warn(
+                    '[ZohoVendorPaymentCreate] Local Payments Made upsert skipped (missing payment_id). Bill may still show Paid.',
+                );
+            }
+            data = syncedPayment;
         } catch (syncError) {
             console.warn(
                 '[ZohoVendorPaymentCreate] Zoho create ok; local DB upsert failed:',
@@ -478,19 +593,23 @@ export const putZohoVendorPayment = async (req, res) => {
         const isDraft = payload.is_draft === true;
         // Swap foreign-org Paid Through for the same-named payment-org account (no new journal on edit).
         await resolveCrossOrgPaidThrough(req.body || {}, payload);
-        const data = await updateVendorPayment(paymentId, payload);
+        let data = await updateVendorPayment(paymentId, payload);
 
         try {
-            const synced = data && typeof data === 'object'
-                ? {
-                      ...data,
-                      status:
-                          data.status ||
-                          data.status_formatted ||
-                          (isDraft ? 'draft' : 'paid'),
-                  }
-                : data;
-            await upsertZohoVendorPaymentFromApi(synced);
+            data = await hydrateVendorPaymentForLocalUpsert(data, {
+                body: req.body || {},
+                payload,
+                isDraft,
+            });
+            if (!extractZohoPaymentId(data)) {
+                data.payment_id = paymentId;
+            }
+            const upserted = await upsertZohoVendorPaymentFromApi(data);
+            if (!upserted) {
+                console.warn(
+                    '[ZohoVendorPaymentUpdate] Local Payments Made upsert skipped (missing payment_id).',
+                );
+            }
         } catch (syncError) {
             console.warn(
                 '[ZohoVendorPaymentUpdate] Zoho update ok; local DB upsert failed:',
