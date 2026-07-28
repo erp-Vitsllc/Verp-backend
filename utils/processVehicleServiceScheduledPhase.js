@@ -15,7 +15,7 @@ const STAGE_SCHEDULED = 'scheduled_service';
 export async function processVehicleServiceScheduledPhase() {
     try {
         const items = await AssetItem.find({ 'activeServiceWorkflow.stage': STAGE_SCHEDULED })
-            .select('assetId name plateNumber status activeServiceWorkflow')
+            .select('assetId name plateNumber status activeServiceWorkflow onServiceActive')
             .limit(1000)
             .lean();
 
@@ -41,7 +41,8 @@ export async function processVehicleServiceScheduledPhase() {
 
             let changed = false;
 
-            if (isServiceActive(asset) && today >= start && today <= end) {
+            // Flip Waiting for Service → On Service once the scheduled window starts.
+            if (!asset.onServiceActive && today >= start && today <= end) {
                 applyServiceActiveState(asset);
                 changed = true;
             }

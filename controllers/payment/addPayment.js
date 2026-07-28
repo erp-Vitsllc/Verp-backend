@@ -86,11 +86,16 @@ export const addPayment = async (req, res) => {
             Boolean(String(expenseAccountId || '').trim()) &&
             Boolean(String(taxTreatment || '').trim()) &&
             Boolean(String(taxId || '').trim());
+        const isLoanRepaymentZohoRefund =
+            ['LoanRepayment', 'AdvanceRepayment'].includes(String(relatedEntityType || '').trim()) &&
+            Boolean(String(paidThroughAccountId || '').trim()) &&
+            Boolean(String(expenseAccountId || '').trim());
         if (
             normalizedSource === 'Cash' &&
             !hasAttachment &&
             !isFineCompanyZohoRefund &&
-            !isUtilityCompanyZohoRefund
+            !isUtilityCompanyZohoRefund &&
+            !isLoanRepaymentZohoRefund
         ) {
             return res.status(400).json({
                 success: false,
@@ -306,6 +311,123 @@ export const addPayment = async (req, res) => {
                     }
                 } else {
                     console.error('[AddPayment] Fine not found:', { relatedEntityId, referenceId });
+                }
+            } else if (
+                relatedEntityType === 'LoanRepayment' ||
+                relatedEntityType === 'AdvanceRepayment'
+            ) {
+                // Employee → company recovery (Expense Refund / Zoho Banking Money In)
+                let loan = await Loan.findById(relatedEntityId);
+                if (!loan && referenceId) {
+                    loan = await Loan.findOne({ loanId: referenceId });
+                }
+
+                if (loan) {
+                    const repaymentQuery = {
+                        relatedEntityType: { $in: ['LoanRepayment', 'AdvanceRepayment'] },
+                        status: 'Completed',
+                    };
+                    const paymentsById = await Payment.find({
+                        ...repaymentQuery,
+                        relatedEntityId: loan._id,
+                    });
+                    const paymentsByRefId = loan.loanId
+                        ? await Payment.find({
+                              ...repaymentQuery,
+                              referenceId: loan.loanId,
+                          })
+                        : [];
+
+                    const allPaymentIds = new Set();
+                    const allPayments = [];
+                    [...paymentsById, ...paymentsByRefId].forEach((p) => {
+                        if (!allPaymentIds.has(p._id.toString())) {
+                            allPaymentIds.add(p._id.toString());
+                            allPayments.push(p);
+                        }
+                    });
+
+                    const totalRepaid = allPayments.reduce(
+                        (sum, p) => sum + parseFloat(p.amount || 0),
+                        0,
+                    );
+                    loan.repaidAmount = totalRepaid;
+                    await loan.save();
+
+                    const paidThroughId = String(
+                        paidThroughAccountId || payment.paidThroughAccountId || '',
+                    ).trim();
+                    const expenseId = String(
+                        expenseAccountId || payment.expenseAccountId || '',
+                    ).trim();
+
+                    if (paidThroughId && expenseId) {
+                        try {
+                            const { syncLoanRepaymentPaymentToZoho } = await import(
+                                '../../utils/syncFineCompanyPaymentToZoho.js'
+                            );
+                            const zohoResult = await syncLoanRepaymentPaymentToZoho({
+                                payment,
+                                loan,
+                                employee,
+                                organizationId:
+                                    zohoOrganizationId || payment.zohoOrganizationId,
+                                expenseAccountId: expenseId,
+                                expenseAccountName:
+                                    expenseAccountName || payment.expenseAccountName,
+                                paidThroughAccountId: paidThroughId,
+                                paidThroughAccountName:
+                                    paidThroughAccountName || payment.paidThroughAccountName,
+                                locationId,
+                                taxTreatment,
+                                placeOfSupply,
+                                taxId,
+                                isInclusiveTax:
+                                    typeof isInclusiveTax === 'boolean' ? isInclusiveTax : true,
+                                paymentMode: paymentMode || receivedVia || 'Cash',
+                                vendorId,
+                                vendorName,
+                                attachments: Array.isArray(attachments)
+                                    ? attachments
+                                    : attachment
+                                      ? [attachment]
+                                      : [],
+                            });
+                            if (zohoResult.ok) {
+                                payment.zohoExpenseId =
+                                    zohoResult.expenseId || payment.zohoExpenseId || '';
+                                payment.zohoOrganizationId =
+                                    zohoResult.organizationId || payment.zohoOrganizationId;
+                                payment.zohoSyncError = '';
+                                await payment.save();
+                                req._loanRepaymentZohoSyncResult = zohoResult;
+                            } else {
+                                payment.zohoSyncError = zohoResult.message || 'Zoho sync failed';
+                                await payment.save();
+                                req._loanRepaymentZohoSyncResult = zohoResult;
+                                console.warn(
+                                    '[AddPayment] Loan repayment Zoho sync:',
+                                    zohoResult.message,
+                                );
+                            }
+                        } catch (zohoErr) {
+                            console.error(
+                                '[AddPayment] Loan repayment Zoho sync error:',
+                                zohoErr?.message || zohoErr,
+                            );
+                            payment.zohoSyncError = zohoErr?.message || 'Zoho sync failed';
+                            await payment.save();
+                            req._loanRepaymentZohoSyncResult = {
+                                ok: false,
+                                message: zohoErr?.message || 'Zoho sync failed',
+                            };
+                        }
+                    }
+                } else {
+                    console.error('[AddPayment] Loan not found for repayment:', {
+                        relatedEntityId,
+                        referenceId,
+                    });
                 }
             } else if (relatedEntityType === 'Loan' || relatedEntityType === 'Advance') {
                 // Loan and Salary Advance share the same Loan model + Zoho Expense sync
@@ -762,13 +884,14 @@ export const addPayment = async (req, res) => {
         const loanZoho = req._loanZohoSyncResult;
         const fineZoho = req._fineZohoSyncResult;
         const utilityZoho = req._utilityZohoSyncResult;
-        const zohoSync = loanZoho || fineZoho || utilityZoho;
+        const loanRepaymentZoho = req._loanRepaymentZohoSyncResult;
+        const zohoSync = loanRepaymentZoho || loanZoho || fineZoho || utilityZoho;
         let message = 'Payment created successfully';
         if (zohoSync) {
             if (zohoSync.ok && zohoSync.expenseId) {
                 message =
                     zohoSync.message ||
-                    (fineZoho || utilityZoho
+                    (fineZoho || utilityZoho || loanRepaymentZoho
                         ? 'Payment created and Zoho Expense Refund posted.'
                         : 'Payment created and Zoho Expense posted.');
             } else if (zohoSync.ok && zohoSync.journalId) {

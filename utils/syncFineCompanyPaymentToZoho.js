@@ -428,3 +428,54 @@ export async function syncUtilityDifferencePaymentToZoho({
         attachments,
     });
 }
+
+/**
+ * Loan / Advance employee repayment → Zoho Books Banking Expense Refund (Money In).
+ */
+export async function syncLoanRepaymentPaymentToZoho({
+    payment,
+    loan,
+    employee,
+    organizationId = '',
+    expenseAccountId = '',
+    expenseAccountName = '',
+    paidThroughAccountId = '',
+    paidThroughAccountName = '',
+    locationId = '',
+    taxTreatment = '',
+    placeOfSupply = '',
+    taxId = '',
+    isInclusiveTax = true,
+    paymentMode = 'Cash',
+    vendorId = '',
+    vendorName = '',
+    attachments = [],
+} = {}) {
+    if (!loan?._id) return { ok: false, message: 'Loan is required.' };
+    const loanLabel = clean(loan.loanId || loan._id);
+    const kind = String(loan.type || 'Loan').trim() === 'Advance' ? 'Advance' : 'Loan';
+    return syncExpenseRefundPaymentToZoho({
+        payment,
+        employee,
+        referenceLabel: `${kind} ${loanLabel}`,
+        organizationHint:
+            clean(organizationId) ||
+            clean(payment?.zohoOrganizationId) ||
+            clean(loan?.zohoOrganizationId),
+        requireEntityId: true,
+        entityId: String(loan._id),
+        expenseAccountId,
+        expenseAccountName,
+        paidThroughAccountId,
+        paidThroughAccountName,
+        locationId,
+        taxTreatment,
+        placeOfSupply,
+        taxId,
+        isInclusiveTax,
+        paymentMode,
+        vendorId,
+        vendorName,
+        attachments,
+    });
+}

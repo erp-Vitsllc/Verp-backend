@@ -15,6 +15,10 @@ import {
     actorMayManageOilService,
     userIsOilServiceAdminOfficer,
     closeOilServicePendingDashboardActions,
+    isOilServiceCashPayment,
+    advanceOilCashAfterHrApprove,
+    advanceOilCashAfterAccountsApprove,
+    parseOilServiceRemark,
 } from '../utils/oilServiceWorkflow.js';
 import {
     advanceTireChangeAfterAccountsApprove,
@@ -930,9 +934,14 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
         const serviceSubEarly = wf.serviceRecordId ? asset.services?.id?.(wf.serviceRecordId) : null;
         const isOilServiceWf = isOilServiceWorkflowRecord(wf, serviceSubEarly);
         const oilServiceManager = isOilServiceWf ? await actorMayManageOilServiceForAsset(req.user, asset) : false;
+        const oilCashAtPaymentStage =
+            isOilServiceWf &&
+            isOilServiceCashPayment(serviceSubEarly) &&
+            [STAGE.HR, STAGE.ACCOUNTS].includes(stage);
         const oilManagerStage =
             isOilServiceWf &&
             oilServiceManager &&
+            !oilCashAtPaymentStage &&
             [STAGE.HR, STAGE.ACCOUNTS, STAGE.ADMIN].includes(stage) &&
             ['approve', 'save'].includes(action);
 
@@ -953,7 +962,8 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
         const performedById = actorEmp?._id;
 
         if (action === 'approve' && (stage === STAGE.HR || stage === STAGE.ACCOUNTS) && !actorSignatureUrl) {
-            const oilBypass = isOilServiceWf && oilServiceManager && stage === STAGE.HR;
+            const oilBypass =
+                isOilServiceWf && oilServiceManager && stage === STAGE.HR && !oilCashAtPaymentStage;
             if (!oilBypass) {
                 return res.status(400).json({
                     message: 'Digital signature is required. Please add your signature in profile before approval.',
@@ -1309,11 +1319,53 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
         const isBodyWf = isBodyWorkWorkflow(wf, serviceSubForOil);
         const isAccWf = isAccidentRepairWorkflow(wf, serviceSubForOil);
         const oilServiceType = isOilServiceWorkflowRecord(wf, serviceSubForOil);
+        const oilCashPayment = oilServiceType && isOilServiceCashPayment(serviceSubForOil || parseOilServiceRemark(serviceSubForOil));
+
+        // Cash oil: End Service → HR → Accounts → Zoho (do not jump to complete).
+        if (action === 'approve' && oilCashPayment && stage === STAGE.HR) {
+            persistWorkflowSnapshotToServiceSubdoc(asset);
+            await advanceOilCashAfterHrApprove(asset, asset.activeServiceWorkflow, actorName);
+            const oilHrFresh = await AssetItem.findById(asset._id).populate(
+                'assignedTo',
+                'firstName lastName employeeId',
+            );
+            return res.json({
+                message: 'HR approved — sent to Accounts for payment (Zoho bill on Accounts approve).',
+                asset: oilHrFresh,
+            });
+        }
+
+        if (action === 'approve' && oilCashPayment && stage === STAGE.ACCOUNTS) {
+            persistWorkflowSnapshotToServiceSubdoc(asset);
+            const oilAccResult = await advanceOilCashAfterAccountsApprove(
+                asset,
+                asset.activeServiceWorkflow,
+                actorName,
+            );
+            const oilAccFresh = await AssetItem.findById(asset._id).populate(
+                'assignedTo',
+                'firstName lastName employeeId',
+            );
+            const zohoBillSync = oilAccResult?.zohoBillSync || null;
+            return res.json({
+                message: zohoBillSync?.ok
+                    ? `Accounts approved. ${zohoBillSync.message || 'Zoho bill created.'}`
+                    : zohoBillSync?.message
+                      ? `Accounts approved. Zoho bill: ${zohoBillSync.message}`
+                      : 'Accounts approved — oil service payment complete.',
+                zohoBillMessage: zohoBillSync?.message || '',
+                zohoBillId: zohoBillSync?.billId || '',
+                zohoBillOk: Boolean(zohoBillSync?.ok),
+                asset: oilAccFresh,
+            });
+        }
+
         if (
             action === 'approve' &&
             oilServiceType &&
             oilServiceManager &&
-            [STAGE.HR, STAGE.ACCOUNTS, STAGE.ADMIN].includes(stage)
+            [STAGE.HR, STAGE.ACCOUNTS, STAGE.ADMIN].includes(stage) &&
+            !oilCashPayment
         ) {
             const meta = parseRemarkMeta(serviceSubForOil?.remark);
             const handOverRaw = meta.handOverDate;

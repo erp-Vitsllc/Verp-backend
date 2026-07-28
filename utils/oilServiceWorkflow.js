@@ -22,6 +22,8 @@ import {
 
 const STAGE_SCHEDULED = 'scheduled_service';
 const STAGE_COMPLETE = 'complete';
+const STAGE_PENDING_HR = 'pending_hr';
+const STAGE_PENDING_ACCOUNTS = 'pending_accounts';
 
 const normEmpId = (s) => (s || '').toString().toLowerCase().replace(/\s+/g, '');
 
@@ -37,9 +39,28 @@ export function isOilServiceLive(asset, service = null) {
         : { wf: asset?.activeServiceWorkflow || null, bindActive: true };
     const wf = ctx.wf || {};
     if (!isOilServiceWorkflowRecord(wf, service)) return false;
+    const stage = String(wf.stage || '').toLowerCase();
+    if (
+        stage === STAGE_COMPLETE ||
+        stage === STAGE_PENDING_HR ||
+        stage === STAGE_PENDING_ACCOUNTS ||
+        stage === 'rejected'
+    ) {
+        return false;
+    }
     if (wf.oilServiceLiveAt) return true;
     const remark = parseOilServiceRemark(service);
-    if (remark?.oilServiceLiveAt) return true;
+    if (remark?.oilServiceLiveAt) {
+        // Live flag alone is not enough once payment approval stages start.
+        if (
+            String(remark.workflowStage || '').toLowerCase() === STAGE_PENDING_HR ||
+            String(remark.workflowStage || '').toLowerCase() === STAGE_PENDING_ACCOUNTS ||
+            String(remark.workflowStage || '').toLowerCase() === STAGE_COMPLETE
+        ) {
+            return false;
+        }
+        return true;
+    }
     if (!ctx.bindActive) return false;
     return asset?.onServiceActive === true && String(wf.stage || '').toLowerCase() === STAGE_SCHEDULED;
 }
@@ -226,6 +247,16 @@ export function parseOilServiceRemark(service) {
     } catch {
         return {};
     }
+}
+
+/** Cash payment (not warranty) — requires HR then Accounts → Zoho bill. */
+export function isOilServiceCashPayment(remarkOrService) {
+    if (!remarkOrService) return true;
+    const remark =
+        remarkOrService.remark != null || remarkOrService.serviceType != null
+            ? parseOilServiceRemark(remarkOrService)
+            : remarkOrService;
+    return String(remark?.amountMode || '').toLowerCase() !== 'warranty';
 }
 
 function toEmpIdString(v) {
@@ -550,7 +581,10 @@ function syncOilActivityToWorkflowHistory(asset, serviceId, { type, byName, note
         service_scheduled: STAGE_SCHEDULED,
         on_service: STAGE_SCHEDULED,
         date_change: STAGE_SCHEDULED,
-        service_completed: STAGE_COMPLETE,
+        service_completed: STAGE_SCHEDULED,
+        hr_approved: STAGE_PENDING_HR,
+        accounts_approved: STAGE_PENDING_ACCOUNTS,
+        zoho_bill_created: STAGE_PENDING_ACCOUNTS,
     };
     const actionByType = {
         service_created: 'created',
@@ -559,6 +593,9 @@ function syncOilActivityToWorkflowHistory(asset, serviceId, { type, byName, note
         on_service: 'on_service',
         date_change: 'date_change',
         service_completed: 'completed',
+        hr_approved: 'approve',
+        accounts_approved: 'approve',
+        zoho_bill_created: 'approve',
     };
     pushWorkflowHistory(asset, {
         stage: stageByType[type] || type,
@@ -785,27 +822,7 @@ export async function submitOilServiceAssignment(asset, serviceId, req) {
         await asset.save();
     }
 
-    // Paid oil assignment: create Zoho Bill when Pay Account + amount are on the garage row.
-    try {
-        const liveService = asset.services?.id?.(serviceId);
-        const liveRemark = parseOilServiceRemark(liveService);
-        const amountMode = String(liveRemark.amountMode || '').toLowerCase();
-        const hasPayAccount = Boolean(
-            String(liveRemark.payAccountId || liveRemark.garagePayAccountId || '').trim(),
-        );
-        if (amountMode !== 'warranty' && hasPayAccount && liveService) {
-            const { syncVehicleGarageServiceToZoho } = await import('./syncVehicleGarageServiceToZoho.js');
-            await syncVehicleGarageServiceToZoho({
-                asset,
-                service: liveService,
-                serviceTypeLabel: 'Oil Service',
-            });
-            asset.markModified('services');
-            await asset.save();
-        }
-    } catch (zohoErr) {
-        console.warn('[OilService] Zoho bill on assignment failed:', zohoErr?.message || zohoErr);
-    }
+    // Cash Zoho bills are created only after End Service → HR → Accounts approve (not on assignment).
 
     const populated = await AssetItem.findById(asset._id)
         .populate('assignedTo', 'firstName lastName employeeId companyEmail workEmail personalEmail email')
@@ -866,7 +883,9 @@ export async function saveOilServiceDetailsDraft(asset, serviceId, serviceUpdate
 }
 
 /**
- * Submit oil service details → complete workflow, restore vehicle status, notify stakeholders.
+ * Submit oil service details (End Service).
+ * - Warranty → complete (no Zoho).
+ * - Cash → pending_hr → Accounts → Zoho bill on Accounts approve.
  */
 export async function submitOilServiceDetails(asset, serviceId, serviceUpdates, req) {
     const service = asset.services?.id?.(serviceId);
@@ -894,18 +913,25 @@ export async function submitOilServiceDetails(asset, serviceId, serviceUpdates, 
         throw new Error('Total service charge is required and must be greater than 0.');
     }
 
+    const isCash = isOilServiceCashPayment(remark);
+    if (isCash) {
+        const hasPayAccount = Boolean(
+            String(remark.payAccountId || remark.garagePayAccountId || '').trim(),
+        );
+        if (!hasPayAccount) {
+            throw new Error('Pay Account is required for Cash oil service before End Service.');
+        }
+    }
+
     const actorName = await getRequesterName(req.user);
-    wf.stage = STAGE_COMPLETE;
     remark.serviceDetailsDraft = false;
-    remark.vehicleServiceCompleted = 'live';
-    remark.vehicleServiceCompletedAt = new Date().toISOString();
-    remark.workflowStage = STAGE_COMPLETE;
-    asset.services.id(serviceId).remark = JSON.stringify(remark);
+    remark.oilServiceEndedAt = new Date().toISOString();
+    remark.serviceCompletedByName = actorName;
 
     recordOilServiceActivity(asset, service, serviceId, {
         type: 'service_completed',
         byName: actorName,
-        note: 'Oil service completed',
+        note: isCash ? 'Oil service ended — sent to HR for payment approval' : 'Oil service completed',
     });
 
     if (bindActive) {
@@ -913,33 +939,48 @@ export async function submitOilServiceDetails(asset, serviceId, serviceUpdates, 
         asset.onServiceActive = false;
     }
 
+    // --- Cash: End Service → HR approval (Zoho after Accounts) ---
+    if (isCash) {
+        wf.stage = STAGE_PENDING_HR;
+        remark.workflowStage = STAGE_PENDING_HR;
+        remark.vehicleServiceCompleted = '';
+        asset.services.id(serviceId).remark = JSON.stringify(remark);
+        commitWorkflowContext(asset, serviceId, { wf, bindActive });
+        asset.markModified('services');
+        await asset.save();
+
+        const populated = await AssetItem.findById(asset._id)
+            .populate('assignedTo', 'firstName lastName employeeId companyEmail workEmail personalEmail email')
+            .lean();
+        const hr = await getDepartmentHOD('hr');
+        if (!hr?._id) {
+            throw new Error('No HR assignee is configured in the company flowchart for Cash oil payment approval.');
+        }
+
+        const plate = [populated?.plateEmirate, populated?.plateNumber].filter(Boolean).join(' ').trim();
+        const detailLine = `Oil service for ${populated?.assetId || ''}${plate ? ` (${plate})` : ''} has ended. Cash payment requires HR approval, then Accounts payment (Zoho bill).`;
+
+        await notifyStakeholders({
+            asset: populated,
+            serviceRecordId: serviceId,
+            recipients: [hr],
+            actionLabel: 'Oil service — HR payment approval',
+            detailLine,
+        });
+
+        return { asset: populated, zohoBillSync: null, routedTo: 'pending_hr' };
+    }
+
+    // --- Warranty: complete immediately (no Zoho) ---
+    wf.stage = STAGE_COMPLETE;
+    remark.vehicleServiceCompleted = 'live';
+    remark.vehicleServiceCompletedAt = new Date().toISOString();
+    remark.workflowStage = STAGE_COMPLETE;
+    asset.services.id(serviceId).remark = JSON.stringify(remark);
+
     commitWorkflowContext(asset, serviceId, { wf, bindActive });
     asset.markModified('services');
     await asset.save();
-
-    // Paid oil jobs: Vendor = Garage, Pay Account, Amount → Zoho Bill (same as shop garage services).
-    let zohoBillSync = null;
-    try {
-        const completedService = asset.services.id(serviceId);
-        const completedRemark = parseOilServiceRemark(completedService);
-        const amountMode = String(completedRemark.amountMode || '').toLowerCase();
-        const hasPayAccount = Boolean(
-            String(completedRemark.payAccountId || completedRemark.garagePayAccountId || '').trim(),
-        );
-        if (amountMode !== 'warranty' && hasPayAccount) {
-            const { syncVehicleGarageServiceToZoho } = await import('./syncVehicleGarageServiceToZoho.js');
-            zohoBillSync = await syncVehicleGarageServiceToZoho({
-                asset,
-                service: completedService,
-                serviceTypeLabel: 'Oil Service',
-            });
-            asset.markModified('services');
-            await asset.save();
-        }
-    } catch (zohoErr) {
-        console.warn('[OilService] Zoho garage bill sync failed:', zohoErr?.message || zohoErr);
-        zohoBillSync = { ok: false, message: zohoErr?.message || 'Zoho bill sync failed' };
-    }
 
     const populated = await AssetItem.findById(asset._id)
         .populate('assignedTo', 'firstName lastName employeeId companyEmail workEmail personalEmail email')
@@ -958,6 +999,136 @@ export async function submitOilServiceDetails(asset, serviceId, serviceUpdates, 
         assignee,
         detailLine,
         actionedBy: req.user?.employeeObjectId || req.user?._id || null,
+    });
+
+    return { asset: populated, zohoBillSync: null, routedTo: 'complete' };
+}
+
+/**
+ * HR approved Cash oil payment → send to Accounts for Zoho bill payment.
+ */
+export async function advanceOilCashAfterHrApprove(asset, wf, actorName) {
+    const serviceId = wf.serviceRecordId;
+    const service = asset.services?.id?.(serviceId);
+    if (!service) throw new Error('Service record not found');
+    const remark = parseOilServiceRemark(service);
+    if (!isOilServiceCashPayment(remark)) {
+        throw new Error('Only Cash oil services require HR → Accounts payment approval.');
+    }
+
+    wf.stage = STAGE_PENDING_ACCOUNTS;
+    remark.workflowStage = STAGE_PENDING_ACCOUNTS;
+    remark.hrPaymentApprovedAt = new Date().toISOString();
+    remark.hrPaymentApprovedByName = actorName || '';
+    service.remark = JSON.stringify(remark);
+
+    recordOilServiceActivity(asset, service, serviceId, {
+        type: 'hr_approved',
+        byName: actorName,
+        note: 'HR approved — sent to Accounts for payment',
+    });
+
+    asset.activeServiceWorkflow = wf;
+    persistWorkflowSnapshot(asset);
+    asset.markModified('activeServiceWorkflow');
+    asset.markModified('services');
+    await asset.save();
+
+    const populated = await AssetItem.findById(asset._id)
+        .populate('assignedTo', 'firstName lastName employeeId companyEmail workEmail personalEmail email')
+        .lean();
+    const accounts = await getDepartmentHOD('accounts');
+    if (!accounts?._id) {
+        throw new Error('No Accounts assignee is configured in the company flowchart.');
+    }
+
+    const plate = [populated?.plateEmirate, populated?.plateNumber].filter(Boolean).join(' ').trim();
+    await notifyStakeholders({
+        asset: populated,
+        serviceRecordId: serviceId,
+        recipients: [accounts],
+        actionLabel: 'Oil service — Accounts payment',
+        detailLine: `HR approved Cash oil service for ${populated?.assetId || ''}${plate ? ` (${plate})` : ''}. Approve to create the Zoho bill.`,
+    });
+
+    return populated;
+}
+
+/**
+ * Accounts approved Cash oil payment → create Zoho bill and complete.
+ */
+export async function advanceOilCashAfterAccountsApprove(asset, wf, actorName) {
+    const serviceId = wf.serviceRecordId;
+    const service = asset.services?.id?.(serviceId);
+    if (!service) throw new Error('Service record not found');
+    const remark = parseOilServiceRemark(service);
+    if (!isOilServiceCashPayment(remark)) {
+        throw new Error('Only Cash oil services create a Zoho bill on Accounts approve.');
+    }
+
+    const hasPayAccount = Boolean(
+        String(remark.payAccountId || remark.garagePayAccountId || '').trim(),
+    );
+    if (!hasPayAccount) {
+        throw new Error('Pay Account is required before Accounts can approve and create the Zoho bill.');
+    }
+
+    let zohoBillSync = null;
+    try {
+        const { syncVehicleGarageServiceToZoho } = await import('./syncVehicleGarageServiceToZoho.js');
+        zohoBillSync = await syncVehicleGarageServiceToZoho({
+            asset,
+            service,
+            serviceTypeLabel: 'Oil Service',
+        });
+    } catch (err) {
+        zohoBillSync = { ok: false, message: err?.message || 'Zoho bill sync failed' };
+        console.error('[OilService] Accounts Zoho bill sync:', err);
+    }
+
+    const liveRemark = parseOilServiceRemark(asset.services.id(serviceId));
+    wf.stage = STAGE_COMPLETE;
+    liveRemark.workflowStage = STAGE_COMPLETE;
+    liveRemark.vehicleServiceCompleted = 'live';
+    liveRemark.vehicleServiceCompletedAt = new Date().toISOString();
+    liveRemark.accountsPaymentApprovedAt = new Date().toISOString();
+    liveRemark.accountsPaymentApprovedByName = actorName || '';
+    asset.services.id(serviceId).remark = JSON.stringify(liveRemark);
+
+    recordOilServiceActivity(asset, asset.services.id(serviceId), serviceId, {
+        type: zohoBillSync?.ok ? 'zoho_bill_created' : 'accounts_approved',
+        byName: actorName,
+        note: zohoBillSync?.ok
+            ? zohoBillSync.message || 'Accounts approved — Zoho bill created'
+            : zohoBillSync?.message
+              ? `Accounts approved. Zoho bill: ${zohoBillSync.message}`
+              : 'Accounts approved — oil service complete',
+    });
+
+    asset.activeServiceWorkflow = wf;
+    persistWorkflowSnapshot(asset);
+    asset.markModified('activeServiceWorkflow');
+    asset.markModified('services');
+    await asset.save();
+
+    const populated = await AssetItem.findById(asset._id)
+        .populate('assignedTo', 'firstName lastName employeeId companyEmail workEmail personalEmail email')
+        .lean();
+    const hr = await getDepartmentHOD('hr');
+    const adminOfficer = await getDepartmentHOD('admincontroller');
+    const assignee = populated?.assignedTo || null;
+    const detailLine = zohoBillSync?.ok
+        ? `Oil service Cash payment approved. ${zohoBillSync.message || 'Zoho bill created.'}`
+        : `Oil service Cash payment approved.${zohoBillSync?.message ? ` Zoho: ${zohoBillSync.message}` : ''}`;
+
+    await notifyOilServiceDetailsCompleted({
+        asset: populated,
+        serviceRecordId: serviceId,
+        adminOfficer,
+        hr,
+        assignee,
+        detailLine,
+        actionedBy: null,
     });
 
     return { asset: populated, zohoBillSync };

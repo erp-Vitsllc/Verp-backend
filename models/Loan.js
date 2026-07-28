@@ -28,6 +28,11 @@ const loanSchema = new mongoose.Schema({
         type: Number,
         default: 0
     },
+    /** Employee → company recovery total (Expense Refund / salary deduction cash-ins). */
+    repaidAmount: {
+        type: Number,
+        default: 0
+    },
     duration: {
         type: Number,
         required: true // in months

@@ -12008,10 +12008,16 @@ export const submitOilServiceDetailsHandler = async (req, res) => {
         );
         const freshAsset = result?.asset || result;
         const zohoBillSync = result?.zohoBillSync || null;
+        const routedTo = result?.routedTo || '';
+        const message =
+            routedTo === 'pending_hr'
+                ? 'Oil service ended. Cash payment sent to HR for approval, then Accounts will create the Zoho bill.'
+                : zohoBillSync?.ok
+                  ? `Oil service completed. ${zohoBillSync.message || 'Zoho bill created.'}`
+                  : 'Oil service completed. Vehicle status restored.';
         return res.json({
-            message: zohoBillSync?.ok
-                ? `Oil service completed. ${zohoBillSync.message || 'Zoho bill created.'}`
-                : 'Oil service completed. Vehicle status restored.',
+            message,
+            routedTo,
             zohoBillOk: Boolean(zohoBillSync?.ok),
             zohoBillMessage: zohoBillSync?.message || '',
             asset: freshAsset,
