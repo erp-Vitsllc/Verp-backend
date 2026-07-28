@@ -112,6 +112,38 @@ export const getDepartmentHOD = async (departmentType) => {
                     };
                 }
             }
+
+            // First-time Pending invite (no Active row yet): use the Pending row's assignee
+            // so Quotation Review / workflows can still resolve HR / Accounts.
+            if (!responsibility) {
+                let pendingInvite = null;
+                if (category === 'admincontroller') {
+                    pendingInvite = await Flowchart.findOne({
+                        category: { $regex: /^admin$/i },
+                        status: 'Pending',
+                    }).populate('empObjectId', empPopulateSelect);
+                    if (!pendingInvite) {
+                        pendingInvite = await Flowchart.findOne({
+                            category: { $regex: /^administrator$/i },
+                            status: 'Pending',
+                        }).populate('empObjectId', empPopulateSelect);
+                    }
+                    if (!pendingInvite) {
+                        pendingInvite = await Flowchart.findOne({
+                            category: { $regex: categoryRegex },
+                            status: 'Pending',
+                        }).populate('empObjectId', empPopulateSelect);
+                    }
+                } else {
+                    pendingInvite = await Flowchart.findOne({
+                        category: { $regex: categoryRegex },
+                        status: 'Pending',
+                    }).populate('empObjectId', empPopulateSelect);
+                }
+                if (pendingInvite?.empObjectId || pendingInvite?.employeeId) {
+                    responsibility = pendingInvite;
+                }
+            }
         }
 
         if (responsibility) {

@@ -243,26 +243,31 @@ export async function submitTireChangeGarage(asset, serviceId, serviceUpdates, r
     appendTireChangeActivity(asset.services.id(serviceId), {
         type: 'garage_updated',
         byName: actorName,
-        note: 'Garage details submitted',
+        note: `Garage details submitted · Service start: ${
+            startRaw ? String(startRaw).slice(0, 10) : '—'
+        }`,
     });
-    wf.stage = TIRE_CHANGE_STAGE.ACCOUNTS;
-    wf.accountsPendingSince = new Date();
-    wf.accountsReminderAt = new Date(Date.now() + TWO_DAYS_MS);
+    // Garage done → schedule immediately. Accounts Zoho billing is only after Service Completed.
     commitWorkflowContext(asset, serviceId, { wf, bindActive });
     asset.markModified('services');
     await asset.save();
 
-    const accounts = await getDepartmentHOD('accounts');
-    await notifyTireChangeStakeholder({
+    const { advanceShopServiceToScheduledAfterAccountsApprove } = await import(
+        './vehicleShopServiceScheduled.js'
+    );
+    await advanceShopServiceToScheduledAfterAccountsApprove(
         asset,
-        serviceRecordId: serviceId,
-        recipient: accounts,
-        requestedByName: actorName,
-        extra2: 'Approve garage and service dates',
-        stageLabel: 'Accounts approval required',
-        actionLabel: 'Tire change — garage approval',
-        detailLine: `${actorName} updated garage details for a tire change. Please review and approve on the Tire Change page.`,
-    });
+        asset.activeServiceWorkflow || wf,
+        actorName,
+        {
+            serviceTypeLabel: 'Tire Change',
+            linkPath: tireChangeDetailsPath(asset._id, serviceId),
+            dashboardMeta: tireChangeDashboardMeta(asset, serviceId),
+            appendActivity: null,
+            scheduleActivityType: 'service_scheduled',
+            scheduleActivityNote: 'Garage submitted — service scheduled (Accounts Zoho after End Service)',
+        },
+    );
 
     return asset;
 }

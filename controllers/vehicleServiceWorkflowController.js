@@ -5,7 +5,7 @@ import EmployeeBasic from '../models/EmployeeBasic.js';
 import { uploadDocumentToS3 } from '../utils/s3Upload.js';
 import { syncDashboardAction } from '../utils/syncDashboard.js';
 import { closeAdminOfficerServiceTrackNotification } from '../utils/vehicleServiceAdminOfficerNotification.js';
-import { getDepartmentHOD } from '../utils/getDepartmentHOD.js';
+import { getDepartmentHOD, isUserInFlowchart } from '../utils/getDepartmentHOD.js';
 import { getManagementHOD } from '../utils/getManagementHOD.js';
 import { sendVehicleServiceWorkflowEmail } from '../utils/sendVehicleServiceWorkflowEmail.js';
 import { resolveEmployeeEmail } from '../utils/resolveEmployeeEmail.js';
@@ -183,14 +183,55 @@ async function resolveWorkflowStakeholders(asset, serviceRecordId) {
 }
 
 async function resolveAssigneeForStage(stage) {
-    if (stage === STAGE.HR) return getDepartmentHOD('hr');
-    if (stage === STAGE.ACCOUNTS) return getDepartmentHOD('accounts');
-    if (stage === STAGE.ADMIN || stage === STAGE.SCHEDULED) return getDepartmentHOD('assetcontroller');
-    if (stage === 'pending_admin_officer' || stage === 'pending_admin_return') {
-        return getDepartmentHOD('admincontroller');
+    const roleKey = flowchartRoleKeyForStage(stage);
+    if (!roleKey) return null;
+    if (roleKey === 'management') return getManagementHOD();
+
+    let assignee = await getDepartmentHOD(roleKey);
+    // Flowchart row exists but empObjectId was never linked — resolve by employeeId.
+    if (assignee && !assignee._id && assignee.employeeId) {
+        const raw = String(assignee.employeeId).trim();
+        const parts = raw.split(/\s+/).filter(Boolean);
+        const pattern = parts.map((p) => p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('\\s*');
+        if (pattern) {
+            const repaired = await EmployeeBasic.findOne({
+                employeeId: { $regex: new RegExp(`^${pattern}$`, 'i') },
+            })
+                .select('_id employeeId firstName lastName signature companyEmail')
+                .lean();
+            if (repaired?._id) assignee = repaired;
+        }
     }
-    if (stage === STAGE.MANAGEMENT) return getManagementHOD();
+    return assignee;
+}
+
+/** Map workflow stage → Flowchart category key. */
+function flowchartRoleKeyForStage(stage) {
+    if (stage === STAGE.HR) return 'hr';
+    if (stage === STAGE.ACCOUNTS || stage === 'pending_billing') return 'accounts';
+    if (stage === STAGE.ADMIN || stage === STAGE.SCHEDULED) return 'assetcontroller';
+    if (stage === 'pending_admin_officer' || stage === 'pending_admin_return') {
+        return 'admincontroller';
+    }
+    if (stage === STAGE.MANAGEMENT) return 'management';
     return null;
+}
+
+function missingAssigneeMessage(stage) {
+    const roleKey = flowchartRoleKeyForStage(stage);
+    if (roleKey === 'hr') {
+        return 'No Active HR is configured in Settings → FlowChart. Set HR to Active and link an employee, then approve again.';
+    }
+    if (roleKey === 'accounts') {
+        return 'No Active Accounts is configured in Settings → FlowChart. Set Accounts to Active and link an employee, then try again.';
+    }
+    if (roleKey === 'admincontroller') {
+        return 'No Active Admin Officer is configured in Settings → FlowChart. Set Admin Officer to Active and link an employee, then try again.';
+    }
+    if (roleKey === 'assetcontroller') {
+        return 'No Active Asset Controller is configured in Settings → FlowChart. Configure the role, then try again.';
+    }
+    return 'Workflow role is not configured in Flowchart (assignee missing).';
 }
 
 async function getRequesterName(reqUser) {
@@ -301,6 +342,13 @@ export async function getWorkflowAssigneePayloadForStage(stage) {
 export async function userMayRespondVehicleServiceWorkflow(reqUser, stage) {
     if (!stage || [STAGE.COMPLETE, STAGE.REJECTED].includes(stage)) return false;
     const assignee = await resolveAssigneeForStage(stage);
+    const roleKey = flowchartRoleKeyForStage(stage);
+    if (assignee?._id) {
+        if (await actorMayAct(reqUser, assignee)) return true;
+    }
+    if (roleKey && (await isUserInFlowchart(reqUser, roleKey).catch(() => false))) {
+        return true;
+    }
     if (!assignee?._id && !isPortalAdmin(reqUser)) {
         return !!(await isUserAdministrator(reqUser?.id));
     }
@@ -934,7 +982,17 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
                     'This request is in the scheduled service window. Use Extend or Mark live (POST .../service-workflow/period), not the approval endpoint.',
             });
         }
-        const assignee = await resolveAssigneeForStage(stage);
+        let assignee = await resolveAssigneeForStage(stage);
+        const roleKey = flowchartRoleKeyForStage(stage);
+        const actorEmpEarly = await resolveActorEmployee(req.user);
+        // UI may show Approve via flowchart row match while HOD lookup failed —
+        // if the actor is the Flowchart role holder, treat them as the assignee.
+        if (!assignee?._id && roleKey && actorEmpEarly?._id) {
+            const inRole = await isUserInFlowchart(req.user, roleKey).catch(() => false);
+            if (inRole) {
+                assignee = actorEmpEarly;
+            }
+        }
         const serviceSubEarly = wf.serviceRecordId ? asset.services?.id?.(wf.serviceRecordId) : null;
         const isOilServiceWf = isOilServiceWorkflowRecord(wf, serviceSubEarly);
         const oilServiceManager = isOilServiceWf ? await actorMayManageOilServiceForAsset(req.user, asset) : false;
@@ -950,7 +1008,7 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
             ['approve', 'save'].includes(action);
 
         if (!assignee?._id && !isPortalAdmin(req.user) && !oilManagerStage) {
-            return res.status(503).json({ message: 'Workflow role is not configured in Flowchart (assignee missing).' });
+            return res.status(503).json({ message: missingAssigneeMessage(stage) });
         }
 
         // Cash Oil HR / Accounts: only the flowchart assignee — no Super User / admin bypass.
@@ -964,10 +1022,14 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
                             : 'Flowchart Accounts is not configured for this approval step.',
                 });
             }
-            const actor = await resolveActorEmployee(req.user);
+            const actor = actorEmpEarly || (await resolveActorEmployee(req.user));
             allowed = !!(actor?._id && String(actor._id) === String(assignee._id));
         } else {
             allowed = (await actorMayAct(req.user, assignee)) || oilManagerStage;
+            // Align with UI: flowchart role holders may act even if HOD doc was partially linked.
+            if (!allowed && roleKey) {
+                allowed = await isUserInFlowchart(req.user, roleKey).catch(() => false);
+            }
         }
         if (!allowed) {
             return res.status(403).json({

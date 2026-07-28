@@ -200,8 +200,12 @@ export function isShopServiceLive(asset, service) {
 }
 
 /**
- * After Accounts approves garage — move to scheduled_service (NO Zoho here).
+ * After Garage is submitted (or legacy Accounts garage approve) — move to scheduled_service (NO Zoho here).
  * Zoho billing happens after End Service / complete → Accounts billing → billed.
+ *
+ * @param {object} [options.appendActivity]
+ * @param {string} [options.scheduleActivityType='accounts_approved'] activity type for timeline
+ * @param {string} [options.scheduleActivityNote]
  */
 export async function advanceShopServiceToScheduledAfterAccountsApprove(
     asset,
@@ -212,7 +216,10 @@ export async function advanceShopServiceToScheduledAfterAccountsApprove(
         linkPath,
         dashboardMeta,
         appendActivity,
-    },
+        scheduleActivityType = 'accounts_approved',
+        scheduleActivityNote =
+            'Garage and service dates approved — service scheduled (Zoho billing after End Service)',
+    } = {},
 ) {
     const serviceRecordId = wf.serviceRecordId;
     const service = asset.services?.id?.(serviceRecordId);
@@ -221,7 +228,7 @@ export async function advanceShopServiceToScheduledAfterAccountsApprove(
     const remark = parseRemark(service);
     const { startD, endD } = resolveServiceWindowDates(wf, remark);
     if (!startD || !endD) {
-        throw new Error('Service start and end dates are required before Accounts approval.');
+        throw new Error('Service start and end dates are required before scheduling.');
     }
 
     wf.stage = SHOP_SERVICE_SCHEDULED_STAGE;
@@ -232,6 +239,8 @@ export async function advanceShopServiceToScheduledAfterAccountsApprove(
     wf.shopServiceLiveAt = null;
     wf.shopServiceScheduledNotifiedAt = null;
     wf.shopServiceLiveNotifiedAt = null;
+    wf.accountsPendingSince = null;
+    wf.accountsReminderAt = null;
 
     remark.workflowStage = SHOP_SERVICE_SCHEDULED_STAGE;
     remark.accountsApprovedAt = new Date().toISOString();
@@ -240,9 +249,9 @@ export async function advanceShopServiceToScheduledAfterAccountsApprove(
 
     if (typeof appendActivity === 'function') {
         appendActivity(service, {
-            type: 'accounts_approved',
+            type: scheduleActivityType,
             byName: actorName,
-            note: 'Garage and service dates approved — service scheduled (Zoho billing after End Service)',
+            note: scheduleActivityNote,
         });
     }
 
@@ -525,6 +534,11 @@ export async function advanceShopBillingAfterAccountsApprove(
     service.remark = JSON.stringify(remark);
 
     if (typeof appendActivity === 'function') {
+        appendActivity(service, {
+            type: 'accounts_approved',
+            byName: actorName,
+            note: 'Accounts billing approved — Zoho bill created',
+        });
         appendActivity(service, {
             type: 'zoho_bill_created',
             byName: actorName,
