@@ -90,14 +90,24 @@ function buildGarageZohoBillNumber({ asset, service, serviceTypeLabel = '' } = {
 
 async function buildAttachmentFromService(service, remark) {
     // Prefer dedicated garage bill attachment — never overwrite Quote 1 (service.attachment).
+    // Fall back to Service Details garage invoice (shopInvoice) so Accounts Zoho bill gets it automatically.
     const key = String(
-        remark.garageAttachmentUrl || remark.garageBillAttachmentUrl || '',
+        remark.garageAttachmentUrl ||
+            remark.garageBillAttachmentUrl ||
+            service?.shopInvoice ||
+            remark.garageInvoiceUrl ||
+            '',
     ).trim();
     if (!key) return null;
     const name =
-        String(remark.garageAttachmentName || '').trim() ||
+        String(
+            remark.garageAttachmentName ||
+                remark.garageInvoiceName ||
+                remark.shopInvoiceName ||
+                '',
+        ).trim() ||
         key.split('/').pop() ||
-        'garage-attachment.pdf';
+        'garage-invoice.pdf';
     try {
         if (key.startsWith('http://') || key.startsWith('https://')) {
             const res = await fetch(key);

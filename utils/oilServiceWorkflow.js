@@ -28,6 +28,24 @@ const STAGE_BILLED = 'billed';
 
 const normEmpId = (s) => (s || '').toString().toLowerCase().replace(/\s+/g, '');
 
+/** Copy Service Details garage invoice (shopInvoice) into Zoho bill attachment remark fields. */
+function seedGarageBillAttachmentFromShopInvoice(serviceRow) {
+    if (!serviceRow) return false;
+    const remark = parseOilServiceRemark(serviceRow);
+    const shopKey = String(serviceRow.shopInvoice || remark.garageInvoiceUrl || '').trim();
+    if (!shopKey) return false;
+    if (String(remark.garageAttachmentUrl || remark.garageBillAttachmentUrl || '').trim()) {
+        return false;
+    }
+    remark.garageAttachmentUrl = shopKey;
+    remark.garageBillAttachmentUrl = shopKey;
+    remark.garageAttachmentName =
+        String(remark.garageAttachmentName || remark.garageInvoiceName || remark.shopInvoiceName || '').trim() ||
+        'garage-invoice.pdf';
+    serviceRow.remark = JSON.stringify(remark);
+    return true;
+}
+
 export function isOilServiceWorkflowRecord(wf, service) {
     if (String(wf?.serviceTypeLabel || '').trim() === 'Oil Service') return true;
     return String(service?.serviceType || '').trim() === 'Oil Service';
@@ -929,6 +947,8 @@ export async function saveOilServiceDetailsDraft(asset, serviceId, serviceUpdate
         service.remark = JSON.stringify({ ...remark, ...parseOilServiceRemark(service) });
     }
 
+    seedGarageBillAttachmentFromShopInvoice(asset.services.id(serviceId));
+
     commitWorkflowContext(asset, serviceId, { wf, bindActive });
     asset.markModified('services');
     await asset.save();
@@ -955,12 +975,23 @@ export async function submitOilServiceDetails(asset, serviceId, serviceUpdates, 
         await mergeWorkflowServiceRecord(asset, serviceId, serviceUpdates);
     }
 
+    seedGarageBillAttachmentFromShopInvoice(asset.services.id(serviceId));
+
     const remark = parseOilServiceRemark(asset.services.id(serviceId));
     if (!String(remark.returnDate || '').trim() || !String(remark.handOverDate || '').trim()) {
         throw new Error('Return date and hand over date are required before submitting service details.');
     }
 
     const serviceRow = asset.services.id(serviceId);
+    const hasGarageInvoice =
+        Boolean(String(serviceRow?.shopInvoice || '').trim()) ||
+        Boolean(String(remark.garageInvoiceUrl || '').trim()) ||
+        Boolean(String(remark.garageInvoiceName || '').trim()) ||
+        Boolean(String(remark.shopInvoiceName || '').trim());
+    if (!hasGarageInvoice) {
+        throw new Error('Garage invoice is required before submitting service details.');
+    }
+
     const totalCharge = Number(remark.totalServiceCharge ?? serviceRow?.value);
     if (!Number.isFinite(totalCharge) || totalCharge <= 0) {
         throw new Error('Total service charge is required and must be greater than 0.');
@@ -1149,8 +1180,11 @@ export async function advanceOilCashAfterAccountsApprove(asset, wf, actorName) {
         throw new Error('Only Cash oil services create a Zoho bill on Accounts approve.');
     }
 
+    seedGarageBillAttachmentFromShopInvoice(service);
+
+    const liveForPay = parseOilServiceRemark(service);
     const hasPayAccount = Boolean(
-        String(remark.payAccountId || remark.garagePayAccountId || '').trim(),
+        String(liveForPay.payAccountId || liveForPay.garagePayAccountId || '').trim(),
     );
     if (!hasPayAccount) {
         throw new Error('Pay Account is required before Accounts can approve and create the Zoho bill.');
@@ -1161,7 +1195,7 @@ export async function advanceOilCashAfterAccountsApprove(asset, wf, actorName) {
         const { syncVehicleGarageServiceToZoho } = await import('./syncVehicleGarageServiceToZoho.js');
         zohoBillSync = await syncVehicleGarageServiceToZoho({
             asset,
-            service,
+            service: asset.services.id(serviceId),
             serviceTypeLabel: 'Oil Service',
         });
     } catch (err) {
