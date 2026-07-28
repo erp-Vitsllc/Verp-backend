@@ -16952,9 +16952,13 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
         }
         match.$or = assigneeClauses;
 
+        // Default: skip expensive sync/heal on read. Pass sync=1 only when a background job wants it.
+        const wantSync = ['1', 'true', 'yes'].includes(String(req.query.sync || '').trim().toLowerCase());
         const skipSync =
-            ctx.isTargeted ||
-            ['1', 'true', 'yes'].includes(String(req.query.skipSync || '').trim().toLowerCase());
+            !wantSync &&
+            (ctx.isTargeted ||
+                scope === 'vehicle' ||
+                ['1', 'true', 'yes'].includes(String(req.query.skipSync || '').trim().toLowerCase()));
         if (!skipSync) {
             await syncPendingAssignmentDashboardRowsForUser(relevantIds, targetEmployeeId);
             await healStaleOilServicePendingDashboardActions();
@@ -17315,18 +17319,31 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
         // Hide stale owner on-duty review bells when no parked assets remain for the request.
         const ownerOnDutyStaleIds = [];
         const itemsAfterOwnerOnDutyFilter = [];
+        const ownerOnDutyCandidates = [];
         for (const row of items) {
             if (row.requestType !== OWNER_ON_DUTY_REQUEST_TYPE) {
                 itemsAfterOwnerOnDutyFilter.push(row);
                 continue;
             }
-            const da = unique.find((x) => String(x._id) === String(row.dashboardActionId));
-            const parkingAssets = da ? await resolveOwnerOnDutyParkingAssetsForDashboard(da) : [];
-            if (!parkingAssets.length) {
-                if (row.dashboardActionId) ownerOnDutyStaleIds.push(row.dashboardActionId);
-                continue;
+            ownerOnDutyCandidates.push(row);
+        }
+        if (ownerOnDutyCandidates.length) {
+            const parkingByActionId = new Map();
+            await Promise.all(
+                ownerOnDutyCandidates.map(async (row) => {
+                    const da = unique.find((x) => String(x._id) === String(row.dashboardActionId));
+                    const parkingAssets = da ? await resolveOwnerOnDutyParkingAssetsForDashboard(da) : [];
+                    parkingByActionId.set(String(row.dashboardActionId || ''), parkingAssets);
+                }),
+            );
+            for (const row of ownerOnDutyCandidates) {
+                const parkingAssets = parkingByActionId.get(String(row.dashboardActionId || '')) || [];
+                if (!parkingAssets.length) {
+                    if (row.dashboardActionId) ownerOnDutyStaleIds.push(row.dashboardActionId);
+                    continue;
+                }
+                itemsAfterOwnerOnDutyFilter.push(row);
             }
-            itemsAfterOwnerOnDutyFilter.push(row);
         }
         items = itemsAfterOwnerOnDutyFilter;
         if (ownerOnDutyStaleIds.length) {
@@ -17339,13 +17356,21 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
         const staleBulkGroupIds = new Set();
         const staleAssignmentDashboardIds = new Set();
         const itemsAfterCompletedFilter = [];
+        const bulkPendingCountCache = new Map();
         for (const row of items) {
             const meta = parseExtra3(row.extra3);
             const isBulkAssign =
                 row.bulkKind === 'assignment' && row.isBulk && meta?.isBulkAssignment === true;
 
             if (isBulkAssign) {
-                const pendingCount = await countPendingBulkAssignmentBatch(meta, row.bulkAssetIds);
+                const cacheKey = String(
+                    meta?.bulkAssignmentGroupId || row.dashboardActionId || JSON.stringify(row.bulkAssetIds || []),
+                );
+                let pendingCount = bulkPendingCountCache.get(cacheKey);
+                if (pendingCount == null) {
+                    pendingCount = await countPendingBulkAssignmentBatch(meta, row.bulkAssetIds);
+                    bulkPendingCountCache.set(cacheKey, pendingCount);
+                }
                 if (pendingCount === 0) {
                     if (meta?.bulkAssignmentGroupId) {
                         staleBulkGroupIds.add(String(meta.bulkAssignmentGroupId));
