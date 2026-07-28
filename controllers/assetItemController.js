@@ -4646,6 +4646,98 @@ export const getAssetItemDetail = async (req, res) => {
 
         const itemObj = item.toObject();
 
+        // Light first-paint: shrink JSON (services remarks / gallery / accessories blobs)
+        // so the details shell can render before full attachment signing.
+        if (deferLightDetail) {
+            if (Array.isArray(itemObj.services)) {
+                itemObj.services = itemObj.services.map((s) => {
+                    let remark = s?.remark;
+                    if (typeof remark === 'string' && remark.length > 0) {
+                        try {
+                            const parsed = JSON.parse(remark);
+                            if (parsed && typeof parsed === 'object') {
+                                const {
+                                    images,
+                                    photos,
+                                    attachments,
+                                    remarkImages,
+                                    garagePhotos,
+                                    beforePhotos,
+                                    afterPhotos,
+                                    ...rest
+                                } = parsed;
+                                remark = JSON.stringify(rest);
+                            }
+                        } catch {
+                            if (remark.length > 4000) remark = '';
+                        }
+                    }
+                    return {
+                        _id: s._id,
+                        type: s.type,
+                        serviceType: s.serviceType,
+                        date: s.date,
+                        endDate: s.endDate,
+                        startDate: s.startDate,
+                        value: s.value,
+                        cost: s.cost,
+                        status: s.status,
+                        kilometer: s.kilometer,
+                        odometer: s.odometer,
+                        workflowSnapshot: s.workflowSnapshot,
+                        createdAt: s.createdAt,
+                        updatedAt: s.updatedAt,
+                        remark,
+                    };
+                });
+            }
+            if (Array.isArray(itemObj.documents)) {
+                itemObj.documents = itemObj.documents.map((d) => ({
+                    _id: d._id,
+                    type: d.type,
+                    name: d.name,
+                    documentType: d.documentType,
+                    title: d.title,
+                    description: d.description,
+                    issueDate: d.issueDate,
+                    expiryDate: d.expiryDate,
+                    fee: d.fee,
+                    amount: d.amount,
+                    status: d.status,
+                    isLive: d.isLive,
+                    archiveReason: d.archiveReason,
+                    meta: d.meta,
+                    createdAt: d.createdAt,
+                    updatedAt: d.updatedAt,
+                    // Keep key so UI knows a file exists; unsigned until upgrade.
+                    attachment: d.attachment || null,
+                    hasAttachment: Boolean(d.attachment),
+                }));
+            }
+            if (Array.isArray(itemObj.images) && itemObj.images.length > 2) {
+                itemObj.images = itemObj.images.slice(0, 2);
+            }
+            if (Array.isArray(itemObj.vehicleAccessoriesListEntries)) {
+                itemObj.vehicleAccessoriesListEntries = itemObj.vehicleAccessoriesListEntries.map((e) => ({
+                    _id: e._id,
+                    name: e.name,
+                    accessoryName: e.accessoryName,
+                    quantity: e.quantity,
+                    status: e.status,
+                    notes: e.notes,
+                    createdAt: e.createdAt,
+                    updatedAt: e.updatedAt,
+                    hasAttachment: Boolean(e.attachment || e.file || e.url),
+                }));
+            }
+            if (Array.isArray(itemObj.accessories)) {
+                itemObj.accessories = itemObj.accessories.map((a) => ({
+                    ...a,
+                    attachment: a.attachment || null,
+                }));
+            }
+        }
+
         const canSeePendingAccessoryAdds =
             isAdmin ||
             isPortalAdmin ||

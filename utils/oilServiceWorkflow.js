@@ -24,6 +24,7 @@ const STAGE_SCHEDULED = 'scheduled_service';
 const STAGE_COMPLETE = 'complete';
 const STAGE_PENDING_HR = 'pending_hr';
 const STAGE_PENDING_ACCOUNTS = 'pending_accounts';
+const STAGE_BILLED = 'billed';
 
 const normEmpId = (s) => (s || '').toString().toLowerCase().replace(/\s+/g, '');
 
@@ -769,7 +770,9 @@ export async function processOilServiceStartDateActivation() {
 }
 
 /**
- * Submit oil service assignment (pending row → scheduled; on service begins on start date).
+ * Submit oil service assignment.
+ * Cash: Send → Scheduled dates stored → pending_hr (HR must approve before On Service).
+ * Warranty: Send → scheduled_service (then On Service on start date).
  */
 export async function submitOilServiceAssignment(asset, serviceId, req) {
     const service = asset.services?.id?.(serviceId);
@@ -795,15 +798,16 @@ export async function submitOilServiceAssignment(asset, serviceId, req) {
 
     const requesterName = await getRequesterName(req.user);
     const previousStatus = asset.status;
+    const isCash = isOilServiceCashPayment(remark);
 
     remark.requestStatus = 'submitted';
     remark.assignmentSubmittedAt = new Date().toISOString();
     remark.oilServiceScheduledAt = remark.assignmentSubmittedAt;
     remark.requestedByName = requesterName;
-    remark.workflowStage = STAGE_SCHEDULED;
+    // Cash waits for HR before On Service; warranty goes straight to scheduled.
+    remark.workflowStage = isCash ? STAGE_PENDING_HR : STAGE_SCHEDULED;
     service.remark = JSON.stringify(remark);
 
-    // Keep prior in-progress workflow on its service row when starting another oil request.
     const priorWf = asset.activeServiceWorkflow;
     if (
         priorWf?.serviceRecordId &&
@@ -815,7 +819,7 @@ export async function submitOilServiceAssignment(asset, serviceId, req) {
     if (!asset.activeServiceWorkflow) asset.activeServiceWorkflow = {};
     asset.activeServiceWorkflow = {
         serviceRecordId: service._id,
-        stage: STAGE_SCHEDULED,
+        stage: isCash ? STAGE_PENDING_HR : STAGE_SCHEDULED,
         previousStatus,
         serviceTypeLabel: 'Oil Service',
         scheduledServiceDate: startD,
@@ -829,41 +833,36 @@ export async function submitOilServiceAssignment(asset, serviceId, req) {
     recordOilServiceActivity(asset, service, service._id, {
         type: 'service_scheduled',
         byName: requesterName,
-        note: 'Oil service scheduled',
+        note: isCash
+            ? 'Oil service scheduled — awaiting HR approval before On Service'
+            : 'Oil service scheduled',
     });
 
-    const today = utcDayStart(new Date());
-    const startUtc = utcDayStart(startD);
-    const shouldGoLive = startUtc != null && today != null && today >= startUtc;
-
-    // Always persist Scheduled first. Previously, when start date was today/past,
-    // activateOilServiceOnStartDate could return false (e.g. stale onServiceActive)
-    // and skip save entirely — Send toasted success but nothing changed after refresh.
-    if (!shouldGoLive) {
-        asset.onServiceActive = false;
-    }
+    asset.onServiceActive = false;
     persistWorkflowSnapshot(asset);
     asset.markModified('services');
     asset.markModified('activeServiceWorkflow');
     await asset.save();
 
-    // Start date today or earlier → go live immediately (On Service on same detail page).
-    if (shouldGoLive) {
-        const fresh = await AssetItem.findById(asset._id);
-        if (fresh) {
-            await activateOilServiceOnStartDate(fresh, {
-                byName: requesterName,
-                force: true,
-                notify: false,
-            });
-            asset.activeServiceWorkflow = fresh.activeServiceWorkflow;
-            asset.onServiceActive = fresh.onServiceActive;
-            asset.status = fresh.status;
-            asset.services = fresh.services;
+    // Warranty (or non-cash): may go live immediately when start date is today/past.
+    if (!isCash) {
+        const today = utcDayStart(new Date());
+        const startUtc = utcDayStart(startD);
+        if (startUtc != null && today != null && today >= startUtc) {
+            const fresh = await AssetItem.findById(asset._id);
+            if (fresh) {
+                await activateOilServiceOnStartDate(fresh, {
+                    byName: requesterName,
+                    force: true,
+                    notify: false,
+                });
+                asset.activeServiceWorkflow = fresh.activeServiceWorkflow;
+                asset.onServiceActive = fresh.onServiceActive;
+                asset.status = fresh.status;
+                asset.services = fresh.services;
+            }
         }
     }
-
-    // Cash Zoho bills are created only after End Service → HR → Accounts approve (not on assignment).
 
     const populated = await AssetItem.findById(asset._id)
         .populate('assignedTo', 'firstName lastName employeeId companyEmail workEmail personalEmail email')
@@ -874,21 +873,34 @@ export async function submitOilServiceAssignment(asset, serviceId, req) {
 
     const plate = [populated?.plateEmirate, populated?.plateNumber].filter(Boolean).join(' ').trim();
     const startLabel = startD.toISOString().slice(0, 10);
-    const isLive = isOilServiceLive(populated, populated?.services?.find?.((s) => String(s._id) === String(service._id)));
-    const detailLine = isLive
-        ? `${requesterName} submitted an oil service request for ${populated?.assetId || ''}${plate ? ` (${plate})` : ''}. The vehicle is now on service.`
-        : `${requesterName} scheduled an oil service for ${populated?.assetId || ''}${plate ? ` (${plate})` : ''}. Service starts on ${startLabel}.`;
 
-    if (isLive) {
-        await notifyOilServiceWentLiveIfNeeded(populated, service._id, { detailLine });
-    } else {
+    if (isCash) {
+        if (!hr?._id) {
+            throw new Error('No HR assignee is configured in the company flowchart.');
+        }
         await notifyStakeholders({
             asset: populated,
             serviceRecordId: service._id,
-            recipients: [hr, adminOfficer, assignee],
-            actionLabel: 'Oil service scheduled',
-            detailLine,
+            recipients: [hr],
+            actionLabel: 'Oil service — HR schedule approval',
+            detailLine: `${requesterName} scheduled an oil service for ${populated?.assetId || ''}${plate ? ` (${plate})` : ''} (start ${startLabel}). Approve so the vehicle can go On Service.`,
         });
+    } else {
+        const isLive = isOilServiceLive(populated, populated?.services?.find?.((s) => String(s._id) === String(service._id)));
+        const detailLine = isLive
+            ? `${requesterName} submitted an oil service request for ${populated?.assetId || ''}${plate ? ` (${plate})` : ''}. The vehicle is now on service.`
+            : `${requesterName} scheduled an oil service for ${populated?.assetId || ''}${plate ? ` (${plate})` : ''}. Service starts on ${startLabel}.`;
+        if (isLive) {
+            await notifyOilServiceWentLiveIfNeeded(populated, service._id, { detailLine });
+        } else {
+            await notifyStakeholders({
+                asset: populated,
+                serviceRecordId: service._id,
+                recipients: [hr, adminOfficer, assignee],
+                actionLabel: 'Oil service scheduled',
+                detailLine,
+            });
+        }
     }
 
     return populated;
@@ -926,7 +938,7 @@ export async function saveOilServiceDetailsDraft(asset, serviceId, serviceUpdate
 /**
  * Submit oil service details (End Service).
  * - Warranty → complete (no Zoho).
- * - Cash → pending_hr → Accounts → Zoho bill on Accounts approve.
+ * - Cash → work complete → pending_accounts → Zoho → billed.
  */
 export async function submitOilServiceDetails(asset, serviceId, serviceUpdates, req) {
     const service = asset.services?.id?.(serviceId);
@@ -972,7 +984,9 @@ export async function submitOilServiceDetails(asset, serviceId, serviceUpdates, 
     recordOilServiceActivity(asset, service, serviceId, {
         type: 'service_completed',
         byName: actorName,
-        note: isCash ? 'Oil service ended — sent to HR for payment approval' : 'Oil service completed',
+        note: isCash
+            ? 'Oil service ended (complete) — sent to Accounts for Zoho billing'
+            : 'Oil service completed',
     });
 
     if (bindActive) {
@@ -980,11 +994,13 @@ export async function submitOilServiceDetails(asset, serviceId, serviceUpdates, 
         asset.onServiceActive = false;
     }
 
-    // --- Cash: End Service → HR approval (Zoho after Accounts) ---
+    // --- Cash: End Service (complete) → Accounts → Zoho → billed ---
     if (isCash) {
-        wf.stage = STAGE_PENDING_HR;
-        remark.workflowStage = STAGE_PENDING_HR;
-        remark.vehicleServiceCompleted = '';
+        wf.stage = STAGE_PENDING_ACCOUNTS;
+        remark.workflowStage = STAGE_PENDING_ACCOUNTS;
+        remark.vehicleServiceCompleted = 'live';
+        remark.vehicleServiceCompletedAt = new Date().toISOString();
+        remark.serviceWorkStatus = 'complete';
         asset.services.id(serviceId).remark = JSON.stringify(remark);
         commitWorkflowContext(asset, serviceId, { wf, bindActive });
         asset.markModified('services');
@@ -993,23 +1009,23 @@ export async function submitOilServiceDetails(asset, serviceId, serviceUpdates, 
         const populated = await AssetItem.findById(asset._id)
             .populate('assignedTo', 'firstName lastName employeeId companyEmail workEmail personalEmail email')
             .lean();
-        const hr = await getDepartmentHOD('hr');
-        if (!hr?._id) {
-            throw new Error('No HR assignee is configured in the company flowchart for Cash oil payment approval.');
+        const accounts = await getDepartmentHOD('accounts');
+        if (!accounts?._id) {
+            throw new Error('No Accounts assignee is configured in the company flowchart.');
         }
 
         const plate = [populated?.plateEmirate, populated?.plateNumber].filter(Boolean).join(' ').trim();
-        const detailLine = `Oil service for ${populated?.assetId || ''}${plate ? ` (${plate})` : ''} has ended. Cash payment requires HR approval, then Accounts payment (Zoho bill).`;
+        const detailLine = `Oil service for ${populated?.assetId || ''}${plate ? ` (${plate})` : ''} is complete. Review billing and submit to create the Zoho bill (Billed only if Zoho succeeds).`;
 
         await notifyStakeholders({
             asset: populated,
             serviceRecordId: serviceId,
-            recipients: [hr],
-            actionLabel: 'Oil service — HR payment approval',
+            recipients: [accounts],
+            actionLabel: 'Oil service — Accounts billing (Zoho)',
             detailLine,
         });
 
-        return { asset: populated, zohoBillSync: null, routedTo: 'pending_hr' };
+        return { asset: populated, zohoBillSync: null, routedTo: 'pending_accounts' };
     }
 
     // --- Warranty: complete immediately (no Zoho) ---
@@ -1046,7 +1062,7 @@ export async function submitOilServiceDetails(asset, serviceId, serviceUpdates, 
 }
 
 /**
- * HR approved Cash oil payment → send to Accounts for Zoho bill payment.
+ * HR approved Cash oil schedule → scheduled_service, then On Service when start date is reached.
  */
 export async function advanceOilCashAfterHrApprove(asset, wf, actorName) {
     const serviceId = wf.serviceRecordId;
@@ -1054,19 +1070,21 @@ export async function advanceOilCashAfterHrApprove(asset, wf, actorName) {
     if (!service) throw new Error('Service record not found');
     const remark = parseOilServiceRemark(service);
     if (!isOilServiceCashPayment(remark)) {
-        throw new Error('Only Cash oil services require HR → Accounts payment approval.');
+        throw new Error('Only Cash oil services require HR schedule approval before On Service.');
     }
 
-    wf.stage = STAGE_PENDING_ACCOUNTS;
-    remark.workflowStage = STAGE_PENDING_ACCOUNTS;
-    remark.hrPaymentApprovedAt = new Date().toISOString();
+    wf.stage = STAGE_SCHEDULED;
+    remark.workflowStage = STAGE_SCHEDULED;
+    remark.hrScheduleApprovedAt = new Date().toISOString();
+    remark.hrScheduleApprovedByName = actorName || '';
+    remark.hrPaymentApprovedAt = remark.hrScheduleApprovedAt;
     remark.hrPaymentApprovedByName = actorName || '';
     service.remark = JSON.stringify(remark);
 
     recordOilServiceActivity(asset, service, serviceId, {
         type: 'hr_approved',
         byName: actorName,
-        note: 'HR approved — sent to Accounts for payment',
+        note: 'HR approved schedule — waiting for On Service start date',
     });
 
     asset.activeServiceWorkflow = wf;
@@ -1075,28 +1093,51 @@ export async function advanceOilCashAfterHrApprove(asset, wf, actorName) {
     asset.markModified('services');
     await asset.save();
 
+    const startD = resolveServiceStartDate(remark) || wf.scheduledServiceDate;
+    const today = utcDayStart(new Date());
+    const startUtc = utcDayStart(startD);
+    if (startUtc != null && today != null && today >= startUtc) {
+        const fresh = await AssetItem.findById(asset._id);
+        if (fresh) {
+            await activateOilServiceOnStartDate(fresh, {
+                byName: actorName || 'System',
+                force: true,
+                notify: true,
+            });
+            asset.activeServiceWorkflow = fresh.activeServiceWorkflow;
+            asset.onServiceActive = fresh.onServiceActive;
+            asset.status = fresh.status;
+            asset.services = fresh.services;
+        }
+    }
+
     const populated = await AssetItem.findById(asset._id)
         .populate('assignedTo', 'firstName lastName employeeId companyEmail workEmail personalEmail email')
         .lean();
-    const accounts = await getDepartmentHOD('accounts');
-    if (!accounts?._id) {
-        throw new Error('No Accounts assignee is configured in the company flowchart.');
-    }
-
+    const adminOfficer = await getDepartmentHOD('admincontroller');
+    const assignee = populated?.assignedTo || null;
     const plate = [populated?.plateEmirate, populated?.plateNumber].filter(Boolean).join(' ').trim();
+    const startLabel = startD ? new Date(startD).toISOString().slice(0, 10) : '';
+    const live = isOilServiceLive(
+        populated,
+        populated?.services?.find?.((s) => String(s._id) === String(serviceId)),
+    );
+
     await notifyStakeholders({
         asset: populated,
         serviceRecordId: serviceId,
-        recipients: [accounts],
-        actionLabel: 'Oil service — Accounts payment',
-        detailLine: `HR approved Cash oil service for ${populated?.assetId || ''}${plate ? ` (${plate})` : ''}. Approve to create the Zoho bill.`,
+        recipients: [adminOfficer, assignee],
+        actionLabel: live ? 'Oil service — On Service' : 'Oil service — HR approved schedule',
+        detailLine: live
+            ? `HR approved. Oil service for ${populated?.assetId || ''}${plate ? ` (${plate})` : ''} is now On Service.`
+            : `HR approved schedule for ${populated?.assetId || ''}${plate ? ` (${plate})` : ''}. On Service begins on ${startLabel}.`,
     });
 
     return populated;
 }
 
 /**
- * Accounts approved Cash oil payment → Zoho bill must succeed, then complete.
+ * Accounts approved Cash oil payment → Zoho bill must succeed, then billed.
  * Warranty oil skips this path (no Zoho). Car Wash is separate (no Zoho gate here).
  */
 export async function advanceOilCashAfterAccountsApprove(asset, wf, actorName) {
@@ -1140,15 +1181,17 @@ export async function advanceOilCashAfterAccountsApprove(asset, wf, actorName) {
         await asset.save();
         throw new Error(
             zohoBillSync?.message ||
-                'Zoho bill must be created successfully before Accounts can approve.',
+                'Zoho bill must be created successfully before status can become Billed.',
         );
     }
 
     const liveRemark = parseOilServiceRemark(asset.services.id(serviceId));
-    wf.stage = STAGE_COMPLETE;
-    liveRemark.workflowStage = STAGE_COMPLETE;
+    wf.stage = STAGE_BILLED;
+    liveRemark.workflowStage = STAGE_BILLED;
+    liveRemark.billingStatus = 'billed';
     liveRemark.vehicleServiceCompleted = 'live';
-    liveRemark.vehicleServiceCompletedAt = new Date().toISOString();
+    liveRemark.vehicleServiceCompletedAt =
+        liveRemark.vehicleServiceCompletedAt || new Date().toISOString();
     liveRemark.accountsPaymentApprovedAt = new Date().toISOString();
     liveRemark.accountsPaymentApprovedByName = actorName || '';
     asset.services.id(serviceId).remark = JSON.stringify(liveRemark);
@@ -1156,7 +1199,7 @@ export async function advanceOilCashAfterAccountsApprove(asset, wf, actorName) {
     recordOilServiceActivity(asset, asset.services.id(serviceId), serviceId, {
         type: 'zoho_bill_created',
         byName: actorName,
-        note: zohoBillSync.message || 'Accounts approved — Zoho bill created',
+        note: zohoBillSync.message || 'Accounts approved — Zoho bill created (Billed)',
     });
 
     asset.activeServiceWorkflow = wf;
@@ -1171,7 +1214,7 @@ export async function advanceOilCashAfterAccountsApprove(asset, wf, actorName) {
     const hr = await getDepartmentHOD('hr');
     const adminOfficer = await getDepartmentHOD('admincontroller');
     const assignee = populated?.assignedTo || null;
-    const detailLine = `Oil service Cash payment approved. ${zohoBillSync.message || 'Zoho bill created.'}`;
+    const detailLine = `Oil service billed. ${zohoBillSync.message || 'Zoho bill created.'}`;
 
     await notifyOilServiceDetailsCompleted({
         asset: populated,

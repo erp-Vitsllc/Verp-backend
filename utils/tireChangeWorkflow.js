@@ -423,48 +423,26 @@ export async function completeTireChangeService(asset, serviceId, serviceUpdates
 
     const remark = parseRemark(asset.services.id(serviceId));
     const actorName = await getRequesterName(req.user);
-    remark.vehicleServiceCompleted = 'live';
-    remark.vehicleServiceCompletedAt = new Date().toISOString();
-    remark.workflowStage = TIRE_CHANGE_STAGE.COMPLETE;
-    remark.serviceCompletedByName = actorName;
-    asset.services.id(serviceId).remark = JSON.stringify(remark);
-    appendTireChangeActivity(asset.services.id(serviceId), {
-        type: 'service_completed',
-        byName: actorName,
-        note: 'Tire change service completed',
-    });
 
-    wf.stage = TIRE_CHANGE_STAGE.COMPLETE;
-    wf.completedAt = new Date();
-    commitWorkflowContext(asset, serviceId, { wf, bindActive });
-    if (bindActive) {
-        applyPostServiceOperationalState(asset, { statusBeforeService: wf.previousStatus || null });
-    }
+    const { routeShopServiceToBillingAfterComplete } = await import('./vehicleShopServiceScheduled.js');
+    const linkPath = `/HRM/Asset/Vehicle/details/${asset._id}/tire-change/${serviceId}`;
+    const dashboardMeta = tireChangeDashboardMeta(asset, serviceId);
+
+    await routeShopServiceToBillingAfterComplete(asset, serviceId, {
+        serviceTypeLabel: 'Tire Change',
+        actorName,
+        linkPath,
+        dashboardMeta,
+        appendActivity: appendTireChangeActivity,
+    });
 
     await createTireChangeEmployeeFines(asset, asset.services.id(serviceId), req.user);
-
-    asset.markModified('services');
-    await asset.save();
-
-    await syncDashboardAction({
-        requestId: asset._id,
-        requestType: 'Vehicle Service Request',
-        status: 'Approved',
-        assignedTo: (await getDepartmentHOD('admincontroller'))?._id,
-        actionedBy: req.user?.employeeObjectId || req.user?._id,
-        comment: 'Tire change completed',
-        subjectEmployee: asset.assignedTo,
-        requestedByName: actorName,
-        extra1: `${asset.assetId} — Tire Change`,
-        extra2: 'Completed',
-        extra3: tireChangeDashboardMeta(asset, serviceId),
-    });
 
     await closeAdminOfficerServiceTrackNotification({
         assetId: asset._id,
         serviceRecordId: serviceId,
         actionedBy: req.user?.employeeObjectId || req.user?._id,
-        comment: 'Tire change completed',
+        comment: 'Tire change completed — awaiting Accounts billing',
         requestedByName: actorName,
     });
 

@@ -25,23 +25,27 @@ import {
     advanceTireChangeAfterHrApprove,
     isTireChangeWorkflow,
     notifyTireChangeAccountsHoldToAdmin,
+    appendTireChangeActivity,
     TIRE_CHANGE_STAGE,
 } from '../utils/tireChangeWorkflow.js';
 import {
     advanceMechanicalWorkAfterAccountsApprove,
     advanceMechanicalWorkAfterHrApprove,
     isMechanicalWorkWorkflow,
+    appendMechanicalWorkActivity,
 } from '../utils/mechanicalWorkWorkflow.js';
 import {
     advanceBodyWorkAfterAccountsApprove,
     advanceBodyWorkAfterHrApprove,
     isBodyWorkWorkflow,
+    appendBodyWorkActivity,
 } from '../utils/bodyWorkWorkflow.js';
 import {
     advanceAccidentRepairAfterAccountsApprove,
     advanceAccidentRepairAfterHrApprove,
     isAccidentRepairWorkflow,
     notifyAccidentRepairStakeholder,
+    appendAccidentRepairActivity,
     ACCIDENT_REPAIR_STAGE,
 } from '../utils/accidentRepairWorkflow.js';
 import {
@@ -1330,7 +1334,7 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
                 'firstName lastName employeeId',
             );
             return res.json({
-                message: 'HR approved — sent to Accounts for payment (Zoho bill on Accounts approve).',
+                message: 'HR approved schedule — vehicle can go On Service on the start date.',
                 asset: oilHrFresh,
             });
         }
@@ -1348,7 +1352,7 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
             );
             const zohoBillSync = oilAccResult?.zohoBillSync || null;
             return res.json({
-                message: `Accounts approved. ${zohoBillSync?.message || 'Zoho bill created.'}`,
+                message: `Billed. ${zohoBillSync?.message || 'Zoho bill created.'}`,
                 zohoBillMessage: zohoBillSync?.message || '',
                 zohoBillId: zohoBillSync?.billId || '',
                 zohoBillOk: true,
@@ -1418,6 +1422,50 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
             return res.json({
                 message: 'Oil service completed. Vehicle status restored.',
                 asset: oilFresh,
+            });
+        }
+
+        if (
+            action === 'approve' &&
+            (isTireWf || isMechWf || isBodyWf || isAccWf) &&
+            stage === 'pending_billing'
+        ) {
+            persistWorkflowSnapshotToServiceSubdoc(asset);
+            const { advanceShopBillingAfterAccountsApprove } = await import(
+                '../utils/vehicleShopServiceScheduled.js'
+            );
+            const label = isTireWf
+                ? 'Tire Change'
+                : isMechWf
+                  ? 'Mechanical Work'
+                  : isBodyWf
+                    ? 'Body Work'
+                    : 'Accident Repair';
+            const append =
+                isTireWf
+                    ? appendTireChangeActivity
+                    : isMechWf
+                      ? appendMechanicalWorkActivity
+                      : isBodyWf
+                        ? appendBodyWorkActivity
+                        : appendAccidentRepairActivity;
+            const billResult = await advanceShopBillingAfterAccountsApprove(
+                asset,
+                asset.activeServiceWorkflow,
+                actorName,
+                { serviceTypeLabel: label, appendActivity: append },
+            );
+            const billFresh = await AssetItem.findById(asset._id).populate(
+                'assignedTo',
+                'firstName lastName employeeId',
+            );
+            const zohoBillSync = billResult?.zohoBillSync || null;
+            return res.json({
+                message: `Billed. ${zohoBillSync?.message || 'Zoho bill created.'}`,
+                zohoBillMessage: zohoBillSync?.message || '',
+                zohoBillId: zohoBillSync?.billId || '',
+                zohoBillOk: true,
+                asset: billFresh,
             });
         }
 

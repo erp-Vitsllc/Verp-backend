@@ -431,48 +431,23 @@ export async function completeMechanicalWorkService(asset, serviceId, serviceUpd
 
     const remark = parseRemark(asset.services.id(serviceId));
     const actorName = await getRequesterName(req.user);
-    remark.vehicleServiceCompleted = 'live';
-    remark.vehicleServiceCompletedAt = new Date().toISOString();
-    remark.workflowStage = MECHANICAL_WORK_STAGE.COMPLETE;
-    remark.serviceCompletedByName = actorName;
-    asset.services.id(serviceId).remark = JSON.stringify(remark);
-    appendMechanicalWorkActivity(asset.services.id(serviceId), {
-        type: 'service_completed',
-        byName: actorName,
-        note: 'Mechanical work service completed',
-    });
 
-    wf.stage = MECHANICAL_WORK_STAGE.COMPLETE;
-    wf.completedAt = new Date();
-    commitWorkflowContext(asset, serviceId, { wf, bindActive });
-    if (bindActive) {
-        applyPostServiceOperationalState(asset, { statusBeforeService: wf.previousStatus || null });
-    }
+    const { routeShopServiceToBillingAfterComplete } = await import('./vehicleShopServiceScheduled.js');
+    await routeShopServiceToBillingAfterComplete(asset, serviceId, {
+        serviceTypeLabel: 'Mechanical Work',
+        actorName,
+        linkPath: `/HRM/Asset/Vehicle/details/${asset._id}/mechanical-work/${serviceId}`,
+        dashboardMeta: mechanicalWorkDashboardMeta(asset, serviceId),
+        appendActivity: appendMechanicalWorkActivity,
+    });
 
     await createMechanicalWorkEmployeeFines(asset, asset.services.id(serviceId), req.user);
-
-    asset.markModified('services');
-    await asset.save();
-
-    await syncDashboardAction({
-        requestId: asset._id,
-        requestType: 'Vehicle Service Request',
-        status: 'Approved',
-        assignedTo: (await getDepartmentHOD('admincontroller'))?._id,
-        actionedBy: req.user?.employeeObjectId || req.user?._id,
-        comment: 'Mechanical work completed',
-        subjectEmployee: asset.assignedTo,
-        requestedByName: actorName,
-        extra1: `${asset.assetId} — Mechanical Work`,
-        extra2: 'Completed',
-        extra3: mechanicalWorkDashboardMeta(asset, serviceId),
-    });
 
     await closeAdminOfficerServiceTrackNotification({
         assetId: asset._id,
         serviceRecordId: serviceId,
         actionedBy: req.user?.employeeObjectId || req.user?._id,
-        comment: 'Mechanical work completed',
+        comment: 'Mechanical work completed — awaiting Accounts billing',
         requestedByName: actorName,
     });
 

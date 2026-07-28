@@ -431,48 +431,23 @@ export async function completeBodyWorkService(asset, serviceId, serviceUpdates, 
 
     const remark = parseRemark(asset.services.id(serviceId));
     const actorName = await getRequesterName(req.user);
-    remark.vehicleServiceCompleted = 'live';
-    remark.vehicleServiceCompletedAt = new Date().toISOString();
-    remark.workflowStage = BODY_WORK_STAGE.COMPLETE;
-    remark.serviceCompletedByName = actorName;
-    asset.services.id(serviceId).remark = JSON.stringify(remark);
-    appendBodyWorkActivity(asset.services.id(serviceId), {
-        type: 'service_completed',
-        byName: actorName,
-        note: 'Body work service completed',
-    });
 
-    wf.stage = BODY_WORK_STAGE.COMPLETE;
-    wf.completedAt = new Date();
-    commitWorkflowContext(asset, serviceId, { wf, bindActive });
-    if (bindActive) {
-        applyPostServiceOperationalState(asset, { statusBeforeService: wf.previousStatus || null });
-    }
+    const { routeShopServiceToBillingAfterComplete } = await import('./vehicleShopServiceScheduled.js');
+    await routeShopServiceToBillingAfterComplete(asset, serviceId, {
+        serviceTypeLabel: 'Body Work',
+        actorName,
+        linkPath: `/HRM/Asset/Vehicle/details/${asset._id}/body-work/${serviceId}`,
+        dashboardMeta: bodyWorkDashboardMeta(asset, serviceId),
+        appendActivity: appendBodyWorkActivity,
+    });
 
     await createBodyWorkEmployeeFines(asset, asset.services.id(serviceId), req.user);
-
-    asset.markModified('services');
-    await asset.save();
-
-    await syncDashboardAction({
-        requestId: asset._id,
-        requestType: 'Vehicle Service Request',
-        status: 'Approved',
-        assignedTo: (await getDepartmentHOD('admincontroller'))?._id,
-        actionedBy: req.user?.employeeObjectId || req.user?._id,
-        comment: 'Body work completed',
-        subjectEmployee: asset.assignedTo,
-        requestedByName: actorName,
-        extra1: `${asset.assetId} — Body Work`,
-        extra2: 'Completed',
-        extra3: bodyWorkDashboardMeta(asset, serviceId),
-    });
 
     await closeAdminOfficerServiceTrackNotification({
         assetId: asset._id,
         serviceRecordId: serviceId,
         actionedBy: req.user?.employeeObjectId || req.user?._id,
-        comment: 'Body work completed',
+        comment: 'Body work completed — awaiting Accounts billing',
         requestedByName: actorName,
     });
 
