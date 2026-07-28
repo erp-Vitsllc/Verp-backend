@@ -4,6 +4,7 @@ import {
     listUtilityBillPayments,
     createUtilityBillPayment,
     createUtilityBillBatch,
+    updateUtilityBillBatch,
     respondUtilityBillPayment,
     respondUtilityBillBatch,
     payUtilityBillBatch,
@@ -76,6 +77,7 @@ router.put('/status-change/:id/respond', respondUtilityEntryStatusChange);
 
 router.post('/batch', createUtilityBillBatch);
 router.get('/batch/:batchId', getUtilityBillBatch);
+router.put('/batch/:batchId', updateUtilityBillBatch);
 router.put('/batch/:batchId/respond', respondUtilityBillBatch);
 router.put('/batch/:batchId/pay', payUtilityBillBatch);
 router.post('/batch/:batchId/sync-zoho', syncUtilityBillBatchToZoho);

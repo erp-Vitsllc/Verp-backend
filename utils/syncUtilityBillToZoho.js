@@ -571,9 +571,10 @@ async function syncApprovedUtilityBillToZohoInner(billDoc, { markAsOpen = true }
                 }
                 billDoc.zohoSyncedAt = new Date();
                 lastAttach = await syncUtilityBillAttachmentToZoho(billDoc, zohoBillId);
-                billDoc.zohoSyncError = lastAttach.ok
+                const openWarn = lastAttach.ok
                     ? openMsg
                     : `${openMsg}; attachment: ${lastAttach.message || 'upload failed'}`;
+                billDoc.zohoSyncError = openWarn;
                 await billDoc.save();
                 try {
                     await upsertZohoBillFromApi(
@@ -583,9 +584,12 @@ async function syncApprovedUtilityBillToZohoInner(billDoc, { markAsOpen = true }
                 } catch {
                     /* ignore */
                 }
+                // Bill is stored in Zoho (Draft). Open can be retried — do not treat as create failure.
                 return {
-                    ok: false,
-                    message: `Zoho bill created as Draft but not Open: ${openMsg}`,
+                    ok: true,
+                    opened: false,
+                    warning: openWarn,
+                    message: `Zoho bill stored as Draft (not Open yet): ${openWarn}`,
                     zohoBillId,
                     zohoBillIds: [zohoBillId],
                     zohoBillStatus: 'draft',

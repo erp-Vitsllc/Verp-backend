@@ -552,6 +552,7 @@ async function notifyOilServiceWentLiveIfNeeded(asset, serviceRecordId, { detail
 
 export async function getRequesterName(reqUser) {
     if (!reqUser) return 'User';
+    const looksLikeObjectId = (value) => /^[a-fA-F0-9]{24}$/.test(String(value || '').trim());
     if (reqUser.employeeObjectId) {
         const emp = await EmployeeBasic.findById(reqUser.employeeObjectId)
             .select('firstName lastName')
@@ -561,7 +562,9 @@ export async function getRequesterName(reqUser) {
             if (n) return n;
         }
     }
-    return (reqUser.name && String(reqUser.name).trim()) || 'User';
+    const rawName = (reqUser.name && String(reqUser.name).trim()) || '';
+    if (rawName && !looksLikeObjectId(rawName)) return rawName;
+    return 'User';
 }
 
 function pushWorkflowHistory(asset, { stage, action, note, byName }) {

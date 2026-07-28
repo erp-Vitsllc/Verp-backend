@@ -1002,6 +1002,136 @@ function applyRowEdits(bills, rowUpdates = []) {
         if (patch.partyAccountCode != null) {
             bill.partyAccountCode = String(patch.partyAccountCode || '');
         }
+        if (patch.billNumber != null) {
+            bill.billNumber = String(patch.billNumber || '').trim();
+        }
+        if (patch.billDate != null) {
+            bill.billDate = String(patch.billDate || '').trim();
+        }
+        if (patch.provider != null) {
+            bill.provider = String(patch.provider || '').trim();
+        }
+        if (Array.isArray(patch.lineItems) || Array.isArray(patch.zohoLineItems)) {
+            const rawLineItems = Array.isArray(patch.lineItems)
+                ? patch.lineItems
+                : patch.zohoLineItems;
+            const zohoLineItems = rawLineItems
+                .map((line) => {
+                    const accountId = String(line?.accountId || line?.account_id || '').trim();
+                    const amount = Number(line?.amount);
+                    const qtyRaw = Number(line?.quantity);
+                    const quantity =
+                        Number.isFinite(qtyRaw) && qtyRaw > 0 ? qtyRaw : 1;
+                    const rateRaw = Number(line?.rate);
+                    const rate =
+                        Number.isFinite(rateRaw) && rateRaw > 0
+                            ? rateRaw
+                            : quantity > 0 && Number.isFinite(amount)
+                              ? Number((amount / quantity).toFixed(2))
+                              : Number.isFinite(amount)
+                                ? amount
+                                : 0;
+                    if (!accountId || !Number.isFinite(amount) || amount <= 0) return null;
+                    const payByEmployeeId = String(line?.payByEmployeeId || '').trim();
+                    const payByCompanyId = String(line?.payByCompanyId || '').trim();
+                    let linePayBy = String(line?.payBy || '').trim();
+                    if (linePayBy !== 'company' && linePayBy !== 'employee') {
+                        linePayBy = payByEmployeeId
+                            ? 'employee'
+                            : payByCompanyId
+                              ? 'company'
+                              : '';
+                    }
+                    return {
+                        item: String(line?.item || line?.description || '').trim(),
+                        description: String(line?.description || line?.item || '').trim(),
+                        accountId,
+                        accountName: String(line?.accountName || '').trim(),
+                        quantity,
+                        amount: Number(amount.toFixed(2)),
+                        rate: Number(rate.toFixed(2)),
+                        payBy: linePayBy,
+                        payByEmployeeId,
+                        payByEmployeeName: String(line?.payByEmployeeName || '').trim(),
+                        payByCompanyId,
+                        payByCompanyName: String(line?.payByCompanyName || '').trim(),
+                        zohoBillId: '',
+                    };
+                })
+                .filter(Boolean);
+            if (zohoLineItems.length) {
+                bill.zohoLineItems = zohoLineItems;
+                if (!bill.expenseAccountId && zohoLineItems[0]?.accountId) {
+                    bill.expenseAccountId = zohoLineItems[0].accountId;
+                    bill.expenseAccountName = zohoLineItems[0].accountName || '';
+                }
+            }
+        }
+
+        // Zoho invalidation is handled by updateUtilityBillBatch (Accounts Edit).
+    }
+}
+
+/**
+ * Accounts / HR edit bill details before Pay (same fields as Add Bills).
+ * Clears Zoho bill ids so sync recreates with updated expense accounts.
+ */
+export async function updateUtilityBillBatch(req, res) {
+    try {
+        const { batchId } = req.params;
+        const { rows = [] } = req.body || {};
+        if (!mongoose.Types.ObjectId.isValid(batchId)) {
+            return res.status(400).json({ message: 'Invalid batchId' });
+        }
+        if (!Array.isArray(rows) || !rows.length) {
+            return res.status(400).json({ message: 'rows are required' });
+        }
+
+        const actor = await resolveRequesterEmployee(req.user);
+        const accountsGate = await isActorAccountsOrAdmin(actor, req.user);
+        const hrGate = await isActorHrOrAdmin(actor, req.user);
+        if (!accountsGate.allowed && !hrGate.allowed) {
+            return res.status(403).json({
+                message: 'Only Accounts or HR can edit utility bill details.',
+            });
+        }
+
+        const bills = await UtilityBillPayment.find({
+            batchId,
+            status: { $in: ['Pending Accounts', 'Pending HR', 'Approved'] },
+        });
+        if (!bills.length) {
+            return res.status(404).json({
+                message: 'No editable bills found for this batch (Paid bills cannot be edited).',
+            });
+        }
+
+        applyRowEdits(bills, rows);
+        for (const bill of bills) {
+            // Invalidate prior Zoho bill so Retry / Pay recreates with updated accounts.
+            bill.zohoBillId = '';
+            bill.zohoBillIds = [];
+            bill.zohoBillStatus = '';
+            bill.zohoSyncError = '';
+            bill.zohoSyncedAt = null;
+            if (Array.isArray(bill.zohoLineItems)) {
+                bill.zohoLineItems.forEach((line) => {
+                    if (line && typeof line === 'object') line.zohoBillId = '';
+                });
+            }
+            await bill.save();
+        }
+
+        const refreshed = await UtilityBillPayment.find({ batchId }).lean();
+        return res.status(200).json({
+            batchId,
+            updatedCount: bills.length,
+            bills: refreshed.map((b) => decorateBill(b)),
+            message: 'Bill details saved. Retry Zoho sync or Pay to store the updated bill.',
+        });
+    } catch (err) {
+        console.error('[updateUtilityBillBatch]', err);
+        return res.status(500).json({ message: err.message || 'Failed to update bills' });
     }
 }
 
@@ -1799,7 +1929,49 @@ export async function payUtilityBillBatch(req, res) {
             return res.status(400).json({ message: 'No approved bills selected to pay.' });
         }
 
+        // Ensure each selected bill is stored in Zoho before marking Paid.
+        const missingZoho = bills.filter((b) => !String(b.zohoBillId || '').trim());
+        if (missingZoho.length) {
+            const first = missingZoho[0];
+            return res.status(400).json({
+                message:
+                    first?.zohoSyncError ||
+                    `Zoho bill missing for ${first?.accountNo || 'selected bill'}. Sync to Zoho first, then Pay.`,
+                zohoSyncError: first?.zohoSyncError || '',
+                failedBillIds: missingZoho.map((b) => String(b._id)),
+            });
+        }
+
         for (const bill of bills) {
+            // Prefer Open; if still Draft, try to open before marking Paid.
+            if (String(bill.zohoBillStatus || '').toLowerCase() !== 'open') {
+                try {
+                    const { syncApprovedUtilityBillToZoho } = await import(
+                        '../../utils/syncUtilityBillToZoho.js'
+                    );
+                    const openResult = await syncApprovedUtilityBillToZoho(bill, {
+                        markAsOpen: true,
+                    });
+                    if (!openResult?.ok && !openResult?.zohoBillId) {
+                        return res.status(400).json({
+                            message:
+                                openResult?.message ||
+                                bill.zohoSyncError ||
+                                'Could not open Zoho bill before payment.',
+                            zohoSyncError: bill.zohoSyncError || openResult?.message || '',
+                        });
+                    }
+                } catch (openErr) {
+                    return res.status(400).json({
+                        message:
+                            openErr?.message ||
+                            bill.zohoSyncError ||
+                            'Could not open Zoho bill before payment.',
+                        zohoSyncError: bill.zohoSyncError || openErr?.message || '',
+                    });
+                }
+            }
+
             bill.status = 'Paid';
             bill.pendingWithName = '';
             bill.pendingWithRole = '';
@@ -1921,8 +2093,13 @@ export async function syncUtilityBillBatchToZoho(req, res) {
 
         const zohoSync = await syncApprovedUtilityBillsToZoho(bills, { markAsOpen: true });
         const failed = (zohoSync || []).filter((r) => r && r.ok === false && !r.skipped);
-        const created = (zohoSync || []).filter((r) => r && r.ok && !r.skipped);
+        const created = (zohoSync || []).filter(
+            (r) => r && r.ok && !r.skipped && !r.opened && r.zohoBillId,
+        );
         const opened = (zohoSync || []).filter((r) => r && r.ok && r.opened);
+        const storedDraft = (zohoSync || []).filter(
+            (r) => r && r.ok && !r.opened && String(r.zohoBillStatus || '').toLowerCase() === 'draft',
+        );
 
         try {
             await upsertUtilityBalancePartyExpensesFromBills(
@@ -1994,13 +2171,22 @@ export async function syncUtilityBillBatchToZoho(req, res) {
             createdCount: created.length,
             openedCount: opened.length,
             failedCount: failed.length,
+            failed: failed.map((r) => ({
+                ok: false,
+                message: r?.message || 'Zoho sync failed',
+                zohoBillId: r?.zohoBillId || '',
+            })),
             bills: refreshed.map((b) => decorateBill(b)),
             message:
                 failed.length > 0
-                    ? `${created.length + opened.length} synced; ${failed.length} failed. Check zohoSyncError on each bill.`
+                    ? `${created.length + opened.length} synced; ${failed.length} failed. ${
+                          failed[0]?.message || 'Check zohoSyncError on each bill.'
+                      }`
                     : opened.length > 0
                       ? `${opened.length} Zoho bill(s) marked Open — Accounts can pay.`
-                      : `${created.length || (zohoSync || []).filter((r) => r?.skipped).length} bill(s) ready in Zoho.`,
+                      : storedDraft.length > 0
+                        ? `${storedDraft.length} Zoho bill(s) stored as Draft. Use Open Zoho bill / Pay to mark Open.`
+                        : `${created.length || (zohoSync || []).filter((r) => r?.skipped).length} bill(s) ready in Zoho.`,
         });
     } catch (err) {
         console.error('[syncUtilityBillBatchToZoho]', err);

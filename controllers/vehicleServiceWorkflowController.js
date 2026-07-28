@@ -236,10 +236,17 @@ function missingAssigneeMessage(stage) {
 
 async function getRequesterName(reqUser) {
     if (!reqUser) return 'System';
-    if (reqUser.name) return reqUser.name;
+    const looksLikeObjectId = (value) => /^[a-fA-F0-9]{24}$/.test(String(value || '').trim());
+    const rawName = reqUser.name ? String(reqUser.name).trim() : '';
+    if (rawName && !looksLikeObjectId(rawName)) return rawName;
     const u = await EmployeeBasic.findById(reqUser.employeeObjectId).select('firstName lastName').lean();
-    if (u) return `${u.firstName || ''} ${u.lastName || ''}`.trim();
-    return reqUser.email || 'User';
+    if (u) {
+        const n = `${u.firstName || ''} ${u.lastName || ''}`.trim();
+        if (n) return n;
+    }
+    const email = reqUser.email ? String(reqUser.email).trim() : '';
+    if (email && !looksLikeObjectId(email)) return email;
+    return 'User';
 }
 
 function isPortalAdmin(reqUser) {
