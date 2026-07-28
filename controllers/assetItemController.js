@@ -11651,10 +11651,32 @@ export const addAssetService = async (req, res) => {
             remarkObj.requestStatus === 'pending';
         if (isOilServicePendingCreate) {
             const creatorName = await getRequesterName(req.user);
+            remarkObj.requestedByName = creatorName;
+            remarkObj.createdByName = creatorName;
+            newService.remark = JSON.stringify(remarkObj);
             appendOilServiceActivity(newService, {
                 type: 'service_created',
                 byName: creatorName,
                 note: 'Oil service request created',
+            });
+        }
+
+        // Also stamp creator when Oil Service is saved as draft (not only pending).
+        const isOilServiceDraftCreate =
+            isVehicleAssetForServiceGate() &&
+            String(serviceType || '').trim() === 'Oil Service' &&
+            isDraft &&
+            remarkObj.requestStatus === 'draft' &&
+            !remarkObj.requestedByName;
+        if (isOilServiceDraftCreate) {
+            const creatorName = await getRequesterName(req.user);
+            remarkObj.requestedByName = creatorName;
+            remarkObj.createdByName = creatorName;
+            newService.remark = JSON.stringify(remarkObj);
+            appendOilServiceActivity(newService, {
+                type: 'service_created',
+                byName: creatorName,
+                note: 'Oil service request draft created',
             });
         }
 
