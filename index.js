@@ -47,6 +47,7 @@ import { processShopServiceStartDateActivation } from "./utils/vehicleShopServic
 import { processAssetServiceOverdue } from "./utils/processAssetServiceOverdue.js";
 import { processFleetHandoverEscalation } from "./utils/processFleetHandoverEscalation.js";
 import { processBirthdayWishes } from "./utils/processBirthdayWishes.js";
+import { scheduleDailyAtMidnight, getScheduledEmailTimeZone } from "./utils/scheduleDailyAtMidnight.js";
 import { setupEmailSubjectTag } from "./utils/setupEmailSubjectTag.js";
 import { purgeExpiredAdminDeletionArchives } from "./services/adminDeletionArchiveService.js";
 import { rerouteAllPendingAssetCreationApprovals } from "./utils/assetApprovalHelpers.js";
@@ -95,35 +96,45 @@ setInterval(() => {
 }, 6 * 60 * 60 * 1000);
 
 setTimeout(() => { processAccidentAssets(); }, 60 * 1000);
-setInterval(() => { processAccidentAssets(); }, 24 * 60 * 60 * 1000);
+scheduleDailyAtMidnight(
+    () => processAccidentAssets(),
+    { name: "AccidentAssets" },
+);
 
-// Run company/employee/vehicle document expiry reminders (30/20/10/0 day emails + HR tasks).
+// Date-based auto emails at 12:00 AM (Asia/Dubai by default).
+// Startup catch-up still runs shortly after boot so overnight downtime does not skip the day;
+// reminder logs keep sends idempotent (no duplicate emails).
+const scheduledEmailTz = getScheduledEmailTimeZone();
+console.log(`[ScheduledEmail] daily jobs armed for ${scheduledEmailTz} midnight`);
+
+// Company / employee / vehicle document expiry (30/20/10/0 day emails + HR tasks).
 setTimeout(() => { processDocumentExpiryReminders(); }, 90 * 1000);
-setInterval(() => { processDocumentExpiryReminders(); }, 24 * 60 * 60 * 1000);
+scheduleDailyAtMidnight(
+    () => processDocumentExpiryReminders(),
+    { name: "DocumentExpiryReminders" },
+);
 
 // Utility bill monthly payment-day reminders (T-10 / T-5 / due day → HR email + bell).
 setTimeout(() => {
     processUtilityBillPaymentDayReminders().catch((e) =>
-        console.error('[UtilityBillPaymentDayReminders] startup failed:', e?.message || e),
+        console.error("[UtilityBillPaymentDayReminders] startup failed:", e?.message || e),
     );
 }, 110 * 1000);
-setInterval(() => {
-    processUtilityBillPaymentDayReminders().catch((e) =>
-        console.error('[UtilityBillPaymentDayReminders] scheduled run failed:', e?.message || e),
-    );
-}, 24 * 60 * 60 * 1000);
+scheduleDailyAtMidnight(
+    () => processUtilityBillPaymentDayReminders(),
+    { name: "UtilityBillPaymentDayReminders" },
+);
 
 // Utility contract end-date expiry (T-10 / T-5 / expiry day → HR email + bell).
 setTimeout(() => {
     processUtilityContractExpiryReminders().catch((e) =>
-        console.error('[UtilityContractExpiryReminders] startup failed:', e?.message || e),
+        console.error("[UtilityContractExpiryReminders] startup failed:", e?.message || e),
     );
 }, 125 * 1000);
-setInterval(() => {
-    processUtilityContractExpiryReminders().catch((e) =>
-        console.error('[UtilityContractExpiryReminders] scheduled run failed:', e?.message || e),
-    );
-}, 24 * 60 * 60 * 1000);
+scheduleDailyAtMidnight(
+    () => processUtilityContractExpiryReminders(),
+    { name: "UtilityContractExpiryReminders" },
+);
 
 // Birthday wishes for active employees (personal email only).
 setTimeout(() => {
@@ -131,11 +142,10 @@ setTimeout(() => {
         console.error("[BirthdayWish] startup run failed:", e?.message || e),
     );
 }, 100 * 1000);
-setInterval(() => {
-    processBirthdayWishes().catch((e) =>
-        console.error("[BirthdayWish] scheduled run failed:", e?.message || e),
-    );
-}, 24 * 60 * 60 * 1000);
+scheduleDailyAtMidnight(
+    () => processBirthdayWishes(),
+    { name: "BirthdayWish" },
+);
 
 // Run vehicle service hold reminders (creates deferred task/email near hold date).
 setTimeout(() => { processVehicleServiceHoldReminders(); }, 120 * 1000);
@@ -170,6 +180,10 @@ setTimeout(() => {
         console.error('[AdminDeletionArchive] startup purge failed:', e?.message || e),
     );
 }, 180 * 1000);
+scheduleDailyAtMidnight(
+    () => purgeExpiredAdminDeletionArchives(),
+    { name: "AdminDeletionArchive" },
+);
 
 setTimeout(() => {
     rerouteAllPendingAssetCreationApprovals()
@@ -182,11 +196,6 @@ setTimeout(() => {
             console.error('[AssetApproval] startup re-route failed:', e?.message || e),
         );
 }, 20 * 1000);
-setInterval(() => {
-    purgeExpiredAdminDeletionArchives().catch((e) =>
-        console.error('[AdminDeletionArchive] scheduled purge failed:', e?.message || e),
-    );
-}, 24 * 60 * 60 * 1000);
 
 // CORS Configuration - MUST BE FIRST
 const staticAllowedOrigins = [

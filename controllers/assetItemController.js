@@ -1121,27 +1121,33 @@ export const getAssetItems = async (req, res) => {
 export const getVehicleFleetDashboard = async (req, res) => {
     try {
         const listOnly = String(req.query.scope || '').trim().toLowerCase() === 'list';
-        const fallbackAssetController = await getDepartmentHOD('assetcontroller');
         const draftVis = buildDraftVisibilityQuery(req.user);
-        const vehicleTypeDocs = await AssetType.find({
-            isActive: true,
-            name: { $regex: /vehicle|car|fleet|truck/i },
-        })
-            .select('_id')
-            .lean();
+
+        // Parallelize role + type lookups so list paint isn't serial.
+        const [fallbackAssetController, vehicleTypeDocs, handoverAdminOfficer] = await Promise.all([
+            getDepartmentHOD('assetcontroller').catch(() => null),
+            AssetType.find({
+                isActive: true,
+                name: { $regex: /vehicle|car|fleet|truck/i },
+            })
+                .select('_id')
+                .lean(),
+            listOnly ? resolveAdminOfficerEmployee().catch(() => null) : Promise.resolve(null),
+        ]);
         const vehicleTypeIds = vehicleTypeDocs.map((t) => t._id);
         // Exclude tools (VEGA-ASSET-*): shared AssetItem defaults used to match every row.
         const fleetScope = buildFleetVehicleMongoScope({ vehicleTypeIds });
+        // List view: skip documents / services — expiry columns use top-level date fields.
         const fleetSelect = listOnly
-            ? 'assetId name vehicleBrand plateEmirate plateNumber modelYear assetValue status registrationExpiryDate insuranceExpiryDate nextServiceDate oilChangeDate gearOilDueDate currentKilometer assignedTo assignedCompany acceptanceStatus pendingAction actionRequiredBy createdBy vehicleProfileActivationStatus vehicleDispositionStatus warrantyEnabled warrantyExpiryDate warrantyYears onServiceActive onLeaveActive typeId assignedDate pendingActionDetails updatedAt documents.type documents.expiryDate documents.issueDate documents.createdAt documents.status documents.documentStatus documents.description'
-            : 'assetId name vehicleBrand plateEmirate plateNumber modelYear assetValue status registrationExpiryDate insuranceExpiryDate nextServiceDate oilChangeDate gearOilDueDate lastServiceDate currentKilometer assignedTo assignedCompany acceptanceStatus pendingAction services documents actionRequiredBy createdBy vehicleProfileActivationStatus vehicleDispositionStatus assignmentType temporaryEndDate warrantyEnabled warrantyExpiryDate warrantyYears accessories parkingExtendedDays parkingReminderSentAt parkingDurationCompleteSentAt onServiceActive onLeaveActive assignedDate pendingActionDetails updatedAt activeServiceWorkflow';
+            ? 'assetId name vehicleBrand plateEmirate plateNumber modelYear assetValue status registrationExpiryDate insuranceExpiryDate nextServiceDate oilChangeDate gearOilDueDate currentKilometer assignedTo assignedCompany acceptanceStatus pendingAction actionRequiredBy createdBy vehicleProfileActivationStatus vehicleDispositionStatus warrantyEnabled warrantyExpiryDate warrantyYears onServiceActive onLeaveActive typeId assignedDate pendingActionDetails updatedAt locatorDeviceId'
+            : 'assetId name vehicleBrand plateEmirate plateNumber modelYear assetValue status registrationExpiryDate insuranceExpiryDate nextServiceDate oilChangeDate gearOilDueDate lastServiceDate currentKilometer assignedTo assignedCompany acceptanceStatus pendingAction services documents actionRequiredBy createdBy vehicleProfileActivationStatus vehicleDispositionStatus assignmentType temporaryEndDate warrantyEnabled warrantyExpiryDate warrantyYears accessories parkingExtendedDays parkingReminderSentAt parkingDurationCompleteSentAt onServiceActive onLeaveActive assignedDate pendingActionDetails updatedAt activeServiceWorkflow locatorDeviceId';
         const items = await AssetItem.find({ $and: [draftVis, fleetScope] })
             .populate('typeId', 'name')
             .populate('assignedTo', 'firstName lastName employeeId')
             .populate('assignedCompany', 'name nickName companyShortName companyName')
             .populate('actionRequiredBy', 'firstName lastName employeeId')
             .select(fleetSelect)
-            .maxTimeMS(20000)
+            .maxTimeMS(listOnly ? 12000 : 20000)
             .lean();
 
         const isVehicleAsset = (it) =>
@@ -1152,10 +1158,6 @@ export const getVehicleFleetDashboard = async (req, res) => {
             });
 
         const vehicles = items.filter(isVehicleAsset);
-
-        const handoverAdminOfficer = listOnly
-            ? await resolveAdminOfficerEmployee().catch(() => null)
-            : null;
 
         const registrationExpiry = (v) => resolveRegistrationExpiryDate(v);
 

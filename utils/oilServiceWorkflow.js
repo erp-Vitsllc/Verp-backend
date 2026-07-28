@@ -680,12 +680,16 @@ export async function activateOilServiceOnStartDate(
     const wf = asset?.activeServiceWorkflow;
     if (!wf || String(wf.stage || '').toLowerCase() !== STAGE_SCHEDULED) return false;
     if (!isOilServiceWorkflowRecord(wf, asset.services?.id?.(wf.serviceRecordId))) return false;
-    if (isOilServiceLive(asset, asset.services?.id?.(wf.serviceRecordId))) return false;
+    // Only skip when this oil row is already live — do not use onServiceActive alone
+    // (stale flag blocks submit save when start date is today).
+    if (wf.oilServiceLiveAt) return false;
 
     const service = asset.services?.id?.(wf.serviceRecordId);
     if (!service) return false;
 
     const remark = parseOilServiceRemark(service);
+    if (remark?.oilServiceLiveAt) return false;
+
     const startD = resolveServiceStartDate(remark) || wf.scheduledServiceDate;
     if (!startD) return false;
 
@@ -830,15 +834,33 @@ export async function submitOilServiceAssignment(asset, serviceId, req) {
 
     const today = utcDayStart(new Date());
     const startUtc = utcDayStart(startD);
-    // Start date today or earlier → go live immediately (On Service on same detail page).
-    if (startUtc != null && today != null && today >= startUtc) {
-        await activateOilServiceOnStartDate(asset, { byName: requesterName, force: true, notify: false });
-    } else {
+    const shouldGoLive = startUtc != null && today != null && today >= startUtc;
+
+    // Always persist Scheduled first. Previously, when start date was today/past,
+    // activateOilServiceOnStartDate could return false (e.g. stale onServiceActive)
+    // and skip save entirely — Send toasted success but nothing changed after refresh.
+    if (!shouldGoLive) {
         asset.onServiceActive = false;
-        persistWorkflowSnapshot(asset);
-        asset.markModified('services');
-        asset.markModified('activeServiceWorkflow');
-        await asset.save();
+    }
+    persistWorkflowSnapshot(asset);
+    asset.markModified('services');
+    asset.markModified('activeServiceWorkflow');
+    await asset.save();
+
+    // Start date today or earlier → go live immediately (On Service on same detail page).
+    if (shouldGoLive) {
+        const fresh = await AssetItem.findById(asset._id);
+        if (fresh) {
+            await activateOilServiceOnStartDate(fresh, {
+                byName: requesterName,
+                force: true,
+                notify: false,
+            });
+            asset.activeServiceWorkflow = fresh.activeServiceWorkflow;
+            asset.onServiceActive = fresh.onServiceActive;
+            asset.status = fresh.status;
+            asset.services = fresh.services;
+        }
     }
 
     // Cash Zoho bills are created only after End Service → HR → Accounts approve (not on assignment).

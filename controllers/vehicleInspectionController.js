@@ -23,6 +23,7 @@ import {
     formatEmployeeDisplayName,
 } from '../utils/vehicleHandoverApprovalFlow.js';
 import { applyPendingHandoverAccessoriesToVehicleList } from '../utils/vehicleAccessoriesListSync.js';
+import { isReqUserSystemSuperUser } from '../utils/systemSuperUser.js';
 
 export const VEHICLE_INSPECTION_DOC_TYPE = 'Vehicle Inspection';
 export const VEHICLE_INSPECTION_HANDOVER_KIND = 'vehicle_inspection';
@@ -159,6 +160,10 @@ export async function canEditInspectionHandoverContent(req, asset, record) {
     const userId = await resolveProfileActivationSubmitterId(req);
     if (!userId) return false;
     if (!isInspectionHandoverHistoryRecord(record)) return false;
+
+    // Portal Super User may add/change photos at any inspection status.
+    if (await isReqUserSystemSuperUser(req.user)) return true;
+
     if (String(asset?.vehicleInspectionStatus || '').toLowerCase() !== 'draft') return false;
 
     const linkedId = asset?.vehicleInspectionHandoverHistoryId;
