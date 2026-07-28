@@ -1348,14 +1348,10 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
             );
             const zohoBillSync = oilAccResult?.zohoBillSync || null;
             return res.json({
-                message: zohoBillSync?.ok
-                    ? `Accounts approved. ${zohoBillSync.message || 'Zoho bill created.'}`
-                    : zohoBillSync?.message
-                      ? `Accounts approved. Zoho bill: ${zohoBillSync.message}`
-                      : 'Accounts approved — oil service payment complete.',
+                message: `Accounts approved. ${zohoBillSync?.message || 'Zoho bill created.'}`,
                 zohoBillMessage: zohoBillSync?.message || '',
                 zohoBillId: zohoBillSync?.billId || '',
-                zohoBillOk: Boolean(zohoBillSync?.ok),
+                zohoBillOk: true,
                 asset: oilAccFresh,
             });
         }
@@ -1456,14 +1452,10 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
             );
             const zohoBillSync = tireAccResult?.zohoBillSync || null;
             return res.json({
-                message: zohoBillSync?.ok
-                    ? `Accounts approved — service scheduled. ${zohoBillSync.message || 'Zoho bill created.'}`
-                    : zohoBillSync?.message
-                      ? `Accounts approved — service scheduled. Zoho bill: ${zohoBillSync.message}`
-                      : 'Accounts approved — service scheduled; vehicle will go on service on the start date',
+                message: `Accounts approved — service scheduled. ${zohoBillSync?.message || 'Zoho bill created.'}`,
                 zohoBillMessage: zohoBillSync?.message || '',
                 zohoBillId: zohoBillSync?.billId || '',
-                zohoBillOk: Boolean(zohoBillSync?.ok),
+                zohoBillOk: true,
                 asset: tireAccFresh,
             });
         }
@@ -1499,14 +1491,10 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
             );
             const zohoBillSync = mechAccResult?.zohoBillSync || null;
             return res.json({
-                message: zohoBillSync?.ok
-                    ? `Accounts approved — service scheduled. ${zohoBillSync.message || 'Zoho bill created.'}`
-                    : zohoBillSync?.message
-                      ? `Accounts approved — service scheduled. Zoho bill: ${zohoBillSync.message}`
-                      : 'Accounts approved — service scheduled; vehicle will go on service on the start date',
+                message: `Accounts approved — service scheduled. ${zohoBillSync?.message || 'Zoho bill created.'}`,
                 zohoBillMessage: zohoBillSync?.message || '',
                 zohoBillId: zohoBillSync?.billId || '',
-                zohoBillOk: Boolean(zohoBillSync?.ok),
+                zohoBillOk: true,
                 asset: mechAccFresh,
             });
         }
@@ -1542,14 +1530,10 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
             );
             const zohoBillSync = bodyAccResult?.zohoBillSync || null;
             return res.json({
-                message: zohoBillSync?.ok
-                    ? `Accounts approved — service scheduled. ${zohoBillSync.message || 'Zoho bill created.'}`
-                    : zohoBillSync?.message
-                      ? `Accounts approved — service scheduled. Zoho bill: ${zohoBillSync.message}`
-                      : 'Accounts approved — service scheduled; vehicle will go on service on the start date',
+                message: `Accounts approved — service scheduled. ${zohoBillSync?.message || 'Zoho bill created.'}`,
                 zohoBillMessage: zohoBillSync?.message || '',
                 zohoBillId: zohoBillSync?.billId || '',
-                zohoBillOk: Boolean(zohoBillSync?.ok),
+                zohoBillOk: true,
                 asset: bodyAccFresh,
             });
         }
@@ -1585,14 +1569,10 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
             );
             const zohoBillSync = accAccResult?.zohoBillSync || null;
             return res.json({
-                message: zohoBillSync?.ok
-                    ? `Accounts approved — service scheduled. ${zohoBillSync.message || 'Zoho bill created.'}`
-                    : zohoBillSync?.message
-                      ? `Accounts approved — service scheduled. Zoho bill: ${zohoBillSync.message}`
-                      : 'Accounts approved — service scheduled; vehicle will go on service on the start date',
+                message: `Accounts approved — service scheduled. ${zohoBillSync?.message || 'Zoho bill created.'}`,
                 zohoBillMessage: zohoBillSync?.message || '',
                 zohoBillId: zohoBillSync?.billId || '',
-                zohoBillOk: Boolean(zohoBillSync?.ok),
+                zohoBillOk: true,
                 asset: accAccFresh,
             });
         }
@@ -1769,7 +1749,13 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
         return res.json({ message: 'Step recorded', asset: fresh });
     } catch (error) {
         console.error('[respondVehicleServiceWorkflow]', error);
-        res.status(500).json({ message: error.message || 'Server error' });
+        const msg = String(error?.message || 'Server error');
+        const isZohoGate =
+            /zoho bill/i.test(msg) ||
+            /account types are not applicable/i.test(msg) ||
+            /pay account is required/i.test(msg) ||
+            /vendor not found/i.test(msg);
+        res.status(isZohoGate ? 400 : 500).json({ message: msg });
     }
 };
 

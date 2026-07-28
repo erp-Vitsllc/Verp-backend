@@ -1211,6 +1211,8 @@ export const getVehicleFleetDashboard = async (req, res) => {
             return {
                 _id: v._id,
                 assetId: v.assetId,
+                name: v.name || '',
+                vehicleBrand: v.vehicleBrand || '',
                 plateEmirate: v.plateEmirate || '',
                 plateNumber: v.plateNumber,
                 label: (v.plateNumber || v.assetId || 'Asset').toString().slice(0, 18),
@@ -1230,9 +1232,15 @@ export const getVehicleFleetDashboard = async (req, res) => {
                 actionRequiredBy: v.actionRequiredBy,
                 onServiceActive: v.onServiceActive === true,
                 onLeaveActive: v.onLeaveActive === true,
+                warrantyEnabled: v.warrantyEnabled === true,
+                warrantyExpiryDate: v.warrantyExpiryDate || null,
+                warrantyYears: v.warrantyYears || null,
+                locatorDeviceId: v.locatorDeviceId ?? null,
+                typeId: v.typeId || null,
                 assetController: controllerPayload,
                 assetControllerId: controllerPayload?._id || null,
                 registrationExpiryDate: regExpResolved,
+                insuranceExpiryDate: v.insuranceExpiryDate || null,
                 nextServiceDate: v.nextServiceDate || null,
                 gearOilDueDate: v.gearOilDueDate || null,
                 oilChangeDate: v.oilChangeDate || null,
@@ -4193,6 +4201,9 @@ export const updateAssetItem = async (req, res) => {
 export const getAssetItemDetail = async (req, res) => {
     try {
         const { id } = req.params;
+        const deferLightDetail =
+            String(req.query.light || '').toLowerCase() === '1' ||
+            String(req.query.light || '').toLowerCase() === 'true';
         const item = await AssetItem.findById(id)
             .populate('assignedCompany')
             .populate({
@@ -4226,7 +4237,9 @@ export const getAssetItemDetail = async (req, res) => {
             return res.status(404).json({ message: 'Asset not found' });
         }
 
-        if (healStaleParkingFields(item)) {
+        // Light first-paint: skip write-heals / sync so the page can render immediately.
+        // Full/deferred loads still run healing below.
+        if (!deferLightDetail && healStaleParkingFields(item)) {
             await item.save();
         }
 
@@ -4246,6 +4259,7 @@ export const getAssetItemDetail = async (req, res) => {
         // If a creation approval is in flight, ensure actionRequiredBy + DashboardAction route to the
         // CURRENT role holder (HR for fleet, AC for tools). Heals stale routing after a flowchart swap.
         let currentCreationApprover = null;
+        if (!deferLightDetail) {
         try {
             currentCreationApprover = await syncStaleAssetCreationApprover(item);
         } catch (syncErr) {
@@ -4397,8 +4411,10 @@ export const getAssetItemDetail = async (req, res) => {
             } catch (healErr) {
             }
         }
+        } // end !deferLightDetail assignment-heal block
 
         if (
+            !deferLightDetail &&
             isAssetAssignmentAcknowledgmentPending(item) &&
             item.assignedToType === 'Employee' &&
             isFleetVehicleAssetFields({ plateNumber: item.plateNumber, typeName: item.typeId?.name }) &&
@@ -4450,6 +4466,7 @@ export const getAssetItemDetail = async (req, res) => {
 
         const handoverFlowForEscalation = getVehicleHandoverFlow(item);
         if (
+            !deferLightDetail &&
             handoverFlowForEscalation?.stage === 'target' &&
             handoverFlowForEscalation?.historyId &&
             !handoverFlowForEscalation?.escalation?.requestedAt &&
@@ -4482,7 +4499,7 @@ export const getAssetItemDetail = async (req, res) => {
             }
         }
 
-        if (handoverFlowForEscalation?.historyId) {
+        if (!deferLightDetail && handoverFlowForEscalation?.historyId) {
             try {
                 await seedPreviousHandoverReportsOnHistory({
                     historyId: handoverFlowForEscalation.historyId,
@@ -4599,12 +4616,12 @@ export const getAssetItemDetail = async (req, res) => {
         }
 
         migrateLegacyOperationalFlags(item);
-        if (item.isModified()) {
+        if (!deferLightDetail && item.isModified()) {
             await item.save();
         }
 
         // Repair accessories left as Attached after L&D was finalized before disposition logic shipped.
-        if (String(item.status || '').trim().toLowerCase() === 'lost' && item.accessories?.length) {
+        if (!deferLightDetail && String(item.status || '').trim().toLowerCase() === 'lost' && item.accessories?.length) {
             let repairNeeded = false;
             for (const acc of item.accessories) {
                 const accSt = String(acc.status || '').trim().toLowerCase();
@@ -4735,9 +4752,7 @@ export const getAssetItemDetail = async (req, res) => {
             String(req.query.deferServiceSigning || '').toLowerCase() === '1' ||
             String(req.query.deferServiceSigning || '').toLowerCase() === 'true';
 
-        const deferLightDetail =
-            String(req.query.light || '').toLowerCase() === '1' ||
-            String(req.query.light || '').toLowerCase() === 'true';
+        // deferLightDetail already parsed at handler start for heal skips.
 
         const headerSignTasks = [
             itemObj.typeId?.imagePreview
@@ -4828,7 +4843,8 @@ export const getAssetItemDetail = async (req, res) => {
         let signTasks;
         if (deferLightDetail) {
             itemObj.deferredAttachmentSigning = true;
-            signTasks = [...headerSignTasks, vehicleAccessoriesListSignTask];
+            // Header thumbnails only — accessories/docs sign on tab refresh.
+            signTasks = [...headerSignTasks];
         } else if (deferHeavyServiceSigning) {
             itemObj.deferredAttachmentSigning = true;
             signTasks = [...nonServiceAttachmentSignTasks, vehicleAccessoriesListSignTask];
@@ -4859,11 +4875,13 @@ export const getAssetItemDetail = async (req, res) => {
         // Role-based creation approver (current flowchart holder) — used for the banner so the UI shows
         // HR for fleet vehicles and Asset Controller for tools, regardless of stored actionRequiredBy.
         try {
-            const approverPerson = currentCreationApprover
-                || (await resolveAssetCreationApproverEmployee({
-                    plateNumber: item.plateNumber,
-                    typeName: item?.typeId?.name || '',
-                }));
+            const approverPerson = deferLightDetail
+                ? currentCreationApprover
+                : (currentCreationApprover
+                    || (await resolveAssetCreationApproverEmployee({
+                        plateNumber: item.plateNumber,
+                        typeName: item?.typeId?.name || '',
+                    })));
             if (approverPerson?._id) {
                 itemObj.creationApprover = {
                     _id: approverPerson._id,

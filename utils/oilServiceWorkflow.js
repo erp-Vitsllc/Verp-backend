@@ -1096,7 +1096,8 @@ export async function advanceOilCashAfterHrApprove(asset, wf, actorName) {
 }
 
 /**
- * Accounts approved Cash oil payment → create Zoho bill and complete.
+ * Accounts approved Cash oil payment → Zoho bill must succeed, then complete.
+ * Warranty oil skips this path (no Zoho). Car Wash is separate (no Zoho gate here).
  */
 export async function advanceOilCashAfterAccountsApprove(asset, wf, actorName) {
     const serviceId = wf.serviceRecordId;
@@ -1127,6 +1128,22 @@ export async function advanceOilCashAfterAccountsApprove(asset, wf, actorName) {
         console.error('[OilService] Accounts Zoho bill sync:', err);
     }
 
+    asset.markModified('services');
+
+    if (!zohoBillSync?.ok) {
+        recordOilServiceActivity(asset, asset.services.id(serviceId), serviceId, {
+            type: 'zoho_bill_failed',
+            byName: actorName,
+            note: zohoBillSync?.message || 'Zoho bill failed — Accounts approval blocked',
+        });
+        asset.markModified('services');
+        await asset.save();
+        throw new Error(
+            zohoBillSync?.message ||
+                'Zoho bill must be created successfully before Accounts can approve.',
+        );
+    }
+
     const liveRemark = parseOilServiceRemark(asset.services.id(serviceId));
     wf.stage = STAGE_COMPLETE;
     liveRemark.workflowStage = STAGE_COMPLETE;
@@ -1137,13 +1154,9 @@ export async function advanceOilCashAfterAccountsApprove(asset, wf, actorName) {
     asset.services.id(serviceId).remark = JSON.stringify(liveRemark);
 
     recordOilServiceActivity(asset, asset.services.id(serviceId), serviceId, {
-        type: zohoBillSync?.ok ? 'zoho_bill_created' : 'accounts_approved',
+        type: 'zoho_bill_created',
         byName: actorName,
-        note: zohoBillSync?.ok
-            ? zohoBillSync.message || 'Accounts approved — Zoho bill created'
-            : zohoBillSync?.message
-              ? `Accounts approved. Zoho bill: ${zohoBillSync.message}`
-              : 'Accounts approved — oil service complete',
+        note: zohoBillSync.message || 'Accounts approved — Zoho bill created',
     });
 
     asset.activeServiceWorkflow = wf;
@@ -1158,9 +1171,7 @@ export async function advanceOilCashAfterAccountsApprove(asset, wf, actorName) {
     const hr = await getDepartmentHOD('hr');
     const adminOfficer = await getDepartmentHOD('admincontroller');
     const assignee = populated?.assignedTo || null;
-    const detailLine = zohoBillSync?.ok
-        ? `Oil service Cash payment approved. ${zohoBillSync.message || 'Zoho bill created.'}`
-        : `Oil service Cash payment approved.${zohoBillSync?.message ? ` Zoho: ${zohoBillSync.message}` : ''}`;
+    const detailLine = `Oil service Cash payment approved. ${zohoBillSync.message || 'Zoho bill created.'}`;
 
     await notifyOilServiceDetailsCompleted({
         asset: populated,

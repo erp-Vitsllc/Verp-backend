@@ -198,7 +198,8 @@ export function isShopServiceLive(asset, service) {
 }
 
 /**
- * After Accounts approves garage — move tire / mechanical / body work to scheduled_service and notify Admin + assignee.
+ * After Accounts approves garage — Zoho bill must succeed first, then move to scheduled_service.
+ * (Oil Warranty and Car Wash do not use this path.)
  */
 export async function advanceShopServiceToScheduledAfterAccountsApprove(
     asset,
@@ -221,6 +222,50 @@ export async function advanceShopServiceToScheduledAfterAccountsApprove(
         throw new Error('Service start and end dates are required before Accounts approval.');
     }
 
+    // Zoho bill first — Accounts cannot advance without a stored Zoho bill.
+    let zohoBillSync = null;
+    try {
+        const { syncVehicleGarageServiceToZoho } = await import('./syncVehicleGarageServiceToZoho.js');
+        zohoBillSync = await syncVehicleGarageServiceToZoho({
+            asset,
+            service,
+            serviceTypeLabel,
+        });
+    } catch (err) {
+        zohoBillSync = {
+            ok: false,
+            message: err?.message || 'Zoho bill sync failed',
+        };
+        console.error('[GarageZoho] accounts approve sync:', err);
+    }
+
+    // Persist Zoho success/error onto the service row (sync mutates service.remark).
+    asset.markModified('services');
+
+    if (!zohoBillSync?.ok) {
+        if (typeof appendActivity === 'function') {
+            appendActivity(service, {
+                type: 'zoho_bill_failed',
+                byName: actorName,
+                note: zohoBillSync?.message || 'Zoho bill failed — Accounts approval blocked',
+            });
+            asset.markModified('services');
+        }
+        await asset.save();
+        throw new Error(
+            zohoBillSync?.message ||
+                'Zoho bill must be created successfully before Accounts can approve.',
+        );
+    }
+
+    if (typeof appendActivity === 'function') {
+        appendActivity(service, {
+            type: 'zoho_bill_created',
+            byName: actorName,
+            note: zohoBillSync.message || 'Zoho bill created',
+        });
+    }
+
     wf.stage = SHOP_SERVICE_SCHEDULED_STAGE;
     wf.accountsHold = null;
     wf.scheduledServiceDate = startD;
@@ -230,49 +275,18 @@ export async function advanceShopServiceToScheduledAfterAccountsApprove(
     wf.shopServiceScheduledNotifiedAt = null;
     wf.shopServiceLiveNotifiedAt = null;
 
-    remark.workflowStage = SHOP_SERVICE_SCHEDULED_STAGE;
-    remark.accountsApprovedAt = new Date().toISOString();
-    remark.accountsApprovedByName = actorName || '';
-    service.remark = JSON.stringify(remark);
+    const liveRemark = parseRemark(service);
+    liveRemark.workflowStage = SHOP_SERVICE_SCHEDULED_STAGE;
+    liveRemark.accountsApprovedAt = new Date().toISOString();
+    liveRemark.accountsApprovedByName = actorName || '';
+    service.remark = JSON.stringify(liveRemark);
 
     if (typeof appendActivity === 'function') {
         appendActivity(service, {
             type: 'accounts_approved',
             byName: actorName,
-            note: 'Garage and service dates approved — service scheduled',
+            note: 'Garage and Zoho bill approved — service scheduled',
         });
-    }
-
-    // Create Zoho Bill: Vendor = Garage Name, Pay Account, Amount, Attachment.
-    let zohoBillSync = null;
-    try {
-        const { syncVehicleGarageServiceToZoho } = await import('./syncVehicleGarageServiceToZoho.js');
-        zohoBillSync = await syncVehicleGarageServiceToZoho({
-            asset,
-            service,
-            serviceTypeLabel,
-        });
-        // Re-parse in case sync wrote zohoBillId / error onto service.remark
-        if (service.remark) {
-            try {
-                Object.assign(remark, JSON.parse(service.remark));
-            } catch {
-                /* keep */
-            }
-        }
-        if (typeof appendActivity === 'function' && zohoBillSync) {
-            appendActivity(service, {
-                type: zohoBillSync.ok ? 'zoho_bill_created' : 'zoho_bill_failed',
-                byName: actorName,
-                note: zohoBillSync.message || (zohoBillSync.ok ? 'Zoho bill created' : 'Zoho bill failed'),
-            });
-        }
-    } catch (err) {
-        zohoBillSync = {
-            ok: false,
-            message: err?.message || 'Zoho bill sync failed',
-        };
-        console.error('[GarageZoho] accounts approve sync:', err);
     }
 
     asset.activeServiceWorkflow = wf;
