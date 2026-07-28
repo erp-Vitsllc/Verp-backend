@@ -953,9 +953,30 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
             return res.status(503).json({ message: 'Workflow role is not configured in Flowchart (assignee missing).' });
         }
 
-        const allowed = (await actorMayAct(req.user, assignee)) || oilManagerStage;
+        // Cash Oil HR / Accounts: only the flowchart assignee — no Super User / admin bypass.
+        let allowed = false;
+        if (oilCashAtPaymentStage) {
+            if (!assignee?._id) {
+                return res.status(503).json({
+                    message:
+                        stage === STAGE.HR
+                            ? 'Flowchart HR is not configured for this approval step.'
+                            : 'Flowchart Accounts is not configured for this approval step.',
+                });
+            }
+            const actor = await resolveActorEmployee(req.user);
+            allowed = !!(actor?._id && String(actor._id) === String(assignee._id));
+        } else {
+            allowed = (await actorMayAct(req.user, assignee)) || oilManagerStage;
+        }
         if (!allowed) {
-            return res.status(403).json({ message: 'You are not authorized for this workflow step' });
+            return res.status(403).json({
+                message: oilCashAtPaymentStage
+                    ? stage === STAGE.HR
+                        ? 'Only the flowchart HR can approve this oil service schedule step.'
+                        : 'Only the flowchart Accounts user can approve this oil service billing step.'
+                    : 'You are not authorized for this workflow step',
+            });
         }
 
         const actorName =
