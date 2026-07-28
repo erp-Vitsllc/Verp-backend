@@ -622,13 +622,31 @@ function persistWorkflowSnapshot(asset) {
         history: Array.isArray(wf.history) ? wf.history : [],
         scheduledServiceDate: wf.scheduledServiceDate || null,
         serviceWindowEndDate: wf.serviceWindowEndDate || null,
+        oilServiceLiveAt: wf.oilServiceLiveAt || null,
     };
 }
 
-function utcDayStart(value) {
-    const d = value ? new Date(value) : new Date();
+/** Prefer YYYY-MM-DD calendar keys to avoid UTC/local off-by-one on date-only fields. */
+function toDateKey(value) {
+    if (value == null || value === '') return null;
+    if (typeof value === 'string') {
+        const trimmed = value.trim();
+        if (/^\d{4}-\d{2}-\d{2}/.test(trimmed)) return trimmed.slice(0, 10);
+    }
+    const d = value instanceof Date ? value : new Date(value);
     if (Number.isNaN(d.getTime())) return null;
-    return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+    return d.toISOString().slice(0, 10);
+}
+
+function utcDayStart(value) {
+    const key = toDateKey(value);
+    if (!key) {
+        const d = value ? new Date(value) : new Date();
+        if (Number.isNaN(d.getTime())) return null;
+        return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+    }
+    const [y, m, day] = key.split('-').map(Number);
+    return Date.UTC(y, m - 1, day);
 }
 
 function resolveServiceEndDate(remark) {
@@ -812,7 +830,8 @@ export async function submitOilServiceAssignment(asset, serviceId, req) {
 
     const today = utcDayStart(new Date());
     const startUtc = utcDayStart(startD);
-    if (startUtc != null && today >= startUtc) {
+    // Start date today or earlier → go live immediately (On Service on same detail page).
+    if (startUtc != null && today != null && today >= startUtc) {
         await activateOilServiceOnStartDate(asset, { byName: requesterName, force: true, notify: false });
     } else {
         asset.onServiceActive = false;
