@@ -962,20 +962,62 @@ export async function maybeStartCarWashWorkflow(asset, { serviceRecordId, req })
 
 /**
  * POST /api/AssetItem/:id/service-workflow/respond
- * body: { action: 'approve' | 'reject' | 'hold' | 'unhold', comment?, serviceUpdates?, holdReason?, holdDays?, holdUntilDate? }
+ * body: { action: 'approve' | 'reject' | 'hold' | 'unhold', comment?, serviceUpdates?, serviceRecordId?, holdReason?, holdDays?, holdUntilDate? }
  * - hold: Accounts step only; requires holdReason + holdUntilDate (or holdDays for legacy payloads).
+ * - serviceRecordId: when provided, act on that service's workflow (even if another service is currently live/scheduled).
  * serviceUpdates uses the same shape as POST /AssetItem/:id/service (optional on approve).
  */
 export const respondVehicleServiceWorkflow = async (req, res) => {
     try {
         const { id } = req.params;
-        const { action, comment, serviceUpdates, holdReason, holdDays, holdUntilDate } = req.body || {};
+        const {
+            action,
+            comment,
+            serviceUpdates,
+            holdReason,
+            holdDays,
+            holdUntilDate,
+            serviceRecordId: bodyServiceRecordId,
+            serviceId: bodyServiceId,
+        } = req.body || {};
         if (!['approve', 'reject', 'hold', 'unhold', 'save'].includes(action)) {
             return res.status(400).json({ message: 'action must be approve, reject, hold, unhold, or save' });
         }
 
         const asset = await AssetItem.findById(id).populate('assignedTo', 'firstName lastName employeeId');
         if (!asset) return res.status(404).json({ message: 'Asset not found' });
+
+        const requestedServiceId = String(bodyServiceRecordId || bodyServiceId || '').trim();
+        if (requestedServiceId) {
+            const { getWorkflowContextForService, snapshotActiveServiceWorkflow } = await import(
+                '../utils/vehicleServiceWorkflowResolve.js'
+            );
+            const { wf: ctxWf, bindActive } = getWorkflowContextForService(asset, requestedServiceId);
+            if (!ctxWf?.stage || [STAGE.COMPLETE, STAGE.REJECTED].includes(String(ctxWf.stage || '').toLowerCase())) {
+                return res.status(400).json({
+                    message: 'No active workflow found for this service request.',
+                });
+            }
+            // Another service may be live/scheduled on the vehicle — switch to the requested row's workflow.
+            if (!bindActive) {
+                snapshotActiveServiceWorkflow(asset);
+                asset.activeServiceWorkflow = {
+                    stage: ctxWf.stage,
+                    serviceTypeLabel: ctxWf.serviceTypeLabel || '',
+                    serviceRecordId: ctxWf.serviceRecordId || requestedServiceId,
+                    history: Array.isArray(ctxWf.history) ? [...ctxWf.history] : [],
+                    scheduledServiceDate: ctxWf.scheduledServiceDate || null,
+                    serviceWindowEndDate: ctxWf.serviceWindowEndDate || null,
+                    serviceDurationDays: ctxWf.serviceDurationDays ?? null,
+                    previousStatus: ctxWf.previousStatus ?? null,
+                    accountsHold: ctxWf.accountsHold || null,
+                    oilServiceLiveAt: ctxWf.oilServiceLiveAt || null,
+                    shopServiceLiveAt: ctxWf.shopServiceLiveAt || null,
+                    garageSubmittedAt: ctxWf.garageSubmittedAt || null,
+                };
+                asset.markModified('activeServiceWorkflow');
+            }
+        }
 
         const wf = asset.activeServiceWorkflow;
         if (!wf?.stage || [STAGE.COMPLETE, STAGE.REJECTED].includes(wf.stage)) {

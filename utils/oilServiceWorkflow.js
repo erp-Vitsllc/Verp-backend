@@ -19,6 +19,7 @@ import {
     commitWorkflowContext,
     getWorkflowContextForService,
 } from './vehicleServiceWorkflowResolve.js';
+import { remarkHasGaragePayAccount } from './syncVehicleGarageServiceToZoho.js';
 
 const STAGE_SCHEDULED = 'scheduled_service';
 const STAGE_COMPLETE = 'complete';
@@ -1002,10 +1003,7 @@ export async function submitOilServiceDetails(asset, serviceId, serviceUpdates, 
 
     const isCash = isOilServiceCashPayment(remark);
     if (isCash) {
-        const hasPayAccount = Boolean(
-            String(remark.payAccountId || remark.garagePayAccountId || '').trim(),
-        );
-        if (!hasPayAccount) {
+        if (!remarkHasGaragePayAccount(remark)) {
             throw new Error('Pay Account is required for Cash oil service before End Service.');
         }
     }
@@ -1186,11 +1184,10 @@ export async function advanceOilCashAfterAccountsApprove(asset, wf, actorName) {
     seedGarageBillAttachmentFromShopInvoice(service);
 
     const liveForPay = parseOilServiceRemark(service);
-    const hasPayAccount = Boolean(
-        String(liveForPay.payAccountId || liveForPay.garagePayAccountId || '').trim(),
-    );
-    if (!hasPayAccount) {
-        throw new Error('Pay Account is required before Accounts can approve and create the Zoho bill.');
+    if (!remarkHasGaragePayAccount(liveForPay)) {
+        throw new Error(
+            'Each payable-from line needs a Chart of Accounts and amount before Accounts can approve and create the Zoho bill.',
+        );
     }
 
     let zohoBillSync = null;

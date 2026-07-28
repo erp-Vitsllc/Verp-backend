@@ -25,12 +25,53 @@ function money(value) {
 
 function resolveAmount(service, remark) {
     return (
+        money(remark.billingTotalAmount) ||
         money(remark.garageBillAmount) ||
         money(remark.hrReviewCompanyPay) ||
         money(remark.hrReviewApprovedAmount) ||
         money(service?.value) ||
         money(remark.approvedAmount) ||
+        money(remark.totalServiceCharge) ||
         0
+    );
+}
+
+/**
+ * Multi payable-from rows (Accounts / Fine-style) → Zoho Bill Item Table lines.
+ * Falls back to a single payAccountId + amount when billingPayables is empty.
+ */
+export function resolveGarageZohoPayableLines(service, remark = {}) {
+    const rows = Array.isArray(remark.billingPayables) ? remark.billingPayables : [];
+    const fromRows = rows
+        .map((row) => {
+            const accountId = String(row?.payAccountId || row?.accountId || '').trim();
+            const amount = money(row?.amount);
+            const name = String(row?.payableTo || row?.payAccountName || '').trim();
+            if (!accountId || !(amount > 0)) return null;
+            return { accountId, amount, name };
+        })
+        .filter(Boolean);
+
+    if (fromRows.length) return fromRows;
+
+    const fallbackId = String(remark.payAccountId || remark.garagePayAccountId || '').trim();
+    const fallbackAmt = resolveAmount(service, remark);
+    const fallbackName = String(
+        remark.payAccountName || remark.garagePayAccountName || '',
+    ).trim();
+    if (fallbackId && fallbackAmt > 0) {
+        return [{ accountId: fallbackId, amount: fallbackAmt, name: fallbackName }];
+    }
+    return [];
+}
+
+export function remarkHasGaragePayAccount(remark = {}) {
+    if (String(remark.payAccountId || remark.garagePayAccountId || '').trim()) return true;
+    const rows = Array.isArray(remark.billingPayables) ? remark.billingPayables : [];
+    return rows.some(
+        (row) =>
+            String(row?.payAccountId || row?.accountId || '').trim() &&
+            money(row?.amount) > 0,
     );
 }
 
@@ -157,16 +198,18 @@ export async function syncVehicleGarageServiceToZoho({
     }
 
     const garageName = String(remark.garageName || remark.vendorName || '').trim();
-    const payAccountId = String(
-        remark.payAccountId || remark.garagePayAccountId || '',
-    ).trim();
-    const amount = resolveAmount(service, remark);
+    const payableLines = resolveGarageZohoPayableLines(service, remark);
+    const amount = payableLines.reduce((sum, line) => sum + line.amount, 0) || resolveAmount(service, remark);
 
     if (!garageName) {
         return { ok: false, message: 'Garage name (vendor) is required for Zoho bill.' };
     }
-    if (!payAccountId) {
-        return { ok: false, message: 'Pay Account is required for Zoho bill.' };
+    if (!payableLines.length) {
+        return {
+            ok: false,
+            message:
+                'Each payable-from line needs a Chart of Accounts and amount greater than zero for the Zoho bill.',
+        };
     }
     if (!(amount > 0)) {
         return { ok: false, message: 'Bill amount must be greater than 0.' };
@@ -212,20 +255,22 @@ export async function syncVehicleGarageServiceToZoho({
                     .slice(-20) ||
                 undefined;
 
+            // Fine-style: one Zoho Item Table row per payable-from (Account + Rate).
+            const line_items = payableLines.map((line) => ({
+                account_id: line.accountId,
+                name: line.name || label,
+                description: [description, line.name].filter(Boolean).join(' · ').slice(0, 200) || label,
+                quantity: 1,
+                rate: line.amount,
+            }));
+
             const billPayload = {
                 vendor_id: vendorId,
                 bill_number: billNumber,
                 date: today,
                 due_date: today,
                 notes: description,
-                line_items: [
-                    {
-                        account_id: payAccountId,
-                        description: description || label,
-                        quantity: 1,
-                        rate: amount,
-                    },
-                ],
+                line_items,
             };
             if (referenceNumber) billPayload.reference_number = referenceNumber;
 
