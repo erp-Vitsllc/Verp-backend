@@ -248,7 +248,21 @@ export async function submitTireChangeGarage(asset, serviceId, serviceUpdates, r
         }`,
     });
     // Garage done → schedule immediately. Accounts Zoho billing is only after Service Completed.
-    commitWorkflowContext(asset, serviceId, { wf, bindActive });
+    const { snapshotActiveServiceWorkflow } = await import('./vehicleServiceWorkflowResolve.js');
+    if (!bindActive) {
+        snapshotActiveServiceWorkflow(asset);
+    }
+    asset.activeServiceWorkflow = {
+        ...(typeof wf.toObject === 'function' ? wf.toObject() : wf),
+        stage: wf.stage,
+        serviceRecordId: wf.serviceRecordId || serviceId,
+        serviceTypeLabel: wf.serviceTypeLabel || 'Tire Change',
+        history: Array.isArray(wf.history) ? [...wf.history] : [],
+        garageSubmittedAt: wf.garageSubmittedAt,
+        scheduledServiceDate: wf.scheduledServiceDate || null,
+        serviceWindowEndDate: wf.serviceWindowEndDate || null,
+    };
+    asset.markModified('activeServiceWorkflow');
     asset.markModified('services');
     await asset.save();
 
@@ -257,7 +271,7 @@ export async function submitTireChangeGarage(asset, serviceId, serviceUpdates, r
     );
     await advanceShopServiceToScheduledAfterAccountsApprove(
         asset,
-        asset.activeServiceWorkflow || wf,
+        asset.activeServiceWorkflow,
         actorName,
         {
             serviceTypeLabel: 'Tire Change',

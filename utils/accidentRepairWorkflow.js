@@ -131,22 +131,28 @@ export async function resolveAccidentRepairAssigneeForStage(stage) {
 }
 
 export async function advanceAccidentRepairAfterHrApprove(asset, wf, actorName) {
+    // After Garage: HR approves → Scheduled / On Service (start date).
     const serviceRecordId = wf.serviceRecordId;
-    wf.stage = ACCIDENT_REPAIR_STAGE.ADMIN_OFFICER;
-    asset.activeServiceWorkflow = wf;
-    asset.markModified('activeServiceWorkflow');
-    await asset.save();
+    const service = asset.services?.id?.(serviceRecordId);
+    if (service) {
+        appendAccidentRepairActivity(service, {
+            type: 'hr_approved',
+            byName: actorName,
+            note: 'HR approved — ready for On Service',
+        });
+        asset.markModified('services');
+    }
 
-    const adminOfficer = await getDepartmentHOD('admincontroller');
-    await notifyAccidentRepairStakeholder({
-        asset,
-        serviceRecordId,
-        recipient: adminOfficer,
-        requestedByName: actorName,
-        extra2: 'Update garage and service dates',
-        stageLabel: 'Garage details required',
-        actionLabel: 'Accident repair — garage update',
-        detailLine: `${actorName} submitted accident repair details for HR approval. Please open the Accident Repair page, complete Garage / Service Details, and click Done.`,
+    const { advanceShopServiceToScheduledAfterAccountsApprove } = await import(
+        './vehicleShopServiceScheduled.js'
+    );
+    return advanceShopServiceToScheduledAfterAccountsApprove(asset, wf, actorName, {
+        serviceTypeLabel: 'Accident Repair',
+        linkPath: accidentRepairDetailsPath(asset._id, serviceRecordId),
+        dashboardMeta: accidentRepairDashboardMeta(asset, serviceRecordId),
+        appendActivity: appendAccidentRepairActivity,
+        scheduleActivityType: 'service_scheduled',
+        scheduleActivityNote: 'HR approved On Service — service scheduled',
     });
 }
 
@@ -238,43 +244,51 @@ export async function submitAccidentRepairGarage(asset, serviceId, serviceUpdate
     if (endRaw) {
         wf.serviceWindowEndDate = new Date(endRaw);
     }
+    if (!startRaw || !endRaw) {
+        throw new Error('Service start and end dates are required before submitting garage details.');
+    }
     const actorName = await getRequesterName(req.user);
     wf.garageSubmittedAt = new Date().toISOString();
     remark.garageSubmittedByName = actorName;
+    remark.workflowStage = ACCIDENT_REPAIR_STAGE.HR;
     asset.services.id(serviceId).remark = JSON.stringify(remark);
     appendAccidentRepairActivity(asset.services.id(serviceId), {
         type: 'garage_updated',
         byName: actorName,
-        note: `Garage details submitted · Service start: ${
+        note: `Garage details submitted · awaiting HR On Service approval · start ${
             startRaw ? String(startRaw).slice(0, 10) : '—'
         }`,
     });
-    // Garage done → schedule immediately. Accounts Zoho billing is only after Service Completed.
-    commitWorkflowContext(asset, serviceId, { wf, bindActive });
+    // Garage done → HR must approve before On Service. Accounts Zoho is only after End Service.
+    const { snapshotActiveServiceWorkflow } = await import('./vehicleServiceWorkflowResolve.js');
+    if (!bindActive) {
+        snapshotActiveServiceWorkflow(asset);
+    }
+    asset.activeServiceWorkflow = {
+        ...(typeof wf.toObject === 'function' ? wf.toObject() : wf),
+        stage: ACCIDENT_REPAIR_STAGE.HR,
+        serviceRecordId: wf.serviceRecordId || serviceId,
+        serviceTypeLabel: wf.serviceTypeLabel || 'Accident Repair',
+        history: Array.isArray(wf.history) ? [...wf.history] : [],
+        garageSubmittedAt: wf.garageSubmittedAt,
+        scheduledServiceDate: wf.scheduledServiceDate || null,
+        serviceWindowEndDate: wf.serviceWindowEndDate || null,
+    };
+    asset.markModified('activeServiceWorkflow');
     asset.markModified('services');
     await asset.save();
 
-    const { advanceShopServiceToScheduledAfterAccountsApprove } = await import(
-        './vehicleShopServiceScheduled.js'
-    );
-    await advanceShopServiceToScheduledAfterAccountsApprove(
+    const hr = await getDepartmentHOD('hr');
+    await notifyAccidentRepairStakeholder({
         asset,
-        asset.activeServiceWorkflow || wf,
-        actorName,
-        {
-            serviceTypeLabel: 'Accident Repair',
-            linkPath: `/HRM/Asset/Vehicle/details/${asset._id}/accident-repair/${serviceId}`,
-            dashboardMeta: JSON.stringify({
-                vehicleId: String(asset._id),
-                serviceRecordId: String(serviceId),
-                serviceType: 'Accident Repair',
-                detailsPath: `/HRM/Asset/Vehicle/details/${asset._id}/accident-repair/${serviceId}`,
-            }),
-            appendActivity: null,
-            scheduleActivityType: 'service_scheduled',
-            scheduleActivityNote: 'Garage submitted — service scheduled (Accounts Zoho after End Service)',
-        },
-    );
+        serviceRecordId: serviceId,
+        recipient: hr,
+        requestedByName: actorName,
+        extra2: 'Approve On Service',
+        stageLabel: 'HR On Service approval',
+        actionLabel: 'Accident repair — HR On Service',
+        detailLine: `${actorName} submitted garage details for ${asset.assetId || 'vehicle'}. Please approve so the vehicle can go On Service.`,
+    });
 
     return asset;
 }

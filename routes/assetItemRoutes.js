@@ -2,7 +2,7 @@ import express from 'express';
 import { getNextFleetVehicleAssetId } from '../controllers/assetItem/getNextFleetVehicleAssetId.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import User from '../models/User.js';
-import { createAssetItem, getAssetItems, getVehicleFleetDashboard, getVehicleFleetServiceRequests, getAllAssignedAssets, getMyAssignedAssetsForReturn, getUnassignedAssetsForEmployee, getCompanyAllocationCoordinatorStatus, getHRCompanyAssets, getOnLeaveAssetsForEmployee, getOnServiceAssetsForEmployee, runAssetServiceOverdueCheck, handleOnLeaveAction, bulkHandleOnLeaveAction, handleOnServiceAction, bulkHandleOnServiceAction, getAssetItemDetail, assignAssetItem, bulkAssignAssetItems, bulkAssignAssetItemsToCompany, downloadHandoverPdf, downloadHistoryHandoverPdf, downloadVehicleHandoverPdf, respondToAssignment, bulkRespondToAssignment, getBulkAssignmentPendingGroup, respondBulkAssignmentGroup, getAssetHistory, getHistoryRecord, deleteVehicleHandoverHistory, uploadHandoverAssessmentPhoto, updateHistoryReceiverAssessment, updateHistoryBodyCondition, updateHistoryHandoverItemFineWaiver, returnAssetItem, updateAssetStatus, addAssetDocument, updateAssetDocument, deleteAssetDocument, addAssetService, deleteAssetService, updateAssetServiceDraft, submitAssetServiceDraft, saveOilServiceDetailsDraftHandler, submitOilServiceDetailsHandler, submitTireChangeGarageHandler, completeTireChangeHandler, updateTireChangeQuoteEmployeeRowsHandler, submitMechanicalWorkGarageHandler, completeMechanicalWorkHandler, updateMechanicalWorkQuoteEmployeeRowsHandler, submitBodyWorkGarageHandler, completeBodyWorkHandler, updateBodyWorkQuoteEmployeeRowsHandler, submitAccidentRepairGarageHandler, completeAccidentRepairHandler, retryGarageZohoBillHandler, updateAccidentRepairQuoteEmployeeRowsHandler, updateOilServiceDatesHandler, updateShopServiceExtendDateHandler, addAssetImage, deleteAssetImage, transferAssetAccessory, manageAccessoryStatus, updateAssetItem, deleteAssetItem, endOfLifeAsset, requestAssetAction, bulkRequestAssetAction, handleAssetActionApproval, finalizeAssetAction, uploadAccessoriesAttachment, requestAccessoryAction, respondAccessoryAction, finalizeAccessoryAction, respondToAssetCreation, bulkRespondToAssetCreation, getBulkAssetDetails, getBulkAssetInventoryForPrint, transferAsset, transferAssigneeAsset, submitDraftForCreationApproval, saveLossDamageFineDraft, getPendingAssetDashboardInbox, deletePendingAssetDashboardInboxItem, getEmployeePreviousAssets } from '../controllers/assetItemController.js';
+import { createAssetItem, getAssetItems, getVehicleFleetDashboard, getVehicleFleetServiceRequests, getAllAssignedAssets, getMyAssignedAssetsForReturn, getUnassignedAssetsForEmployee, getCompanyAllocationCoordinatorStatus, getHRCompanyAssets, getOnLeaveAssetsForEmployee, getOnServiceAssetsForEmployee, runAssetServiceOverdueCheck, handleOnLeaveAction, bulkHandleOnLeaveAction, handleOnServiceAction, bulkHandleOnServiceAction, getAssetItemDetail, assignAssetItem, bulkAssignAssetItems, bulkAssignAssetItemsToCompany, downloadHandoverPdf, downloadHistoryHandoverPdf, downloadVehicleHandoverPdf, respondToAssignment, bulkRespondToAssignment, getBulkAssignmentPendingGroup, respondBulkAssignmentGroup, getAssetHistory, getHistoryRecord, deleteVehicleHandoverHistory, uploadHandoverAssessmentPhoto, updateHistoryReceiverAssessment, updateHistoryBodyCondition, updateHistoryHandoverItemFineWaiver, returnAssetItem, updateAssetStatus, addAssetDocument, updateAssetDocument, deleteAssetDocument, addAssetService, deleteAssetService, updateAssetServiceDraft, submitAssetServiceDraft, saveOilServiceDetailsDraftHandler, submitOilServiceDetailsHandler, submitTireChangeGarageHandler, completeTireChangeHandler, updateTireChangeQuoteEmployeeRowsHandler, submitMechanicalWorkGarageHandler, completeMechanicalWorkHandler, updateMechanicalWorkQuoteEmployeeRowsHandler, submitBodyWorkGarageHandler, completeBodyWorkHandler, updateBodyWorkQuoteEmployeeRowsHandler, submitAccidentRepairGarageHandler, completeAccidentRepairHandler, retryGarageZohoBillHandler, updateAccidentRepairQuoteEmployeeRowsHandler, updateOilServiceDatesHandler, approveOilAccountsQuoteHandler, updateShopServiceExtendDateHandler, addAssetImage, deleteAssetImage, transferAssetAccessory, manageAccessoryStatus, updateAssetItem, deleteAssetItem, endOfLifeAsset, requestAssetAction, bulkRequestAssetAction, handleAssetActionApproval, finalizeAssetAction, uploadAccessoriesAttachment, requestAccessoryAction, respondAccessoryAction, finalizeAccessoryAction, respondToAssetCreation, bulkRespondToAssetCreation, getBulkAssetDetails, getBulkAssetInventoryForPrint, transferAsset, transferAssigneeAsset, submitDraftForCreationApproval, saveLossDamageFineDraft, getPendingAssetDashboardInbox, deletePendingAssetDashboardInboxItem, getEmployeePreviousAssets } from '../controllers/assetItemController.js';
 import { respondVehicleServiceWorkflow, respondVehicleServiceScheduledPeriod } from '../controllers/vehicleServiceWorkflowController.js';
 import {
     listVehicleOilServiceTypes,
@@ -640,14 +640,17 @@ const requireAssetFullAccess = async (req, res, next) => {
 
                     if (assignedToEmpId === currentEmpId) return next();
 
-                    // Delegate allowed only when the assigned employee has NO ERP portal access
+                    // Delegate allowed only when assignee cannot self-ack (no company email and/or no User account)
                     const assignedEmp = await EmployeeBasic.findById(asset.assignedTo)
-                        .select('primaryReportee employeeId')
+                        .select('primaryReportee employeeId companyEmail')
                         .lean()
                         .catch(() => null);
 
                     const managerId = assignedEmp?.primaryReportee ? assignedEmp.primaryReportee.toString() : null;
 
+                    const hasCompanyEmail = !!(
+                        assignedEmp?.companyEmail && String(assignedEmp.companyEmail).trim().length > 0
+                    );
                     const assignedEmployeeUser = assignedEmp?.employeeId
                         ? await User.findOne({ employeeId: assignedEmp.employeeId, status: 'Active' })
                             .select('enablePortalAccess')
@@ -655,12 +658,15 @@ const requireAssetFullAccess = async (req, res, next) => {
                             .catch(() => null)
                         : null;
 
-                    const assignedHasPortalAccess = assignedEmployeeUser?.enablePortalAccess === true;
+                    const assignedHasUserAccount = !!(
+                        assignedEmployeeUser && assignedEmployeeUser.enablePortalAccess !== false
+                    );
+                    const assigneeCanSelfAck = hasCompanyEmail && assignedHasUserAccount;
 
                     const delegateAllowed = !!(
                         managerId &&
                         managerId === currentEmpId &&
-                        assignedHasPortalAccess === false
+                        !assigneeCanSelfAck
                     );
 
                     if (delegateAllowed) return next();
@@ -935,6 +941,7 @@ router.delete('/:id/service/:serviceId', protect, requireAssetFullAccess, delete
 router.put('/:id/service/:serviceId', protect, requireAssetFullAccess, updateAssetServiceDraft);
 router.post('/:id/service/:serviceId/submit-request', protect, requireAssetFullAccess, submitAssetServiceDraft);
 router.put('/:id/service/:serviceId/oil-dates', protect, requireAssetFullAccess, updateOilServiceDatesHandler);
+router.put('/:id/service/:serviceId/oil-accounts-quote-approve', protect, requireAssetFullAccess, approveOilAccountsQuoteHandler);
 router.put('/:id/service/:serviceId/extend-date', protect, requireAssetFullAccess, updateShopServiceExtendDateHandler);
 router.post('/:id/service/:serviceId/oil-details/save', protect, requireAssetFullAccess, saveOilServiceDetailsDraftHandler);
 router.post('/:id/service/:serviceId/oil-details/submit', protect, requireAssetFullAccess, submitOilServiceDetailsHandler);

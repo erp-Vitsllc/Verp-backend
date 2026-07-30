@@ -89,6 +89,8 @@ import {
     submitOilServiceDetails,
     updateOilServiceDates,
     userMayEditOilServiceDates,
+    approveOilAccountsQuote,
+    userMayApproveOilAccountsQuote,
     closeOilServicePendingDashboardActions,
     healStaleOilServicePendingDashboardActions,
     activateOilServiceOnStartDate,
@@ -648,11 +650,12 @@ const assigneeHasCompanyEmailOnRecord = (emp) =>
 
 /**
  * Can the assignee Accept in ERP themselves?
- * Requires an Active User login with portal enabled — companyEmail alone is not enough
- * (employees without a User profile cannot get inbox tasks; primary reportee must).
+ * Requires BOTH company email and an Active User account with portal enabled.
+ * Otherwise Accept / notification / "Waiting for" go to primary reportee.
  */
 const assigneeCanSelfAcknowledgeAssignment = async (emp) => {
     if (!emp) return false;
+    if (!assigneeHasCompanyEmailOnRecord(emp)) return false;
     if (emp.enablePortalAccess === false) return false;
     const empId = emp.employeeId ? String(emp.employeeId).trim() : '';
     if (!empId) return false;
@@ -796,6 +799,8 @@ const applyMainAssetLossDamageAccessoryDisposition = async (asset, fineData, req
 
 /**
  * Employee assignment: assignee keeps `assignedTo`; accept task goes to assignee or primary reportee.
+ * - Company email + User account → request, notification, Waiting for = assignee
+ * - No user account (or no company email) → request, notification, Waiting for = primary reportee
  * When assigner === designated acceptor (e.g. AC is also HOD / primary reportee) and assignee cannot
  * self-acknowledge, skip the redundant pending step — asset is directly Assigned to the employee.
  */
@@ -804,13 +809,20 @@ const resolveEmployeeAssignmentActors = async (employeeToAssign, assignerEmpObje
     const assigneeCanSelfAcknowledge = await assigneeCanSelfAcknowledgeAssignment(employeeToAssign);
     let pendingActionActorId = employeeToAssign._id;
     let actionRecipientDoc = employeeToAssign;
+    let missingPrimaryReporteeForNoPortal = false;
 
-    if (!assigneeCanSelfAcknowledge && employeeToAssign.primaryReportee) {
-        pendingActionActorId =
-            employeeToAssign.primaryReportee._id || employeeToAssign.primaryReportee;
+    if (!assigneeCanSelfAcknowledge) {
         const pr = employeeToAssign.primaryReportee;
-        if (pr && typeof pr === 'object' && (pr.employeeId || pr.firstName || pr._id)) {
-            actionRecipientDoc = pr;
+        const prId = pr?._id || pr;
+        if (prId) {
+            // No company email and/or no User account → Accept + notification go to primary reportee.
+            pendingActionActorId = prId;
+            if (pr && typeof pr === 'object' && (pr.employeeId || pr.firstName || pr._id)) {
+                actionRecipientDoc = pr;
+            }
+        } else {
+            // Never leave actionRequiredBy on an employee who cannot log in — that waits forever.
+            missingPrimaryReporteeForNoPortal = true;
         }
     }
 
@@ -821,7 +833,11 @@ const resolveEmployeeAssignmentActors = async (employeeToAssign, assignerEmpObje
         '';
 
     const autoAcceptOnAssign =
-        !assigneeCanSelfAcknowledge && !!assignerId && !!actorId && assignerId === actorId;
+        !assigneeCanSelfAcknowledge &&
+        !missingPrimaryReporteeForNoPortal &&
+        !!assignerId &&
+        !!actorId &&
+        assignerId === actorId;
 
     return {
         assigneeHasCompanyEmail,
@@ -829,79 +845,146 @@ const resolveEmployeeAssignmentActors = async (employeeToAssign, assignerEmpObje
         pendingActionActorId,
         actionRecipientDoc,
         autoAcceptOnAssign,
+        missingPrimaryReporteeForNoPortal,
     };
 };
 
+const NO_PORTAL_NO_REPORTEE_ASSIGN_MESSAGE =
+    'This employee has no company email and/or no user account, and no primary reportee. Set a primary reportee on their profile before assigning — otherwise Accept waits forever on someone who cannot log in.';
+
 /**
- * Re-route Pending "Asset Assignment" inbox tasks when the assignee has no ERP login
- * so the primary reportee receives the Accept task (and badge/inbox stay correct).
+ * Re-route existing Pending "Asset Assignment" Accept tasks onto the correct actor:
+ * company email + user account → assignee; otherwise → primary reportee.
+ * Updates actionRequiredBy, inbox row, and emails the newly correct person when healed.
  */
 const healMisroutedAssignmentInboxTasks = async () => {
     try {
-        const pending = await DashboardAction.find({
-            status: 'Pending',
-            requestType: 'Asset Assignment',
+        const pendingAssets = await AssetItem.find({
+            assignedToType: 'Employee',
+            acceptanceStatus: 'Pending',
+            status: { $in: ['Pending', 'Assigned'] },
+            pendingAction: null,
+            assignedTo: { $ne: null },
         })
-            .select('_id requestId assignedTo')
-            .limit(100)
+            .select(
+                'assetId name status acceptanceStatus pendingAction actionRequiredBy assignedToType assignedTo assignedBy typeId pendingActionDetails categoryId assignmentType',
+            )
+            .populate({
+                path: 'assignedTo',
+                select: 'employeeId firstName lastName companyEmail workEmail enablePortalAccess primaryReportee department',
+                populate: {
+                    path: 'primaryReportee',
+                    select: '_id firstName lastName employeeId companyEmail workEmail',
+                },
+            })
+            .populate('categoryId', 'name')
+            .limit(300)
             .lean();
-        if (!pending.length) return;
 
-        for (const da of pending) {
-            if (!da.requestId) continue;
-            const asset = await AssetItem.findById(da.requestId)
-                .select(
-                    'status acceptanceStatus pendingAction actionRequiredBy assignedToType assignedTo assignedBy plateNumber typeId pendingActionDetails',
-                )
-                .populate({
-                    path: 'assignedTo',
-                    select: 'employeeId firstName lastName companyEmail enablePortalAccess primaryReportee',
-                    populate: {
-                        path: 'primaryReportee',
-                        select: '_id firstName lastName employeeId',
-                    },
-                })
-                .lean();
-            if (!asset || !isAssetAssignmentAcknowledgmentPending(asset)) continue;
-            if (asset.assignedToType !== 'Employee' || !asset.assignedTo) continue;
-            // Skip fleet handover multi-stage rows (handled elsewhere).
+        if (!pendingAssets.length) return;
+
+        for (const asset of pendingAssets) {
+            if (!isAssetAssignmentAcknowledgmentPending(asset)) continue;
             if (getVehicleHandoverFlow(asset)?.stage) continue;
+            if (!asset.assignedTo) continue;
 
             const resolved = await resolveEmployeeAssignmentActors(
                 asset.assignedTo,
                 asset.assignedBy,
             );
-            if (resolved.autoAcceptOnAssign || !resolved.pendingActionActorId) continue;
+            if (
+                resolved.missingPrimaryReporteeForNoPortal ||
+                resolved.autoAcceptOnAssign ||
+                !resolved.pendingActionActorId
+            ) {
+                continue;
+            }
+
             const expectedId =
                 resolved.pendingActionActorId?._id?.toString?.() ||
                 resolved.pendingActionActorId?.toString?.() ||
                 '';
             if (!expectedId) continue;
 
-            const currentActionAssignee =
-                da.assignedTo?._id?.toString?.() || da.assignedTo?.toString?.() || '';
             const currentAr =
                 asset.actionRequiredBy?._id?.toString?.() ||
                 asset.actionRequiredBy?.toString?.() ||
                 '';
-            if (currentActionAssignee === expectedId && currentAr === expectedId) continue;
+
+            const pendingDash = await DashboardAction.find({
+                requestId: asset._id,
+                requestType: 'Asset Assignment',
+                status: 'Pending',
+            })
+                .select('_id assignedTo')
+                .lean();
+
+            const dashNeedsHeal = pendingDash.some((da) => {
+                const cur = da.assignedTo?._id?.toString?.() || da.assignedTo?.toString?.() || '';
+                return cur !== expectedId;
+            });
+            const arNeedsHeal = currentAr !== expectedId;
+            if (!arNeedsHeal && !dashNeedsHeal && pendingDash.length > 0) continue;
 
             const healed = await EmployeeBasic.findById(expectedId)
-                .select('firstName lastName employeeId')
+                .select('firstName lastName employeeId companyEmail workEmail primaryReportee')
+                .populate('primaryReportee', 'firstName lastName employeeId companyEmail workEmail')
                 .lean();
-            await AssetItem.updateOne(
-                { _id: asset._id },
-                { $set: { actionRequiredBy: expectedId } },
-            );
-            await DashboardAction.updateOne(
-                { _id: da._id, status: 'Pending' },
-                {
-                    $set: {
-                        assignedTo: expectedId,
-                        ...(healed?.employeeId ? { assignedToEmpId: healed.employeeId } : {}),
+            if (!healed) continue;
+
+            if (arNeedsHeal) {
+                await AssetItem.updateOne(
+                    { _id: asset._id },
+                    { $set: { actionRequiredBy: expectedId } },
+                );
+            }
+
+            if (pendingDash.length) {
+                await DashboardAction.updateMany(
+                    {
+                        requestId: asset._id,
+                        requestType: 'Asset Assignment',
+                        status: 'Pending',
                     },
-                },
-            );
+                    {
+                        $set: {
+                            assignedTo: expectedId,
+                            ...(healed.employeeId ? { assignedToEmpId: healed.employeeId } : {}),
+                        },
+                    },
+                );
+            } else {
+                const assignee = asset.assignedTo;
+                await DashboardAction.findOneAndUpdate(
+                    {
+                        requestId: asset._id,
+                        requestType: 'Asset Assignment',
+                        status: 'Pending',
+                    },
+                    {
+                        assignedTo: expectedId,
+                        assignedToEmpId: healed.employeeId,
+                        requestId: asset._id,
+                        requestType: 'Asset Assignment',
+                        subjectEmployeeId: assignee?.employeeId,
+                        subjectName: `${assignee?.firstName || ''} ${assignee?.lastName || ''}`.trim(),
+                        extra1: `${asset.assetId || ''} — ${asset.name || ''}`.trim(),
+                        extra2: asset.assignmentType || 'Permanent',
+                        status: 'Pending',
+                    },
+                    { upsert: true, new: true, setDefaultsOnInsert: true },
+                );
+            }
+
+            // Only re-notify when we actually moved the Accept task to someone else.
+            if (arNeedsHeal || dashNeedsHeal) {
+                await sendAssetAssignmentEmail({
+                    asset,
+                    employee: asset.assignedTo,
+                    recipient: healed,
+                    pendingAssignment: true,
+                }).catch(() => null);
+            }
         }
     } catch {
         /* non-fatal */
@@ -1013,7 +1096,7 @@ const getActorPermissionFlagsForAsset = async (reqUser, asset) => {
         isPrimaryReporteeDelegate = !!(
             primaryReporteeId &&
             primaryReporteeId === currentEmpObjectId &&
-            (!assigneeHasCompanyEmail || hasPortalAccess === false)
+            (!assigneeHasCompanyEmail || hasPortalAccess !== true)
         );
     }
 
@@ -5514,6 +5597,9 @@ export const assignAssetItem = async (req, res) => {
                     employeeToAssign,
                     actingEmpObjectId,
                 );
+                if (standardActors.missingPrimaryReporteeForNoPortal) {
+                    return res.status(400).json({ message: NO_PORTAL_NO_REPORTEE_ASSIGN_MESSAGE });
+                }
                 resolvedActors = {
                     ...standardActors,
                     pendingActionActorId: fleetHandoverActor.actorId,
@@ -5527,6 +5613,9 @@ export const assignAssetItem = async (req, res) => {
                     employeeToAssign,
                     actingEmpObjectId,
                 );
+                if (resolvedActors.missingPrimaryReporteeForNoPortal) {
+                    return res.status(400).json({ message: NO_PORTAL_NO_REPORTEE_ASSIGN_MESSAGE });
+                }
             }
             let actionRecipientDoc = resolvedActors.actionRecipientDoc;
 
@@ -5950,6 +6039,8 @@ export const assignAssetItem = async (req, res) => {
                         }).catch(() => null);
                     }
                 } else {
+                    // Pending Accept: email only the actor who must respond
+                    // (assignee if company email + user account; else primary reportee).
                     await sendAssetAssignmentEmail({
                         asset: itemForEmail || item,
                         employee:
@@ -5966,26 +6057,10 @@ export const assignAssetItem = async (req, res) => {
                         stageLabel: fleetVehicle ? 'Target User / Admin Officer' : null,
                     });
 
-                    const assigneeId = employeeToAssign?._id?.toString?.();
-                    const recipientId = actionRecipient?._id?.toString?.();
-                    if (assignedToType === 'Employee' && assigneeId && recipientId && assigneeId !== recipientId) {
-                        await sendAssetAssignmentEmail({
-                            asset: itemForEmail || item,
-                            employee: employeeToAssign,
-                            recipient: employeeToAssign,
-                            attachments: assignAttachments,
-                            pendingAssignment: true,
-                            detailsPath:
-                                fleetVehicle && fleetHandoverHistoryId
-                                    ? buildHandoverAssignDetailsUrl(item._id, fleetHandoverHistoryId)
-                                    : null,
-                            stageLabel: fleetVehicle ? 'Vehicle Handover — assigned to you' : null,
-                        }).catch(() => null);
-                    }
-
                     if (fleetVehicle && fleetHandoverHistoryId) {
                         const adminOfficer = fleetAdminOfficerEmp || (await resolveAdminOfficerEmployee().catch(() => null));
                         const adminId = adminOfficer?._id?.toString?.();
+                        const recipientId = actionRecipient?._id?.toString?.();
                         if (adminOfficer?._id && adminId !== recipientId) {
                             await notifyHandoverStageEmail({
                                 asset: itemForEmail || item,
@@ -6079,6 +6154,9 @@ export const bulkAssignAssetItems = async (req, res) => {
             employeeToAssign,
             req.user.employeeObjectId,
         );
+        if (resolvedActors.missingPrimaryReporteeForNoPortal) {
+            return res.status(400).json({ message: NO_PORTAL_NO_REPORTEE_ASSIGN_MESSAGE });
+        }
         const pendingActionActorId = resolvedActors.pendingActionActorId;
         const autoAcceptOnAssign = resolvedActors.autoAcceptOnAssign;
 
@@ -6379,6 +6457,7 @@ export const bulkAssignAssetItems = async (req, res) => {
                         });
                     }
                 } else {
+                    // Pending Accept: email only actionRequiredBy actor (assignee or primary reportee).
                     const emailRecipient = await EmployeeBasic.findById(pendingActionActorId).select(
                         'employeeId firstName lastName companyEmail workEmail personalEmail email primaryReportee',
                     ).populate('primaryReportee', 'firstName lastName employeeId companyEmail workEmail');
@@ -6393,22 +6472,6 @@ export const bulkAssignAssetItems = async (req, res) => {
                         bulkAssignmentGroupId: bulkAssignmentGroupId.toString(),
                         pendingAssignment: true,
                     });
-
-                    const assigneeId = employeeToAssign?._id?.toString?.();
-                    const recipientId = emailRecipient?._id?.toString?.();
-                    if (assigneeId && recipientId && assigneeId !== recipientId) {
-                        await sendAssetAssignmentEmail({
-                            asset: firstAsset,
-                            assets: assetsForEmail,
-                            employee: employeeToAssign,
-                            recipient: employeeToAssign,
-                            isBulk: true,
-                            assetCount: assetIds.length,
-                            attachments: bulkAssignmentAttachments,
-                            bulkAssignmentGroupId: bulkAssignmentGroupId.toString(),
-                            pendingAssignment: true,
-                        }).catch(() => null);
-                    }
                 }
             }
         } catch (emailErr) {
@@ -9786,7 +9849,7 @@ export const updateAssetStatus = async (req, res) => {
             // Build service record
             serviceRecord = {
                 _id: new mongoose.Types.ObjectId(),
-                serviceReqNo: allocateNextServiceReqNo(item),
+                serviceReqNo: await allocateNextServiceReqNo(item),
                 date: new Date(),
                 expiryDate: expiryDate,
                 serviceDuration: normalizedDuration,
@@ -9833,7 +9896,7 @@ export const updateAssetStatus = async (req, res) => {
             if (serviceReport || amount) {
                 completionRecord = {
                     _id: new mongoose.Types.ObjectId(),
-                    serviceReqNo: allocateNextServiceReqNo(item),
+                    serviceReqNo: await allocateNextServiceReqNo(item),
                     date: new Date(),
                     description: serviceReport,
                     value: amount || 0,
@@ -11626,7 +11689,7 @@ export const addAssetService = async (req, res) => {
         }
         const newService = {
             _id: new mongoose.Types.ObjectId(),
-            serviceReqNo: allocateNextServiceReqNo(asset),
+            serviceReqNo: await allocateNextServiceReqNo(asset),
             serviceType,
             date: date || new Date(),
             expiryDate: expiryDate || null,
@@ -12008,6 +12071,35 @@ export const updateAssetServiceDraft = async (req, res) => {
         }
 
         await asset.save();
+
+        // Initiate Service Send — open Admin Officer email + dashboard task (stays until complete).
+        if (isOilServicePending) {
+            try {
+                const beforeRemark = remarkObj || {};
+                const afterRemark = (() => {
+                    try {
+                        const updatedSvc = asset.services.id(serviceId);
+                        return updatedSvc?.remark ? JSON.parse(updatedSvc.remark) : {};
+                    } catch {
+                        return {};
+                    }
+                })();
+                const wasInitiated = Boolean(String(beforeRemark.oilServiceInitiatedAt || '').trim());
+                const nowInitiated = Boolean(String(afterRemark.oilServiceInitiatedAt || '').trim());
+                if (!wasInitiated && nowInitiated) {
+                    const creatorName = await getRequesterName(req.user);
+                    await notifyAdminOfficerOnVehicleServiceCreated({
+                        asset,
+                        serviceRecordId: serviceId,
+                        serviceType: 'Oil Service',
+                        requestedByName: creatorName,
+                        sendEmail: true,
+                    });
+                }
+            } catch (notifyErr) {
+                console.error('[updateAssetServiceDraft] Oil initiate admin notify failed:', notifyErr);
+            }
+        }
 
         const updated = asset.services.id(serviceId);
         const out = updated?.toObject ? updated.toObject() : updated;
@@ -12404,12 +12496,48 @@ export const updateOilServiceDatesHandler = async (req, res) => {
             });
         }
 
-        const { serviceStartDate, serviceEndDate } = req.body || {};
-        await updateOilServiceDates(asset, serviceId, { serviceStartDate, serviceEndDate }, req.user);
+        const { serviceStartDate, serviceEndDate, garageName, garageLocation, garageContact, zohoVendorId, serviceIssue } =
+            req.body || {};
+        await updateOilServiceDates(
+            asset,
+            serviceId,
+            {
+                serviceStartDate,
+                serviceEndDate,
+                garageName,
+                garageLocation,
+                garageContact,
+                zohoVendorId,
+                serviceIssue,
+            },
+            req.user,
+        );
         const fresh = await AssetItem.findById(asset._id).populate('assignedTo', 'firstName lastName employeeId');
-        return res.json({ message: 'Service dates updated', asset: fresh });
+        return res.json({ message: 'Schedule updated', asset: fresh });
     } catch (error) {
         return res.status(400).json({ message: error.message || 'Could not update service dates' });
+    }
+};
+
+/** Approve Service card — Accounts Approve column. Records approval only, no Zoho bill. */
+export const approveOilAccountsQuoteHandler = async (req, res) => {
+    try {
+        const { id, serviceId } = req.params;
+        const asset = await AssetItem.findById(id).populate('assignedTo', 'firstName lastName employeeId');
+        if (!asset) return res.status(404).json({ message: 'Asset not found' });
+
+        const mayApprove = await userMayApproveOilAccountsQuote(req.user, asset, serviceId);
+        if (!mayApprove) {
+            return res.status(403).json({
+                message: 'Only the flowchart Accounts user can approve the quote at this step.',
+            });
+        }
+
+        await approveOilAccountsQuote(asset, serviceId, req.user);
+        const fresh = await AssetItem.findById(asset._id).populate('assignedTo', 'firstName lastName employeeId');
+        return res.json({ message: 'Accounts approved the quotation.', asset: fresh });
+    } catch (error) {
+        return res.status(400).json({ message: error.message || 'Could not approve accounts quote' });
     }
 };
 
@@ -12564,6 +12692,9 @@ export const transferAssigneeAsset = async (req, res) => {
         if (!newAssignee) return res.status(404).json({ message: 'Target employee not found.' });
 
         const resolvedActors = await resolveEmployeeAssignmentActors(newAssignee, actingEmpObjectId);
+        if (resolvedActors.missingPrimaryReporteeForNoPortal) {
+            return res.status(400).json({ message: NO_PORTAL_NO_REPORTEE_ASSIGN_MESSAGE });
+        }
         if (resolvedActors.autoAcceptOnAssign) {
             return res.status(400).json({
                 message: 'Cannot transfer to an employee who cannot self-acknowledge without a company email delegate.',
@@ -13558,6 +13689,9 @@ export const handleAssetActionApproval = async (req, res) => {
                 employeeToAssign,
                 req.user.employeeObjectId,
             );
+            if (resolvedActors.missingPrimaryReporteeForNoPortal) {
+                return res.status(400).json({ message: NO_PORTAL_NO_REPORTEE_ASSIGN_MESSAGE });
+            }
 
             asset.pendingAction = null;
             asset.pendingActionDetails = null;

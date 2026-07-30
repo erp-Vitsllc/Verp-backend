@@ -6,11 +6,14 @@ import { sendVehicleServiceWorkflowEmail } from './sendVehicleServiceWorkflowEma
 import { resolveEmployeeEmail } from './resolveEmployeeEmail.js';
 
 export const CAR_WASH_STAGE_ACCOUNTS = 'pending_accounts';
+export const CAR_WASH_STAGE_PENDING_BILLING = 'pending_billing';
 export const CAR_WASH_STAGE_COMPLETE = 'complete';
+export const CAR_WASH_STAGE_BILLED = 'billed';
 export const CAR_WASH_STAGE_REJECTED = 'rejected';
 
 export const CAR_WASH_PAYMENT_PENDING = 'pending';
 export const CAR_WASH_PAYMENT_NOT_PAID = 'not_paid';
+export const CAR_WASH_PAYMENT_BILLED = 'billed';
 
 export function isCarWashServiceRecord(service, wf = null) {
     if (String(wf?.serviceTypeLabel || '').trim() === 'Car Wash') return true;
@@ -240,4 +243,69 @@ export async function notifyCarWashAccountsApproved({
     } catch (e) {
         console.error('[CarWashWorkflow] approve notify failed:', e);
     }
+}
+
+/**
+ * Accounts stores Zoho bill after car wash is complete → billed.
+ */
+export async function advanceCarWashBillingAfterAccountsApprove(asset, wf, actorName) {
+    const serviceRecordId = wf.serviceRecordId;
+    const service = asset.services?.id?.(serviceRecordId);
+    if (!service) throw new Error('Service record not found');
+
+    const stage = String(wf.stage || '').toLowerCase();
+    if (stage !== CAR_WASH_STAGE_PENDING_BILLING && stage !== CAR_WASH_STAGE_ACCOUNTS) {
+        throw new Error('Car wash is not awaiting Accounts Zoho billing.');
+    }
+
+    const amount = Number(service.value);
+    if (!Number.isFinite(amount) || amount <= 0) {
+        throw new Error('A valid amount is required before storing the Zoho bill.');
+    }
+
+    const remark = parseCarWashRemark(service);
+    if (!String(remark.garageName || remark.vendorName || '').trim()) {
+        remark.garageName = String(remark.carWashType || 'Car Wash').trim() || 'Car Wash';
+        service.remark = JSON.stringify(remark);
+    }
+
+    let zohoBillSync = null;
+    try {
+        const { syncVehicleGarageServiceToZoho } = await import('./syncVehicleGarageServiceToZoho.js');
+        zohoBillSync = await syncVehicleGarageServiceToZoho({
+            asset,
+            service,
+            serviceTypeLabel: 'Car Wash',
+        });
+    } catch (err) {
+        zohoBillSync = { ok: false, message: err?.message || 'Zoho bill sync failed' };
+        console.error('[CarWash] Accounts Zoho bill sync:', err);
+    }
+
+    asset.markModified('services');
+
+    if (!zohoBillSync?.ok) {
+        await asset.save();
+        throw new Error(
+            zohoBillSync?.message ||
+                'Zoho bill must be created successfully before status becomes Billed.',
+        );
+    }
+
+    const liveRemark = parseCarWashRemark(asset.services.id(serviceRecordId));
+    wf.stage = CAR_WASH_STAGE_BILLED;
+    liveRemark.workflowStage = CAR_WASH_STAGE_BILLED;
+    liveRemark.billingStatus = 'billed';
+    liveRemark.carWashPaymentStatus = CAR_WASH_PAYMENT_BILLED;
+    liveRemark.vehicleServiceCompleted = 'live';
+    liveRemark.accountsBillingApprovedAt = new Date().toISOString();
+    liveRemark.accountsBillingApprovedByName = actorName || '';
+    asset.services.id(serviceRecordId).remark = JSON.stringify(liveRemark);
+
+    asset.activeServiceWorkflow = wf;
+    asset.markModified('activeServiceWorkflow');
+    asset.markModified('services');
+    await asset.save();
+
+    return { asset, zohoBillSync };
 }

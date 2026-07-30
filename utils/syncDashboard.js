@@ -329,11 +329,21 @@ export const syncDashboardAction = async (data) => {
             status: 'Pending',
         };
         // Parallel disposition + inspection handover: separate bell rows per viewer role / task type.
+        // Oil service: keep Admin Officer track row separate from stage tasks (HR / Accounts / On Service).
         if (
             (requestType === 'Vehicle Disposition Request' || requestType === 'Vehicle Inspection') &&
             pendingExtra3
         ) {
             pendingUpsertFilter.extra3 = pendingExtra3;
+        } else if (requestType === 'Vehicle Service Request' && pendingExtra3) {
+            try {
+                const meta = JSON.parse(String(pendingExtra3));
+                if (meta?.adminOfficerServiceTrack || meta?.oilStage || meta?.serviceRecordId) {
+                    pendingUpsertFilter.extra3 = pendingExtra3;
+                }
+            } catch {
+                /* keep default filter */
+            }
         }
 
         await DashboardAction.findOneAndUpdate(

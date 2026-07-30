@@ -651,7 +651,7 @@ const assetItemSchema = new mongoose.Schema({
         attachment: { type: String } // URL to uploaded document
     }],
     services: [{
-        /** Human-readable request id: `{assetId}-{NNN}` e.g. VEGA-Veh-001-001 */
+        /** Global ERP-wide VSR-No: `VSR-001`, `VSR-002`, … (unique across all vehicles & service types) */
         serviceReqNo: { type: String, default: '' },
         serviceType: {
             type: String,
