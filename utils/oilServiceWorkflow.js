@@ -814,7 +814,8 @@ export async function approveOilAccountsQuote(asset, serviceId, reqUser, payment
                 serviceRecordId: serviceId,
                 recipients: [adminOfficer],
                 actionLabel: 'Oil service — Ready to Service',
-                detailLine: `Accounts approved quotation for ${populatedForMail?.assetId || ''}${plate ? ` (${plate})` : ''}. Status is Ready to Service until ${startLabel}, then On Service.`,
+                detailLine: `Accounts approved quotation for ${populatedForMail?.assetId || ''}${plate ? ` (${plate})` : ''}. Status is Ready to Service until ${startLabel}, then On Service. Full service details below.`,
+                detailRows: buildOilScheduleEmailDetailRows(remark),
                 oilStage: 'ready_to_service',
             });
         }
@@ -1239,6 +1240,7 @@ async function notifyStakeholders({
     recipients,
     actionLabel,
     detailLine,
+    detailRows = [],
     oilStage = '',
 }) {
     const linkPath = oilServiceDetailsPath(asset._id, serviceRecordId);
@@ -1249,6 +1251,7 @@ async function notifyStakeholders({
             asset,
             actionLabel,
             detailLine,
+            detailRows,
             serviceRecordId,
             linkPath,
         });
@@ -1275,6 +1278,9 @@ async function notifyOilServiceWentLiveIfNeeded(asset, serviceRecordId, { detail
 
     const populated = await AssetItem.findById(asset._id)
         .populate('assignedTo', 'firstName lastName employeeId companyEmail workEmail personalEmail email')
+        .select(
+            'assetId name plateEmirate plateNumber assignedTo services._id services.serviceReqNo services.serviceType services.remark',
+        )
         .lean();
     if (!populated) return false;
 
@@ -1284,6 +1290,13 @@ async function notifyOilServiceWentLiveIfNeeded(asset, serviceRecordId, { detail
     const message =
         detailLine ||
         `Oil service for ${populated?.assetId || ''}${plate ? ` (${plate})` : ''} has started today. The vehicle is now On Service — complete the service when ready.`;
+
+    const service =
+        (Array.isArray(populated.services) &&
+            populated.services.find((s) => String(s._id) === String(serviceRecordId))) ||
+        null;
+    const remark = parseOilServiceRemark(service);
+    const scheduleRows = buildOilScheduleEmailDetailRows(remark);
 
     if (adminOfficer?._id) {
         await closeOilServiceStageDashboardActions(asset._id, serviceRecordId, {
@@ -1297,6 +1310,7 @@ async function notifyOilServiceWentLiveIfNeeded(asset, serviceRecordId, { detail
             recipients: [adminOfficer],
             actionLabel: 'Oil service — On Service',
             detailLine: message,
+            detailRows: scheduleRows,
             oilStage: 'on_service',
         });
     }
@@ -1309,6 +1323,7 @@ async function notifyOilServiceWentLiveIfNeeded(asset, serviceRecordId, { detail
             asset: populated,
             actionLabel: 'Oil service — On Service',
             detailLine: message,
+            detailRows: scheduleRows,
             serviceRecordId,
             linkPath,
         });
@@ -2209,14 +2224,33 @@ export async function advanceOilCashAfterHrApprove(asset, wf, actorName) {
         comment: 'HR approved — Schedule/HR open task closed',
     });
 
+    const scheduleRows = buildOilScheduleEmailDetailRows(remark);
+    const adminOfficer = await getDepartmentHOD('admincontroller');
+
+    // Accounts: dashboard task + email with full schedule details.
     await notifyStakeholders({
         asset: populated,
         serviceRecordId: serviceId,
         recipients: [accounts],
         actionLabel: 'Oil service — Accounts Approve',
         detailLine: `HR approved the oil service for ${populated?.assetId || ''}${plate ? ` (${plate})` : ''}. Review amount/quotation and approve${startLabel ? ` (start ${startLabel})` : ''}.`,
+        detailRows: scheduleRows,
         oilStage: 'accounts_quote',
     });
+
+    // Admin: full-details email when HR approves (no extra dashboard spam).
+    if (adminOfficer?._id && String(adminOfficer._id) !== String(accounts._id)) {
+        const linkPath = oilServiceDetailsPath(populated._id, serviceId);
+        await sendOilEmail({
+            recipient: adminOfficer,
+            asset: populated,
+            actionLabel: 'Oil service — HR approved',
+            detailLine: `HR approved the oil service schedule for ${populated?.assetId || ''}${plate ? ` (${plate})` : ''}. Full garage and date details are below. Accounts will review next.`,
+            detailRows: scheduleRows,
+            serviceRecordId: serviceId,
+            linkPath,
+        });
+    }
 
     return populated;
 }
