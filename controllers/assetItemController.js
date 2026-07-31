@@ -4290,8 +4290,11 @@ export const getAssetItemDetail = async (req, res) => {
         const deferLightDetail =
             String(req.query.light || '').toLowerCase() === '1' ||
             String(req.query.light || '').toLowerCase() === 'true';
+        const deferHeavyServiceSigning =
+            String(req.query.deferServiceSigning || '').toLowerCase() === '1' ||
+            String(req.query.deferServiceSigning || '').toLowerCase() === 'true';
         const item = await AssetItem.findById(id)
-            .populate('assignedCompany')
+            .populate('assignedCompany', 'name nickName companyId companyShortName companyName')
             .populate({
                 path: 'assignedTo',
                 select: 'firstName lastName employeeId profilePicture companyEmail workEmail department dateOfJoining reportingAuthority primaryReportee signature enablePortalAccess',
@@ -4926,12 +4929,6 @@ export const getAssetItemDetail = async (req, res) => {
             }
         };
 
-        const deferHeavyServiceSigning =
-            String(req.query.deferServiceSigning || '').toLowerCase() === '1' ||
-            String(req.query.deferServiceSigning || '').toLowerCase() === 'true';
-
-        // deferLightDetail already parsed at handler start for heal skips.
-
         const headerSignTasks = [
             itemObj.typeId?.imagePreview
                 ? signKey(itemObj.typeId.imagePreview).then((u) => { itemObj.typeId.imagePreview = u; })
@@ -4942,6 +4939,8 @@ export const getAssetItemDetail = async (req, res) => {
             itemObj.imagePreview ? signKey(itemObj.imagePreview).then((u) => { itemObj.imagePreview = u; }) : null,
             itemObj.photo ? signKey(itemObj.photo).then((u) => { itemObj.photo = u; }) : null,
         ];
+
+        // deferHeavyServiceSigning already parsed at handler start.
 
         const nonServiceAttachmentSignTasks = [
             itemObj.invoiceFile ? signKey(itemObj.invoiceFile).then((u) => { itemObj.invoiceFile = u; }) : null,
@@ -5153,6 +5152,16 @@ export const getAssetItemDetail = async (req, res) => {
         }
 
         try {
+            // Heavy oil/shop heal + activate + auto-create must NOT run on light/deferred paints —
+            // that was making vehicle details / oil-service pages extremely slow.
+            // Run only when explicitly requested (?sync=1) or on a full (non-light, non-deferred) load.
+            const wantInlineOilSync = ['1', 'true', 'yes'].includes(
+                String(req.query.sync || '').trim().toLowerCase(),
+            );
+            const skipOilSyncOnThisRequest =
+                deferLightDetail || (deferHeavyServiceSigning && !wantInlineOilSync);
+
+            if (!skipOilSyncOnThisRequest) {
             for (const s of itemObj.services || []) {
                 if (String(s.serviceType || '').trim() !== 'Oil Service') continue;
                 let remark = {};
@@ -5245,11 +5254,66 @@ export const getAssetItemDetail = async (req, res) => {
                     itemObj.status = activated.status;
                 }
             }
+            }
         } catch (healErr) {
             /* non-fatal */
         }
 
         res.status(200).json(itemObj);
+
+        // After response: background oil/shop sync so UI is not blocked (data unchanged; next visit sees updates).
+        if (deferLightDetail || deferHeavyServiceSigning) {
+            const assetIdForBg = item._id;
+            setImmediate(() => {
+                void (async () => {
+                    try {
+                        const bgItem = await AssetItem.findById(assetIdForBg).select(
+                            'services activeServiceWorkflow onServiceActive status assignedTo plateEmirate plateNumber assetId currentKilometer nextServiceDate vehicleProfileActivationStatus typeId',
+                        );
+                        if (!bgItem) return;
+                        await healStaleOilServicePendingDashboardActions({ assetIds: [assetIdForBg] });
+                        await ensureOilAccountsMakePaymentNotification(bgItem);
+                        await activateOilServiceOnStartDate(bgItem, { byName: 'System' });
+                        const shopWf = bgItem.activeServiceWorkflow || {};
+                        const shopType = String(shopWf.serviceTypeLabel || '').trim();
+                        if (
+                            shopType === 'Tire Change' ||
+                            shopType === 'Mechanical Work' ||
+                            shopType === 'Body Work' ||
+                            shopType === 'Accident Repair'
+                        ) {
+                            const linkPath =
+                                shopType === 'Tire Change'
+                                    ? `/HRM/Asset/Vehicle/details/${assetIdForBg}/tire-change/${shopWf.serviceRecordId}`
+                                    : shopType === 'Mechanical Work'
+                                      ? `/HRM/Asset/Vehicle/details/${assetIdForBg}/mechanical-work/${shopWf.serviceRecordId}`
+                                      : shopType === 'Body Work'
+                                        ? `/HRM/Asset/Vehicle/details/${assetIdForBg}/body-work/${shopWf.serviceRecordId}`
+                                        : `/HRM/Asset/Vehicle/details/${assetIdForBg}/accident-repair/${shopWf.serviceRecordId}`;
+                            await activateShopServiceOnStartDate(bgItem, {
+                                serviceTypeLabel: shopType,
+                                linkPath,
+                                dashboardMeta: JSON.stringify({
+                                    vehicleId: String(assetIdForBg),
+                                    serviceRecordId: String(shopWf.serviceRecordId || ''),
+                                    serviceType: shopType,
+                                    detailsPath: linkPath,
+                                }),
+                                byName: 'System',
+                                notify: true,
+                            });
+                        }
+                        await maybeAutoCreateOilServiceDue(bgItem);
+                    } catch (bgErr) {
+                        console.warn(
+                            '[getAssetItemDetail] background oil/shop sync failed:',
+                            bgErr?.message || bgErr,
+                        );
+                    }
+                })();
+            });
+        }
+        return;
     } catch (error) {
         res.status(500).json({ message: 'Server Error' });
     }

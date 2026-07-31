@@ -753,6 +753,9 @@ export async function approveOilAccountsQuote(asset, serviceId, reqUser, payment
         },
     });
 
+    // Lock oil change / next service dates on the vehicle from the approved schedule.
+    applyOilChangeDatesFromSchedule(asset, remark);
+
     commitWorkflowContext(asset, serviceId, { wf, bindActive });
     asset.markModified('services');
     await asset.save();
@@ -785,21 +788,33 @@ export async function approveOilAccountsQuote(asset, serviceId, reqUser, payment
         }
     }
 
+    const populatedForMail = await AssetItem.findById(asset._id)
+        .populate('assignedTo', OIL_EMP_EMAIL_SELECT)
+        .lean();
+    const plate = [populatedForMail?.plateEmirate, populatedForMail?.plateNumber]
+        .filter(Boolean)
+        .join(' ')
+        .trim();
+    const startLabel = startD ? new Date(startD).toISOString().slice(0, 10) : '';
+
+    await notifyOilScheduleStakeholders({
+        asset: populatedForMail || asset,
+        serviceRecordId: serviceId,
+        remark,
+        actionLabel: 'Oil service — schedule confirmed (Accounts approved)',
+        detailLine: `Your vehicle${plate ? ` (${plate})` : ''} is confirmed for oil service at the garage. Accounts approved the quotation and the service schedule below is locked in.`,
+    });
+
     // If start date is in the future, notify Admin: Ready to Service (awaits start date / On Service).
     if (!wentLive) {
-        const populated = await AssetItem.findById(asset._id)
-            .populate('assignedTo', 'firstName lastName employeeId companyEmail workEmail personalEmail email')
-            .lean();
         const adminOfficer = await getDepartmentHOD('admincontroller');
-        const plate = [populated?.plateEmirate, populated?.plateNumber].filter(Boolean).join(' ').trim();
-        const startLabel = startD ? new Date(startD).toISOString().slice(0, 10) : '';
-        if (adminOfficer?._id && populated) {
+        if (adminOfficer?._id && populatedForMail) {
             await notifyStakeholders({
-                asset: populated,
+                asset: populatedForMail,
                 serviceRecordId: serviceId,
                 recipients: [adminOfficer],
                 actionLabel: 'Oil service — Ready to Service',
-                detailLine: `Accounts approved quotation for ${populated?.assetId || ''}${plate ? ` (${plate})` : ''}. Status is Ready to Service until ${startLabel}, then On Service.`,
+                detailLine: `Accounts approved quotation for ${populatedForMail?.assetId || ''}${plate ? ` (${plate})` : ''}. Status is Ready to Service until ${startLabel}, then On Service.`,
                 oilStage: 'ready_to_service',
             });
         }
@@ -824,7 +839,265 @@ function uniqRecipients(list) {
     return out;
 }
 
-async function sendOilEmail({ recipient, asset, actionLabel, detailLine, linkPath, cc = [] }) {
+const OIL_EMP_EMAIL_SELECT =
+    'firstName lastName employeeId companyEmail workEmail personalEmail email';
+
+/** Vehicle “Car driven by” from oil service remark. */
+async function resolveOilDrivenByEmployee(remark = {}) {
+    const raw = String(remark?.carDrivenByEmployeeId || '').trim();
+    if (!raw) return null;
+    if (mongoose.Types.ObjectId.isValid(raw)) {
+        return EmployeeBasic.findById(raw).select(OIL_EMP_EMAIL_SELECT).lean();
+    }
+    return EmployeeBasic.findOne({ employeeId: raw }).select(OIL_EMP_EMAIL_SELECT).lean();
+}
+
+/** Vehicle owner from oil service remark (Vehicle assigned / owner field). */
+async function resolveOilVehicleOwnerEmployee(remark = {}) {
+    const raw = String(remark?.vehicleOwnerEmployeeId || '').trim();
+    if (!raw) return null;
+    if (mongoose.Types.ObjectId.isValid(raw)) {
+        return EmployeeBasic.findById(raw).select(OIL_EMP_EMAIL_SELECT).lean();
+    }
+    return EmployeeBasic.findOne({ employeeId: raw }).select(OIL_EMP_EMAIL_SELECT).lean();
+}
+
+/** Detail rows for post–Complete Service owner/assignee email. */
+function buildOilCompletedEmailDetailRows(asset = {}, remark = {}) {
+    const fmtKm = (value) => {
+        if (value == null || value === '') return '';
+        const n = Number(value);
+        if (!Number.isFinite(n)) return String(value);
+        return `${n.toLocaleString()} KM`;
+    };
+    const start =
+        String(remark.serviceStartDate || remark.scheduledServiceDate || '').trim().slice(0, 10) ||
+        formatOilDueDateLabel(resolveServiceStartDate(remark));
+    const end =
+        String(remark.serviceEndDate || '').trim().slice(0, 10) ||
+        formatOilDueDateLabel(resolveServiceEndDate(remark));
+    const nextDate =
+        String(remark.nextServiceDate || '').trim().slice(0, 10) ||
+        String(remark.nextChangeMonth || '').trim() ||
+        formatOilDueDateLabel(asset.nextServiceDate);
+    const handOver = String(remark.handOverDate || '').trim().slice(0, 10);
+    const returnDate = String(remark.returnDate || '').trim().slice(0, 10);
+    const garage = String(remark.garageName || remark.vendorName || '').trim();
+    const location = String(remark.garageLocation || '').trim();
+    const contact = String(remark.garageContact || '').trim();
+    const description = String(
+        remark.serviceIssue || remark.accountsReviewDescription || remark.description || '',
+    ).trim();
+
+    const rows = [
+        { label: 'Service status', value: 'Oil service completed' },
+        { label: 'Current KM', value: fmtKm(asset.currentKilometer) },
+        {
+            label: 'KM note',
+            value: 'If the current kilometer reading is not correct, please update it on the vehicle profile in VeRP.',
+        },
+        { label: 'Next oil service KM', value: fmtKm(remark.nextChangeKm) },
+        { label: 'Next oil change date', value: nextDate },
+        { label: 'Service start date', value: start },
+        { label: 'Service end date', value: end },
+        { label: 'Hand over date', value: handOver },
+        { label: 'Return date', value: returnDate },
+        { label: 'Garage', value: garage },
+        { label: 'Garage location', value: location },
+        { label: 'Garage contact', value: contact },
+        { label: 'Description', value: description },
+    ];
+    return rows.filter((row) => String(row.value || '').trim());
+}
+
+/**
+ * After Complete Service — email vehicle owner + assigned user with next oil change details.
+ * Email only (no dashboard task).
+ */
+async function notifyOilServiceCompletedOwnerAndAssignee({
+    asset,
+    serviceRecordId,
+    remark = {},
+}) {
+    const populated = await AssetItem.findById(asset._id || asset)
+        .select(
+            'assetId name plateEmirate plateNumber currentKilometer nextServiceDate oilChangeDate assignedTo',
+        )
+        .populate('assignedTo', OIL_EMP_EMAIL_SELECT)
+        .lean();
+    if (!populated) return;
+
+    const [owner, assigneeResolved] = await Promise.all([
+        resolveOilVehicleOwnerEmployee(remark),
+        (async () => {
+            let assignee = populated.assignedTo || null;
+            if (assignee && (!assignee.firstName || !resolveEmployeeEmail(assignee).email)) {
+                const id = assignee._id || assignee;
+                if (id && mongoose.Types.ObjectId.isValid(String(id))) {
+                    assignee = await EmployeeBasic.findById(id).select(OIL_EMP_EMAIL_SELECT).lean();
+                }
+            }
+            return assignee;
+        })(),
+    ]);
+
+    const recipients = uniqRecipients([assigneeResolved, owner]);
+    if (!recipients.length) {
+        console.warn('[OilService] No owner/assignee email for completion notice.');
+        return;
+    }
+
+    const plate = [populated.plateEmirate, populated.plateNumber].filter(Boolean).join(' ').trim();
+    const detailRows = buildOilCompletedEmailDetailRows(populated, remark);
+    const linkPath = oilServiceDetailsPath(populated._id, serviceRecordId);
+    const detailLine = `Oil service for ${populated.assetId || 'your vehicle'}${plate ? ` (${plate})` : ''} is complete. Next oil change details are below — if the current KM is not correct, please update it.`;
+
+    for (const recipient of recipients) {
+        await sendOilEmail({
+            recipient,
+            asset: populated,
+            actionLabel: 'Oil service completed — next oil change',
+            detailLine,
+            detailRows,
+            linkPath,
+        });
+    }
+    console.log(
+        `[OilService] Completion mail (owner/assignee) -> ${recipients
+            .map((r) => `${r.firstName || ''} ${r.lastName || ''}`.trim() || r.employeeId)
+            .join(', ')}`,
+    );
+}
+
+/**
+ * Sync vehicle oilChangeDate / lastServiceDate / nextServiceDate from the oil schedule.
+ * Start → oil change / last service; end / nextChangeMonth → next service due.
+ */
+function applyOilChangeDatesFromSchedule(asset, remark = {}) {
+    if (!asset) return false;
+    let changed = false;
+    const start = resolveServiceStartDate(remark);
+    if (start && !Number.isNaN(start.getTime())) {
+        asset.oilChangeDate = start;
+        asset.lastServiceDate = start;
+        changed = true;
+    }
+    const next = resolveNextOilServiceDateFromRemark(remark, asset);
+    if (next && !Number.isNaN(next.getTime())) {
+        asset.nextServiceDate = next;
+        changed = true;
+    }
+    return changed;
+}
+
+/** Admin / HR / assigned user / vehicle driven by — email recipients for schedule updates. */
+async function resolveOilScheduleMailRecipients(assetDoc, remark = {}) {
+    const [adminOfficer, hr, driver] = await Promise.all([
+        getDepartmentHOD('admincontroller'),
+        getDepartmentHOD('hr'),
+        resolveOilDrivenByEmployee(remark),
+    ]);
+
+    let assignee = assetDoc?.assignedTo || null;
+    if (assignee && (!assignee.firstName || !resolveEmployeeEmail(assignee).email)) {
+        const assigneeId = assignee._id || assignee;
+        if (assigneeId && mongoose.Types.ObjectId.isValid(String(assigneeId))) {
+            assignee = await EmployeeBasic.findById(assigneeId).select(OIL_EMP_EMAIL_SELECT).lean();
+        }
+    }
+
+    return uniqRecipients([adminOfficer, hr, assignee, driver]);
+}
+
+/**
+ * Email-only schedule update to Admin Officer, HR, assigned user, and vehicle driven by.
+ * (No new dashboard tasks — avoids inbox spam on every reschedule.)
+ */
+async function notifyOilScheduleStakeholders({
+    asset,
+    serviceRecordId,
+    remark = {},
+    actionLabel,
+    detailLine,
+    detailRows = null,
+}) {
+    const populated =
+        asset?.assignedTo && (asset.assignedTo.firstName || asset.assignedTo.companyEmail)
+            ? asset
+            : await AssetItem.findById(asset._id || asset)
+                  .populate('assignedTo', OIL_EMP_EMAIL_SELECT)
+                  .lean();
+    if (!populated) return;
+
+    const recipients = await resolveOilScheduleMailRecipients(populated, remark);
+    if (!recipients.length) return;
+
+    const rows = Array.isArray(detailRows) ? detailRows : buildOilScheduleEmailDetailRows(remark);
+    const linkPath = oilServiceDetailsPath(populated._id, serviceRecordId);
+    for (const recipient of recipients) {
+        await sendOilEmail({
+            recipient,
+            asset: populated,
+            actionLabel,
+            detailLine,
+            detailRows: rows,
+            linkPath,
+        });
+    }
+    console.log(
+        `[OilService] Schedule mail (${actionLabel}) -> ${recipients
+            .map((r) => `${r.firstName || ''} ${r.lastName || ''}`.trim() || r.employeeId)
+            .join(', ')}`,
+    );
+}
+
+/** Full schedule details for oil service emails (garage, location, contact, dates, description). */
+function buildOilScheduleEmailDetailRows(remark = {}) {
+    const start =
+        String(remark.serviceStartDate || remark.scheduledServiceDate || '').trim().slice(0, 10) ||
+        formatOilDueDateLabel(resolveServiceStartDate(remark));
+    const end =
+        String(remark.serviceEndDate || '').trim().slice(0, 10) ||
+        formatOilDueDateLabel(resolveServiceEndDate(remark));
+    const next =
+        String(remark.nextChangeMonth || '').trim() ||
+        formatOilDueDateLabel(resolveNextOilServiceDateFromRemark(remark, null));
+    const garage = String(remark.garageName || remark.vendorName || '').trim();
+    const location = String(remark.garageLocation || '').trim();
+    const contact = String(remark.garageContact || '').trim();
+    const description = String(
+        remark.serviceIssue ||
+            remark.accountsReviewDescription ||
+            remark.description ||
+            remark.notes ||
+            '',
+    ).trim();
+    const paymentType = String(remark.amountMode || '').toLowerCase();
+    const paymentMethod = String(remark.paymentMethod || '').trim();
+
+    const rows = [];
+    rows.push({ label: 'Status', value: 'Your vehicle is scheduled for oil service (garage)' });
+    if (start) rows.push({ label: 'Service start date', value: start });
+    if (end) rows.push({ label: 'Service end date', value: end });
+    if (next) rows.push({ label: 'Next oil change', value: next });
+    if (garage) rows.push({ label: 'Garage', value: garage });
+    if (location) rows.push({ label: 'Garage location', value: location });
+    if (contact) rows.push({ label: 'Garage contact', value: contact });
+    if (paymentType === 'warranty') {
+        rows.push({ label: 'Payment', value: 'Warranty' });
+    } else if (paymentType || paymentMethod) {
+        rows.push({
+            label: 'Payment',
+            value: [paymentType === 'amount' ? 'Cash' : paymentType, paymentMethod]
+                .filter(Boolean)
+                .join(' · '),
+        });
+    }
+    if (description) rows.push({ label: 'Description', value: description });
+    return rows;
+}
+
+async function sendOilEmail({ recipient, asset, actionLabel, detailLine, detailRows = [], linkPath, cc = [] }) {
     const who = `${recipient?.firstName || ''} ${recipient?.lastName || ''}`.trim() || recipient?.employeeId || 'Unknown';
     const { email } = resolveEmployeeEmail(recipient || {});
     console.log(`[OilService][Email] ${actionLabel} -> ${who} <${email || 'no-email'}>`);
@@ -835,6 +1108,7 @@ async function sendOilEmail({ recipient, asset, actionLabel, detailLine, linkPat
         stageLabel: 'Oil service',
         actionLabel,
         detailLine,
+        detailRows,
         linkPath,
         cc,
     });
@@ -1504,6 +1778,7 @@ export async function submitOilServiceDetails(asset, serviceId, serviceUpdates, 
         asset?.activeServiceWorkflow?.serviceWindowEndDate ||
         '';
     const handOverKey = String(remark.handOverDate || '').trim().slice(0, 10);
+    const returnKey = String(remark.returnDate || '').trim().slice(0, 10);
     const endKey = (() => {
         const raw = String(serviceEndRaw || '').trim();
         if (/^\d{4}-\d{2}-\d{2}/.test(raw)) return raw.slice(0, 10);
@@ -1514,6 +1789,27 @@ export async function submitOilServiceDetails(asset, serviceId, serviceUpdates, 
     })();
     if (endKey && handOverKey && handOverKey < endKey) {
         throw new Error('Hand over date must be on or after the service end date.');
+    }
+    if (endKey && returnKey && returnKey < endKey) {
+        throw new Error('Return date must be on or after the service end date.');
+    }
+
+    const nextServiceRaw =
+        remark.nextServiceDate ||
+        remark.nextChangeMonth ||
+        serviceUpdates?.nextServiceDate ||
+        serviceUpdates?.nextServiceMonth ||
+        '';
+    const nextKey = (() => {
+        const raw = String(nextServiceRaw || '').trim();
+        if (/^\d{4}-\d{2}-\d{2}/.test(raw)) return raw.slice(0, 10);
+        if (/^\d{4}-\d{2}$/.test(raw)) return `${raw}-01`;
+        const d = raw ? new Date(raw) : null;
+        if (!d || Number.isNaN(d.getTime())) return '';
+        return d.toISOString().slice(0, 10);
+    })();
+    if (endKey && nextKey && nextKey <= endKey) {
+        throw new Error('Next service date must be after the service end date.');
     }
 
     const serviceRow = asset.services.id(serviceId);
@@ -1561,6 +1857,26 @@ export async function submitOilServiceDetails(asset, serviceId, serviceUpdates, 
         asset.onServiceActive = false;
     }
 
+    // Persist next oil change on the vehicle from Complete Service form.
+    const completedNext =
+        String(remark.nextServiceDate || '').trim().slice(0, 10) ||
+        (/^\d{4}-\d{2}$/.test(String(remark.nextChangeMonth || '').trim())
+            ? `${String(remark.nextChangeMonth).trim()}-01`
+            : '');
+    if (completedNext) {
+        const nextD = new Date(completedNext);
+        if (!Number.isNaN(nextD.getTime())) asset.nextServiceDate = nextD;
+    }
+    const handOverOrEnd =
+        String(remark.handOverDate || remark.serviceEndDate || '').trim().slice(0, 10);
+    if (handOverOrEnd) {
+        const oilD = new Date(handOverOrEnd);
+        if (!Number.isNaN(oilD.getTime())) {
+            asset.oilChangeDate = oilD;
+            asset.lastServiceDate = oilD;
+        }
+    }
+
     // --- Cash: End Service (complete) → Accounts → Zoho → billed ---
     if (isCash) {
         wf.stage = STAGE_PENDING_ACCOUNTS;
@@ -1590,6 +1906,12 @@ export async function submitOilServiceDetails(asset, serviceId, serviceUpdates, 
             oilStage: 'on_service',
             comment: 'Complete Service submitted',
             actionedBy: req.user?.employeeObjectId || req.user?._id || null,
+        });
+
+        await notifyOilServiceCompletedOwnerAndAssignee({
+            asset: populated || asset,
+            serviceRecordId: serviceId,
+            remark,
         });
 
         await notifyStakeholders({
@@ -1627,6 +1949,12 @@ export async function submitOilServiceDetails(asset, serviceId, serviceUpdates, 
     const assignee = populated?.assignedTo || null;
 
     const detailLine = `Oil service for ${populated?.assetId || ''} has been completed. The vehicle status has been restored.`;
+
+    await notifyOilServiceCompletedOwnerAndAssignee({
+        asset: populated || asset,
+        serviceRecordId: serviceId,
+        remark,
+    });
 
     await notifyOilServiceDetailsCompleted({
         asset: populated,
@@ -2032,9 +2360,49 @@ export async function updateOilServiceDates(
     if (serviceIssue !== undefined) {
         service.description = String(serviceIssue || '').trim();
     }
+
+    const startChanged =
+        Boolean(serviceStartDate) &&
+        String(prevStart).slice(0, 10) !== String(serviceStartDate).slice(0, 10);
+    const endChanged =
+        Boolean(serviceEndDate) &&
+        String(prevEnd).slice(0, 10) !== String(serviceEndDate).slice(0, 10);
+
+    // Keep vehicle oil change / next service dates aligned with Admin reschedule.
+    applyOilChangeDatesFromSchedule(asset, remark);
+
     commitWorkflowContext(asset, serviceId, { wf, bindActive });
     asset.markModified('services');
     await asset.save();
+
+    if (startChanged || endChanged) {
+        const populated = await AssetItem.findById(asset._id)
+            .populate('assignedTo', OIL_EMP_EMAIL_SELECT)
+            .lean();
+        const plate = [populated?.plateEmirate, populated?.plateNumber]
+            .filter(Boolean)
+            .join(' ')
+            .trim();
+        const startLabel = String(remark.serviceStartDate || '').slice(0, 10);
+        const endLabel = String(remark.serviceEndDate || '').slice(0, 10);
+        const parts = [];
+        if (startChanged) {
+            parts.push(
+                `start ${String(prevStart).slice(0, 10) || '—'} → ${startLabel || '—'}`,
+            );
+        }
+        if (endChanged) {
+            parts.push(`end ${String(prevEnd).slice(0, 10) || '—'} → ${endLabel || '—'}`);
+        }
+        await notifyOilScheduleStakeholders({
+            asset: populated || asset,
+            serviceRecordId: serviceId,
+            remark,
+            actionLabel: 'Oil service — schedule updated',
+            detailLine: `Your vehicle${plate ? ` (${plate})` : ''} oil service schedule was updated by Admin. Please review the garage details and dates below${parts.length ? ` (${parts.join('; ')})` : ''}.`,
+        });
+    }
+
     return asset;
 }
 
@@ -2074,9 +2442,28 @@ export async function updateOilServiceEndDateExtend(asset, serviceId, { serviceE
     }
 
     service.remark = JSON.stringify(remark);
+    applyOilChangeDatesFromSchedule(asset, remark);
     commitWorkflowContext(asset, serviceId, { wf, bindActive });
     asset.markModified('services');
     await asset.save();
+
+    if (String(prevEnd).slice(0, 10) !== endDate) {
+        const populated = await AssetItem.findById(asset._id)
+            .populate('assignedTo', OIL_EMP_EMAIL_SELECT)
+            .lean();
+        const plate = [populated?.plateEmirate, populated?.plateNumber]
+            .filter(Boolean)
+            .join(' ')
+            .trim();
+        await notifyOilScheduleStakeholders({
+            asset: populated || asset,
+            serviceRecordId: serviceId,
+            remark,
+            actionLabel: 'Oil service — schedule updated',
+            detailLine: `Your vehicle${plate ? ` (${plate})` : ''} oil service end date was extended by Admin. Please review the garage details and dates below (end ${String(prevEnd).slice(0, 10) || '—'} → ${endDate}).`,
+        });
+    }
+
     return asset;
 }
 
