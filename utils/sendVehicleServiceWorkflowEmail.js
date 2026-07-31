@@ -5,6 +5,7 @@ import { resolveEmployeeEmailWithReporteeLoaded, getFallbackEmailNote, employeeD
 /**
  * Notify flowchart role when a vehicle service workflow step is waiting or completed.
  * @param {Array<{label:string,value:string}>} [detailRows] optional key/value rows shown under the summary
+ * @param {string} [serviceReqNo] VSR number for this service (shown in subject + details)
  */
 export async function sendVehicleServiceWorkflowEmail({
     recipient,
@@ -13,6 +14,7 @@ export async function sendVehicleServiceWorkflowEmail({
     actionLabel,
     detailLine,
     detailRows = [],
+    serviceReqNo = '',
     linkPath,
     cc = [],
 }) {
@@ -56,16 +58,20 @@ export async function sendVehicleServiceWorkflowEmail({
                 .replace(/>/g, '&gt;')
                 .replace(/"/g, '&quot;');
 
+        const vsr = String(serviceReqNo || '').trim();
         const plate = [asset?.plateEmirate, asset?.plateNumber].filter(Boolean).join(' ').trim();
+        const incomingRows = (Array.isArray(detailRows) ? detailRows : [])
+            .map((row) => ({
+                label: String(row?.label || '').trim(),
+                value: String(row?.value ?? '').trim(),
+            }))
+            .filter((row) => row.label && row.value);
+        const hasVsrRow = incomingRows.some((row) => /^vsr(\s*no\.?)?$/i.test(row.label));
         const rows = [
             { label: 'Asset', value: `${asset?.assetId || ''}${asset?.name ? ` — ${asset.name}` : ''}`.trim() },
+            ...(vsr && !hasVsrRow ? [{ label: 'VSR No', value: vsr }] : []),
             ...(plate ? [{ label: 'Plate', value: plate }] : []),
-            ...((Array.isArray(detailRows) ? detailRows : [])
-                .map((row) => ({
-                    label: String(row?.label || '').trim(),
-                    value: String(row?.value ?? '').trim(),
-                }))
-                .filter((row) => row.label && row.value)),
+            ...incomingRows,
         ];
 
         const rowsHtml = rows
@@ -75,12 +81,15 @@ export async function sendVehicleServiceWorkflowEmail({
             )
             .join('');
 
-        const subject = `[VeRP] Vehicle service — ${actionLabel}: ${asset.assetId || asset.name}`;
+        const subjectAsset = asset.assetId || asset.name || '';
+        const subject = vsr
+            ? `[VeRP] Vehicle service — ${actionLabel}: ${vsr}${subjectAsset ? ` · ${subjectAsset}` : ''}`
+            : `[VeRP] Vehicle service — ${actionLabel}: ${subjectAsset}`;
         const html = `
             <div style="font-family:Segoe UI,sans-serif;color:#1e293b;line-height:1.6;max-width:600px;margin:0 auto;border:1px solid #e2e8f0;border-radius:12px;overflow:hidden;">
                 <div style="background:#0d9488;color:#fff;padding:18px 24px;">
                     <h1 style="margin:0;font-size:18px;">${esc(actionLabel)}</h1>
-                    <p style="margin:8px 0 0;font-size:13px;opacity:.95;">${esc(stageLabel)}</p>
+                    <p style="margin:8px 0 0;font-size:13px;opacity:.95;">${esc(stageLabel)}${vsr ? ` · ${esc(vsr)}` : ''}</p>
                 </div>
                 <div style="padding:24px;">
                     ${fallbackNote}

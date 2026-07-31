@@ -959,6 +959,7 @@ async function notifyOilServiceCompletedOwnerAndAssignee({
             actionLabel: 'Oil service completed — next oil change',
             detailLine,
             detailRows,
+            serviceRecordId,
             linkPath,
         });
     }
@@ -1041,6 +1042,7 @@ async function notifyOilScheduleStakeholders({
             actionLabel,
             detailLine,
             detailRows: rows,
+            serviceRecordId,
             linkPath,
         });
     }
@@ -1097,18 +1099,66 @@ function buildOilScheduleEmailDetailRows(remark = {}) {
     return rows;
 }
 
-async function sendOilEmail({ recipient, asset, actionLabel, detailLine, detailRows = [], linkPath, cc = [] }) {
+/** Resolve VSR No from asset.services for email subject/body. */
+function resolveOilServiceReqNo(asset, serviceRecordId) {
+    if (!asset || !serviceRecordId) return '';
+    const services = Array.isArray(asset.services) ? asset.services : [];
+    const service =
+        (typeof asset.services?.id === 'function' ? asset.services.id(serviceRecordId) : null) ||
+        services.find((s) => String(s?._id) === String(serviceRecordId)) ||
+        null;
+    const stored = String(service?.serviceReqNo || '').trim();
+    if (stored) return stored;
+
+    const assetId = String(asset.assetId || '').trim();
+    if (assetId && service?._id && services.length) {
+        const idx = services.findIndex((s) => String(s?._id) === String(service._id));
+        if (idx >= 0) return `${assetId}-${String(idx + 1).padStart(3, '0')}`;
+    }
+    return '';
+}
+
+async function sendOilEmail({
+    recipient,
+    asset,
+    actionLabel,
+    detailLine,
+    detailRows = [],
+    serviceRecordId = '',
+    serviceReqNo = '',
+    linkPath,
+    cc = [],
+}) {
     const who = `${recipient?.firstName || ''} ${recipient?.lastName || ''}`.trim() || recipient?.employeeId || 'Unknown';
     const { email } = resolveEmployeeEmail(recipient || {});
     console.log(`[OilService][Email] ${actionLabel} -> ${who} <${email || 'no-email'}>`);
     if (!email) return;
+
+    let vsr = String(serviceReqNo || '').trim() || resolveOilServiceReqNo(asset, serviceRecordId);
+    // Lean/populated assets often omit services — fetch VSR when needed.
+    if (!vsr && serviceRecordId && asset?._id) {
+        try {
+            const slim = await AssetItem.findById(asset._id)
+                .select('assetId services._id services.serviceReqNo')
+                .lean();
+            vsr = resolveOilServiceReqNo(slim, serviceRecordId);
+        } catch {
+            /* keep empty */
+        }
+    }
+    const rows = Array.isArray(detailRows) ? [...detailRows] : [];
+    if (vsr && !rows.some((r) => /^vsr(\s*no\.?)?$/i.test(String(r?.label || '')))) {
+        rows.unshift({ label: 'VSR No', value: vsr });
+    }
+
     await sendVehicleServiceWorkflowEmail({
         recipient,
         asset,
         stageLabel: 'Oil service',
         actionLabel,
         detailLine,
-        detailRows,
+        detailRows: rows,
+        serviceReqNo: vsr,
         linkPath,
         cc,
     });
@@ -1160,6 +1210,7 @@ async function notifyOilServiceDetailsCompleted({
             asset,
             actionLabel: 'Oil service completed',
             detailLine,
+            serviceRecordId,
             linkPath,
             cc,
         });
@@ -1193,7 +1244,14 @@ async function notifyStakeholders({
     const linkPath = oilServiceDetailsPath(asset._id, serviceRecordId);
     const list = uniqRecipients(recipients);
     for (const recipient of list) {
-        await sendOilEmail({ recipient, asset, actionLabel, detailLine, linkPath });
+        await sendOilEmail({
+            recipient,
+            asset,
+            actionLabel,
+            detailLine,
+            serviceRecordId,
+            linkPath,
+        });
         if (recipient?._id) {
             await syncDashboardAction({
                 requestId: asset._id,
@@ -1251,6 +1309,7 @@ async function notifyOilServiceWentLiveIfNeeded(asset, serviceRecordId, { detail
             asset: populated,
             actionLabel: 'Oil service — On Service',
             detailLine: message,
+            serviceRecordId,
             linkPath,
         });
     }
