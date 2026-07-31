@@ -15,6 +15,7 @@ import {
     resolveZohoVendorIdByProvider,
 } from '../../utils/syncUtilityBillToZoho.js';
 import { upsertUtilityBalancePartyExpensesFromBills, employeeIdQueryVariants } from '../../utils/upsertUtilityBalancePartyExpense.js';
+import { syncApprovedUtilityBillsPaidFromZoho } from '../../utils/markUtilityVendorBillsPaidFromZoho.js';
 import Company from '../../models/Company.js';
 
 const REQUEST_TYPE = 'Utility Bill Payment';
@@ -425,6 +426,37 @@ export async function listUtilityBillPayments(req, res) {
             .populate('actionedBy', 'firstName lastName employeeId')
             .sort({ createdAt: -1 })
             .lean();
+
+        // If Zoho already shows paid (payment made outside ERP mark-paid), flip Vendor Payment → Paid.
+        if (entryId || (Array.isArray(bills) && bills.some((b) => b.status === 'Approved'))) {
+            try {
+                const syncFilterEntry = entryId ? String(entryId) : null;
+                const approvedIds = bills
+                    .filter((b) => b.status === 'Approved' && String(b.zohoBillId || '').trim())
+                    .map((b) => b._id);
+                if (approvedIds.length) {
+                    await syncApprovedUtilityBillsPaidFromZoho({
+                        entryId: syncFilterEntry,
+                        billIds: approvedIds,
+                        userId: actor?._id || req.user?._id || null,
+                        fetchLive: true,
+                    });
+                    const refreshed = await UtilityBillPayment.find(filter)
+                        .populate('accountsApprovedBy', 'firstName lastName employeeId')
+                        .populate('hrApprovedBy', 'firstName lastName employeeId')
+                        .populate('actionedBy', 'firstName lastName employeeId')
+                        .sort({ createdAt: -1 })
+                        .lean();
+                    return res.status(200).json({ bills: refreshed.map(withPermissions) });
+                }
+            } catch (syncErr) {
+                console.warn(
+                    '[listUtilityBillPayments] Zoho paid sync failed:',
+                    syncErr?.message || syncErr,
+                );
+            }
+        }
+
         return res.status(200).json({ bills: bills.map(withPermissions) });
     } catch (err) {
         return res.status(500).json({ message: err.message || 'Failed to load bills' });
@@ -456,6 +488,33 @@ export async function getUtilityBillBatch(req, res) {
 
         if (!bills.length) {
             return res.status(404).json({ message: 'Batch not found' });
+        }
+
+        // Sync Vendor Payment status from Zoho for Approved bills in this batch.
+        try {
+            const approvedIds = bills
+                .filter((b) => b.status === 'Approved' && String(b.zohoBillId || '').trim())
+                .map((b) => b._id);
+            if (approvedIds.length) {
+                await syncApprovedUtilityBillsPaidFromZoho({
+                    billIds: approvedIds,
+                    userId: req.user?._id || null,
+                    fetchLive: true,
+                });
+                const batchKey = bills[0]?.batchId || batchId;
+                bills = await UtilityBillPayment.find(
+                    mongoose.Types.ObjectId.isValid(String(batchKey))
+                        ? { batchId: batchKey }
+                        : { _id: { $in: bills.map((b) => b._id) } },
+                )
+                    .sort({ createdAt: 1 })
+                    .lean();
+            }
+        } catch (syncErr) {
+            console.warn(
+                '[getUtilityBillBatch] Zoho paid sync failed:',
+                syncErr?.message || syncErr,
+            );
         }
 
         const actor = await resolveRequesterEmployee(req.user);

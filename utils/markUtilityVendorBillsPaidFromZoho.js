@@ -2,6 +2,10 @@ import mongoose from 'mongoose';
 import UtilityBillPayment from '../models/UtilityBillPayment.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import DashboardAction from '../models/DashboardAction.js';
+import ZohoBill from '../models/ZohoBill.js';
+import { fetchBillById } from '../services/zohoService.js';
+import { upsertZohoBillFromApi } from '../services/zohoPurchaseSyncService.js';
+import { withZohoOrganization } from './zohoOrgContext.js';
 
 const UTILITY_REQUEST_TYPE = 'Utility Bill Payment';
 
@@ -9,6 +13,108 @@ const clean = (value, fallback = '') => {
     const text = String(value ?? '').trim();
     return text || fallback;
 };
+
+/** Zoho bill is fully paid (balance cleared). Avoid matching "unpaid". */
+export function isZohoBillFullyPaid(zohoBill) {
+    if (!zohoBill || typeof zohoBill !== 'object') return false;
+    const status = clean(zohoBill.status || zohoBill.status_formatted).toLowerCase();
+    if (status === 'paid') return true;
+    if (status === 'void' || status === 'draft' || status === 'partially_paid') return false;
+    const balance = Number(
+        zohoBill.balance ?? zohoBill.balance_due ?? zohoBill.balanceDue ?? NaN,
+    );
+    if (Number.isFinite(balance) && Math.abs(balance) < 0.01) {
+        const total = Number(zohoBill.total ?? zohoBill.total_amount ?? zohoBill.amount ?? 0);
+        if (status === 'open' || status === 'overdue' || status === 'unpaid') {
+            return total > 0;
+        }
+        return true;
+    }
+    return false;
+}
+
+function collectZohoIdsFromUtilityBill(bill) {
+    const ids = new Set();
+    const push = (v) => {
+        const id = clean(v);
+        if (id) ids.add(id);
+    };
+    push(bill?.zohoBillId);
+    for (const id of Array.isArray(bill?.zohoBillIds) ? bill.zohoBillIds : []) push(id);
+    for (const line of Array.isArray(bill?.zohoLineItems) ? bill.zohoLineItems : []) {
+        push(line?.zohoBillId);
+    }
+    return [...ids];
+}
+
+async function resolvePaidByEmployeeId(userId) {
+    if (!userId || !mongoose.Types.ObjectId.isValid(String(userId))) return null;
+    const userEmp = await EmployeeBasic.findOne({
+        $or: [{ _id: userId }, { userId }],
+    })
+        .select('_id')
+        .lean();
+    if (userEmp?._id) return userEmp._id;
+    try {
+        return new mongoose.Types.ObjectId(String(userId));
+    } catch {
+        return null;
+    }
+}
+
+async function persistUtilityBillsAsPaid(bills, { paidBy = null, comment = '' } = {}) {
+    if (!bills?.length) return { paidCount: 0, bills: [] };
+    const now = new Date();
+    const batchIds = new Set();
+
+    for (const bill of bills) {
+        bill.status = 'Paid';
+        bill.pendingWithName = '';
+        bill.pendingWithRole = '';
+        bill.paidBy = paidBy || bill.paidBy || null;
+        bill.paidAt = now;
+        bill.actionedBy = paidBy || bill.actionedBy || null;
+        bill.actionedAt = now;
+        if (comment) bill.comment = comment;
+        await bill.save();
+        if (bill.batchId) batchIds.add(String(bill.batchId));
+    }
+
+    try {
+        for (const bid of batchIds) {
+            if (!mongoose.Types.ObjectId.isValid(bid)) continue;
+            const remainingApproved = await UtilityBillPayment.countDocuments({
+                batchId: bid,
+                status: 'Approved',
+            });
+            if (remainingApproved === 0) {
+                await DashboardAction.updateMany(
+                    {
+                        requestId: bid,
+                        requestType: UTILITY_REQUEST_TYPE,
+                        status: 'Pending',
+                    },
+                    {
+                        status: 'Approved',
+                        actionedDate: now,
+                        actionedBy: paidBy || null,
+                        comment: comment || 'Paid via Zoho',
+                    },
+                );
+            }
+        }
+    } catch (dashErr) {
+        console.warn(
+            '[persistUtilityBillsAsPaid] dashboard sync failed:',
+            dashErr?.message || dashErr,
+        );
+    }
+
+    return {
+        paidCount: bills.length,
+        bills: bills.map((b) => (typeof b.toObject === 'function' ? b.toObject() : b)),
+    };
+}
 
 function collectZohoBillIds({ body = {}, payload = {}, zohoPayment = {} } = {}) {
     const ids = new Set();
@@ -106,8 +212,6 @@ export async function markUtilityVendorBillsPaidFromZohoPayment({
         });
     }
 
-    // Prefill with batch + mode bills, but no explicit ids — mark Approved bills in batch
-    // that have a Zoho bill id matching applied payment bills (or all Approved if only batch).
     if (!or.length && batchId && mongoose.Types.ObjectId.isValid(batchId) && mode === 'bills') {
         or.push({ batchId: new mongoose.Types.ObjectId(batchId) });
     }
@@ -116,17 +220,14 @@ export async function markUtilityVendorBillsPaidFromZohoPayment({
         return { paidCount: 0, bills: [] };
     }
 
-    const filter = {
+    let bills = await UtilityBillPayment.find({
         status: 'Approved',
         $or: or,
-    };
-
-    let bills = await UtilityBillPayment.find(filter);
+    });
     if (!bills.length) {
         return { paidCount: 0, bills: [] };
     }
 
-    // When matching by Zoho ids, keep only bills that actually intersect applied Zoho bills.
     if (zohoBillIds.length) {
         const zohoSet = new Set(zohoBillIds);
         bills = bills.filter((bill) => {
@@ -143,79 +244,153 @@ export async function markUtilityVendorBillsPaidFromZohoPayment({
         return { paidCount: 0, bills: [] };
     }
 
-    let paidBy = null;
-    if (userId && mongoose.Types.ObjectId.isValid(String(userId))) {
-        const userEmp = await EmployeeBasic.findOne({
-            $or: [{ _id: userId }, { userId }],
-        })
-            .select('_id')
-            .lean();
-        paidBy = userEmp?._id || null;
-        if (!paidBy) {
-            try {
-                paidBy = new mongoose.Types.ObjectId(String(userId));
-            } catch {
-                paidBy = null;
-            }
-        }
-    }
-
+    const paidBy = await resolvePaidByEmployeeId(userId);
     const zohoPaymentId = clean(
         zohoPayment.payment_id || zohoPayment.vendorpayment_id || zohoPayment.id,
     );
-    const now = new Date();
-    const batchIds = new Set();
-
-    for (const bill of bills) {
-        bill.status = 'Paid';
-        bill.pendingWithName = '';
-        bill.pendingWithRole = '';
-        bill.paidBy = paidBy || bill.paidBy || null;
-        bill.paidAt = now;
-        bill.actionedBy = paidBy || bill.actionedBy || null;
-        bill.actionedAt = now;
-        await bill.save();
-        if (bill.batchId) batchIds.add(String(bill.batchId));
-    }
-
-    // Clear / refresh Accounts dashboard rows for affected batches.
-    try {
-        for (const bid of batchIds) {
-            if (!mongoose.Types.ObjectId.isValid(bid)) continue;
-            const remainingApproved = await UtilityBillPayment.countDocuments({
-                batchId: bid,
-                status: 'Approved',
-            });
-            if (remainingApproved === 0) {
-                await DashboardAction.updateMany(
-                    {
-                        requestId: bid,
-                        requestType: UTILITY_REQUEST_TYPE,
-                        status: 'Pending',
-                    },
-                    {
-                        status: 'Approved',
-                        actionedDate: now,
-                        actionedBy: paidBy || null,
-                        comment: 'Paid via Zoho Payments Made',
-                    },
-                );
-            }
-        }
-    } catch (dashErr) {
-        console.warn(
-            '[markUtilityVendorBillsPaidFromZoho] dashboard sync failed:',
-            dashErr?.message || dashErr,
-        );
-    }
-
+    const result = await persistUtilityBillsAsPaid(bills, {
+        paidBy,
+        comment: zohoPaymentId ? `Paid via Zoho Payments Made (${zohoPaymentId})` : 'Paid via Zoho',
+    });
     console.log(
-        `[markUtilityVendorBillsPaidFromZoho] Marked ${bills.length} utility bill(s) Paid` +
+        `[markUtilityVendorBillsPaidFromZoho] Marked ${result.paidCount} utility bill(s) Paid` +
             (zohoPaymentId ? ` (payment ${zohoPaymentId})` : ''),
     );
+    return result;
+}
 
-    return {
-        paidCount: bills.length,
-        bills: bills.map((b) => b.toObject()),
+/**
+ * For Approved ERP utility bills that already have a Zoho bill: if Zoho shows
+ * paid / balance 0, flip ERP to Paid (covers payments made outside ERP Save as Paid).
+ */
+export async function syncApprovedUtilityBillsPaidFromZoho({
+    entryId = null,
+    billIds = null,
+    userId = null,
+    fetchLive = true,
+} = {}) {
+    const filter = {
+        status: 'Approved',
+        $or: [
+            { zohoBillId: { $nin: [null, ''] } },
+            { zohoBillIds: { $exists: true, $ne: [] } },
+            { 'zohoLineItems.zohoBillId': { $nin: [null, ''] } },
+        ],
     };
+    if (entryId) filter.entryId = String(entryId);
+    if (Array.isArray(billIds) && billIds.length) {
+        filter._id = {
+            $in: billIds
+                .map((id) => String(id || '').trim())
+                .filter((id) => mongoose.Types.ObjectId.isValid(id))
+                .map((id) => new mongoose.Types.ObjectId(id)),
+        };
+    }
+
+    const candidates = await UtilityBillPayment.find(filter).limit(100);
+    if (!candidates.length) return { paidCount: 0, checked: 0 };
+
+    const paidBy = await resolvePaidByEmployeeId(userId);
+    const toMark = [];
+    const orgFallbacks = [
+        ...new Set(
+            [
+                process.env.ZOHO_ORGANIZATION_ID,
+                process.env.ZOHO_ORGANIZATION_ID_NNIT,
+                process.env.ZOHO_ORGANIZATION_ID_VEGA,
+            ]
+                .map((id) => clean(id))
+                .filter(Boolean),
+        ),
+    ];
+
+    async function fetchZohoBillLive(zohoId, preferredOrgId) {
+        const orgTries = [
+            ...new Set([clean(preferredOrgId), ...orgFallbacks].filter(Boolean)),
+        ];
+        // Prefer preferred org first; if empty list, one try with default context.
+        const attempts = orgTries.length ? orgTries : [''];
+        let lastErr = null;
+        for (const orgId of attempts) {
+            try {
+                const live = await withZohoOrganization(orgId || null, () =>
+                    fetchBillById(zohoId),
+                );
+                if (live) return live;
+            } catch (err) {
+                lastErr = err;
+            }
+        }
+        if (lastErr) throw lastErr;
+        return null;
+    }
+
+    for (const bill of candidates) {
+        const zohoIds = collectZohoIdsFromUtilityBill(bill);
+        if (!zohoIds.length) continue;
+
+        let allPaid = true;
+        let sawAny = false;
+
+        for (const zohoId of zohoIds) {
+            const cached = await ZohoBill.findOne({ zohoBillId: zohoId })
+                .select('status balance total zohoBillId organizationId')
+                .lean();
+
+            if (fetchLive) {
+                try {
+                    const live = await fetchZohoBillLive(
+                        zohoId,
+                        bill.zohoOrganizationId || cached?.organizationId,
+                    );
+                    if (live) {
+                        sawAny = true;
+                        try {
+                            await upsertZohoBillFromApi(live);
+                        } catch {
+                            /* cache update optional */
+                        }
+                        if (!isZohoBillFullyPaid(live)) {
+                            allPaid = false;
+                            break;
+                        }
+                        continue;
+                    }
+                } catch (err) {
+                    console.warn(
+                        `[syncApprovedUtilityBillsPaidFromZoho] fetch ${zohoId} failed:`,
+                        err?.message || err,
+                    );
+                }
+            }
+
+            if (cached) {
+                sawAny = true;
+                if (!isZohoBillFullyPaid(cached)) {
+                    allPaid = false;
+                    break;
+                }
+            } else {
+                allPaid = false;
+                break;
+            }
+        }
+
+        if (sawAny && allPaid) {
+            toMark.push(bill);
+        }
+    }
+
+    if (!toMark.length) {
+        return { paidCount: 0, checked: candidates.length };
+    }
+
+    const result = await persistUtilityBillsAsPaid(toMark, {
+        paidBy,
+        comment: 'Paid in Zoho (synced to ERP)',
+    });
+    console.log(
+        `[syncApprovedUtilityBillsPaidFromZoho] Synced ${result.paidCount}/${candidates.length} Approved → Paid`,
+    );
+    return { ...result, checked: candidates.length };
 }
