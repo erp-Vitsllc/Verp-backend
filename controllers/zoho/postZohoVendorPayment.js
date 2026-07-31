@@ -15,6 +15,7 @@ import {
     recordPartyExpensesFromVendorPaymentBody,
     settleUtilityDifferenceViaJournal,
 } from '../../utils/recordPartyExpenseFromZohoPayment.js';
+import { markUtilityVendorBillsPaidFromZohoPayment } from '../../utils/markUtilityVendorBillsPaidFromZoho.js';
 import { getZohoOrgContext, withZohoOrganization } from '../../utils/zohoOrgContext.js';
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -523,6 +524,20 @@ export const postZohoVendorPayment = async (req, res) => {
                 );
             }
 
+            try {
+                await markUtilityVendorBillsPaidFromZohoPayment({
+                    body: req.body || {},
+                    payload,
+                    zohoPayment: data && typeof data === 'object' ? data : {},
+                    userId: req.user?._id || null,
+                });
+            } catch (utilityPayErr) {
+                console.warn(
+                    '[ZohoVendorPaymentCreate] Utility vendor bill mark-Paid failed:',
+                    utilityPayErr?.message || utilityPayErr,
+                );
+            }
+
             const fineIdsRaw = req.body?.fineMongoIds ?? req.body?.fineMongoId;
             const fineMongoIds = []
                 .concat(fineIdsRaw || [])
@@ -640,6 +655,20 @@ export const putZohoVendorPayment = async (req, res) => {
                 console.warn(
                     '[ZohoVendorPaymentUpdate] Party expense Paid/ledger sync failed:',
                     expenseErr?.message || expenseErr,
+                );
+            }
+
+            try {
+                await markUtilityVendorBillsPaidFromZohoPayment({
+                    body: req.body || {},
+                    payload,
+                    zohoPayment: data && typeof data === 'object' ? data : {},
+                    userId: req.user?._id || null,
+                });
+            } catch (utilityPayErr) {
+                console.warn(
+                    '[ZohoVendorPaymentUpdate] Utility vendor bill mark-Paid failed:',
+                    utilityPayErr?.message || utilityPayErr,
                 );
             }
 
