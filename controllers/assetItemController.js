@@ -4293,11 +4293,21 @@ export const getAssetItemDetail = async (req, res) => {
         const deferHeavyServiceSigning =
             String(req.query.deferServiceSigning || '').toLowerCase() === '1' ||
             String(req.query.deferServiceSigning || '').toLowerCase() === 'true';
-        const item = await AssetItem.findById(id)
+        // Light + deferred paints: skip write-heals so the HTTP response is not blocked.
+        // Exception: explicit document-tab signing still skips heals but signs attachments.
+        const wantDocumentSigning =
+            String(req.query.signDocuments || '').toLowerCase() === '1' ||
+            String(req.query.signDocuments || '').toLowerCase() === 'true';
+        const skipInlineWriteHeals = deferLightDetail || (deferHeavyServiceSigning && !wantDocumentSigning);
+        const focusServiceId = String(req.query.serviceId || req.query.focusServiceId || '').trim();
+        let itemQuery = AssetItem.findById(id)
             .populate('assignedCompany', 'name nickName companyId companyShortName companyName')
             .populate({
                 path: 'assignedTo',
-                select: 'firstName lastName employeeId profilePicture companyEmail workEmail department dateOfJoining reportingAuthority primaryReportee signature enablePortalAccess',
+                // Light: skip signature blobs — oil/service pages do not need them for first paint.
+                select: deferLightDetail
+                    ? 'firstName lastName employeeId profilePicture companyEmail workEmail department dateOfJoining reportingAuthority primaryReportee enablePortalAccess'
+                    : 'firstName lastName employeeId profilePicture companyEmail workEmail department dateOfJoining reportingAuthority primaryReportee signature enablePortalAccess',
                 populate: [
                     {
                         path: 'reportingAuthority',
@@ -4305,15 +4315,22 @@ export const getAssetItemDetail = async (req, res) => {
                     },
                     {
                         path: 'primaryReportee',
-                        select: 'firstName lastName employeeId signature',
+                        select: deferLightDetail
+                            ? 'firstName lastName employeeId'
+                            : 'firstName lastName employeeId signature',
                     },
                 ]
             })
             .populate({
                 path: 'assignedBy',
-                select: 'firstName lastName employeeId signature'
+                select: deferLightDetail
+                    ? 'firstName lastName employeeId'
+                    : 'firstName lastName employeeId signature'
             })
-            .populate('acceptedBy', 'firstName lastName signature')
+            .populate(
+                'acceptedBy',
+                deferLightDetail ? 'firstName lastName' : 'firstName lastName signature',
+            )
             .populate({
                 path: 'createdBy',
                 select: '_id id employeeId firstName lastName'
@@ -4321,14 +4338,173 @@ export const getAssetItemDetail = async (req, res) => {
             .populate('typeId', 'name imagePreview')
             .populate('actionRequiredBy', 'firstName lastName employeeId')
             .populate('categoryId', 'name imagePreview');
+        // Lean light reads skip mongoose document overhead on large embedded arrays.
+        if (deferLightDetail) itemQuery = itemQuery.lean();
+        const item = await itemQuery;
 
         if (!item) {
             return res.status(404).json({ message: 'Asset not found' });
         }
 
-        // Light first-paint: skip write-heals / sync so the page can render immediately.
-        // Full/deferred loads still run healing below.
-        if (!deferLightDetail && healStaleParkingFields(item)) {
+        // ─── LIGHT FAST PATH ─────────────────────────────────────────────────
+        // Vehicle / oil / service pages use ?light=1 for first paint. Return a
+        // trimmed shell immediately — no heals, no S3, no flowchart HOD fan-out
+        // (except Draft visibility). Full flags + signed URLs come on upgrade.
+        if (deferLightDetail) {
+            const statusTrimmed = String(item.status || '').trim();
+            if (statusTrimmed === 'Draft') {
+                const [isAdmin, isAssetController, assetController] = await Promise.all([
+                    isUserAdministrator(req.user?.id),
+                    isUserInFlowchart(req.user, 'assetcontroller'),
+                    getDepartmentHOD('assetcontroller'),
+                ]);
+                const isPortalAdmin = isJwtSystemSuperUser(req.user);
+                const normUserRefId = (ref) => {
+                    if (ref == null) return '';
+                    if (typeof ref === 'object' && ref._id != null) return String(ref._id);
+                    return String(ref);
+                };
+                const viewerUserStr = normUserRefId(req.user?._id) || normUserRefId(req.user?.id);
+                const createdByStr = normUserRefId(item.createdBy);
+                const isCreator = !!(viewerUserStr && createdByStr && viewerUserStr === createdByStr);
+                const currentEmpId = req.user?.employeeObjectId?.toString();
+                const isDeptAssetController =
+                    assetController?._id &&
+                    currentEmpId &&
+                    assetController._id.toString() === currentEmpId;
+                const canViewDraft =
+                    isCreator ||
+                    isPortalAdmin ||
+                    isAdmin ||
+                    isAssetController ||
+                    isDeptAssetController;
+                if (!canViewDraft) {
+                    return res.status(404).json({ message: 'Asset not found' });
+                }
+            }
+
+            const itemObj = typeof item.toObject === 'function' ? item.toObject() : { ...item };
+
+            if (Array.isArray(itemObj.services)) {
+                itemObj.services = itemObj.services.map((s) => {
+                    let remark = s?.remark;
+                    if (typeof remark === 'string' && remark.length > 0) {
+                        try {
+                            const parsed = JSON.parse(remark);
+                            if (parsed && typeof parsed === 'object') {
+                                const {
+                                    images,
+                                    photos,
+                                    attachments,
+                                    remarkImages,
+                                    garagePhotos,
+                                    beforePhotos,
+                                    afterPhotos,
+                                    ...rest
+                                } = parsed;
+                                remark = JSON.stringify(rest);
+                            }
+                        } catch {
+                            if (remark.length > 4000) remark = '';
+                        }
+                    }
+                    return {
+                        _id: s._id,
+                        type: s.type,
+                        serviceType: s.serviceType,
+                        date: s.date,
+                        endDate: s.endDate,
+                        startDate: s.startDate,
+                        value: s.value,
+                        cost: s.cost,
+                        status: s.status,
+                        kilometer: s.kilometer,
+                        odometer: s.odometer,
+                        workflowSnapshot: s.workflowSnapshot,
+                        createdAt: s.createdAt,
+                        updatedAt: s.updatedAt,
+                        remark,
+                    };
+                });
+            }
+            if (Array.isArray(itemObj.documents)) {
+                itemObj.documents = itemObj.documents.map((d) => ({
+                    _id: d._id,
+                    type: d.type,
+                    name: d.name,
+                    documentType: d.documentType,
+                    title: d.title,
+                    description: d.description,
+                    issueDate: d.issueDate,
+                    expiryDate: d.expiryDate,
+                    fee: d.fee,
+                    amount: d.amount,
+                    status: d.status,
+                    isLive: d.isLive,
+                    archiveReason: d.archiveReason,
+                    meta: d.meta,
+                    createdAt: d.createdAt,
+                    updatedAt: d.updatedAt,
+                    attachment: d.attachment || null,
+                    hasAttachment: Boolean(d.attachment),
+                }));
+            }
+            if (Array.isArray(itemObj.images) && itemObj.images.length > 2) {
+                itemObj.images = itemObj.images.slice(0, 2);
+            }
+            if (Array.isArray(itemObj.vehicleAccessoriesListEntries)) {
+                itemObj.vehicleAccessoriesListEntries = itemObj.vehicleAccessoriesListEntries.map((e) => ({
+                    _id: e._id,
+                    name: e.name,
+                    accessoryName: e.accessoryName,
+                    quantity: e.quantity,
+                    status: e.status,
+                    notes: e.notes,
+                    createdAt: e.createdAt,
+                    updatedAt: e.updatedAt,
+                    hasAttachment: Boolean(e.attachment || e.file || e.url),
+                }));
+            }
+
+            itemObj.deferredAttachmentSigning = true;
+            itemObj.canRespondToServiceWorkflow = false;
+            itemObj.canApproveAssetCreation = false;
+            itemObj.assetController = null;
+            itemObj.assetControllerId = null;
+            itemObj.creationApprover = null;
+            itemObj.creationApproverRole = creationApproverRoleLabel({
+                plateNumber: item.plateNumber,
+                typeName: item?.typeId?.name || '',
+            });
+
+            res.status(200).json(itemObj);
+
+            const assetIdForBg = item._id;
+            setImmediate(() => {
+                void (async () => {
+                    try {
+                        const bgItem = await AssetItem.findById(assetIdForBg).select(
+                            'services activeServiceWorkflow onServiceActive status assignedTo plateEmirate plateNumber assetId currentKilometer nextServiceDate vehicleProfileActivationStatus typeId',
+                        );
+                        if (!bgItem) return;
+                        await healStaleOilServicePendingDashboardActions({ assetIds: [assetIdForBg] });
+                        await ensureOilAccountsMakePaymentNotification(bgItem);
+                        await activateOilServiceOnStartDate(bgItem, { byName: 'System' });
+                        await maybeAutoCreateOilServiceDue(bgItem);
+                    } catch (bgErr) {
+                        console.warn(
+                            '[getAssetItemDetail] light background sync failed:',
+                            bgErr?.message || bgErr,
+                        );
+                    }
+                })();
+            });
+            return;
+        }
+        // ─── END LIGHT FAST PATH ─────────────────────────────────────────────
+
+        // Light/deferred first-paint: skip write-heals / sync so the page can render immediately.
+        if (!skipInlineWriteHeals && healStaleParkingFields(item)) {
             await item.save();
         }
 
@@ -4348,7 +4524,7 @@ export const getAssetItemDetail = async (req, res) => {
         // If a creation approval is in flight, ensure actionRequiredBy + DashboardAction route to the
         // CURRENT role holder (HR for fleet, AC for tools). Heals stale routing after a flowchart swap.
         let currentCreationApprover = null;
-        if (!deferLightDetail) {
+        if (!skipInlineWriteHeals) {
         try {
             currentCreationApprover = await syncStaleAssetCreationApprover(item);
         } catch (syncErr) {
@@ -4500,10 +4676,10 @@ export const getAssetItemDetail = async (req, res) => {
             } catch (healErr) {
             }
         }
-        } // end !deferLightDetail assignment-heal block
+        } // end !skipInlineWriteHeals assignment-heal block
 
         if (
-            !deferLightDetail &&
+            !skipInlineWriteHeals &&
             isAssetAssignmentAcknowledgmentPending(item) &&
             item.assignedToType === 'Employee' &&
             isFleetVehicleAssetFields({ plateNumber: item.plateNumber, typeName: item.typeId?.name }) &&
@@ -4555,7 +4731,7 @@ export const getAssetItemDetail = async (req, res) => {
 
         const handoverFlowForEscalation = getVehicleHandoverFlow(item);
         if (
-            !deferLightDetail &&
+            !skipInlineWriteHeals &&
             handoverFlowForEscalation?.stage === 'target' &&
             handoverFlowForEscalation?.historyId &&
             !handoverFlowForEscalation?.escalation?.requestedAt &&
@@ -4588,7 +4764,7 @@ export const getAssetItemDetail = async (req, res) => {
             }
         }
 
-        if (!deferLightDetail && handoverFlowForEscalation?.historyId) {
+        if (!skipInlineWriteHeals && handoverFlowForEscalation?.historyId) {
             try {
                 await seedPreviousHandoverReportsOnHistory({
                     historyId: handoverFlowForEscalation.historyId,
@@ -4705,12 +4881,12 @@ export const getAssetItemDetail = async (req, res) => {
         }
 
         migrateLegacyOperationalFlags(item);
-        if (!deferLightDetail && item.isModified()) {
+        if (!skipInlineWriteHeals && item.isModified()) {
             await item.save();
         }
 
         // Repair accessories left as Attached after L&D was finalized before disposition logic shipped.
-        if (!deferLightDetail && String(item.status || '').trim().toLowerCase() === 'lost' && item.accessories?.length) {
+        if (!skipInlineWriteHeals && String(item.status || '').trim().toLowerCase() === 'lost' && item.accessories?.length) {
             let repairNeeded = false;
             for (const acc of item.accessories) {
                 const accSt = String(acc.status || '').trim().toLowerCase();
@@ -5020,11 +5196,24 @@ export const getAssetItemDetail = async (req, res) => {
         let signTasks;
         if (deferLightDetail) {
             itemObj.deferredAttachmentSigning = true;
-            // Header thumbnails only — accessories/docs sign on tab refresh.
-            signTasks = [...headerSignTasks];
+            // Zero S3 on light paint — oil/service pages render workflow from unsigned keys.
+            signTasks = [];
         } else if (deferHeavyServiceSigning) {
             itemObj.deferredAttachmentSigning = true;
-            signTasks = [...nonServiceAttachmentSignTasks, vehicleAccessoriesListSignTask];
+            if (focusServiceId) {
+                // Service detail pages: sign only that service's files (not every doc/accessory).
+                const servicesToSign = (itemObj.services || []).filter(
+                    (s) => String(s?._id || '') === focusServiceId,
+                );
+                signTasks = servicesToSign.map((s) => signOneService(s));
+            } else if (wantDocumentSigning) {
+                // Document tab on-demand: sign docs/header/accessories only.
+                itemObj.deferredAttachmentSigning = false;
+                signTasks = [...nonServiceAttachmentSignTasks, vehicleAccessoriesListSignTask];
+            } else {
+                // Vehicle details upgrade: skip S3 fan-out — document tab loads signed files on demand.
+                signTasks = [];
+            }
         } else {
             signTasks = [...nonServiceAttachmentSignTasks, vehicleAccessoriesListSignTask];
             if (itemObj.services?.length) {
@@ -5143,12 +5332,17 @@ export const getAssetItemDetail = async (req, res) => {
         );
 
         const wfStage = itemObj.activeServiceWorkflow?.stage;
-        itemObj.canRespondToServiceWorkflow = await userMayRespondVehicleServiceWorkflow(req.user, wfStage);
-        if (wfStage && !['complete', 'rejected'].includes(wfStage)) {
-            itemObj.activeServiceWorkflow = {
-                ...itemObj.activeServiceWorkflow,
-                currentAssignee: await getWorkflowAssigneePayloadForStage(wfStage)
-            };
+        if (deferLightDetail) {
+            // Skip flowchart HOD lookups on light — frontend role gates use /Flowchart separately.
+            itemObj.canRespondToServiceWorkflow = false;
+        } else {
+            itemObj.canRespondToServiceWorkflow = await userMayRespondVehicleServiceWorkflow(req.user, wfStage);
+            if (wfStage && !['complete', 'rejected'].includes(wfStage)) {
+                itemObj.activeServiceWorkflow = {
+                    ...itemObj.activeServiceWorkflow,
+                    currentAssignee: await getWorkflowAssigneePayloadForStage(wfStage)
+                };
+            }
         }
 
         try {
