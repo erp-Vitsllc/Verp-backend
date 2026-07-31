@@ -93,6 +93,8 @@ import {
     userMayApproveOilAccountsQuote,
     closeOilServicePendingDashboardActions,
     healStaleOilServicePendingDashboardActions,
+    ensureOilAccountsMakePaymentNotification,
+    restoreMissingOilAccountsMakePaymentNotifications,
     activateOilServiceOnStartDate,
     processOilServiceStartDateActivation,
     maybeAutoCreateOilServiceDue,
@@ -5160,12 +5162,33 @@ export const getAssetItemDetail = async (req, res) => {
                     remark = {};
                 }
                 if (String(remark.vehicleServiceCompleted || '').toLowerCase() === 'live') {
-                    await closeOilServicePendingDashboardActions(item._id, s._id, {
-                        comment: 'Oil service completed',
-                    });
+                    const stage = String(
+                        remark.workflowStage ||
+                            (String(item.activeServiceWorkflow?.serviceRecordId || '') === String(s._id)
+                                ? item.activeServiceWorkflow?.stage
+                                : '') ||
+                            s?.workflowSnapshot?.stage ||
+                            '',
+                    )
+                        .toLowerCase()
+                        .trim();
+                    const stillNeedsAccountsPay =
+                        stage === 'pending_accounts' ||
+                        (String(remark.billingStatus || '').toLowerCase() === 'pending' &&
+                            String(remark.amountMode || '').toLowerCase() !== 'warranty' &&
+                            !String(remark.zohoBillId || '').trim());
+                    // Cash Complete sets vehicleServiceCompleted=live before Zoho Make Payment —
+                    // do not clear Accounts' pending bell until billed.
+                    if (!stillNeedsAccountsPay) {
+                        await closeOilServicePendingDashboardActions(item._id, s._id, {
+                            comment: 'Oil service completed',
+                        });
+                    }
                 }
             }
             await healStaleOilServicePendingDashboardActions({ assetIds: [item._id] });
+            // Re-create Accounts Make Payment bell if heal previously wiped it while Zoho still pending.
+            await ensureOilAccountsMakePaymentNotification(item);
             const freshForOilActivation = await AssetItem.findById(item._id).select(
                 'services activeServiceWorkflow onServiceActive status',
             );
@@ -12272,9 +12295,11 @@ export const submitOilServiceDetailsHandler = async (req, res) => {
         const message =
             routedTo === 'pending_hr'
                 ? 'Oil service ended. Cash payment sent to HR for approval, then Accounts will create the Zoho bill.'
-                : zohoBillSync?.ok
-                  ? `Oil service completed. ${zohoBillSync.message || 'Zoho bill created.'}`
-                  : 'Oil service completed. Vehicle status restored.';
+                : routedTo === 'pending_accounts'
+                  ? 'Oil service completed. Accounts was notified to Make Payment (Zoho bill).'
+                  : zohoBillSync?.ok
+                    ? `Oil service completed. ${zohoBillSync.message || 'Zoho bill created.'}`
+                    : 'Oil service completed. Vehicle status restored.';
         return res.json({
             message,
             routedTo,
@@ -17249,6 +17274,18 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
                 extra3: { $regex: '"handoverViewerRole"\\s*:\\s*"adminOfficer"', $options: 'i' },
             });
         }
+        if (isAccountsRoleHolder) {
+            // Cash oil Make Payment / quote — keep visible for flowchart Accounts even if
+            // assignedTo still points at a previous Accounts holder until re-route runs.
+            assigneeClauses.push({
+                requestType: 'Vehicle Service Request',
+                extra3: { $regex: '"oilStage"\\s*:\\s*"accounts_payment"', $options: 'i' },
+            });
+            assigneeClauses.push({
+                requestType: 'Vehicle Service Request',
+                extra3: { $regex: '"oilStage"\\s*:\\s*"accounts_quote"', $options: 'i' },
+            });
+        }
         if (isAcRoleHolder) {
             assigneeClauses.push({
                 requestType: 'Asset Approval',
@@ -17271,6 +17308,10 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
         if (!skipSync) {
             await syncPendingAssignmentDashboardRowsForUser(relevantIds, targetEmployeeId);
             await healStaleOilServicePendingDashboardActions();
+        }
+        // Accounts inbox: restore Make Payment bells wiped by the old "live = done" heal bug.
+        if (isAccountsRoleHolder) {
+            await restoreMissingOilAccountsMakePaymentNotifications();
         }
 
         const parseExtra3 = (raw) => {

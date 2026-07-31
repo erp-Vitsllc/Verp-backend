@@ -169,7 +169,9 @@ function parseOilServiceDashboardMeta(extra3) {
     }
 }
 
-/** Clear pending vehicle-service bell rows when an oil service is finished. */
+/** Clear pending vehicle-service bell rows when an oil service is finished.
+ * Skips Accounts Make Payment rows while cash billing is still open (pending_accounts).
+ */
 export async function closeOilServicePendingDashboardActions(
     assetId,
     serviceRecordId,
@@ -201,12 +203,50 @@ export async function closeOilServicePendingDashboardActions(
         status: 'Pending',
     }).select('_id extra3').lean();
 
+    let keepAccountsPaymentOpen = false;
+    if (targetServiceId) {
+        try {
+            const assetDoc = await AssetItem.findById(assetObjectId)
+                .select('services activeServiceWorkflow')
+                .lean();
+            const service = (assetDoc?.services || []).find((s) => String(s._id) === targetServiceId);
+            if (service) {
+                const remark = parseOilServiceRemark(service);
+                const stage = String(
+                    remark.workflowStage ||
+                        (String(assetDoc?.activeServiceWorkflow?.serviceRecordId || '') === targetServiceId
+                            ? assetDoc?.activeServiceWorkflow?.stage
+                            : '') ||
+                        service?.workflowSnapshot?.stage ||
+                        '',
+                ).toLowerCase();
+                const billed =
+                    stage === 'billed' ||
+                    String(remark.billingStatus || '').toLowerCase() === 'billed' ||
+                    Boolean(String(remark.zohoBillId || '').trim());
+                keepAccountsPaymentOpen =
+                    !billed &&
+                    (stage === 'pending_accounts' ||
+                        String(remark.billingStatus || '').toLowerCase() === 'pending');
+            }
+        } catch {
+            keepAccountsPaymentOpen = false;
+        }
+    }
+
     const idsToClose = pendingRows
         .filter((row) => {
             if (!targetServiceId) return true;
             const meta = parseOilServiceDashboardMeta(row.extra3);
             if (!meta?.serviceRecordId) return true;
-            return String(meta.serviceRecordId) === targetServiceId;
+            if (String(meta.serviceRecordId) !== targetServiceId) return false;
+            if (
+                keepAccountsPaymentOpen &&
+                ['accounts_payment', 'accounts_quote'].includes(String(meta.oilStage || '').toLowerCase())
+            ) {
+                return false;
+            }
+            return true;
         })
         .map((row) => row._id);
 
@@ -226,6 +266,8 @@ export async function closeOilServicePendingDashboardActions(
 /**
  * Remove stale pending vehicle-service inbox rows (legacy bug + already-completed services).
  * Safe to run on inbox sync — idempotent.
+ * Important: Cash Complete Service sets vehicleServiceCompleted=live while stage is still
+ * pending_accounts (Make Payment / Zoho). Do NOT close Accounts Make Payment bells until billed.
  */
 export async function healStaleOilServicePendingDashboardActions({ assetIds = null } = {}) {
     const bugQuery = {
@@ -252,7 +294,7 @@ export async function healStaleOilServicePendingDashboardActions({ assetIds = nu
         rowQuery.requestId = { $in: assetIds };
     }
 
-    const rows = await DashboardAction.find(rowQuery).select('_id requestId extra3 requestedByName').lean();
+    const rows = await DashboardAction.find(rowQuery).select('_id requestId extra3 requestedByName extra1').lean();
     if (!rows.length) return;
 
     const idsToLoad = [...new Set(rows.map((row) => String(row.requestId || '')).filter(Boolean))];
@@ -260,6 +302,31 @@ export async function healStaleOilServicePendingDashboardActions({ assetIds = nu
         .select('_id services activeServiceWorkflow')
         .lean();
     const assetMap = Object.fromEntries(assets.map((asset) => [String(asset._id), asset]));
+
+    const isOilCashBillingStillOpen = (remark = {}, wf = {}, service = null, meta = {}) => {
+        const oilStage = String(meta?.oilStage || '').toLowerCase();
+        const remarkStage = String(remark.workflowStage || '').toLowerCase();
+        const snapStage = String(service?.workflowSnapshot?.stage || '').toLowerCase();
+        const wfStage =
+            service && String(wf.serviceRecordId || '') === String(service._id || '')
+                ? String(wf.stage || '').toLowerCase()
+                : '';
+        const stage = remarkStage || wfStage || snapStage;
+        const billed =
+            stage === 'billed' ||
+            String(remark.billingStatus || '').toLowerCase() === 'billed' ||
+            Boolean(String(remark.zohoBillId || '').trim());
+        if (billed) return false;
+        if (oilStage === 'accounts_payment' || oilStage === 'accounts_quote') return true;
+        if (stage === 'pending_accounts') return true;
+        if (
+            String(remark.billingStatus || '').toLowerCase() === 'pending' &&
+            isOilServiceCashPayment(remark)
+        ) {
+            return true;
+        }
+        return false;
+    };
 
     const staleIds = [];
     for (const row of rows) {
@@ -271,9 +338,14 @@ export async function healStaleOilServicePendingDashboardActions({ assetIds = nu
         const service = serviceRecordId
             ? (asset.services || []).find((s) => String(s._id) === serviceRecordId)
             : null;
+        const wf = asset.activeServiceWorkflow || {};
 
         if (service) {
             const remark = parseOilServiceRemark(service);
+            // Keep Accounts Zoho / Make Payment tasks until the bill is created.
+            if (isOilCashBillingStillOpen(remark, wf, service, meta)) {
+                continue;
+            }
             if (String(remark.vehicleServiceCompleted || '').toLowerCase() === 'live') {
                 staleIds.push(row._id);
                 continue;
@@ -291,10 +363,17 @@ export async function healStaleOilServicePendingDashboardActions({ assetIds = nu
             continue;
         }
 
-        const wf = asset.activeServiceWorkflow || {};
         if (String(wf.stage || '').toLowerCase() === 'complete') {
             if (!serviceRecordId || String(wf.serviceRecordId || '') === serviceRecordId) {
                 staleIds.push(row._id);
+            }
+        }
+        // pending_accounts is still an open Accounts Make Payment step — never heal-close by stage alone.
+        if (String(wf.stage || '').toLowerCase() === 'pending_accounts') {
+            const oilStage = String(meta?.oilStage || '').toLowerCase();
+            if (oilStage === 'accounts_payment' || oilStage === 'accounts_quote' || !oilStage) {
+                // already handled above when service exists; if no service meta, keep row
+                continue;
             }
         }
     }
@@ -1522,6 +1601,10 @@ export async function submitOilServiceDetails(asset, serviceId, serviceUpdates, 
             oilStage: 'accounts_payment',
         });
 
+        console.log(
+            `[OilService] Accounts Make Payment notified -> ${accounts.firstName || ''} ${accounts.lastName || ''} (${accounts.employeeId || accounts._id})`,
+        );
+
         return { asset: populated, zohoBillSync: null, routedTo: 'pending_accounts' };
     }
 
@@ -1556,6 +1639,129 @@ export async function submitOilServiceDetails(asset, serviceId, serviceUpdates, 
     });
 
     return { asset: populated, zohoBillSync: null, routedTo: 'complete' };
+}
+
+/**
+ * Resolve cash oil service id that still needs Accounts Make Payment (Zoho).
+ */
+function resolvePendingAccountsOilServiceId(assetDoc) {
+    const wf = assetDoc?.activeServiceWorkflow || {};
+    const wfStage = String(wf.stage || '').toLowerCase();
+    if (wfStage === STAGE_PENDING_ACCOUNTS && wf.serviceRecordId) {
+        return String(wf.serviceRecordId);
+    }
+    for (const s of assetDoc?.services || []) {
+        if (String(s?.serviceType || '').trim() !== 'Oil Service') continue;
+        const remark = parseOilServiceRemark(s);
+        const stage = String(
+            remark.workflowStage || s?.workflowSnapshot?.stage || '',
+        ).toLowerCase();
+        if (stage !== STAGE_PENDING_ACCOUNTS) continue;
+        if (!isOilServiceCashPayment(remark)) continue;
+        if (
+            String(remark.billingStatus || '').toLowerCase() === 'billed' ||
+            String(remark.zohoBillId || '').trim()
+        ) {
+            continue;
+        }
+        return String(s._id);
+    }
+    return null;
+}
+
+/**
+ * Re-open Accounts Make Payment bell/email if cash oil is pending_accounts but the
+ * dashboard row was incorrectly auto-closed (legacy heal bug).
+ */
+export async function ensureOilAccountsMakePaymentNotification(assetDoc) {
+    try {
+        if (!assetDoc?._id) return false;
+        const serviceId = resolvePendingAccountsOilServiceId(assetDoc);
+        if (!serviceId) return false;
+        const service =
+            assetDoc.services?.id?.(serviceId) ||
+            (assetDoc.services || []).find?.((s) => String(s._id) === String(serviceId));
+        if (!service || String(service.serviceType || '').trim() !== 'Oil Service') return false;
+        const remark = parseOilServiceRemark(service);
+        if (!isOilServiceCashPayment(remark)) return false;
+        if (
+            String(remark.billingStatus || '').toLowerCase() === 'billed' ||
+            String(remark.zohoBillId || '').trim()
+        ) {
+            return false;
+        }
+
+        const accounts = await getDepartmentHOD('accounts');
+        if (!accounts?._id) return false;
+
+        const existing = await DashboardAction.find({
+            requestId: assetDoc._id,
+            requestType: 'Vehicle Service Request',
+            status: 'Pending',
+        })
+            .select('_id extra3 assignedTo')
+            .lean();
+        const hasPaymentRow = existing.some((row) => {
+            const meta = parseOilServiceDashboardMeta(row.extra3);
+            return (
+                String(meta?.serviceRecordId || '') === String(serviceId) &&
+                String(meta?.oilStage || '').toLowerCase() === 'accounts_payment'
+            );
+        });
+        if (hasPaymentRow) return false;
+
+        const populated = await AssetItem.findById(assetDoc._id)
+            .populate('assignedTo', 'firstName lastName employeeId companyEmail workEmail personalEmail email')
+            .lean();
+        const plate = [populated?.plateEmirate, populated?.plateNumber].filter(Boolean).join(' ').trim();
+        const detailLine = `Oil service for ${populated?.assetId || ''}${plate ? ` (${plate})` : ''} is complete. Review billing and submit to create the Zoho bill.`;
+
+        await notifyStakeholders({
+            asset: populated,
+            serviceRecordId: serviceId,
+            recipients: [accounts],
+            actionLabel: 'Oil service — Make Payment (Zoho)',
+            detailLine,
+            oilStage: 'accounts_payment',
+        });
+        console.log(
+            `[OilService] Restored Accounts Make Payment notification for asset ${populated?.assetId || assetDoc._id}`,
+        );
+        return true;
+    } catch (err) {
+        console.error('[ensureOilAccountsMakePaymentNotification]', err?.message || err);
+        return false;
+    }
+}
+
+/** Restore missing Accounts Make Payment bells for all (or listed) pending_accounts cash oil services. */
+export async function restoreMissingOilAccountsMakePaymentNotifications({ assetIds = null } = {}) {
+    try {
+        const query = {
+            'activeServiceWorkflow.stage': STAGE_PENDING_ACCOUNTS,
+            $or: [
+                { 'activeServiceWorkflow.serviceTypeLabel': 'Oil Service' },
+                { 'services.serviceType': 'Oil Service' },
+            ],
+        };
+        if (Array.isArray(assetIds) && assetIds.length) {
+            query._id = { $in: assetIds };
+        }
+        const assets = await AssetItem.find(query).select(
+            'services activeServiceWorkflow assetId plateEmirate plateNumber assignedTo',
+        );
+        let restored = 0;
+        for (const asset of assets) {
+            if (await ensureOilAccountsMakePaymentNotification(asset)) restored += 1;
+        }
+        if (restored) {
+            console.log(`[OilService] Restored ${restored} Accounts Make Payment notification(s)`);
+        }
+        return restored;
+    } catch (err) {
+        console.error('[restoreMissingOilAccountsMakePaymentNotifications]', err?.message || err);
+        return 0;
+    }
 }
 
 /**
