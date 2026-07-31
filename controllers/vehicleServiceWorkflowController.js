@@ -1508,7 +1508,7 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
             );
             const zohoBillSync = oilAccResult?.zohoBillSync || null;
             return res.json({
-                message: `Billed. ${zohoBillSync?.message || 'Zoho bill created.'}`,
+                message: `Make Payment submitted. ${zohoBillSync?.message || 'Zoho bill created.'}`,
                 zohoBillMessage: zohoBillSync?.message || '',
                 zohoBillId: zohoBillSync?.billId || '',
                 zohoBillOk: true,

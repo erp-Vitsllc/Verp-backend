@@ -38,6 +38,7 @@ function resolveAmount(service, remark) {
 
 /**
  * Multi payable-from rows (Accounts / Fine-style) → Zoho Bill Item Table lines.
+ * Each row: description, Chart of Accounts, qty, amount (line total).
  * Falls back to a single payAccountId + amount when billingPayables is empty.
  */
 export function resolveGarageZohoPayableLines(service, remark = {}) {
@@ -47,8 +48,19 @@ export function resolveGarageZohoPayableLines(service, remark = {}) {
             const accountId = String(row?.payAccountId || row?.accountId || '').trim();
             const amount = money(row?.amount);
             const name = String(row?.payableTo || row?.payAccountName || '').trim();
+            const description = String(row?.description || row?.item || '').trim();
+            const qtyRaw = Number(row?.qty ?? row?.quantity);
+            const quantity = Number.isFinite(qtyRaw) && qtyRaw > 0 ? qtyRaw : 1;
             if (!accountId || !(amount > 0)) return null;
-            return { accountId, amount, name };
+            return {
+                accountId,
+                amount,
+                name,
+                description,
+                quantity,
+                // Zoho Item Table: rate × quantity = line amount
+                rate: Number((amount / quantity).toFixed(6)),
+            };
         })
         .filter(Boolean);
 
@@ -60,7 +72,16 @@ export function resolveGarageZohoPayableLines(service, remark = {}) {
         remark.payAccountName || remark.garagePayAccountName || '',
     ).trim();
     if (fallbackId && fallbackAmt > 0) {
-        return [{ accountId: fallbackId, amount: fallbackAmt, name: fallbackName }];
+        return [
+            {
+                accountId: fallbackId,
+                amount: fallbackAmt,
+                name: fallbackName,
+                description: '',
+                quantity: 1,
+                rate: fallbackAmt,
+            },
+        ];
     }
     return [];
 }
@@ -255,14 +276,25 @@ export async function syncVehicleGarageServiceToZoho({
                     .slice(-20) ||
                 undefined;
 
-            // Fine-style: one Zoho Item Table row per payable-from (Account + Rate).
-            const line_items = payableLines.map((line) => ({
-                account_id: line.accountId,
-                name: line.name || label,
-                description: [description, line.name].filter(Boolean).join(' · ').slice(0, 200) || label,
-                quantity: 1,
-                rate: line.amount,
-            }));
+            // One Zoho Item Table row per payable line: Description, Account, Qty, Amount (via rate×qty).
+            const line_items = payableLines.map((line) => {
+                const qty = Number(line.quantity) > 0 ? Number(line.quantity) : 1;
+                const rate =
+                    Number(line.rate) > 0
+                        ? Number(line.rate)
+                        : Number((line.amount / qty).toFixed(6));
+                const lineDescription =
+                    String(line.description || '').trim() ||
+                    [description, line.name].filter(Boolean).join(' · ').slice(0, 200) ||
+                    label;
+                return {
+                    account_id: line.accountId,
+                    name: line.name || lineDescription || label,
+                    description: lineDescription.slice(0, 200),
+                    quantity: qty,
+                    rate,
+                };
+            });
 
             const billPayload = {
                 vendor_id: vendorId,

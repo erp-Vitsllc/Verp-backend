@@ -96,6 +96,7 @@ import {
     activateOilServiceOnStartDate,
     processOilServiceStartDateActivation,
     maybeAutoCreateOilServiceDue,
+    bootstrapOilCashAfterInitiate,
 } from '../utils/oilServiceWorkflow.js';
 import { activateShopServiceOnStartDate } from '../utils/vehicleShopServiceScheduled.js';
 import {
@@ -11792,15 +11793,27 @@ export const addAssetService = async (req, res) => {
         if (isVehicleAssetForServiceGate()) {
             const createStatus = String(remarkObj.requestStatus || '').toLowerCase();
             const notifyAdminOnCreate = !isDraft || createStatus === 'pending';
-            if (notifyAdminOnCreate && lastServiceDoc?._id) {
+            // Oil Service: shell row is created first; Admin Officer email + task fire on Initiate Send.
+            const isOilPendingShell =
+                String(serviceType || '').trim() === 'Oil Service' &&
+                isDraft &&
+                createStatus === 'pending';
+            if (notifyAdminOnCreate && lastServiceDoc?._id && !isOilPendingShell) {
                 try {
                     const creatorName =
                         remarkObj.requestedByName || (await getRequesterName(req.user));
+                    const creatorIsAdminOfficer = await userIsFlowchartAdminOfficer(req).catch(
+                        () => false,
+                    );
                     await notifyAdminOfficerOnVehicleServiceCreated({
                         asset,
                         serviceRecordId: lastServiceDoc._id,
                         serviceType,
                         requestedByName: creatorName,
+                        // Email Admin Officer only when someone else creates/initiates the service.
+                        sendEmail: !creatorIsAdminOfficer,
+                        notifyAssignee: true,
+                        event: 'created',
                     });
                 } catch (notifyErr) {
                     console.error('[addAssetService] Admin officer create notify failed:', notifyErr);
@@ -12072,7 +12085,7 @@ export const updateAssetServiceDraft = async (req, res) => {
 
         await asset.save();
 
-        // Initiate Service Send — open Admin Officer email + dashboard task (stays until complete).
+        // Initiate Service Send — open Admin Officer dashboard task; email only if initiator ≠ Admin Officer.
         if (isOilServicePending) {
             try {
                 const beforeRemark = remarkObj || {};
@@ -12088,13 +12101,34 @@ export const updateAssetServiceDraft = async (req, res) => {
                 const nowInitiated = Boolean(String(afterRemark.oilServiceInitiatedAt || '').trim());
                 if (!wasInitiated && nowInitiated) {
                     const creatorName = await getRequesterName(req.user);
+                    const creatorIsAdminOfficer = await userIsFlowchartAdminOfficer(req).catch(
+                        () => false,
+                    );
                     await notifyAdminOfficerOnVehicleServiceCreated({
                         asset,
                         serviceRecordId: serviceId,
                         serviceType: 'Oil Service',
                         requestedByName: creatorName,
-                        sendEmail: true,
+                        sendEmail: !creatorIsAdminOfficer,
+                        notifyAssignee: true,
+                        event: 'initiated',
                     });
+                    // Cash: open Schedule + HR together — email + dashboard/bell to Admin + HR.
+                    try {
+                        const freshForBootstrap = await AssetItem.findById(asset._id);
+                        if (freshForBootstrap) {
+                            await bootstrapOilCashAfterInitiate(freshForBootstrap, serviceId, {
+                                byName: creatorName,
+                            });
+                            asset.activeServiceWorkflow = freshForBootstrap.activeServiceWorkflow;
+                            asset.services = freshForBootstrap.services;
+                        }
+                    } catch (bootstrapErr) {
+                        console.error(
+                            '[updateAssetServiceDraft] Oil Schedule/HR bootstrap failed:',
+                            bootstrapErr,
+                        );
+                    }
                 }
             } catch (notifyErr) {
                 console.error('[updateAssetServiceDraft] Oil initiate admin notify failed:', notifyErr);
@@ -12533,7 +12567,14 @@ export const approveOilAccountsQuoteHandler = async (req, res) => {
             });
         }
 
-        await approveOilAccountsQuote(asset, serviceId, req.user);
+        const amountMode = req.body?.amountMode;
+        const paymentMethod = req.body?.paymentMethod;
+        const description = req.body?.description;
+        await approveOilAccountsQuote(asset, serviceId, req.user, {
+            amountMode,
+            paymentMethod,
+            description,
+        });
         const fresh = await AssetItem.findById(asset._id).populate('assignedTo', 'firstName lastName employeeId');
         return res.json({ message: 'Accounts approved the quotation.', asset: fresh });
     } catch (error) {

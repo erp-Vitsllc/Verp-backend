@@ -42,7 +42,7 @@ import { processUtilityBillPaymentDayReminders } from "./utils/processUtilityBil
 import { processUtilityContractExpiryReminders } from "./utils/processUtilityContractExpiryReminders.js";
 import { processVehicleServiceHoldReminders } from "./utils/processVehicleServiceHoldReminders.js";
 import { processVehicleServiceScheduledPhase } from "./utils/processVehicleServiceScheduledPhase.js";
-import { processOilServiceOverdue, processOilServiceStartDateActivation, processOilServiceDueAutoCreate } from "./utils/oilServiceWorkflow.js";
+import { processOilServiceOverdue, processOilServiceStartDateActivation, processOilServiceDueAutoCreate, processOilServiceCompleteDueReminder } from "./utils/oilServiceWorkflow.js";
 import { processShopServiceStartDateActivation } from "./utils/vehicleShopServiceScheduled.js";
 import { processAssetServiceOverdue } from "./utils/processAssetServiceOverdue.js";
 import { processFleetHandoverEscalation } from "./utils/processFleetHandoverEscalation.js";
@@ -156,6 +156,8 @@ setTimeout(() => { processVehicleServiceScheduledPhase(); }, 150 * 1000);
 setInterval(() => { processVehicleServiceScheduledPhase(); }, 2 * 60 * 60 * 1000);
 setTimeout(() => { processOilServiceOverdue(); }, 180 * 1000);
 setInterval(() => { processOilServiceOverdue(); }, 2 * 60 * 60 * 1000);
+setTimeout(() => { processOilServiceCompleteDueReminder(); }, 185 * 1000);
+setInterval(() => { processOilServiceCompleteDueReminder(); }, 2 * 60 * 60 * 1000);
 setTimeout(() => { processOilServiceStartDateActivation(); }, 165 * 1000);
 setInterval(() => { processOilServiceStartDateActivation(); }, 2 * 60 * 60 * 1000);
 setTimeout(() => { processShopServiceStartDateActivation(); }, 170 * 1000);

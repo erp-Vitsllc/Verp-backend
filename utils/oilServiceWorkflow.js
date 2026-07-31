@@ -332,6 +332,95 @@ export function isOilServiceCashPayment(remarkOrService) {
     return String(remark?.amountMode || '').toLowerCase() !== 'warranty';
 }
 
+/**
+ * After Initiate Service (Cash): open Schedule + HR together.
+ * Bootstraps pending_hr workflow and emails/dashboard-tasks Admin Officer + HR.
+ */
+export async function bootstrapOilCashAfterInitiate(asset, serviceId, { byName = 'User' } = {}) {
+    const service = asset.services?.id?.(serviceId);
+    if (!service || String(service.serviceType || '').trim() !== 'Oil Service') return null;
+
+    const remark = parseOilServiceRemark(service);
+    if (!isOilServiceCashPayment(remark)) return null;
+    if (!String(remark.oilServiceInitiatedAt || '').trim()) return null;
+    if (String(remark.hrScheduleApprovedAt || '').trim()) return null;
+
+    const existingWf = asset.activeServiceWorkflow;
+    const alreadyBootstrapped =
+        existingWf &&
+        String(existingWf.serviceRecordId) === String(service._id) &&
+        ['pending_hr', 'scheduled_service', 'pending_accounts', 'billed', 'complete'].includes(
+            String(existingWf.stage || '').toLowerCase(),
+        );
+    if (alreadyBootstrapped && String(existingWf.stage || '').toLowerCase() !== 'pending_hr') {
+        return null;
+    }
+
+    remark.workflowStage = STAGE_PENDING_HR;
+    remark.oilScheduleHrOpenedAt = remark.oilScheduleHrOpenedAt || new Date().toISOString();
+    service.remark = JSON.stringify(remark);
+
+    if (!alreadyBootstrapped) {
+        const previousStatus = asset.status;
+        asset.activeServiceWorkflow = {
+            serviceRecordId: service._id,
+            stage: STAGE_PENDING_HR,
+            previousStatus,
+            serviceTypeLabel: 'Oil Service',
+            scheduledServiceDate: null,
+            serviceWindowEndDate: null,
+            serviceDurationEmailSentAt: null,
+            oilServiceOverdueNotifiedAt: null,
+            oilServiceCompleteDueNotifiedAt: null,
+            oilServiceLiveAt: null,
+            oilScheduleHrNotifiedAt: new Date(),
+            history: [],
+        };
+        recordOilServiceActivity(asset, service, service._id, {
+            type: 'service_updated',
+            byName,
+            note: 'Oil service initiated — Schedule and HR Approval open together',
+        });
+    } else if (!existingWf.oilScheduleHrNotifiedAt) {
+        asset.activeServiceWorkflow.oilScheduleHrNotifiedAt = new Date();
+    }
+
+    persistWorkflowSnapshot(asset);
+    asset.markModified('services');
+    asset.markModified('activeServiceWorkflow');
+    await asset.save();
+
+    if (alreadyBootstrapped && existingWf?.oilScheduleHrNotifiedAt) {
+        return asset;
+    }
+
+    const populated = await AssetItem.findById(asset._id)
+        .populate('assignedTo', 'firstName lastName employeeId companyEmail workEmail personalEmail email')
+        .lean();
+    const hr = await getDepartmentHOD('hr');
+    const adminOfficer = await getDepartmentHOD('admincontroller');
+    if (!hr?._id) {
+        console.warn('[OilService] No HR flowchart assignee — skipping Schedule/HR open notify.');
+        return populated;
+    }
+
+    const plate = [populated?.plateEmirate, populated?.plateNumber].filter(Boolean).join(' ').trim();
+    const detailLine = `${byName} initiated an oil service for ${populated?.assetId || ''}${
+        plate ? ` (${plate})` : ''
+    }. Schedule/Reschedule (Admin) and HR Approval are open together — Admin may change dates anytime; HR approves once.`;
+
+    await notifyStakeholders({
+        asset: populated,
+        serviceRecordId: service._id,
+        recipients: [adminOfficer, hr].filter(Boolean),
+        actionLabel: 'Oil service — Schedule & HR Approval',
+        detailLine,
+        oilStage: 'schedule_hr_open',
+    });
+
+    return populated;
+}
+
 function toEmpIdString(v) {
     if (!v) return null;
     if (typeof v === 'string') return v;
@@ -488,17 +577,21 @@ export async function userMayApproveOilAccountsQuote(reqUser, asset, serviceId) 
     return userIsOilServiceAccounts(reqUser);
 }
 
-/** Accounts quote approval — records approval only, does not create Zoho bill. */
-export async function approveOilAccountsQuote(asset, serviceId, reqUser) {
+/** Accounts quote approval — records approval only, does not create Zoho bill.
+ * Optional paymentPatch: { amountMode, paymentMethod, description } — Accounts may edit before approve.
+ */
+export async function approveOilAccountsQuote(asset, serviceId, reqUser, paymentPatch = {}) {
     const service = asset.services?.id?.(serviceId);
     if (!service) throw new Error('Service record not found');
     const { wf, bindActive } = getWorkflowContextForService(asset, serviceId);
     if (!wf) throw new Error('No active oil service workflow.');
-    if (!isOilServiceCashPayment(service)) {
+
+    const remark = parseOilServiceRemark(service);
+    // Must still be cash when Accounts opens this step (initiated as cash / HR path).
+    if (!isOilServiceCashPayment(remark)) {
         throw new Error('Accounts quote approval only applies to cash oil services.');
     }
 
-    const remark = parseOilServiceRemark(service);
     const stage = String(wf.stage || '').toLowerCase();
     const hrDone = Boolean(String(remark.hrScheduleApprovedAt || remark.hrPaymentApprovedAt || '').trim());
     if (stage === STAGE_PENDING_HR && !hrDone) {
@@ -513,11 +606,56 @@ export async function approveOilAccountsQuote(asset, serviceId, reqUser) {
         throw new Error('Accounts has already approved this quotation.');
     }
 
+    // Accounts may edit payment type + method on approve.
+    const rawType = String(paymentPatch?.amountMode || '').toLowerCase().trim();
+    const nextType =
+        rawType === 'warranty'
+            ? 'warranty'
+            : rawType === 'amount' || rawType === 'cash'
+              ? 'amount'
+              : '';
+    if (nextType) {
+        remark.amountMode = nextType;
+    }
+    if (String(remark.amountMode || '').toLowerCase() === 'warranty') {
+        delete remark.paymentMethod;
+    } else {
+        const rawMethod = String(paymentPatch?.paymentMethod || remark.paymentMethod || '')
+            .toLowerCase()
+            .trim();
+        const nextMethod =
+            rawMethod === 'acc_pay' || rawMethod === 'accpay' || rawMethod === 'account_pay'
+                ? 'acc_pay'
+                : rawMethod === 'bank_transfer' ||
+                    rawMethod === 'banktransfer' ||
+                    rawMethod === 'bank transfer'
+                  ? 'bank_transfer'
+                  : rawMethod === 'cash' || rawMethod === 'amount'
+                    ? 'cash'
+                    : '';
+        if (nextMethod) {
+            remark.paymentMethod = nextMethod;
+        } else if (!String(remark.paymentMethod || '').trim()) {
+            remark.paymentMethod = 'cash';
+        }
+        if (!nextType && !String(remark.amountMode || '').trim()) {
+            remark.amountMode = 'amount';
+        }
+    }
+
+    const accountsDescription = String(paymentPatch?.description || '').trim();
+    if (accountsDescription) {
+        remark.accountsReviewDescription = accountsDescription;
+    } else {
+        delete remark.accountsReviewDescription;
+    }
+
+    const switchedToWarranty = String(remark.amountMode || '').toLowerCase() === 'warranty';
     const actorName = await getRequesterName(reqUser);
     remark.accountsQuoteApprovedAt = new Date().toISOString();
     remark.accountsQuoteApprovedByName = actorName;
     // Ensure we are on scheduled_service after both approvals.
-    if (stage === STAGE_PENDING_HR) {
+    if (stage === STAGE_PENDING_HR || switchedToWarranty) {
         wf.stage = STAGE_SCHEDULED;
         remark.workflowStage = STAGE_SCHEDULED;
     }
@@ -526,7 +664,14 @@ export async function approveOilAccountsQuote(asset, serviceId, reqUser) {
     recordOilServiceActivity(asset, service, serviceId, {
         type: 'accounts_quote_approved',
         byName: actorName,
-        note: 'Accounts approved quotation — Ready to Service / On Service on start date',
+        note: switchedToWarranty
+            ? 'Accounts approved — payment type set to Warranty'
+            : `Accounts approved quotation (${remark.paymentMethod || 'cash'}) — Ready to Service / On Service on start date`,
+        meta: {
+            amountMode: remark.amountMode || '',
+            paymentMethod: remark.paymentMethod || '',
+            ...(accountsDescription ? { description: accountsDescription } : {}),
+        },
     });
 
     commitWorkflowContext(asset, serviceId, { wf, bindActive });
@@ -1013,9 +1158,9 @@ export async function processOilServiceStartDateActivation() {
 }
 
 /**
- * Submit oil service assignment.
- * Cash: Send → Scheduled dates stored → pending_hr (HR must approve before On Service).
- * Warranty: Send → scheduled_service (then On Service on start date).
+ * Submit oil service assignment (Schedule at least once).
+ * Cash: dates stored; Schedule + HR already open from initiate (do not re-notify HR).
+ * Warranty: scheduled_service (then On Service on start date).
  */
 export async function submitOilServiceAssignment(asset, serviceId, req) {
     const service = asset.services?.id?.(serviceId);
@@ -1042,53 +1187,86 @@ export async function submitOilServiceAssignment(asset, serviceId, req) {
     const requesterName = await getRequesterName(req.user);
     const previousStatus = asset.status;
     const isCash = isOilServiceCashPayment(remark);
+    const hrAlreadyApproved = Boolean(
+        String(remark.hrScheduleApprovedAt || remark.hrPaymentApprovedAt || '').trim(),
+    );
+    const priorWf = asset.activeServiceWorkflow;
+    const sameServiceWf =
+        priorWf?.serviceRecordId && String(priorWf.serviceRecordId) === String(service._id);
+    const scheduleHrAlreadyOpen =
+        isCash &&
+        sameServiceWf &&
+        (Boolean(priorWf.oilScheduleHrNotifiedAt) ||
+            String(priorWf.stage || '').toLowerCase() === STAGE_PENDING_HR ||
+            Boolean(String(remark.oilScheduleHrOpenedAt || '').trim()));
 
     remark.requestStatus = 'submitted';
     remark.assignmentSubmittedAt = new Date().toISOString();
     remark.oilServiceScheduledAt = remark.assignmentSubmittedAt;
     remark.requestedByName = requesterName;
-    // Cash waits for HR before On Service; warranty goes straight to scheduled.
-    remark.workflowStage = isCash ? STAGE_PENDING_HR : STAGE_SCHEDULED;
+    if (isCash) {
+        remark.workflowStage = hrAlreadyApproved ? STAGE_SCHEDULED : STAGE_PENDING_HR;
+    } else {
+        remark.workflowStage = STAGE_SCHEDULED;
+    }
     service.remark = JSON.stringify(remark);
 
-    const priorWf = asset.activeServiceWorkflow;
-    if (
-        priorWf?.serviceRecordId &&
-        String(priorWf.serviceRecordId) !== String(service._id)
-    ) {
+    if (priorWf?.serviceRecordId && String(priorWf.serviceRecordId) !== String(service._id)) {
         persistWorkflowSnapshot(asset);
     }
 
-    if (!asset.activeServiceWorkflow) asset.activeServiceWorkflow = {};
+    const nextStage = isCash
+        ? hrAlreadyApproved
+            ? STAGE_SCHEDULED
+            : STAGE_PENDING_HR
+        : STAGE_SCHEDULED;
+    const priorPlain = sameServiceWf
+        ? typeof priorWf.toObject === 'function'
+            ? priorWf.toObject()
+            : { ...priorWf }
+        : {};
+
     asset.activeServiceWorkflow = {
+        ...priorPlain,
         serviceRecordId: service._id,
-        stage: isCash ? STAGE_PENDING_HR : STAGE_SCHEDULED,
-        previousStatus,
+        stage: nextStage,
+        previousStatus: sameServiceWf ? priorWf.previousStatus || previousStatus : previousStatus,
         serviceTypeLabel: 'Oil Service',
         scheduledServiceDate: startD,
         serviceWindowEndDate: endD,
-        serviceDurationEmailSentAt: null,
-        oilServiceOverdueNotifiedAt: null,
-        oilServiceLiveAt: null,
-        history: [],
+        serviceDurationEmailSentAt: sameServiceWf ? priorWf.serviceDurationEmailSentAt || null : null,
+        oilServiceOverdueNotifiedAt: sameServiceWf ? priorWf.oilServiceOverdueNotifiedAt || null : null,
+        oilServiceCompleteDueNotifiedAt: sameServiceWf
+            ? priorWf.oilServiceCompleteDueNotifiedAt || null
+            : null,
+        oilServiceLiveAt: sameServiceWf ? priorWf.oilServiceLiveAt || null : null,
+        oilScheduleHrNotifiedAt: sameServiceWf ? priorWf.oilScheduleHrNotifiedAt || null : null,
+        history: sameServiceWf && Array.isArray(priorWf.history) ? [...priorWf.history] : [],
     };
 
     recordOilServiceActivity(asset, service, service._id, {
         type: 'service_scheduled',
         byName: requesterName,
         note: isCash
-            ? 'Oil service scheduled — awaiting HR approval before On Service'
+            ? hrAlreadyApproved
+                ? 'Oil service schedule submitted — HR already approved'
+                : 'Oil service schedule submitted — HR Approval still open'
             : 'Oil service scheduled',
     });
 
-    asset.onServiceActive = false;
+    if (!asset.activeServiceWorkflow.oilServiceLiveAt) {
+        asset.onServiceActive = false;
+    }
     persistWorkflowSnapshot(asset);
     asset.markModified('services');
     asset.markModified('activeServiceWorkflow');
     await asset.save();
 
-    // Warranty (or non-cash): may go live immediately when start date is today/past.
-    if (!isCash) {
+    const accountsQuoteDone = Boolean(String(remark.accountsQuoteApprovedAt || '').trim());
+    if (
+        (!isCash || (hrAlreadyApproved && accountsQuoteDone)) &&
+        !asset.activeServiceWorkflow.oilServiceLiveAt
+    ) {
         const today = utcDayStart(new Date());
         const startUtc = utcDayStart(startD);
         if (startUtc != null && today != null && today >= startUtc) {
@@ -1097,7 +1275,7 @@ export async function submitOilServiceAssignment(asset, serviceId, req) {
                 await activateOilServiceOnStartDate(fresh, {
                     byName: requesterName,
                     force: true,
-                    notify: false,
+                    notify: !isCash,
                 });
                 asset.activeServiceWorkflow = fresh.activeServiceWorkflow;
                 asset.onServiceActive = fresh.onServiceActive;
@@ -1112,25 +1290,29 @@ export async function submitOilServiceAssignment(asset, serviceId, req) {
         .lean();
     const hr = await getDepartmentHOD('hr');
     const adminOfficer = await getDepartmentHOD('admincontroller');
-    const assignee = populated?.assignedTo || null;
 
     const plate = [populated?.plateEmirate, populated?.plateNumber].filter(Boolean).join(' ').trim();
     const startLabel = startD.toISOString().slice(0, 10);
 
     if (isCash) {
-        if (!hr?._id) {
-            throw new Error('No HR assignee is configured in the company flowchart.');
+        if (!hrAlreadyApproved && !scheduleHrAlreadyOpen) {
+            if (!hr?._id) {
+                throw new Error('No HR assignee is configured in the company flowchart.');
+            }
+            await notifyStakeholders({
+                asset: populated,
+                serviceRecordId: service._id,
+                recipients: [adminOfficer, hr].filter(Boolean),
+                actionLabel: 'Oil service — Schedule & HR Approval',
+                detailLine: `${requesterName} scheduled an oil service for ${populated?.assetId || ''}${plate ? ` (${plate})` : ''} (start ${startLabel}). HR Approval is open.`,
+                oilStage: 'schedule_hr_open',
+            });
         }
-        await notifyStakeholders({
-            asset: populated,
-            serviceRecordId: service._id,
-            recipients: [hr],
-            actionLabel: 'Oil service — HR schedule approval',
-            detailLine: `${requesterName} scheduled an oil service for ${populated?.assetId || ''}${plate ? ` (${plate})` : ''} (start ${startLabel}). Approve so Accounts can review the quotation.`,
-            oilStage: 'hr_approval',
-        });
     } else {
-        const isLive = isOilServiceLive(populated, populated?.services?.find?.((s) => String(s._id) === String(service._id)));
+        const isLive = isOilServiceLive(
+            populated,
+            populated?.services?.find?.((s) => String(s._id) === String(service._id)),
+        );
         const detailLine = isLive
             ? `${requesterName} submitted an oil service request for ${populated?.assetId || ''}${plate ? ` (${plate})` : ''}. The vehicle is now on service.`
             : `${requesterName} scheduled an oil service for ${populated?.assetId || ''}${plate ? ` (${plate})` : ''}. Service starts on ${startLabel}.`;
@@ -1164,8 +1346,15 @@ function oilServiceEndDateReached(asset, service) {
     return endUtc != null && today != null && today >= endUtc;
 }
 
+/** Complete Service: On Service required (cash also needs schedule once + Accounts quote). */
 function oilServiceCompleteAllowed(asset, service) {
-    return isOilServiceLive(asset, service) || oilServiceEndDateReached(asset, service);
+    if (!isOilServiceLive(asset, service)) return false;
+    const remark = parseOilServiceRemark(service);
+    if (String(remark.requestStatus || '').toLowerCase() !== 'submitted') return false;
+    if (isOilServiceCashPayment(remark) && !String(remark.accountsQuoteApprovedAt || '').trim()) {
+        return false;
+    }
+    return true;
 }
 
 /**
@@ -1180,7 +1369,7 @@ export async function saveOilServiceDetailsDraft(asset, serviceId, serviceUpdate
     }
     if (!oilServiceCompleteAllowed(asset, service)) {
         throw new Error(
-            'Complete Service is available after On Service, or when the service end date is today or past.',
+            'Complete Service unlocks on On Service after Schedule (at least once) and Accounts Approve (cash).',
         );
     }
 
@@ -1215,7 +1404,7 @@ export async function submitOilServiceDetails(asset, serviceId, serviceUpdates, 
     }
     if (!oilServiceCompleteAllowed(asset, service)) {
         throw new Error(
-            'Complete Service can only be submitted after On Service, or when the service end date is today or past.',
+            'Complete Service unlocks on On Service after Schedule (at least once) and Accounts Approve (cash).',
         );
     }
 
@@ -1228,6 +1417,24 @@ export async function submitOilServiceDetails(asset, serviceId, serviceUpdates, 
     const remark = parseOilServiceRemark(asset.services.id(serviceId));
     if (!String(remark.returnDate || '').trim() || !String(remark.handOverDate || '').trim()) {
         throw new Error('Return date and hand over date are required before completing the service.');
+    }
+
+    const serviceEndRaw =
+        remark.serviceEndDate ||
+        remark.nextChangeMonth ||
+        asset?.activeServiceWorkflow?.serviceWindowEndDate ||
+        '';
+    const handOverKey = String(remark.handOverDate || '').trim().slice(0, 10);
+    const endKey = (() => {
+        const raw = String(serviceEndRaw || '').trim();
+        if (/^\d{4}-\d{2}-\d{2}/.test(raw)) return raw.slice(0, 10);
+        if (/^\d{4}-\d{2}$/.test(raw)) return `${raw}-01`;
+        const d = raw ? new Date(raw) : null;
+        if (!d || Number.isNaN(d.getTime())) return '';
+        return d.toISOString().slice(0, 10);
+    })();
+    if (endKey && handOverKey && handOverKey < endKey) {
+        throw new Error('Hand over date must be on or after the service end date.');
     }
 
     const serviceRow = asset.services.id(serviceId);
@@ -1402,13 +1609,19 @@ export async function advanceOilCashAfterHrApprove(asset, wf, actorName) {
         oilStage: 'hr_approval',
         comment: 'HR approved schedule',
     });
+    // Close HR's parallel Schedule/HR open task (Admin keeps schedule task / initiate track).
+    await closeOilServiceStageDashboardActions(asset._id, serviceId, {
+        assignedTo: hr?._id || null,
+        oilStage: 'schedule_hr_open',
+        comment: 'HR approved — Schedule/HR open task closed',
+    });
 
     await notifyStakeholders({
         asset: populated,
         serviceRecordId: serviceId,
         recipients: [accounts],
         actionLabel: 'Oil service — Accounts Approve',
-        detailLine: `HR approved the oil service schedule for ${populated?.assetId || ''}${plate ? ` (${plate})` : ''}. Review amount/quotation and approve (start ${startLabel}).`,
+        detailLine: `HR approved the oil service for ${populated?.assetId || ''}${plate ? ` (${plate})` : ''}. Review amount/quotation and approve${startLabel ? ` (start ${startLabel})` : ''}.`,
         oilStage: 'accounts_quote',
     });
 
@@ -2025,5 +2238,62 @@ export async function processOilServiceOverdue() {
         }
     } catch (e) {
         console.error('[processOilServiceOverdue]', e);
+    }
+}
+
+/**
+ * Cron: On Service + end date = today → Admin email + dashboard/bell to Complete Service.
+ */
+export async function processOilServiceCompleteDueReminder() {
+    try {
+        const items = await AssetItem.find({
+            'activeServiceWorkflow.stage': STAGE_SCHEDULED,
+            'activeServiceWorkflow.serviceTypeLabel': 'Oil Service',
+            onServiceActive: true,
+        })
+            .select('assetId name plateNumber plateEmirate activeServiceWorkflow assignedTo onServiceActive')
+            .limit(500)
+            .lean();
+
+        const today = utcDayStart(new Date());
+        const adminOfficer = await getDepartmentHOD('admincontroller');
+        if (!adminOfficer?._id) return;
+
+        for (const row of items) {
+            const wf = row.activeServiceWorkflow;
+            if (!wf?.serviceWindowEndDate || !wf?.serviceRecordId) continue;
+            if (wf.oilServiceCompleteDueNotifiedAt) continue;
+            const end = utcDayStart(wf.serviceWindowEndDate);
+            if (end == null || today !== end) continue;
+
+            const asset = await AssetItem.findById(row._id).populate(
+                'assignedTo',
+                'firstName lastName employeeId companyEmail workEmail personalEmail email',
+            );
+            if (!asset?.activeServiceWorkflow) continue;
+            const serviceSub = asset.services?.id?.(asset.activeServiceWorkflow.serviceRecordId);
+            if (String(serviceSub?.serviceType || '').trim() !== 'Oil Service') continue;
+            if (!isOilServiceLive(asset, serviceSub)) continue;
+
+            asset.activeServiceWorkflow.oilServiceCompleteDueNotifiedAt = new Date();
+            asset.markModified('activeServiceWorkflow');
+            await asset.save();
+
+            const plate = [asset.plateEmirate, asset.plateNumber].filter(Boolean).join(' ').trim();
+            const detailLine = `Oil service end date is today for ${asset.assetId || ''}${
+                plate ? ` (${plate})` : ''
+            }. Please submit Complete Service.`;
+
+            await notifyStakeholders({
+                asset: asset.toObject ? asset.toObject() : asset,
+                serviceRecordId: wf.serviceRecordId,
+                recipients: [adminOfficer],
+                actionLabel: 'Oil service — Complete Service due',
+                detailLine,
+                oilStage: 'complete_due',
+            });
+        }
+    } catch (e) {
+        console.error('[processOilServiceCompleteDueReminder]', e);
     }
 }

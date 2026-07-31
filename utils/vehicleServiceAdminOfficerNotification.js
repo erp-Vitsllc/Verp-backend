@@ -49,8 +49,12 @@ async function loadAssetWithAssignee(asset) {
 }
 
 /**
- * Open (or refresh) Admin Officer inbox task when any vehicle service is created.
+ * Open (or refresh) Admin Officer inbox task when any vehicle service is created / initiated.
  * Stays Pending until closeAdminOfficerServiceTrackNotification is called on completion.
+ *
+ * Email to Admin Officer: only when sendEmail is true (callers skip when the actor
+ * is already the flowchart Admin Officer).
+ * @param {'created'|'initiated'} [event]
  */
 export async function notifyAdminOfficerOnVehicleServiceCreated({
     asset,
@@ -58,6 +62,8 @@ export async function notifyAdminOfficerOnVehicleServiceCreated({
     serviceType,
     requestedByName = 'System',
     sendEmail = true,
+    notifyAssignee = true,
+    event = 'created',
 }) {
     const adminOfficer = await getDepartmentHOD('admincontroller');
     if (!adminOfficer?._id || !asset?._id || !serviceRecordId) return;
@@ -68,6 +74,11 @@ export async function notifyAdminOfficerOnVehicleServiceCreated({
     const linkPath = vehicleServiceDetailsPath(asset._id, serviceRecordId, serviceTypeLabel);
     const subjectEmp = populated?.assignedTo || null;
     const plate = [populated?.plateEmirate, populated?.plateNumber].filter(Boolean).join(' ').trim();
+    const isInitiated = String(event || '').toLowerCase() === 'initiated';
+    const verb = isInitiated ? 'initiated' : 'created';
+    const stageLabel = isInitiated ? 'Vehicle service initiated' : 'New vehicle service request';
+    const actionLabel = `${serviceTypeLabel} ${verb}`;
+    const assetLabel = `${asset.assetId || ''}${plate ? ` (${plate})` : ''}`;
 
     await DashboardAction.findOneAndUpdate(
         {
@@ -98,26 +109,32 @@ export async function notifyAdminOfficerOnVehicleServiceCreated({
         await sendVehicleServiceWorkflowEmail({
             recipient: adminOfficer,
             asset: populated || asset,
-            stageLabel: 'New vehicle service request',
-            actionLabel: `${serviceTypeLabel} created`,
-            detailLine: `${requestedByName} created a ${serviceTypeLabel} request for ${asset.assetId || ''}${plate ? ` (${plate})` : ''}. Open the service details page — this task closes when the service is completed.`,
+            stageLabel,
+            actionLabel,
+            detailLine: `${requestedByName} ${verb} a ${serviceTypeLabel} request for ${assetLabel}. Open the service details page — this task closes when the service is completed.`,
             linkPath,
         });
+    }
 
-        // Also notify the assigned driver/user when the vehicle has one (same create path as Admin Officer).
-        if (subjectEmp?._id && String(subjectEmp._id) !== String(adminOfficer._id)) {
-            try {
-                await sendVehicleServiceWorkflowEmail({
-                    recipient: subjectEmp,
-                    asset: populated || asset,
-                    stageLabel: 'New vehicle service request',
-                    actionLabel: `${serviceTypeLabel} created`,
-                    detailLine: `A ${serviceTypeLabel} request was created for your assigned vehicle ${asset.assetId || ''}${plate ? ` (${plate})` : ''}.`,
-                    linkPath,
-                });
-            } catch (assigneeMailErr) {
-                console.error('[VehicleService] Assignee create notify failed:', assigneeMailErr);
-            }
+    // Assigned driver/user — independent of Admin Officer email (e.g. Admin Officer self-initiates).
+    if (
+        notifyAssignee &&
+        subjectEmp?._id &&
+        String(subjectEmp._id) !== String(adminOfficer._id)
+    ) {
+        try {
+            await sendVehicleServiceWorkflowEmail({
+                recipient: subjectEmp,
+                asset: populated || asset,
+                stageLabel,
+                actionLabel,
+                detailLine: isInitiated
+                    ? `${requestedByName} initiated a ${serviceTypeLabel} request for your assigned vehicle ${assetLabel}.`
+                    : `A ${serviceTypeLabel} request was created for your assigned vehicle ${assetLabel}.`,
+                linkPath,
+            });
+        } catch (assigneeMailErr) {
+            console.error('[VehicleService] Assignee create notify failed:', assigneeMailErr);
         }
     }
 }

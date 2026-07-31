@@ -480,6 +480,14 @@ const assetItemSchema = new mongoose.Schema({
         serviceWindowEndDate: { type: Date, default: null },
         /** Set once when the service window has ended (end-of-duration email to Asset Controller). */
         serviceDurationEmailSentAt: { type: Date, default: null },
+        /** Oil: start date reached — vehicle On Service. */
+        oilServiceLiveAt: { type: Date, default: null },
+        oilServiceLiveNotifiedAt: { type: Date, default: null },
+        oilServiceOverdueNotifiedAt: { type: Date, default: null },
+        /** Oil: end date = today — Admin Complete Service reminder sent. */
+        oilServiceCompleteDueNotifiedAt: { type: Date, default: null },
+        /** Oil cash: Schedule + HR opened together after Initiate. */
+        oilScheduleHrNotifiedAt: { type: Date, default: null },
         accountsHold: {
             reason: { type: String, default: '' },
             days: { type: Number, default: null },
