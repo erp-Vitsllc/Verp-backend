@@ -29,6 +29,7 @@ const LEFT_USER_PENDING_NOTIFICATION_TYPES = [
     "Employee Document Expiry Reminder",
     "Document Expiry Reminder",
     "Probation Change",
+    "Left User Request",
     "Profile Activation",
     "Notice Request",
     "Employee Document Not Renew",

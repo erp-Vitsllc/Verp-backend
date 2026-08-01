@@ -857,6 +857,88 @@ const resolveEmployeeAssignmentActors = async (employeeToAssign, assignerEmpObje
 const NO_PORTAL_NO_REPORTEE_ASSIGN_MESSAGE =
     'This employee has no user account, and no primary reportee. Set a primary reportee (with a login) on their profile before assigning — otherwise Accept waits forever on someone who cannot log in.';
 
+const empAckDisplayName = (emp) => {
+    if (!emp || typeof emp !== 'object') return '';
+    const n = `${emp.firstName || ''} ${emp.lastName || ''}`.trim();
+    if (n) return n;
+    if (emp.employeeId) return String(emp.employeeId);
+    return '';
+};
+
+/**
+ * Who should Accept a pending employee assignment, and what name to show on "Waiting …".
+ * Always fresh-loads assignee + primary reportee so stuck rows can be healed.
+ */
+const resolvePendingAssignmentAckMeta = async (asset) => {
+    if (!asset || !isAssetAssignmentAcknowledgmentPending(asset)) return null;
+    if (asset.assignedToType === 'Company' || (asset.assignedCompany && !asset.assignedTo)) {
+        const ar = asset.actionRequiredBy;
+        const arId = ar?._id?.toString?.() || ar?.toString?.() || null;
+        return {
+            assigneeCanSelfAcknowledge: false,
+            waitingForId: arId,
+            waitingForName: empAckDisplayName(ar) || 'Company coordinator',
+            primaryReporteeId: null,
+            missingPrimaryReporteeForNoPortal: false,
+        };
+    }
+    if (!asset.assignedTo) return null;
+
+    const assigneeId = asset.assignedTo?._id || asset.assignedTo;
+    const assigneeDoc = await EmployeeBasic.findById(assigneeId)
+        .select(
+            'employeeId firstName lastName companyEmail workEmail enablePortalAccess primaryReportee',
+        )
+        .populate({
+            path: 'primaryReportee',
+            select: '_id firstName lastName employeeId companyEmail workEmail enablePortalAccess',
+        })
+        .lean()
+        .catch(() => null);
+    if (!assigneeDoc) return null;
+
+    const assignerRef = asset.assignedBy?._id || asset.assignedBy;
+    const resolved = await resolveEmployeeAssignmentActors(assigneeDoc, assignerRef);
+    const waitingForId =
+        resolved.pendingActionActorId?._id?.toString?.() ||
+        resolved.pendingActionActorId?.toString?.() ||
+        null;
+    let waitingForName = '';
+    if (waitingForId) {
+        if (
+            String(assigneeDoc._id) === String(waitingForId) &&
+            resolved.assigneeCanSelfAcknowledge
+        ) {
+            waitingForName = empAckDisplayName(assigneeDoc);
+        } else if (
+            assigneeDoc.primaryReportee &&
+            String(assigneeDoc.primaryReportee._id || assigneeDoc.primaryReportee) ===
+                String(waitingForId)
+        ) {
+            waitingForName = empAckDisplayName(assigneeDoc.primaryReportee);
+        } else {
+            const waitingEmp = await EmployeeBasic.findById(waitingForId)
+                .select('firstName lastName employeeId')
+                .lean()
+                .catch(() => null);
+            waitingForName = empAckDisplayName(waitingEmp);
+        }
+    }
+
+    return {
+        assigneeCanSelfAcknowledge: !!resolved.assigneeCanSelfAcknowledge,
+        waitingForId,
+        waitingForName: waitingForName || 'Acknowledgment',
+        primaryReporteeId:
+            assigneeDoc.primaryReportee?._id?.toString?.() ||
+            assigneeDoc.primaryReportee?.toString?.() ||
+            null,
+        missingPrimaryReporteeForNoPortal: !!resolved.missingPrimaryReporteeForNoPortal,
+        resolved,
+        assigneeDoc,
+    };
+};
+
 /**
  * Re-route existing Pending "Asset Assignment" Accept tasks onto the correct actor:
  * company email + user account → assignee; otherwise → primary reportee.
@@ -4526,32 +4608,36 @@ export const getAssetItemDetail = async (req, res) => {
         // If a creation approval is in flight, ensure actionRequiredBy + DashboardAction route to the
         // CURRENT role holder (HR for fleet, AC for tools). Heals stale routing after a flowchart swap.
         let currentCreationApprover = null;
+        let assignmentAckMeta = null;
         if (!skipInlineWriteHeals) {
         try {
             currentCreationApprover = await syncStaleAssetCreationApprover(item);
         } catch (syncErr) {
         }
 
-        // Heal assignment rows where creation-approver sync previously overwrote assignee routing.
+        // Heal assignment Accept routing: user account → assignee; else → primary reportee.
+        // Do not require assignedToType === 'Employee' (older rows may omit it).
         if (
             isAssetAssignmentAcknowledgmentPending(item) &&
-            item.assignedToType === 'Employee' &&
             item.assignedTo &&
+            !(item.assignedToType === 'Company' && item.assignedCompany) &&
             !item.pendingAction
         ) {
             try {
-                const assigneeDoc =
-                    typeof item.assignedTo === 'object' && item.assignedTo.employeeId
-                        ? item.assignedTo
-                        : await EmployeeBasic.findById(item.assignedTo._id || item.assignedTo)
-                            .select(
-                                'employeeId firstName lastName companyEmail primaryReportee enablePortalAccess',
-                            )
-                            .populate({
-                                path: 'primaryReportee',
-                                select: '_id firstName lastName employeeId companyEmail',
-                            })
-                            .lean();
+                // Always fresh-load assignee + primaryReportee so heal is not blocked by stale populate.
+                const assigneeDoc = await EmployeeBasic.findById(item.assignedTo._id || item.assignedTo)
+                    .select(
+                        'employeeId firstName lastName companyEmail workEmail primaryReportee enablePortalAccess',
+                    )
+                    .populate({
+                        path: 'primaryReportee',
+                        select: '_id firstName lastName employeeId companyEmail workEmail enablePortalAccess',
+                    })
+                    .lean();
+                if (assigneeDoc && typeof item.assignedTo === 'object') {
+                    item.assignedTo.primaryReportee = assigneeDoc.primaryReportee;
+                    item.assignedTo.enablePortalAccess = assigneeDoc.enablePortalAccess;
+                }
                 const assignerRef = item.assignedBy?._id || item.assignedBy;
                 const handoverFlowHeal = getVehicleHandoverFlow(item);
                 const fleetHeal = isFleetVehicleAssetFields({
@@ -4586,18 +4672,40 @@ export const getAssetItemDetail = async (req, res) => {
                             handoverFlowHeal.stage = 'hr';
                         }
                     }
-                } else {
+                } else if (assigneeDoc) {
                     const resolved = await resolveEmployeeAssignmentActors(assigneeDoc, assignerRef);
+                    const waitingId =
+                        resolved.pendingActionActorId?._id?.toString?.() ||
+                        resolved.pendingActionActorId?.toString?.() ||
+                        null;
+                    let waitingName = '';
+                    if (waitingId && String(assigneeDoc._id) === String(waitingId)) {
+                        waitingName = empAckDisplayName(assigneeDoc);
+                    } else if (
+                        waitingId &&
+                        assigneeDoc.primaryReportee &&
+                        String(assigneeDoc.primaryReportee._id || assigneeDoc.primaryReportee) ===
+                            String(waitingId)
+                    ) {
+                        waitingName = empAckDisplayName(assigneeDoc.primaryReportee);
+                    }
+                    assignmentAckMeta = {
+                        assigneeCanSelfAcknowledge: !!resolved.assigneeCanSelfAcknowledge,
+                        waitingForId: waitingId,
+                        waitingForName: waitingName || 'Acknowledgment',
+                        primaryReporteeId:
+                            assigneeDoc.primaryReportee?._id?.toString?.() ||
+                            assigneeDoc.primaryReportee?.toString?.() ||
+                            null,
+                        missingPrimaryReporteeForNoPortal: !!resolved.missingPrimaryReporteeForNoPortal,
+                    };
                     // Only re-route when we have a real acceptor (assignee with login, or primary reportee).
                     if (
                         !resolved.missingPrimaryReporteeForNoPortal &&
                         !resolved.autoAcceptOnAssign &&
                         resolved.pendingActionActorId
                     ) {
-                        expectedId =
-                            resolved.pendingActionActorId?._id?.toString?.() ||
-                            resolved.pendingActionActorId?.toString?.() ||
-                            null;
+                        expectedId = waitingId;
                     }
                 }
 
@@ -4609,12 +4717,23 @@ export const getAssetItemDetail = async (req, res) => {
                     if (currentId !== expectedId) {
                         await AssetItem.updateOne(
                             { _id: item._id },
-                            { $set: { actionRequiredBy: expectedId } },
+                            {
+                                $set: {
+                                    actionRequiredBy: expectedId,
+                                    ...(item.assignedToType ? {} : { assignedToType: 'Employee' }),
+                                },
+                            },
                         );
                         const healed = await EmployeeBasic.findById(expectedId)
                             .select('firstName lastName employeeId')
                             .lean();
-                        if (healed) item.actionRequiredBy = healed;
+                        if (healed) {
+                            item.actionRequiredBy = healed;
+                            if (assignmentAckMeta) {
+                                assignmentAckMeta.waitingForName =
+                                    empAckDisplayName(healed) || assignmentAckMeta.waitingForName;
+                            }
+                        }
                         await DashboardAction.findOneAndUpdate(
                             {
                                 requestId: item._id,
@@ -4917,6 +5036,43 @@ export const getAssetItemDetail = async (req, res) => {
         }
 
         const itemObj = item.toObject();
+
+        // Always expose who must Accept + Waiting name (fixes stale UI for already-pending assigns).
+        try {
+            if (
+                isAssetAssignmentAcknowledgmentPending(itemObj) &&
+                itemObj.assignedTo &&
+                !(itemObj.assignedToType === 'Company' && itemObj.assignedCompany)
+            ) {
+                if (!assignmentAckMeta?.waitingForId) {
+                    assignmentAckMeta = await resolvePendingAssignmentAckMeta(itemObj);
+                }
+                if (assignmentAckMeta) {
+                    itemObj.assignmentAck = {
+                        assigneeCanSelfAcknowledge: !!assignmentAckMeta.assigneeCanSelfAcknowledge,
+                        waitingForId: assignmentAckMeta.waitingForId || null,
+                        waitingForName: assignmentAckMeta.waitingForName || '',
+                        primaryReporteeId: assignmentAckMeta.primaryReporteeId || null,
+                        missingPrimaryReporteeForNoPortal:
+                            !!assignmentAckMeta.missingPrimaryReporteeForNoPortal,
+                    };
+                    // Keep actionRequiredBy populated with the waiting actor for the Waiting pill.
+                    if (
+                        assignmentAckMeta.waitingForId &&
+                        (!itemObj.actionRequiredBy?.firstName ||
+                            String(itemObj.actionRequiredBy?._id || itemObj.actionRequiredBy) !==
+                                String(assignmentAckMeta.waitingForId))
+                    ) {
+                        const waitingEmp = await EmployeeBasic.findById(assignmentAckMeta.waitingForId)
+                            .select('firstName lastName employeeId')
+                            .lean();
+                        if (waitingEmp) itemObj.actionRequiredBy = waitingEmp;
+                    }
+                }
+            }
+        } catch {
+            /* non-fatal */
+        }
 
         // Light first-paint: shrink JSON (services remarks / gallery / accessories blobs)
         // so the details shell can render before full attachment signing.

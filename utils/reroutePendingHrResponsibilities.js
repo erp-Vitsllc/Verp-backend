@@ -16,6 +16,7 @@ export const HR_DASHBOARD_REQUEST_TYPES = [
     "Group Fine Request",
     "Loan",
     "Notice Request",
+    "Left User Request",
     "Vehicle Service Request",
     "Vehicle Profile Activation",
     "Vehicle Disposition Request",
