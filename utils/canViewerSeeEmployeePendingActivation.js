@@ -1,6 +1,7 @@
 import { isEmployeeProfileActivationDesignatedHr } from "./isEmployeeProfileActivationDesignatedHr.js";
 import { isReqUserAdmin } from "./sendAdminDeletionNotificationEmails.js";
 import { portalActorMatchesStoredId } from "./resolvePortalActorId.js";
+import { pendingChangesIncludeLeftUser } from "./employeeLeftUserWorkflow.js";
 
 const normEmpId = (s) => String(s || "").trim().toLowerCase().replace(/\s+/g, "");
 
@@ -59,11 +60,18 @@ export async function canViewerSeeEmployeePendingActivation(req, employee) {
     if (!req?.user || !employee) return false;
     const isSubmitter = viewerIsProfileActivationSubmitter(req, employee);
     const isSubject = viewerIsEmployeeProfileSubject(req, employee);
+    const isHrOrAdmin =
+        (await isReqUserAdmin(req)) || (await isEmployeeProfileActivationDesignatedHr(req, employee));
+
     if (isProfileApprovalSubmitted(employee)) {
-        const isHrOrAdmin =
-            (await isReqUserAdmin(req)) || (await isEmployeeProfileActivationDesignatedHr(req, employee));
         return isHrOrAdmin || isSubmitter || isSubject;
     }
+
+    // Left User queued for HR: designated HR/admin may see the queue before Send for Activation.
+    if (isHrOrAdmin && pendingChangesIncludeLeftUser(employee.pendingReactivationChanges)) {
+        return true;
+    }
+
     return isSubmitter || isSubject || viewerIsProfileActivationDraftEditor(req, employee);
 }
 

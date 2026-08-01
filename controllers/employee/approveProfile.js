@@ -31,7 +31,10 @@ import {
 import { archiveSupersededBankIfNeeded, bankUpdateTouchesFields } from "../../utils/archiveSupersededBankIfNeeded.js";
 import { isEmployeeProfileActivationDesignatedHr } from "../../utils/isEmployeeProfileActivationDesignatedHr.js";
 import { applyEmployeeLeftUserStatus, isLeftUserStatus } from "../../utils/applyEmployeeLeftUserStatus.js";
-import { closeLeftUserDashboardTasks } from "../../utils/employeeLeftUserWorkflow.js";
+import {
+    closeLeftUserDashboardTasks,
+    pendingChangesIncludeLeftUser,
+} from "../../utils/employeeLeftUserWorkflow.js";
 import {
     pendingEntryIncludedInSubmittedCards,
     resolveLatestActivationSubmissionLabels,
@@ -138,14 +141,23 @@ export const approveProfile = async (req, res) => {
         }
 
         const canActAsHr = await isEmployeeProfileActivationDesignatedHr(req, employee);
-        if (directHrBypass) {
+        const approvalStatusNorm = String(employee.profileApprovalStatus || "").trim().toLowerCase();
+        const pendingQueue = Array.isArray(employee.pendingReactivationChanges)
+            ? employee.pendingReactivationChanges
+            : [];
+        // Left User queue: HR/admin may approve without a prior Send for Activation.
+        const leftUserDirect =
+            pendingChangesIncludeLeftUser(pendingQueue) && canActAsHr;
+        const effectiveDirectHr = Boolean(directHrBypass || leftUserDirect);
+
+        if (effectiveDirectHr) {
             if (!canActAsHr) {
                 return res.status(403).json({
                     message:
                         "Only designated HR (Flowchart HR or the assigned reviewer), an administrator, or a user with Employees (Edit) can activate before Send for Activation. Others must use Send for Activation so HR receives the request.",
                 });
             }
-        } else if (employee.profileApprovalStatus === "submitted") {
+        } else if (approvalStatusNorm === "submitted") {
             if (!canActAsHr) {
                 return res.status(403).json({
                     message:
@@ -154,7 +166,7 @@ export const approveProfile = async (req, res) => {
             }
         }
 
-        if (!directHrBypass && employee.profileApprovalStatus !== "submitted") {
+        if (!effectiveDirectHr && approvalStatusNorm !== "submitted") {
             return res.status(400).json({
                 message:
                     "Profile must be submitted for HR review before it can be activated. Use Send for Activation first.",
@@ -179,23 +191,23 @@ export const approveProfile = async (req, res) => {
 
         const submissionLabels = resolveLatestActivationSubmissionLabels(updated.profileWorkflow || []);
         const reviewRows =
-            directHrBypass || submissionLabels.length === 0
+            effectiveDirectHr || submissionLabels.length === 0
                 ? sortedChanges
                 : sortedChanges.filter((entry) =>
                       pendingEntryIncludedInSubmittedCards(entry, submissionLabels),
                   );
         const reviewRowIds = reviewRows.map((entry) => entry.__applyId);
-        const selectionScopeRows = directHrBypass ? sortedChanges : reviewRows;
+        const selectionScopeRows = effectiveDirectHr ? sortedChanges : reviewRows;
         const approvedIdSet = new Set(approvedChangeIds.map(String));
 
-        if (directHrBypass && hasExplicitSelection && sortedChanges.length > 0 && approvedIdSet.size === 0) {
+        if (effectiveDirectHr && hasExplicitSelection && sortedChanges.length > 0 && approvedIdSet.size === 0) {
             return res.status(400).json({
                 message: "Select at least one change to apply.",
             });
         }
 
         /** HR full activation after submission: every row in this submission must be approved or sent back via hold. */
-        if (hasExplicitSelection && reviewRowIds.length > 0 && !directHrBypass) {
+        if (hasExplicitSelection && reviewRowIds.length > 0 && !effectiveDirectHr) {
             const missingScopeIds = reviewRowIds.filter((rowId) => !approvedIdSet.has(String(rowId)));
             if (missingScopeIds.length > 0) {
                 return res.status(400).json({
@@ -207,9 +219,9 @@ export const approveProfile = async (req, res) => {
 
         const changesToApply = hasExplicitSelection
             ? selectionScopeRows.filter((entry) => approvedIdSet.has(String(entry.__applyId)))
-            : directHrBypass
-              ? []
-              : sortedChanges;
+            : leftUserDirect || !effectiveDirectHr
+              ? sortedChanges
+              : [];
 
         for (const change of changesToApply) {
             if (String(change?.section || "").toLowerCase() !== "documents") continue;
@@ -549,7 +561,7 @@ export const approveProfile = async (req, res) => {
         const appliedIds = new Set(changesToApply.map((entry) => entry.__applyId));
         const scopedIdSet = new Set(selectionScopeRows.map((entry) => String(entry.__applyId)));
 
-        if (directHrBypass && hasExplicitSelection) {
+        if (effectiveDirectHr && hasExplicitSelection) {
             for (const entry of selectionScopeRows) {
                 if (!appliedIds.has(String(entry.__applyId))) {
                     await revertSinglePendingEmployeeChange(employeeId, updated, entry);
@@ -561,7 +573,7 @@ export const approveProfile = async (req, res) => {
             .filter((entry) => {
                 const entryId = String(entry.__applyId);
                 if (appliedIds.has(entryId)) return false;
-                if (directHrBypass && hasExplicitSelection && scopedIdSet.has(entryId)) return false;
+                if (effectiveDirectHr && hasExplicitSelection && scopedIdSet.has(entryId)) return false;
                 return true;
             })
             .map(({ __applyId, ...rest }) => rest);
