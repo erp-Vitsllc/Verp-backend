@@ -6,6 +6,8 @@ import ZohoBill from '../models/ZohoBill.js';
 import { fetchBillById } from '../services/zohoService.js';
 import { upsertZohoBillFromApi } from '../services/zohoPurchaseSyncService.js';
 import { withZohoOrganization } from './zohoOrgContext.js';
+import { resolveZohoOrganizationIdForCompany } from './resolveZohoOrganization.js';
+import Company from '../models/Company.js';
 
 const UTILITY_REQUEST_TYPE = 'Utility Bill Payment';
 
@@ -45,6 +47,11 @@ function collectZohoIdsFromUtilityBill(bill) {
         push(line?.zohoBillId);
     }
     return [...ids];
+}
+
+/** True when the ERP utility bill is linked to at least one Zoho bill. */
+export function utilityBillHasZohoLink(bill) {
+    return collectZohoIdsFromUtilityBill(bill).length > 0;
 }
 
 async function resolvePaidByEmployeeId(userId) {
@@ -296,17 +303,58 @@ export async function syncApprovedUtilityBillsPaidFromZoho({
     const paidBy = await resolvePaidByEmployeeId(userId);
     const toMarkPaid = [];
     const toMarkUnpaid = [];
+
+    let companyOrgIds = [];
+    try {
+        companyOrgIds = (
+            await Company.find({ zohoOrganizationId: { $nin: [null, ''] } })
+                .select('zohoOrganizationId')
+                .lean()
+        )
+            .map((c) => clean(c.zohoOrganizationId))
+            .filter(Boolean);
+    } catch {
+        companyOrgIds = [];
+    }
+
+    let cachedOrgIds = [];
+    try {
+        cachedOrgIds = (await ZohoBill.distinct('organizationId'))
+            .map((id) => clean(id))
+            .filter(Boolean);
+    } catch {
+        cachedOrgIds = [];
+    }
+
     const orgFallbacks = [
         ...new Set(
             [
                 process.env.ZOHO_ORGANIZATION_ID,
                 process.env.ZOHO_ORGANIZATION_ID_NNIT,
                 process.env.ZOHO_ORGANIZATION_ID_VEGA,
+                ...companyOrgIds,
+                ...cachedOrgIds,
             ]
                 .map((id) => clean(id))
                 .filter(Boolean),
         ),
     ];
+
+    async function resolvePreferredOrgForBill(bill, cachedOrgId = '') {
+        const fromBill = clean(bill?.zohoOrganizationId);
+        if (fromBill) return fromBill;
+        const fromCache = clean(cachedOrgId);
+        if (fromCache) return fromCache;
+        const companyRef = clean(bill?.payByCompanyId);
+        if (companyRef) {
+            try {
+                return clean(await resolveZohoOrganizationIdForCompany(companyRef));
+            } catch {
+                /* fall through */
+            }
+        }
+        return '';
+    }
 
     async function fetchZohoBillLive(zohoId, preferredOrgId) {
         const orgTries = [
@@ -319,7 +367,13 @@ export async function syncApprovedUtilityBillsPaidFromZoho({
                 const live = await withZohoOrganization(orgId || null, () =>
                     fetchBillById(zohoId),
                 );
-                if (live) return live;
+                if (live) {
+                    // Remember which org worked for later updates.
+                    if (orgId && live && typeof live === 'object' && !live.organization_id) {
+                        live.organization_id = orgId;
+                    }
+                    return live;
+                }
             } catch (err) {
                 lastErr = err;
             }
@@ -342,16 +396,31 @@ export async function syncApprovedUtilityBillsPaidFromZoho({
 
             if (fetchLive) {
                 try {
-                    const live = await fetchZohoBillLive(
-                        zohoId,
-                        bill.zohoOrganizationId || cached?.organizationId,
+                    const preferredOrg = await resolvePreferredOrgForBill(
+                        bill,
+                        cached?.organizationId,
                     );
+                    const live = await fetchZohoBillLive(zohoId, preferredOrg);
                     if (live) {
                         sawAny = true;
                         try {
                             await upsertZohoBillFromApi(live);
                         } catch {
                             /* cache update optional */
+                        }
+                        // Persist working org on ERP bill when missing.
+                        if (!clean(bill.zohoOrganizationId)) {
+                            const liveOrg = clean(
+                                live.organization_id || live.organizationId || preferredOrg,
+                            );
+                            if (liveOrg) {
+                                bill.zohoOrganizationId = liveOrg;
+                                try {
+                                    await bill.save();
+                                } catch {
+                                    /* non-fatal */
+                                }
+                            }
                         }
                         if (!isZohoBillFullyPaid(live)) {
                             allPaid = false;
@@ -374,7 +443,9 @@ export async function syncApprovedUtilityBillsPaidFromZoho({
                     break;
                 }
             } else {
+                // Unknown Zoho state (no live + no cache) — do not flip this bill.
                 allPaid = false;
+                sawAny = false;
                 break;
             }
         }

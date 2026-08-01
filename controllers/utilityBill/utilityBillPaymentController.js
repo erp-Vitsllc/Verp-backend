@@ -15,7 +15,7 @@ import {
     resolveZohoVendorIdByProvider,
 } from '../../utils/syncUtilityBillToZoho.js';
 import { upsertUtilityBalancePartyExpensesFromBills, employeeIdQueryVariants } from '../../utils/upsertUtilityBalancePartyExpense.js';
-import { syncApprovedUtilityBillsPaidFromZoho } from '../../utils/markUtilityVendorBillsPaidFromZoho.js';
+import { syncApprovedUtilityBillsPaidFromZoho, utilityBillHasZohoLink } from '../../utils/markUtilityVendorBillsPaidFromZoho.js';
 import Company from '../../models/Company.js';
 
 const REQUEST_TYPE = 'Utility Bill Payment';
@@ -431,13 +431,15 @@ export async function listUtilityBillPayments(req, res) {
         if (entryId || (Array.isArray(bills) && bills.some((b) => b.status === 'Approved'))) {
             try {
                 const syncFilterEntry = entryId ? String(entryId) : null;
-                const approvedIds = bills
-                    .filter((b) => b.status === 'Approved' && String(b.zohoBillId || '').trim())
+                const approvedLinkedIds = bills
+                    .filter((b) => b.status === 'Approved' && utilityBillHasZohoLink(b))
                     .map((b) => b._id);
-                if (approvedIds.length) {
+                // With entryId, sync the whole entry (any Zoho-linked Approved/Paid bill).
+                // Otherwise only sync the Approved bills that are Zoho-linked.
+                if (syncFilterEntry || approvedLinkedIds.length) {
                     await syncApprovedUtilityBillsPaidFromZoho({
                         entryId: syncFilterEntry,
-                        billIds: approvedIds,
+                        billIds: syncFilterEntry ? null : approvedLinkedIds,
                         userId: actor?._id || req.user?._id || null,
                         fetchLive: true,
                     });
@@ -490,14 +492,18 @@ export async function getUtilityBillBatch(req, res) {
             return res.status(404).json({ message: 'Batch not found' });
         }
 
-        // Sync Vendor Payment status from Zoho for Approved bills in this batch.
+        // Sync Vendor Payment status from Zoho for Approved/Paid bills in this batch.
         try {
-            const approvedIds = bills
-                .filter((b) => b.status === 'Approved' && String(b.zohoBillId || '').trim())
+            const linkedIds = bills
+                .filter(
+                    (b) =>
+                        (b.status === 'Approved' || b.status === 'Paid') &&
+                        utilityBillHasZohoLink(b),
+                )
                 .map((b) => b._id);
-            if (approvedIds.length) {
+            if (linkedIds.length) {
                 await syncApprovedUtilityBillsPaidFromZoho({
-                    billIds: approvedIds,
+                    billIds: linkedIds,
                     userId: req.user?._id || null,
                     fetchLive: true,
                 });

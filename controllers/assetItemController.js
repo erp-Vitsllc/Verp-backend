@@ -655,12 +655,12 @@ const assigneeHasCompanyEmailOnRecord = (emp) =>
 
 /**
  * Can the assignee Accept in ERP themselves?
- * Requires BOTH company email and an Active User account with portal enabled.
- * Otherwise Accept / notification / "Waiting for" go to primary reportee.
+ * Rule: Active User account with portal enabled → assignee gets Accept / "Waiting for {assignee}".
+ * No user account (or portal disabled) → primary reportee gets Accept / "Waiting for {reportee}".
+ * Company email is used for notifications only; it does not decide who Approves.
  */
 const assigneeCanSelfAcknowledgeAssignment = async (emp) => {
     if (!emp) return false;
-    if (!assigneeHasCompanyEmailOnRecord(emp)) return false;
     if (emp.enablePortalAccess === false) return false;
     const empId = emp.employeeId ? String(emp.employeeId).trim() : '';
     if (!empId) return false;
@@ -820,7 +820,7 @@ const resolveEmployeeAssignmentActors = async (employeeToAssign, assignerEmpObje
         const pr = employeeToAssign.primaryReportee;
         const prId = pr?._id || pr;
         if (prId) {
-            // No company email and/or no User account → Accept + notification go to primary reportee.
+            // No ERP user account → Accept + "Waiting for" go to primary reportee (by name).
             pendingActionActorId = prId;
             if (pr && typeof pr === 'object' && (pr.employeeId || pr.firstName || pr._id)) {
                 actionRecipientDoc = pr;
@@ -855,7 +855,7 @@ const resolveEmployeeAssignmentActors = async (employeeToAssign, assignerEmpObje
 };
 
 const NO_PORTAL_NO_REPORTEE_ASSIGN_MESSAGE =
-    'This employee has no company email and/or no user account, and no primary reportee. Set a primary reportee on their profile before assigning — otherwise Accept waits forever on someone who cannot log in.';
+    'This employee has no user account, and no primary reportee. Set a primary reportee (with a login) on their profile before assigning — otherwise Accept waits forever on someone who cannot log in.';
 
 /**
  * Re-route existing Pending "Asset Assignment" Accept tasks onto the correct actor:
@@ -1084,7 +1084,6 @@ const getActorPermissionFlagsForAsset = async (reqUser, asset) => {
                 .catch(() => assigneeDoc);
         }
 
-        const assigneeHasCompanyEmail = !!(assigneeDoc?.companyEmail && String(assigneeDoc.companyEmail).trim().length > 0);
         const primaryReporteeId = toIdString(assigneeDoc?.primaryReportee);
 
         // Portal access check (ERP login-enabled user)
@@ -1101,7 +1100,7 @@ const getActorPermissionFlagsForAsset = async (reqUser, asset) => {
         isPrimaryReporteeDelegate = !!(
             primaryReporteeId &&
             primaryReporteeId === currentEmpObjectId &&
-            (!assigneeHasCompanyEmail || hasPortalAccess !== true)
+            hasPortalAccess !== true
         );
     }
 
@@ -1175,7 +1174,7 @@ export const getAssetItems = async (req, res) => {
                     { path: 'reportingAuthority', select: 'firstName lastName' }
                 ]
             })
-            .populate('actionRequiredBy', 'employeeId')
+            .populate('actionRequiredBy', 'firstName lastName employeeId')
             .populate('acceptedBy', 'firstName lastName signature')
             .sort({ assetId: 1 });
 
@@ -4589,7 +4588,12 @@ export const getAssetItemDetail = async (req, res) => {
                     }
                 } else {
                     const resolved = await resolveEmployeeAssignmentActors(assigneeDoc, assignerRef);
-                    if (!resolved.autoAcceptOnAssign && resolved.pendingActionActorId) {
+                    // Only re-route when we have a real acceptor (assignee with login, or primary reportee).
+                    if (
+                        !resolved.missingPrimaryReporteeForNoPortal &&
+                        !resolved.autoAcceptOnAssign &&
+                        resolved.pendingActionActorId
+                    ) {
                         expectedId =
                             resolved.pendingActionActorId?._id?.toString?.() ||
                             resolved.pendingActionActorId?.toString?.() ||

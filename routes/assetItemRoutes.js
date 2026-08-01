@@ -640,17 +640,14 @@ const requireAssetFullAccess = async (req, res, next) => {
 
                     if (assignedToEmpId === currentEmpId) return next();
 
-                    // Delegate allowed only when assignee cannot self-ack (no company email and/or no User account)
+                    // Delegate allowed only when assignee has no ERP user account
                     const assignedEmp = await EmployeeBasic.findById(asset.assignedTo)
-                        .select('primaryReportee employeeId companyEmail')
+                        .select('primaryReportee employeeId companyEmail enablePortalAccess')
                         .lean()
                         .catch(() => null);
 
                     const managerId = assignedEmp?.primaryReportee ? assignedEmp.primaryReportee.toString() : null;
 
-                    const hasCompanyEmail = !!(
-                        assignedEmp?.companyEmail && String(assignedEmp.companyEmail).trim().length > 0
-                    );
                     const assignedEmployeeUser = assignedEmp?.employeeId
                         ? await User.findOne({ employeeId: assignedEmp.employeeId, status: 'Active' })
                             .select('enablePortalAccess')
@@ -659,9 +656,11 @@ const requireAssetFullAccess = async (req, res, next) => {
                         : null;
 
                     const assignedHasUserAccount = !!(
-                        assignedEmployeeUser && assignedEmployeeUser.enablePortalAccess !== false
+                        assignedEmp?.enablePortalAccess !== false &&
+                        assignedEmployeeUser &&
+                        assignedEmployeeUser.enablePortalAccess !== false
                     );
-                    const assigneeCanSelfAck = hasCompanyEmail && assignedHasUserAccount;
+                    const assigneeCanSelfAck = assignedHasUserAccount;
 
                     const delegateAllowed = !!(
                         managerId &&

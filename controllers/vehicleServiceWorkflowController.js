@@ -2211,9 +2211,6 @@ export const respondVehicleServiceScheduledPeriod = async (req, res) => {
                 return res.status(400).json({ message: 'Mark live is not available before the scheduled first service day.' });
             }
             const goLiveNote = String(comment || '').trim();
-            if (!goLiveNote) {
-                return res.status(400).json({ message: 'Description is required to mark live.' });
-            }
             if (!serviceRecordId) {
                 return res.status(400).json({ message: 'Missing service record for this workflow.' });
             }
