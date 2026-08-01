@@ -21,12 +21,7 @@ export async function getLeftUserEligibilityBlockers(employee) {
         return blockers;
     }
 
-    if (String(employee?.profileStatus || "").toLowerCase() !== "active") {
-        blockers.push({
-            code: "PROFILE_INACTIVE",
-            message: "Profile status must be active before marking as Left User.",
-        });
-    }
+    // Profile active/inactive does not block Left User — clearance checks below still apply.
 
     const activeLoan = await Loan.findOne({
         employeeId: employee.employeeId,
