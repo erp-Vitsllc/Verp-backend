@@ -64,6 +64,7 @@ export async function notifyAdminOfficerOnVehicleServiceCreated({
     sendEmail = true,
     notifyAssignee = true,
     event = 'created',
+    serviceReqNo = '',
 }) {
     const adminOfficer = await getDepartmentHOD('admincontroller');
     if (!adminOfficer?._id || !asset?._id || !serviceRecordId) return;
@@ -75,10 +76,35 @@ export async function notifyAdminOfficerOnVehicleServiceCreated({
     const subjectEmp = populated?.assignedTo || null;
     const plate = [populated?.plateEmirate, populated?.plateNumber].filter(Boolean).join(' ').trim();
     const isInitiated = String(event || '').toLowerCase() === 'initiated';
-    const verb = isInitiated ? 'initiated' : 'created';
-    const stageLabel = isInitiated ? 'Vehicle service initiated' : 'New vehicle service request';
-    const actionLabel = `${serviceTypeLabel} ${verb}`;
+    const actorName = String(requestedByName || 'A user').trim() || 'A user';
+    const stageLabel = isInitiated
+        ? `${serviceTypeLabel} initiated — please complete`
+        : `${serviceTypeLabel} created — please complete`;
+    const actionLabel = isInitiated
+        ? `Please complete ${serviceTypeLabel}`
+        : `Please complete ${serviceTypeLabel}`;
     const assetLabel = `${asset.assetId || ''}${plate ? ` (${plate})` : ''}`;
+    const adminDetailLine = isInitiated
+        ? `A ${serviceTypeLabel} was initiated by ${actorName} for ${assetLabel}. Please open the request and complete this ${serviceTypeLabel}.`
+        : `A ${serviceTypeLabel} was created by ${actorName} for ${assetLabel}. Please open the request and complete this ${serviceTypeLabel}.`;
+    const inboxExtra2 = isInitiated
+        ? `Initiated by ${actorName} — please complete ${serviceTypeLabel}`
+        : `Created by ${actorName} — please complete ${serviceTypeLabel}`;
+    const vsr =
+        String(serviceReqNo || '').trim() ||
+        (() => {
+            try {
+                const services = Array.isArray(populated?.services)
+                    ? populated.services
+                    : Array.isArray(asset?.services)
+                      ? asset.services
+                      : [];
+                const match = services.find((s) => String(s?._id) === String(serviceRecordId));
+                return String(match?.serviceReqNo || '').trim();
+            } catch {
+                return '';
+            }
+        })();
 
     await DashboardAction.findOneAndUpdate(
         {
@@ -96,10 +122,10 @@ export async function notifyAdminOfficerOnVehicleServiceCreated({
             subjectName: subjectEmp
                 ? `${subjectEmp.firstName || ''} ${subjectEmp.lastName || ''}`.trim()
                 : '',
-            requestedByName: requestedByName || '',
+            requestedByName: actorName,
             requestedDate: new Date(),
             extra1: `${asset.assetId || asset.name || ''} — ${serviceTypeLabel}`,
-            extra2: 'Service open — manage until completed',
+            extra2: inboxExtra2,
             extra3,
         },
         { upsert: true, new: true, setDefaultsOnInsert: true },
@@ -111,8 +137,9 @@ export async function notifyAdminOfficerOnVehicleServiceCreated({
             asset: populated || asset,
             stageLabel,
             actionLabel,
-            detailLine: `${requestedByName} ${verb} a ${serviceTypeLabel} request for ${assetLabel}. Open the service details page — this task closes when the service is completed.`,
+            detailLine: adminDetailLine,
             linkPath,
+            serviceReqNo: vsr,
         });
     }
 
@@ -126,12 +153,15 @@ export async function notifyAdminOfficerOnVehicleServiceCreated({
             await sendVehicleServiceWorkflowEmail({
                 recipient: subjectEmp,
                 asset: populated || asset,
-                stageLabel,
-                actionLabel,
+                stageLabel: isInitiated
+                    ? `${serviceTypeLabel} initiated`
+                    : `${serviceTypeLabel} created`,
+                actionLabel: serviceTypeLabel,
                 detailLine: isInitiated
-                    ? `${requestedByName} initiated a ${serviceTypeLabel} request for your assigned vehicle ${assetLabel}.`
+                    ? `${actorName} initiated a ${serviceTypeLabel} request for your assigned vehicle ${assetLabel}.`
                     : `A ${serviceTypeLabel} request was created for your assigned vehicle ${assetLabel}.`,
                 linkPath,
+                serviceReqNo: vsr,
             });
         } catch (assigneeMailErr) {
             console.error('[VehicleService] Assignee create notify failed:', assigneeMailErr);

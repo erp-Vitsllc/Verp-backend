@@ -16,6 +16,7 @@ import {
     settleUtilityDifferenceViaJournal,
 } from '../../utils/recordPartyExpenseFromZohoPayment.js';
 import { markUtilityVendorBillsPaidFromZohoPayment } from '../../utils/markUtilityVendorBillsPaidFromZoho.js';
+import { markVehicleGarageServicesPaidFromZohoPayment } from '../../utils/markVehicleGarageServicesPaidFromZoho.js';
 import { getZohoOrgContext, withZohoOrganization } from '../../utils/zohoOrgContext.js';
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -538,6 +539,19 @@ export const postZohoVendorPayment = async (req, res) => {
                 );
             }
 
+            try {
+                await markVehicleGarageServicesPaidFromZohoPayment({
+                    body: req.body || {},
+                    payload,
+                    zohoPayment: data && typeof data === 'object' ? data : {},
+                });
+            } catch (svcPayErr) {
+                console.warn(
+                    '[ZohoVendorPaymentCreate] Vehicle service mark-Paid failed:',
+                    svcPayErr?.message || svcPayErr,
+                );
+            }
+
             const fineIdsRaw = req.body?.fineMongoIds ?? req.body?.fineMongoId;
             const fineMongoIds = []
                 .concat(fineIdsRaw || [])
@@ -669,6 +683,19 @@ export const putZohoVendorPayment = async (req, res) => {
                 console.warn(
                     '[ZohoVendorPaymentUpdate] Utility vendor bill mark-Paid failed:',
                     utilityPayErr?.message || utilityPayErr,
+                );
+            }
+
+            try {
+                await markVehicleGarageServicesPaidFromZohoPayment({
+                    body: req.body || {},
+                    payload,
+                    zohoPayment: data && typeof data === 'object' ? data : {},
+                });
+            } catch (svcPayErr) {
+                console.warn(
+                    '[ZohoVendorPaymentUpdate] Vehicle service mark-Paid failed:',
+                    svcPayErr?.message || svcPayErr,
                 );
             }
 

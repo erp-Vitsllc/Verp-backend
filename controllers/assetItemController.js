@@ -101,6 +101,7 @@ import {
     bootstrapOilCashAfterInitiate,
 } from '../utils/oilServiceWorkflow.js';
 import { activateShopServiceOnStartDate } from '../utils/vehicleShopServiceScheduled.js';
+import { syncVehicleServicePaymentStatusFromZoho } from '../utils/markVehicleGarageServicesPaidFromZoho.js';
 import {
     updateShopServiceExtendDate,
     userMayExtendServiceEndDate,
@@ -122,6 +123,7 @@ import {
     isFleetVehicleProfileActive,
     FLEET_PROFILE_INACTIVE_ASSIGNMENT_MSG,
     userIsFlowchartAdminOfficer,
+    userIsFlowchartAdminOfficerEmployeeOnly,
 } from '../utils/assetApprovalHelpers.js';
 import { buildFleetVehicleMongoScope } from '../utils/fleetVehicleAssetId.js';
 import AssetAccessoryCatalog from '../models/AssetAccessoryCatalog.js';
@@ -4491,6 +4493,7 @@ export const getAssetItemDetail = async (req, res) => {
                         await ensureOilAccountsMakePaymentNotification(bgItem);
                         await activateOilServiceOnStartDate(bgItem, { byName: 'System' });
                         await maybeAutoCreateOilServiceDue(bgItem);
+                        await syncVehicleServicePaymentStatusFromZoho(bgItem, { fetchLive: true });
                     } catch (bgErr) {
                         console.warn(
                             '[getAssetItemDetail] light background sync failed:',
@@ -5498,6 +5501,7 @@ export const getAssetItemDetail = async (req, res) => {
                             });
                         }
                         await maybeAutoCreateOilServiceDue(bgItem);
+                        await syncVehicleServicePaymentStatusFromZoho(bgItem, { fetchLive: true });
                     } catch (bgErr) {
                         console.warn(
                             '[getAssetItemDetail] background oil/shop sync failed:',
@@ -12073,28 +12077,26 @@ export const addAssetService = async (req, res) => {
 
         if (isVehicleAssetForServiceGate()) {
             const createStatus = String(remarkObj.requestStatus || '').toLowerCase();
-            const notifyAdminOnCreate = !isDraft || createStatus === 'pending';
-            // Oil Service: shell row is created first; Admin Officer email + task fire on Initiate Send.
-            const isOilPendingShell =
-                String(serviceType || '').trim() === 'Oil Service' &&
-                isDraft &&
-                createStatus === 'pending';
-            if (notifyAdminOnCreate && lastServiceDoc?._id && !isOilPendingShell) {
+            // Notify Admin on create for any non-empty draft/pending/live row (including Oil pending shell).
+            const notifyAdminOnCreate =
+                !isDraft || createStatus === 'pending' || createStatus === 'draft' || createStatus === 'submitted';
+            if (notifyAdminOnCreate && lastServiceDoc?._id) {
                 try {
                     const creatorName =
                         remarkObj.requestedByName || (await getRequesterName(req.user));
-                    const creatorIsAdminOfficer = await userIsFlowchartAdminOfficer(req).catch(
-                        () => false,
-                    );
+                    // Skip Admin email only when the flowchart Admin Officer themselves created it
+                    // (portal Super User still triggers Admin email).
+                    const creatorIsAdminOfficer =
+                        await userIsFlowchartAdminOfficerEmployeeOnly(req).catch(() => false);
                     await notifyAdminOfficerOnVehicleServiceCreated({
                         asset,
                         serviceRecordId: lastServiceDoc._id,
                         serviceType,
                         requestedByName: creatorName,
-                        // Email Admin Officer only when someone else creates/initiates the service.
                         sendEmail: !creatorIsAdminOfficer,
                         notifyAssignee: true,
                         event: 'created',
+                        serviceReqNo: lastServiceDoc.serviceReqNo || '',
                     });
                 } catch (notifyErr) {
                     console.error('[addAssetService] Admin officer create notify failed:', notifyErr);
@@ -12382,9 +12384,9 @@ export const updateAssetServiceDraft = async (req, res) => {
                 const nowInitiated = Boolean(String(afterRemark.oilServiceInitiatedAt || '').trim());
                 if (!wasInitiated && nowInitiated) {
                     const creatorName = await getRequesterName(req.user);
-                    const creatorIsAdminOfficer = await userIsFlowchartAdminOfficer(req).catch(
-                        () => false,
-                    );
+                    // Skip Admin email only when flowchart Admin Officer initiates (not portal Super User).
+                    const creatorIsAdminOfficer =
+                        await userIsFlowchartAdminOfficerEmployeeOnly(req).catch(() => false);
                     await notifyAdminOfficerOnVehicleServiceCreated({
                         asset,
                         serviceRecordId: serviceId,
@@ -12393,6 +12395,7 @@ export const updateAssetServiceDraft = async (req, res) => {
                         sendEmail: !creatorIsAdminOfficer,
                         notifyAssignee: true,
                         event: 'initiated',
+                        serviceReqNo: asset.services?.id?.(serviceId)?.serviceReqNo || '',
                     });
                     // Cash: open Schedule + HR together — email + dashboard/bell to Admin + HR.
                     try {
@@ -12486,6 +12489,24 @@ export const submitAssetServiceDraft = async (req, res) => {
         }
         asset.markModified('services');
         await asset.save();
+
+        try {
+            const initiatorName = await getRequesterName(req.user);
+            const initiatorIsAdminOfficer =
+                await userIsFlowchartAdminOfficerEmployeeOnly(req).catch(() => false);
+            await notifyAdminOfficerOnVehicleServiceCreated({
+                asset,
+                serviceRecordId: service._id,
+                serviceType: service.serviceType,
+                requestedByName: initiatorName,
+                sendEmail: !initiatorIsAdminOfficer,
+                notifyAssignee: true,
+                event: 'initiated',
+                serviceReqNo: service.serviceReqNo || '',
+            });
+        } catch (notifyErr) {
+            console.error('[submitAssetServiceRequest] Admin officer initiate notify failed:', notifyErr);
+        }
 
         try {
             if (String(service.serviceType || '').trim() === 'Car Wash') {

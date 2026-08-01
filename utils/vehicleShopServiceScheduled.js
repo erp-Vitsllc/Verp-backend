@@ -1,6 +1,8 @@
 import AssetItem from '../models/AssetItem.js';
 import { getDepartmentHOD } from './getDepartmentHOD.js';
 import { sendVehicleServiceWorkflowEmail } from './sendVehicleServiceWorkflowEmail.js';
+import { sendVehicleServiceScheduledNotificationEmail } from './sendVehicleServiceScheduledNotificationEmail.js';
+import { sendVehicleServiceCompletedNotificationEmail } from './sendVehicleServiceCompletedNotificationEmail.js';
 import { syncDashboardAction } from './syncDashboard.js';
 import { applyServiceActiveState } from './assetOperationalFlags.js';
 import { getWorkflowContextForService } from './vehicleServiceWorkflowResolve.js';
@@ -97,31 +99,49 @@ async function notifyShopServiceScheduled({
     const populated = await AssetItem.findById(asset._id)
         .populate({
             path: 'assignedTo',
-            select: 'firstName lastName employeeId companyEmail workEmail',
-            populate: {
-                path: 'primaryReportee',
-                select: 'firstName lastName employeeId companyEmail workEmail',
-            },
+            select: 'firstName lastName employeeId companyEmail workEmail company',
+            populate: [
+                {
+                    path: 'primaryReportee',
+                    select: 'firstName lastName employeeId companyEmail workEmail',
+                },
+                { path: 'company', select: 'name' },
+            ],
         })
         .lean();
     if (!populated) return;
 
-    const adminOfficer = await getDepartmentHOD('admincontroller');
-    const assignee = populated.assignedTo || null;
-    const plate = [populated.plateEmirate, populated.plateNumber].filter(Boolean).join(' ').trim();
-    const startLabel = startD ? startD.toISOString().slice(0, 10) : 'the scheduled date';
-    const detailLine = `${actorName || 'Accounts'} approved garage details for ${populated.assetId || ''}${plate ? ` (${plate})` : ''}. Service is scheduled — start date ${startLabel}.`;
+    const service =
+        (Array.isArray(populated.services) ? populated.services : []).find(
+            (s) => String(s?._id) === String(serviceRecordId),
+        ) || null;
+    const remark = parseRemark(service);
 
-    await notifyShopServiceRecipients({
+    // Formal letter-style email: TO assigned user, CC assigned + Admin Officer + driven-by.
+    await sendVehicleServiceScheduledNotificationEmail({
         asset: populated,
-        serviceRecordId,
-        recipients: [adminOfficer, assignee],
-        serviceTypeLabel,
-        actionLabel: `${serviceTypeLabel} scheduled`,
-        detailLine,
-        linkPath,
-        dashboardMeta,
+        remark,
+        service,
+        serviceTypeLabel: serviceTypeLabel || service?.serviceType || 'Vehicle Service',
     });
+
+    // Keep Admin Officer dashboard task for the scheduled window.
+    const adminOfficer = await getDepartmentHOD('admincontroller');
+    if (adminOfficer?._id) {
+        const plate = [populated.plateEmirate, populated.plateNumber].filter(Boolean).join(' ').trim();
+        const startLabel = startD ? startD.toISOString().slice(0, 10) : 'the scheduled date';
+        await syncDashboardAction({
+            requestId: asset._id,
+            requestType: 'Vehicle Service Request',
+            status: 'Pending',
+            assignedTo: adminOfficer._id,
+            subjectEmployee: asset.assignedTo,
+            requestedByName: `${serviceTypeLabel} scheduled`,
+            extra1: `${populated.assetId} — ${serviceTypeLabel}`,
+            extra2: `${actorName || 'Accounts'} approved garage details. Service scheduled — start ${startLabel}${plate ? ` (${plate})` : ''}.`,
+            extra3: dashboardMeta,
+        });
+    }
 
     const fresh = await AssetItem.findById(asset._id);
     if (fresh?.activeServiceWorkflow) {
@@ -218,7 +238,7 @@ export async function advanceShopServiceToScheduledAfterAccountsApprove(
         appendActivity,
         scheduleActivityType = 'accounts_approved',
         scheduleActivityNote =
-            'Garage and service dates approved — service scheduled (Zoho billing after End Service)',
+        'Garage and service dates approved — service scheduled (Zoho billing after End Service)',
     } = {},
 ) {
     const serviceRecordId = wf.serviceRecordId;
@@ -364,10 +384,10 @@ export async function processShopServiceStartDateActivation() {
                     serviceTypeLabel === 'Tire Change'
                         ? `/HRM/Asset/Vehicle/details/${asset._id}/tire-change/${wf.serviceRecordId}`
                         : serviceTypeLabel === 'Mechanical Work'
-                          ? `/HRM/Asset/Vehicle/details/${asset._id}/mechanical-work/${wf.serviceRecordId}`
-                          : serviceTypeLabel === 'Body Work'
-                            ? `/HRM/Asset/Vehicle/details/${asset._id}/body-work/${wf.serviceRecordId}`
-                            : `/HRM/Asset/Vehicle/details/${asset._id}/accident-repair/${wf.serviceRecordId}`;
+                            ? `/HRM/Asset/Vehicle/details/${asset._id}/mechanical-work/${wf.serviceRecordId}`
+                            : serviceTypeLabel === 'Body Work'
+                                ? `/HRM/Asset/Vehicle/details/${asset._id}/body-work/${wf.serviceRecordId}`
+                                : `/HRM/Asset/Vehicle/details/${asset._id}/accident-repair/${wf.serviceRecordId}`;
                 const dashboardMeta = JSON.stringify({
                     vehicleId: String(asset._id),
                     serviceRecordId: String(wf.serviceRecordId || ''),
@@ -440,10 +460,20 @@ export async function routeShopServiceToBillingAfterComplete(
     }
 
     const populated = await AssetItem.findById(asset._id)
-        .populate('assignedTo', 'firstName lastName employeeId companyEmail workEmail personalEmail email')
+        .populate({
+            path: 'assignedTo',
+            select: 'firstName lastName employeeId companyEmail workEmail personalEmail email company',
+            populate: { path: 'company', select: 'name' },
+        })
         .lean();
     const plate = [populated?.plateEmirate, populated?.plateNumber].filter(Boolean).join(' ').trim();
     const detailLine = `${serviceTypeLabel || 'Service'} for ${populated?.assetId || ''}${plate ? ` (${plate})` : ''} is complete. Review billing and submit to Zoho (Billed only if Zoho succeeds).`;
+
+    await sendVehicleServiceCompletedNotificationEmail({
+        asset: populated || asset,
+        remark,
+        service,
+    });
 
     await syncDashboardAction({
         requestId: asset._id,
@@ -468,7 +498,7 @@ export async function routeShopServiceToBillingAfterComplete(
             actionLabel: `${serviceTypeLabel || 'Service'} — Accounts billing (Zoho)`,
             detailLine,
             linkPath: linkPath || undefined,
-        }).catch(() => {});
+        }).catch(() => { });
     }
 
     return asset;
@@ -522,7 +552,7 @@ export async function advanceShopBillingAfterAccountsApprove(
         await asset.save();
         throw new Error(
             zohoBillSync?.message ||
-                'Zoho bill must be created successfully before status can become Billed.',
+            'Zoho bill must be created successfully before status can become Billed.',
         );
     }
 

@@ -260,8 +260,9 @@ export async function markUtilityVendorBillsPaidFromZohoPayment({
 }
 
 /**
- * For Approved ERP utility bills that already have a Zoho bill: if Zoho shows
- * paid / balance 0, flip ERP to Paid (covers payments made outside ERP Save as Paid).
+ * For ERP utility bills linked to Zoho: keep Vendor Payment Paid / Not Paid in sync.
+ * - Approved + Zoho paid  → Paid
+ * - Paid + Zoho not paid → Approved (Not Paid in UI)
  */
 export async function syncApprovedUtilityBillsPaidFromZoho({
     entryId = null,
@@ -269,17 +270,16 @@ export async function syncApprovedUtilityBillsPaidFromZoho({
     userId = null,
     fetchLive = true,
 } = {}) {
-    const filter = {
-        status: 'Approved',
+    const baseFilter = {
         $or: [
             { zohoBillId: { $nin: [null, ''] } },
             { zohoBillIds: { $exists: true, $ne: [] } },
             { 'zohoLineItems.zohoBillId': { $nin: [null, ''] } },
         ],
     };
-    if (entryId) filter.entryId = String(entryId);
+    if (entryId) baseFilter.entryId = String(entryId);
     if (Array.isArray(billIds) && billIds.length) {
-        filter._id = {
+        baseFilter._id = {
             $in: billIds
                 .map((id) => String(id || '').trim())
                 .filter((id) => mongoose.Types.ObjectId.isValid(id))
@@ -287,11 +287,15 @@ export async function syncApprovedUtilityBillsPaidFromZoho({
         };
     }
 
-    const candidates = await UtilityBillPayment.find(filter).limit(100);
-    if (!candidates.length) return { paidCount: 0, checked: 0 };
+    const candidates = await UtilityBillPayment.find({
+        ...baseFilter,
+        status: { $in: ['Approved', 'Paid'] },
+    }).limit(150);
+    if (!candidates.length) return { paidCount: 0, unpaidCount: 0, checked: 0 };
 
     const paidBy = await resolvePaidByEmployeeId(userId);
-    const toMark = [];
+    const toMarkPaid = [];
+    const toMarkUnpaid = [];
     const orgFallbacks = [
         ...new Set(
             [
@@ -308,7 +312,6 @@ export async function syncApprovedUtilityBillsPaidFromZoho({
         const orgTries = [
             ...new Set([clean(preferredOrgId), ...orgFallbacks].filter(Boolean)),
         ];
-        // Prefer preferred org first; if empty list, one try with default context.
         const attempts = orgTries.length ? orgTries : [''];
         let lastErr = null;
         for (const orgId of attempts) {
@@ -376,21 +379,43 @@ export async function syncApprovedUtilityBillsPaidFromZoho({
             }
         }
 
-        if (sawAny && allPaid) {
-            toMark.push(bill);
+        if (!sawAny) continue;
+
+        const erpStatus = String(bill.status || '').trim();
+        if (allPaid && erpStatus === 'Approved') {
+            toMarkPaid.push(bill);
+        } else if (!allPaid && erpStatus === 'Paid') {
+            toMarkUnpaid.push(bill);
         }
     }
 
-    if (!toMark.length) {
-        return { paidCount: 0, checked: candidates.length };
+    let unpaidCount = 0;
+    if (toMarkUnpaid.length) {
+        for (const bill of toMarkUnpaid) {
+            bill.status = 'Approved';
+            bill.paidAt = null;
+            bill.paidBy = null;
+            bill.comment = clean(bill.comment)
+                ? `${clean(bill.comment)} · Reopened — Zoho bill not paid`
+                : 'Reopened — Zoho bill not paid';
+            await bill.save();
+            unpaidCount += 1;
+        }
+        console.log(
+            `[syncApprovedUtilityBillsPaidFromZoho] Synced ${unpaidCount} Paid → Approved (Not Paid)`,
+        );
     }
 
-    const result = await persistUtilityBillsAsPaid(toMark, {
+    if (!toMarkPaid.length) {
+        return { paidCount: 0, unpaidCount, checked: candidates.length };
+    }
+
+    const result = await persistUtilityBillsAsPaid(toMarkPaid, {
         paidBy,
         comment: 'Paid in Zoho (synced to ERP)',
     });
     console.log(
         `[syncApprovedUtilityBillsPaidFromZoho] Synced ${result.paidCount}/${candidates.length} Approved → Paid`,
     );
-    return { ...result, checked: candidates.length };
+    return { ...result, unpaidCount, checked: candidates.length };
 }

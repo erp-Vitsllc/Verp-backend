@@ -177,9 +177,9 @@ export async function userCanManageFleetVehicleHandover(req) {
     );
 }
 
-/** Active flowchart Admin Officer (admincontroller row). */
-export async function userIsFlowchartAdminOfficer(req) {
-    if (isJwtSystemSuperUser(req.user)) return true;
+/** Flowchart Admin Officer / Admin Controller only — does NOT treat portal Super User as Admin. */
+export async function userIsFlowchartAdminOfficerEmployeeOnly(req) {
+    if (!req?.user) return false;
 
     let isAdminOfficer = false;
     try {
@@ -196,6 +196,12 @@ export async function userIsFlowchartAdminOfficer(req) {
         if (normEmpId(adminHod.employeeId) === normEmpId(req.user.employeeId)) isAdminOfficer = true;
     }
     return isAdminOfficer;
+}
+
+export async function userIsFlowchartAdminOfficer(req) {
+    if (isJwtSystemSuperUser(req.user)) return true;
+
+    return userIsFlowchartAdminOfficerEmployeeOnly(req);
 }
 
 /** Flowchart Admin Officer — may assign fleet vehicles from the pool. */
