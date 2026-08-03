@@ -97,19 +97,32 @@ export function isOilServiceWaitingForStartDate(asset, service = null) {
     return !isOilServiceLive(asset, service);
 }
 
-export function oilServiceDetailsPath(vehicleId, serviceRecordId) {
+export function oilServiceDetailsPath(vehicleId, serviceRecordId, { focus = '' } = {}) {
     if (!vehicleId || !serviceRecordId) return null;
-    return `/HRM/Asset/Vehicle/details/${vehicleId}/oil-service/${serviceRecordId}`;
+    const base = `/HRM/Asset/Vehicle/details/${vehicleId}/oil-service/${serviceRecordId}`;
+    const focusKey = String(focus || '').trim().toLowerCase();
+    if (focusKey === 'payment' || focusKey === 'accounts_payment') {
+        return `${base}?focus=payment`;
+    }
+    return base;
 }
 
 function oilServiceDashboardMeta(asset, serviceRecordId, oilStage = '') {
-    const path = oilServiceDetailsPath(asset?._id, serviceRecordId);
+    const stage = String(oilStage || '').trim();
+    const focus =
+        stage.toLowerCase() === 'accounts_payment' || stage.toLowerCase() === 'accounts_quote'
+            ? stage.toLowerCase() === 'accounts_payment'
+                ? 'payment'
+                : ''
+            : '';
+    const path = oilServiceDetailsPath(asset?._id, serviceRecordId, { focus });
     return JSON.stringify({
         vehicleId: asset?._id ? String(asset._id) : '',
         serviceRecordId: serviceRecordId ? String(serviceRecordId) : '',
         serviceType: 'Oil Service',
         detailsPath: path || '',
-        ...(oilStage ? { oilStage: String(oilStage) } : {}),
+        ...(stage ? { oilStage: stage } : {}),
+        ...(focus ? { focus } : {}),
     });
 }
 
@@ -413,6 +426,42 @@ export function isOilServiceCashPayment(remarkOrService) {
     return String(remark?.amountMode || '').toLowerCase() !== 'warranty';
 }
 
+/** Garage + dates required before Schedule is considered complete (tick / HR / Accounts). */
+export function isOilScheduleFieldsComplete(remark = {}) {
+    const garage = String(remark.garageName || remark.vendorName || '').trim();
+    const location = String(remark.garageLocation || '').trim();
+    const contact = String(remark.garageContact || '').trim();
+    const start = String(remark.serviceStartDate || remark.scheduledServiceDate || '').trim();
+    const end = String(remark.serviceEndDate || remark.nextChangeMonth || '').trim();
+    return Boolean(garage && location && contact && start && end);
+}
+
+/** Admin Schedule OK submitted with all required garage/date fields. */
+export function isOilScheduleStepComplete(remark = {}) {
+    const submitted = String(remark.requestStatus || '').toLowerCase() === 'submitted';
+    return submitted && isOilScheduleFieldsComplete(remark);
+}
+
+function assertOilScheduleStepComplete(remark, actionLabel = 'this step') {
+    if (isOilScheduleStepComplete(remark)) return;
+    const missing = [];
+    if (String(remark.requestStatus || '').toLowerCase() !== 'submitted') {
+        missing.push('Admin Schedule OK (submit)');
+    }
+    if (!String(remark.garageName || remark.vendorName || '').trim()) missing.push('Garage name');
+    if (!String(remark.garageLocation || '').trim()) missing.push('Garage location');
+    if (!String(remark.garageContact || '').trim()) missing.push('Garage contact');
+    if (!String(remark.serviceStartDate || remark.scheduledServiceDate || '').trim()) {
+        missing.push('Service start date');
+    }
+    if (!String(remark.serviceEndDate || remark.nextChangeMonth || '').trim()) {
+        missing.push('Service end date');
+    }
+    throw new Error(
+        `Admin must complete Schedule and Reschedule before ${actionLabel}. Still required: ${missing.join(', ')}.`,
+    );
+}
+
 /**
  * After Initiate Service (Cash): open Schedule + HR together.
  * Bootstraps pending_hr workflow and emails/dashboard-tasks Admin Officer + HR.
@@ -685,6 +734,7 @@ export async function approveOilAccountsQuote(asset, serviceId, reqUser, payment
     if (String(remark.accountsQuoteApprovedAt || '').trim()) {
         throw new Error('Accounts has already approved this quotation.');
     }
+    assertOilScheduleStepComplete(remark, 'Accounts Approve');
 
     // Accounts may edit payment type + method on approve.
     const rawType = String(paymentPatch?.amountMode || '').toLowerCase().trim();
@@ -1504,6 +1554,10 @@ export async function activateOilServiceOnStartDate(
     if (isOilServiceCashPayment(remark) && !String(remark.accountsQuoteApprovedAt || '').trim()) {
         return false;
     }
+    // Never go Ready/On Service if Admin skipped garage/date fields.
+    if (!isOilScheduleFieldsComplete(remark)) {
+        return false;
+    }
 
     const startD = resolveServiceStartDate(remark) || wf.scheduledServiceDate;
     if (!startD) return false;
@@ -1608,6 +1662,12 @@ export async function submitOilServiceAssignment(asset, serviceId, req) {
     }
     if (utcDayStart(endD) < utcDayStart(startD)) {
         throw new Error('Service end date must be on or after service start date.');
+    }
+    if (!isOilScheduleFieldsComplete(remark)) {
+        assertOilScheduleStepComplete(
+            { ...remark, requestStatus: 'submitted' },
+            'submitting the schedule',
+        );
     }
 
     const requesterName = await getRequesterName(req.user);
@@ -2014,7 +2074,7 @@ export async function submitOilServiceDetails(asset, serviceId, serviceUpdates, 
         }
 
         const plate = [populated?.plateEmirate, populated?.plateNumber].filter(Boolean).join(' ').trim();
-        const detailLine = `Oil service for ${populated?.assetId || ''}${plate ? ` (${plate})` : ''} is complete. Review billing and submit to create the Zoho bill (Billed only if Zoho succeeds).`;
+        const detailLine = `Oil service for ${populated?.assetId || ''}${plate ? ` (${plate})` : ''} is complete. Open Make Payment to create the Zoho bill (Billed only if Zoho succeeds).`;
 
         const adminOfficerForClose = await getDepartmentHOD('admincontroller');
         await closeOilServiceStageDashboardActions(asset._id, serviceId, {
@@ -2036,6 +2096,7 @@ export async function submitOilServiceDetails(asset, serviceId, serviceUpdates, 
             service: asset.services?.id?.(serviceId) || serviceRow || null,
         });
 
+        // Accounts: email + dashboard task + Vehicle list badge → oil service Make Payment (Zoho).
         await notifyStakeholders({
             asset: populated,
             serviceRecordId: serviceId,
@@ -2235,6 +2296,7 @@ export async function advanceOilCashAfterHrApprove(asset, wf, actorName) {
     if (!isOilServiceCashPayment(remark)) {
         throw new Error('Only Cash oil services require HR schedule approval before On Service.');
     }
+    assertOilScheduleStepComplete(remark, 'HR Approval');
 
     wf.stage = STAGE_SCHEDULED;
     remark.workflowStage = STAGE_SCHEDULED;

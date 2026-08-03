@@ -8,6 +8,7 @@ import { upsertZohoBillFromApi } from '../services/zohoPurchaseSyncService.js';
 import { withZohoOrganization } from './zohoOrgContext.js';
 import { resolveZohoOrganizationIdForCompany } from './resolveZohoOrganization.js';
 import Company from '../models/Company.js';
+import { clearUtilityBillPaymentDayDueReminder } from './processUtilityBillPaymentDayReminders.js';
 
 const UTILITY_REQUEST_TYPE = 'Utility Bill Payment';
 
@@ -114,6 +115,29 @@ async function persistUtilityBillsAsPaid(bills, { paidBy = null, comment = '' } 
         console.warn(
             '[persistUtilityBillsAsPaid] dashboard sync failed:',
             dashErr?.message || dashErr,
+        );
+    }
+
+    try {
+        const clearedKeys = new Set();
+        for (const bill of bills) {
+            const entryId = String(bill.entryId || '').trim();
+            const billMonth = String(bill.billMonth || '').trim();
+            if (!entryId || !billMonth) continue;
+            const key = `${entryId}:${billMonth}`;
+            if (clearedKeys.has(key)) continue;
+            clearedKeys.add(key);
+            await clearUtilityBillPaymentDayDueReminder({
+                entryId,
+                billMonth,
+                actionedBy: paidBy || null,
+                comment: comment || 'Bill paid via Zoho — payment-day reminder cleared',
+            });
+        }
+    } catch (remindErr) {
+        console.warn(
+            '[persistUtilityBillsAsPaid] due reminder clear failed:',
+            remindErr?.message || remindErr,
         );
     }
 

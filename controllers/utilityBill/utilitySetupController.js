@@ -6,7 +6,7 @@ import UtilityBillPayment from '../../models/UtilityBillPayment.js';
 import UtilityBillPaymentDay from '../../models/UtilityBillPaymentDay.js';
 import UtilityEntryStatusChange from '../../models/UtilityEntryStatusChange.js';
 import {
-    cascadeDeleteEntriesByType,
+    cascadeDeleteUtilityConfig,
     isUtilityAdminSuperUser,
 } from '../../utils/utilityBillAdminDelete.js';
 import { listZohoVendorsFromDb } from '../../services/zohoContactSyncService.js';
@@ -395,18 +395,13 @@ export async function deleteUtilityConfig(req, res) {
         if (!isAdminLike(req)) {
             return res.status(403).json({ message: 'Only admin can delete utility tabs.' });
         }
-        const id = String(req.params?.id || '').trim();
-        const doc = await UtilityConfig.findById(id);
-        if (!doc) return res.status(404).json({ message: 'Utility not found.' });
-
-        const entryCount = await UtilityEntry.countDocuments({ type: nameRegex(doc.type) });
-        if (entryCount > 0) {
-            // Admin may force-delete the tab and cascade all related records.
-            await cascadeDeleteEntriesByType(doc.type);
+        const result = await cascadeDeleteUtilityConfig(req.params?.id, { req });
+        if (!result.ok) {
+            return res.status(result.message === 'Utility not found.' ? 404 : 400).json({
+                message: result.message || 'Failed to delete utility',
+            });
         }
-
-        await UtilityConfig.deleteOne({ _id: doc._id });
-        return res.json({ ok: true, deletedEntries: entryCount });
+        return res.json(result);
     } catch (err) {
         console.error('[deleteUtilityConfig]', err);
         return res.status(500).json({ message: err?.message || 'Failed to delete utility' });

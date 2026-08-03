@@ -16,6 +16,7 @@ import {
 } from '../../utils/syncUtilityBillToZoho.js';
 import { upsertUtilityBalancePartyExpensesFromBills, employeeIdQueryVariants } from '../../utils/upsertUtilityBalancePartyExpense.js';
 import { syncApprovedUtilityBillsPaidFromZoho, utilityBillHasZohoLink } from '../../utils/markUtilityVendorBillsPaidFromZoho.js';
+import { clearUtilityBillPaymentDayDueReminder } from '../../utils/processUtilityBillPaymentDayReminders.js';
 import Company from '../../models/Company.js';
 
 const REQUEST_TYPE = 'Utility Bill Payment';
@@ -2082,6 +2083,26 @@ export async function payUtilityBillBatch(req, res) {
             });
         }
 
+        // Clear payment-day due/overdue bells once each paid bill’s month is complete.
+        const paidRows = allInBatch.filter((b) => b.status === 'Paid');
+        const clearedKeys = new Set();
+        for (const row of paidRows) {
+            const entryId = String(row.entryId || '').trim();
+            const billMonth = String(row.billMonth || '').trim();
+            if (!entryId || !billMonth) continue;
+            const key = `${entryId}:${billMonth}`;
+            if (clearedKeys.has(key)) continue;
+            clearedKeys.add(key);
+            await clearUtilityBillPaymentDayDueReminder({
+                entryId,
+                billMonth,
+                actionedBy: actor?._id || null,
+                comment: 'Bill paid — payment-day reminder cleared',
+            }).catch((e) =>
+                console.warn('[payUtilityBills] clear due reminder', e?.message || e),
+            );
+        }
+
         const requester = allInBatch[0]?.requestedBy
             ? await EmployeeBasic.findById(allInBatch[0].requestedBy)
                   .select('firstName lastName companyEmail workEmail personalEmail email employeeId')
@@ -2265,7 +2286,7 @@ export async function deleteUtilityBillPayment(req, res) {
         if (!isUtilityAdminSuperUser(req)) {
             return res.status(403).json({ message: 'Only admin can delete utility bills.' });
         }
-        const result = await cascadeDeleteUtilityBill(req.params.id);
+        const result = await cascadeDeleteUtilityBill(req.params.id, { req });
         if (!result.ok) {
             return res.status(result.message === 'Bill not found.' ? 404 : 400).json({
                 message: result.message || 'Failed to delete bill',

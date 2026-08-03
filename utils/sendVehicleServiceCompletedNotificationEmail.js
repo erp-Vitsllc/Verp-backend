@@ -141,8 +141,8 @@ async function resolveCompanyName(assignee, remark = {}) {
 
 /**
  * After Complete / End Service — formal completion & return email.
- * TO: assigned user + car driven by (each personalized)
- * CC: Admin Officer
+ * TO: assigned user (+ car driven by, each personalized)
+ * CC: Admin Officer, HR, Accounts
  */
 export async function sendVehicleServiceCompletedNotificationEmail({
     asset,
@@ -160,8 +160,10 @@ export async function sendVehicleServiceCompletedNotificationEmail({
         }
 
         let assignee = await loadEmployeeFull(asset?.assignedTo || null);
-        const [adminOfficer, driver] = await Promise.all([
+        const [adminOfficer, hr, accounts, driver] = await Promise.all([
             getDepartmentHOD('admincontroller'),
+            getDepartmentHOD('hr'),
+            getDepartmentHOD('accounts'),
             resolveEmployeeByIdOrCode(remark.carDrivenByEmployeeId),
         ]);
 
@@ -191,6 +193,17 @@ export async function sendVehicleServiceCompletedNotificationEmail({
         );
 
         const adminCc = pickEmpEmail(adminOfficer);
+        const stakeholderCc = [];
+        for (const emp of [adminOfficer, hr, accounts, driver]) {
+            const addr = pickEmpEmail(emp);
+            if (addr) stakeholderCc.push(addr.toLowerCase());
+        }
+        for (const extra of ccExtra || []) {
+            const addr = String(extra || '').trim();
+            if (addr) stakeholderCc.push(addr.toLowerCase());
+        }
+        const uniqueStakeholderCc = [...new Set(stakeholderCc)];
+
         const transporter = nodemailer.createTransport({
             host: 'smtp.office365.com',
             port: 587,
@@ -208,8 +221,14 @@ export async function sendVehicleServiceCompletedNotificationEmail({
             primaryRecipients.push(emp);
         }
 
+        const buildCcForTo = (toAddr) => {
+            const ccSet = new Set(uniqueStakeholderCc);
+            ccSet.delete(String(toAddr || '').toLowerCase());
+            return [...ccSet];
+        };
+
         if (toOverride) {
-            // Preview / force path: single TO override, still CC admin.
+            // Preview / force path: single TO override, still CC stakeholders.
             const html = buildVehicleServiceCompletedEmailHtml({
                 employeeName: employeeDisplayName(assignee) || 'Employee',
                 serviceCompletedDate: completedDate,
@@ -222,18 +241,11 @@ export async function sendVehicleServiceCompletedNotificationEmail({
                 adminOfficerEmail: adminCc || '',
                 companyName,
             });
-            const cc = [];
-            if (adminCc && adminCc.toLowerCase() !== String(toOverride).toLowerCase()) {
-                cc.push(adminCc);
-            }
-            for (const extra of ccExtra || []) {
-                const addr = String(extra || '').trim();
-                if (addr && addr.toLowerCase() !== String(toOverride).toLowerCase()) cc.push(addr);
-            }
+            const cc = buildCcForTo(toOverride);
             await transporter.sendMail({
                 from: `"VeRP Portal" <${emailUser}>`,
                 to: toOverride,
-                ...(cc.length ? { cc: [...new Set(cc)] } : {}),
+                ...(cc.length ? { cc } : {}),
                 subject: VEHICLE_SERVICE_COMPLETED_SUBJECT,
                 html,
             });
@@ -249,6 +261,7 @@ export async function sendVehicleServiceCompletedNotificationEmail({
         }
 
         const sentTo = [];
+        let lastCc = [];
         for (const recipient of primaryRecipients) {
             const {
                 email: resolvedTo,
@@ -290,14 +303,8 @@ export async function sendVehicleServiceCompletedNotificationEmail({
                 fallbackNoteHtml: fallbackNote,
             });
 
-            const ccSet = new Set();
-            if (adminCc) ccSet.add(adminCc.toLowerCase());
-            for (const extra of ccExtra || []) {
-                const addr = String(extra || '').trim();
-                if (addr) ccSet.add(addr.toLowerCase());
-            }
-            ccSet.delete(to.toLowerCase());
-            const cc = [...ccSet];
+            const cc = buildCcForTo(to);
+            lastCc = cc;
 
             await transporter.sendMail({
                 from: `"VeRP Portal" <${emailUser}>`,
@@ -312,7 +319,7 @@ export async function sendVehicleServiceCompletedNotificationEmail({
             );
         }
 
-        return { ok: sentTo.length > 0, to: sentTo, cc: adminCc ? [adminCc] : [] };
+        return { ok: sentTo.length > 0, to: sentTo, cc: lastCc };
     } catch (err) {
         console.error('[VehicleServiceCompleted] Email error:', err.message);
         return { ok: false, reason: err.message };

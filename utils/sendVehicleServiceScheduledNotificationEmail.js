@@ -97,7 +97,7 @@ function dayLabel(value) {
 /**
  * Formal scheduled-service email (Accounts Approve for cash, or Admin schedule for warranty).
  * TO: vehicle assigned user
- * CC: Admin Officer, HR, car driven by (oil schedule persons)
+ * CC: Admin Officer, HR, Accounts, car driven by
  */
 export async function sendVehicleServiceScheduledNotificationEmail({
     asset,
@@ -131,9 +131,10 @@ export async function sendVehicleServiceScheduledNotificationEmail({
                 .lean();
         }
 
-        const [adminOfficer, hr, driver] = await Promise.all([
+        const [adminOfficer, hr, accounts, driver] = await Promise.all([
             getDepartmentHOD('admincontroller'),
             getDepartmentHOD('hr'),
+            getDepartmentHOD('accounts'),
             resolveEmployeeByIdOrCode(remark.carDrivenByEmployeeId),
         ]);
 
@@ -204,7 +205,7 @@ export async function sendVehicleServiceScheduledNotificationEmail({
         });
 
         const ccSet = new Set();
-        for (const emp of [adminOfficer, hr, driver]) {
+        for (const emp of [adminOfficer, hr, accounts, driver]) {
             const addr = pickEmpEmail(emp);
             if (addr) ccSet.add(addr.toLowerCase());
         }

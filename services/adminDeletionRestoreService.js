@@ -25,12 +25,77 @@ import EmployeeSalary from '../models/EmployeeSalary.js';
 import EmployeeContact from '../models/EmployeeContact.js';
 import EmployeePersonal from '../models/EmployeePersonal.js';
 import EmployeeBank from '../models/EmployeeBank.js';
+import UtilityEntry from '../models/UtilityEntry.js';
+import UtilityBillPayment from '../models/UtilityBillPayment.js';
+import UtilityBillPaymentDay from '../models/UtilityBillPaymentDay.js';
+import UtilityBillPaymentDayReminderLog from '../models/UtilityBillPaymentDayReminderLog.js';
+import UtilityEntryStatusChange from '../models/UtilityEntryStatusChange.js';
+import UtilityConfig from '../models/UtilityConfig.js';
 import { normalizeS3Key } from '../utils/s3Upload.js';
 
 function stripMongoDoc(doc) {
     if (!doc || typeof doc !== 'object') return doc;
     const { _id, __v, createdAt, updatedAt, ...rest } = doc;
     return rest;
+}
+
+/** Restore docs that use a stable custom `_id` (e.g. UtilityEntry string ids). */
+async function restoreMongoKeepingId(Model, snapshot) {
+    if (!snapshot || typeof snapshot !== 'object') {
+        throw new Error('Invalid snapshot for restore.');
+    }
+    const id = snapshot._id;
+    if (id != null) {
+        const exists = await Model.findById(id).lean();
+        if (exists) {
+            throw new Error('A record with this ID already exists. Cannot restore.');
+        }
+    }
+    const data = { ...snapshot };
+    delete data.__v;
+    return Model.create(data);
+}
+
+async function restoreUtilityEntryBundle(bundle) {
+    const entry = bundle?.entry;
+    if (!entry) throw new Error('Missing utility entry snapshot.');
+
+    await restoreMongoKeepingId(UtilityEntry, entry);
+
+    for (const bill of bundle.bills || []) {
+        const exists = bill?._id ? await UtilityBillPayment.findById(bill._id).lean() : null;
+        if (exists) continue;
+        const data = { ...bill };
+        delete data.__v;
+        await UtilityBillPayment.create(data);
+    }
+    for (const day of bundle.paymentDays || []) {
+        const exists = day?.entryId
+            ? await UtilityBillPaymentDay.findOne({ entryId: day.entryId }).lean()
+            : day?._id
+              ? await UtilityBillPaymentDay.findById(day._id).lean()
+              : null;
+        if (exists) continue;
+        const data = { ...day };
+        delete data.__v;
+        await UtilityBillPaymentDay.create(data);
+    }
+    for (const sc of bundle.statusChanges || []) {
+        const exists = sc?._id ? await UtilityEntryStatusChange.findById(sc._id).lean() : null;
+        if (exists) continue;
+        const data = { ...sc };
+        delete data.__v;
+        await UtilityEntryStatusChange.create(data);
+    }
+    for (const log of bundle.reminderLogs || []) {
+        const exists = log?._id ? await UtilityBillPaymentDayReminderLog.findById(log._id).lean() : null;
+        if (exists) continue;
+        const data = { ...log };
+        delete data.__v;
+        await UtilityBillPaymentDayReminderLog.create(data);
+    }
+
+    return { entryId: entry._id, type: entry.type };
 }
 
 async function restoreMongoByUnique(Model, snapshot, uniqueField) {
@@ -227,6 +292,40 @@ export async function restoreArchivedRecord(archive) {
             return restoreMongoByUnique(Loan, snapshot, 'loanId');
         case 'payment':
             return restoreMongoByUnique(Payment, snapshot, 'paymentId');
+
+        case 'utility_entry': {
+            return restoreUtilityEntryBundle(snapshot);
+        }
+
+        case 'utility_bill': {
+            return restoreMongoKeepingId(UtilityBillPayment, snapshot);
+        }
+
+        case 'utility_config': {
+            const config = snapshot?.config || snapshot;
+            if (!config || typeof config !== 'object') {
+                throw new Error('Missing utility config snapshot.');
+            }
+            const typeName = String(config.type || '').trim();
+            if (typeName) {
+                const exists = await UtilityConfig.findOne({
+                    type: new RegExp(`^${typeName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i'),
+                }).lean();
+                if (exists) {
+                    throw new Error('A utility type with this name already exists. Cannot restore.');
+                }
+            }
+            await restoreMongoKeepingId(UtilityConfig, config);
+            for (const bundle of snapshot?.entries || []) {
+                try {
+                    await restoreUtilityEntryBundle(bundle);
+                } catch (e) {
+                    // Skip entries that already exist; still restore the rest of the type.
+                    if (!String(e?.message || '').includes('already exists')) throw e;
+                }
+            }
+            return { type: typeName, restoredEntries: (snapshot?.entries || []).length };
+        }
 
         case 'company_whole': {
             const companyId = snapshot.companyId;

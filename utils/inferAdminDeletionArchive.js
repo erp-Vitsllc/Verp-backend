@@ -55,6 +55,9 @@ const MODULE_RULES = [
     { test: (m) => m.includes('Accessory catalog'), entityType: 'accessory_catalog', topModule: 'tools_asset', category: 'catalog' },
     { test: (m) => m.includes('Asset Type'), entityType: 'asset_type', topModule: 'tools_asset', category: 'list' },
     { test: (m) => m.includes('Asset Category'), entityType: 'asset_category', topModule: 'tools_asset', category: 'list' },
+    { test: (m) => m === 'Utility Entry' || m.includes('Utility Entry'), entityType: 'utility_entry', topModule: 'utility_bills', category: 'list' },
+    { test: (m) => m === 'Utility Bill' || m.includes('Utility Bill Payment'), entityType: 'utility_bill', topModule: 'utility_bills', category: 'bills' },
+    { test: (m) => m === 'Utility Config' || m.includes('Utility Type') || m.includes('Utility Config'), entityType: 'utility_config', topModule: 'utility_bills', category: 'configs' },
     { test: (m) => m === 'User', entityType: 'user', topModule: 'settings', category: 'users' },
     { test: (m) => m === 'Group', entityType: 'group', topModule: 'settings', category: 'groups' },
     { test: (m) => m === 'Payment', entityType: 'payment', topModule: 'payment', category: 'list' },
@@ -87,12 +90,24 @@ export function inferAdminDeletionArchiveMeta({ moduleName, recordId, details, d
         parentRef = { assetId: payload?.assetId || recordId };
     }
 
+    if (topModule === 'utility_bills') {
+        const entry = payload?.entry || payload;
+        parentRef = {
+            entryId: entry?._id || payload?.entryId || recordId,
+            utilityType: entry?.type || payload?.utilityType || payload?.config?.type || '',
+        };
+    }
+
     const subtitle =
         payload.companyName ||
         payload.employeeId ||
         payload.name ||
+        parentRef.utilityType ||
         parentRef.employeeId ||
         parentRef.companyId ||
+        payload?.entry?.values?.provider ||
+        payload?.values?.provider ||
+        payload?.accountNo ||
         '';
 
     return {

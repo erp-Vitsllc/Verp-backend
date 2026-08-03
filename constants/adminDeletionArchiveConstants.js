@@ -10,6 +10,7 @@ export const ARCHIVE_TOP_MODULES = {
     reward: { key: 'reward', label: 'Reward' },
     vehicle_asset: { key: 'vehicle_asset', label: 'Vehicle Asset' },
     tools_asset: { key: 'tools_asset', label: 'Tools Asset' },
+    utility_bills: { key: 'utility_bills', label: 'Utility Bills' },
     payment: { key: 'payment', label: 'Payments' },
     settings: { key: 'settings', label: 'Settings' },
     other: { key: 'other', label: 'Other' },
@@ -50,6 +51,11 @@ export const ARCHIVE_CATEGORIES = {
         documents: { key: 'documents', label: 'Documents' },
         service: { key: 'service', label: 'Service records' },
         catalog: { key: 'catalog', label: 'Accessory catalog' },
+    },
+    utility_bills: {
+        list: { key: 'list', label: 'Utility accounts' },
+        bills: { key: 'bills', label: 'Bill payments' },
+        configs: { key: 'configs', label: 'Utility types' },
     },
     settings: {
         list: { key: 'list', label: 'Users & groups' },

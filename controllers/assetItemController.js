@@ -11226,6 +11226,29 @@ export const deleteVehicleHandoverHistory = async (req, res) => {
             });
         }
 
+        // Only end rows may be deleted (not middle of handover/inspection chain).
+        const siblingRows = await AssetHistory.find({
+            assetId: record.assetId,
+            action: { $in: [...DELETABLE_HANDOVER_HISTORY_ACTIONS] },
+        })
+            .select('_id date createdAt action')
+            .lean();
+
+        const ordered = [...siblingRows].sort((a, b) => {
+            const timeA = new Date(a?.date || a?.createdAt || 0).getTime();
+            const timeB = new Date(b?.date || b?.createdAt || 0).getTime();
+            if (timeA !== timeB) return timeA - timeB;
+            return String(a?._id || '').localeCompare(String(b?._id || ''));
+        });
+
+        const rowIndex = ordered.findIndex((row) => String(row._id) === String(historyId));
+        if (rowIndex > 0 && rowIndex < ordered.length - 1) {
+            return res.status(400).json({
+                message:
+                    'Cannot delete a handover in the middle of the list. Delete the previous end rows first (top or bottom) until this row is at either end.',
+            });
+        }
+
         await AssetHistory.findByIdAndDelete(historyId);
 
         const asset = await AssetItem.findById(record.assetId).select(

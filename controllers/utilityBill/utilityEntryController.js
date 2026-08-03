@@ -235,7 +235,7 @@ export async function deleteUtilityEntry(req, res) {
         if (!isUtilityAdminSuperUser(req)) {
             return res.status(403).json({ message: 'Only admin can delete utility records.' });
         }
-        const result = await cascadeDeleteUtilityEntry(req.params.id);
+        const result = await cascadeDeleteUtilityEntry(req.params.id, { req });
         if (!result.ok) {
             return res.status(result.message === 'Entry not found.' ? 404 : 400).json({
                 message: result.message || 'Failed to delete entry',
