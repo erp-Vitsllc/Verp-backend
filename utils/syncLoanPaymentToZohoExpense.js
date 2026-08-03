@@ -307,15 +307,16 @@ export async function syncLoanPaymentToZohoExpense({
         toDateKey(payment?.paymentDate) ||
         new Date().toISOString().slice(0, 10);
 
-    // Same text for Zoho Reference# and Notes (loan/advance description).
+    // Same text for Zoho Notes (loan/advance description). Cap at 100 (Zoho Books max).
     const description = clean(
         loan.reason ||
             loan.description ||
             payment?.notes ||
             `${typeLabel} ${clean(loan.loanId)} · ${clean(loan.employeeId)}`,
-    ).slice(0, 500);
+    ).slice(0, 100);
 
-    const referenceNumber = description.slice(0, 100);
+    // Reference# → short loanId (stable; avoids long reason failing Zoho).
+    const referenceNumber = clean(loan.loanId || description).slice(0, 100);
 
     try {
         const result = await withZohoOrganization(orgId, async () => {

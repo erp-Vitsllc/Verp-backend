@@ -4,6 +4,7 @@ import Loan from "../../models/Loan.js";
 import { getCompleteEmployee } from "../../services/employeeService.js";
 import {
     isApprovedLoanStatus,
+    isLoanSuperUserEditor,
     isUserHrForApprovedLoanEdit,
     restrictApprovedLoanUpdates,
 } from "../../utils/loanApprovedEditAuth.js";
@@ -32,12 +33,24 @@ export const updateLoanDetails = async (req, res) => {
             return res.status(404).json({ message: "Loan request not found" });
         }
 
+        if (reason !== undefined && reason !== null) {
+            const reasonText = String(reason).trim();
+            if (!reasonText) {
+                return res.status(400).json({ message: 'Reason is mandatory.' });
+            }
+            if (reasonText.length > 50) {
+                return res.status(400).json({ message: 'Reason must be 50 characters or less.' });
+            }
+        }
+
         const loanStatus = loan.approvalStatus || loan.status;
         const isApproved = isApprovedLoanStatus(loanStatus);
+        const isSuperUser = isLoanSuperUserEditor(req);
 
         // Accounts fills Expense Account + Paid Through on Loan/Adv Parties card.
         // Editable twice: (1) Pending Accounts approve, (2) Pending Payment to Employee before pay/Zoho.
         // Also allow fix when Paid in ERP but Zoho Expense failed (no zohoExpenseId yet).
+        // Super User may edit party accounts at any stage.
         if (partyPayableOnly) {
             const hasZohoPosted = Boolean(String(loan.zohoExpenseId || '').trim());
             const canFixFailedZoho =
@@ -52,7 +65,12 @@ export const updateLoanDetails = async (req, res) => {
                     (loanStatus === 'Approved' &&
                         Number(loan.amount || 0) - Number(loan.paidAmount || 0) > 0.01));
 
-            if (!canEditAtAccounts && !canEditAtPayToEmployee && !canFixFailedZoho) {
+            if (
+                !isSuperUser &&
+                !canEditAtAccounts &&
+                !canEditAtPayToEmployee &&
+                !canFixFailedZoho
+            ) {
                 return res.status(403).json({
                     message: hasZohoPosted
                         ? 'Accounts fields cannot be changed after Zoho Expense is posted.'
@@ -93,7 +111,9 @@ export const updateLoanDetails = async (req, res) => {
             });
         }
 
-        if (isApproved) {
+        // Non–Super User: approved/paid loans are schedule-only (HR).
+        // Super User: full edit at any stage (including Paid / Completed).
+        if (isApproved && !isSuperUser) {
             if (!scheduleOnlyEdit) {
                 return res.status(403).json({
                     message: 'Approved loans can only have repayment schedule updated by HR.',
@@ -135,6 +155,33 @@ export const updateLoanDetails = async (req, res) => {
             });
         }
 
+        // Super User schedule-only shortcut (still allow duration/monthStart-only saves).
+        if (isApproved && isSuperUser && scheduleOnlyEdit) {
+            const { error, allowed } = restrictApprovedLoanUpdates(req.body, loan);
+            if (error) {
+                return res.status(400).json({ message: error });
+            }
+            const { preserveOriginalLoanScheduleBeforeEdit } = await import('../../utils/loanDeductionScheduleSnapshot.js');
+            preserveOriginalLoanScheduleBeforeEdit(loan);
+            if (allowed.duration !== undefined) {
+                loan.duration = loan.type === 'Advance' ? 1 : allowed.duration;
+            }
+            if (allowed.monthStart !== undefined) {
+                loan.monthStart = allowed.monthStart;
+            }
+            const savedLoan = await loan.save();
+            try {
+                const { persistLoanApprovalAttachments } = await import('../../utils/persistLoanApprovalAttachments.js');
+                await persistLoanApprovalAttachments(savedLoan, { forceRegenerate: true });
+            } catch (pdfErr) {
+                console.error('[UpdateLoan] Failed to regenerate acknowledgment PDF:', pdfErr?.message || pdfErr);
+            }
+            return res.status(200).json({
+                message: 'Repayment schedule updated successfully',
+                loan: savedLoan,
+            });
+        }
+
         // Prevent editing if not Draft or rejected? For now, allow edit if user is authorized.
         const oldStatus = loan.status;
         const newStatus = status || loan.status;
@@ -143,7 +190,9 @@ export const updateLoanDetails = async (req, res) => {
         loan.type = type || loan.type;
         loan.amount = amount || loan.amount;
         loan.duration = duration || loan.duration;
-        loan.reason = reason || loan.reason;
+        if (reason !== undefined && reason !== null) {
+            loan.reason = String(reason).trim();
+        }
         if (monthStart !== undefined) loan.monthStart = monthStart;
 
         // Handle attachment update
@@ -255,6 +304,21 @@ export const updateLoanDetails = async (req, res) => {
         }
 
         const savedLoan = await loan.save();
+
+        // Super User full edit on post-management loans — refresh acknowledgment PDF.
+        if (isApproved && isSuperUser) {
+            try {
+                const { persistLoanApprovalAttachments } = await import(
+                    '../../utils/persistLoanApprovalAttachments.js'
+                );
+                await persistLoanApprovalAttachments(savedLoan, { forceRegenerate: true });
+            } catch (pdfErr) {
+                console.error(
+                    '[UpdateLoan] Failed to regenerate acknowledgment PDF after super-user edit:',
+                    pdfErr?.message || pdfErr,
+                );
+            }
+        }
 
         // Send Email Notification if status changed to Pending OR if still Pending and details updated
         if (newStatus === 'Pending' || sendEmail) {

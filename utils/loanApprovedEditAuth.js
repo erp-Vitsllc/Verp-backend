@@ -2,10 +2,15 @@ import EmployeeBasic from '../models/EmployeeBasic.js';
 import { isJwtSystemSuperUser } from './systemSuperUser.js';
 import { isRequestUserDesignatedFlowchartHr } from './isDesignatedFlowchartHr.js';
 
-export const APPROVED_LOAN_STATUSES = ['Approved', 'Paid'];
+export const APPROVED_LOAN_STATUSES = ['Approved', 'Pending Payment to Employee', 'Paid'];
 
 export function isApprovedLoanStatus(status) {
-    return APPROVED_LOAN_STATUSES.includes(status);
+    return APPROVED_LOAN_STATUSES.includes(String(status || '').trim());
+}
+
+/** Portal Super User (`.env` admin) — full loan edit at any stage. Not Flowchart Admin Officer. */
+export function isLoanSuperUserEditor(req) {
+    return isJwtSystemSuperUser(req?.user);
 }
 
 function collectIdentityIds(user) {
@@ -26,7 +31,7 @@ function identityMatches(user, target) {
 export async function isUserHrForApprovedLoanEdit(req, loan) {
     if (!req?.user) return false;
 
-    if (isJwtSystemSuperUser(req.user)) {
+    if (isLoanSuperUserEditor(req)) {
         return true;
     }
 

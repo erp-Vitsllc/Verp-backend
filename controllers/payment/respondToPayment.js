@@ -103,6 +103,81 @@ export const respondToPayment = async (req, res) => {
                 } else if (relatedEntityType === 'Loan' || relatedEntityType === 'Advance') {
                     let loan = await Loan.findById(relatedEntityId) || await Loan.findOne({ loanId: referenceId });
                     if (loan) {
+                        // Do not complete Paid to Employee unless Zoho Expense already exists (or sync now succeeds).
+                        const hasZoho = Boolean(String(loan.zohoExpenseId || payment.zohoExpenseId || '').trim());
+                        if (!hasZoho) {
+                            const paidThroughId = String(
+                                payment.paidThroughAccountId || loan.paidThroughAccountId || '',
+                            ).trim();
+                            const expenseId = String(
+                                payment.expenseAccountId || loan.expenseAccountId || '',
+                            ).trim();
+                            const orgId = String(
+                                payment.zohoOrganizationId || loan.zohoOrganizationId || '',
+                            ).trim();
+                            if (!paidThroughId || !expenseId || !orgId) {
+                                payment.status = 'Failed';
+                                payment.zohoSyncError =
+                                    'Zoho Expense required before Paid to Employee. Fill Loan Parties accounts and retry Pay.';
+                                await payment.save();
+                                return res.status(422).json({
+                                    success: false,
+                                    message: payment.zohoSyncError,
+                                    payment,
+                                });
+                            }
+                            try {
+                                const employee = await EmployeeBasic.findById(payment.paidBy).lean();
+                                const { syncLoanPaymentToZoho } = await import(
+                                    '../../utils/syncRewardPaymentToZoho.js'
+                                );
+                                const zohoResult = await syncLoanPaymentToZoho({
+                                    payment,
+                                    loan,
+                                    employee,
+                                    organizationId: orgId,
+                                    expenseAccountId: expenseId,
+                                    expenseAccountName:
+                                        payment.expenseAccountName || loan.expenseAccountName,
+                                    paidThroughAccountId: paidThroughId,
+                                    paidThroughAccountName:
+                                        payment.paidThroughAccountName || loan.paidThroughAccountName,
+                                });
+                                if (!zohoResult.ok || !String(zohoResult.expenseId || '').trim()) {
+                                    payment.status = 'Failed';
+                                    payment.zohoSyncError = zohoResult.message || 'Zoho sync failed';
+                                    await payment.save();
+                                    loan.zohoSyncError = zohoResult.message || 'Zoho sync failed';
+                                    await loan.save();
+                                    return res.status(422).json({
+                                        success: false,
+                                        message:
+                                            zohoResult.message ||
+                                            'Zoho Expense failed. Loan was not marked Paid.',
+                                        payment,
+                                        zohoSync: { ok: false, message: zohoResult.message || '' },
+                                    });
+                                }
+                                payment.zohoExpenseId = zohoResult.expenseId;
+                                payment.zohoSyncError = '';
+                                await payment.save();
+                                loan.zohoExpenseId = zohoResult.expenseId;
+                                loan.zohoExpenseNumber = zohoResult.expenseNumber || '';
+                                loan.zohoOrganizationId = zohoResult.organizationId || orgId;
+                                loan.zohoSyncedAt = new Date();
+                                loan.zohoSyncError = '';
+                            } catch (zohoErr) {
+                                payment.status = 'Failed';
+                                payment.zohoSyncError = zohoErr?.message || 'Zoho sync failed';
+                                await payment.save();
+                                return res.status(422).json({
+                                    success: false,
+                                    message: payment.zohoSyncError,
+                                    payment,
+                                });
+                            }
+                        }
+
                         const allPayments = await Payment.find({
                             $or: [{ relatedEntityId: loan._id }, { referenceId: loan.loanId }],
                             status: 'Completed'

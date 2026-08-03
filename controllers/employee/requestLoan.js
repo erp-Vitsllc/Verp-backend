@@ -57,6 +57,14 @@ export const requestLoan = async (req, res) => {
     const { employeeId, type, amount, duration, reason, employeeObjectId, monthStart, status } = req.body;
 
     try {
+        const reasonText = String(reason || '').trim();
+        if (!reasonText) {
+            return res.status(400).json({ message: 'Reason is mandatory.' });
+        }
+        if (reasonText.length > 50) {
+            return res.status(400).json({ message: 'Reason must be 50 characters or less.' });
+        }
+
         // 1. Fetch Employee Info FIRST to identify Manager
         const employeeBasic = await getCompleteEmployee(employeeObjectId);
 
@@ -136,7 +144,7 @@ export const requestLoan = async (req, res) => {
             amount,
             duration,
             monthStart: monthStart || '',
-            reason,
+            reason: reasonText,
             status: targetStatus,
             approvalStatus: targetStatus,
             createdBy: req.user ? req.user.id : null,
@@ -270,7 +278,7 @@ export const requestLoan = async (req, res) => {
                                         </tr>
                                         <tr>
                                             <td style="padding: 8px 0; color: #64748b; font-size: 13px;"><strong>Reason:</strong></td>
-                                            <td style="padding: 8px 0; color: #475569; font-size: 14px; font-style: italic;">"${reason}"</td>
+                                            <td style="padding: 8px 0; color: #475569; font-size: 14px; font-style: italic;">"${reasonText}"</td>
                                         </tr>
                                     </table>
                                 </div>
