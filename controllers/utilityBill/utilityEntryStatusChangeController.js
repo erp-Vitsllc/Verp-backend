@@ -7,6 +7,7 @@ import mongoose from 'mongoose';
 import { getDepartmentHOD, isUserInFlowchart } from '../../utils/getDepartmentHOD.js';
 import { syncDashboardAction } from '../../utils/syncDashboard.js';
 import { sendUtilityEntryStatusEmail } from '../../utils/sendUtilityEntryStatusEmail.js';
+import { clearUtilityContractExpiryNotifications } from '../../utils/processUtilityContractExpiryReminders.js';
 
 export const REQUEST_TYPE = 'Utility Entry Status Change';
 
@@ -287,6 +288,17 @@ export async function respondUtilityEntryStatusChange(req, res) {
                 { $set: { status: doc.requestedStatus } },
                 { upsert: false },
             );
+            if (doc.requestedStatus === 'Inactive') {
+                await clearUtilityContractExpiryNotifications(
+                    doc.entryId,
+                    'Utility account deactivated',
+                ).catch((e) =>
+                    console.error(
+                        '[respondUtilityEntryStatusChange] clear contract expiry',
+                        e?.message || e,
+                    ),
+                );
+            }
         }
 
         await syncStatusChangeDashboard({

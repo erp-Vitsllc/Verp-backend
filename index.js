@@ -125,7 +125,7 @@ scheduleDailyAtMidnight(
     { name: "UtilityBillPaymentDayReminders" },
 );
 
-// Utility contract end-date expiry (T-10 / T-5 / expiry day → HR email + bell).
+// Utility contract end-date expiry (T-10 / T-5 / due-or-past → Accounts flowchart; sticky until done).
 setTimeout(() => {
     processUtilityContractExpiryReminders().catch((e) =>
         console.error("[UtilityContractExpiryReminders] startup failed:", e?.message || e),

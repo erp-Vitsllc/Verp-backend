@@ -55,16 +55,13 @@ export async function sendUtilityBillPaymentDayEmail({
             t10: 'Utility Bill — Payment due in 10 days',
             t5: 'Utility Bill — Payment due in 5 days',
             due: 'Utility Bill — Payment due today',
-            overdue: 'Utility Bill — Payment overdue',
         };
         const bodies = {
             t10: 'A utility account payment day is coming up in 10 days. Please prepare Add Bills / review.',
             t5: 'A utility account payment day is coming up in 5 days. Please prepare Add Bills / review.',
-            due: 'Today is the scheduled utility payment day for this account. Please process and complete the bill. This reminder stays until the bill is Paid.',
-            overdue:
-                'The scheduled utility payment day for this account has passed. Please process and complete the bill. This reminder stays until the bill is Paid.',
+            due: 'Today is the scheduled utility payment day for this account. Please process the bill.',
         };
-        const colors = { t10: '#0d9488', t5: '#d97706', due: '#dc2626', overdue: '#991b1b' };
+        const colors = { t10: '#0d9488', t5: '#d97706', due: '#dc2626' };
 
         const html = `
             <div style="font-family: Segoe UI, Tahoma, sans-serif; color: #1e293b; max-width: 600px; margin: 0 auto; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden;">

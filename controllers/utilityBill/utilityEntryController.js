@@ -6,6 +6,10 @@ import {
     isUtilityAdminSuperUser,
 } from '../../utils/utilityBillAdminDelete.js';
 import { sendUtilityAssignmentEmail } from '../../utils/sendUtilityAssignmentEmail.js';
+import {
+    clearUtilityContractExpiryNotifications,
+    daysUntilContractEnd,
+} from '../../utils/processUtilityContractExpiryReminders.js';
 
 function escapeRegex(s) {
     return String(s || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -202,6 +206,20 @@ export async function updateUtilityEntry(req, res) {
         await syncPaymentDay(doc);
 
         const mapped = mapEntry(doc);
+        const timing = daysUntilContractEnd(mapped?.values?.contractEnd);
+        const contractResolved =
+            mapped.status === 'Inactive' || !timing || timing.daysUntil > 0;
+        if (contractResolved) {
+            await clearUtilityContractExpiryNotifications(
+                mapped.id || mapped._id || doc._id,
+                mapped.status === 'Inactive'
+                    ? 'Utility account deactivated'
+                    : 'Contract end renewed / no longer due',
+            ).catch((e) =>
+                console.error('[updateUtilityEntry] clear contract expiry', e?.message || e),
+            );
+        }
+
         const nextAssignedToId = String(mapped.assignedToId || '').trim();
         const nextAssignedToType = String(mapped.assignedToType || '').trim();
         const assignmentChanged =

@@ -16,7 +16,6 @@ import {
 } from '../../utils/syncUtilityBillToZoho.js';
 import { upsertUtilityBalancePartyExpensesFromBills, employeeIdQueryVariants } from '../../utils/upsertUtilityBalancePartyExpense.js';
 import { syncApprovedUtilityBillsPaidFromZoho, utilityBillHasZohoLink } from '../../utils/markUtilityVendorBillsPaidFromZoho.js';
-import { clearUtilityBillPaymentDayDueReminder } from '../../utils/processUtilityBillPaymentDayReminders.js';
 import Company from '../../models/Company.js';
 
 const REQUEST_TYPE = 'Utility Bill Payment';
@@ -2081,26 +2080,6 @@ export async function payUtilityBillBatch(req, res) {
                 requestedByName: allInBatch[0]?.requestedByName || '',
                 extra2: 'partially paid',
             });
-        }
-
-        // Clear payment-day due/overdue bells once each paid bill’s month is complete.
-        const paidRows = allInBatch.filter((b) => b.status === 'Paid');
-        const clearedKeys = new Set();
-        for (const row of paidRows) {
-            const entryId = String(row.entryId || '').trim();
-            const billMonth = String(row.billMonth || '').trim();
-            if (!entryId || !billMonth) continue;
-            const key = `${entryId}:${billMonth}`;
-            if (clearedKeys.has(key)) continue;
-            clearedKeys.add(key);
-            await clearUtilityBillPaymentDayDueReminder({
-                entryId,
-                billMonth,
-                actionedBy: actor?._id || null,
-                comment: 'Bill paid — payment-day reminder cleared',
-            }).catch((e) =>
-                console.warn('[payUtilityBills] clear due reminder', e?.message || e),
-            );
         }
 
         const requester = allInBatch[0]?.requestedBy

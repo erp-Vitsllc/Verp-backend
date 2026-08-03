@@ -7,6 +7,7 @@ import UtilityConfig from '../models/UtilityConfig.js';
 import DashboardAction from '../models/DashboardAction.js';
 import { isJwtSystemSuperUser } from './systemSuperUser.js';
 import { awaitAdminDeletionArchive } from './adminDeletionArchiveRun.js';
+import { clearUtilityContractExpiryNotifications } from './processUtilityContractExpiryReminders.js';
 
 const BILL_REQUEST_TYPE = 'Utility Bill Payment';
 const STATUS_CHANGE_REQUEST_TYPE = 'Utility Entry Status Change';
@@ -169,6 +170,7 @@ export async function cascadeDeleteUtilityEntry(entryId, { req, skipArchive = fa
         UtilityEntry.deleteOne({ _id: entry._id }),
         clearBillBatchDashboard(batchIds),
         clearStatusChangeDashboard(statusChanges.map((s) => s._id)),
+        clearUtilityContractExpiryNotifications(id, 'Utility account deleted'),
     ]);
 
     return {
