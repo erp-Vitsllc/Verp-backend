@@ -802,7 +802,8 @@ export async function approveOilAccountsQuote(asset, serviceId, reqUser, payment
         .trim();
     const startLabel = startD ? new Date(startD).toISOString().slice(0, 10) : '';
 
-    // Formal scheduled notification: TO assigned user, CC assigned + Admin Officer + driven-by.
+    // Formal scheduled letter after Accounts Approve (not Admin) — Ready to Service or On Service.
+    // TO assigned · CC Admin + HR + driven-by.
     const serviceForMail =
         (populatedForMail?.services || []).find((s) => String(s?._id) === String(serviceId)) ||
         service ||
@@ -814,7 +815,7 @@ export async function approveOilAccountsQuote(asset, serviceId, reqUser, payment
         serviceTypeLabel: 'Oil Service',
     });
 
-    // If start date is in the future, notify Admin: Ready to Service (awaits start date / On Service).
+    // If start date is in the future, Admin dashboard only: Ready to Service (awaits start date).
     if (!wentLive) {
         const adminOfficer = await getDepartmentHOD('admincontroller');
         if (adminOfficer?._id && populatedForMail) {
@@ -1280,7 +1281,11 @@ async function notifyStakeholders({
     }
 }
 
-/** Email + dashboard task for Admin Officer when oil service goes On Service. */
+/**
+ * Admin Officer dashboard/task when oil goes On Service.
+ * Assignees already get the formal "Vehicle Service Scheduled Notification" on Accounts Approve
+ * (cash) or Admin schedule (warranty) — do not send the short On Service letter to them again.
+ */
 async function notifyOilServiceWentLiveIfNeeded(asset, serviceRecordId, { detailLine } = {}) {
     const wf = asset?.activeServiceWorkflow;
     if (!wf || wf.oilServiceLiveNotifiedAt) return false;
@@ -1294,7 +1299,6 @@ async function notifyOilServiceWentLiveIfNeeded(asset, serviceRecordId, { detail
     if (!populated) return false;
 
     const adminOfficer = await getDepartmentHOD('admincontroller');
-    const assignee = populated?.assignedTo || null;
     const plate = [populated?.plateEmirate, populated?.plateNumber].filter(Boolean).join(' ').trim();
     const message =
         detailLine ||
@@ -1321,20 +1325,6 @@ async function notifyOilServiceWentLiveIfNeeded(asset, serviceRecordId, { detail
             detailLine: message,
             detailRows: scheduleRows,
             oilStage: 'on_service',
-        });
-    }
-
-    // Assignee gets email only (no separate dashboard task).
-    if (assignee?._id && String(assignee._id) !== String(adminOfficer?._id || '')) {
-        const linkPath = oilServiceDetailsPath(populated._id, serviceRecordId);
-        await sendOilEmail({
-            recipient: assignee,
-            asset: populated,
-            actionLabel: 'Oil service — On Service',
-            detailLine: message,
-            detailRows: scheduleRows,
-            serviceRecordId,
-            linkPath,
         });
     }
 
@@ -1757,7 +1747,7 @@ export async function submitOilServiceAssignment(asset, serviceId, req) {
             ? `${requesterName} submitted an oil service request for ${populated?.assetId || ''}${plate ? ` (${plate})` : ''}. The vehicle is now on service.`
             : `${requesterName} scheduled an oil service for ${populated?.assetId || ''}${plate ? ` (${plate})` : ''}. Service starts on ${startLabel}.`;
 
-        // Warranty path has no Accounts confirm — send formal scheduled notice when Admin schedules.
+        // Warranty has no Accounts step — formal scheduled letter when Admin schedules (Ready / On Service).
         await sendVehicleServiceScheduledNotificationEmail({
             asset: populated,
             remark,
