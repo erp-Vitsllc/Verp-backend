@@ -8214,6 +8214,30 @@ export const respondToAssignment = async (req, res) => {
                     currentUser,
                     comments || 'Vehicle handover rejected.',
                 );
+            } else if (action === 'Accept' || action === 'Reject') {
+                // Close every pending Accept task for this asset (not only the actor's row).
+                // Outcome FYI rows (assignmentOutcome) are created after this and must stay Pending.
+                await DashboardAction.updateMany(
+                    {
+                        requestId: item._id,
+                        requestType: { $in: ['Asset Assignment', 'Asset'] },
+                        status: 'Pending',
+                        $or: [
+                            { extra3: { $exists: false } },
+                            { extra3: null },
+                            { extra3: '' },
+                            { extra3: { $not: { $regex: '"assignmentOutcome"\\s*:\\s*true', $options: 'i' } } },
+                        ],
+                    },
+                    {
+                        $set: {
+                            status: action === 'Reject' ? 'Rejected' : 'Approved',
+                            actionedDate: new Date(),
+                            actionedBy: currentUser,
+                            comment: comments || '',
+                        },
+                    },
+                );
             } else {
                 const existingAction = await DashboardAction.findOne({
                     requestId: item._id,
@@ -8733,15 +8757,25 @@ export const bulkRespondToAssignment = async (req, res) => {
 
                 await item.save();
 
-                // Clear Dashboard Actions
+                // Clear every pending Accept task for this asset (not only the actor's row).
                 await DashboardAction.updateMany(
-                    { requestId: item._id, assignedTo: currentUser, status: 'Pending' },
+                    {
+                        requestId: item._id,
+                        requestType: { $in: ['Asset Assignment', 'Asset'] },
+                        status: 'Pending',
+                        $or: [
+                            { extra3: { $exists: false } },
+                            { extra3: null },
+                            { extra3: '' },
+                            { extra3: { $not: { $regex: '"assignmentOutcome"\\s*:\\s*true', $options: 'i' } } },
+                        ],
+                    },
                     {
                         status: action === 'Accept' ? 'Approved' : 'Rejected',
                         actionedDate: new Date(),
                         actionedBy: currentUser,
-                        comment: comments || 'Bulk Action'
-                    }
+                        comment: comments || 'Bulk Action',
+                    },
                 );
 
                 if (bulkAssignGroupId) {
@@ -18308,6 +18342,11 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
 
             if (row.requestType === 'Asset Assignment' || row.requestType === 'Asset') {
                 if (meta?.isBulkAssignment === true) {
+                    itemsAfterCompletedFilter.push(row);
+                    continue;
+                }
+                // FYI after Accept/Reject — keep visible for assigner / parties (not an Accept task).
+                if (meta?.assignmentOutcome === true) {
                     itemsAfterCompletedFilter.push(row);
                     continue;
                 }

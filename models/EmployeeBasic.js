@@ -166,6 +166,7 @@ const employeeBasicSchema = new mongoose.Schema(
                 createdAt: { type: Date, default: Date.now },
                 document: {
                     url: { type: String }, // Storage URL (preferred)
+                    publicId: { type: String }, // Durable S3 key (same as oldDocuments)
                     data: { type: String }, // Base64 data (legacy/fallback)
                     name: { type: String },
                     mimeType: { type: String }

@@ -885,12 +885,16 @@ export async function getEmployeeOldDocumentsForClient(employeeId) {
     await Promise.all(
         list.map(async (entry) => {
             const doc = entry?.document;
-            if (!doc?.url) return;
-            if (isPresignedUrlStillFresh(doc.url)) return;
+            if (!doc) return;
+            if (!doc.url && !doc.publicId) return;
+            if (doc.url && isPresignedUrlStillFresh(doc.url)) return;
             const key = doc.publicId || normalizeS3Key(doc.url);
             if (!key) return;
             const signed = await getSignedFileUrl(key);
-            if (signed) doc.url = signed;
+            if (signed) {
+                doc.url = signed;
+                if (!doc.publicId) doc.publicId = key;
+            }
         }),
     );
     return list;

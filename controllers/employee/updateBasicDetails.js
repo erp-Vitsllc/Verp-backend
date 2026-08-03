@@ -364,6 +364,7 @@ export const updateBasicDetails = async (req, res) => {
                     if (doc.document.url) {
                         doc.document = {
                             url: doc.document.url,
+                            publicId: doc.document.publicId || undefined,
                             name: doc.document.name,
                             mimeType: doc.document.mimeType
                         };
@@ -378,6 +379,7 @@ export const updateBasicDetails = async (req, res) => {
                             );
                             doc.document = {
                                 url: uploadResult.url,
+                                publicId: uploadResult.publicId,
                                 name: doc.document.name,
                                 mimeType: doc.document.mimeType
                             };

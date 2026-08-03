@@ -61,7 +61,7 @@ export const addDocument = async (req, res) => {
 
                 documentData = {
                     name: document.name,
-                    url: uploadResult.url,
+                    url: uploadResult.publicId || uploadResult.url,
                     mimeType: document.mimeType || 'application/pdf',
                     publicId: uploadResult.publicId // S3 Key
                 };
@@ -71,7 +71,7 @@ export const addDocument = async (req, res) => {
                     name: document.name,
                     url: document.url,
                     mimeType: document.mimeType,
-                    publicId: document.publicId
+                    publicId: document.publicId || (document.url && !String(document.url).startsWith('http') ? document.url : undefined)
                 };
             }
         }
