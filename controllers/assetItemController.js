@@ -4655,6 +4655,35 @@ export const getAssetItemDetail = async (req, res) => {
                 typeName: item?.typeId?.name || '',
             });
 
+            // Header photo must be a usable URL even on light paint (otherwise <img> shows broken).
+            await Promise.all([
+                itemObj.imagePreview
+                    ? signOrKeepAttachmentUrl(itemObj.imagePreview).then((u) => {
+                          itemObj.imagePreview = u;
+                      })
+                    : null,
+                itemObj.photo
+                    ? signOrKeepAttachmentUrl(itemObj.photo).then((u) => {
+                          itemObj.photo = u;
+                      })
+                    : null,
+                itemObj.typeId?.imagePreview
+                    ? signOrKeepAttachmentUrl(itemObj.typeId.imagePreview).then((u) => {
+                          itemObj.typeId.imagePreview = u;
+                      })
+                    : null,
+                itemObj.categoryId?.imagePreview
+                    ? signOrKeepAttachmentUrl(itemObj.categoryId.imagePreview).then((u) => {
+                          itemObj.categoryId.imagePreview = u;
+                      })
+                    : null,
+                Array.isArray(itemObj.images) && itemObj.images[0]?.url
+                    ? signOrKeepAttachmentUrl(itemObj.images[0].url).then((u) => {
+                          itemObj.images[0].url = u;
+                      })
+                    : null,
+            ].filter(Boolean));
+
             res.status(200).json(itemObj);
 
             const assetIdForBg = item._id;
@@ -5487,14 +5516,17 @@ export const getAssetItemDetail = async (req, res) => {
                 const servicesToSign = (itemObj.services || []).filter(
                     (s) => String(s?._id || '') === focusServiceId,
                 );
-                signTasks = servicesToSign.map((s) => signOneService(s));
+                signTasks = [
+                    ...headerSignTasks,
+                    ...servicesToSign.map((s) => signOneService(s)),
+                ];
             } else if (wantDocumentSigning) {
                 // Document tab on-demand: sign docs/header/accessories only.
                 itemObj.deferredAttachmentSigning = false;
                 signTasks = [...nonServiceAttachmentSignTasks, vehicleAccessoriesListSignTask];
             } else {
-                // Vehicle details upgrade: skip S3 fan-out — document tab loads signed files on demand.
-                signTasks = [];
+                // Vehicle details upgrade: always sign header photo; skip heavy doc/service fan-out.
+                signTasks = [...headerSignTasks];
             }
         } else {
             signTasks = [...nonServiceAttachmentSignTasks, vehicleAccessoriesListSignTask];
@@ -11226,7 +11258,7 @@ export const deleteVehicleHandoverHistory = async (req, res) => {
             });
         }
 
-        // Only end rows may be deleted (not middle of handover/inspection chain).
+        // Only the oldest remaining row may be deleted (past rows first).
         const siblingRows = await AssetHistory.find({
             assetId: record.assetId,
             action: { $in: [...DELETABLE_HANDOVER_HISTORY_ACTIONS] },
@@ -11242,10 +11274,10 @@ export const deleteVehicleHandoverHistory = async (req, res) => {
         });
 
         const rowIndex = ordered.findIndex((row) => String(row._id) === String(historyId));
-        if (rowIndex > 0 && rowIndex < ordered.length - 1) {
+        if (rowIndex > 0) {
             return res.status(400).json({
                 message:
-                    'Cannot delete a handover in the middle of the list. Delete the previous end rows first (top or bottom) until this row is at either end.',
+                    'Cannot delete this handover yet. Delete the past (older) rows first, starting from the top of the list.',
             });
         }
 
@@ -12023,6 +12055,10 @@ export const deleteAssetDocument = async (req, res) => {
         for (const removeId of idsToDelete) {
             asset.documents.pull({ _id: removeId });
         }
+        const { syncVehicleExpiryFieldsFromLiveDocuments } = await import(
+            '../utils/vehicleDocumentRenewal.js'
+        );
+        syncVehicleExpiryFieldsFromLiveDocuments(asset);
         await asset.save();
 
         // Log to history

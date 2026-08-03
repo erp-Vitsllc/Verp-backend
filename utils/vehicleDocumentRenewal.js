@@ -237,8 +237,9 @@ export function syncVehicleExpiryFieldsFromLiveDocuments(asset) {
     if (!asset) return;
     const reg = pickLatestLiveDoc(asset, 'registration');
     const ins = pickLatestLiveDoc(asset, 'insurance');
-    if (reg?.expiryDate) asset.registrationExpiryDate = reg.expiryDate;
-    if (ins?.expiryDate) asset.insuranceExpiryDate = ins.expiryDate;
+    // Clear top-level dates when the live card is gone so progress / expiry UI cannot stay "complete".
+    asset.registrationExpiryDate = reg?.expiryDate || null;
+    asset.insuranceExpiryDate = ins?.expiryDate || null;
 }
 
 /** Prefer stored field; otherwise latest live registration document expiry. */
