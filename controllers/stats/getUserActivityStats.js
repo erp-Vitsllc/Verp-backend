@@ -16,6 +16,10 @@ import { getCompleteEmployee } from "../../services/employeeService.js";
 import { isEmployeeActiveForNotifications } from "../../utils/applyEmployeeLeftUserStatus.js";
 import { isEmployeeProfileLiveActive } from "../../utils/employeeDocumentRenewal.js";
 import {
+    pendingChangesIncludeLeftUser,
+    LEFT_USER_REQUEST_TYPE,
+} from "../../utils/employeeLeftUserWorkflow.js";
+import {
     buildProfileActivationApprovedMessage,
     buildProfileActivationEntityLine,
     buildProfileActivationPendingMessage,
@@ -285,6 +289,126 @@ const filterCompletedCompanyActivationItems = async (activityList = []) => {
         if (st === "on hold" || st === "rejected") return true;
         return awaitingHrById.has(String(item.id));
     });
+};
+
+const parseActivationExtra3 = (extra3) => {
+    if (extra3 == null || extra3 === "") return null;
+    if (typeof extra3 === "object") return extra3;
+    try {
+        return JSON.parse(extra3);
+    } catch {
+        return null;
+    }
+};
+
+/**
+ * Drop dead Profile Activation / Left User inbox rows (open profile has nothing to Accept/Reject).
+ * Also deletes orphan Left User Request dashboard actions when the queue no longer has Left User.
+ */
+const filterStaleEmployeeActivationInboxItems = async (activityList = []) => {
+    if (!Array.isArray(activityList) || activityList.length === 0) return activityList;
+
+    const employeeMongoIds = new Set();
+    activityList.forEach((item) => {
+        const type = String(item?.type || "").trim();
+        if (type !== "Profile Activation" && type !== LEFT_USER_REQUEST_TYPE) return;
+        const idStr = String(item?.id || "");
+        if (mongoose.Types.ObjectId.isValid(idStr)) {
+            employeeMongoIds.add(idStr);
+        }
+    });
+    if (!employeeMongoIds.size) return activityList;
+
+    const employees = await EmployeeBasic.find({ _id: { $in: [...employeeMongoIds] } })
+        .select("_id status profileApprovalStatus profileStatus pendingReactivationChanges")
+        .lean()
+        .maxTimeMS(6000);
+
+    const byId = new Map(employees.map((e) => [String(e._id), e]));
+    const orphanLeftUserActionIds = [];
+    const orphanRejectedProfileActionIds = [];
+
+    const filtered = activityList.filter((item) => {
+        const type = String(item?.type || "").trim();
+        if (type !== "Profile Activation" && type !== LEFT_USER_REQUEST_TYPE) return true;
+
+        const emp = byId.get(String(item.id));
+        const status = String(item.status || "").trim();
+        const meta = parseActivationExtra3(item.extra3);
+
+        if (type === LEFT_USER_REQUEST_TYPE) {
+            if (status !== "Pending") return false;
+            const stillPending =
+                emp &&
+                String(emp.status || "").trim() !== "Left User" &&
+                pendingChangesIncludeLeftUser(emp.pendingReactivationChanges);
+            if (!stillPending) {
+                if (item.actionId && mongoose.Types.ObjectId.isValid(String(item.actionId))) {
+                    orphanLeftUserActionIds.push(String(item.actionId));
+                }
+                return false;
+            }
+            return true;
+        }
+
+        // Profile Activation
+        if (status === "Pending") {
+            if (!emp) return false;
+            const approval = String(emp.profileApprovalStatus || "").toLowerCase();
+            const hasLeftUser = pendingChangesIncludeLeftUser(emp.pendingReactivationChanges);
+            // Live HR task only while submitted, or Left User still queued for Accept.
+            return approval === "submitted" || hasLeftUser;
+        }
+
+        if (status === "On Hold") {
+            return meta?.activationViewerRole === "submitter" || item.scope === "outgoing";
+        }
+
+        if (status === "Rejected") {
+            // Only submitter follow-up rows — never HR's closed assignee ghost.
+            if (meta?.activationViewerRole !== "submitter" && item.scope !== "outgoing") {
+                if (item.actionId && mongoose.Types.ObjectId.isValid(String(item.actionId))) {
+                    orphanRejectedProfileActionIds.push(String(item.actionId));
+                }
+                return false;
+            }
+            // Reactivation reject on an already-active profile with empty queue: nothing to do.
+            if (!emp) return false;
+            const profileStatus = String(emp.profileStatus || "").toLowerCase();
+            const approval = String(emp.profileApprovalStatus || "").toLowerCase();
+            const queueLen = Array.isArray(emp.pendingReactivationChanges)
+                ? emp.pendingReactivationChanges.length
+                : 0;
+            if (profileStatus === "active" && approval === "active" && queueLen === 0) {
+                if (item.actionId && mongoose.Types.ObjectId.isValid(String(item.actionId))) {
+                    orphanRejectedProfileActionIds.push(String(item.actionId));
+                }
+                return false;
+            }
+            // First-activation reject: submitter still needs to fix / resubmit.
+            return profileStatus === "inactive" || approval === "rejected";
+        }
+
+        // Approved outcomes are informational — hide from actionable inbox lists.
+        if (status === "Approved") return false;
+
+        return true;
+    });
+
+    const orphanIds = [...orphanLeftUserActionIds, ...orphanRejectedProfileActionIds];
+    if (orphanIds.length > 0) {
+        try {
+            const DashboardAction = (await import("../../models/DashboardAction.js")).default;
+            await DashboardAction.deleteMany({
+                _id: { $in: orphanIds },
+                requestType: { $in: [LEFT_USER_REQUEST_TYPE, "Profile Activation"] },
+            });
+        } catch (err) {
+            console.error("[getUserActivityStats] orphan activation inbox cleanup:", err);
+        }
+    }
+
+    return filtered;
 };
 
 /**
@@ -1985,7 +2109,9 @@ export const getUserActivityStats = async (req, res) => {
             });
         });
 
-        const finalActivityList = await filterCompletedCompanyActivationItems(activityList);
+        const finalActivityList = await filterStaleEmployeeActivationInboxItems(
+            await filterCompletedCompanyActivationItems(activityList),
+        );
 
         // Final counts
         const pendingCount = finalActivityList.filter(i => i.status === 'Pending').length;

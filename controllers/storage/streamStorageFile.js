@@ -46,10 +46,22 @@ export const streamStorageFile = async (req, res) => {
         return res.status(500).json({ message: 'Empty file in storage' });
     } catch (error) {
         const status = error?.$metadata?.httpStatusCode;
+        const raw = req.query?.key ?? req.query?.url ?? req.query?.publicId;
+        const key = typeof raw === 'string' ? normalizeS3Key(raw.trim()) : null;
         if (status === 404 || error?.name === 'NoSuchKey' || error?.name === 'NotFound') {
-            return res.status(404).json({ message: 'File not found in storage' });
+            console.warn(
+                `[streamStorageFile] missing object bucket=${bucketName || '(unset)'} key=${key || raw || '(none)'}`,
+            );
+            return res.status(404).json({
+                message: 'File not found in storage',
+                bucket: bucketName || null,
+                key: key || null,
+            });
         }
-        console.error('[streamStorageFile]', error?.message || error);
+        console.error(
+            `[streamStorageFile] bucket=${bucketName || '(unset)'} key=${key || raw || '(none)'}`,
+            error?.message || error,
+        );
         return res.status(500).json({ message: 'Failed to load file from storage' });
     }
 };

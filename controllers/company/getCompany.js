@@ -2,7 +2,6 @@ import Company from "../../models/Company.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { calculateCompanyActivationProgress } from "../../utils/companyActivation.js";
 import { isRequestUserDesignatedFlowchartHr } from "../../utils/isDesignatedFlowchartHr.js";
-import { signCompanyDocumentArray } from "../../utils/signCompanyDocumentFields.js";
 import { signCompanyProfileForResponse } from "../../utils/signCompanyProfileForResponse.js";
 import { loadCompanyFullProfile } from "../../services/companyPartitionService.js";
 
@@ -46,19 +45,8 @@ export const getCompany = async (req, res) => {
             return res.status(404).json({ message: "Company not found" });
         }
 
-        const { getSignedFileUrl } = await import("../../utils/s3Upload.js");
+        const { signOrKeepAttachmentUrl } = await import("../../utils/s3Upload.js");
         const AssetItem = await import("../../models/AssetItem.js").then(m => m.default);
-
-        // Core Documents
-        if (companyObj.tradeLicenseAttachment) {
-            companyObj.tradeLicenseAttachment = await getSignedFileUrl(companyObj.tradeLicenseAttachment);
-        }
-        if (companyObj.establishmentCardAttachment) {
-            companyObj.establishmentCardAttachment = await getSignedFileUrl(companyObj.establishmentCardAttachment);
-        }
-        if (companyObj.logo) {
-            companyObj.logo = await getSignedFileUrl(companyObj.logo);
-        }
 
         // Add Financial stats to responsibilities for FlowChart display
         if (companyObj.responsibilities && Array.isArray(companyObj.responsibilities)) {
@@ -92,20 +80,6 @@ export const getCompany = async (req, res) => {
             }
         }
 
-        // Custom / archived / insurance / ejari rows (document.url + legacy attachment)
-        if (companyObj.documents) {
-            companyObj.documents = await signCompanyDocumentArray(companyObj.documents);
-        }
-        if (companyObj.insurance) {
-            companyObj.insurance = await signCompanyDocumentArray(companyObj.insurance);
-        }
-        if (companyObj.ejari) {
-            companyObj.ejari = await signCompanyDocumentArray(companyObj.ejari);
-        }
-        if (companyObj.oldDocuments) {
-            companyObj.oldDocuments = await signCompanyDocumentArray(companyObj.oldDocuments);
-        }
-
         const viewerIsDesignatedFlowchartHr = await isRequestUserDesignatedFlowchartHr(req);
 
         if (Array.isArray(companyObj.pendingNotRenewRequests) && companyObj.pendingNotRenewRequests.length) {
@@ -113,7 +87,7 @@ export const getCompany = async (req, res) => {
                 const key = (p.supportingAttachmentKey || "").trim();
                 if (key) {
                     try {
-                        p.supportingAttachmentUrl = await getSignedFileUrl(key);
+                        p.supportingAttachmentUrl = await signOrKeepAttachmentUrl(key);
                     } catch {
                         p.supportingAttachmentUrl = "";
                     }
@@ -140,8 +114,8 @@ export const getCompany = async (req, res) => {
         // 3. Sign URLs for asset artifacts
         companyObj.assets = await Promise.all(companyAssets.map(async (asset) => {
             const assetObj = asset.toObject();
-            if (assetObj.photo) assetObj.photo = await getSignedFileUrl(assetObj.photo);
-            if (assetObj.invoiceFile) assetObj.invoiceFile = await getSignedFileUrl(assetObj.invoiceFile);
+            if (assetObj.photo) assetObj.photo = await signOrKeepAttachmentUrl(assetObj.photo);
+            if (assetObj.invoiceFile) assetObj.invoiceFile = await signOrKeepAttachmentUrl(assetObj.invoiceFile);
             return assetObj;
         }));
 

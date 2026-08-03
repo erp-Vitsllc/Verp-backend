@@ -426,6 +426,17 @@ export const getSignedFileUrl = async (key, expiresIn = 86400) => {
     }
 };
 
+/**
+ * Sign a storage key/URL for API responses. On failure keep the original value
+ * so clients can still open via /storage/file (key) instead of losing the file.
+ */
+export async function signOrKeepAttachmentUrl(value, expiresIn = 86400) {
+    if (value == null || value === '') return value;
+    if (typeof value !== 'string') return value;
+    const signed = await getSignedFileUrl(value, expiresIn);
+    return signed || value;
+}
+
 function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }

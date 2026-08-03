@@ -3,7 +3,7 @@ import AssetItem from "../../models/AssetItem.js";
 import Fine from "../../models/Fine.js";
 import Reward from "../../models/Reward.js";
 import Loan from "../../models/Loan.js";
-import { getSignedFileUrl } from "../../utils/s3Upload.js";
+import { getSignedFileUrl, signOrKeepAttachmentUrl } from "../../utils/s3Upload.js";
 import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { isRequestUserDesignatedFlowchartHr } from "../../utils/isDesignatedFlowchartHr.js";
 import { mapPendingReactivationEntriesWithIds } from "../../utils/pendingReactivationEntryId.js";
@@ -156,7 +156,7 @@ export const getEmployeeById = async (req, res) => {
                 if (asset.invoiceFile) {
                     try {
                         const signedUrl = await getSignedFileUrl(asset.invoiceFile);
-                        return { ...asset, invoiceFile: signedUrl };
+                        return { ...asset, invoiceFile: signedUrl || asset.invoiceFile };
                     } catch (err) {
                         console.error(`[getEmployeeById] Failed to sign invoice URL for asset ${asset.assetId}:`, err);
                         return asset;
@@ -210,7 +210,7 @@ export const getEmployeeById = async (req, res) => {
                 const key = (p.supportingAttachmentKey || "").trim();
                 if (key) {
                     try {
-                        p.supportingAttachmentUrl = await getSignedFileUrl(key);
+                        p.supportingAttachmentUrl = await signOrKeepAttachmentUrl(key);
                     } catch {
                         p.supportingAttachmentUrl = "";
                     }

@@ -1,4 +1,4 @@
-import { getSignedFileUrl, attachmentValueForDatabase } from './s3Upload.js';
+import { signOrKeepAttachmentUrl, attachmentValueForDatabase, normalizeS3Key } from './s3Upload.js';
 
 const OWNER_DOC_KEYS = [
     'passport',
@@ -31,7 +31,16 @@ export function normalizeCompanyUpdateAttachments(updateData) {
                 doc.attachment = attachmentValueForDatabase(doc.attachment);
             }
             if (doc.document?.url) {
-                doc.document.url = attachmentValueForDatabase(doc.document.url);
+                const stored = attachmentValueForDatabase(doc.document.url);
+                doc.document.url = stored;
+                if (stored && !String(stored).startsWith('http') && !String(stored).startsWith('data:')) {
+                    doc.document.publicId = stored;
+                } else if (doc.document.publicId) {
+                    doc.document.publicId = attachmentValueForDatabase(doc.document.publicId) || doc.document.publicId;
+                }
+            } else if (doc.document?.publicId) {
+                doc.document.publicId = attachmentValueForDatabase(doc.document.publicId) || doc.document.publicId;
+                if (!doc.document.url) doc.document.url = doc.document.publicId;
             }
         }
     };
@@ -61,11 +70,19 @@ export function normalizeCompanyUpdateAttachments(updateData) {
 /** Sign `document.url` and legacy `attachment` on a company document row (live, old, memo, etc.). */
 export async function signCompanyDocumentArrayEntry(doc) {
     if (!doc || typeof doc !== 'object') return doc;
-    if (doc.document?.url) {
-        doc.document.url = await getSignedFileUrl(doc.document.url);
+    if (doc.document && typeof doc.document === 'object') {
+        const key = doc.document.publicId || doc.document.url;
+        if (key) {
+            const signed = await signOrKeepAttachmentUrl(String(key));
+            if (signed) doc.document.url = signed;
+            if (!doc.document.publicId) {
+                const normalized = normalizeS3Key(String(key));
+                if (normalized) doc.document.publicId = normalized;
+            }
+        }
     }
     if (typeof doc.attachment === 'string' && doc.attachment.trim()) {
-        doc.attachment = await getSignedFileUrl(doc.attachment);
+        doc.attachment = await signOrKeepAttachmentUrl(doc.attachment);
     }
     return doc;
 }

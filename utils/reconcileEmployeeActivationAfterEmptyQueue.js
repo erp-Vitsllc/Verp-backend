@@ -53,21 +53,26 @@ export async function withdrawEmployeeActivationSubmissionIfQueueEmpty(doc, { ac
 
     try {
         const DashboardAction = (await import("../models/DashboardAction.js")).default;
-        await DashboardAction.updateMany(
-            {
-                requestId: doc._id,
-                requestType: "Profile Activation",
-                status: { $in: ["Pending", "On Hold"] },
-            },
-            {
-                status: "Rejected",
-                actionedDate: new Date(),
-                actionedBy: actionedBy || null,
-                comment: "Withdrawn — activation queue empty.",
-            },
-        );
+        // Delete open HR/submitter Pending/On Hold rows — do not leave Rejected ghosts in the inbox.
+        await DashboardAction.deleteMany({
+            requestId: doc._id,
+            requestType: "Profile Activation",
+            status: { $in: ["Pending", "On Hold"] },
+        });
     } catch (err) {
         console.error("[withdrawEmployeeActivationSubmissionIfQueueEmpty] dashboard:", err);
+    }
+
+    try {
+        const { closeLeftUserDashboardTasks } = await import("./employeeLeftUserWorkflow.js");
+        await closeLeftUserDashboardTasks({
+            employeeMongoId: doc._id,
+            status: "Rejected",
+            actionedBy: actionedBy || null,
+            comment: "Withdrawn — activation queue empty.",
+        });
+    } catch (err) {
+        console.error("[withdrawEmployeeActivationSubmissionIfQueueEmpty] left user:", err);
     }
 
     return true;

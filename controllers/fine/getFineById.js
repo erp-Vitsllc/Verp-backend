@@ -309,7 +309,7 @@ export const getFineById = async (req, res) => {
         if (fine.attachment?.publicId) {
             try {
                 const signedUrl = await getSignedFileUrl(fine.attachment.publicId);
-                fine.attachment.url = signedUrl;
+                if (signedUrl) fine.attachment.url = signedUrl;
             } catch (err) {
                 console.error("Error signing attachment URL:", err);
             }
@@ -329,7 +329,8 @@ export const getFineById = async (req, res) => {
                     if (!item) return;
                     if (item.publicId) {
                         try {
-                            item.url = await getSignedFileUrl(item.publicId);
+                            const signedUrl = await getSignedFileUrl(item.publicId);
+                            if (signedUrl) item.url = signedUrl;
                         } catch (err) {
                             console.error(`Error signing attachment URL [${index}]:`, err);
                         }

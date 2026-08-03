@@ -35,6 +35,7 @@ import {
     closeLeftUserDashboardTasks,
     pendingChangesIncludeLeftUser,
 } from "../../utils/employeeLeftUserWorkflow.js";
+import { isRequestUserDesignatedFlowchartHr } from "../../utils/isDesignatedFlowchartHr.js";
 import {
     pendingEntryIncludedInSubmittedCards,
     resolveLatestActivationSubmissionLabels,
@@ -141,13 +142,14 @@ export const approveProfile = async (req, res) => {
         }
 
         const canActAsHr = await isEmployeeProfileActivationDesignatedHr(req, employee);
+        const isFlowchartHr = await isRequestUserDesignatedFlowchartHr(req);
         const approvalStatusNorm = String(employee.profileApprovalStatus || "").trim().toLowerCase();
         const pendingQueue = Array.isArray(employee.pendingReactivationChanges)
             ? employee.pendingReactivationChanges
             : [];
-        // Left User queue: HR/admin may approve without a prior Send for Activation.
+        // Left User: only designated Flowchart HR may Accept (not portal admin bypass).
         const leftUserDirect =
-            pendingChangesIncludeLeftUser(pendingQueue) && canActAsHr;
+            pendingChangesIncludeLeftUser(pendingQueue) && isFlowchartHr;
         const effectiveDirectHr = Boolean(directHrBypass || leftUserDirect);
 
         if (effectiveDirectHr) {
@@ -222,6 +224,18 @@ export const approveProfile = async (req, res) => {
             : leftUserDirect || !effectiveDirectHr
               ? sortedChanges
               : [];
+
+        const leftUserInSelection = changesToApply.some(
+            (change) =>
+                String(change?.section || "").toLowerCase() === "workdetails" &&
+                isLeftUserStatus(change?.proposedData?.status),
+        );
+        if (leftUserInSelection && !isFlowchartHr) {
+            return res.status(403).json({
+                message:
+                    "Only Flowchart HR can approve Left User status. The request stays queued for HR (email + dashboard task).",
+            });
+        }
 
         for (const change of changesToApply) {
             if (String(change?.section || "").toLowerCase() !== "documents") continue;
@@ -573,6 +587,11 @@ export const approveProfile = async (req, res) => {
             .filter((entry) => {
                 const entryId = String(entry.__applyId);
                 if (appliedIds.has(entryId)) return false;
+                const isLeftUserRow =
+                    String(entry?.section || "").toLowerCase() === "workdetails" &&
+                    isLeftUserStatus(entry?.proposedData?.status);
+                // Admin apply must not silently drop Left User — only Flowchart HR applies/clears it.
+                if (isLeftUserRow && !isFlowchartHr) return true;
                 if (effectiveDirectHr && hasExplicitSelection && scopedIdSet.has(entryId)) return false;
                 return true;
             })

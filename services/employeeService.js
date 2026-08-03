@@ -630,8 +630,9 @@ export const getCompleteEmployee = async (id) => {
 
         // --- POST-PROCESSING: Signed URL Generation ---
         const signUrl = async (obj, context = 'unknown') => {
-            if (!obj || !obj.url) return;
-            if (isPresignedUrlStillFresh(obj.url)) return;
+            if (!obj) return;
+            if (!obj.url && !obj.publicId) return;
+            if (obj.url && isPresignedUrlStillFresh(obj.url)) return;
 
             let keyToSign = obj?.publicId;
 

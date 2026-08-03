@@ -11,7 +11,6 @@ import {
 import { isEmployeeProfileActivationDesignatedHr } from "../../utils/isEmployeeProfileActivationDesignatedHr.js";
 import {
     closeLeftUserDashboardTasks,
-    pendingChangesIncludeLeftUser,
 } from "../../utils/employeeLeftUserWorkflow.js";
 import { resolveEmployeeProfileStatusWrite } from "../../utils/employeeProfileStatusLock.js";
 import { revertAllPendingEmployeeChanges } from "../../utils/revertPendingEmployeeProfileChange.js";
@@ -37,8 +36,6 @@ export const rejectProfile = async (req, res) => {
         }
 
         const employeeId = employee.employeeId;
-
-        const hadLeftUserPending = pendingChangesIncludeLeftUser(employee.pendingReactivationChanges);
 
         const basicDoc = await EmployeeBasic.findOne({ employeeId });
         if (basicDoc && Array.isArray(basicDoc.pendingReactivationChanges) && basicDoc.pendingReactivationChanges.length > 0) {
@@ -140,7 +137,7 @@ export const rejectProfile = async (req, res) => {
             }
         }
 
-        // Close HR / interim rows (submitter outcome row is upserted above).
+        // Close HR / interim rows — delete them so HR does not keep a dead Rejected inbox item.
         try {
             const closeQuery = {
                 requestId: updated._id,
@@ -150,27 +147,21 @@ export const rejectProfile = async (req, res) => {
             if (submitterForNotify?._id) {
                 closeQuery.assignedTo = { $ne: submitterForNotify._id };
             }
-            await DashboardAction.updateMany(closeQuery, {
-                status: "Rejected",
-                actionedDate: new Date(),
-                actionedBy: req.user?.employeeObjectId || req.user?._id,
-                comment: reason || "",
-            });
+            await DashboardAction.deleteMany(closeQuery);
         } catch (syncErr) {
             console.error("[RejectProfile] Dashboard Update Error:", syncErr);
         }
 
-        if (hadLeftUserPending) {
-            try {
-                await closeLeftUserDashboardTasks({
-                    employeeMongoId: updated._id,
-                    status: "Rejected",
-                    actionedBy: req.user?.employeeObjectId || req.user?._id,
-                    comment: reason || "",
-                });
-            } catch (syncErr) {
-                console.error("[RejectProfile] Left User dashboard sync:", syncErr);
-            }
+        // Always clear Left User Request tasks for this employee (queue is emptied on reject).
+        try {
+            await closeLeftUserDashboardTasks({
+                employeeMongoId: updated._id,
+                status: "Rejected",
+                actionedBy: req.user?.employeeObjectId || req.user?._id,
+                comment: reason || "",
+            });
+        } catch (syncErr) {
+            console.error("[RejectProfile] Left User dashboard sync:", syncErr);
         }
 
         // Get complete employee data for response

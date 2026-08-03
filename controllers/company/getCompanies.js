@@ -78,12 +78,12 @@ export const getCompanies = async (req, res) => {
 
         // Step 3: sign logo URLs (local crypto, fast but defensive)
         const tSign = Date.now();
-        const { getSignedFileUrl } = await import("../../utils/s3Upload.js");
+        const { signOrKeepAttachmentUrl } = await import("../../utils/s3Upload.js");
         const finalizedCompanies = await Promise.all(companies.map(async (company) => {
             company.employeeCount = countByCompany.get(String(company._id)) || 0;
             if (company.logo) {
                 try {
-                    company.logo = await getSignedFileUrl(company.logo);
+                    company.logo = await signOrKeepAttachmentUrl(company.logo);
                 } catch (err) {
                     console.warn("getCompanies: failed to sign logo for", company._id, err.message);
                 }

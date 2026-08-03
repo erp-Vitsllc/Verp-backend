@@ -6,7 +6,7 @@ import EmployeeBasic from '../models/EmployeeBasic.js';
 import AssetHistory from '../models/AssetHistory.js';
 import Company from '../models/Company.js';
 import User from '../models/User.js';
-import { getSignedFileUrl, uploadDocumentToS3, persistStoredAttachmentValue, deleteDocumentFromS3, normalizeS3Key } from '../utils/s3Upload.js';
+import { signOrKeepAttachmentUrl, uploadDocumentToS3, persistStoredAttachmentValue, deleteDocumentFromS3, normalizeS3Key } from '../utils/s3Upload.js';
 import { generatePdf } from '../utils/generatePdf.js';
 import { sendAssetAssignmentEmail } from '../utils/sendAssetAssignmentEmail.js';
 import {
@@ -944,7 +944,7 @@ const resolvePendingAssignmentAckMeta = async (asset) => {
  * company email + user account → assignee; otherwise → primary reportee.
  * Updates actionRequiredBy, inbox row, and emails the newly correct person when healed.
  */
-const healMisroutedAssignmentInboxTasks = async () => {
+export const healMisroutedAssignmentInboxTasks = async () => {
     try {
         const pendingAssets = await AssetItem.find({
             assignedToType: 'Employee',
@@ -1072,6 +1072,101 @@ const healMisroutedAssignmentInboxTasks = async () => {
                     pendingAssignment: true,
                 }).catch(() => null);
             }
+        }
+    } catch {
+        /* non-fatal */
+    }
+};
+
+/** Bell/inbox rows for assigner (+ counterpart) when assignment is accepted or rejected. */
+const notifyAssignmentOutcomeDashboard = async ({
+    asset,
+    action,
+    actorEmp,
+    currentUserId,
+    comments = '',
+}) => {
+    try {
+        if (!asset?._id || (action !== 'Accept' && action !== 'Reject')) return;
+        const actorId = String(actorEmp?._id || currentUserId || '');
+        const outcomeLabel = action === 'Reject' ? 'rejected' : 'accepted';
+        const assetLabel = `${asset.assetId || ''} — ${asset.name || ''}`.trim();
+        const actorName = empAckDisplayName(actorEmp) || 'User';
+
+        const recipients = [];
+        const seen = new Set();
+        const pushEmp = (emp) => {
+            if (!emp) return;
+            const id = String(emp._id || emp);
+            if (!id || seen.has(id) || (actorId && id === actorId)) return;
+            seen.add(id);
+            recipients.push(emp._id ? emp : { _id: emp });
+        };
+
+        let assigner = asset.assignedBy;
+        if (assigner && !assigner.firstName && !assigner.employeeId) {
+            assigner = await EmployeeBasic.findById(assigner)
+                .select('firstName lastName employeeId')
+                .lean()
+                .catch(() => null);
+        }
+        pushEmp(assigner);
+
+        if (asset.assignedToType === 'Employee' && asset.assignedTo) {
+            let assignee = asset.assignedTo;
+            if (!assignee.firstName && !assignee.employeeId) {
+                assignee = await EmployeeBasic.findById(assignee)
+                    .select(
+                        'firstName lastName employeeId enablePortalAccess primaryReportee companyEmail',
+                    )
+                    .populate('primaryReportee', 'firstName lastName employeeId')
+                    .lean()
+                    .catch(() => null);
+            }
+            if (assignee) {
+                const canSelf = await assigneeCanSelfAcknowledgeAssignment(assignee);
+                if (canSelf) {
+                    pushEmp(assignee);
+                } else {
+                    pushEmp(assignee.primaryReportee);
+                    // Reportee acted — also inform the employee the asset is for
+                    if (actorId && String(assignee._id) !== actorId) {
+                        pushEmp(assignee);
+                    }
+                }
+            }
+        }
+
+        for (const r of recipients) {
+            const emp =
+                r.firstName || r.employeeId
+                    ? r
+                    : await EmployeeBasic.findById(r._id || r)
+                          .select('firstName lastName employeeId')
+                          .lean()
+                          .catch(() => null);
+            if (!emp?._id) continue;
+            await DashboardAction.create({
+                assignedTo: emp._id,
+                assignedToEmpId: emp.employeeId,
+                requestId: asset._id,
+                requestType: 'Asset Assignment',
+                status: 'Pending',
+                subjectEmployeeId: asset.assignedTo?.employeeId || emp.employeeId || '',
+                subjectName:
+                    empAckDisplayName(asset.assignedTo) ||
+                    empAckDisplayName(emp) ||
+                    '',
+                requestedByName: actorName,
+                extra1: `Assignment ${outcomeLabel}: ${assetLabel}`,
+                extra2: action === 'Reject' ? 'Assignment Rejected' : 'Assignment Accepted',
+                extra3: JSON.stringify({
+                    assignmentOutcome: true,
+                    outcome: action,
+                    assetMongoId: String(asset._id),
+                }),
+                comment: comments || '',
+            });
         }
     } catch {
         /* non-fatal */
@@ -1267,10 +1362,10 @@ export const getAssetItems = async (req, res) => {
                 itemObj.accessories = filterAccessoriesHidingPendingAdds(itemObj.accessories, canSeePending, itemObj.status);
             }
             if (itemObj.photo) {
-                itemObj.photo = await getSignedFileUrl(itemObj.photo);
+                itemObj.photo = await signOrKeepAttachmentUrl(itemObj.photo);
             }
             if (itemObj.imagePreview) {
-                itemObj.imagePreview = await getSignedFileUrl(itemObj.imagePreview);
+                itemObj.imagePreview = await signOrKeepAttachmentUrl(itemObj.imagePreview);
             }
             return itemObj;
         }));
@@ -2165,10 +2260,10 @@ export const getVehicleFleetServiceRequests = async (req, res) => {
                     continue;
                 }
                 const [attachment, quotation2, quotation3, invoice] = await Promise.all([
-                    s.attachment ? getSignedFileUrl(s.attachment) : Promise.resolve(null),
-                    s.quotation2 ? getSignedFileUrl(s.quotation2) : Promise.resolve(null),
-                    s.quotation3 ? getSignedFileUrl(s.quotation3) : Promise.resolve(null),
-                    s.invoice ? getSignedFileUrl(s.invoice) : Promise.resolve(null),
+                    s.attachment ? signOrKeepAttachmentUrl(s.attachment) : Promise.resolve(null),
+                    s.quotation2 ? signOrKeepAttachmentUrl(s.quotation2) : Promise.resolve(null),
+                    s.quotation3 ? signOrKeepAttachmentUrl(s.quotation3) : Promise.resolve(null),
+                    s.invoice ? signOrKeepAttachmentUrl(s.invoice) : Promise.resolve(null),
                 ]);
                 const wfMatch = wfSid && String(wfSid) === String(s._id);
                 const stored = s.workflowSnapshot;
@@ -2355,12 +2450,12 @@ export const getAllAssignedAssets = async (req, res) => {
                 itemObj.accessories = filterAccessoriesHidingPendingAdds(itemObj.accessories, canSeePending, itemObj.status);
             }
             if (itemObj.invoiceFile) {
-                itemObj.invoiceFile = await getSignedFileUrl(itemObj.invoiceFile);
+                itemObj.invoiceFile = await signOrKeepAttachmentUrl(itemObj.invoiceFile);
             }
             if (itemObj.documents && itemObj.documents.length > 0) {
                 for (let doc of itemObj.documents) {
                     if (doc.attachment) {
-                        doc.attachment = await getSignedFileUrl(doc.attachment);
+                        doc.attachment = await signOrKeepAttachmentUrl(doc.attachment);
                     }
                 }
             }
@@ -5074,6 +5169,30 @@ export const getAssetItemDetail = async (req, res) => {
             /* non-fatal */
         }
 
+        // Clear info-only Accept/Reject outcome bells once the user opens the asset
+        try {
+            if (currentEmpId && item?._id) {
+                await DashboardAction.updateMany(
+                    {
+                        requestId: item._id,
+                        assignedTo: currentEmpId,
+                        requestType: 'Asset Assignment',
+                        status: 'Pending',
+                        extra3: { $regex: '"assignmentOutcome"\\s*:\\s*true', $options: 'i' },
+                    },
+                    {
+                        $set: {
+                            status: 'Approved',
+                            actionedDate: new Date(),
+                            actionedBy: currentEmpId,
+                        },
+                    },
+                );
+            }
+        } catch {
+            /* non-fatal */
+        }
+
         // Light first-paint: shrink JSON (services remarks / gallery / accessories blobs)
         // so the details shell can render before full attachment signing.
         if (deferLightDetail) {
@@ -5182,7 +5301,7 @@ export const getAssetItemDetail = async (req, res) => {
             );
         }
 
-        const signKey = (key) => (key ? getSignedFileUrl(key) : Promise.resolve(key));
+        const signKey = (key) => (key ? signOrKeepAttachmentUrl(key) : Promise.resolve(key));
 
         const signMortgageAttachment = async (val) => {
             if (val == null || val === '') return val;
@@ -6257,6 +6376,8 @@ export const assignAssetItem = async (req, res) => {
                             { upsert: true, new: true, setDefaultsOnInsert: true },
                         );
                         await healDuplicatePendingAssignmentDashboardRows(item._id).catch(() => null);
+                        // Ensure Accept task sits on primary reportee when assignee has no ERP User
+                        await healMisroutedAssignmentInboxTasks().catch(() => null);
                         if (fleetVehicle && fleetHandoverHistoryId && assigner?._id) {
                             await upsertHandoverAssignerDashboardAction({
                                 asset: item,
@@ -6802,7 +6923,7 @@ export const bulkAssignAssetItems = async (req, res) => {
                         assignedTo: actionRequiredBy,
                         assignedToEmpId: dashboardActor?.employeeId,
                         requestId: assetIds[0],
-                        requestType: 'Asset',
+                        requestType: 'Asset Assignment',
                         subjectEmployeeId: subjectEmp?.employeeId,
                         subjectName: `${subjectEmp?.firstName || ''} ${subjectEmp?.lastName || ''}`.trim(),
                         requestedByName: `${assigner?.firstName || 'System'} ${assigner?.lastName || ''}`.trim(),
@@ -6821,7 +6942,7 @@ export const bulkAssignAssetItems = async (req, res) => {
                         assignedTo: actionRequiredBy,
                         assignedToEmpId: dashboardActor?.employeeId,
                         requestId: one._id,
-                        requestType: 'Asset',
+                        requestType: 'Asset Assignment',
                         subjectEmployeeId: subjectEmp?.employeeId,
                         subjectName: `${subjectEmp?.firstName || ''} ${subjectEmp?.lastName || ''}`.trim(),
                         requestedByName: `${assigner?.firstName || 'System'} ${assigner?.lastName || ''}`.trim(),
@@ -6830,6 +6951,7 @@ export const bulkAssignAssetItems = async (req, res) => {
                         status: 'Pending',
                     });
                 }
+                await healMisroutedAssignmentInboxTasks().catch(() => null);
             } catch (err) {
             }
         }
@@ -7616,13 +7738,9 @@ export const respondToAssignment = async (req, res) => {
 
                 // 2. Notify the subject (employee or delegated primary reportee) if they were NOT the one who acted
                 if (item.assignedToType === 'Employee' && item.assignedTo && item.assignedTo._id.toString() !== currentUser.toString()) {
-                    // If assignee has portal access, notify assignee.
-                    // Otherwise notify their primaryReportee delegate.
-                    const assigneeHasPortalAccess = typeof item.assignedTo.enablePortalAccess === 'boolean'
-                        ? item.assignedTo.enablePortalAccess
-                        : null;
-
-                    if (assigneeHasPortalAccess === true) {
+                    // Same rule as Accept routing: Active User + portal → assignee; else primary reportee
+                    const canSelf = await assigneeCanSelfAcknowledgeAssignment(item.assignedTo);
+                    if (canSelf) {
                         pushRecipient(item.assignedTo);
                     } else {
                         const managerId = item.assignedTo.primaryReportee?._id || item.assignedTo.primaryReportee;
@@ -7659,6 +7777,14 @@ export const respondToAssignment = async (req, res) => {
                         attachments: responseInvPdf
                     });
                 }
+
+                await notifyAssignmentOutcomeDashboard({
+                    asset: item,
+                    action,
+                    actorEmp: actor,
+                    currentUserId: currentUser,
+                    comments,
+                });
             } catch (err) {
             }
         };
@@ -8390,6 +8516,14 @@ export const respondToAssignment = async (req, res) => {
                         attachments: acceptPdfAttachments,
                     });
                 }
+
+                await notifyAssignmentOutcomeDashboard({
+                    asset: item,
+                    action: 'Accept',
+                    actorEmp: signerEmp,
+                    currentUserId: currentUser,
+                    comments,
+                });
             } catch (acceptNotifyErr) {
             }
 
@@ -10510,7 +10644,7 @@ export const addAssetImage = async (req, res) => {
         await item.save();
 
         const savedImage = item.images[item.images.length - 1].toObject();
-        savedImage.url = await getSignedFileUrl(savedImage.url);
+        savedImage.url = await signOrKeepAttachmentUrl(savedImage.url);
 
         res.status(200).json(savedImage);
     } catch (error) {
@@ -10696,7 +10830,7 @@ export const getAssetHistory = async (req, res) => {
                         details?.receiverAssessment ||
                         details?.vehicleAssessmentReportByReceiver;
                     if (hasHandoverMedia && details) {
-                        await signHandoverAssessmentMediaInDetails(details, getSignedFileUrl);
+                        await signHandoverAssessmentMediaInDetails(details, signOrKeepAttachmentUrl);
                     }
                     return slim;
                 }),
@@ -10762,41 +10896,41 @@ export const getAssetHistory = async (req, res) => {
             }
 
             if (recordObj.file) {
-                recordObj.file = await getSignedFileUrl(recordObj.file);
+                recordObj.file = await signOrKeepAttachmentUrl(recordObj.file);
             }
             if (recordObj.details) {
                 const d = recordObj.details;
-                if (d.invoice) d.invoice = await getSignedFileUrl(d.invoice);
-                if (d.invoiceFile) d.invoiceFile = await getSignedFileUrl(d.invoiceFile);
-                if (d.attachment) d.attachment = await getSignedFileUrl(d.attachment);
-                if (d.serviceRecord?.invoice) d.serviceRecord.invoice = await getSignedFileUrl(d.serviceRecord.invoice);
-                if (d.serviceRecord?.attachment) d.serviceRecord.attachment = await getSignedFileUrl(d.serviceRecord.attachment);
+                if (d.invoice) d.invoice = await signOrKeepAttachmentUrl(d.invoice);
+                if (d.invoiceFile) d.invoiceFile = await signOrKeepAttachmentUrl(d.invoiceFile);
+                if (d.attachment) d.attachment = await signOrKeepAttachmentUrl(d.attachment);
+                if (d.serviceRecord?.invoice) d.serviceRecord.invoice = await signOrKeepAttachmentUrl(d.serviceRecord.invoice);
+                if (d.serviceRecord?.attachment) d.serviceRecord.attachment = await signOrKeepAttachmentUrl(d.serviceRecord.attachment);
                 if (d.completionRecord?.attachment) {
-                    d.completionRecord.attachment = await getSignedFileUrl(d.completionRecord.attachment);
+                    d.completionRecord.attachment = await signOrKeepAttachmentUrl(d.completionRecord.attachment);
                 }
                 if (d.assignedBy?.signature?.url) {
-                    d.assignedBy.signature.url = await getSignedFileUrl(d.assignedBy.signature.url);
+                    d.assignedBy.signature.url = await signOrKeepAttachmentUrl(d.assignedBy.signature.url);
                 }
                 if (d.assignedTo?.signature?.url) {
-                    d.assignedTo.signature.url = await getSignedFileUrl(d.assignedTo.signature.url);
+                    d.assignedTo.signature.url = await signOrKeepAttachmentUrl(d.assignedTo.signature.url);
                 }
                 if (d.acceptedBy?.signature?.url) {
-                    d.acceptedBy.signature.url = await getSignedFileUrl(d.acceptedBy.signature.url);
+                    d.acceptedBy.signature.url = await signOrKeepAttachmentUrl(d.acceptedBy.signature.url);
                 }
-                await signHandoverAssessmentMediaInDetails(d, getSignedFileUrl);
+                await signHandoverAssessmentMediaInDetails(d, signOrKeepAttachmentUrl);
             }
             if (recordObj.performedBy?.signature?.url) {
-                recordObj.performedBy.signature.url = await getSignedFileUrl(recordObj.performedBy.signature.url);
+                recordObj.performedBy.signature.url = await signOrKeepAttachmentUrl(recordObj.performedBy.signature.url);
             }
             if (recordObj.assignedTo?.signature?.url) {
-                recordObj.assignedTo.signature.url = await getSignedFileUrl(recordObj.assignedTo.signature.url);
+                recordObj.assignedTo.signature.url = await signOrKeepAttachmentUrl(recordObj.assignedTo.signature.url);
             }
             if (recordObj.assignedTo?.primaryReportee?.signature?.url) {
-                recordObj.assignedTo.primaryReportee.signature.url = await getSignedFileUrl(
+                recordObj.assignedTo.primaryReportee.signature.url = await signOrKeepAttachmentUrl(
                     recordObj.assignedTo.primaryReportee.signature.url,
                 );
             }
-            await enrichHandoverWorkflowActorSignatures(recordObj, getSignedFileUrl);
+            await enrichHandoverWorkflowActorSignatures(recordObj, signOrKeepAttachmentUrl);
             return recordObj;
         }));
 
@@ -10938,26 +11072,26 @@ export const getHistoryRecord = async (req, res) => {
 
         const recordObj = recordForResponse.toObject();
         if (recordObj.file) {
-            recordObj.file = await getSignedFileUrl(recordObj.file);
+            recordObj.file = await signOrKeepAttachmentUrl(recordObj.file);
         }
         if (recordObj.details) {
             const d = recordObj.details;
-            if (d.invoice) d.invoice = await getSignedFileUrl(d.invoice);
-            if (d.invoiceFile) d.invoiceFile = await getSignedFileUrl(d.invoiceFile);
-            await signHandoverAssessmentMediaInDetails(d, getSignedFileUrl);
+            if (d.invoice) d.invoice = await signOrKeepAttachmentUrl(d.invoice);
+            if (d.invoiceFile) d.invoiceFile = await signOrKeepAttachmentUrl(d.invoiceFile);
+            await signHandoverAssessmentMediaInDetails(d, signOrKeepAttachmentUrl);
         }
         if (recordObj.performedBy?.signature?.url) {
-            recordObj.performedBy.signature.url = await getSignedFileUrl(recordObj.performedBy.signature.url);
+            recordObj.performedBy.signature.url = await signOrKeepAttachmentUrl(recordObj.performedBy.signature.url);
         }
         if (recordObj.assignedTo?.signature?.url) {
-            recordObj.assignedTo.signature.url = await getSignedFileUrl(recordObj.assignedTo.signature.url);
+            recordObj.assignedTo.signature.url = await signOrKeepAttachmentUrl(recordObj.assignedTo.signature.url);
         }
         if (recordObj.assignedTo?.primaryReportee?.signature?.url) {
-            recordObj.assignedTo.primaryReportee.signature.url = await getSignedFileUrl(
+            recordObj.assignedTo.primaryReportee.signature.url = await signOrKeepAttachmentUrl(
                 recordObj.assignedTo.primaryReportee.signature.url,
             );
         }
-        await enrichHandoverWorkflowActorSignatures(recordObj, getSignedFileUrl);
+        await enrichHandoverWorkflowActorSignatures(recordObj, signOrKeepAttachmentUrl);
 
         if (recordObj.assignedTo) {
             await attachAssigneeDrivingLicenseIssueDate(recordObj.assignedTo);
@@ -11143,7 +11277,7 @@ export const uploadHandoverAssessmentPhoto = async (req, res) => {
             return res.status(400).json({ message: 'Could not store uploaded photo.' });
         }
 
-        const signedUrl = await getSignedFileUrl(stored).catch(() => null);
+        const signedUrl = await signOrKeepAttachmentUrl(stored).catch(() => null);
         res.status(200).json({
             publicId: stored,
             url: signedUrl || stored,
@@ -11289,7 +11423,7 @@ export const updateHistoryReceiverAssessment = async (req, res) => {
 
         const recordObj = populated.toObject();
         if (recordObj.details) {
-            await signHandoverAssessmentMediaInDetails(recordObj.details, getSignedFileUrl);
+            await signHandoverAssessmentMediaInDetails(recordObj.details, signOrKeepAttachmentUrl);
         }
 
         res.status(200).json(recordObj);
@@ -11473,7 +11607,7 @@ export const updateHistoryBodyCondition = async (req, res) => {
 
         const responseBody = populated.toObject();
         if (responseBody.details) {
-            await signHandoverAssessmentMediaInDetails(responseBody.details, getSignedFileUrl);
+            await signHandoverAssessmentMediaInDetails(responseBody.details, signOrKeepAttachmentUrl);
         }
         if (inspectionSubmitResult?.asset) {
             responseBody.vehicleAsset = inspectionSubmitResult.asset;
@@ -11586,7 +11720,7 @@ export const updateHistoryHandoverItemFineWaiver = async (req, res) => {
 
         const responseBody = populated.toObject();
         if (responseBody.details) {
-            await signHandoverAssessmentMediaInDetails(responseBody.details, getSignedFileUrl);
+            await signHandoverAssessmentMediaInDetails(responseBody.details, signOrKeepAttachmentUrl);
         }
 
         return res.status(200).json(responseBody);
@@ -11680,7 +11814,7 @@ export const addAssetDocument = async (req, res) => {
         // Return signed URL for immediate UI update if needed
         const newDoc = asset.documents[asset.documents.length - 1].toObject();
         if (newDoc.attachment) {
-            newDoc.attachment = await getSignedFileUrl(newDoc.attachment);
+            newDoc.attachment = await signOrKeepAttachmentUrl(newDoc.attachment);
         }
 
         res.status(200).json({ message: 'Document added successfully', document: newDoc });
@@ -11762,7 +11896,7 @@ export const updateAssetDocument = async (req, res) => {
 
         const updatedDoc = doc.toObject();
         if (updatedDoc.attachment) {
-            updatedDoc.attachment = await getSignedFileUrl(updatedDoc.attachment);
+            updatedDoc.attachment = await signOrKeepAttachmentUrl(updatedDoc.attachment);
         }
 
         res.status(200).json({ message: 'Document updated successfully', document: updatedDoc });
@@ -12311,16 +12445,16 @@ export const addAssetService = async (req, res) => {
         // Return signed URL for the new invoice
         const addedService = asset.services[asset.services.length - 1].toObject();
         if (addedService.invoice) {
-            addedService.invoice = await getSignedFileUrl(addedService.invoice);
+            addedService.invoice = await signOrKeepAttachmentUrl(addedService.invoice);
         }
         if (addedService.attachment) {
-            addedService.attachment = await getSignedFileUrl(addedService.attachment);
+            addedService.attachment = await signOrKeepAttachmentUrl(addedService.attachment);
         }
         if (addedService.quotation2) {
-            addedService.quotation2 = await getSignedFileUrl(addedService.quotation2);
+            addedService.quotation2 = await signOrKeepAttachmentUrl(addedService.quotation2);
         }
         if (addedService.quotation3) {
-            addedService.quotation3 = await getSignedFileUrl(addedService.quotation3);
+            addedService.quotation3 = await signOrKeepAttachmentUrl(addedService.quotation3);
         }
 
         res.status(200).json({ message: isDraft ? 'Service draft saved successfully' : 'Service record added successfully', service: addedService });
@@ -12581,10 +12715,10 @@ export const updateAssetServiceDraft = async (req, res) => {
 
         const updated = asset.services.id(serviceId);
         const out = updated?.toObject ? updated.toObject() : updated;
-        if (out?.invoice) out.invoice = await getSignedFileUrl(out.invoice);
-        if (out?.attachment) out.attachment = await getSignedFileUrl(out.attachment);
-        if (out?.quotation2) out.quotation2 = await getSignedFileUrl(out.quotation2);
-        if (out?.quotation3) out.quotation3 = await getSignedFileUrl(out.quotation3);
+        if (out?.invoice) out.invoice = await signOrKeepAttachmentUrl(out.invoice);
+        if (out?.attachment) out.attachment = await signOrKeepAttachmentUrl(out.attachment);
+        if (out?.quotation2) out.quotation2 = await signOrKeepAttachmentUrl(out.quotation2);
+        if (out?.quotation3) out.quotation3 = await signOrKeepAttachmentUrl(out.quotation3);
 
         return res.json({ message: 'Service draft updated successfully', service: out });
     } catch (error) {

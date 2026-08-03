@@ -112,7 +112,7 @@ export const getRewards = async (req, res) => {
         const signedRewards = await Promise.all(rewards.map(async (reward) => {
             if (reward.attachment?.publicId) {
                 const signedUrl = await getSignedFileUrl(reward.attachment.publicId);
-                reward.attachment.url = signedUrl;
+                if (signedUrl) reward.attachment.url = signedUrl;
             }
             return reward;
         }));

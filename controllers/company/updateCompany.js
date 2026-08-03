@@ -17,7 +17,6 @@ import { archiveSupersededCompanyOwners } from "../../utils/archiveCompanyOwners
 import { syncDashboardAction } from "../../utils/syncDashboard.js";
 import { sendResponsibilityApprovalEmail } from "../../utils/sendResponsibilityApprovalEmail.js";
 import { buildResponsibilityEmailData } from "../../utils/flowchartResponsibilityEmailData.js";
-import { getSignedFileUrl } from "../../utils/s3Upload.js";
 import {
     calculateCompanyActivationProgress,
     shouldTriggerCompanyReactivation,
@@ -56,8 +55,8 @@ import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.
 import { isRequestUserDesignatedFlowchartHr } from "../../utils/isDesignatedFlowchartHr.js";
 import {
     normalizeCompanyUpdateAttachments,
-    signCompanyDocumentArray,
 } from "../../utils/signCompanyDocumentFields.js";
+import { signCompanyProfileForResponse } from "../../utils/signCompanyProfileForResponse.js";
 import { reconcileCompanyDocumentExpiryDashboard } from "../../utils/processDocumentExpiryReminders.js";
 import {
     closeCreatorNotRenewFollowUpTasks,
@@ -237,49 +236,6 @@ const TRADE_LICENSE_UPDATE_KEYS = [
 const isTradeLicenseOwnersBundleUpdate = (updateData = {}) =>
     Object.prototype.hasOwnProperty.call(updateData, "owners") &&
     TRADE_LICENSE_UPDATE_KEYS.some((k) => Object.prototype.hasOwnProperty.call(updateData, k));
-
-const signCompanyProfileForResponse = async (companyObj = {}) => {
-    const out = { ...companyObj };
-    if (out.logo) out.logo = await getSignedFileUrl(out.logo);
-    if (typeof out.tradeLicenseAttachment === "string" && out.tradeLicenseAttachment) {
-        out.tradeLicenseAttachment = await getSignedFileUrl(out.tradeLicenseAttachment);
-    }
-    if (typeof out.establishmentCardAttachment === "string" && out.establishmentCardAttachment) {
-        out.establishmentCardAttachment = await getSignedFileUrl(out.establishmentCardAttachment);
-    }
-    if (Array.isArray(out.documents)) out.documents = await signCompanyDocumentArray(out.documents);
-    if (Array.isArray(out.oldDocuments)) out.oldDocuments = await signCompanyDocumentArray(out.oldDocuments);
-    if (Array.isArray(out.insurance)) out.insurance = await signCompanyDocumentArray(out.insurance);
-    if (Array.isArray(out.ejari)) out.ejari = await signCompanyDocumentArray(out.ejari);
-    if (Array.isArray(out.owners)) {
-        out.owners = await Promise.all(
-            out.owners.map(async (owner) => {
-                if (!owner || typeof owner !== "object") return owner;
-                const o = { ...owner };
-                if (typeof o.attachment === "string" && o.attachment) {
-                    o.attachment = await getSignedFileUrl(o.attachment);
-                }
-                for (const key of [
-                    "passport",
-                    "visa",
-                    "visitVisa",
-                    "employmentVisa",
-                    "spouseVisa",
-                    "emiratesId",
-                    "medical",
-                    "drivingLicense",
-                    "labourCard",
-                ]) {
-                    if (typeof o[key]?.attachment === "string" && o[key].attachment) {
-                        o[key] = { ...o[key], attachment: await getSignedFileUrl(o[key].attachment) };
-                    }
-                }
-                return o;
-            }),
-        );
-    }
-    return out;
-};
 
 export const updateCompany = async (req, res) => {
     try {

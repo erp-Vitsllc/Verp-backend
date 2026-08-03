@@ -7,7 +7,7 @@ import { getDepartmentHOD, isUserInFlowchart } from '../utils/getDepartmentHOD.j
 import { isUserAdministrator } from '../services/permissionService.js';
 import { isJwtSystemSuperUser } from '../utils/systemSuperUser.js';
 import mongoose from 'mongoose';
-import { uploadDocumentToS3, getSignedFileUrl, persistStoredAttachmentValue, normalizeS3Key } from '../utils/s3Upload.js';
+import { uploadDocumentToS3, signOrKeepAttachmentUrl, persistStoredAttachmentValue, normalizeS3Key } from '../utils/s3Upload.js';
 import { sendAssetCreationApprovalEmail } from '../utils/sendAssetCreationApprovalEmail.js';
 import {
     buildCreationRequestHandoverAttachments,
@@ -623,14 +623,14 @@ export const createAssetType = async (req, res) => {
 
             // Prepare first asset for response
             const assetObj = createdAssets[0];
-            if (assetObj.imagePreview) assetObj.imagePreview = await getSignedFileUrl(assetObj.imagePreview);
-            if (assetObj.invoiceFile) assetObj.invoiceFile = await getSignedFileUrl(assetObj.invoiceFile);
-            if (assetObj.warrantyAttachment) assetObj.warrantyAttachment = await getSignedFileUrl(assetObj.warrantyAttachment);
+            if (assetObj.imagePreview) assetObj.imagePreview = await signOrKeepAttachmentUrl(assetObj.imagePreview);
+            if (assetObj.invoiceFile) assetObj.invoiceFile = await signOrKeepAttachmentUrl(assetObj.invoiceFile);
+            if (assetObj.warrantyAttachment) assetObj.warrantyAttachment = await signOrKeepAttachmentUrl(assetObj.warrantyAttachment);
 
             if (assetObj.accessories && Array.isArray(assetObj.accessories)) {
                 assetObj.accessories = await Promise.all(assetObj.accessories.map(async (acc) => ({
                     ...acc,
-                    attachment: acc.attachment ? await getSignedFileUrl(acc.attachment) : null
+                    attachment: acc.attachment ? await signOrKeepAttachmentUrl(acc.attachment) : null
                 })));
             }
 
@@ -712,6 +712,14 @@ export const getAssetTypes = async (req, res) => {
             }
 
             if (toolsOnly) {
+                // Align actionRequiredBy + Accept inbox with primary reportee when assignee has no portal User
+                // (same heal as tools dashboard inbox — keeps list "Waiting: …" in sync with asset details).
+                try {
+                    const { healMisroutedAssignmentInboxTasks } = await import('./assetItemController.js');
+                    await healMisroutedAssignmentInboxTasks();
+                } catch {
+                    /* non-fatal */
+                }
                 assetQuery.$and = assetQuery.$and || [];
                 // Tools list: VEGA-ASSET-* only; never fleet IDs or plated/fleet-marked rows.
                 assetQuery.$and.push({ assetId: { $regex: /^VEGA-ASSET-/i } });
@@ -891,7 +899,7 @@ export const getAssetTypes = async (req, res) => {
                     _id: c._id,
                     assetId: c.categoryId,
                     category: c.name,
-                    imagePreview: await getSignedFileUrl(c.imagePreview),
+                    imagePreview: await signOrKeepAttachmentUrl(c.imagePreview),
                     type: c.typeId?.name || null
                 }))),
                 ...await Promise.all(types.map(async (t) => ({
@@ -900,7 +908,7 @@ export const getAssetTypes = async (req, res) => {
                     type: t.name,
                     category: null,
                     categoryCount: typeCategoryCounts[t._id.toString()] || 0,
-                    imagePreview: await getSignedFileUrl(t.imagePreview),
+                    imagePreview: await signOrKeepAttachmentUrl(t.imagePreview),
                     description: t.description
                 }))),
                 ...await Promise.all(
@@ -951,7 +959,7 @@ export const getAssetTypes = async (req, res) => {
                             };
                         });
 
-                        const signIf = async (key) => (key ? getSignedFileUrl(key) : null);
+                        const signIf = async (key) => (key ? signOrKeepAttachmentUrl(key) : null);
                         const imagePreview = await signIf(a.imagePreview);
                         const photo = await signIf(a.photo);
                         return {
@@ -992,7 +1000,7 @@ export const getAssetTypes = async (req, res) => {
                                     accList.map(async (accObj) => ({
                                         ...accObj,
                                         attachment: accObj.attachment
-                                            ? await getSignedFileUrl(accObj.attachment)
+                                            ? await signOrKeepAttachmentUrl(accObj.attachment)
                                             : null,
                                     })),
                                 ),
@@ -1045,13 +1053,13 @@ export const getAssetTypeById = async (req, res) => {
         const assetType = await AssetType.findById(req.params.id);
         if (assetType) {
             const o = assetType.toObject();
-            if (o.imagePreview) o.imagePreview = await getSignedFileUrl(o.imagePreview);
+            if (o.imagePreview) o.imagePreview = await signOrKeepAttachmentUrl(o.imagePreview);
             return res.status(200).json(o);
         }
         const category = await AssetCategory.findById(req.params.id).populate('typeId', 'name typeId');
         if (category) {
             const o = category.toObject();
-            if (o.imagePreview) o.imagePreview = await getSignedFileUrl(o.imagePreview);
+            if (o.imagePreview) o.imagePreview = await signOrKeepAttachmentUrl(o.imagePreview);
             return res.status(200).json(o);
         }
         return res.status(404).json({ message: 'Asset type or category not found' });
@@ -1336,7 +1344,7 @@ export const updateAssetItem = async (req, res) => {
             }
             await categoryDoc.save();
             const out = categoryDoc.toObject();
-            if (out.imagePreview) out.imagePreview = await getSignedFileUrl(out.imagePreview);
+            if (out.imagePreview) out.imagePreview = await signOrKeepAttachmentUrl(out.imagePreview);
             return res.status(200).json(out);
         }
 
@@ -1360,7 +1368,7 @@ export const updateAssetItem = async (req, res) => {
             }
             await typeDoc.save();
             const out = typeDoc.toObject();
-            if (out.imagePreview) out.imagePreview = await getSignedFileUrl(out.imagePreview);
+            if (out.imagePreview) out.imagePreview = await signOrKeepAttachmentUrl(out.imagePreview);
             return res.status(200).json(out);
         }
 
@@ -2052,13 +2060,13 @@ export const updateAssetItem = async (req, res) => {
         // Convert to object and sign the invoice URL before returning
         const assetObj = asset.toObject();
         if (assetObj.invoiceFile) {
-            assetObj.invoiceFile = await getSignedFileUrl(assetObj.invoiceFile);
+            assetObj.invoiceFile = await signOrKeepAttachmentUrl(assetObj.invoiceFile);
         }
         if (assetObj.warrantyAttachment) {
-            assetObj.warrantyAttachment = await getSignedFileUrl(assetObj.warrantyAttachment);
+            assetObj.warrantyAttachment = await signOrKeepAttachmentUrl(assetObj.warrantyAttachment);
         }
         if (assetObj.accidentReportAttachment) {
-            assetObj.accidentReportAttachment = await getSignedFileUrl(assetObj.accidentReportAttachment);
+            assetObj.accidentReportAttachment = await signOrKeepAttachmentUrl(assetObj.accidentReportAttachment);
         }
 
         const signMortgageAttachment = async (val) => {
@@ -2069,7 +2077,7 @@ export const updateAssetItem = async (req, res) => {
                 if (trimmed.length > 80 && !trimmed.includes('/') && !trimmed.startsWith('http')) {
                     return val;
                 }
-                return getSignedFileUrl(trimmed);
+                return signOrKeepAttachmentUrl(trimmed);
             }
             if (typeof val === 'object' && !Array.isArray(val)) {
                 if (val.data && !val.publicId && !val.url) return val;
@@ -2078,7 +2086,7 @@ export const updateAssetItem = async (req, res) => {
                 }
                 const ref = val.publicId || val.url;
                 if (ref) {
-                    const signed = await getSignedFileUrl(String(ref));
+                    const signed = await signOrKeepAttachmentUrl(String(ref));
                     return { ...val, url: signed };
                 }
             }
@@ -2111,7 +2119,7 @@ export const updateAssetItem = async (req, res) => {
             assetObj.accessories = await Promise.all(assetObj.accessories.map(async (acc) => {
                 return {
                     ...acc,
-                    attachment: acc.attachment ? await getSignedFileUrl(acc.attachment) : null
+                    attachment: acc.attachment ? await signOrKeepAttachmentUrl(acc.attachment) : null
                 };
             }));
         }
@@ -2119,7 +2127,7 @@ export const updateAssetItem = async (req, res) => {
         if (Array.isArray(assetObj.vehicleAccessoriesListEntries) && assetObj.vehicleAccessoriesListEntries.length) {
             assetObj.vehicleAccessoriesListEntries = await signVehicleAccessoriesListEntries(
                 assetObj.vehicleAccessoriesListEntries,
-                getSignedFileUrl,
+                signOrKeepAttachmentUrl,
             );
         }
 

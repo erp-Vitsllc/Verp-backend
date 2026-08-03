@@ -107,7 +107,7 @@ export const getFines = async (req, res) => {
         const signedFines = await Promise.all(fines.map(async (fine) => {
             if (fine.attachment?.publicId) {
                 const signedUrl = await getSignedFileUrl(fine.attachment.publicId);
-                fine.attachment.url = signedUrl;
+                if (signedUrl) fine.attachment.url = signedUrl;
             }
 
             if (Array.isArray(fine.attachments) && fine.attachments.length > 0) {

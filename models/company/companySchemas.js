@@ -122,6 +122,7 @@ const documentRowSchema = {
     value: { type: Number },
     document: {
         url: { type: String },
+        publicId: { type: String },
         name: { type: String },
         mimeType: { type: String },
     },
@@ -150,6 +151,7 @@ export const companyDocumentBundleSchema = new mongoose.Schema(
                 trainingCost: { type: Number },
                 certificate: {
                     url: { type: String },
+                    publicId: { type: String },
                     name: { type: String },
                     mimeType: { type: String },
                 },
