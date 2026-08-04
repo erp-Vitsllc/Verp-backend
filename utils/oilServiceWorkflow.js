@@ -747,7 +747,7 @@ export async function approveOilAccountsQuote(asset, serviceId, reqUser, payment
     if (String(remark.accountsQuoteApprovedAt || '').trim()) {
         throw new Error('Accounts has already approved this quotation.');
     }
-    assertOilScheduleStepComplete(remark, 'Accounts Approve');
+    // Accounts follows HR only — Schedule remains parallel (Admin can finish anytime before Complete).
 
     // Accounts may edit payment type + method on approve.
     const rawType = String(paymentPatch?.amountMode || '').toLowerCase().trim();
@@ -2309,7 +2309,7 @@ export async function advanceOilCashAfterHrApprove(asset, wf, actorName) {
     if (!isOilServiceCashPayment(remark)) {
         throw new Error('Only Cash oil services require HR schedule approval before On Service.');
     }
-    assertOilScheduleStepComplete(remark, 'HR Approval');
+    // Schedule + HR are parallel after Initiate — do not block HR on Schedule OK.
 
     wf.stage = STAGE_SCHEDULED;
     remark.workflowStage = STAGE_SCHEDULED;

@@ -745,6 +745,36 @@ async function closeInspectionAssigneeDashboardTasks(assetId, comment = 'Submitt
     );
 }
 
+/**
+ * Close pending Vehicle Inspection inbox rows for an asset (e.g. Super User deleted the handover).
+ * When historyId is set, only rows that reference that handover are closed.
+ */
+export async function closeVehicleInspectionDashboardActions(
+    requestId,
+    status = 'Rejected',
+    actionedBy = null,
+    comment = '',
+    historyId = null,
+) {
+    if (!requestId) return;
+    const filter = {
+        requestId,
+        requestType: 'Vehicle Inspection',
+        status: 'Pending',
+    };
+    if (historyId) {
+        const hid = String(historyId).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        filter.extra3 = { $regex: `"historyId"\\s*:\\s*"${hid}"`, $options: 'i' };
+    }
+    const patch = {
+        status,
+        actionedDate: new Date(),
+    };
+    if (actionedBy) patch.actionedBy = actionedBy;
+    if (comment) patch.comment = comment;
+    await DashboardAction.updateMany(filter, { $set: patch });
+}
+
 async function upsertInspectionHrDashboardAction({
     asset,
     handoverHistory,

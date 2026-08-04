@@ -8,6 +8,14 @@ const COMPANY_RESPONSIBILITIES_PROJECTION = {
     responsibilities: 1,
 };
 
+/** Short in-memory cache — Sidebar/Dashboard hit /Company often; list rarely changes. */
+const LIST_CACHE_TTL_MS = 45 * 1000;
+const listCache = new Map();
+
+function listCacheKey(search, status, scope) {
+    return `${scope || ""}|${status || ""}|${search || ""}`;
+}
+
 export const getCompanies = async (req, res) => {
     const t0 = Date.now();
     const ms = (since) => `${Date.now() - since}ms`;
@@ -15,6 +23,15 @@ export const getCompanies = async (req, res) => {
         const { search, status, scope } = req.query;
         const filters = {};
         const responsibilitiesOnly = scope === "responsibilities";
+        const cacheKey = listCacheKey(search, status, scope);
+
+        if (!responsibilitiesOnly) {
+            const hit = listCache.get(cacheKey);
+            if (hit && Date.now() - hit.at < LIST_CACHE_TTL_MS) {
+                console.log(`[getCompanies] cache hit total=${ms(t0)}`);
+                return res.status(200).json(hit.payload);
+            }
+        }
 
         if (status) filters.status = status;
         if (search) {
@@ -100,11 +117,13 @@ export const getCompanies = async (req, res) => {
 
         const totalCompaniesWithEmployees = finalizedCompanies.filter(c => c.employeeCount > 0).length;
 
-        return res.status(200).json({
+        const payload = {
             message: "Companies fetched successfully",
             companies: finalizedCompanies,
             totalCompaniesWithEmployees
-        });
+        };
+        listCache.set(cacheKey, { at: Date.now(), payload });
+        return res.status(200).json(payload);
     } catch (error) {
         console.error(`Error in getCompanies (after ${ms(t0)}):`, error);
         return res.status(500).json({ message: error.message || "Failed to fetch companies" });

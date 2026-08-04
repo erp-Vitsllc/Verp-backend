@@ -165,7 +165,14 @@ import { sendParkingExtensionEmail } from '../utils/sendAssetParkingNotification
 import { notifyAssetControllerReassignmentAcceptedWithHandover } from '../utils/notifyAssetControllerReassignmentAcceptedWithHandover.js';
 import { notifyPreviousAssigneeReassignmentAcceptedWithHandover } from '../utils/notifyPreviousAssigneeReassignmentAcceptedWithHandover.js';
 import { pickEffectiveEmail } from '../utils/resolveEmployeeEmail.js';
-import { submitInspectionHandoverAfterAssessment, isVehicleInspectionWorkflowActive, isInspectionHandoverHistoryRecord, canEditInspectionHandoverContent, VEHICLE_INSPECTION_HANDOVER_KIND } from './vehicleInspectionController.js';
+import {
+    submitInspectionHandoverAfterAssessment,
+    isVehicleInspectionWorkflowActive,
+    isInspectionHandoverHistoryRecord,
+    canEditInspectionHandoverContent,
+    closeVehicleInspectionDashboardActions,
+    VEHICLE_INSPECTION_HANDOVER_KIND,
+} from './vehicleInspectionController.js';
 import { ASSET_HANDOVER_PDF_SELECTOR, VEHICLE_HANDOVER_PDF_SELECTOR } from '../utils/assetHandoverPdfConstants.js';
 import {
     requireBulkAssetInventoryPdfAttachment,
@@ -249,6 +256,7 @@ import { awaitAdminDeletionArchive } from '../utils/adminDeletionArchiveRun.js';
 import {
     cleanupDashboardActionsForDeletedAsset,
     deleteDashboardActionsForVehicleService,
+    dismissOrphanedHandoverHistoryInboxRows,
     ASSET_DASHBOARD_INBOX_TYPES,
     ASSET_TOOLS_INBOX_TYPES,
     VEHICLE_DASHBOARD_INBOX_TYPES,
@@ -4564,7 +4572,8 @@ export const getAssetItemDetail = async (req, res) => {
             const itemObj = typeof item.toObject === 'function' ? item.toObject() : { ...item };
 
             if (Array.isArray(itemObj.services)) {
-                itemObj.services = itemObj.services.map((s) => {
+                const focusId = String(focusServiceId || '').trim();
+                const slimService = (s) => {
                     let remark = s?.remark;
                     if (typeof remark === 'string' && remark.length > 0) {
                         try {
@@ -4603,7 +4612,27 @@ export const getAssetItemDetail = async (req, res) => {
                         updatedAt: s.updatedAt,
                         remark,
                     };
-                });
+                };
+                // Service detail pages pass serviceId — keep focused row + same-type history only.
+                let services = itemObj.services;
+                if (focusId) {
+                    const focused = services.find((s) => String(s?._id || '') === focusId);
+                    const focusType = String(focused?.serviceType || focused?.type || '')
+                        .trim()
+                        .toLowerCase();
+                    const sameType = (s) => {
+                        const t = String(s?.serviceType || s?.type || '').trim().toLowerCase();
+                        if (!focusType) return false;
+                        if (t === focusType) return true;
+                        // Oil history aliases
+                        if (focusType.includes('oil') && t.includes('oil')) return true;
+                        return false;
+                    };
+                    services = services.filter(
+                        (s) => String(s?._id || '') === focusId || sameType(s),
+                    );
+                }
+                itemObj.services = services.map(slimService);
             }
             if (Array.isArray(itemObj.documents)) {
                 itemObj.documents = itemObj.documents.map((d) => ({
@@ -4655,34 +4684,37 @@ export const getAssetItemDetail = async (req, res) => {
                 typeName: item?.typeId?.name || '',
             });
 
-            // Header photo must be a usable URL even on light paint (otherwise <img> shows broken).
-            await Promise.all([
-                itemObj.imagePreview
-                    ? signOrKeepAttachmentUrl(itemObj.imagePreview).then((u) => {
-                          itemObj.imagePreview = u;
-                      })
-                    : null,
-                itemObj.photo
-                    ? signOrKeepAttachmentUrl(itemObj.photo).then((u) => {
-                          itemObj.photo = u;
-                      })
-                    : null,
-                itemObj.typeId?.imagePreview
-                    ? signOrKeepAttachmentUrl(itemObj.typeId.imagePreview).then((u) => {
-                          itemObj.typeId.imagePreview = u;
-                      })
-                    : null,
-                itemObj.categoryId?.imagePreview
-                    ? signOrKeepAttachmentUrl(itemObj.categoryId.imagePreview).then((u) => {
-                          itemObj.categoryId.imagePreview = u;
-                      })
-                    : null,
-                Array.isArray(itemObj.images) && itemObj.images[0]?.url
-                    ? signOrKeepAttachmentUrl(itemObj.images[0].url).then((u) => {
-                          itemObj.images[0].url = u;
-                      })
-                    : null,
-            ].filter(Boolean));
+            // Service-detail light paint: skip S3 header signing (text shell only).
+            // Full vehicle detail light still signs preview images for the gallery header.
+            if (!focusServiceId) {
+                await Promise.all([
+                    itemObj.imagePreview
+                        ? signOrKeepAttachmentUrl(itemObj.imagePreview).then((u) => {
+                              itemObj.imagePreview = u;
+                          })
+                        : null,
+                    itemObj.photo
+                        ? signOrKeepAttachmentUrl(itemObj.photo).then((u) => {
+                              itemObj.photo = u;
+                          })
+                        : null,
+                    itemObj.typeId?.imagePreview
+                        ? signOrKeepAttachmentUrl(itemObj.typeId.imagePreview).then((u) => {
+                              itemObj.typeId.imagePreview = u;
+                          })
+                        : null,
+                    itemObj.categoryId?.imagePreview
+                        ? signOrKeepAttachmentUrl(itemObj.categoryId.imagePreview).then((u) => {
+                              itemObj.categoryId.imagePreview = u;
+                          })
+                        : null,
+                    Array.isArray(itemObj.images) && itemObj.images[0]?.url
+                        ? signOrKeepAttachmentUrl(itemObj.images[0].url).then((u) => {
+                              itemObj.images[0].url = u;
+                          })
+                        : null,
+                ].filter(Boolean));
+            }
 
             res.status(200).json(itemObj);
 
@@ -4698,7 +4730,8 @@ export const getAssetItemDetail = async (req, res) => {
                         await ensureOilAccountsMakePaymentNotification(bgItem);
                         await activateOilServiceOnStartDate(bgItem, { byName: 'System' });
                         await maybeAutoCreateOilServiceDue(bgItem);
-                        await syncVehicleServicePaymentStatusFromZoho(bgItem, { fetchLive: true });
+                        // Use cached Zoho bills only — live Zoho on every detail view starved the API.
+                        await syncVehicleServicePaymentStatusFromZoho(bgItem, { fetchLive: false });
                     } catch (bgErr) {
                         console.warn(
                             '[getAssetItemDetail] light background sync failed:',
@@ -5199,8 +5232,9 @@ export const getAssetItemDetail = async (req, res) => {
         }
 
         // Clear info-only Accept/Reject outcome bells once the user opens the asset
+        // Skip on deferred service-detail paints — those pages are not the assignment UI.
         try {
-            if (currentEmpId && item?._id) {
+            if (!skipInlineWriteHeals && currentEmpId && item?._id) {
                 await DashboardAction.updateMany(
                     {
                         requestId: item._id,
@@ -5812,7 +5846,8 @@ export const getAssetItemDetail = async (req, res) => {
                             });
                         }
                         await maybeAutoCreateOilServiceDue(bgItem);
-                        await syncVehicleServicePaymentStatusFromZoho(bgItem, { fetchLive: true });
+                        // Cached Zoho only on page load; live fetch is for explicit payment sync paths.
+                        await syncVehicleServicePaymentStatusFromZoho(bgItem, { fetchLive: false });
                     } catch (bgErr) {
                         console.warn(
                             '[getAssetItemDetail] background oil/shop sync failed:',
@@ -11213,6 +11248,9 @@ function buildHandoverDeleteAssetPatch(asset, record, historyId) {
     const flowMatchesDeleted =
         flow?.historyId && String(flow.historyId) === String(historyId);
     const isPendingAssigned = isActivePendingAssignedHandover(asset, record);
+    const isInspectionLinked =
+        !!asset.vehicleInspectionHandoverHistoryId &&
+        String(asset.vehicleInspectionHandoverHistoryId) === String(historyId);
 
     if (flowMatchesDeleted || isPendingAssigned) {
         assetPatch.pendingAction = null;
@@ -11225,10 +11263,7 @@ function buildHandoverDeleteAssetPatch(asset, record, historyId) {
         }
     }
 
-    if (
-        asset.vehicleInspectionHandoverHistoryId &&
-        String(asset.vehicleInspectionHandoverHistoryId) === String(historyId)
-    ) {
+    if (isInspectionLinked) {
         assetPatch.vehicleInspectionHandoverHistoryId = null;
         const inspStatus = String(asset.vehicleInspectionStatus || '').toLowerCase();
         if (inspStatus === 'pending_hr' || inspStatus === 'draft') {
@@ -11236,7 +11271,12 @@ function buildHandoverDeleteAssetPatch(asset, record, historyId) {
         }
     }
 
-    return { assetPatch, isActiveFlow: flowMatchesDeleted };
+    return {
+        assetPatch,
+        // Assignment bells: active flowchart OR pending acceptance on this Assigned row
+        isActiveFlow: flowMatchesDeleted || isPendingAssigned,
+        isInspectionLinked,
+    };
 }
 
 // @desc    Delete a vehicle handover history record (system Super User only)
@@ -11256,7 +11296,7 @@ export const deleteVehicleHandoverHistory = async (req, res) => {
         }
 
         const record = await AssetHistory.findById(historyId)
-            .select('action assetId file assignedTo assignedToType assignedCompany')
+            .select('action assetId file assignedTo assignedToType assignedCompany details')
             .lean();
         if (!record) {
             return res.status(404).json({ message: 'History record not found' });
@@ -11292,6 +11332,8 @@ export const deleteVehicleHandoverHistory = async (req, res) => {
             });
         }
 
+        const isInspectionHandover = isInspectionHandoverHistoryRecord(record);
+
         await AssetHistory.findByIdAndDelete(historyId);
 
         const asset = await AssetItem.findById(record.assetId).select(
@@ -11299,13 +11341,12 @@ export const deleteVehicleHandoverHistory = async (req, res) => {
         );
 
         let isActiveFlow = false;
+        let isInspectionLinked = false;
         if (asset) {
-            const { assetPatch, isActiveFlow: activeFlow } = buildHandoverDeleteAssetPatch(
-                asset,
-                record,
-                historyId,
-            );
-            isActiveFlow = activeFlow;
+            const patchResult = buildHandoverDeleteAssetPatch(asset, record, historyId);
+            const { assetPatch } = patchResult;
+            isActiveFlow = patchResult.isActiveFlow;
+            isInspectionLinked = patchResult.isInspectionLinked;
 
             if (Array.isArray(asset.vehicleAccessoriesListEntries)) {
                 const filtered = asset.vehicleAccessoriesListEntries.filter(
@@ -11329,12 +11370,27 @@ export const deleteVehicleHandoverHistory = async (req, res) => {
 
         void (async () => {
             try {
+                const actionedBy = req.user?.employeeObjectId || req.user?._id;
+                const deleteComment = 'Handover record deleted by Super User.';
+
                 if (isActiveFlow && asset?._id) {
-                    void closeFleetHandoverDashboardActions(
+                    await closeFleetHandoverDashboardActions(
                         asset._id,
                         'Rejected',
-                        req.user?.employeeObjectId || req.user?._id,
-                        'Handover record deleted by Super User.',
+                        actionedBy,
+                        deleteComment,
+                    );
+                }
+
+                // Inspection bells are requestType "Vehicle Inspection" — always close them
+                // when an inspection handover row is deleted (linked or historical orphan).
+                if (asset?._id && (isInspectionLinked || isInspectionHandover)) {
+                    await closeVehicleInspectionDashboardActions(
+                        asset._id,
+                        'Rejected',
+                        actionedBy,
+                        deleteComment,
+                        isInspectionLinked ? null : historyId,
                     );
                 }
 
@@ -18039,6 +18095,11 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
             seen.add(k);
             unique.push(it);
         }
+
+        // Heal stale bells after Super User deleted the underlying handover history row.
+        const healedRows = await dismissOrphanedHandoverHistoryInboxRows(unique, parseExtra3);
+        unique.length = 0;
+        unique.push(...healedRows);
 
         const hrInspectionSeen = new Set();
         const dedupedInspectionHr = [];

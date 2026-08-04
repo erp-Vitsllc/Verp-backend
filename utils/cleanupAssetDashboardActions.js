@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
 import DashboardAction from '../models/DashboardAction.js';
 import AssetItem from '../models/AssetItem.js';
+import AssetHistory from '../models/AssetHistory.js';
 
 /** Same set as asset pending inbox (DashboardAction.requestType). */
 export const ASSET_DASHBOARD_INBOX_TYPES = [
@@ -147,6 +148,67 @@ function parseDashboardExtra3(extra3) {
     } catch {
         return {};
     }
+}
+
+const HANDOVER_HISTORY_LINKED_INBOX_TYPES = new Set(['Vehicle Inspection', 'Asset Assignment']);
+
+/**
+ * Drop (and permanently dismiss) pending inbox rows whose extra3.historyId
+ * points at a handover that no longer exists (e.g. Super User deleted the row).
+ */
+export async function dismissOrphanedHandoverHistoryInboxRows(rows, parseExtra3) {
+    if (!Array.isArray(rows) || !rows.length) return rows || [];
+    const parse =
+        typeof parseExtra3 === 'function'
+            ? parseExtra3
+            : (raw) => parseDashboardExtra3(raw);
+
+    const historyIds = [];
+    for (const row of rows) {
+        if (!HANDOVER_HISTORY_LINKED_INBOX_TYPES.has(row?.requestType)) continue;
+        const meta = parse(row.extra3);
+        const hid = meta?.historyId != null ? String(meta.historyId).trim() : '';
+        if (hid && mongoose.Types.ObjectId.isValid(hid)) historyIds.push(hid);
+    }
+    if (!historyIds.length) return rows;
+
+    const existing = await AssetHistory.find({
+        _id: { $in: [...new Set(historyIds)].map((id) => new mongoose.Types.ObjectId(id)) },
+    })
+        .select('_id')
+        .lean();
+    const existingSet = new Set(existing.map((h) => String(h._id)));
+
+    const orphanIds = [];
+    const kept = [];
+    for (const row of rows) {
+        if (!HANDOVER_HISTORY_LINKED_INBOX_TYPES.has(row?.requestType)) {
+            kept.push(row);
+            continue;
+        }
+        const meta = parse(row.extra3);
+        const hid = meta?.historyId != null ? String(meta.historyId).trim() : '';
+        if (hid && mongoose.Types.ObjectId.isValid(hid) && !existingSet.has(hid)) {
+            orphanIds.push(row._id);
+            continue;
+        }
+        kept.push(row);
+    }
+
+    if (orphanIds.length) {
+        await DashboardAction.updateMany(
+            { _id: { $in: orphanIds }, status: 'Pending' },
+            {
+                $set: {
+                    status: 'Rejected',
+                    actionedDate: new Date(),
+                    comment: 'Handover record no longer exists.',
+                },
+            },
+        ).catch(() => null);
+    }
+
+    return kept;
 }
 
 /** Permanently remove inbox rows for a deleted vehicle service request. */
