@@ -15,7 +15,8 @@ export const getPayments = async (req, res) => {
             paidBy,
             relatedEntityType,
             relatedEntityId,
-            referenceId
+            referenceId,
+            excludeRelatedEntityTypes,
         } = req.query;
 
         const query = {};
@@ -52,12 +53,36 @@ export const getPayments = async (req, res) => {
             }
         }
         
-        // Filter by related entity (for fine/loan/advance)
-        if (relatedEntityType) query.relatedEntityType = relatedEntityType;
-        if (relatedEntityId) query.relatedEntityId = relatedEntityId;
-        
-        // Filter by referenceId (for fine ID or loan ID)
-        if (referenceId) query.referenceId = referenceId;
+        // Filter by related entity (for fine/loan/advance).
+        // When both relatedEntityId + referenceId are sent (loan repayments), match either
+        // so individual loans stay isolated without missing alternate linkage styles.
+        if (relatedEntityType) {
+            query.relatedEntityType = relatedEntityType;
+        } else if (excludeRelatedEntityTypes) {
+            // Accounts ledger: hide Zoho Expense-Refund repayments (shown on loan detail instead).
+            const excluded = String(excludeRelatedEntityTypes)
+                .split(',')
+                .map((s) => s.trim())
+                .filter(Boolean);
+            if (excluded.length) {
+                query.relatedEntityType = { $nin: excluded };
+            }
+        }
+        if (relatedEntityId && referenceId) {
+            const entityOr = [
+                { relatedEntityId },
+                { referenceId },
+            ];
+            if (query.$or) {
+                query.$and = [{ $or: query.$or }, { $or: entityOr }];
+                delete query.$or;
+            } else {
+                query.$or = entityOr;
+            }
+        } else {
+            if (relatedEntityId) query.relatedEntityId = relatedEntityId;
+            if (referenceId) query.referenceId = referenceId;
+        }
 
         if (startDate || endDate) {
             query.paymentDate = {};
