@@ -1,5 +1,6 @@
 import express from "express";
 import { getPayments } from "../controllers/payment/getPayments.js";
+import { getPaymentById } from "../controllers/payment/getPaymentById.js";
 import { addPayment } from "../controllers/payment/addPayment.js";
 import { deletePayment } from "../controllers/payment/deletePayment.js";
 import { respondToPayment } from "../controllers/payment/respondToPayment.js";
@@ -18,6 +19,9 @@ router.get("/", checkPermission('accounts', 'view'), getPayments);
 
 // Pending payment approval inbox for Accounts bell / sidebar
 router.get("/dashboard/pending-inbox", checkPermission('accounts', 'view'), getPendingPaymentDashboardInbox);
+
+// Single payment (receipt / invoice) — by Mongo _id or paymentId
+router.get("/:id", checkPermission('accounts', 'view'), getPaymentById);
 
 // Add payment - requires create permission
 router.post("/", checkPermission('accounts', 'create'), addPayment);
