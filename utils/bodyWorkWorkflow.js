@@ -1,4 +1,4 @@
-﻿import AssetItem from '../models/AssetItem.js';
+import AssetItem from '../models/AssetItem.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import User from '../models/User.js';
 import Fine from '../models/Fine.js';
@@ -252,14 +252,14 @@ export async function submitBodyWorkGarage(asset, serviceId, serviceUpdates, req
             startRaw ? String(startRaw).slice(0, 10) : '—'
         }`,
     });
-    // Garage done → schedule immediately. Accounts Zoho billing is only after Service Completed.
+    // Garage done → Accounts Approve (Oil-style), then schedule after Accounts approves.
     const { snapshotActiveServiceWorkflow } = await import('./vehicleServiceWorkflowResolve.js');
     if (!bindActive) {
         snapshotActiveServiceWorkflow(asset);
     }
     asset.activeServiceWorkflow = {
         ...(typeof wf.toObject === 'function' ? wf.toObject() : wf),
-        stage: wf.stage,
+        stage: BODY_WORK_STAGE.ACCOUNTS,
         serviceRecordId: wf.serviceRecordId || serviceId,
         serviceTypeLabel: wf.serviceTypeLabel || 'Body Work',
         history: Array.isArray(wf.history) ? [...wf.history] : [],
@@ -271,27 +271,16 @@ export async function submitBodyWorkGarage(asset, serviceId, serviceUpdates, req
     asset.markModified('services');
     await asset.save();
 
-    const { advanceShopServiceToScheduledAfterAccountsApprove } = await import(
+    const { routeShopServiceToAccountsApproveAfterGarage } = await import(
         './vehicleShopServiceScheduled.js'
     );
-    await advanceShopServiceToScheduledAfterAccountsApprove(
-        asset,
-        asset.activeServiceWorkflow,
+    await routeShopServiceToAccountsApproveAfterGarage(asset, serviceId, {
+        serviceTypeLabel: 'Body Work',
         actorName,
-        {
-            serviceTypeLabel: 'Body Work',
-            linkPath: `/HRM/Asset/Vehicle/details/${asset._id}/body-work/${serviceId}`,
-            dashboardMeta: JSON.stringify({
-                vehicleId: String(asset._id),
-                serviceRecordId: String(serviceId),
-                serviceType: 'Body Work',
-                detailsPath: `/HRM/Asset/Vehicle/details/${asset._id}/body-work/${serviceId}`,
-            }),
-            appendActivity: null,
-            scheduleActivityType: 'service_scheduled',
-            scheduleActivityNote: 'Garage submitted — service scheduled (Accounts Zoho after End Service)',
-        },
-    );
+        linkPath: bodyWorkDetailsPath(asset._id, serviceId),
+        dashboardMeta: bodyWorkDashboardMeta(asset, serviceId),
+        appendActivity: null,
+    });
 
     return asset;
 }

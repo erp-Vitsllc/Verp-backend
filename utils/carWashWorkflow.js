@@ -206,9 +206,9 @@ export async function notifyCarWashAccountsApproved({
                   })}.`
                 : '';
         const monthText = remark?.carWashMonth ? ` Car wash month: ${remark.carWashMonth}.` : '';
-        const detailLine = `${actorName} approved the car wash request for ${asset.assetId || ''}${
+        const detailLine = `${actorName} stored the car wash Zoho Expense for ${asset.assetId || ''}${
             plate ? ` (${plate})` : ''
-        }. Status is now Not paid.${amountText}${monthText}`.trim();
+        }. Status is now Billed / Complete.${amountText}${monthText}`.trim();
         const linkPath = carWashDetailsPath(asset._id, serviceRecordId);
 
         let assignee = asset.assignedTo || null;
@@ -228,14 +228,14 @@ export async function notifyCarWashAccountsApproved({
                 `${recipient?.firstName || ''} ${recipient?.lastName || ''}`.trim() ||
                 recipient?.employeeId ||
                 'Unknown';
-            console.log(`[CarWashWorkflow][Email] Approved -> ${who} <${email || 'no-company-email'}>`);
+            console.log(`[CarWashWorkflow][Email] Expense stored -> ${who} <${email || 'no-company-email'}>`);
             if (!email) continue;
 
             await sendVehicleServiceWorkflowEmail({
                 recipient,
                 asset,
-                stageLabel: 'Approved by Accounts — Not paid',
-                actionLabel: 'Car wash request approved',
+                stageLabel: 'Car Wash — Zoho Expense stored',
+                actionLabel: 'Car wash complete (Zoho Expense)',
                 detailLine,
                 linkPath,
             });
@@ -246,7 +246,8 @@ export async function notifyCarWashAccountsApproved({
 }
 
 /**
- * Accounts stores Zoho bill after car wash is complete → billed.
+ * Accounts stores Zoho Expense after car wash submit → billed/complete only on Zoho success.
+ * Car Wash uses Expenses only (not Bills).
  */
 export async function advanceCarWashBillingAfterAccountsApprove(asset, wf, actorName) {
     const serviceRecordId = wf.serviceRecordId;
@@ -255,40 +256,49 @@ export async function advanceCarWashBillingAfterAccountsApprove(asset, wf, actor
 
     const stage = String(wf.stage || '').toLowerCase();
     if (stage !== CAR_WASH_STAGE_PENDING_BILLING && stage !== CAR_WASH_STAGE_ACCOUNTS) {
-        throw new Error('Car wash is not awaiting Accounts Zoho billing.');
+        throw new Error('Car wash is not awaiting Accounts Zoho Expense.');
     }
 
     const amount = Number(service.value);
     if (!Number.isFinite(amount) || amount <= 0) {
-        throw new Error('A valid amount is required before storing the Zoho bill.');
+        throw new Error('A valid amount is required before creating the Zoho Expense.');
     }
 
     const remark = parseCarWashRemark(service);
-    if (!String(remark.garageName || remark.vendorName || '').trim()) {
-        remark.garageName = String(remark.carWashType || 'Car Wash').trim() || 'Car Wash';
-        service.remark = JSON.stringify(remark);
+    const expenseAccountId = String(remark.expenseAccountId || '').trim();
+    const paidThroughAccountId = String(remark.paidThroughAccountId || '').trim();
+    if (!expenseAccountId || !paidThroughAccountId) {
+        throw new Error('Expense Account and Paid Through are required before creating the Zoho Expense.');
+    }
+    if (expenseAccountId === paidThroughAccountId) {
+        throw new Error('Expense Account and Paid Through must be different accounts.');
     }
 
-    let zohoBillSync = null;
+    let zohoExpenseSync = null;
     try {
-        const { syncVehicleGarageServiceToZoho } = await import('./syncVehicleGarageServiceToZoho.js');
-        zohoBillSync = await syncVehicleGarageServiceToZoho({
+        const { syncCarWashToZohoExpense } = await import('./syncCarWashToZohoExpense.js');
+        zohoExpenseSync = await syncCarWashToZohoExpense({
             asset,
             service,
-            serviceTypeLabel: 'Car Wash',
+            expenseAccountId,
+            expenseAccountName: remark.expenseAccountName || '',
+            paidThroughAccountId,
+            paidThroughAccountName: remark.paidThroughAccountName || '',
+            expenseName: remark.zohoExpenseName || '',
+            organizationId: remark.zohoOrganizationId || '',
         });
     } catch (err) {
-        zohoBillSync = { ok: false, message: err?.message || 'Zoho bill sync failed' };
-        console.error('[CarWash] Accounts Zoho bill sync:', err);
+        zohoExpenseSync = { ok: false, message: err?.message || 'Zoho Expense sync failed' };
+        console.error('[CarWash] Accounts Zoho Expense sync:', err);
     }
 
     asset.markModified('services');
 
-    if (!zohoBillSync?.ok) {
+    if (!zohoExpenseSync?.ok) {
         await asset.save();
         throw new Error(
-            zohoBillSync?.message ||
-                'Zoho bill must be created successfully before status becomes Billed.',
+            zohoExpenseSync?.message ||
+                'Zoho Expense must be created successfully before status becomes Complete.',
         );
     }
 
@@ -298,8 +308,19 @@ export async function advanceCarWashBillingAfterAccountsApprove(asset, wf, actor
     liveRemark.billingStatus = 'billed';
     liveRemark.carWashPaymentStatus = CAR_WASH_PAYMENT_BILLED;
     liveRemark.vehicleServiceCompleted = 'live';
+    liveRemark.vehicleServiceCompletedAt = new Date().toISOString();
     liveRemark.accountsBillingApprovedAt = new Date().toISOString();
     liveRemark.accountsBillingApprovedByName = actorName || '';
+    liveRemark.zohoExpenseId = zohoExpenseSync.expenseId || liveRemark.zohoExpenseId || '';
+    liveRemark.zohoExpenseNumber = zohoExpenseSync.expenseNumber || '';
+    liveRemark.zohoOrganizationId = zohoExpenseSync.organizationId || liveRemark.zohoOrganizationId || '';
+    liveRemark.zohoExpenseName = zohoExpenseSync.expenseName || liveRemark.zohoExpenseName || '';
+    liveRemark.expenseAccountId = zohoExpenseSync.expenseAccountId || expenseAccountId;
+    liveRemark.expenseAccountName =
+        zohoExpenseSync.expenseAccountName || liveRemark.expenseAccountName || '';
+    liveRemark.paidThroughAccountId = zohoExpenseSync.paidThroughAccountId || paidThroughAccountId;
+    liveRemark.paidThroughAccountName =
+        zohoExpenseSync.paidThroughAccountName || liveRemark.paidThroughAccountName || '';
     asset.services.id(serviceRecordId).remark = JSON.stringify(liveRemark);
 
     asset.activeServiceWorkflow = wf;
@@ -307,5 +328,21 @@ export async function advanceCarWashBillingAfterAccountsApprove(asset, wf, actor
     asset.markModified('services');
     await asset.save();
 
-    return { asset, zohoBillSync };
+    await notifyCarWashAccountsApproved({
+        asset,
+        serviceRecordId,
+        actorName,
+        validatedAmount: amount,
+    });
+
+    // Keep response shape compatible with older callers (zohoBill* aliases).
+    return {
+        asset,
+        zohoExpenseSync,
+        zohoBillSync: {
+            ok: true,
+            billId: zohoExpenseSync.expenseId,
+            message: zohoExpenseSync.message,
+        },
+    };
 }

@@ -1,4 +1,4 @@
-﻿import AssetItem from '../models/AssetItem.js';
+import AssetItem from '../models/AssetItem.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import User from '../models/User.js';
 import Fine from '../models/Fine.js';
@@ -252,14 +252,14 @@ export async function submitMechanicalWorkGarage(asset, serviceId, serviceUpdate
             startRaw ? String(startRaw).slice(0, 10) : '—'
         }`,
     });
-    // Garage done → schedule immediately. Accounts Zoho billing is only after Service Completed.
+    // Garage done → Accounts Approve (Oil-style), then schedule after Accounts approves.
     const { snapshotActiveServiceWorkflow } = await import('./vehicleServiceWorkflowResolve.js');
     if (!bindActive) {
         snapshotActiveServiceWorkflow(asset);
     }
     asset.activeServiceWorkflow = {
         ...(typeof wf.toObject === 'function' ? wf.toObject() : wf),
-        stage: wf.stage,
+        stage: MECHANICAL_WORK_STAGE.ACCOUNTS,
         serviceRecordId: wf.serviceRecordId || serviceId,
         serviceTypeLabel: wf.serviceTypeLabel || 'Mechanical Work',
         history: Array.isArray(wf.history) ? [...wf.history] : [],
@@ -271,22 +271,16 @@ export async function submitMechanicalWorkGarage(asset, serviceId, serviceUpdate
     asset.markModified('services');
     await asset.save();
 
-    const { advanceShopServiceToScheduledAfterAccountsApprove } = await import(
+    const { routeShopServiceToAccountsApproveAfterGarage } = await import(
         './vehicleShopServiceScheduled.js'
     );
-    await advanceShopServiceToScheduledAfterAccountsApprove(
-        asset,
-        asset.activeServiceWorkflow,
+    await routeShopServiceToAccountsApproveAfterGarage(asset, serviceId, {
+        serviceTypeLabel: 'Mechanical Work',
         actorName,
-        {
-            serviceTypeLabel: 'Mechanical Work',
-            linkPath: mechanicalWorkDetailsPath(asset._id, serviceId),
-            dashboardMeta: mechanicalWorkDashboardMeta(asset, serviceId),
-            appendActivity: null,
-            scheduleActivityType: 'service_scheduled',
-            scheduleActivityNote: 'Garage submitted — service scheduled (Accounts Zoho after End Service)',
-        },
-    );
+        linkPath: mechanicalWorkDetailsPath(asset._id, serviceId),
+        dashboardMeta: mechanicalWorkDashboardMeta(asset, serviceId),
+        appendActivity: null,
+    });
 
     return asset;
 }

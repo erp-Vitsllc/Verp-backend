@@ -1,4 +1,4 @@
-﻿import AssetItem from '../models/AssetItem.js';
+import AssetItem from '../models/AssetItem.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import User from '../models/User.js';
 import Fine from '../models/Fine.js';
@@ -131,28 +131,27 @@ export async function resolveAccidentRepairAssigneeForStage(stage) {
 }
 
 export async function advanceAccidentRepairAfterHrApprove(asset, wf, actorName) {
-    // After Garage: HR approves → Scheduled / On Service (start date).
+    // After Garage: HR approves → Accounts Approve (Oil-style), then schedule.
     const serviceRecordId = wf.serviceRecordId;
     const service = asset.services?.id?.(serviceRecordId);
     if (service) {
         appendAccidentRepairActivity(service, {
             type: 'hr_approved',
             byName: actorName,
-            note: 'HR approved — ready for On Service',
+            note: 'HR approved — sent to Accounts Approve',
         });
         asset.markModified('services');
     }
 
-    const { advanceShopServiceToScheduledAfterAccountsApprove } = await import(
+    const { routeShopServiceToAccountsApproveAfterGarage } = await import(
         './vehicleShopServiceScheduled.js'
     );
-    return advanceShopServiceToScheduledAfterAccountsApprove(asset, wf, actorName, {
+    return routeShopServiceToAccountsApproveAfterGarage(asset, serviceRecordId, {
         serviceTypeLabel: 'Accident Repair',
+        actorName,
         linkPath: accidentRepairDetailsPath(asset._id, serviceRecordId),
         dashboardMeta: accidentRepairDashboardMeta(asset, serviceRecordId),
-        appendActivity: appendAccidentRepairActivity,
-        scheduleActivityType: 'service_scheduled',
-        scheduleActivityNote: 'HR approved On Service — service scheduled',
+        appendActivity: null,
     });
 }
 

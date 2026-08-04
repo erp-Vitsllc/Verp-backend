@@ -39,6 +39,11 @@ function resolveServiceWindowDates(wf, remark) {
     };
 }
 
+function resolveRecipientEmail(emp) {
+    if (!emp) return '';
+    return String(emp.companyEmail || emp.workEmail || emp.personalEmail || emp.email || '').trim();
+}
+
 function uniqRecipients(list) {
     const seen = new Set();
     const out = [];
@@ -51,6 +56,66 @@ function uniqRecipients(list) {
     return out;
 }
 
+function resolveServiceReqNo(service, remark = {}) {
+    return String(
+        service?.serviceReqNo ||
+            remark.serviceReqNo ||
+            remark.vsrNo ||
+            remark.requestNo ||
+            '',
+    ).trim();
+}
+
+/** Oil-style schedule rows for shop service emails. */
+function buildShopScheduleEmailDetailRows(remark = {}, serviceTypeLabel = 'Vehicle Service') {
+    const start =
+        String(remark.serviceStartDate || remark.scheduledServiceDate || '').trim().slice(0, 10);
+    const end = String(remark.serviceEndDate || remark.serviceWindowEndDate || '').trim().slice(0, 10);
+    const garage = String(remark.garageName || remark.vendorName || '').trim();
+    const location = String(remark.garageLocation || '').trim();
+    const contact = String(remark.garageContact || '').trim();
+    const description = String(
+        remark.serviceIssue || remark.description || remark.notes || '',
+    ).trim();
+    const amount =
+        Number(remark.hrReviewApprovedAmount) ||
+        Number(remark.approvedAmount) ||
+        Number(remark.estimatedCost) ||
+        Number(remark.garageBillAmount) ||
+        0;
+
+    const rows = [];
+    rows.push({
+        label: 'Status',
+        value: `Your vehicle is scheduled for ${serviceTypeLabel || 'service'} (garage)`,
+    });
+    if (start) rows.push({ label: 'Service start date', value: start });
+    if (end) rows.push({ label: 'Service end date', value: end });
+    if (garage) rows.push({ label: 'Garage', value: garage });
+    if (location) rows.push({ label: 'Garage location', value: location });
+    if (contact) rows.push({ label: 'Garage contact', value: contact });
+    if (amount > 0) {
+        rows.push({
+            label: 'Amount',
+            value: `AED ${amount.toLocaleString(undefined, { maximumFractionDigits: 2 })}`,
+        });
+    }
+    if (description) rows.push({ label: 'Description', value: description });
+    return rows;
+}
+
+function collectCcEmails(people = [], excludeEmail = '') {
+    const exclude = String(excludeEmail || '').trim().toLowerCase();
+    const set = new Set();
+    for (const person of people || []) {
+        const email = resolveRecipientEmail(person);
+        if (!email) continue;
+        if (exclude && email.toLowerCase() === exclude) continue;
+        set.add(email);
+    }
+    return [...set];
+}
+
 async function notifyShopServiceRecipients({
     asset,
     serviceRecordId,
@@ -58,9 +123,21 @@ async function notifyShopServiceRecipients({
     serviceTypeLabel,
     actionLabel,
     detailLine,
+    detailRows = [],
     linkPath,
     dashboardMeta,
+    cc = [],
 }) {
+    const serviceReqNo = resolveServiceReqNo(
+        (Array.isArray(asset?.services) ? asset.services : []).find(
+            (s) => String(s?._id) === String(serviceRecordId),
+        ),
+        parseRemark(
+            (Array.isArray(asset?.services) ? asset.services : []).find(
+                (s) => String(s?._id) === String(serviceRecordId),
+            ),
+        ),
+    );
     for (const recipient of uniqRecipients(recipients)) {
         if (!recipient) continue;
         await sendVehicleServiceWorkflowEmail({
@@ -69,7 +146,10 @@ async function notifyShopServiceRecipients({
             stageLabel: actionLabel,
             actionLabel,
             detailLine,
+            detailRows,
+            serviceReqNo,
             linkPath,
+            cc,
         });
         if (recipient._id) {
             await syncDashboardAction({
@@ -117,7 +197,7 @@ async function notifyShopServiceScheduled({
         ) || null;
     const remark = parseRemark(service);
 
-    // Formal letter-style email: TO assigned user, CC assigned + Admin Officer + driven-by.
+    // Formal letter-style email: TO assigned user, CC Admin Officer + HR + Accounts + driven-by.
     await sendVehicleServiceScheduledNotificationEmail({
         asset: populated,
         remark,
@@ -125,11 +205,33 @@ async function notifyShopServiceScheduled({
         serviceTypeLabel: serviceTypeLabel || service?.serviceType || 'Vehicle Service',
     });
 
-    // Keep Admin Officer dashboard task for the scheduled window.
     const adminOfficer = await getDepartmentHOD('admincontroller');
+    const plate = [populated.plateEmirate, populated.plateNumber].filter(Boolean).join(' ').trim();
+    const startLabel = startD ? startD.toISOString().slice(0, 10) : 'the scheduled date';
+    const scheduleRows = buildShopScheduleEmailDetailRows(
+        remark,
+        serviceTypeLabel || service?.serviceType || 'Vehicle Service',
+    );
+    const todayUtc = utcDayStart(new Date());
+    const startUtc = startD ? utcDayStart(startD) : null;
+    const isLiveAlready = startUtc != null && todayUtc != null && startUtc <= todayUtc;
+
+    // Oil parity: if start is in the future, Admin gets Ready-to-Service email with schedule rows.
+    if (adminOfficer?._id && !isLiveAlready) {
+        await sendVehicleServiceWorkflowEmail({
+            recipient: adminOfficer,
+            asset: populated,
+            stageLabel: `${serviceTypeLabel} — Ready to Service`,
+            actionLabel: `${serviceTypeLabel} — Ready to Service`,
+            detailLine: `${actorName || 'Accounts'} approved garage details for ${populated.assetId || ''}${plate ? ` (${plate})` : ''}. Status is Ready to Service until ${startLabel}, then On Service. Full service details below.`,
+            detailRows: scheduleRows,
+            serviceReqNo: resolveServiceReqNo(service, remark),
+            linkPath,
+        }).catch(() => {});
+    }
+
+    // Keep Admin Officer dashboard task for the scheduled window.
     if (adminOfficer?._id) {
-        const plate = [populated.plateEmirate, populated.plateNumber].filter(Boolean).join(' ').trim();
-        const startLabel = startD ? startD.toISOString().slice(0, 10) : 'the scheduled date';
         await syncDashboardAction({
             requestId: asset._id,
             requestType: 'Vehicle Service Request',
@@ -171,26 +273,39 @@ async function notifyShopServiceWentLiveIfNeeded({
                 select: 'firstName lastName employeeId companyEmail workEmail',
             },
         })
+        .select(
+            'assetId name plateEmirate plateNumber assignedTo services._id services.serviceReqNo services.serviceType services.remark',
+        )
         .lean();
     if (!populated) return false;
 
     const adminOfficer = await getDepartmentHOD('admincontroller');
-    const assignee = populated.assignedTo || null;
     const plate = [populated.plateEmirate, populated.plateNumber].filter(Boolean).join(' ').trim();
     const message =
         detailLine ||
-        `${serviceTypeLabel} for ${populated.assetId || ''}${plate ? ` (${plate})` : ''} has started today. The vehicle is now on service.`;
+        `${serviceTypeLabel} for ${populated.assetId || ''}${plate ? ` (${plate})` : ''} has started today. The vehicle is now On Service — complete the service when ready.`;
 
-    await notifyShopServiceRecipients({
-        asset: populated,
-        serviceRecordId,
-        recipients: [adminOfficer, assignee],
-        serviceTypeLabel,
-        actionLabel: 'Vehicle on service',
-        detailLine: message,
-        linkPath,
-        dashboardMeta,
-    });
+    const service =
+        (Array.isArray(populated.services) ? populated.services : []).find(
+            (s) => String(s?._id) === String(serviceRecordId),
+        ) || null;
+    const remark = parseRemark(service);
+    const scheduleRows = buildShopScheduleEmailDetailRows(remark, serviceTypeLabel);
+
+    // Oil parity: On Service email goes to Admin only (assignee already got formal scheduled letter).
+    if (adminOfficer?._id) {
+        await notifyShopServiceRecipients({
+            asset: populated,
+            serviceRecordId,
+            recipients: [adminOfficer],
+            serviceTypeLabel,
+            actionLabel: `${serviceTypeLabel} — On Service`,
+            detailLine: message,
+            detailRows: scheduleRows,
+            linkPath,
+            dashboardMeta,
+        });
+    }
 
     const fresh = await AssetItem.findById(asset._id);
     if (fresh?.activeServiceWorkflow) {
@@ -205,6 +320,166 @@ async function notifyShopServiceWentLiveIfNeeded({
 export function isShopServiceWorkflowRecord(wf, service) {
     const label = String(wf?.serviceTypeLabel || service?.serviceType || '').trim();
     return SHOP_SERVICE_TYPE_LABELS.includes(label);
+}
+
+export const SHOP_SERVICE_PENDING_ACCOUNTS = 'pending_accounts';
+
+/**
+ * After Admin submits Schedule/Garage — send to Accounts Approve (Oil-style), with email + inbox task.
+ * Accounts approve then calls advanceShopServiceToScheduledAfterAccountsApprove.
+ */
+export async function routeShopServiceToAccountsApproveAfterGarage(
+    asset,
+    serviceId,
+    {
+        serviceTypeLabel,
+        actorName,
+        linkPath,
+        dashboardMeta,
+        appendActivity,
+    } = {},
+) {
+    const service = asset.services?.id?.(serviceId);
+    if (!service) throw new Error('Service record not found');
+    const remark = parseRemark(service);
+    const { wf, bindActive } = getWorkflowContextForService(asset, serviceId);
+    if (!wf) throw new Error('Workflow not found');
+
+    const accounts = await getDepartmentHOD('accounts');
+    if (!accounts?._id) {
+        throw new Error('No Accounts assignee is configured in the company flowchart.');
+    }
+
+    remark.workflowStage = SHOP_SERVICE_PENDING_ACCOUNTS;
+    remark.accountsGarageSubmittedAt = new Date().toISOString();
+    service.remark = JSON.stringify(remark);
+
+    if (typeof appendActivity === 'function') {
+        appendActivity(service, {
+            type: 'garage_updated',
+            byName: actorName,
+            note: `${serviceTypeLabel || 'Service'} scheduled details submitted — awaiting Accounts Approve`,
+        });
+    }
+
+    wf.stage = SHOP_SERVICE_PENDING_ACCOUNTS;
+    if (bindActive) {
+        asset.activeServiceWorkflow = wf;
+    }
+    asset.markModified('activeServiceWorkflow');
+    asset.markModified('services');
+    await asset.save();
+
+    const populated = await AssetItem.findById(asset._id)
+        .populate({
+            path: 'assignedTo',
+            select: 'firstName lastName employeeId companyEmail workEmail',
+        })
+        .select(
+            'assetId name plateEmirate plateNumber assignedTo services._id services.serviceReqNo services.serviceType services.remark',
+        )
+        .lean();
+    const plate = [populated?.plateEmirate, populated?.plateNumber].filter(Boolean).join(' ').trim();
+    const startLabel =
+        String(remark.serviceStartDate || remark.scheduledServiceDate || '').slice(0, 10) || 'the start date';
+    const detailLine = `${actorName || 'Admin'} submitted schedule/garage details for ${populated?.assetId || ''}${plate ? ` (${plate})` : ''}. Review amount/quotation and approve (start ${startLabel}).`;
+    const scheduleRows = buildShopScheduleEmailDetailRows(remark, serviceTypeLabel || 'Vehicle Service');
+
+    await syncDashboardAction({
+        requestId: asset._id,
+        requestType: 'Vehicle Service Request',
+        status: 'Pending',
+        assignedTo: accounts._id,
+        subjectEmployee: populated?.assignedTo,
+        requestedByName: actorName || '',
+        extra1: `${populated?.assetId || ''} — ${serviceTypeLabel || 'Service'}`,
+        extra2: 'Awaiting Accounts Approve',
+        extra3: dashboardMeta || '',
+    });
+
+    await sendVehicleServiceWorkflowEmail({
+        recipient: accounts,
+        asset: populated || asset,
+        stageLabel: `${serviceTypeLabel || 'Service'} — Accounts Approve`,
+        actionLabel: `${serviceTypeLabel || 'Service'} — Accounts Approve`,
+        detailLine,
+        detailRows: scheduleRows,
+        serviceReqNo: resolveServiceReqNo(service, remark),
+        linkPath: linkPath || undefined,
+    }).catch((err) => {
+        console.error('[ShopService] Accounts Approve email failed:', err?.message || err);
+    });
+
+    // Oil parity: Admin FYI when Accounts is next (no extra dashboard spam).
+    const adminOfficer = await getDepartmentHOD('admincontroller');
+    if (adminOfficer?._id && String(adminOfficer._id) !== String(accounts._id)) {
+        await sendVehicleServiceWorkflowEmail({
+            recipient: adminOfficer,
+            asset: populated || asset,
+            stageLabel: `${serviceTypeLabel || 'Service'} — sent to Accounts`,
+            actionLabel: `${serviceTypeLabel || 'Service'} — Schedule submitted`,
+            detailLine: `Schedule/garage details for ${populated?.assetId || ''}${plate ? ` (${plate})` : ''} were submitted. Accounts will review next.`,
+            detailRows: scheduleRows,
+            serviceReqNo: resolveServiceReqNo(service, remark),
+            linkPath: linkPath || undefined,
+        }).catch(() => {});
+    }
+
+    return asset;
+}
+
+/**
+ * Email-only schedule update to Admin Officer, HR, assigned user (Oil-style extend/reschedule).
+ */
+export async function notifyShopScheduleStakeholders({
+    asset,
+    serviceRecordId,
+    remark = {},
+    serviceTypeLabel = 'Vehicle Service',
+    actionLabel,
+    detailLine,
+}) {
+    const populated = await AssetItem.findById(asset._id || asset)
+        .populate({
+            path: 'assignedTo',
+            select: 'firstName lastName employeeId companyEmail workEmail personalEmail email',
+            populate: {
+                path: 'primaryReportee',
+                select: 'firstName lastName employeeId companyEmail workEmail',
+            },
+        })
+        .select(
+            'assetId name plateEmirate plateNumber assignedTo services._id services.serviceReqNo services.serviceType services.remark',
+        )
+        .lean();
+    if (!populated) return;
+
+    const adminOfficer = await getDepartmentHOD('admincontroller');
+    const hr = await getDepartmentHOD('hr');
+    const accounts = await getDepartmentHOD('accounts');
+    const recipients = uniqRecipients([adminOfficer, hr, accounts, populated.assignedTo]);
+    if (!recipients.length) return;
+
+    const service =
+        (Array.isArray(populated.services) ? populated.services : []).find(
+            (s) => String(s?._id) === String(serviceRecordId),
+        ) || null;
+    const liveRemark = Object.keys(remark || {}).length ? remark : parseRemark(service);
+    const rows = buildShopScheduleEmailDetailRows(liveRemark, serviceTypeLabel);
+    const linkPath = `/HRM/Asset/Vehicle/details/${populated._id}`;
+
+    for (const recipient of recipients) {
+        await sendVehicleServiceWorkflowEmail({
+            recipient,
+            asset: populated,
+            stageLabel: actionLabel,
+            actionLabel,
+            detailLine,
+            detailRows: rows,
+            serviceReqNo: resolveServiceReqNo(service, liveRemark),
+            linkPath,
+        }).catch(() => {});
+    }
 }
 
 export function isShopServiceLive(asset, service) {
@@ -489,24 +764,22 @@ export async function routeShopServiceToBillingAfterComplete(
         extra3: dashboardMeta || '',
     });
 
-    const email = resolveRecipientEmail(accounts);
-    if (email) {
-        await sendVehicleServiceWorkflowEmail({
-            to: email,
-            asset: populated,
-            serviceTypeLabel: serviceTypeLabel || 'Vehicle Service',
-            actionLabel: `${serviceTypeLabel || 'Service'} — Accounts billing (Zoho)`,
-            detailLine,
-            linkPath: linkPath || undefined,
-        }).catch(() => { });
-    }
+    // Oil parity: Accounts Make Payment email (recipient + stageLabel + detail rows).
+    const scheduleRows = buildShopScheduleEmailDetailRows(remark, serviceTypeLabel || 'Vehicle Service');
+    await sendVehicleServiceWorkflowEmail({
+        recipient: accounts,
+        asset: populated || asset,
+        stageLabel: `${serviceTypeLabel || 'Service'} — Make Payment`,
+        actionLabel: `${serviceTypeLabel || 'Service'} — Make Payment`,
+        detailLine,
+        detailRows: scheduleRows,
+        serviceReqNo: resolveServiceReqNo(service, remark),
+        linkPath: linkPath || undefined,
+    }).catch((err) => {
+        console.error('[ShopService] Accounts Make Payment email failed:', err?.message || err);
+    });
 
     return asset;
-}
-
-function resolveRecipientEmail(emp) {
-    if (!emp) return '';
-    return String(emp.companyEmail || emp.workEmail || emp.personalEmail || emp.email || '').trim();
 }
 
 /**
@@ -596,6 +869,43 @@ export async function advanceShopBillingAfterAccountsApprove(
         extra2: 'Billed',
         extra3: '',
     });
+
+    // Oil parity: after Make Payment / Zoho billed → Admin TO, HR + assignee CC.
+    try {
+        const populated = await AssetItem.findById(asset._id)
+            .populate({
+                path: 'assignedTo',
+                select: 'firstName lastName employeeId companyEmail workEmail personalEmail email',
+                populate: {
+                    path: 'primaryReportee',
+                    select: 'firstName lastName employeeId companyEmail workEmail',
+                },
+            })
+            .select(
+                'assetId name plateEmirate plateNumber assignedTo services._id services.serviceReqNo services.serviceType services.remark',
+            )
+            .lean();
+        const adminOfficer = await getDepartmentHOD('admincontroller');
+        const hr = await getDepartmentHOD('hr');
+        const plate = [populated?.plateEmirate, populated?.plateNumber].filter(Boolean).join(' ').trim();
+        const detailLine = `${serviceTypeLabel || 'Service'} for ${populated?.assetId || ''}${plate ? ` (${plate})` : ''} is billed (Zoho). Service workflow is complete.`;
+        const adminTo = resolveRecipientEmail(adminOfficer);
+        if (adminOfficer?._id && adminTo) {
+            const cc = collectCcEmails([hr, populated?.assignedTo], adminTo);
+            await sendVehicleServiceWorkflowEmail({
+                recipient: adminOfficer,
+                asset: populated || asset,
+                stageLabel: `${serviceTypeLabel || 'Service'} completed`,
+                actionLabel: `${serviceTypeLabel || 'Service'} completed`,
+                detailLine,
+                detailRows: buildShopScheduleEmailDetailRows(remark, serviceTypeLabel || 'Vehicle Service'),
+                serviceReqNo: resolveServiceReqNo(service, remark),
+                cc,
+            });
+        }
+    } catch (err) {
+        console.error('[ShopService] Post-billed completion email failed:', err?.message || err);
+    }
 
     return { asset, zohoBillSync };
 }

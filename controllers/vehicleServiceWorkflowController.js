@@ -881,7 +881,8 @@ export async function maybeStartVehicleServiceWorkflow(asset, { serviceRecordId,
 }
 
 /**
- * Car Wash: submit marks work complete → Accounts gets email + task to store Zoho bill.
+ * Car Wash: submit → Accounts gets email + task to store Zoho Expense.
+ * Remains Incomplete until Zoho Expense succeeds.
  */
 export async function maybeStartCarWashWorkflow(asset, { serviceRecordId, req }) {
     try {
@@ -902,8 +903,8 @@ export async function maybeStartCarWashWorkflow(asset, { serviceRecordId, req })
         setCarWashPaymentStatusOnService(serviceSub, CAR_WASH_PAYMENT_PENDING);
         const remark = parseRemarkMeta(serviceSub.remark);
         remark.workflowStage = CAR_WASH_STAGE_PENDING_BILLING;
-        remark.vehicleServiceCompleted = 'live';
-        remark.vehicleServiceCompletedAt = new Date().toISOString();
+        // Incomplete until Accounts successfully creates Zoho Expense.
+        remark.vehicleServiceCompleted = 'incomplete';
         remark.billingStatus = 'pending';
         serviceSub.remark = JSON.stringify(remark);
 
@@ -921,14 +922,14 @@ export async function maybeStartCarWashWorkflow(asset, { serviceRecordId, req })
         await pushWorkflowHistory(asset, {
             stage: CAR_WASH_STAGE_PENDING_BILLING,
             action: 'created',
-            note: 'Car wash complete — awaiting Accounts Zoho bill',
+            note: 'Car wash submitted — awaiting Accounts Zoho Expense',
             byName: requesterName,
         });
 
         await logVehicleServiceWorkflowToAssetHistory(asset, {
             stage: CAR_WASH_STAGE_PENDING_BILLING,
             workflowAction: 'start',
-            note: 'Car wash complete — awaiting Accounts Zoho bill',
+            note: 'Car wash submitted — awaiting Accounts Zoho Expense',
             byName: requesterName,
             performedById: requesterEmp?._id,
             serviceTypeLabel: 'Car Wash',
@@ -944,16 +945,16 @@ export async function maybeStartCarWashWorkflow(asset, { serviceRecordId, req })
             subjectEmployee: asset.assignedTo,
             requestedByName: requesterName,
             extra1: `${asset.assetId} — Car Wash`,
-            extra2: 'Store Zoho bill (Car Wash complete)',
+            extra2: 'Store Zoho Expense (Car Wash)',
             extra3: carWashDashboardMeta(asset, serviceRecordId),
         });
 
         await sendWorkflowEmailWithConsole({
             recipient: accounts,
             asset,
-            stageLabel: 'Accounts Zoho billing required',
-            actionLabel: 'Car wash complete — store Zoho bill',
-            detailLine: `${requesterName} completed a car wash request for ${asset.assetId || 'vehicle'}. Open VeRP and click Store to Zoho to create the bill.`,
+            stageLabel: 'Accounts Zoho Expense required',
+            actionLabel: 'Car wash — store Zoho Expense',
+            detailLine: `${requesterName} submitted a car wash request for ${asset.assetId || 'vehicle'}. Open VeRP, enter Expense Account / Amount / Paid Through, then Store to Zoho Expense. Status stays Incomplete until Zoho succeeds.`,
             linkPath: carWashDetailsPath(asset._id, serviceRecordId),
         });
 
@@ -1295,20 +1296,22 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
         ) {
             const validatedAmount = Number(serviceSubCarWash?.value);
             if (!Number.isFinite(validatedAmount) || validatedAmount <= 0) {
-                return res.status(400).json({ message: 'A valid amount is required before storing the Zoho bill.' });
+                return res.status(400).json({
+                    message: 'A valid amount is required before creating the Zoho Expense.',
+                });
             }
 
             persistWorkflowSnapshotToServiceSubdoc(asset);
-            let carWashBillResult;
+            let carWashExpenseResult;
             try {
-                carWashBillResult = await advanceCarWashBillingAfterAccountsApprove(
+                carWashExpenseResult = await advanceCarWashBillingAfterAccountsApprove(
                     asset,
                     asset.activeServiceWorkflow,
                     actorName,
                 );
-            } catch (billErr) {
+            } catch (expenseErr) {
                 return res.status(400).json({
-                    message: billErr?.message || 'Could not store Zoho bill for car wash.',
+                    message: expenseErr?.message || 'Could not store Zoho Expense for car wash.',
                 });
             }
 
@@ -1319,7 +1322,7 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
                     status: 'Approved',
                     assignedTo: assignee._id,
                     actionedBy: performedById,
-                    comment: comment || 'Zoho bill stored — Billed',
+                    comment: comment || 'Zoho Expense stored — Complete',
                     subjectEmployee: asset.assignedTo,
                     requestedByName: actorName,
                 });
@@ -1328,14 +1331,14 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
             await pushWorkflowHistory(asset, {
                 stage: stage,
                 action: 'approve',
-                note: comment || 'Accounts stored Zoho bill — Billed',
+                note: comment || 'Accounts stored Zoho Expense — Complete',
                 byName: actorName,
                 bySignatureUrl: actorSignatureUrl,
             });
             await logVehicleServiceWorkflowToAssetHistory(asset, {
                 stage: stage,
                 workflowAction: 'approve',
-                note: comment || 'Accounts stored Zoho bill — Billed',
+                note: comment || 'Accounts stored Zoho Expense — Complete',
                 byName: actorName,
                 performedById,
                 serviceTypeLabel: 'Car Wash',
@@ -1345,14 +1348,14 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
 
             await closeCarWashPendingDashboardActions(asset._id, wf.serviceRecordId, {
                 actionedBy: performedById,
-                comment: comment || 'Car wash Zoho bill stored',
+                comment: comment || 'Car wash Zoho Expense stored',
             });
 
             await closeAdminOfficerServiceTrackNotification({
                 assetId: asset._id,
                 serviceRecordId: wf.serviceRecordId,
                 actionedBy: performedById,
-                comment: comment || 'Car wash billed',
+                comment: comment || 'Car wash expense stored',
                 requestedByName: actorName,
             });
 
@@ -1360,15 +1363,19 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
             asset.markModified('services');
             await asset.save();
 
-            const zohoBillSync = carWashBillResult?.zohoBillSync || null;
+            const zohoExpenseSync = carWashExpenseResult?.zohoExpenseSync || null;
             const fresh = await AssetItem.findById(asset._id).populate(
                 'assignedTo',
                 'firstName lastName employeeId',
             );
             return res.json({
-                message: `Billed. ${zohoBillSync?.message || 'Zoho bill created.'}`,
-                zohoBillMessage: zohoBillSync?.message || '',
-                zohoBillId: zohoBillSync?.billId || '',
+                message: `Complete. ${zohoExpenseSync?.message || 'Zoho Expense created.'}`,
+                zohoExpenseMessage: zohoExpenseSync?.message || '',
+                zohoExpenseId: zohoExpenseSync?.expenseId || '',
+                zohoExpenseOk: true,
+                // Backward-compatible aliases
+                zohoBillMessage: zohoExpenseSync?.message || '',
+                zohoBillId: zohoExpenseSync?.expenseId || '',
                 zohoBillOk: true,
                 asset: fresh,
             });

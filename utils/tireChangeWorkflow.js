@@ -247,14 +247,14 @@ export async function submitTireChangeGarage(asset, serviceId, serviceUpdates, r
             startRaw ? String(startRaw).slice(0, 10) : '—'
         }`,
     });
-    // Garage done → schedule immediately. Accounts Zoho billing is only after Service Completed.
+    // Garage done → Accounts Approve (Oil-style), then schedule after Accounts approves.
     const { snapshotActiveServiceWorkflow } = await import('./vehicleServiceWorkflowResolve.js');
     if (!bindActive) {
         snapshotActiveServiceWorkflow(asset);
     }
     asset.activeServiceWorkflow = {
         ...(typeof wf.toObject === 'function' ? wf.toObject() : wf),
-        stage: wf.stage,
+        stage: TIRE_CHANGE_STAGE.ACCOUNTS,
         serviceRecordId: wf.serviceRecordId || serviceId,
         serviceTypeLabel: wf.serviceTypeLabel || 'Tire Change',
         history: Array.isArray(wf.history) ? [...wf.history] : [],
@@ -266,22 +266,16 @@ export async function submitTireChangeGarage(asset, serviceId, serviceUpdates, r
     asset.markModified('services');
     await asset.save();
 
-    const { advanceShopServiceToScheduledAfterAccountsApprove } = await import(
+    const { routeShopServiceToAccountsApproveAfterGarage } = await import(
         './vehicleShopServiceScheduled.js'
     );
-    await advanceShopServiceToScheduledAfterAccountsApprove(
-        asset,
-        asset.activeServiceWorkflow,
+    await routeShopServiceToAccountsApproveAfterGarage(asset, serviceId, {
+        serviceTypeLabel: 'Tire Change',
         actorName,
-        {
-            serviceTypeLabel: 'Tire Change',
-            linkPath: tireChangeDetailsPath(asset._id, serviceId),
-            dashboardMeta: tireChangeDashboardMeta(asset, serviceId),
-            appendActivity: null,
-            scheduleActivityType: 'service_scheduled',
-            scheduleActivityNote: 'Garage submitted — service scheduled (Accounts Zoho after End Service)',
-        },
-    );
+        linkPath: tireChangeDetailsPath(asset._id, serviceId),
+        dashboardMeta: tireChangeDashboardMeta(asset, serviceId),
+        appendActivity: null,
+    });
 
     return asset;
 }
