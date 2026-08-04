@@ -212,6 +212,8 @@ export async function syncExpenseRefundPaymentToZoho({
             );
             const resolvedPaymentMode = clean(paymentMode || 'Cash', 'Cash');
             const resolvedTaxId = clean(taxId);
+            const taxTreatmentLower = resolvedTaxTreatment.toLowerCase();
+            const isVatNotRegistered = taxTreatmentLower.includes('not_registered');
 
             const payload = {
                 transaction_type: FINE_COMPANY_TRANSACTION_TYPE,
@@ -223,12 +225,15 @@ export async function syncExpenseRefundPaymentToZoho({
                 date,
                 reference_number: referenceNumber,
                 description,
-                is_inclusive_tax: Boolean(isInclusiveTax),
                 tax_treatment: resolvedTaxTreatment,
                 place_of_supply: resolvedPlaceOfSupply,
                 location_id: resolvedLocationId,
             };
-            if (resolvedTaxId) payload.tax_id = resolvedTaxId;
+            // Zoho rejects tax_id / inclusive tax when treatment is VAT not registered.
+            if (!isVatNotRegistered) {
+                payload.is_inclusive_tax = Boolean(isInclusiveTax);
+                if (resolvedTaxId) payload.tax_id = resolvedTaxId;
+            }
             // Zoho bank txn accepts customer_id for customer or vendor contact.
             if (resolvedVendorId) {
                 payload.customer_id = resolvedVendorId;

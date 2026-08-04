@@ -107,6 +107,15 @@ const paymentSchema = new mongoose.Schema(
         zohoJournalId: { type: String, default: '' },
         zohoExpenseId: { type: String, default: '' },
         zohoSyncError: { type: String, default: '' },
+        /** Persisted for Zoho Expense Refund retry */
+        locationId: { type: String, default: '' },
+        taxTreatment: { type: String, default: '' },
+        placeOfSupply: { type: String, default: '' },
+        taxId: { type: String, default: '' },
+        isInclusiveTax: { type: Boolean, default: true },
+        vendorId: { type: String, default: '' },
+        vendorName: { type: String, default: '' },
+        paymentMode: { type: String, default: '' },
         attachment: {
             url: { type: String },
             publicId: { type: String },

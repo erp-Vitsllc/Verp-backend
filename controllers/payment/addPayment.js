@@ -164,6 +164,14 @@ export const addPayment = async (req, res) => {
             paidThroughAccountName: String(paidThroughAccountName || '').trim(),
             expenseAccountId: String(expenseAccountId || '').trim(),
             expenseAccountName: String(expenseAccountName || '').trim(),
+            locationId: String(locationId || '').trim(),
+            taxTreatment: String(taxTreatment || '').trim(),
+            placeOfSupply: String(placeOfSupply || '').trim(),
+            taxId: String(taxId || '').trim(),
+            isInclusiveTax: typeof isInclusiveTax === 'boolean' ? isInclusiveTax : true,
+            vendorId: String(vendorId || '').trim(),
+            vendorName: String(vendorName || '').trim(),
+            paymentMode: String(paymentMode || receivedVia || '').trim(),
         });
 
         await payment.save();
@@ -232,82 +240,133 @@ export const addPayment = async (req, res) => {
                         const expenseId = String(
                             expenseAccountId || payment.expenseAccountId || '',
                         ).trim();
-                        if (paidThroughId && expenseId) {
-                            try {
-                                const { syncFineCompanyPaymentToZoho } = await import(
-                                    '../../utils/syncFineCompanyPaymentToZoho.js'
-                                );
-                                const zohoResult = await syncFineCompanyPaymentToZoho({
-                                    payment,
-                                    fine,
-                                    employee,
-                                    organizationId:
-                                        zohoOrganizationId || payment.zohoOrganizationId,
-                                    expenseAccountId: expenseId,
-                                    expenseAccountName:
-                                        expenseAccountName || payment.expenseAccountName,
-                                    paidThroughAccountId: paidThroughId,
-                                    paidThroughAccountName:
-                                        paidThroughAccountName || payment.paidThroughAccountName,
-                                    locationId,
-                                    taxTreatment,
-                                    placeOfSupply,
-                                    taxId,
-                                    isInclusiveTax:
-                                        typeof isInclusiveTax === 'boolean'
-                                            ? isInclusiveTax
-                                            : true,
-                                    paymentMode: paymentMode || receivedVia || 'Cash',
-                                    vendorId,
-                                    vendorName,
-                                    attachments: Array.isArray(attachments)
-                                        ? attachments
-                                        : attachment
-                                          ? [attachment]
-                                          : [],
-                                });
-                                if (zohoResult.ok) {
-                                    payment.zohoExpenseId =
-                                        zohoResult.expenseId || payment.zohoExpenseId || '';
-                                    payment.zohoOrganizationId =
-                                        zohoResult.organizationId || payment.zohoOrganizationId;
-                                    payment.zohoSyncError = '';
-                                    payment.paidThroughAccountId = paidThroughId;
-                                    payment.paidThroughAccountName =
-                                        paidThroughAccountName || payment.paidThroughAccountName;
-                                    payment.expenseAccountId = expenseId;
-                                    payment.expenseAccountName =
-                                        expenseAccountName || payment.expenseAccountName;
-                                    await payment.save();
-                                    if (zohoResult.organizationId) {
-                                        fine.zohoOrganizationId =
-                                            zohoResult.organizationId || fine.zohoOrganizationId;
-                                    }
-                                } else {
-                                    payment.zohoSyncError =
-                                        zohoResult.message || 'Zoho sync failed';
-                                    await payment.save();
-                                    console.warn(
-                                        '[AddPayment] Fine Zoho sync:',
-                                        zohoResult.message,
-                                    );
-                                }
-                                req._fineZohoSyncResult = zohoResult;
-                            } catch (zohoErr) {
-                                console.error(
-                                    '[AddPayment] Fine Zoho sync error:',
-                                    zohoErr?.message || zohoErr,
-                                );
-                                payment.zohoSyncError = zohoErr?.message || 'Zoho sync failed';
-                                await payment.save();
-                                req._fineZohoSyncResult = {
-                                    ok: false,
-                                    message: zohoErr?.message || 'Zoho sync failed',
-                                };
+
+                        const recomputeFinePaidFromCompleted = async () => {
+                            const completed = await Payment.find(paymentQuery);
+                            const totalPaidCompleted = completed.reduce(
+                                (sum, p) => sum + parseFloat(p.amount || 0),
+                                0,
+                            );
+                            fine.paidAmount = totalPaidCompleted;
+                            const rem = employeeShare - totalPaidCompleted;
+                            if (rem > 0.01 && fine.fineStatus === 'Paid') {
+                                fine.fineStatus = 'Approved';
+                            } else if (rem <= 0.01) {
+                                fine.fineStatus = 'Paid';
                             }
+                            await fine.save();
+                        };
+
+                        const failFineExpenseRefund = async (message, statusCode = 422) => {
+                            payment.status = 'Failed';
+                            payment.zohoSyncError = message || 'Zoho Expense Refund failed';
+                            await payment.save();
+                            await recomputeFinePaidFromCompleted();
+                            return res.status(statusCode).json({
+                                success: false,
+                                message:
+                                    message ||
+                                    'Zoho Expense Refund failed. Payment was not approved — fix VAT/accounts and Retry Zoho.',
+                                payment,
+                                zohoSync: {
+                                    ok: false,
+                                    expenseId: '',
+                                    expenseNumber: '',
+                                    journalId: '',
+                                    message: message || 'Zoho sync failed',
+                                },
+                            });
+                        };
+
+                        if (!paidThroughId || !expenseId) {
+                            // Salary-source / non-Zoho fine payments: keep Completed without Zoho.
+                            // Expense Refund modal always sends both accounts.
+                            const intendedExpenseRefund =
+                                Boolean(String(taxTreatment || payment.taxTreatment || '').trim()) ||
+                                Boolean(String(vendorId || payment.vendorId || '').trim());
+                            if (intendedExpenseRefund) {
+                                return failFineExpenseRefund(
+                                    'Expense Account and Paid Through are required. Zoho Expense Refund must succeed before this payment is approved.',
+                                    400,
+                                );
+                            }
+                            await fine.save();
+                        } else {
+                        try {
+                            const { syncFineCompanyPaymentToZoho } = await import(
+                                '../../utils/syncFineCompanyPaymentToZoho.js'
+                            );
+                            const zohoResult = await syncFineCompanyPaymentToZoho({
+                                payment,
+                                fine,
+                                employee,
+                                organizationId:
+                                    zohoOrganizationId || payment.zohoOrganizationId,
+                                expenseAccountId: expenseId,
+                                expenseAccountName:
+                                    expenseAccountName || payment.expenseAccountName,
+                                paidThroughAccountId: paidThroughId,
+                                paidThroughAccountName:
+                                    paidThroughAccountName || payment.paidThroughAccountName,
+                                locationId,
+                                taxTreatment,
+                                placeOfSupply,
+                                taxId,
+                                isInclusiveTax:
+                                    typeof isInclusiveTax === 'boolean'
+                                        ? isInclusiveTax
+                                        : true,
+                                paymentMode: paymentMode || receivedVia || 'Cash',
+                                vendorId,
+                                vendorName,
+                                attachments: Array.isArray(attachments)
+                                    ? attachments
+                                    : attachment
+                                      ? [attachment]
+                                      : [],
+                            });
+                            if (!zohoResult.ok || !String(zohoResult.expenseId || '').trim()) {
+                                console.warn(
+                                    '[AddPayment] Fine Zoho sync blocked approve:',
+                                    zohoResult.message,
+                                );
+                                req._fineZohoSyncResult = zohoResult;
+                                return failFineExpenseRefund(
+                                    zohoResult.message || 'Zoho Expense Refund failed',
+                                );
+                            }
+                            payment.zohoExpenseId =
+                                zohoResult.expenseId || payment.zohoExpenseId || '';
+                            payment.zohoOrganizationId =
+                                zohoResult.organizationId || payment.zohoOrganizationId;
+                            payment.zohoSyncError = '';
+                            payment.paidThroughAccountId = paidThroughId;
+                            payment.paidThroughAccountName =
+                                paidThroughAccountName || payment.paidThroughAccountName;
+                            payment.expenseAccountId = expenseId;
+                            payment.expenseAccountName =
+                                expenseAccountName || payment.expenseAccountName;
+                            await payment.save();
+                            if (zohoResult.organizationId) {
+                                fine.zohoOrganizationId =
+                                    zohoResult.organizationId || fine.zohoOrganizationId;
+                            }
+                            await fine.save();
+                            req._fineZohoSyncResult = zohoResult;
+                        } catch (zohoErr) {
+                            console.error(
+                                '[AddPayment] Fine Zoho sync error:',
+                                zohoErr?.message || zohoErr,
+                            );
+                            req._fineZohoSyncResult = {
+                                ok: false,
+                                message: zohoErr?.message || 'Zoho sync failed',
+                            };
+                            return failFineExpenseRefund(
+                                zohoErr?.message || 'Zoho Expense Refund failed',
+                            );
                         }
-                        
-                        await fine.save();
+                        }
                     }
                 } else {
                     console.error('[AddPayment] Fine not found:', { relatedEntityId, referenceId });
@@ -361,67 +420,126 @@ export const addPayment = async (req, res) => {
                         expenseAccountId || payment.expenseAccountId || '',
                     ).trim();
 
-                    if (paidThroughId && expenseId) {
-                        try {
-                            const { syncLoanRepaymentPaymentToZoho } = await import(
-                                '../../utils/syncFineCompanyPaymentToZoho.js'
-                            );
-                            const zohoResult = await syncLoanRepaymentPaymentToZoho({
-                                payment,
-                                loan,
-                                employee,
-                                organizationId:
-                                    zohoOrganizationId || payment.zohoOrganizationId,
-                                expenseAccountId: expenseId,
-                                expenseAccountName:
-                                    expenseAccountName || payment.expenseAccountName,
-                                paidThroughAccountId: paidThroughId,
-                                paidThroughAccountName:
-                                    paidThroughAccountName || payment.paidThroughAccountName,
-                                locationId,
-                                taxTreatment,
-                                placeOfSupply,
-                                taxId,
-                                isInclusiveTax:
-                                    typeof isInclusiveTax === 'boolean' ? isInclusiveTax : true,
-                                paymentMode: paymentMode || receivedVia || 'Cash',
-                                vendorId,
-                                vendorName,
-                                attachments: Array.isArray(attachments)
-                                    ? attachments
-                                    : attachment
-                                      ? [attachment]
-                                      : [],
-                            });
-                            if (zohoResult.ok) {
-                                payment.zohoExpenseId =
-                                    zohoResult.expenseId || payment.zohoExpenseId || '';
-                                payment.zohoOrganizationId =
-                                    zohoResult.organizationId || payment.zohoOrganizationId;
-                                payment.zohoSyncError = '';
-                                await payment.save();
-                                req._loanRepaymentZohoSyncResult = zohoResult;
-                            } else {
-                                payment.zohoSyncError = zohoResult.message || 'Zoho sync failed';
-                                await payment.save();
-                                req._loanRepaymentZohoSyncResult = zohoResult;
-                                console.warn(
-                                    '[AddPayment] Loan repayment Zoho sync:',
-                                    zohoResult.message,
-                                );
+                    const recomputeLoanRepaidFromCompleted = async () => {
+                        const paymentsByIdDone = await Payment.find({
+                            ...repaymentQuery,
+                            relatedEntityId: loan._id,
+                        });
+                        const paymentsByRefDone = loan.loanId
+                            ? await Payment.find({
+                                  ...repaymentQuery,
+                                  referenceId: loan.loanId,
+                              })
+                            : [];
+                        const ids = new Set();
+                        const merged = [];
+                        [...paymentsByIdDone, ...paymentsByRefDone].forEach((p) => {
+                            if (!ids.has(p._id.toString())) {
+                                ids.add(p._id.toString());
+                                merged.push(p);
                             }
-                        } catch (zohoErr) {
-                            console.error(
-                                '[AddPayment] Loan repayment Zoho sync error:',
-                                zohoErr?.message || zohoErr,
-                            );
-                            payment.zohoSyncError = zohoErr?.message || 'Zoho sync failed';
-                            await payment.save();
-                            req._loanRepaymentZohoSyncResult = {
+                        });
+                        loan.repaidAmount = merged.reduce(
+                            (sum, p) => sum + parseFloat(p.amount || 0),
+                            0,
+                        );
+                        await loan.save();
+                    };
+
+                    const failLoanRepaymentZoho = async (message, statusCode = 422) => {
+                        payment.status = 'Failed';
+                        payment.zohoSyncError = message || 'Zoho Expense Refund failed';
+                        await payment.save();
+                        await recomputeLoanRepaidFromCompleted();
+                        return res.status(statusCode).json({
+                            success: false,
+                            message:
+                                message ||
+                                'Zoho Expense Refund failed. Payment was not approved — fix VAT/accounts and Retry Zoho.',
+                            payment,
+                            zohoSync: {
                                 ok: false,
-                                message: zohoErr?.message || 'Zoho sync failed',
-                            };
+                                expenseId: '',
+                                expenseNumber: '',
+                                journalId: '',
+                                message: message || 'Zoho sync failed',
+                            },
+                        });
+                    };
+
+                    if (!paidThroughId || !expenseId) {
+                        return failLoanRepaymentZoho(
+                            'Expense Account and Paid Through are required. Zoho Expense Refund must succeed before this repayment is approved.',
+                            400,
+                        );
+                    }
+
+                    try {
+                        const { syncLoanRepaymentPaymentToZoho } = await import(
+                            '../../utils/syncFineCompanyPaymentToZoho.js'
+                        );
+                        const zohoResult = await syncLoanRepaymentPaymentToZoho({
+                            payment,
+                            loan,
+                            employee,
+                            organizationId:
+                                zohoOrganizationId || payment.zohoOrganizationId,
+                            expenseAccountId: expenseId,
+                            expenseAccountName:
+                                expenseAccountName || payment.expenseAccountName,
+                            paidThroughAccountId: paidThroughId,
+                            paidThroughAccountName:
+                                paidThroughAccountName || payment.paidThroughAccountName,
+                            locationId,
+                            taxTreatment,
+                            placeOfSupply,
+                            taxId,
+                            isInclusiveTax:
+                                typeof isInclusiveTax === 'boolean' ? isInclusiveTax : true,
+                            paymentMode: paymentMode || receivedVia || 'Cash',
+                            vendorId,
+                            vendorName,
+                            attachments: Array.isArray(attachments)
+                                ? attachments
+                                : attachment
+                                  ? [attachment]
+                                  : [],
+                        });
+                        if (!zohoResult.ok || !String(zohoResult.expenseId || '').trim()) {
+                            req._loanRepaymentZohoSyncResult = zohoResult;
+                            console.warn(
+                                '[AddPayment] Loan repayment Zoho sync blocked approve:',
+                                zohoResult.message,
+                            );
+                            return failLoanRepaymentZoho(
+                                zohoResult.message || 'Zoho Expense Refund failed',
+                            );
                         }
+                        payment.zohoExpenseId =
+                            zohoResult.expenseId || payment.zohoExpenseId || '';
+                        payment.zohoOrganizationId =
+                            zohoResult.organizationId || payment.zohoOrganizationId;
+                        payment.zohoSyncError = '';
+                        payment.paidThroughAccountId = paidThroughId;
+                        payment.paidThroughAccountName =
+                            paidThroughAccountName || payment.paidThroughAccountName;
+                        payment.expenseAccountId = expenseId;
+                        payment.expenseAccountName =
+                            expenseAccountName || payment.expenseAccountName;
+                        await payment.save();
+                        req._loanRepaymentZohoSyncResult = zohoResult;
+                    } catch (zohoErr) {
+                        console.error(
+                            '[AddPayment] Loan repayment Zoho sync error:',
+                            zohoErr?.message || zohoErr,
+                        );
+                        req._loanRepaymentZohoSyncResult = {
+                            ok: false,
+                            message: zohoErr?.message || 'Zoho sync failed',
+                        };
+                        return failLoanRepaymentZoho(
+                            zohoErr?.message || 'Zoho Expense Refund failed',
+                        );
                     }
                 } else {
                     console.error('[AddPayment] Loan not found for repayment:', {
