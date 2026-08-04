@@ -7,6 +7,8 @@ import {
 } from "../../services/companyPartitionService.js";
 import { isReqUserAdmin } from "../../utils/sendAdminDeletionNotificationEmails.js";
 import { disposeCompanyProfileAttachment } from "../../utils/profileAttachmentDisposition.js";
+import { cleanupAllNotificationsForCompanyCardDelete } from "../../utils/cleanupCompanyCardNotifications.js";
+import { closeCreatorNotRenewFollowUpTasks } from "../../utils/companyNotRenewFollowUp.js";
 
 const buildCompanyFilter = (id) => ({
     $or: [
@@ -35,6 +37,8 @@ export const deleteDocument = async (req, res) => {
         }
 
         const { field, row: deletedDoc } = located;
+        const docLabel = String(deletedDoc?.type || deletedDoc?.label || "Document").trim();
+        const documentItemId = deletedDoc?._id ? String(deletedDoc._id) : String(target || "");
 
         await disposeCompanyProfileAttachment(req, {
             company: fullProfile,
@@ -56,6 +60,18 @@ export const deleteDocument = async (req, res) => {
         if (!found || !modified) {
             return res.status(404).json({ message: "Document not found." });
         }
+
+        await closeCreatorNotRenewFollowUpTasks(company._id, {
+            kind: "document",
+            documentItemId,
+            closeAllOfKind: false,
+        });
+        await cleanupAllNotificationsForCompanyCardDelete({
+            companyObjectId: company._id,
+            labels: [docLabel],
+            notRenewKind: "document",
+            documentItemId,
+        });
 
         return res.status(200).json({ message: "Company document deleted successfully." });
     } catch (error) {

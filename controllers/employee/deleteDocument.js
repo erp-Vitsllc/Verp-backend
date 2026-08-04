@@ -3,7 +3,7 @@ import mongoose from "mongoose";
 import { resolveEmployeeId, getCompleteEmployee } from "../../services/employeeService.js";
 import { disposeEmployeeProfileAttachment } from "../../utils/profileAttachmentDisposition.js";
 import { denyEmployeeCardDeleteUnlessAllowed } from "../../utils/employeeCardDeleteAccess.js";
-import { cleanupEmployeeExpiryNotificationsByLabels } from "../../utils/cleanupEmployeeExpiryNotifications.js";
+import { cleanupAllNotificationsForEmployeeCardDelete } from "../../utils/cleanupEmployeeExpiryNotifications.js";
 import {
     documentStorageFingerprint,
     purgeEmployeeOldDocuments,
@@ -63,9 +63,12 @@ export const deleteDocument = async (req, res) => {
             purgeDeletedArchiveReason: true,
         });
 
-        await cleanupEmployeeExpiryNotificationsByLabels({
+        await cleanupAllNotificationsForEmployeeCardDelete({
             employeeObjectId: employee._id,
             labels: [deletedDocLabel],
+            cardLabels: [String(deletedDocLabel || "").toLowerCase()],
+            notRenewKinds: ["manualDocument"],
+            actionedBy: req.user?.employeeObjectId || null,
         });
         
         const completeEmployee = await getCompleteEmployee(employee.employeeId);

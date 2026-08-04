@@ -3,7 +3,7 @@ import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { resolveEmployeeId } from "../../services/employeeService.js";
 import { denyEmployeeCardDeleteUnlessAllowed } from "../../utils/employeeCardDeleteAccess.js";
 import { disposeEmployeeProfileAttachment } from "../../utils/profileAttachmentDisposition.js";
-import { cleanupEmployeeExpiryNotificationsByLabels } from "../../utils/cleanupEmployeeExpiryNotifications.js";
+import { cleanupAllNotificationsForEmployeeCardDelete } from "../../utils/cleanupEmployeeExpiryNotifications.js";
 import { PURGE_TYPES, purgeEmployeeOldDocuments } from "../../utils/purgeEmployeeOldDocuments.js";
 import { scheduleEmployeeProfileFileChangeHrEmailForRequest } from "../../utils/employeeInformativeHrNotify.js";
 import { scheduleEmployeeCardDeletedNotification } from "../../utils/cardDeleteNotificationHelper.js";
@@ -69,9 +69,12 @@ export const deleteVisaDetails = async (req, res) => {
             purgeDeletedArchiveReason: true,
         });
 
-        await cleanupEmployeeExpiryNotificationsByLabels({
+        await cleanupAllNotificationsForEmployeeCardDelete({
             employeeObjectId: employee._id,
-            labels: [visaLabelByType[type] || "Visa"],
+            labels: [visaLabelByType[type] || "Visa", "Visa"],
+            cardLabels: ["visa", String(visaLabelByType[type] || "visa").toLowerCase()],
+            notRenewKinds: ["visa"],
+            actionedBy: req.user?.employeeObjectId || null,
         });
 
         scheduleEmployeeProfileFileChangeHrEmailForRequest({

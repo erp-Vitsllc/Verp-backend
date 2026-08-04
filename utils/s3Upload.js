@@ -1,6 +1,7 @@
 import { PutObjectCommand, DeleteObjectCommand, GetObjectCommand, HeadObjectCommand, CopyObjectCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import s3Client, { bucketName } from '../config/s3Client.js';
+import { getS3ReadBucketNames } from '../config/storageConfig.js';
 import { randomUUID } from 'crypto';
 import { assertAllowedUploadMime } from './allowedUploadMime.js';
 
@@ -47,9 +48,16 @@ export function normalizeS3Key(keyOrUrl) {
         try {
             const parsed = new URL(key);
             let pathKey = decodeURIComponent(String(parsed.pathname || '').replace(/^\/+/, ''));
-            const bucketPrefix = `${bucketName}/`;
-            if (pathKey.startsWith(bucketPrefix)) {
-                pathKey = pathKey.substring(bucketPrefix.length);
+            const bucketPrefixes = [
+                bucketName,
+                ...getS3ReadBucketNames(),
+            ].filter(Boolean);
+            for (const name of bucketPrefixes) {
+                const prefix = `${name}/`;
+                if (pathKey.startsWith(prefix)) {
+                    pathKey = pathKey.substring(prefix.length);
+                    break;
+                }
             }
             if (pathKey && !pathKey.includes(' ')) return pathKey;
         } catch {
@@ -61,23 +69,45 @@ export function normalizeS3Key(keyOrUrl) {
     return key.replace(/^\/+/, '');
 }
 
-export async function s3ObjectExists(key) {
+/**
+ * Find which configured bucket holds the object (primary first, then fallbacks).
+ * @returns {Promise<string|null>}
+ */
+export async function resolveBucketForKey(key) {
     const normalized = normalizeS3Key(key);
-    if (!normalized) return false;
-    try {
-        await s3Client.send(
-            new HeadObjectCommand({
-                Bucket: bucketName,
-                Key: normalized,
-            })
-        );
-        return true;
-    } catch (error) {
-        if (error?.name === 'NotFound' || error?.$metadata?.httpStatusCode === 404) return false;
-        // HeadObject can fail on permissions while GetObject/sign still works — allow signing to proceed.
-        console.warn('[s3ObjectExists]', normalized, error?.message || error);
-        return true;
+    if (!normalized) return null;
+
+    const buckets = getS3ReadBucketNames();
+    if (!buckets.length) return bucketName || null;
+
+    let lastAmbiguousError = null;
+    for (const bucket of buckets) {
+        try {
+            await s3Client.send(
+                new HeadObjectCommand({
+                    Bucket: bucket,
+                    Key: normalized,
+                }),
+            );
+            return bucket;
+        } catch (error) {
+            if (error?.name === 'NotFound' || error?.$metadata?.httpStatusCode === 404) {
+                continue;
+            }
+            // HeadObject can fail on permissions while GetObject still works — prefer this bucket.
+            lastAmbiguousError = error;
+            console.warn('[resolveBucketForKey]', bucket, normalized, error?.message || error);
+            return bucket;
+        }
     }
+
+    if (lastAmbiguousError) return buckets[0] || bucketName || null;
+    return null;
+}
+
+export async function s3ObjectExists(key) {
+    const bucket = await resolveBucketForKey(key);
+    return Boolean(bucket);
 }
 
 /**
@@ -413,8 +443,11 @@ export const getSignedFileUrl = async (key, expiresIn = 86400) => {
             return key;
         }
 
+        const resolvedBucket = (await resolveBucketForKey(key)) || bucketName;
+        if (!resolvedBucket) return null;
+
         const command = new GetObjectCommand({
-            Bucket: bucketName,
+            Bucket: resolvedBucket,
             Key: key,
         });
 

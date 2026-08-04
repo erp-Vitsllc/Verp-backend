@@ -5,6 +5,7 @@ import { disposeEmployeeProfileAttachment } from "../../utils/profileAttachmentD
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
 import { scheduleEmployeeProfileFileChangeHrEmailForRequest } from "../../utils/employeeInformativeHrNotify.js";
 import { scheduleEmployeeCardDeletedNotification } from "../../utils/cardDeleteNotificationHelper.js";
+import { cleanupAllNotificationsForEmployeeCardDelete } from "../../utils/cleanupEmployeeExpiryNotifications.js";
 
 export const deleteWorkDetailsCard = async (req, res) => {
     const { id } = req.params;
@@ -51,6 +52,14 @@ export const deleteWorkDetailsCard = async (req, res) => {
                 },
             }
         );
+
+        await cleanupAllNotificationsForEmployeeCardDelete({
+            employeeObjectId: employee._id,
+            labels: ["Work Details", "workDetails"],
+            cardLabels: ["workDetails", "work details"],
+            notRenewKinds: [],
+            actionedBy: req.user?.employeeObjectId || null,
+        });
 
         await triggerProfileReactivationIfNeeded({
             employeeId: employee.employeeId,

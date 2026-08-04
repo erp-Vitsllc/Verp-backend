@@ -15,7 +15,36 @@ import {
 } from "../../services/companyPartitionService.js";
 import { signCompanyProfileForResponse } from "../../utils/signCompanyProfileForResponse.js";
 import { closeCreatorNotRenewFollowUpTasks } from "../../utils/companyNotRenewFollowUp.js";
+import { cleanupAllNotificationsForCompanyCardDelete } from "../../utils/cleanupCompanyCardNotifications.js";
+import DashboardAction from "../../models/DashboardAction.js";
 
+const clearCompanyPendingNotRenewRequestsByKind = async (companyObjectId, kind) => {
+    if (!companyObjectId || !kind) return;
+    try {
+        const Company = (await import("../../models/Company.js")).default;
+        const core = await Company.findById(companyObjectId).lean();
+        if (!core) return;
+        const full = (await loadCompanyFullProfile(core)) || core;
+        const pending = Array.isArray(full.pendingNotRenewRequests) ? full.pendingNotRenewRequests : [];
+        if (!pending.length) return;
+        const kindNorm = String(kind).trim().toLowerCase();
+        const next = pending.filter((p) => String(p?.kind || "").trim().toLowerCase() !== kindNorm);
+        if (next.length === pending.length) return;
+        await upsertCompanyPartitions(companyObjectId, { pendingNotRenewRequests: next });
+    } catch (err) {
+        console.error("[clearCompanyPendingNotRenewRequestsByKind]", err);
+    }
+};
+
+const closeCompanyActivationIfQueueEmpty = async (companyObjectId, pendingEntries = []) => {
+    if (!companyObjectId) return;
+    if (Array.isArray(pendingEntries) && pendingEntries.length > 0) return;
+    await DashboardAction.deleteMany({
+        requestId: companyObjectId,
+        requestType: "Company Activation",
+        status: { $in: ["Pending", "On Hold"] },
+    });
+};
 const CARD_FIELD_MAP = {
     tradeLicense: [
         "tradeLicenseNumber",
@@ -117,10 +146,22 @@ export const clearCompanyCard = async (req, res) => {
         const activationProgress = calculateCompanyActivationProgress(fullProfile || {});
 
         const notRenewKind = card === "tradeLicense" ? "tradeLicense" : "establishmentCard";
+        const expiryLabels =
+            card === "tradeLicense"
+                ? ["Trade License", "Trade licence", "TradeLicense", "tradeLicense"]
+                : ["Establishment Card", "Establishment", "establishmentCard"];
+
         await closeCreatorNotRenewFollowUpTasks(companyBefore._id, {
             kind: notRenewKind,
             closeAllOfKind: true,
         });
+        await clearCompanyPendingNotRenewRequestsByKind(companyBefore._id, notRenewKind);
+        await cleanupAllNotificationsForCompanyCardDelete({
+            companyObjectId: companyBefore._id,
+            labels: expiryLabels,
+            notRenewKind,
+        });
+        await closeCompanyActivationIfQueueEmpty(companyBefore._id, nextPending);
 
         scheduleCompanyCardDeletedNotification(req, fullProfile || companyBefore, {
             cardLabel: CARD_LABEL_MAP[card] || card,

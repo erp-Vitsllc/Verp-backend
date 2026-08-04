@@ -357,11 +357,24 @@ export async function healStaleOilServicePendingDashboardActions({ assetIds = nu
 
         if (service) {
             const remark = parseOilServiceRemark(service);
-            // Keep Accounts Zoho / Make Payment tasks until the bill is created.
-            if (isOilCashBillingStillOpen(remark, wf, service, meta)) {
+            const serviceType = String(
+                meta?.serviceType || service?.serviceType || remark?.serviceType || '',
+            ).trim();
+            const isOilService =
+                serviceType === 'Oil Service' ||
+                /\bOil Service\b/i.test(String(row.extra1 || '')) ||
+                Boolean(meta?.oilStage);
+
+            // Keep Accounts Zoho / Make Payment tasks until the bill is created (Oil cash only).
+            if (isOilService && isOilCashBillingStillOpen(remark, wf, service, meta)) {
                 continue;
             }
-            if (String(remark.vehicleServiceCompleted || '').toLowerCase() === 'live') {
+            // Only Oil Service uses vehicleServiceCompleted=live as "done" for heal.
+            // Mechanical / Body / Car Wash / Tire also set live during billing — do not close them here.
+            if (
+                isOilService &&
+                String(remark.vehicleServiceCompleted || '').toLowerCase() === 'live'
+            ) {
                 staleIds.push(row._id);
                 continue;
             }

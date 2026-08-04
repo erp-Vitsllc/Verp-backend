@@ -3,7 +3,7 @@ import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { resolveEmployeeId } from "../../services/employeeService.js";
 import { denyEmployeeCardDeleteUnlessAllowed } from "../../utils/employeeCardDeleteAccess.js";
 import { disposeEmployeeProfileAttachment } from "../../utils/profileAttachmentDisposition.js";
-import { cleanupEmployeeExpiryNotificationsByLabels } from "../../utils/cleanupEmployeeExpiryNotifications.js";
+import { cleanupAllNotificationsForEmployeeCardDelete } from "../../utils/cleanupEmployeeExpiryNotifications.js";
 import { PURGE_TYPES, purgeEmployeeOldDocuments } from "../../utils/purgeEmployeeOldDocuments.js";
 import { scheduleEmployeeProfileFileChangeHrEmailForRequest } from "../../utils/employeeInformativeHrNotify.js";
 import { scheduleEmployeeCardDeletedNotification } from "../../utils/cardDeleteNotificationHelper.js";
@@ -39,9 +39,12 @@ export const deleteDrivingLicenseDetails = async (req, res) => {
             types: PURGE_TYPES.driving,
             purgeDeletedArchiveReason: true,
         });
-        await cleanupEmployeeExpiryNotificationsByLabels({
+        await cleanupAllNotificationsForEmployeeCardDelete({
             employeeObjectId: employee._id,
             labels: ["Driving License"],
+            cardLabels: ["driving"],
+            notRenewKinds: ["drivingLicense", "driving"],
+            actionedBy: req.user?.employeeObjectId || null,
         });
 
         scheduleEmployeeProfileFileChangeHrEmailForRequest({

@@ -25,6 +25,34 @@ export function getS3BucketName() {
     return String(process.env.S3_BUCKET_NAME || process.env.IDRIVE_BUCKET_NAME || '').trim();
 }
 
+/** Extra buckets to try on read when object is missing from the primary bucket. */
+export function getS3FallbackBucketNames() {
+    const primary = getS3BucketName();
+    const fromEnv = String(process.env.S3_FALLBACK_BUCKETS || '')
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+
+    // Team historically used both names against the same shared Mongo keys.
+    const knownAlternates = ['verp-storage', 'local-bucket-verp'];
+    const merged = [...fromEnv];
+    for (const name of knownAlternates) {
+        if (name && name !== primary && !merged.includes(name)) merged.push(name);
+    }
+    return merged.filter((name) => name && name !== primary);
+}
+
+/** Ordered list: primary write bucket first, then read fallbacks. */
+export function getS3ReadBucketNames() {
+    const primary = getS3BucketName();
+    const buckets = [];
+    if (primary) buckets.push(primary);
+    for (const name of getS3FallbackBucketNames()) {
+        if (name && !buckets.includes(name)) buckets.push(name);
+    }
+    return buckets;
+}
+
 const ALLOWED_STORAGE_HOST_PATTERNS = [
     /\.wasabisys\.com$/i,
     /\.idrivee2\.com$/i,

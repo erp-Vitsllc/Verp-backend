@@ -5955,12 +5955,19 @@ export const assignAssetItem = async (req, res) => {
             }
         } else {
             canAssign = await userCanAssignAssets(req, assetControllerEmp);
+            // Tools: Asset Owner (current assignee) may reassign their Assigned assets.
+            const assigneeId = (item.assignedTo?._id || item.assignedTo)?.toString?.() || null;
+            const isAssigneeActor =
+                !!actingEmpObjectId && !!assigneeId && actingEmpObjectId === assigneeId;
+            if (!canAssign && isReassignment && isAssigneeActor) {
+                canAssign = true;
+            }
         }
         if (!canAssign) {
             return res.status(403).json({
                 message: fleetVehicle
                     ? 'Only the flowchart Admin Officer can assign fleet vehicles.'
-                    : 'Only Asset Controller or Administrator can assign assets.',
+                    : 'Only Asset Controller, Administrator, or the Asset Owner can reassign assets.',
             });
         }
 
@@ -8917,7 +8924,7 @@ const supersedeOverlappingPendingBulkAssignmentRows = async (assetIdStrings, act
 
     const rows = await DashboardAction.find({
         status: 'Pending',
-        requestType: 'Asset',
+        requestType: { $in: ['Asset', 'Asset Assignment'] },
         extra3: { $exists: true, $nin: [null, ''] },
     })
         .select('_id extra3')
@@ -9058,7 +9065,7 @@ const markBulkAssignmentDashboardRowComplete = async (bulkGroupId, actionedBy, s
     const gid = String(bulkGroupId);
     const rows = await DashboardAction.find({
         status: 'Pending',
-        requestType: 'Asset',
+        requestType: { $in: ['Asset', 'Asset Assignment'] },
         extra3: { $exists: true, $nin: [null, ''] }
     })
         .select('_id extra3')
@@ -9590,9 +9597,8 @@ export const respondBulkAssignmentGroup = async (req, res) => {
                 return res.status(400).json({ message: 'One or more asset ids are not part of this pending batch.' });
             }
         }
-        if (accepted.length + rejected.length !== expectedIds.size) {
-            return res.status(400).json({ message: 'You must respond to every asset in this batch (accept or reject each).' });
-        }
+        // Unselected assets stay Pending — partial accept/reject is allowed.
+        const remainingPending = expectedIds.size - accepted.length - rejected.length;
 
         const first = allInGroup[0];
         const isCompanyBatch = first.assignedToType === 'Company' && first.assignedCompany;
@@ -9774,11 +9780,12 @@ export const respondBulkAssignmentGroup = async (req, res) => {
             results.rejected.push(item.assetId);
         }
 
-        await markBulkAssignmentDashboardRowComplete(
-            gid,
-            currentUser,
-            `Bulk assignment: ${results.accepted.length} accepted, ${results.rejected.length} declined.${comments ? ` ${comments}` : ''}`.trim()
-        );
+        const summaryComment =
+            `Bulk assignment: ${results.accepted.length} accepted, ${results.rejected.length} declined` +
+            (remainingPending > 0 ? `, ${remainingPending} still pending` : '') +
+            (comments ? `. ${comments}` : '.');
+        // Inbox row stays until every asset in the group is accepted or rejected.
+        await refreshBulkAssignmentDashboardIfGroupFullyResolved(gid, currentUser, summaryComment.trim());
 
         const acceptedSummary = accepted.map((idStr) => {
             const item = byId.get(idStr);
@@ -9822,8 +9829,12 @@ export const respondBulkAssignmentGroup = async (req, res) => {
         });
 
         return res.status(200).json({
-            message: `Batch processed: ${results.accepted.length} accepted, ${results.rejected.length} declined.`,
-            results
+            message:
+                remainingPending > 0
+                    ? `Accepted ${results.accepted.length}, declined ${results.rejected.length}. ${remainingPending} still pending in this batch.`
+                    : `Batch completed: ${results.accepted.length} accepted, ${results.rejected.length} declined.`,
+            results,
+            remainingPending,
         });
     } catch (e) {
         const detail = e?.message || 'Server Error';
@@ -17950,6 +17961,15 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
             assigneeClauses.push({
                 requestType: 'Vehicle Service Request',
                 extra3: { $regex: '"oilStage"\\s*:\\s*"accounts_quote"', $options: 'i' },
+            });
+            // Mechanical / Body / Accident / Car Wash / Tire — Accounts stages when assignedTo is stale.
+            assigneeClauses.push({
+                requestType: 'Vehicle Service Request',
+                extra3: {
+                    $regex:
+                        '"serviceType"\\s*:\\s*"(Mechanical Work|Body Work|Accident Repair|Car Wash|Tire Change)"[\\s\\S]{0,800}"(pending_accounts|accounts_payment|accounts_quote|accountsStage)"',
+                    $options: 'i',
+                },
             });
         }
         if (isAcRoleHolder) {

@@ -4,7 +4,7 @@ import { resolveEmployeeId } from "../../services/employeeService.js";
 import { denyEmployeeCardDeleteUnlessAllowed } from "../../utils/employeeCardDeleteAccess.js";
 import { disposeEmployeeProfileAttachment } from "../../utils/profileAttachmentDisposition.js";
 import { triggerProfileReactivationIfNeeded } from "../../utils/triggerProfileReactivation.js";
-import { cleanupEmployeeExpiryNotificationsByLabels } from "../../utils/cleanupEmployeeExpiryNotifications.js";
+import { cleanupAllNotificationsForEmployeeCardDelete } from "../../utils/cleanupEmployeeExpiryNotifications.js";
 import { PURGE_TYPES, purgeEmployeeOldDocuments } from "../../utils/purgeEmployeeOldDocuments.js";
 import { scheduleEmployeeProfileFileChangeHrEmailForRequest } from "../../utils/employeeInformativeHrNotify.js";
 import { scheduleEmployeeCardDeletedNotification } from "../../utils/cardDeleteNotificationHelper.js";
@@ -40,9 +40,12 @@ export const deleteEmiratesIdDetails = async (req, res) => {
             types: PURGE_TYPES.emirates,
             purgeDeletedArchiveReason: true,
         });
-        await cleanupEmployeeExpiryNotificationsByLabels({
+        await cleanupAllNotificationsForEmployeeCardDelete({
             employeeObjectId: employee._id,
             labels: ["Emirates ID"],
+            cardLabels: ["emirates"],
+            notRenewKinds: ["emiratesId", "emirates"],
+            actionedBy: req.user?.employeeObjectId || null,
         });
         await triggerProfileReactivationIfNeeded({
             employeeId: employee.employeeId,
