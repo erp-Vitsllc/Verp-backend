@@ -813,6 +813,8 @@ export async function maybeStartVehicleServiceWorkflow(asset, { serviceRecordId,
             return;
         }
 
+        const adminOfficer = await getDepartmentHOD('admincontroller');
+
         const populated = await AssetItem.findById(asset._id).populate('assignedTo', 'firstName lastName employeeId').lean();
         const subjectEmp = populated?.assignedTo || null;
 
@@ -826,7 +828,7 @@ export async function maybeStartVehicleServiceWorkflow(asset, { serviceRecordId,
         await pushWorkflowHistory(asset, {
             stage: STAGE.HR,
             action: 'created',
-            note: `Service logged: ${serviceType}`,
+            note: `Service logged: ${serviceType} — Schedule and HR Approval open together`,
             byName: await getRequesterName(req.user)
         });
 
@@ -834,7 +836,7 @@ export async function maybeStartVehicleServiceWorkflow(asset, { serviceRecordId,
         await logVehicleServiceWorkflowToAssetHistory(asset, {
             stage: STAGE.HR,
             workflowAction: 'start',
-            note: `Service logged: ${serviceType}`,
+            note: `Service logged: ${serviceType} — Schedule and HR Approval open together`,
             byName: await getRequesterName(req.user),
             performedById: requesterEmp?._id,
             serviceTypeLabel: serviceType || '',
@@ -843,8 +845,20 @@ export async function maybeStartVehicleServiceWorkflow(asset, { serviceRecordId,
         });
 
         const isTireChange = String(serviceType || '').trim() === 'Tire Change';
+        const isShopQuoteService = ['Tire Change', 'Mechanical Work', 'Body Work'].includes(
+            String(serviceType || '').trim(),
+        );
         const plate = [asset.plateEmirate, asset.plateNumber].filter(Boolean).join(' ').trim();
         const assetLabel = `${asset.assetId || ''}${plate ? ` (${plate})` : ''}`.trim();
+        const detailsPath = vehicleServiceDetailsPath(asset._id, serviceRecordId, serviceType);
+
+        // Oil-style: Schedule (Admin) + HR open together after Initiate (Tire / Mech / Body).
+        const scheduleHrExtra2 = isTireChange
+            ? 'Tire change submitted — Schedule & HR Approval open'
+            : 'Schedule and HR Approval open together';
+        const scheduleHrDetail = isTireChange
+            ? `${requesterName} submitted a tire change request for ${assetLabel}. Schedule/Reschedule (Admin) and HR Approval are open together — Admin may complete garage/dates; HR reviews quotations.`
+            : `${requesterName} logged a service (${serviceType}) for ${assetLabel}. Schedule/Reschedule (Admin) and HR Approval are open together.`;
 
         await syncDashboardAction({
             requestId: asset._id,
@@ -855,22 +869,45 @@ export async function maybeStartVehicleServiceWorkflow(asset, { serviceRecordId,
             subjectName: asset.name || asset.assetId || 'Vehicle',
             requestedByName: requesterName,
             extra1: `${asset.assetId} — ${serviceType || 'Service'}`,
-            extra2: isTireChange
-                ? 'Tire change submitted — review quotations'
-                : 'Awaiting HR approval',
+            extra2: isShopQuoteService ? scheduleHrExtra2 : 'Awaiting HR approval',
             extra3: vehicleServiceDashboardMeta(asset, serviceRecordId, serviceType),
         });
 
         await sendWorkflowEmailWithConsole({
             recipient: hr,
             asset,
-            stageLabel: isTireChange ? 'HR quotation review required' : 'HR approval required',
-            actionLabel: isTireChange ? 'Tire change — quotation review' : 'New vehicle service request',
-            detailLine: isTireChange
-                ? `${requesterName} submitted a tire change request for ${assetLabel}. Open the Tire Change details page, drag Quote 1/2/3 into Approved Quote, then approve or reject.`
+            stageLabel: isShopQuoteService ? 'Schedule & HR Approval open' : 'HR approval required',
+            actionLabel: isShopQuoteService
+                ? `${serviceType} — Schedule & HR Approval`
+                : 'New vehicle service request',
+            detailLine: isShopQuoteService
+                ? scheduleHrDetail
                 : `${requesterName} logged a service (${serviceType}). Please approve or reject in your dashboard.`,
-            linkPath: vehicleServiceDetailsPath(asset._id, serviceRecordId, serviceType),
+            linkPath: detailsPath,
         });
+
+        if (isShopQuoteService && adminOfficer?._id && String(adminOfficer._id) !== String(hr._id)) {
+            await syncDashboardAction({
+                requestId: asset._id,
+                requestType: 'Vehicle Service Request',
+                status: 'Pending',
+                assignedTo: adminOfficer._id,
+                subjectEmployee: subjectEmp,
+                subjectName: asset.name || asset.assetId || 'Vehicle',
+                requestedByName: requesterName,
+                extra1: `${asset.assetId} — ${serviceType || 'Service'}`,
+                extra2: 'Complete garage / Schedule and Reschedule',
+                extra3: vehicleServiceDashboardMeta(asset, serviceRecordId, serviceType),
+            });
+            await sendWorkflowEmailWithConsole({
+                recipient: adminOfficer,
+                asset,
+                stageLabel: 'Schedule & HR Approval open',
+                actionLabel: `${serviceType} — Schedule & HR Approval`,
+                detailLine: scheduleHrDetail,
+                linkPath: detailsPath,
+            });
+        }
 
         persistWorkflowSnapshotToServiceSubdoc(asset);
         asset.markModified('activeServiceWorkflow');
@@ -1638,12 +1675,22 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
             stage === STAGE.HR
         ) {
             persistWorkflowSnapshotToServiceSubdoc(asset);
+            const tireSvc = asset.services?.id?.(asset.activeServiceWorkflow?.serviceRecordId);
+            const tireGarageDone = Boolean(
+                asset.activeServiceWorkflow?.garageSubmittedAt ||
+                    String(parseRemarkMeta(tireSvc?.remark).garageSubmittedByName || '').trim(),
+            );
             await advanceTireChangeAfterHrApprove(asset, asset.activeServiceWorkflow, actorName);
             const tireHrFresh = await AssetItem.findById(asset._id).populate(
                 'assignedTo',
                 'firstName lastName employeeId',
             );
-            return res.json({ message: 'HR approved — sent to Admin Officer for garage details', asset: tireHrFresh });
+            return res.json({
+                message: tireGarageDone
+                    ? 'HR approved — sent to Accounts Approve'
+                    : 'HR approved — sent to Admin Officer for garage details',
+                asset: tireHrFresh,
+            });
         }
 
         if (
@@ -1677,12 +1724,22 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
             stage === STAGE.HR
         ) {
             persistWorkflowSnapshotToServiceSubdoc(asset);
+            const mechSvc = asset.services?.id?.(asset.activeServiceWorkflow?.serviceRecordId);
+            const mechGarageDone = Boolean(
+                asset.activeServiceWorkflow?.garageSubmittedAt ||
+                    String(parseRemarkMeta(mechSvc?.remark).garageSubmittedByName || '').trim(),
+            );
             await advanceMechanicalWorkAfterHrApprove(asset, asset.activeServiceWorkflow, actorName);
             const mechHrFresh = await AssetItem.findById(asset._id).populate(
                 'assignedTo',
                 'firstName lastName employeeId',
             );
-            return res.json({ message: 'HR approved — sent to Admin Officer for garage details', asset: mechHrFresh });
+            return res.json({
+                message: mechGarageDone
+                    ? 'HR approved — sent to Accounts Approve'
+                    : 'HR approved — sent to Admin Officer for garage details',
+                asset: mechHrFresh,
+            });
         }
 
         if (
@@ -1716,12 +1773,22 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
             stage === STAGE.HR
         ) {
             persistWorkflowSnapshotToServiceSubdoc(asset);
+            const bodySvc = asset.services?.id?.(asset.activeServiceWorkflow?.serviceRecordId);
+            const bodyGarageDone = Boolean(
+                asset.activeServiceWorkflow?.garageSubmittedAt ||
+                    String(parseRemarkMeta(bodySvc?.remark).garageSubmittedByName || '').trim(),
+            );
             await advanceBodyWorkAfterHrApprove(asset, asset.activeServiceWorkflow, actorName);
             const bodyHrFresh = await AssetItem.findById(asset._id).populate(
                 'assignedTo',
                 'firstName lastName employeeId',
             );
-            return res.json({ message: 'HR approved — sent to Admin Officer for garage details', asset: bodyHrFresh });
+            return res.json({
+                message: bodyGarageDone
+                    ? 'HR approved — sent to Accounts Approve'
+                    : 'HR approved — sent to Admin Officer for garage details',
+                asset: bodyHrFresh,
+            });
         }
 
         if (

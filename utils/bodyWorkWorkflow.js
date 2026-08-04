@@ -135,6 +135,41 @@ export async function resolveBodyWorkAssigneeForStage(stage) {
 
 export async function advanceBodyWorkAfterHrApprove(asset, wf, actorName) {
     const serviceRecordId = wf.serviceRecordId;
+    const service = asset.services?.id?.(serviceRecordId);
+    const remark = parseRemark(service);
+    const garageDone = Boolean(
+        wf.garageSubmittedAt || String(remark.garageSubmittedByName || '').trim(),
+    );
+
+    if (garageDone) {
+        const { snapshotActiveServiceWorkflow } = await import('./vehicleServiceWorkflowResolve.js');
+        snapshotActiveServiceWorkflow(asset);
+        asset.activeServiceWorkflow = {
+            ...(typeof wf.toObject === 'function' ? wf.toObject() : wf),
+            stage: BODY_WORK_STAGE.ACCOUNTS,
+            serviceRecordId: wf.serviceRecordId || serviceRecordId,
+            serviceTypeLabel: wf.serviceTypeLabel || 'Body Work',
+            history: Array.isArray(wf.history) ? [...wf.history] : [],
+            garageSubmittedAt: wf.garageSubmittedAt,
+            scheduledServiceDate: wf.scheduledServiceDate || null,
+            serviceWindowEndDate: wf.serviceWindowEndDate || null,
+        };
+        asset.markModified('activeServiceWorkflow');
+        await asset.save();
+
+        const { routeShopServiceToAccountsApproveAfterGarage } = await import(
+            './vehicleShopServiceScheduled.js'
+        );
+        await routeShopServiceToAccountsApproveAfterGarage(asset, serviceRecordId, {
+            serviceTypeLabel: 'Body Work',
+            actorName,
+            linkPath: bodyWorkDetailsPath(asset._id, serviceRecordId),
+            dashboardMeta: bodyWorkDashboardMeta(asset, serviceRecordId),
+            appendActivity: null,
+        });
+        return;
+    }
+
     wf.stage = BODY_WORK_STAGE.ADMIN_OFFICER;
     asset.activeServiceWorkflow = wf;
     asset.markModified('activeServiceWorkflow');
@@ -221,10 +256,11 @@ export async function submitBodyWorkGarage(asset, serviceId, serviceUpdates, req
     const remarkBefore = parseRemark(service);
     const garageAlreadySubmitted = Boolean(wf.garageSubmittedAt || remarkBefore.garageSubmittedByName);
     const mayUpdateGarage =
+        stage === BODY_WORK_STAGE.HR ||
         stage === BODY_WORK_STAGE.ADMIN_OFFICER ||
         (stage === BODY_WORK_STAGE.ACCOUNTS && !garageAlreadySubmitted);
     if (!mayUpdateGarage) {
-        throw new Error('Garage can only be updated while waiting for Admin Officer.');
+        throw new Error('Garage can only be updated while Schedule is open.');
     }
 
     const allowed = await actorMayManageTireChangeRequest(req.user, asset);
@@ -252,7 +288,30 @@ export async function submitBodyWorkGarage(asset, serviceId, serviceUpdates, req
             startRaw ? String(startRaw).slice(0, 10) : '—'
         }`,
     });
-    // Garage done → Accounts Approve (Oil-style), then schedule after Accounts approves.
+
+    // During pending_hr: save garage only — do not skip HR by advancing to Accounts.
+    if (stage === BODY_WORK_STAGE.HR) {
+        const { snapshotActiveServiceWorkflow } = await import('./vehicleServiceWorkflowResolve.js');
+        if (!bindActive) {
+            snapshotActiveServiceWorkflow(asset);
+        }
+        asset.activeServiceWorkflow = {
+            ...(typeof wf.toObject === 'function' ? wf.toObject() : wf),
+            stage: BODY_WORK_STAGE.HR,
+            serviceRecordId: wf.serviceRecordId || serviceId,
+            serviceTypeLabel: wf.serviceTypeLabel || 'Body Work',
+            history: Array.isArray(wf.history) ? [...wf.history] : [],
+            garageSubmittedAt: wf.garageSubmittedAt,
+            scheduledServiceDate: wf.scheduledServiceDate || null,
+            serviceWindowEndDate: wf.serviceWindowEndDate || null,
+        };
+        asset.markModified('activeServiceWorkflow');
+        asset.markModified('services');
+        await asset.save();
+        return asset;
+    }
+
+    // Garage done after HR → Accounts Approve (Oil-style), then schedule after Accounts approves.
     const { snapshotActiveServiceWorkflow } = await import('./vehicleServiceWorkflowResolve.js');
     if (!bindActive) {
         snapshotActiveServiceWorkflow(asset);
