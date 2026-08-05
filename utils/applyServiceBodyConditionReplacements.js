@@ -1,3 +1,4 @@
+import mongoose from 'mongoose';
 import AssetHistory from '../models/AssetHistory.js';
 import { persistStoredAttachmentValue, normalizeS3Key } from './s3Upload.js';
 
@@ -20,29 +21,123 @@ const BODY_CONDITION_KEYS = [
 
 const BODY_CONDITION_KEY_SET = new Set(BODY_CONDITION_KEYS);
 
-function hasBodyConditionReportData(entry) {
-    const source =
-        entry?.details?.bodyConditionReport ||
-        entry?.details?.bodyCondition ||
-        entry?.bodyConditionReport ||
-        null;
-    if (!source || typeof source !== 'object') return false;
+const HANDOVER_HISTORY_ACTIONS = ['Assigned', 'Accepted', 'Transfer', 'ControllerHandover'];
+
+function asObjectId(value) {
+    if (!value) return null;
+    if (value instanceof mongoose.Types.ObjectId) return value;
+    const raw = typeof value === 'object' && value._id != null ? value._id : value;
+    const str = String(raw || '').trim();
+    if (!str || str.startsWith('live-') || !mongoose.Types.ObjectId.isValid(str)) return null;
+    return new mongoose.Types.ObjectId(str);
+}
+
+function resolveBodyConditionSource(entry) {
+    const candidates = [
+        entry?.details?.bodyConditionReport,
+        entry?.details?.bodyCondition,
+        entry?.bodyConditionReport,
+    ];
+    return candidates.find((item) => item && typeof item === 'object') || null;
+}
+
+function hasPhotoValue(value) {
+    if (!value) return false;
+    if (typeof value === 'string') {
+        const trimmed = value.trim();
+        return Boolean(trimmed && trimmed !== 'undefined' && trimmed !== 'null');
+    }
+    if (typeof value === 'object') {
+        return Boolean(value.url || value.publicId || value.path || value.data || value.image);
+    }
+    return false;
+}
+
+/** True when a history row has a usable body-condition report (photos, comments, or completed flag). */
+export function hasBodyConditionReportData(entry) {
+    if (!entry) return false;
+    if (entry?.details?.bodyConditionCompleted === true) return true;
+
+    const source = resolveBodyConditionSource(entry);
+    if (!source) return false;
+
     return BODY_CONDITION_KEYS.some((key) => {
         const block = source[key];
         if (!block || typeof block !== 'object') {
-            return Boolean(source[`${key}Photo`]);
+            return hasPhotoValue(source[`${key}Photo`]) || Boolean(String(source[`${key}Comment`] || '').trim());
         }
-        return Boolean(block.photo || block.image || block.attachment);
+        return (
+            hasPhotoValue(block.photo || block.image || block.attachment) ||
+            Boolean(String(block.comment || block.notes || '').trim())
+        );
     });
 }
 
-export async function findLatestBodyConditionHistoryRecord(assetId) {
+async function loadHistoryIfBodyCondition(historyId) {
+    const id = asObjectId(historyId);
+    if (!id) return null;
+    const row = await AssetHistory.findById(id).exec();
+    if (!row || !hasBodyConditionReportData(row)) return null;
+    return row;
+}
+
+/**
+ * Resolve the latest handover/inspection body-condition history for a vehicle.
+ * Prefers linked inspection / open handover IDs, then handover-action rows (not only the
+ * newest 40 history events — service/comment spam used to hide the real report).
+ */
+export async function findLatestBodyConditionHistoryRecord(assetOrId) {
+    const looksLikeAssetDoc =
+        Boolean(assetOrId) &&
+        typeof assetOrId === 'object' &&
+        !(assetOrId instanceof mongoose.Types.ObjectId) &&
+        (assetOrId._id != null ||
+            assetOrId.id != null ||
+            assetOrId.vehicleInspectionHandoverHistoryId != null ||
+            assetOrId.pendingActionDetails != null ||
+            Array.isArray(assetOrId.services));
+
+    const asset = looksLikeAssetDoc ? assetOrId : null;
+    const assetId = asObjectId(asset?._id || asset?.id || assetOrId);
     if (!assetId) return null;
-    const rows = await AssetHistory.find({ assetId })
+
+    const preferredIds = [
+        asset?.vehicleInspectionHandoverHistoryId,
+        asset?.pendingActionDetails?.vehicleHandoverFlow?.historyId,
+        asset?.pendingActionDetails?.historyId,
+    ];
+
+    for (const preferredId of preferredIds) {
+        const preferred = await loadHistoryIfBodyCondition(preferredId);
+        if (preferred && String(preferred.assetId) === String(assetId)) {
+            return preferred;
+        }
+    }
+
+    // Targeted search: handover/inspection rows that already store body condition.
+    const handoverRows = await AssetHistory.find({
+        assetId,
+        action: { $in: HANDOVER_HISTORY_ACTIONS },
+        $or: [
+            { 'details.bodyConditionCompleted': true },
+            { 'details.bodyConditionReport': { $exists: true, $ne: null } },
+            { 'details.bodyCondition': { $exists: true, $ne: null } },
+        ],
+    })
         .sort({ createdAt: -1, _id: -1 })
-        .limit(40)
+        .limit(80)
         .exec();
-    return rows.find((row) => hasBodyConditionReportData(row)) || null;
+
+    const fromHandover = handoverRows.find((row) => hasBodyConditionReportData(row));
+    if (fromHandover) return fromHandover;
+
+    // Fallback: scan more history in case action typing differs.
+    const recentRows = await AssetHistory.find({ assetId })
+        .sort({ createdAt: -1, _id: -1 })
+        .limit(200)
+        .exec();
+
+    return recentRows.find((row) => hasBodyConditionReportData(row)) || null;
 }
 
 /**
@@ -60,7 +155,7 @@ export async function applyServiceBodyConditionReplacements(asset, {
     });
     if (!replacements.length) return { updated: 0, historyId: null };
 
-    const record = await findLatestBodyConditionHistoryRecord(asset?._id || asset?.id);
+    const record = await findLatestBodyConditionHistoryRecord(asset);
     if (!record) {
         throw new Error(
             'No handover body condition report found to replace. Complete a handover body condition first.',
@@ -70,7 +165,9 @@ export async function applyServiceBodyConditionReplacements(asset, {
     const existing =
         record.details?.bodyConditionReport && typeof record.details.bodyConditionReport === 'object'
             ? { ...record.details.bodyConditionReport }
-            : {};
+            : record.details?.bodyCondition && typeof record.details.bodyCondition === 'object'
+              ? { ...record.details.bodyCondition }
+              : {};
 
     const usedKeys = new Set();
     const label = String(serviceTypeLabel || 'Service').trim() || 'Service';
@@ -120,6 +217,7 @@ export async function applyServiceBodyConditionReplacements(asset, {
     const detailsBase =
         record.details && typeof record.details === 'object' ? { ...record.details } : {};
     detailsBase.bodyConditionReport = existing;
+    detailsBase.bodyConditionCompleted = true;
     record.details = detailsBase;
     record.markModified('details');
     await record.save();
