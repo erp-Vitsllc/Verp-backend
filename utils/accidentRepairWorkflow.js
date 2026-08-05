@@ -449,6 +449,20 @@ export async function completeAccidentRepairService(asset, serviceId, serviceUpd
         await mergeService(asset, serviceId, serviceUpdates);
     }
 
+    const mappedImages = Array.isArray(serviceUpdates?.newConditionImages)
+        ? serviceUpdates.newConditionImages.filter((img) => String(img?.bodyPartKey || '').trim())
+        : [];
+    if (mappedImages.length) {
+        const { applyServiceBodyConditionReplacements } = await import(
+            './applyServiceBodyConditionReplacements.js'
+        );
+        await applyServiceBodyConditionReplacements(asset, {
+            images: mappedImages,
+            serviceTypeLabel: 'Accident Repair',
+            serviceId,
+        });
+    }
+
     const remark = parseRemark(asset.services.id(serviceId));
     const actorName = await getRequesterName(req.user);
 

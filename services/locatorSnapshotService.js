@@ -6,6 +6,17 @@ import { reconcileLocatorPositionsToErp } from './locatorVehicleListService.js';
 const SNAPSHOT_MIN_INTERVAL_MS = 2 * 60 * 1000;
 const lastSnapshotAtByDevice = new Map();
 
+/** Dashboard charts only need recent windows — full 400-day TTL was loading/precomputing every day. */
+const DASHBOARD_SNAPSHOT_LOOKBACK_DAYS = 92;
+const DASHBOARD_DAY_OPTIONS_MAX = 45;
+const DASHBOARD_WEEK_OPTIONS_MAX = 12;
+const DASHBOARD_MONTH_OPTIONS_MAX = 12;
+const RECONCILE_MIN_INTERVAL_MS = 5 * 60 * 1000;
+
+let lastReconcileAt = 0;
+let lastReconcileSummary = null;
+let reconcileInFlight = null;
+
 const MONTH_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
 /** Standard Dubai Salik gate charge used when Locator reports crossing counts only. */
@@ -186,18 +197,26 @@ function rangeHasSnapshots(snapshots, start, end) {
 function getDayOptionsFromSnapshots(snapshots, now = new Date()) {
     const snapshotDays = new Set(collectSnapshotDayKeys(snapshots, now));
     const labels = [];
-    const cursor = resolveSnapshotStartDay(snapshots, now);
     const end = startOfDay(now);
+    const windowStart = startOfDay(now);
+    windowStart.setDate(windowStart.getDate() - (DASHBOARD_DAY_OPTIONS_MAX - 1));
+    const firstData = resolveSnapshotStartDay(snapshots, now);
+    const cursor = new Date(Math.max(windowStart.getTime(), firstData.getTime()));
+    const todayKey = localDateKey(now);
 
     while (cursor <= end) {
         const key = localDateKey(cursor);
-        labels.push({
-            key,
-            label: formatDayLabel(cursor),
-            start: new Date(cursor),
-            end: endOfDay(cursor),
-            hasSnapshots: snapshotDays.has(key),
-        });
+        const hasSnapshots = snapshotDays.has(key);
+        // Skip empty calendar days — previously precomputed ~400 day buckets per chart.
+        if (hasSnapshots || key === todayKey) {
+            labels.push({
+                key,
+                label: formatDayLabel(cursor),
+                start: new Date(cursor),
+                end: endOfDay(cursor),
+                hasSnapshots,
+            });
+        }
         cursor.setDate(cursor.getDate() + 1);
     }
 
@@ -207,7 +226,13 @@ function getDayOptionsFromSnapshots(snapshots, now = new Date()) {
 function getMonthOptionsFromSnapshots(snapshots, now = new Date()) {
     const labels = [];
     const firstDay = resolveSnapshotStartDay(snapshots, now);
-    const cursor = new Date(firstDay.getFullYear(), firstDay.getMonth(), 1);
+    const earliestAllowed = new Date(now.getFullYear(), now.getMonth() - (DASHBOARD_MONTH_OPTIONS_MAX - 1), 1);
+    const cursor = new Date(
+        Math.max(
+            new Date(firstDay.getFullYear(), firstDay.getMonth(), 1).getTime(),
+            earliestAllowed.getTime(),
+        ),
+    );
     const current = new Date(now.getFullYear(), now.getMonth(), 1);
 
     while (cursor <= current) {
@@ -780,7 +805,10 @@ function getWeekRange(now = new Date()) {
 function getWeekOptionsFromSnapshots(snapshots, now = new Date()) {
     const options = [];
     const seen = new Set();
-    let cursor = resolveSnapshotStartDay(snapshots, now);
+    const windowStart = startOfDay(now);
+    windowStart.setDate(windowStart.getDate() - DASHBOARD_WEEK_OPTIONS_MAX * 7);
+    const firstData = resolveSnapshotStartDay(snapshots, now);
+    let cursor = new Date(Math.max(windowStart.getTime(), firstData.getTime()));
 
     while (cursor <= now) {
         const { start, end } = getWeekRange(cursor);
@@ -802,7 +830,7 @@ function getWeekOptionsFromSnapshots(snapshots, now = new Date()) {
         cursor = next;
     }
 
-    return options;
+    return options.slice(-DASHBOARD_WEEK_OPTIONS_MAX);
 }
 
 function buildRunningKmByVehicleForRange(snapshots, positions, start, end) {
@@ -984,6 +1012,35 @@ function buildSalikWiseByVehicleDashboard(snapshots, positions, now = new Date()
     };
 }
 
+function scheduleLocatorReconcile(positions) {
+    const nowMs = Date.now();
+    if (reconcileInFlight) {
+        return { summary: lastReconcileSummary, deferred: true, inFlight: true };
+    }
+    if (nowMs - lastReconcileAt < RECONCILE_MIN_INTERVAL_MS && lastReconcileSummary) {
+        return { summary: lastReconcileSummary, deferred: true, inFlight: false };
+    }
+
+    lastReconcileAt = nowMs;
+    reconcileInFlight = reconcileLocatorPositionsToErp(positions)
+        .then((summary) => {
+            lastReconcileSummary = summary;
+            return summary;
+        })
+        .catch((error) => {
+            console.warn(
+                '[LocatorFleetDashboard] Background reconcile failed:',
+                error?.message || error,
+            );
+            return null;
+        })
+        .finally(() => {
+            reconcileInFlight = null;
+        });
+
+    return { summary: lastReconcileSummary, deferred: true, inFlight: true };
+}
+
 export async function buildLocatorFleetDashboard() {
     if (!isLocatorConfigured()) {
         return {
@@ -992,10 +1049,11 @@ export async function buildLocatorFleetDashboard() {
         };
     }
 
+    const startedAt = Date.now();
     const now = new Date();
-    // Match LocatorGpsSnapshot TTL (~400 days) so all stored days feed the charts.
+    // Charts use day/week/month pickers — ~3 months is enough; TTL still retains longer history.
     const lookbackStart = new Date(now);
-    lookbackStart.setDate(lookbackStart.getDate() - 400);
+    lookbackStart.setDate(lookbackStart.getDate() - DASHBOARD_SNAPSHOT_LOOKBACK_DAYS);
 
     let positions = [];
     let snapshotWarning = null;
@@ -1017,35 +1075,34 @@ export async function buildLocatorFleetDashboard() {
         };
     }
 
-    try {
-        // Match / create / patch ERP vehicles against live GPS on every dashboard render.
-        reconcileSummary = await reconcileLocatorPositionsToErp(positions);
-    } catch (error) {
-        reconcileWarning = error?.message || 'Failed to sync Locator devices with ERP vehicles';
-        console.warn('[LocatorFleetDashboard] Reconcile failed:', reconcileWarning);
-    }
+    // Do not block dashboard paint on per-device ERP create/patch (was N sequential DB round-trips).
+    const reconcileSchedule = scheduleLocatorReconcile(positions);
+    reconcileSummary = reconcileSchedule.summary;
 
-    try {
-        await Promise.all(
-            (positions || []).map((position) => recordLocatorSnapshot(position, 'rest')),
-        );
-    } catch (error) {
-        snapshotWarning = error?.message || 'Failed to save GPS snapshots';
-        console.warn('[LocatorFleetDashboard] Snapshot capture failed:', snapshotWarning);
-    }
+    // Snapshot writes are best-effort — don't delay chart query on inserts.
+    void Promise.all((positions || []).map((position) => recordLocatorSnapshot(position, 'rest'))).catch(
+        (error) => {
+            snapshotWarning = error?.message || 'Failed to save GPS snapshots';
+            console.warn('[LocatorFleetDashboard] Snapshot capture failed:', snapshotWarning);
+        },
+    );
 
-    const snapshots = await LocatorGpsSnapshot.find({
-        capturedAt: { $gte: lookbackStart },
-    })
-        .sort({ capturedAt: 1 })
-        .lean();
+    const [snapshots, resolveLabel, gpsTrackedVehicles] = await Promise.all([
+        LocatorGpsSnapshot.find({
+            capturedAt: { $gte: lookbackStart },
+        })
+            .select('deviceId deviceName odometer totalDistanceM expenseAed state speedKmh capturedAt')
+            .sort({ capturedAt: 1 })
+            .lean(),
+        createLocatorChartLabelResolver(positions),
+        buildGpsTrackedVehicles(positions),
+    ]);
 
-    const resolveLabel = await createLocatorChartLabelResolver(positions);
     const trackingFrom = snapshots[0]?.capturedAt || null;
     const trackingDaysWithData = collectSnapshotDayKeys(snapshots, now).length;
     const odometerByVehicle = applyLocatorChartLabels(buildOdometerChart(positions), resolveLabel);
 
-    return {
+    const payload = {
         configured: true,
         connected: true,
         generatedAt: now.toISOString(),
@@ -1053,6 +1110,7 @@ export async function buildLocatorFleetDashboard() {
         positionsStale,
         snapshotWarning,
         reconcileSummary,
+        reconcileDeferred: reconcileSchedule.deferred === true,
         reconcileWarning,
         trackingFrom,
         trackingDaysWithData,
@@ -1060,7 +1118,7 @@ export async function buildLocatorFleetDashboard() {
         // Live from Locator /v1/position/latest — totalDistanceKm / odometer (no history API in Locator docs)
         odometerByVehicle,
         currentKmByVehicle: odometerByVehicle,
-        gpsTrackedVehicles: await buildGpsTrackedVehicles(positions),
+        gpsTrackedVehicles,
         runningKmByVehicle: mapLocatorPeriodDashboardLabels(
             buildRunningKmByVehicleDashboard(snapshots, positions, now),
             resolveLabel,
@@ -1083,4 +1141,10 @@ export async function buildLocatorFleetDashboard() {
         historySource: 'local_snapshots',
         locatorApiSupportsHistory: false,
     };
+
+    console.log(
+        `[LocatorFleetDashboard] positions=${positions.length} snapshots=${snapshots.length} total=${Date.now() - startedAt}ms`,
+    );
+
+    return payload;
 }

@@ -10,7 +10,7 @@ import { readLocatorTokens } from '../utils/locatorTokenStore.js';
 import { resolveRegistrationExpiryDate } from '../utils/vehicleDocumentRenewal.js';
 
 const ERP_VEHICLE_LIST_SELECT =
-    'assetId name plateEmirate plateNumber modelYear currentKilometer status registrationExpiryDate assignedTo assignedCompany acceptanceStatus vehicleProfileActivationStatus vehicleDispositionStatus onServiceActive onLeaveActive pendingAction actionRequiredBy assignedDate pendingActionDetails updatedAt locatorDeviceId documents.type documents.expiryDate documents.issueDate documents.createdAt documents.status documents.documentStatus documents.description';
+    'assetId name plateEmirate plateNumber modelYear currentKilometer status registrationExpiryDate assignedTo assignedCompany acceptanceStatus vehicleProfileActivationStatus vehicleDispositionStatus onServiceActive onLeaveActive pendingAction actionRequiredBy assignedDate pendingActionDetails updatedAt locatorDeviceId typeId';
 
 let lastLocatorLatestFetchAt = 0;
 const LOCATOR_LATEST_MIN_INTERVAL_MS = 60 * 1000;
@@ -18,27 +18,25 @@ const LOCATOR_LATEST_MIN_INTERVAL_MS = 60 * 1000;
 async function resolveLocatorPositionsForList() {
     const cached = getCachedLocatorPositions();
     const now = Date.now();
-    const cacheIsFresh = cached.length > 0 && now - lastLocatorLatestFetchAt < LOCATOR_LATEST_MIN_INTERVAL_MS;
 
-    if (cacheIsFresh) {
+    // List paint must not wait on Locator's live API (3 req/min + network). Prefer WS cache.
+    if (cached.length > 0) {
+        if (now - lastLocatorLatestFetchAt >= LOCATOR_LATEST_MIN_INTERVAL_MS) {
+            lastLocatorLatestFetchAt = now;
+            void fetchLatestPositions({ allowStale: true }).catch(() => {});
+        }
         return { positions: cached, source: 'cache' };
     }
 
     try {
-        const latest = await fetchLatestPositions();
+        const latest = await fetchLatestPositions({ allowStale: true });
         lastLocatorLatestFetchAt = now;
         const positions = latest.positions || [];
         if (positions.length > 0) {
-            return { positions, source: 'live' };
-        }
-        if (cached.length > 0) {
-            return { positions: cached, source: 'cache-empty-live' };
+            return { positions, source: latest.stale ? 'live-stale' : 'live' };
         }
         return { positions: [], source: 'live-empty' };
     } catch (error) {
-        if (cached.length > 0) {
-            return { positions: cached, source: 'cache-fallback', warning: error?.message };
-        }
         throw error;
     }
 }
@@ -599,6 +597,7 @@ async function resolveLocatorErpListRow({ deviceId, deviceName, locatorOverlay }
 }
 
 export async function buildLocatorVehicleList() {
+    const startedAt = Date.now();
     if (!isLocatorConfigured()) {
         return {
             configured: false,
@@ -673,26 +672,9 @@ export async function buildLocatorVehicleList() {
             matchedErpIds.add(String(erpMatch._id));
             mergedRows.push(mapErpVehicleToListRow(erpMatch, locatorOverlay));
         } else {
-            let locatorRow = null;
-            try {
-                locatorRow = await resolveLocatorErpListRow({
-                    deviceId,
-                    deviceName: locatorName,
-                    locatorOverlay,
-                });
-            } catch (error) {
-                console.warn(
-                    `[LocatorList] Failed to ensure ERP vehicle for device ${deviceId}:`,
-                    error?.message,
-                );
-            }
-
-            if (locatorRow) {
-                matchedErpIds.add(String(locatorRow._id));
-                mergedRows.push(locatorRow);
-            } else {
-                mergedRows.push(mapLocatorOnlyRow(deviceId, registryVehicle, position));
-            }
+            // Never ensure/create ERP rows on list paint — that was N sequential DB writes
+            // and made Vehicle Assets hang on skeletons. Unmatched GPS shows as locator-only.
+            mergedRows.push(mapLocatorOnlyRow(deviceId, registryVehicle, position));
         }
     }
 
@@ -708,6 +690,10 @@ export async function buildLocatorVehicleList() {
         const bName = String(b.locator?.deviceName || b.name || b.assetId || '');
         return aName.localeCompare(bName, undefined, { sensitivity: 'base' });
     });
+
+    console.log(
+        `[LocatorVehicleList] devices=${deviceIds.size} erp=${erpVehicles.length} rows=${enrichedRows.length} source=${positionsSource} total=${Date.now() - startedAt}ms`,
+    );
 
     return {
         configured: true,
@@ -897,54 +883,84 @@ export async function ensureLocatorErpVehicle({
     return asset;
 }
 
+let lastReconcilePositionsAt = 0;
+let reconcilePositionsInFlight = null;
+const RECONCILE_POSITIONS_MIN_INTERVAL_MS = 5 * 60 * 1000;
+
 /**
  * For each live Locator position: match/create/patch the ERP vehicle and sync odometer.
- * Used by fleet dashboard (and can be reused by list) so every GPS load keeps DB aligned.
+ * Throttled — never run on every list/dashboard click (was N sequential DB writes).
  */
-export async function reconcileLocatorPositionsToErp(positions = [], { createdBy } = {}) {
-    const summary = {
-        processed: 0,
-        created: 0,
-        linked: 0,
-        odometerUpdated: 0,
-        failed: 0,
-    };
-
-    for (const position of positions || []) {
-        const deviceId = position?.deviceId;
-        if (deviceId == null || deviceId === '') continue;
-
-        const deviceName = String(position?.deviceName || position?.name || '').trim();
-
-        try {
-            const existing = await findErpVehicleForLocatorLink({ deviceId, deviceName });
-            const asset = await ensureLocatorErpVehicle({
-                deviceId,
-                deviceName: deviceName || `Locator ${deviceId}`,
-                createdBy,
-            });
-
-            summary.processed += 1;
-            if (!existing) summary.created += 1;
-            else if (Number(existing.locatorDeviceId) !== Number(deviceId)) summary.linked += 1;
-
-            const km = toOdometerKm(position);
-            if (km != null && Number.isFinite(km) && km >= 0) {
-                const current = Number(asset.currentKilometer);
-                if (!Number.isFinite(current) || current !== km) {
-                    asset.currentKilometer = km;
-                    await asset.save();
-                    summary.odometerUpdated += 1;
-                }
-            }
-        } catch (error) {
-            summary.failed += 1;
-            console.warn(
-                `[LocatorReconcile] device ${deviceId}:`,
-                error?.message || error,
-            );
-        }
+export async function reconcileLocatorPositionsToErp(positions = [], { createdBy, force = false } = {}) {
+    const now = Date.now();
+    if (
+        !force &&
+        reconcilePositionsInFlight == null &&
+        now - lastReconcilePositionsAt < RECONCILE_POSITIONS_MIN_INTERVAL_MS
+    ) {
+        return {
+            processed: 0,
+            created: 0,
+            linked: 0,
+            odometerUpdated: 0,
+            failed: 0,
+            skipped: true,
+        };
+    }
+    if (reconcilePositionsInFlight) {
+        return reconcilePositionsInFlight;
     }
 
-    return summary;
+    lastReconcilePositionsAt = now;
+    reconcilePositionsInFlight = (async () => {
+        const summary = {
+            processed: 0,
+            created: 0,
+            linked: 0,
+            odometerUpdated: 0,
+            failed: 0,
+        };
+
+        for (const position of positions || []) {
+            const deviceId = position?.deviceId;
+            if (deviceId == null || deviceId === '') continue;
+
+            const deviceName = String(position?.deviceName || position?.name || '').trim();
+
+            try {
+                const existing = await findErpVehicleForLocatorLink({ deviceId, deviceName });
+                const asset = await ensureLocatorErpVehicle({
+                    deviceId,
+                    deviceName: deviceName || `Locator ${deviceId}`,
+                    createdBy,
+                });
+
+                summary.processed += 1;
+                if (!existing) summary.created += 1;
+                else if (Number(existing.locatorDeviceId) !== Number(deviceId)) summary.linked += 1;
+
+                const km = toOdometerKm(position);
+                if (km != null && Number.isFinite(km) && km >= 0) {
+                    const current = Number(asset.currentKilometer);
+                    if (!Number.isFinite(current) || current !== km) {
+                        asset.currentKilometer = km;
+                        await asset.save();
+                        summary.odometerUpdated += 1;
+                    }
+                }
+            } catch (error) {
+                summary.failed += 1;
+                console.warn(
+                    `[LocatorReconcile] device ${deviceId}:`,
+                    error?.message || error,
+                );
+            }
+        }
+
+        return summary;
+    })().finally(() => {
+        reconcilePositionsInFlight = null;
+    });
+
+    return reconcilePositionsInFlight;
 }

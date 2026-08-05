@@ -1391,13 +1391,15 @@ export const getAssetItems = async (req, res) => {
  * @route GET /api/AssetItem/vehicle-fleet-dashboard
  */
 export const getVehicleFleetDashboard = async (req, res) => {
+    const startedAt = Date.now();
     try {
         const listOnly = String(req.query.scope || '').trim().toLowerCase() === 'list';
         const draftVis = buildDraftVisibilityQuery(req.user);
 
         // Parallelize role + type lookups so list paint isn't serial.
         const [fallbackAssetController, vehicleTypeDocs, handoverAdminOfficer] = await Promise.all([
-            getDepartmentHOD('assetcontroller').catch(() => null),
+            // List table does not need flowchart HOD resolution on every load.
+            listOnly ? Promise.resolve(null) : getDepartmentHOD('assetcontroller').catch(() => null),
             AssetType.find({
                 isActive: true,
                 name: { $regex: /vehicle|car|fleet|truck/i },
@@ -1410,9 +1412,61 @@ export const getVehicleFleetDashboard = async (req, res) => {
         // Exclude tools (VEGA-ASSET-*): shared AssetItem defaults used to match every row.
         const fleetScope = buildFleetVehicleMongoScope({ vehicleTypeIds });
         // List view: skip documents / services — expiry columns use top-level date fields.
+        // Full dashboard: project only nested fields charts/modals need (skip quotation URLs,
+        // workflow history signatures, document attachments — those balloon BSON + JSON).
         const fleetSelect = listOnly
             ? 'assetId name vehicleBrand plateEmirate plateNumber modelYear assetValue status registrationExpiryDate insuranceExpiryDate nextServiceDate oilChangeDate gearOilDueDate currentKilometer assignedTo assignedCompany acceptanceStatus pendingAction actionRequiredBy createdBy vehicleProfileActivationStatus vehicleDispositionStatus warrantyEnabled warrantyExpiryDate warrantyYears onServiceActive onLeaveActive typeId assignedDate pendingActionDetails updatedAt locatorDeviceId'
-            : 'assetId name vehicleBrand plateEmirate plateNumber modelYear assetValue status registrationExpiryDate insuranceExpiryDate nextServiceDate oilChangeDate gearOilDueDate lastServiceDate currentKilometer assignedTo assignedCompany acceptanceStatus pendingAction services documents actionRequiredBy createdBy vehicleProfileActivationStatus vehicleDispositionStatus assignmentType temporaryEndDate warrantyEnabled warrantyExpiryDate warrantyYears accessories parkingExtendedDays parkingReminderSentAt parkingDurationCompleteSentAt onServiceActive onLeaveActive assignedDate pendingActionDetails updatedAt activeServiceWorkflow locatorDeviceId';
+            : [
+                'assetId',
+                'name',
+                'vehicleBrand',
+                'plateEmirate',
+                'plateNumber',
+                'modelYear',
+                'assetValue',
+                'status',
+                'registrationExpiryDate',
+                'insuranceExpiryDate',
+                'nextServiceDate',
+                'oilChangeDate',
+                'gearOilDueDate',
+                'lastServiceDate',
+                'currentKilometer',
+                'assignedTo',
+                'assignedCompany',
+                'acceptanceStatus',
+                'pendingAction',
+                'actionRequiredBy',
+                'createdBy',
+                'vehicleProfileActivationStatus',
+                'vehicleDispositionStatus',
+                'assignmentType',
+                'temporaryEndDate',
+                'warrantyEnabled',
+                'warrantyExpiryDate',
+                'warrantyYears',
+                'onServiceActive',
+                'onLeaveActive',
+                'assignedDate',
+                'pendingActionDetails',
+                'updatedAt',
+                'activeServiceWorkflow',
+                'locatorDeviceId',
+                'services._id',
+                'services.serviceType',
+                'services.date',
+                'services.value',
+                'services.remark',
+                'services.workflowSnapshot.stage',
+                'services.workflowSnapshot.serviceRecordId',
+                'documents._id',
+                'documents.type',
+                'documents.expiryDate',
+                'documents.description',
+                'documents.status',
+                'documents.documentStatus',
+            ].join(' ');
+        const findStartedAt = Date.now();
         const items = await AssetItem.find({ $and: [draftVis, fleetScope] })
             .populate('typeId', 'name')
             .populate('assignedTo', 'firstName lastName employeeId')
@@ -1421,6 +1475,7 @@ export const getVehicleFleetDashboard = async (req, res) => {
             .select(fleetSelect)
             .maxTimeMS(listOnly ? 12000 : 20000)
             .lean();
+        const findMs = Date.now() - findStartedAt;
 
         const isVehicleAsset = (it) =>
             isFleetVehicleAssetFields({
@@ -1521,6 +1576,9 @@ export const getVehicleFleetDashboard = async (req, res) => {
         });
 
         if (listOnly) {
+            console.log(
+                `[vehicle-fleet-dashboard] scope=list vehicles=${vehicles.length} find=${findMs}ms total=${Date.now() - startedAt}ms`,
+            );
             return res.json({ vehicles: fleetRows });
         }
 
@@ -1675,26 +1733,6 @@ export const getVehicleFleetDashboard = async (req, res) => {
             .filter((v) => stNorm(v.status) === 'assigned' && !v.assignedDate)
             .map((v) => v._id)
             .filter(Boolean);
-        const assignedStartByAssetId = new Map();
-        if (assignedMissingDateIds.length) {
-            const historyStarts = await AssetHistory.aggregate([
-                {
-                    $match: {
-                        assetId: { $in: assignedMissingDateIds },
-                        action: { $in: ['Accepted', 'Assigned'] },
-                    },
-                },
-                { $sort: { date: -1 } },
-                { $group: { _id: '$assetId', startDate: { $first: '$date' } } },
-            ]);
-            for (const row of historyStarts) {
-                if (row?._id && row.startDate) {
-                    assignedStartByAssetId.set(String(row._id), row.startDate);
-                }
-            }
-        }
-        const resolveAssignedStartDate = (v) =>
-            v.assignedDate || assignedStartByAssetId.get(String(v._id)) || null;
 
         const parseServiceRemark = (service) => {
             if (!service?.remark || typeof service.remark !== 'string') return {};
@@ -1754,6 +1792,58 @@ export const getVehicleFleetDashboard = async (req, res) => {
             return false;
         };
 
+        // Parallel secondary reads — previously serial and contended with Locator dashboard.
+        const secondaryStartedAt = Date.now();
+        const [historyStarts, pendingServiceActions, daPending, daApproved] = await Promise.all([
+            assignedMissingDateIds.length
+                ? AssetHistory.aggregate([
+                      {
+                          $match: {
+                              assetId: { $in: assignedMissingDateIds },
+                              action: { $in: ['Accepted', 'Assigned'] },
+                          },
+                      },
+                      { $sort: { date: -1 } },
+                      { $group: { _id: '$assetId', startDate: { $first: '$date' } } },
+                  ])
+                : Promise.resolve([]),
+            vehicleIds.length
+                ? DashboardAction.find({
+                      requestId: { $in: vehicleIds },
+                      requestType: 'Vehicle Service Request',
+                      status: 'Pending',
+                  })
+                      .populate('assignedTo', 'firstName lastName employeeId')
+                      .select('requestId assignedTo extra3')
+                      .lean()
+                      .catch(() => [])
+                : Promise.resolve([]),
+            vehicleIds.length
+                ? DashboardAction.countDocuments({
+                      requestId: { $in: vehicleIds },
+                      status: 'Pending',
+                      requestType: { $in: ASSET_DASHBOARD_INBOX_TYPES },
+                  })
+                : Promise.resolve(0),
+            vehicleIds.length
+                ? DashboardAction.countDocuments({
+                      requestId: { $in: vehicleIds },
+                      status: 'Approved',
+                      requestType: { $in: ASSET_DASHBOARD_INBOX_TYPES },
+                  })
+                : Promise.resolve(0),
+        ]);
+        const secondaryMs = Date.now() - secondaryStartedAt;
+
+        const assignedStartByAssetId = new Map();
+        for (const row of historyStarts) {
+            if (row?._id && row.startDate) {
+                assignedStartByAssetId.set(String(row._id), row.startDate);
+            }
+        }
+        const resolveAssignedStartDate = (v) =>
+            v.assignedDate || assignedStartByAssetId.get(String(v._id)) || null;
+
         let assigned = 0;
         let unassigned = 0;
         let inService = 0;
@@ -1762,17 +1852,6 @@ export const getVehicleFleetDashboard = async (req, res) => {
         const inServiceRows = [];
         const totalServiceRows = [];
 
-        const pendingServiceActions = vehicleIds.length
-            ? await DashboardAction.find({
-                  requestId: { $in: vehicleIds },
-                  requestType: 'Vehicle Service Request',
-                  status: 'Pending',
-              })
-                  .populate('assignedTo', 'firstName lastName employeeId')
-                  .select('requestId assignedTo extra3')
-                  .lean()
-                  .catch(() => [])
-            : [];
         const pendingForByServiceKey = new Map();
         for (const row of pendingServiceActions) {
             let serviceRecordId = '';
@@ -1893,30 +1972,21 @@ export const getVehicleFleetDashboard = async (req, res) => {
             if (v.assignedTo && String(v.acceptanceStatus || '') === 'Accepted') handoverConfirmed++;
         }
 
-        let daPending = 0;
-        let daApproved = 0;
-        if (vehicleIds.length) {
-            daPending = await DashboardAction.countDocuments({
-                requestId: { $in: vehicleIds },
-                status: 'Pending',
-                requestType: { $in: ASSET_DASHBOARD_INBOX_TYPES }
-            });
-            daApproved = await DashboardAction.countDocuments({
-                requestId: { $in: vehicleIds },
-                status: 'Approved',
-                requestType: { $in: ASSET_DASHBOARD_INBOX_TYPES }
-            });
-        }
-
         const monthTotals = {};
-        for (const v of vehicles) {
+        // Pre-index service timestamps once — usage series used to re-scan V×S per bucket.
+        const serviceTsByVehicle = vehicles.map((v) => {
+            const times = [];
             for (const s of v.services || []) {
                 if (!s?.date) continue;
-                const d = new Date(s.date);
+                const t = new Date(s.date).getTime();
+                if (!Number.isFinite(t)) continue;
+                times.push(t);
+                const d = new Date(t);
                 const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
                 monthTotals[key] = (monthTotals[key] || 0) + Number(s.value || 0);
             }
-        }
+            return times;
+        });
         const monthKeys = Object.keys(monthTotals).sort();
         const serviceCostByMonth = monthKeys.slice(-12).map((k) => ({ label: k, total: monthTotals[k] }));
 
@@ -1936,23 +2006,21 @@ export const getVehicleFleetDashboard = async (req, res) => {
                 return String(b.year).localeCompare(String(a.year));
             });
 
-        const hasServiceInRange = (v, start, end) =>
-            (v.services || []).some((s) => {
-                if (!s?.date) return false;
-                const t = new Date(s.date).getTime();
-                return t >= start.getTime() && t <= end.getTime();
-            });
-
-        const countServicesInRange = (start, end) => {
+        const countServicesInRange = (startMs, endMs) => {
             let c = 0;
-            for (const v of vehicles) {
-                for (const s of v.services || []) {
-                    if (!s?.date) continue;
-                    const t = new Date(s.date).getTime();
-                    if (t >= start.getTime() && t <= end.getTime()) c++;
+            for (const times of serviceTsByVehicle) {
+                for (const t of times) {
+                    if (t >= startMs && t <= endMs) c++;
                 }
             }
             return c;
+        };
+        const countIdleVehiclesInRange = (startMs, endMs) => {
+            let idle = 0;
+            for (const times of serviceTsByVehicle) {
+                if (!times.some((t) => t >= startMs && t <= endMs)) idle++;
+            }
+            return idle;
         };
 
         const buildUsageSeries = (unit) => {
@@ -1967,8 +2035,8 @@ export const getVehicleFleetDashboard = async (req, res) => {
                     const end = new Date(start);
                     end.setHours(23, 59, 59, 999);
                     labels.push(`${start.getDate()}/${start.getMonth() + 1}`);
-                    usage.push(countServicesInRange(start, end));
-                    idle.push(vehicles.filter((v) => !hasServiceInRange(v, start, end)).length);
+                    usage.push(countServicesInRange(start.getTime(), end.getTime()));
+                    idle.push(countIdleVehiclesInRange(start.getTime(), end.getTime()));
                 }
             } else if (unit === 'week') {
                 for (let i = 7; i >= 0; i--) {
@@ -1979,8 +2047,8 @@ export const getVehicleFleetDashboard = async (req, res) => {
                     start.setDate(start.getDate() - 6);
                     start.setHours(0, 0, 0, 0);
                     labels.push(`W${8 - i}`);
-                    usage.push(countServicesInRange(start, end));
-                    idle.push(vehicles.filter((v) => !hasServiceInRange(v, start, end)).length);
+                    usage.push(countServicesInRange(start.getTime(), end.getTime()));
+                    idle.push(countIdleVehiclesInRange(start.getTime(), end.getTime()));
                 }
             } else {
                 for (let i = 11; i >= 0; i--) {
@@ -1988,14 +2056,18 @@ export const getVehicleFleetDashboard = async (req, res) => {
                     const start = new Date(d.getFullYear(), d.getMonth(), 1);
                     const end = new Date(d.getFullYear(), d.getMonth() + 1, 0, 23, 59, 59, 999);
                     labels.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`);
-                    usage.push(countServicesInRange(start, end));
-                    idle.push(vehicles.filter((v) => !hasServiceInRange(v, start, end)).length);
+                    usage.push(countServicesInRange(start.getTime(), end.getTime()));
+                    idle.push(countIdleVehiclesInRange(start.getTime(), end.getTime()));
                 }
             }
             return { labels, usage, idle };
         };
 
         const fleetAnalytics = buildVehicleFleetAnalytics(vehicles);
+
+        console.log(
+            `[vehicle-fleet-dashboard] vehicles=${vehicles.length} find=${findMs}ms secondary=${secondaryMs}ms total=${Date.now() - startedAt}ms`,
+        );
 
         res.json({
             reminders: {
@@ -2031,6 +2103,10 @@ export const getVehicleFleetDashboard = async (req, res) => {
             generatedAt: new Date().toISOString()
         });
     } catch (error) {
+        console.error(
+            `[vehicle-fleet-dashboard] failed after ${Date.now() - startedAt}ms:`,
+            error?.message || error,
+        );
         res.status(500).json({ message: 'Failed to load vehicle fleet dashboard' });
     }
 };
@@ -11700,6 +11776,29 @@ export const updateHistoryBodyCondition = async (req, res) => {
                 photo,
                 ...(photoSource ? { photoSource } : {}),
                 ...(userSelected ? { userSelected: true } : {}),
+                ...(row.replacedByService === true || existingRow.replacedByService === true
+                    ? {
+                          replacedByService: true,
+                          ...(row.replacedByServiceType || existingRow.replacedByServiceType
+                              ? {
+                                    replacedByServiceType:
+                                        row.replacedByServiceType || existingRow.replacedByServiceType,
+                                }
+                              : {}),
+                          ...(row.replacedByServiceId || existingRow.replacedByServiceId
+                              ? {
+                                    replacedByServiceId:
+                                        row.replacedByServiceId || existingRow.replacedByServiceId,
+                                }
+                              : {}),
+                          ...(row.replacedByServiceAt || existingRow.replacedByServiceAt
+                              ? {
+                                    replacedByServiceAt:
+                                        row.replacedByServiceAt || existingRow.replacedByServiceAt,
+                                }
+                              : {}),
+                      }
+                    : {}),
             };
         }
 

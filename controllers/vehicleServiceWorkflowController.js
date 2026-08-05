@@ -595,6 +595,9 @@ export async function mergeWorkflowServiceRecord(asset, serviceRecordId, body) {
                 uploaded.push({
                     url: uploadResult.publicId,
                     name: img.name || 'New condition photo',
+                    ...(String(img.bodyPartKey || '').trim()
+                        ? { bodyPartKey: String(img.bodyPartKey).trim() }
+                        : {}),
                 });
             } catch (error) {
                 console.error('[mergeWorkflowServiceRecord] newConditionImages upload:', error);
