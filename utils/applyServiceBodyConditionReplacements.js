@@ -22,6 +22,20 @@ const BODY_CONDITION_KEYS = [
 const BODY_CONDITION_KEY_SET = new Set(BODY_CONDITION_KEYS);
 
 const HANDOVER_HISTORY_ACTIONS = ['Assigned', 'Accepted', 'Transfer', 'ControllerHandover'];
+const VEHICLE_INSPECTION_HANDOVER_KIND = 'vehicle_inspection';
+
+function isInspectionHandoverHistoryRecord(record) {
+    if (!record) return false;
+    if (String(record?.details?.handoverKind || '').trim() === VEHICLE_INSPECTION_HANDOVER_KIND) {
+        return true;
+    }
+    return record?.details?.firstInspection === true;
+}
+
+function isInspectionWorkflowActive(asset) {
+    const status = String(asset?.vehicleInspectionStatus || '').toLowerCase();
+    return status === 'draft' || status === 'pending_hr';
+}
 
 function asObjectId(value) {
     if (!value) return null;
@@ -82,9 +96,11 @@ async function loadHistoryIfBodyCondition(historyId) {
 }
 
 /**
- * Resolve the latest handover/inspection body-condition history for a vehicle.
- * Prefers linked inspection / open handover IDs, then handover-action rows (not only the
- * newest 40 history events — service/comment spam used to hide the real report).
+ * Resolve the latest handover body-condition history for a vehicle.
+ * Prefer the open fleet handover, then the latest non-inspection assignment report.
+ * Only prefer the linked inspection history while inspection is still in draft/pending_hr —
+ * after approval that ID stays set and must not steal service photo replacements from the
+ * assignment Body Condition Report the UI shows.
  */
 export async function findLatestBodyConditionHistoryRecord(assetOrId) {
     const looksLikeAssetDoc =
@@ -101,16 +117,23 @@ export async function findLatestBodyConditionHistoryRecord(assetOrId) {
     const assetId = asObjectId(asset?._id || asset?.id || assetOrId);
     if (!assetId) return null;
 
-    const preferredIds = [
-        asset?.vehicleInspectionHandoverHistoryId,
+    const openHandoverIds = [
         asset?.pendingActionDetails?.vehicleHandoverFlow?.historyId,
         asset?.pendingActionDetails?.historyId,
     ];
 
-    for (const preferredId of preferredIds) {
+    for (const preferredId of openHandoverIds) {
         const preferred = await loadHistoryIfBodyCondition(preferredId);
         if (preferred && String(preferred.assetId) === String(assetId)) {
             return preferred;
+        }
+    }
+
+    // While inspection is actively in progress, update that linked report.
+    if (isInspectionWorkflowActive(asset)) {
+        const inspection = await loadHistoryIfBodyCondition(asset?.vehicleInspectionHandoverHistoryId);
+        if (inspection && String(inspection.assetId) === String(assetId)) {
+            return inspection;
         }
     }
 
@@ -128,8 +151,22 @@ export async function findLatestBodyConditionHistoryRecord(assetOrId) {
         .limit(80)
         .exec();
 
+    // Prefer fleet assignment / return handovers over a completed inspection baseline.
+    const fromFleet = handoverRows.find(
+        (row) => hasBodyConditionReportData(row) && !isInspectionHandoverHistoryRecord(row),
+    );
+    if (fromFleet) return fromFleet;
+
     const fromHandover = handoverRows.find((row) => hasBodyConditionReportData(row));
     if (fromHandover) return fromHandover;
+
+    // Approved inspection may still be the only body-condition report on the vehicle.
+    if (!isInspectionWorkflowActive(asset)) {
+        const inspection = await loadHistoryIfBodyCondition(asset?.vehicleInspectionHandoverHistoryId);
+        if (inspection && String(inspection.assetId) === String(assetId)) {
+            return inspection;
+        }
+    }
 
     // Fallback: scan more history in case action typing differs.
     const recentRows = await AssetHistory.find({ assetId })
@@ -137,7 +174,50 @@ export async function findLatestBodyConditionHistoryRecord(assetOrId) {
         .limit(200)
         .exec();
 
+    const fromRecentFleet = recentRows.find(
+        (row) => hasBodyConditionReportData(row) && !isInspectionHandoverHistoryRecord(row),
+    );
+    if (fromRecentFleet) return fromRecentFleet;
+
     return recentRows.find((row) => hasBodyConditionReportData(row)) || null;
+}
+
+function parseServiceRemark(service) {
+    if (!service?.remark) return {};
+    if (typeof service.remark === 'object' && !Array.isArray(service.remark)) return { ...service.remark };
+    try {
+        const parsed = JSON.parse(service.remark);
+        return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    } catch {
+        return {};
+    }
+}
+
+function isMappedConditionImage(img) {
+    const key = String(img?.bodyPartKey || '').trim();
+    return Boolean(key && BODY_CONDITION_KEY_SET.has(key) && (img?.data || img?.url || img?.photo));
+}
+
+/**
+ * Build mapped replacement images from this request plus saved service remark URLs.
+ * Request images win per body part (may still include base64 `data`).
+ */
+export function resolveMappedNewConditionImages({ requestImages = [], service = null } = {}) {
+    const byKey = new Map();
+
+    const remark = parseServiceRemark(service);
+    const fromRemark = Array.isArray(remark.newConditionImages) ? remark.newConditionImages : [];
+    for (const img of fromRemark) {
+        if (!isMappedConditionImage(img)) continue;
+        byKey.set(String(img.bodyPartKey).trim(), img);
+    }
+
+    for (const img of Array.isArray(requestImages) ? requestImages : []) {
+        if (!isMappedConditionImage(img)) continue;
+        byKey.set(String(img.bodyPartKey).trim(), img);
+    }
+
+    return [...byKey.values()];
 }
 
 /**
@@ -149,10 +229,7 @@ export async function applyServiceBodyConditionReplacements(asset, {
     serviceTypeLabel = '',
     serviceId = '',
 } = {}) {
-    const replacements = (Array.isArray(images) ? images : []).filter((img) => {
-        const key = String(img?.bodyPartKey || '').trim();
-        return key && BODY_CONDITION_KEY_SET.has(key) && (img?.data || img?.url || img?.photo);
-    });
+    const replacements = (Array.isArray(images) ? images : []).filter(isMappedConditionImage);
     if (!replacements.length) return { updated: 0, historyId: null };
 
     const record = await findLatestBodyConditionHistoryRecord(asset);
@@ -223,4 +300,33 @@ export async function applyServiceBodyConditionReplacements(asset, {
     await record.save();
 
     return { updated: usedKeys.size, historyId: String(record._id) };
+}
+
+/**
+ * Re-apply mapped new-condition photos from a completed service remark onto the
+ * current fleet handover body-condition report (recovery / re-sync).
+ */
+export async function syncServiceNewConditionImagesToHandover(asset, serviceId, {
+    serviceTypeLabel = '',
+} = {}) {
+    const service = asset?.services?.id?.(serviceId);
+    if (!service) {
+        throw new Error('Service record not found');
+    }
+
+    const mappedImages = resolveMappedNewConditionImages({ service });
+    if (!mappedImages.length) {
+        throw new Error(
+            'No mapped new condition photos found. Complete the service with Replace to body parts selected.',
+        );
+    }
+
+    const label =
+        String(serviceTypeLabel || service.serviceType || '').trim() || 'Service';
+
+    return applyServiceBodyConditionReplacements(asset, {
+        images: mappedImages,
+        serviceTypeLabel: label,
+        serviceId,
+    });
 }

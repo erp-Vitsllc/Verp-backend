@@ -13348,6 +13348,44 @@ export const completeAccidentRepairHandler = async (req, res) => {
     }
 };
 
+/** Re-apply completed service new-condition photos onto the current handover body report. */
+export const syncServiceBodyConditionPhotosHandler = async (req, res) => {
+    try {
+        const { id, serviceId } = req.params;
+        const asset = await AssetItem.findById(id).populate('assignedTo', 'firstName lastName employeeId');
+        if (!asset) return res.status(404).json({ message: 'Asset not found' });
+
+        const service = asset.services?.id?.(serviceId);
+        if (!service) return res.status(404).json({ message: 'Service record not found' });
+
+        const { actorMayManageTireChangeRequest } = await import('../utils/oilServiceWorkflow.js');
+        const allowed = await actorMayManageTireChangeRequest(req.user, asset);
+        if (!allowed) return res.status(403).json({ message: 'Access denied.' });
+
+        const { syncServiceNewConditionImagesToHandover } = await import(
+            '../utils/applyServiceBodyConditionReplacements.js'
+        );
+        const result = await syncServiceNewConditionImagesToHandover(asset, serviceId, {
+            serviceTypeLabel: service.serviceType || req.body?.serviceTypeLabel || 'Service',
+        });
+
+        const fresh = await AssetItem.findById(asset._id).populate('assignedTo', 'firstName lastName employeeId');
+        return res.json({
+            message:
+                result?.updated > 0
+                    ? `Updated ${result.updated} handover body photo(s).`
+                    : 'No handover photos were updated.',
+            updated: result?.updated || 0,
+            historyId: result?.historyId || null,
+            asset: fresh,
+        });
+    } catch (error) {
+        return res.status(400).json({
+            message: error.message || 'Could not sync body condition photos',
+        });
+    }
+};
+
 /** Retry Zoho bill after Accounts approve when first sync failed (e.g. bill_number). */
 export const retryGarageZohoBillHandler = async (req, res) => {
     try {

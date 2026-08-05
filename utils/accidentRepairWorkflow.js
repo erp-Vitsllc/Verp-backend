@@ -449,13 +449,16 @@ export async function completeAccidentRepairService(asset, serviceId, serviceUpd
         await mergeService(asset, serviceId, serviceUpdates);
     }
 
-    const mappedImages = Array.isArray(serviceUpdates?.newConditionImages)
-        ? serviceUpdates.newConditionImages.filter((img) => String(img?.bodyPartKey || '').trim())
-        : [];
+    const completedService = asset.services.id(serviceId);
+    const {
+        applyServiceBodyConditionReplacements,
+        resolveMappedNewConditionImages,
+    } = await import('./applyServiceBodyConditionReplacements.js');
+    const mappedImages = resolveMappedNewConditionImages({
+        requestImages: serviceUpdates?.newConditionImages,
+        service: completedService,
+    });
     if (mappedImages.length) {
-        const { applyServiceBodyConditionReplacements } = await import(
-            './applyServiceBodyConditionReplacements.js'
-        );
         await applyServiceBodyConditionReplacements(asset, {
             images: mappedImages,
             serviceTypeLabel: 'Accident Repair',
@@ -463,7 +466,7 @@ export async function completeAccidentRepairService(asset, serviceId, serviceUpd
         });
     }
 
-    const remark = parseRemark(asset.services.id(serviceId));
+    const remark = parseRemark(completedService);
     const actorName = await getRequesterName(req.user);
 
     const { routeShopServiceToBillingAfterComplete } = await import('./vehicleShopServiceScheduled.js');
