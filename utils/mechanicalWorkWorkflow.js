@@ -14,6 +14,7 @@ import {
     commitWorkflowContext,
     getWorkflowContextForService,
 } from './vehicleServiceWorkflowResolve.js';
+import { applyShopHrPayTotalsToRemark } from './vehicleShopHrReviewPay.js';
 
 export const MECHANICAL_WORK_STAGE = {
     HR: 'pending_hr',
@@ -206,7 +207,7 @@ async function actorMayEditMechanicalWorkQuoteEmployeeRows(reqUser, asset) {
     return actorEmpId && String(hrHod._id) === String(actorEmpId);
 }
 
-export async function updateMechanicalWorkQuoteEmployeeRows(asset, serviceId, employeeRows, req) {
+export async function updateMechanicalWorkQuoteEmployeeRows(asset, serviceId, body, req) {
     const service = asset.services?.id?.(serviceId);
     if (!service) throw new Error('Service record not found');
     if (!isMechanicalWorkServiceType(service.serviceType)) {
@@ -225,6 +226,7 @@ export async function updateMechanicalWorkQuoteEmployeeRows(asset, serviceId, em
     const allowed = await actorMayEditMechanicalWorkQuoteEmployeeRows(req.user, asset);
     if (!allowed) throw new Error('Access denied.');
 
+    const employeeRows = Array.isArray(body) ? body : body?.employeeRows;
     const rows = Array.isArray(employeeRows) ? employeeRows : [];
     const payload = rows.map((row) => ({
         employeeId: String(row.employeeId || '').trim(),
@@ -240,6 +242,11 @@ export async function updateMechanicalWorkQuoteEmployeeRows(asset, serviceId, em
     remark.hrReviewEmployeeRows = payload;
     remark.employeeLiabilityRows = payload;
     remark.employeeLiabilityTotal = payload.reduce((sum, row) => sum + row.paidAmount, 0);
+    applyShopHrPayTotalsToRemark(remark, {
+        approvedAmount: Array.isArray(body) ? undefined : body?.approvedAmount,
+        companyPay: Array.isArray(body) ? undefined : body?.companyPay,
+        employeePay: Array.isArray(body) ? undefined : body?.employeePay,
+    });
     service.remark = JSON.stringify(remark);
     asset.markModified('services');
     await asset.save();

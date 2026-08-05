@@ -13150,7 +13150,7 @@ export const updateTireChangeQuoteEmployeeRowsHandler = async (req, res) => {
         const asset = await AssetItem.findById(id).populate('assignedTo', 'firstName lastName employeeId');
         if (!asset) return res.status(404).json({ message: 'Asset not found' });
 
-        await updateTireChangeQuoteEmployeeRows(asset, serviceId, req.body?.employeeRows, req);
+        await updateTireChangeQuoteEmployeeRows(asset, serviceId, req.body || {}, req);
         const fresh = await AssetItem.findById(asset._id).populate('assignedTo', 'firstName lastName employeeId');
         return res.json({
             message: 'Employee liability rows saved',
@@ -13201,7 +13201,7 @@ export const updateMechanicalWorkQuoteEmployeeRowsHandler = async (req, res) => 
         const asset = await AssetItem.findById(id).populate('assignedTo', 'firstName lastName employeeId');
         if (!asset) return res.status(404).json({ message: 'Asset not found' });
 
-        await updateMechanicalWorkQuoteEmployeeRows(asset, serviceId, req.body?.employeeRows, req);
+        await updateMechanicalWorkQuoteEmployeeRows(asset, serviceId, req.body || {}, req);
         const fresh = await AssetItem.findById(asset._id).populate('assignedTo', 'firstName lastName employeeId');
         return res.json({
             message: 'Employee liability rows saved',
@@ -13252,7 +13252,7 @@ export const updateBodyWorkQuoteEmployeeRowsHandler = async (req, res) => {
         const asset = await AssetItem.findById(id).populate('assignedTo', 'firstName lastName employeeId');
         if (!asset) return res.status(404).json({ message: 'Asset not found' });
 
-        await updateBodyWorkQuoteEmployeeRows(asset, serviceId, req.body?.employeeRows, req);
+        await updateBodyWorkQuoteEmployeeRows(asset, serviceId, req.body || {}, req);
         const fresh = await AssetItem.findById(asset._id).populate('assignedTo', 'firstName lastName employeeId');
         return res.json({
             message: 'Employee liability rows saved',
