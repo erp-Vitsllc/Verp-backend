@@ -50,6 +50,17 @@ const hasIdentitySectionData = (details = {}) =>
             hasStoredDocumentFile(details.labourContractAttachment),
     );
 
+/** True when expiryDate is today or in the future — keep on live documents. */
+const hasValidLiveExpiry = (expiryDate) => {
+    if (!expiryDate) return false;
+    const exp = new Date(expiryDate);
+    if (Number.isNaN(exp.getTime())) return false;
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    exp.setHours(0, 0, 0, 0);
+    return exp >= today;
+};
+
 const formatSalaryPeriod = (entry) => {
     if (entry?.month && String(entry.month).trim()) return String(entry.month).trim();
     const from = entry?.fromDate ? new Date(entry.fromDate) : null;
@@ -73,8 +84,9 @@ const hasSalaryEntryData = (entry = {}) =>
     hasStoredDocumentFile(entry.attachment);
 
 /**
- * Move live profile documents to oldDocuments and clear partition collections
- * so the returned employee starts with empty live cards.
+ * Archive prior profile data to oldDocuments on Left User return.
+ * Documents that still have a valid (not expired) expiryDate stay on live cards.
+ * Salary, bank, signature, expired docs, and docs without expiry go to Old Documents.
  */
 export async function archiveEmployeeProfileForLeftUserReturn(employeeDoc) {
     const employeeId = employeeDoc?.employeeId;
@@ -100,6 +112,8 @@ export async function archiveEmployeeProfileForLeftUserReturn(employeeDoc) {
         EmployeeBank.findOne({ employeeId }),
     ]);
 
+    const partitionDeletes = [];
+
     if (
         passport &&
         (String(passport.number || "").trim() ||
@@ -107,19 +121,34 @@ export async function archiveEmployeeProfileForLeftUserReturn(employeeDoc) {
             passport.expiryDate ||
             hasStoredDocumentFile(passport.document))
     ) {
-        pushOldDocumentRow(employeeDoc, {
-            type: "Previous Passport",
-            description: archiveDescription(passport.number ? `Passport No: ${passport.number}` : "Passport"),
-            issueDate: passport.issueDate || passport.lastUpdated || null,
-            expiryDate: passport.expiryDate || null,
-            document: asPlainDocument(passport.document),
-        });
+        if (hasValidLiveExpiry(passport.expiryDate)) {
+            // Keep live passport — still valid.
+        } else {
+            pushOldDocumentRow(employeeDoc, {
+                type: "Previous Passport",
+                description: archiveDescription(passport.number ? `Passport No: ${passport.number}` : "Passport"),
+                issueDate: passport.issueDate || passport.lastUpdated || null,
+                expiryDate: passport.expiryDate || null,
+                document: asPlainDocument(passport.document),
+            });
+            partitionDeletes.push(EmployeePassport.deleteOne({ employeeId }));
+        }
+    } else if (passport) {
+        partitionDeletes.push(EmployeePassport.deleteOne({ employeeId }));
     }
 
     if (visa) {
+        let keptAnyVisa = false;
+        let visaModified = false;
         for (const visaType of VISA_TYPES) {
             const details = visa[visaType];
             if (!hasIdentitySectionData(details)) continue;
+
+            if (hasValidLiveExpiry(details.expiryDate)) {
+                keptAnyVisa = true;
+                continue;
+            }
+
             const visaLabel = `${visaType.charAt(0).toUpperCase() + visaType.slice(1)} Visa`;
             pushOldDocumentRow(employeeDoc, {
                 type: `Previous ${visaLabel}`,
@@ -128,76 +157,113 @@ export async function archiveEmployeeProfileForLeftUserReturn(employeeDoc) {
                 expiryDate: details.expiryDate || null,
                 document: asPlainDocument(details.document),
             });
+            visa.set(visaType, undefined);
+            visaModified = true;
+        }
+
+        if (keptAnyVisa) {
+            if (visaModified) await visa.save();
+        } else {
+            partitionDeletes.push(EmployeeVisa.deleteOne({ employeeId }));
         }
     }
 
     const emiratesDetails = emiratesId?.emiratesId;
     if (hasIdentitySectionData(emiratesDetails)) {
-        pushOldDocumentRow(employeeDoc, {
-            type: "Previous Emirates ID",
-            description: archiveDescription(
-                emiratesDetails.number ? `Emirates ID No: ${emiratesDetails.number}` : "Emirates ID",
-            ),
-            issueDate: emiratesDetails.issueDate || emiratesDetails.lastUpdated || null,
-            expiryDate: emiratesDetails.expiryDate || null,
-            document: asPlainDocument(emiratesDetails.document),
-        });
+        if (hasValidLiveExpiry(emiratesDetails.expiryDate)) {
+            // Keep live Emirates ID.
+        } else {
+            pushOldDocumentRow(employeeDoc, {
+                type: "Previous Emirates ID",
+                description: archiveDescription(
+                    emiratesDetails.number ? `Emirates ID No: ${emiratesDetails.number}` : "Emirates ID",
+                ),
+                issueDate: emiratesDetails.issueDate || emiratesDetails.lastUpdated || null,
+                expiryDate: emiratesDetails.expiryDate || null,
+                document: asPlainDocument(emiratesDetails.document),
+            });
+            partitionDeletes.push(EmployeeEmiratesId.deleteOne({ employeeId }));
+        }
+    } else if (emiratesId) {
+        partitionDeletes.push(EmployeeEmiratesId.deleteOne({ employeeId }));
     }
 
     const labourDetails = labourCard?.labourCard;
     if (hasIdentitySectionData(labourDetails)) {
-        pushOldDocumentRow(employeeDoc, {
-            type: "Previous Labour Card",
-            description: archiveDescription(
-                labourDetails.number ? `Labour Card No: ${labourDetails.number}` : "Labour Card",
-            ),
-            issueDate: labourDetails.issueDate || labourDetails.lastUpdated || null,
-            expiryDate: labourDetails.expiryDate || null,
-            document: asPlainDocument(labourDetails.document),
-        });
-        if (hasStoredDocumentFile(labourDetails.labourContractAttachment)) {
+        if (hasValidLiveExpiry(labourDetails.expiryDate)) {
+            // Keep live labour card (+ contract attachment on the same card).
+        } else {
             pushOldDocumentRow(employeeDoc, {
-                type: "Previous Labour Contract",
+                type: "Previous Labour Card",
                 description: archiveDescription(
-                    labourDetails.number
-                        ? `Labour Contract (Labour Card No: ${labourDetails.number})`
-                        : "Labour Contract",
+                    labourDetails.number ? `Labour Card No: ${labourDetails.number}` : "Labour Card",
                 ),
                 issueDate: labourDetails.issueDate || labourDetails.lastUpdated || null,
                 expiryDate: labourDetails.expiryDate || null,
-                document: asPlainDocument(labourDetails.labourContractAttachment),
+                document: asPlainDocument(labourDetails.document),
             });
+            if (hasStoredDocumentFile(labourDetails.labourContractAttachment)) {
+                pushOldDocumentRow(employeeDoc, {
+                    type: "Previous Labour Contract",
+                    description: archiveDescription(
+                        labourDetails.number
+                            ? `Labour Contract (Labour Card No: ${labourDetails.number})`
+                            : "Labour Contract",
+                    ),
+                    issueDate: labourDetails.issueDate || labourDetails.lastUpdated || null,
+                    expiryDate: labourDetails.expiryDate || null,
+                    document: asPlainDocument(labourDetails.labourContractAttachment),
+                });
+            }
+            partitionDeletes.push(EmployeeLabourCard.deleteOne({ employeeId }));
         }
+    } else if (labourCard) {
+        partitionDeletes.push(EmployeeLabourCard.deleteOne({ employeeId }));
     }
 
     const medicalDetails = medicalInsurance?.medicalInsurance;
     if (hasIdentitySectionData(medicalDetails)) {
-        pushOldDocumentRow(employeeDoc, {
-            type: "Previous Medical Insurance",
-            description: archiveDescription(
-                medicalDetails.number
-                    ? `Policy No: ${medicalDetails.number}`
-                    : String(medicalDetails.provider || "Medical Insurance"),
-            ),
-            issueDate: medicalDetails.issueDate || medicalDetails.lastUpdated || null,
-            expiryDate: medicalDetails.expiryDate || null,
-            document: asPlainDocument(medicalDetails.document),
-        });
+        if (hasValidLiveExpiry(medicalDetails.expiryDate)) {
+            // Keep live medical insurance.
+        } else {
+            pushOldDocumentRow(employeeDoc, {
+                type: "Previous Medical Insurance",
+                description: archiveDescription(
+                    medicalDetails.number
+                        ? `Policy No: ${medicalDetails.number}`
+                        : String(medicalDetails.provider || "Medical Insurance"),
+                ),
+                issueDate: medicalDetails.issueDate || medicalDetails.lastUpdated || null,
+                expiryDate: medicalDetails.expiryDate || null,
+                document: asPlainDocument(medicalDetails.document),
+            });
+            partitionDeletes.push(EmployeeMedicalInsurance.deleteOne({ employeeId }));
+        }
+    } else if (medicalInsurance) {
+        partitionDeletes.push(EmployeeMedicalInsurance.deleteOne({ employeeId }));
     }
 
     const drivingDetails = drivingLicense?.drivingLicenceDetails;
     if (hasIdentitySectionData(drivingDetails)) {
-        pushOldDocumentRow(employeeDoc, {
-            type: "Previous Driving License",
-            description: archiveDescription(
-                drivingDetails.number ? `License No: ${drivingDetails.number}` : "Driving License",
-            ),
-            issueDate: drivingDetails.issueDate || drivingDetails.lastUpdated || null,
-            expiryDate: drivingDetails.expiryDate || null,
-            document: asPlainDocument(drivingDetails.document),
-        });
+        if (hasValidLiveExpiry(drivingDetails.expiryDate)) {
+            // Keep live driving license.
+        } else {
+            pushOldDocumentRow(employeeDoc, {
+                type: "Previous Driving License",
+                description: archiveDescription(
+                    drivingDetails.number ? `License No: ${drivingDetails.number}` : "Driving License",
+                ),
+                issueDate: drivingDetails.issueDate || drivingDetails.lastUpdated || null,
+                expiryDate: drivingDetails.expiryDate || null,
+                document: asPlainDocument(drivingDetails.document),
+            });
+            partitionDeletes.push(EmployeeDrivingLicense.deleteOne({ employeeId }));
+        }
+    } else if (drivingLicense) {
+        partitionDeletes.push(EmployeeDrivingLicense.deleteOne({ employeeId }));
     }
 
+    // Salary / bank / signature always archive — not expiry-tracked live identity docs.
     if (salary) {
         const history = Array.isArray(salary.salaryHistory) ? salary.salaryHistory : [];
         const archivedOfferFingerprints = new Set();
@@ -257,6 +323,8 @@ export async function archiveEmployeeProfileForLeftUserReturn(employeeDoc) {
                 document: asPlainDocument(salary.offerLetter),
             });
         }
+
+        partitionDeletes.push(EmployeeSalary.deleteOne({ employeeId }));
     }
 
     if (bank) {
@@ -278,6 +346,7 @@ export async function archiveEmployeeProfileForLeftUserReturn(employeeDoc) {
                 document: asPlainDocument(bank.bankAttachment),
             });
         }
+        partitionDeletes.push(EmployeeBank.deleteOne({ employeeId }));
     }
 
     const signature = employeeDoc.signature;
@@ -302,8 +371,13 @@ export async function archiveEmployeeProfileForLeftUserReturn(employeeDoc) {
     }
 
     const manualDocuments = Array.isArray(employeeDoc.documents) ? [...employeeDoc.documents] : [];
+    const remainingLiveManual = [];
     for (const source of manualDocuments) {
         const plain = source?.toObject ? source.toObject() : { ...source };
+        if (hasValidLiveExpiry(plain.expiryDate)) {
+            remainingLiveManual.push(plain);
+            continue;
+        }
         pushOldDocumentRow(employeeDoc, {
             type: plain.type || "Document",
             description: archiveDescription(plain.description || plain.type || "Document"),
@@ -320,23 +394,16 @@ export async function archiveEmployeeProfileForLeftUserReturn(employeeDoc) {
             document: asPlainDocument(plain.document),
         });
     }
-    employeeDoc.documents = [];
+    employeeDoc.documents = remainingLiveManual;
     employeeDoc.markModified("documents");
 
     employeeDoc.pendingNotRenewRequests = [];
     employeeDoc.pendingReactivationChanges = [];
     employeeDoc.markModified("oldDocuments");
 
-    await Promise.all([
-        EmployeePassport.deleteOne({ employeeId }),
-        EmployeeVisa.deleteOne({ employeeId }),
-        EmployeeEmiratesId.deleteOne({ employeeId }),
-        EmployeeLabourCard.deleteOne({ employeeId }),
-        EmployeeMedicalInsurance.deleteOne({ employeeId }),
-        EmployeeDrivingLicense.deleteOne({ employeeId }),
-        EmployeeSalary.deleteOne({ employeeId }),
-        EmployeeBank.deleteOne({ employeeId }),
-    ]);
+    if (partitionDeletes.length) {
+        await Promise.all(partitionDeletes);
+    }
 
     await DashboardAction.deleteMany({
         requestId: employeeDoc._id,

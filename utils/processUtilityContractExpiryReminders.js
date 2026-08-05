@@ -7,8 +7,7 @@ import { getDepartmentHOD } from './getDepartmentHOD.js';
 import { sendUtilityContractExpiryEmail } from './sendUtilityContractExpiryEmail.js';
 
 const REQUEST_TYPE = 'Utility Contract Expiry';
-/** Early warnings (email + one-shot bell). Due/overdue use sticky Accounts task. */
-const EARLY_STAGES = [10, 5];
+/** No advance T-10 / T-5 emails — only due/overdue (one email + sticky Accounts task). */
 
 /** DashboardAction.requestId is ObjectId — derive a stable id from the reminder key. */
 function requestObjectId(key) {
@@ -65,13 +64,6 @@ export function daysUntilContractEnd(contractEnd, today = new Date()) {
         contractEnd: end,
         contractEndKey: yearMonthDayKey(end),
     };
-}
-
-function kindForStage(daysBefore) {
-    if (daysBefore === 10) return 't10';
-    if (daysBefore === 5) return 't5';
-    if (daysBefore < 0) return 'overdue';
-    return 'due';
 }
 
 async function wasSent(entryId, contractEndKey, daysBefore) {
@@ -170,46 +162,9 @@ async function upsertAccountsSticky({ entry, contractEnd, daysUntil, accounts })
     );
 }
 
-async function createEarlyWarningBell({ entry, daysBefore, contractEnd, accounts }) {
-    if (!accounts?._id) return;
-    const entryId = String(entry._id || entry.id || '');
-    const endLabel = contractEnd.toLocaleDateString('en-GB');
-    const stageLabel = `expires in ${daysBefore} day${daysBefore === 1 ? '' : 's'}`;
-    const reminderKey = `${entryId}:${yearMonthDayKey(contractEnd)}:${daysBefore}`;
-    const requestId = requestObjectId(reminderKey);
-    const values = entry.values || {};
-    const titleBits = [entry.type || 'Utility', values.provider].filter(Boolean).join(' · ');
-
-    await DashboardAction.findOneAndUpdate(
-        { requestId, requestType: REQUEST_TYPE },
-        {
-            requestId,
-            requestType: REQUEST_TYPE,
-            assignedTo: accounts._id,
-            status: 'Pending',
-            subjectEmployee: accounts._id,
-            subjectName:
-                `${accounts.firstName || ''} ${accounts.lastName || ''}`.trim() || 'Accounts',
-            requestedByName: 'System',
-            extra1: titleBits || 'Utility contract',
-            extra2: `Contract ${stageLabel} (${endLabel})`,
-            extra3: JSON.stringify({
-                entryId,
-                utilityType: entry.type || '',
-                contractEnd: yearMonthDayKey(contractEnd),
-                daysBefore,
-                reminderKey,
-                detailsPath: `/HRM/Asset/UtilityBills/details/${encodeURIComponent(entryId)}`,
-            }),
-        },
-        { upsert: true, new: true, setDefaultsOnInsert: true },
-    );
-}
-
 /**
- * Daily scan:
- * - T-10 / T-5 → one-shot email + bell to flowchart Accounts
- * - contractEnd <= today → sticky Accounts email/notification until renewed or deactivated
+ * Daily scan: contractEnd <= today → one email + sticky Accounts notification
+ * until renewed or deactivated. No advance (10/5 day) emails.
  */
 export async function processUtilityContractExpiryReminders() {
     try {
@@ -229,67 +184,39 @@ export async function processUtilityContractExpiryReminders() {
             const entryId = String(entry._id || '');
             if (!entryId) continue;
 
-            // Sticky Accounts task while contract is due or past.
-            if (timing.daysUntil <= 0) {
-                activeOpenIds.add(entryId);
-                if (accounts) {
-                    await upsertAccountsSticky({
-                        entry,
-                        contractEnd: timing.contractEnd,
-                        daysUntil: timing.daysUntil,
-                        accounts,
-                    });
+            // Only when contract end date is today or past — skip future dates.
+            if (timing.daysUntil > 0) continue;
 
-                    // Email once per contract-end date when first seen as due/past.
-                    const already = await wasSent(entryId, timing.contractEndKey, 0);
-                    if (!already) {
-                        const kind = timing.daysUntil < 0 ? 'overdue' : 'due';
-                        await sendUtilityContractExpiryEmail({
-                            recipient: accounts,
-                            entry,
-                            kind,
-                            contractEndLabel: timing.contractEnd.toLocaleDateString('en-GB'),
-                        });
-                        await markSent(
-                            entryId,
-                            timing.contractEndKey,
-                            0,
-                            timing.contractEnd,
-                        );
-                        console.log(
-                            `[UtilityContractExpiryReminders] ${kind} → Accounts for entry ${entryId} (end ${timing.contractEndKey})`,
-                        );
-                    }
-                }
-                continue;
-            }
-
-            // Early warnings only on exact T-10 / T-5 days.
-            if (!EARLY_STAGES.includes(timing.daysUntil)) continue;
-
-            const already = await wasSent(entryId, timing.contractEndKey, timing.daysUntil);
-            if (already) continue;
-
-            const kind = kindForStage(timing.daysUntil);
+            activeOpenIds.add(entryId);
             if (accounts) {
-                await sendUtilityContractExpiryEmail({
-                    recipient: accounts,
+                await upsertAccountsSticky({
                     entry,
-                    kind,
-                    contractEndLabel: timing.contractEnd.toLocaleDateString('en-GB'),
-                });
-                await createEarlyWarningBell({
-                    entry,
-                    daysBefore: timing.daysUntil,
                     contractEnd: timing.contractEnd,
+                    daysUntil: timing.daysUntil,
                     accounts,
                 });
-            }
 
-            await markSent(entryId, timing.contractEndKey, timing.daysUntil, timing.contractEnd);
-            console.log(
-                `[UtilityContractExpiryReminders] ${kind} → Accounts for entry ${entryId} (end ${timing.contractEndKey})`,
-            );
+                // Email once per contract-end date when first seen as due/past.
+                const already = await wasSent(entryId, timing.contractEndKey, 0);
+                if (!already) {
+                    const kind = timing.daysUntil < 0 ? 'overdue' : 'due';
+                    await sendUtilityContractExpiryEmail({
+                        recipient: accounts,
+                        entry,
+                        kind,
+                        contractEndLabel: timing.contractEnd.toLocaleDateString('en-GB'),
+                    });
+                    await markSent(
+                        entryId,
+                        timing.contractEndKey,
+                        0,
+                        timing.contractEnd,
+                    );
+                    console.log(
+                        `[UtilityContractExpiryReminders] ${kind} → Accounts for entry ${entryId} (end ${timing.contractEndKey})`,
+                    );
+                }
+            }
         }
 
         // Drop sticky tasks when contract is no longer due (renewed / deactivated / missing).

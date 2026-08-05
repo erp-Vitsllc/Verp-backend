@@ -29,13 +29,11 @@ async function resolveRecipient(person) {
 }
 
 /**
- * HR monthly payment-day reminders.
- * kind: t10 | t5 | due
+ * HR monthly payment-day email — only when payable date == today.
  */
 export async function sendUtilityBillPaymentDayEmail({
     recipient,
     record,
-    kind = 'due',
     dueDateLabel = '',
 }) {
     try {
@@ -50,27 +48,17 @@ export async function sendUtilityBillPaymentDayEmail({
         const frontendUrl = emailFrontendUrl();
         const path = `/HRM/Asset/UtilityBills/details/${encodeURIComponent(String(record.entryId))}`;
         const buttonUrl = `${frontendUrl}${path}`;
-
-        const titles = {
-            t10: 'Utility Bill — Payment due in 10 days',
-            t5: 'Utility Bill — Payment due in 5 days',
-            due: 'Utility Bill — Payment due today',
-        };
-        const bodies = {
-            t10: 'A utility account payment day is coming up in 10 days. Please prepare Add Bills / review.',
-            t5: 'A utility account payment day is coming up in 5 days. Please prepare Add Bills / review.',
-            due: 'Today is the scheduled utility payment day for this account. Please process the bill.',
-        };
-        const colors = { t10: '#0d9488', t5: '#d97706', due: '#dc2626' };
+        const title = 'Utility Bill — Payment due today';
+        const accent = '#dc2626';
 
         const html = `
             <div style="font-family: Segoe UI, Tahoma, sans-serif; color: #1e293b; max-width: 600px; margin: 0 auto; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden;">
-                <div style="background:${colors[kind] || colors.due}; color:#fff; padding:24px; text-align:center;">
-                    <h1 style="margin:0; font-size:22px;">${titles[kind] || titles.due}</h1>
+                <div style="background:${accent}; color:#fff; padding:24px; text-align:center;">
+                    <h1 style="margin:0; font-size:22px;">${title}</h1>
                 </div>
                 <div style="padding:28px;">
                     <p>Hello <strong>${to.firstName || ''} ${to.lastName || ''}</strong>,</p>
-                    <p style="margin:12px 0 20px;">${bodies[kind] || bodies.due}</p>
+                    <p style="margin:12px 0 20px;">Today is the scheduled utility payment day for this account. Please process the bill.</p>
                     <div style="background:#f8fafc; border:1px solid #f1f5f9; border-radius:10px; padding:18px;">
                         <p style="margin:0 0 8px;"><strong>Type:</strong> ${record.utilityType || '—'}</p>
                         <p style="margin:0 0 8px;"><strong>Provider:</strong> ${record.provider || '—'}</p>
@@ -79,7 +67,7 @@ export async function sendUtilityBillPaymentDayEmail({
                         <p style="margin:0;"><strong>This cycle due:</strong> ${dueDateLabel || '—'}</p>
                     </div>
                     <div style="text-align:center; margin-top:28px;">
-                        <a href="${buttonUrl}" style="background:${colors[kind] || colors.due}; color:#fff; text-decoration:none; padding:12px 28px; border-radius:8px; font-weight:600; display:inline-block;">
+                        <a href="${buttonUrl}" style="background:${accent}; color:#fff; text-decoration:none; padding:12px 28px; border-radius:8px; font-weight:600; display:inline-block;">
                             Open Utility Account
                         </a>
                     </div>
@@ -90,7 +78,7 @@ export async function sendUtilityBillPaymentDayEmail({
         await transporter.sendMail({
             from: `"VeRP Notifications" <${process.env.EMAIL_USER}>`,
             to: recipientEmail,
-            subject: titles[kind] || titles.due,
+            subject: title,
             html,
         });
     } catch (err) {

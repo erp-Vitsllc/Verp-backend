@@ -11,9 +11,6 @@ export function rewardStageBellLabel(role, { rewardType, rewardStatus } = {}) {
         case 'Manager':
             return 'Awaiting Reportee approval';
         case 'Accounts':
-            if (String(rewardStatus || '').includes('Approved')) {
-                return 'Pay reward — Approved (Not Paid)';
-            }
             return 'Pending Accounts review';
         case 'Management':
             return 'Pending Management authorization';

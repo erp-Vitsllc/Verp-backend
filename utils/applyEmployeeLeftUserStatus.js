@@ -98,7 +98,7 @@ function resetEmployeeProfileForLeftUserReturn(employeeDoc) {
     employeeDoc.markModified("profileWorkflow");
 }
 
-/** Admin-only: return Left User to Probation — archive prior data, inactive profile, fresh live cards. */
+/** Admin-only: return Left User to Probation — archive prior data (keep valid-expiry docs live), inactive profile. */
 export async function applyEmployeeReturnFromLeftUser(employeeDoc) {
     if (!employeeDoc?.employeeId) return;
     if (!isLeftUserStatus(employeeDoc.status)) return;

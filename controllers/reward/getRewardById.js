@@ -53,6 +53,51 @@ export const getRewardById = async (req, res) => {
             return res.status(404).json({ message: "Reward not found" });
         }
 
+        // Heal inconsistent state: never keep Approved (Paid) without Zoho Expense
+        const amount = parseFloat(reward.amount || 0) || 0;
+        const isCashOrGift =
+            reward.rewardType === 'Cash Reward' ||
+            reward.rewardType === 'Gift Reward' ||
+            amount > 0;
+        const hasZoho = Boolean(
+            String(reward.zohoExpenseId || '').trim() || String(reward.zohoJournalId || '').trim()
+        );
+        const status = String(reward.rewardStatus || '').trim();
+        if (
+            isCashOrGift &&
+            !hasZoho &&
+            (status === 'Approved (Paid)' || status === 'Paid')
+        ) {
+            try {
+                await Reward.findByIdAndUpdate(reward._id, {
+                    $set: {
+                        rewardStatus: 'Pending Accounts',
+                        approvalStatus: 'Pending Accounts',
+                        paidAmount: 0,
+                    },
+                    $setOnInsert: {},
+                });
+                // Re-open Accounts workflow step if it was closed
+                const doc = await Reward.findById(reward._id);
+                if (doc?.workflow?.length) {
+                    const accountsStep = doc.workflow.find((w) => w.role === 'Accounts');
+                    if (accountsStep) {
+                        accountsStep.status = 'Pending';
+                        accountsStep.actionedAt = null;
+                        await doc.save();
+                    }
+                }
+                reward.rewardStatus = 'Pending Accounts';
+                reward.approvalStatus = 'Pending Accounts';
+                reward.paidAmount = 0;
+                console.warn(
+                    `[getRewardById] Healed ${reward.rewardId || reward._id}: Approved (Paid) without Zoho → Pending Accounts`,
+                );
+            } catch (healErr) {
+                console.error('[getRewardById] Heal failed:', healErr);
+            }
+        }
+
         // Visibility: Draft - only creator sees; Admin sees all
         const { isUserAdministrator } = await import('../../services/permissionService.js');
         const isAdmin = await isUserAdministrator(req.user?.id);

@@ -5,7 +5,8 @@ import { getDepartmentHOD } from './getDepartmentHOD.js';
 import { sendUtilityBillPaymentDayEmail } from './sendUtilityBillPaymentDayEmail.js';
 
 const REQUEST_TYPE = 'Utility Bill Payment Reminder';
-const STAGES = [10, 5, 0];
+/** Only fire when payable date == today (no T-10 / T-5 advance emails). */
+const DUE_TODAY_STAGE = 0;
 
 function startOfDay(d) {
     const x = new Date(d);
@@ -43,12 +44,6 @@ export function daysUntilPaymentDay(paymentDay, today = new Date()) {
     };
 }
 
-function kindForStage(daysBefore) {
-    if (daysBefore === 10) return 't10';
-    if (daysBefore === 5) return 't5';
-    return 'due';
-}
-
 async function wasSent(entryId, yearMonth, daysBefore) {
     const hit = await UtilityBillPaymentDayReminderLog.findOne({
         entryId: String(entryId),
@@ -73,12 +68,10 @@ async function markSent(entryId, yearMonth, daysBefore, dueDate) {
     }
 }
 
-async function createHrBell({ record, daysBefore, dueDate, hr }) {
+async function createHrBell({ record, dueDate, hr }) {
     if (!hr?._id) return;
     const dueLabel = dueDate.toLocaleDateString('en-GB');
-    const stageLabel =
-        daysBefore === 0 ? 'due today' : `due in ${daysBefore} day${daysBefore === 1 ? '' : 's'}`;
-    const requestId = `${record.entryId}:${yearMonthKey(dueDate)}:${daysBefore}`;
+    const requestId = `${record.entryId}:${yearMonthKey(dueDate)}:${DUE_TODAY_STAGE}`;
 
     await DashboardAction.findOneAndUpdate(
         { requestId, requestType: REQUEST_TYPE },
@@ -91,11 +84,11 @@ async function createHrBell({ record, daysBefore, dueDate, hr }) {
             subjectName: `${hr.firstName || ''} ${hr.lastName || ''}`.trim() || 'HR',
             requestedByName: 'System',
             extra1: `${record.utilityType || 'Utility'} · Day ${record.paymentDay}`,
-            extra2: `Payment ${stageLabel} (${dueLabel})`,
+            extra2: `Payment due today (${dueLabel})`,
             extra3: JSON.stringify({
                 entryId: record.entryId,
                 paymentDay: record.paymentDay,
-                daysBefore,
+                daysBefore: DUE_TODAY_STAGE,
                 yearMonth: yearMonthKey(dueDate),
                 detailsPath: `/HRM/Asset/UtilityBills/details/${encodeURIComponent(String(record.entryId))}`,
             }),
@@ -105,7 +98,7 @@ async function createHrBell({ record, daysBefore, dueDate, hr }) {
 }
 
 /**
- * Daily scan: Active payment-day rows → email + HR bell at T-10, T-5, and due day.
+ * Daily scan: Active payment-day rows → one email + HR bell only when payable date == today.
  */
 export async function processUtilityBillPaymentDayReminders() {
     try {
@@ -119,32 +112,29 @@ export async function processUtilityBillPaymentDayReminders() {
 
         for (const record of records) {
             const { daysUntil, dueDate, yearMonth } = daysUntilPaymentDay(record.paymentDay);
-            if (!STAGES.includes(daysUntil)) continue;
+            if (daysUntil !== DUE_TODAY_STAGE) continue;
 
-            const already = await wasSent(record.entryId, yearMonth, daysUntil);
+            const already = await wasSent(record.entryId, yearMonth, DUE_TODAY_STAGE);
             if (already) continue;
 
             const dueDateLabel = dueDate.toLocaleDateString('en-GB');
-            const kind = kindForStage(daysUntil);
 
             if (hr) {
                 await sendUtilityBillPaymentDayEmail({
                     recipient: hr,
                     record,
-                    kind,
                     dueDateLabel,
                 });
                 await createHrBell({
                     record,
-                    daysBefore: daysUntil,
                     dueDate,
                     hr,
                 });
             }
 
-            await markSent(record.entryId, yearMonth, daysUntil, dueDate);
+            await markSent(record.entryId, yearMonth, DUE_TODAY_STAGE, dueDate);
             console.log(
-                `[UtilityBillPaymentDayReminders] ${kind} sent for entry ${record.entryId} (day ${record.paymentDay})`,
+                `[UtilityBillPaymentDayReminders] due-today sent for entry ${record.entryId} (day ${record.paymentDay})`,
             );
         }
     } catch (err) {

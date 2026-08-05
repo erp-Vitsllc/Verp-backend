@@ -29,8 +29,8 @@ async function resolveRecipient(person) {
 }
 
 /**
- * Flowchart Accounts — utility contract expiry reminders.
- * kind: t10 | t5 | due | overdue
+ * Flowchart Accounts — utility contract expiry email (due/overdue only).
+ * kind: due | overdue
  */
 export async function sendUtilityContractExpiryEmail({
     recipient,
@@ -54,19 +54,15 @@ export async function sendUtilityContractExpiryEmail({
         const values = entry.values || {};
 
         const titles = {
-            t10: 'Utility Contract — Expires in 10 days',
-            t5: 'Utility Contract — Expires in 5 days',
             due: 'Utility Contract — Expired today',
             overdue: 'Utility Contract — Expired',
         };
         const bodies = {
-            t10: 'A utility account contract ends in 10 days. Please review renewal or replacement.',
-            t5: 'A utility account contract ends in 5 days. Please review renewal or replacement.',
             due: 'A utility account contract expires today. Please renew, replace, or deactivate the account. This Accounts reminder stays open until the contract is renewed or the account is deactivated.',
             overdue:
                 'A utility account contract has expired. Please renew, replace, or deactivate the account. This Accounts reminder stays open until the contract is renewed or the account is deactivated.',
         };
-        const colors = { t10: '#0d9488', t5: '#d97706', due: '#dc2626', overdue: '#991b1b' };
+        const colors = { due: '#dc2626', overdue: '#991b1b' };
 
         const html = `
             <div style="font-family: Segoe UI, Tahoma, sans-serif; color: #1e293b; max-width: 600px; margin: 0 auto; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden;">

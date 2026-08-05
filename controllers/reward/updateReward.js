@@ -417,7 +417,13 @@ export const updateReward = async (req, res) => {
                 }
             }
 
-            if (rewardStatus === 'Approved' || rewardStatus === 'Pending Authorization' || rewardStatus === 'Pending HR' || rewardStatus === 'Pending Accounts') {
+            if (
+                rewardStatus === 'Approved' ||
+                rewardStatus === 'Approved (Paid)' ||
+                rewardStatus === 'Pending Authorization' ||
+                rewardStatus === 'Pending HR' ||
+                rewardStatus === 'Pending Accounts'
+            ) {
                 // Identify Approver
                 let approverBasic = null;
                 const approverUserId = req.user?.id;
@@ -510,7 +516,7 @@ export const updateReward = async (req, res) => {
                             finalStatus = 'Approved';
                         }
                     }
-                    // 3. Accounts Step -> Approved (Cash/Gift only)
+                    // 3. Accounts Step -> Approved (Paid) directly (no separate Pay step)
                     else if (currentStage === 'Pending Accounts' && isAccounts) {
                         if (!String(reward.expenseAccountId || '').trim()) {
                             return res.status(400).json({
@@ -533,7 +539,7 @@ export const updateReward = async (req, res) => {
                                     'Expense Account and Paid Through must be different Chart of Accounts.',
                             });
                         }
-                        finalStatus = 'Approved';
+                        finalStatus = 'Approved (Paid)';
                     }
                     // Management Override (Certificate / non-cash only — Cash/Gift still need Accounts)
                     else if (isManagement && reward.rewardStatus !== 'Rejected' && !isCashOrGift) {
@@ -567,9 +573,9 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
             // Allow publicStatus to reflect the exact current progression stage
             let publicStatus = finalStatus;
 
-            // Cash/Gift Accounts approve: require Expense Account + Paid Through (Loan-style)
+            // Cash/Gift Accounts approve: require Expense Account + Paid Through
             if (
-                nextInternalStage === 'Approved' &&
+                (nextInternalStage === 'Approved' || nextInternalStage === 'Approved (Paid)') &&
                 (reward.approvalStatus || reward.rewardStatus) === 'Pending Accounts' &&
                 (reward.rewardType === 'Cash Reward' ||
                     reward.rewardType === 'Gift Reward' ||
@@ -658,6 +664,82 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
                             });
                         }
 
+                        // After Management: email reward employee + primary reportee, then Accounts notification
+                        try {
+                            const employeeForStageMail = await EmployeeBasic.findOne({
+                                employeeId: reward.employeeId,
+                            })
+                                .select('firstName lastName email companyEmail workEmail primaryReportee')
+                                .populate(
+                                    'primaryReportee',
+                                    'firstName lastName email companyEmail workEmail',
+                                )
+                                .lean();
+
+                            if (employeeForStageMail) {
+                                const toEmails = new Set();
+                                const { email: empEmail } = resolveEmployeeEmail(employeeForStageMail);
+                                if (empEmail) toEmails.add(empEmail);
+
+                                if (employeeForStageMail.primaryReportee) {
+                                    const { email: reporteeEmail } = resolveEmployeeEmail(
+                                        employeeForStageMail.primaryReportee,
+                                    );
+                                    if (reporteeEmail) toEmails.add(reporteeEmail);
+                                }
+
+                                const recipients = Array.from(toEmails);
+                                const emailUser =
+                                    process.env.EMAIL_USER ||
+                                    process.env.VERP_EMAIL ||
+                                    process.env.GMAIL_USER;
+                                const emailPass =
+                                    process.env.EMAIL_PASS ||
+                                    process.env.VERP_PASS ||
+                                    process.env.GMAIL_PASS;
+
+                                if (emailUser && emailPass && recipients.length > 0) {
+                                    const smtpHost =
+                                        emailUser.includes('@gmail') || process.env.GMAIL_USER
+                                            ? 'smtp.gmail.com'
+                                            : 'smtp.office365.com';
+                                    const transporter = nodemailer.createTransport({
+                                        host: smtpHost,
+                                        port: 587,
+                                        secure: false,
+                                        auth: { user: emailUser, pass: emailPass },
+                                    });
+                                    const amountNote =
+                                        Number(reward.amount || 0) > 0
+                                            ? `<p>Amount: <strong>AED ${Number(reward.amount).toLocaleString()}</strong></p>`
+                                            : '';
+                                    await transporter.sendMail({
+                                        from: `"VeRP Notification" <${emailUser}>`,
+                                        to: recipients,
+                                        subject: `Reward Management Approved — Pending Accounts: ${reward.rewardType} — ${employeeForStageMail.firstName || ''} ${employeeForStageMail.lastName || ''}`.trim(),
+                                        html: `
+                                            <div style="font-family: Arial, sans-serif; color: #333; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #eee; border-radius: 10px;">
+                                                <h2 style="color: #1565c0; text-align: center;">Management Approved</h2>
+                                                <p>Dear All,</p>
+                                                <p>Management has approved the reward for <strong>${employeeForStageMail.firstName || ''} ${employeeForStageMail.lastName || ''}</strong> (${reward.rewardType}${reward.title ? ` — ${reward.title}` : ''}).</p>
+                                                ${amountNote}
+                                                <p>Accounts will review expense details and complete the reward next.</p>
+                                                <p>Best Regards,<br/>VeRP System</p>
+                                            </div>
+                                        `,
+                                    });
+                                    console.log(
+                                        `[UpdateReward] Management→Accounts info email sent to: ${recipients.join(', ')}`,
+                                    );
+                                }
+                            }
+                        } catch (infoMailErr) {
+                            console.error(
+                                '[UpdateReward] Employee/reportee stage email failed:',
+                                infoMailErr,
+                            );
+                        }
+
                         try {
                             await sendHODAuthorizationEmail('Reward', reward, targetHOD, approverDetails);
                         } catch (mailErr) {
@@ -718,71 +800,25 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
             }
 
             // If status is being approved (Final), ensure metadata and workflow are updated
-            if (finalStatus === 'Approved') {
+            if (finalStatus === 'Approved' || finalStatus === 'Approved (Paid)') {
                 console.log("[UpdateReward] Entering Final Approval Block");
                 if (!reward.approvedBy) reward.approvedBy = req.user?.id || null;
 
                 if (!reward.approvedDate) reward.approvedDate = new Date();
 
-                // Update Management / Accounts Workflow to Approved
-                if (reward.workflow?.length) {
-
-                    console.log(
-                        `[UpdateReward] Management Workflow Update Check: User=${req.user?._id}`
-                    );
-
-                    if (reward.workflow) {
-                        console.log("Current Workflow:", JSON.stringify(reward.workflow, null, 2));
-                    }
-
-                    const managementEntry = reward.workflow.find(w =>
-                        (w.role === 'Management' || w.role === 'CEO') &&
-                        w.status === 'Pending'
-                    );
-
-                    console.log(
-                        `[UpdateReward] Found Pending Management Entry:`,
-                        managementEntry ? "YES" : "NO"
-                    );
-
-                    if (managementEntry) {
-                        managementEntry.status = 'Approved';
-                        managementEntry.actionedAt = new Date();
-                    }
-
-                    const accountsEntry = reward.workflow.find(
-                        (w) => w.role === 'Accounts' && w.status === 'Pending'
-                    );
-                    if (accountsEntry) {
-                        accountsEntry.status = 'Approved';
-                        accountsEntry.actionedAt = new Date();
-                        reward.accountsApprovedBy = req.user?.id || reward.accountsApprovedBy || null;
-                    }
-
-                    // Explicitly ensure reward status is Approved
-                    finalStatus = 'Approved';
-                    reward.rewardStatus = 'Approved';
-
-                    // Update skipped/pending workflows to Approved
-                    if (reward.workflow) {
-                        reward.workflow.forEach(w => {
-                            if (w.status === 'Pending') {
-                                w.status = 'Approved';
-                                w.actionedAt = new Date();
-                            }
-                        });
-                    }
-                }
-
-                // Cash/Gift: post Zoho Expense on Accounts approve (reference + notes = reward description)
-                // Persist certificate PDF first so it can be uploaded to Zoho "Upload your Files".
                 const isCashOrGiftZoho =
                     reward.rewardType === 'Cash Reward' ||
                     reward.rewardType === 'Gift Reward' ||
                     (parseFloat(reward.amount || 0) > 0);
-                if (
+                const isAccountsPaidAttempt =
                     isCashOrGiftZoho &&
                     currentStatus === 'Pending Accounts' &&
+                    finalStatus === 'Approved (Paid)';
+
+                // Cash/Gift: Zoho Expense MUST succeed before status can become Approved (Paid)
+                let zohoOkForPaid = !isAccountsPaidAttempt;
+                if (
+                    isAccountsPaidAttempt &&
                     !String(reward.zohoExpenseId || '').trim()
                 ) {
                     try {
@@ -830,15 +866,14 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
                             employee: employeeForZoho,
                             certificatePdfBase64: certificatePdfForZoho,
                         });
-                        if (zohoResult?.ok) {
-                            if (zohoResult.expenseId) {
-                                reward.zohoExpenseId = zohoResult.expenseId;
-                                reward.zohoExpenseNumber = zohoResult.expenseNumber || '';
-                                reward.zohoOrganizationId =
-                                    zohoResult.organizationId || reward.zohoOrganizationId || '';
-                                reward.zohoSyncedAt = new Date();
-                                reward.zohoSyncError = '';
-                            }
+                        if (zohoResult?.ok && zohoResult.expenseId) {
+                            reward.zohoExpenseId = zohoResult.expenseId;
+                            reward.zohoExpenseNumber = zohoResult.expenseNumber || '';
+                            reward.zohoOrganizationId =
+                                zohoResult.organizationId || reward.zohoOrganizationId || '';
+                            reward.zohoSyncedAt = new Date();
+                            reward.zohoSyncError = '';
+                            zohoOkForPaid = true;
                             console.log(
                                 '[UpdateReward] Zoho Expense on Accounts approve:',
                                 zohoResult.message || zohoResult.expenseId,
@@ -846,18 +881,96 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
                             );
                         } else {
                             reward.zohoSyncError = zohoResult?.message || 'Zoho Expense sync failed';
+                            zohoOkForPaid = false;
                             console.warn('[UpdateReward] Zoho Expense failed:', reward.zohoSyncError);
                         }
                     } catch (zohoErr) {
                         reward.zohoSyncError = zohoErr?.message || 'Zoho Expense sync failed';
+                        zohoOkForPaid = false;
                         console.error('[UpdateReward] Zoho Expense error:', zohoErr);
                     }
+                } else if (
+                    isAccountsPaidAttempt &&
+                    String(reward.zohoExpenseId || '').trim()
+                ) {
+                    zohoOkForPaid = true;
+                    reward.zohoSyncError = '';
                 }
 
+                // Zoho failed → stay Pending Accounts (NOT Paid). Fix accounts & approve again.
+                if (isAccountsPaidAttempt && !zohoOkForPaid) {
+                    finalStatus = 'Pending Accounts';
+                    publicStatus = 'Pending Accounts';
+                    reward.approvalStatus = 'Pending Accounts';
+                    reward.rewardStatus = 'Pending Accounts';
+                    reward.paidAmount = 0;
+                    console.warn(
+                        '[UpdateReward] Accounts approve blocked — Zoho Expense failed; status remains Pending Accounts',
+                    );
+                } else if (reward.workflow?.length) {
+                    console.log(
+                        `[UpdateReward] Management Workflow Update Check: User=${req.user?._id}`
+                    );
+
+                    if (reward.workflow) {
+                        console.log("Current Workflow:", JSON.stringify(reward.workflow, null, 2));
+                    }
+
+                    const managementEntry = reward.workflow.find(w =>
+                        (w.role === 'Management' || w.role === 'CEO') &&
+                        w.status === 'Pending'
+                    );
+
+                    console.log(
+                        `[UpdateReward] Found Pending Management Entry:`,
+                        managementEntry ? "YES" : "NO"
+                    );
+
+                    if (managementEntry) {
+                        managementEntry.status = 'Approved';
+                        managementEntry.actionedAt = new Date();
+                    }
+
+                    const accountsEntry = reward.workflow.find(
+                        (w) => w.role === 'Accounts' && w.status === 'Pending'
+                    );
+                    if (accountsEntry) {
+                        accountsEntry.status = 'Approved';
+                        accountsEntry.actionedAt = new Date();
+                        reward.accountsApprovedBy = req.user?.id || reward.accountsApprovedBy || null;
+                    }
+
+                    // Cash/Gift Paid only after Zoho; certificate stays Approved
+                    if (finalStatus === 'Approved (Paid)') {
+                        reward.rewardStatus = 'Approved (Paid)';
+                        reward.approvalStatus = 'Approved (Paid)';
+                        const dueAmount = parseFloat(reward.amount || 0);
+                        if (dueAmount > 0) {
+                            reward.paidAmount = dueAmount;
+                        }
+                    } else {
+                        finalStatus = 'Approved';
+                        reward.rewardStatus = 'Approved';
+                    }
+
+                    // Update skipped/pending workflows to Approved
+                    if (reward.workflow) {
+                        reward.workflow.forEach(w => {
+                            if (w.status === 'Pending') {
+                                w.status = 'Approved';
+                                w.actionedAt = new Date();
+                            }
+                        });
+                    }
+                }
             }
 
             // If status is being approved (Final), send email to recipient
-            if (finalStatus === 'Approved' && currentStatus !== 'Approved') {
+            if (
+                (finalStatus === 'Approved' || finalStatus === 'Approved (Paid)') &&
+                currentStatus !== 'Approved' &&
+                currentStatus !== 'Approved (Paid)'
+            ) {
                 const isCashOrGiftFinal =
                     reward.rewardType === 'Cash Reward' ||
                     reward.rewardType === 'Gift Reward' ||
@@ -939,9 +1052,9 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
                                     auth: { user: emailUser, pass: emailPass }
                                 });
 
-                                const statusLabel = isCashOrGiftFinal ? 'Approved (Not Paid)' : 'Approved';
+                                const statusLabel = isCashOrGiftFinal ? 'Approved (Paid)' : 'Approved';
                                 const subject = isCashOrGiftFinal
-                                    ? `Reward Approved (Not Paid): ${reward.rewardType} - ${employeeForEmail.firstName} ${employeeForEmail.lastName}`
+                                    ? `Reward Approved (Paid): ${reward.rewardType} - ${employeeForEmail.firstName} ${employeeForEmail.lastName}`
                                     : "Congratulations! Reward Request Approved";
                                 const html = `
                                     <div style="font-family: Arial, sans-serif; color: #333; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #eee; border-radius: 10px;">
@@ -949,7 +1062,7 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
                                         ${isFallbackToReportee ? getFallbackEmailNote(employeeName, reporteeName) : ''}
                                         <p>Dear All,</p>
                                         <p>We are pleased to inform you that the reward request for <strong>${employeeForEmail.firstName} ${employeeForEmail.lastName}</strong> regarding <strong>${reward.rewardType}</strong> (${reward.title}) has been <strong>${statusLabel}</strong>.</p>
-                                        ${isCashOrGiftFinal ? `<p>Amount: <strong>AED ${Number(reward.amount || 0).toLocaleString()}</strong>. Accounts will process payment next.</p>` : ''}
+                                        ${isCashOrGiftFinal ? `<p>Amount: <strong>AED ${Number(reward.amount || 0).toLocaleString()}</strong>.</p>` : ''}
                                         <p>Please find the reward certificate ${reward.attachment && (reward.attachment.url || reward.attachment.publicId) ? 'and original documentation' : ''} attached to this email.</p>
                                         <br>
                                         <p>Best Regards,</p>
@@ -1229,74 +1342,71 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
 
         await reward.save();
 
+        const zohoBlockedPaid =
+            reward.rewardStatus === 'Pending Accounts' &&
+            Boolean(String(reward.zohoSyncError || '').trim()) &&
+            !String(reward.zohoExpenseId || '').trim();
+
         // === SYNC DASHBOARD ACTION ===
         try {
             const { syncDashboardAction } = await import("../../utils/syncDashboard.js");
-            const { syncRewardPaymentDueBell } = await import("../../utils/rewardPaymentStatus.js");
             const employee = await EmployeeBasic.findOne({ employeeId: reward.employeeId });
-
-            const amountDue = parseFloat(reward.amount || 0);
-            const isCashOrGiftDash =
-                reward.rewardType === 'Cash Reward' ||
-                reward.rewardType === 'Gift Reward' ||
-                amountDue > 0;
-            const needsAccountsPayment =
-                reward.rewardStatus === 'Approved' &&
-                isCashOrGiftDash &&
-                amountDue > 0 &&
-                amountDue - parseFloat(reward.paidAmount || 0) > 0.01;
 
             // Terminal = no further approval/payment tasks (certificate Approved, or Paid / Rejected / Cancelled)
             const isTerminalStatus =
                 ['Rejected', 'Cancelled', 'Approved (Paid)'].includes(reward.rewardStatus) ||
-                (reward.rewardStatus === 'Approved' && !needsAccountsPayment);
+                reward.rewardStatus === 'Approved';
 
-            if (needsAccountsPayment) {
-                // Clear approval bells, then create Accounts pay task
+            const { rewardStageBellLabel } = await import("../../utils/rewardStageBellLabel.js");
+
+            // Clear previous stage bells for this reward, then open the next assignee's bell
+            await syncDashboardAction({
+                requestId: reward._id,
+                requestType: 'Reward',
+                assignedTo: null,
+                status: isTerminalStatus
+                    ? (reward.rewardStatus === 'Approved (Paid)' ? 'Approved' : reward.rewardStatus)
+                    : 'Approved',
+                subjectEmployee: employee,
+                requestedByName: req.user?.name,
+                actionedBy: req.user?._id,
+                comment: remarks
+            });
+
+            const nextPendingStep = reward.workflow?.find(w => w.status === 'Pending');
+            if (nextPendingStep) {
+                console.log(`[UpdateReward] Syncing Next Dashboard Action for: ${nextPendingStep.assignedTo} (Role: ${nextPendingStep.role})`);
                 await syncDashboardAction({
                     requestId: reward._id,
                     requestType: 'Reward',
-                    assignedTo: null,
-                    status: 'Approved',
+                    assignedTo: nextPendingStep.assignedTo,
+                    status: 'Pending',
                     subjectEmployee: employee,
                     requestedByName: req.user?.name,
-                    actionedBy: req.user?._id,
-                    comment: remarks
+                    extra1: rewardStageBellLabel(nextPendingStep.role, {
+                        rewardType: reward.rewardType,
+                        rewardStatus: reward.rewardStatus,
+                    }),
+                    extra2: reward.amount ? `AED ${reward.amount}` : reward.title
                 });
-                console.log('[UpdateReward] Syncing Accounts Pay bell after Approved (Not Paid)');
-                await syncRewardPaymentDueBell(reward, employee, req.user?.name || '');
-            } else {
-                const { rewardStageBellLabel } = await import("../../utils/rewardStageBellLabel.js");
-
-                // Clear previous stage bells for this reward, then open the next assignee's bell
-                await syncDashboardAction({
-                    requestId: reward._id,
-                    requestType: 'Reward',
-                    assignedTo: null,
-                    status: isTerminalStatus
-                        ? (reward.rewardStatus === 'Approved (Paid)' ? 'Approved' : reward.rewardStatus)
-                        : 'Approved',
-                    subjectEmployee: employee,
-                    requestedByName: req.user?.name,
-                    actionedBy: req.user?._id,
-                    comment: remarks
-                });
-
-                const nextPendingStep = reward.workflow?.find(w => w.status === 'Pending');
-                if (nextPendingStep) {
-                    console.log(`[UpdateReward] Syncing Next Dashboard Action for: ${nextPendingStep.assignedTo} (Role: ${nextPendingStep.role})`);
+            } else if (zohoBlockedPaid) {
+                // Keep Accounts bell open after Zoho failure
+                const accountsStep = reward.workflow?.find((w) => w.role === 'Accounts');
+                if (accountsStep?.assignedTo) {
+                    if (accountsStep.status !== 'Pending') {
+                        accountsStep.status = 'Pending';
+                        accountsStep.actionedAt = null;
+                        await reward.save();
+                    }
                     await syncDashboardAction({
                         requestId: reward._id,
                         requestType: 'Reward',
-                        assignedTo: nextPendingStep.assignedTo,
+                        assignedTo: accountsStep.assignedTo,
                         status: 'Pending',
                         subjectEmployee: employee,
                         requestedByName: req.user?.name,
-                        extra1: rewardStageBellLabel(nextPendingStep.role, {
-                            rewardType: reward.rewardType,
-                            rewardStatus: reward.rewardStatus,
-                        }),
-                        extra2: reward.amount ? `AED ${reward.amount}` : reward.title
+                        extra1: 'Pending Accounts review — Zoho failed',
+                        extra2: reward.amount ? `AED ${reward.amount}` : reward.title,
                     });
                 }
             }
@@ -1307,8 +1417,12 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
         await reward.save();
 
         return res.status(200).json({
-            message: "Reward updated successfully",
-            reward
+            message: zohoBlockedPaid
+                ? `Zoho Expense failed — reward stays Pending Accounts. Fix Expense Account / Paid Through and approve again. ${reward.zohoSyncError || ''}`.trim()
+                : "Reward updated successfully",
+            reward,
+            zohoSyncFailed: zohoBlockedPaid || undefined,
+            zohoSyncError: zohoBlockedPaid ? reward.zohoSyncError : undefined,
         });
     } catch (error) {
         console.error('Error updating reward:', error);

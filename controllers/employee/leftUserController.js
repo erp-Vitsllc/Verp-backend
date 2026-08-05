@@ -135,7 +135,7 @@ export const returnEmployeeFromLeftUser = async (req, res) => {
 
         return res.status(200).json({
             message:
-                "Employee returned to Probation with inactive profile. Previous documents are archived; complete the profile like a new joiner.",
+                "Employee returned to Probation with inactive profile. Prior data archived to Old Documents; documents with a valid expiry date remain on Live Documents.",
             employee: completeEmployee,
         });
     } catch (err) {

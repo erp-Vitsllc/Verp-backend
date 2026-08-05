@@ -12830,7 +12830,25 @@ export const updateAssetServiceDraft = async (req, res) => {
             }
         })();
         const reqStatus = String(remarkObj?.requestStatus || '').toLowerCase();
-        if (!['draft', 'pending'].includes(reqStatus)) {
+        const wf = asset.activeServiceWorkflow || {};
+        const wfMatchesService =
+            wf?.serviceRecordId && String(wf.serviceRecordId) === String(serviceId);
+        const workflowStage = String(
+            remarkObj?.workflowStage || remarkObj?.stage || (wfMatchesService ? wf.stage : '') || '',
+        )
+            .toLowerCase()
+            .trim();
+        // HR / Accounts / Zoho Make Payment — allow Initiate Service field updates after Send.
+        const initiateEditableStage = ['pending_hr', 'pending_accounts', 'pending_billing'].includes(
+            workflowStage,
+        );
+        const mayUpdateDraft = ['draft', 'pending'].includes(reqStatus);
+        const mayUpdateAtHrAccounts =
+            initiateEditableStage &&
+            (reqStatus === 'submitted' ||
+                reqStatus === 'pending' ||
+                Boolean(String(remarkObj?.oilServiceInitiatedAt || '').trim()));
+        if (!mayUpdateDraft && !mayUpdateAtHrAccounts) {
             return res.status(400).json({ message: 'Only pending service requests can be updated.' });
         }
 
@@ -12854,7 +12872,25 @@ export const updateAssetServiceDraft = async (req, res) => {
         const isTireChangePending =
             isTireChangeServiceType(service.serviceType) &&
             ['draft', 'pending'].includes(String(remarkObj?.requestStatus || '').toLowerCase());
-        if (isTireChangePending) {
+        const isHrAccountsInitiateEdit =
+            mayUpdateAtHrAccounts &&
+            (String(service.serviceType || '').trim() === 'Oil Service' ||
+                isVehicleServiceTabRequestType(service.serviceType) ||
+                isTireChangeServiceType(service.serviceType));
+        if (isHrAccountsInitiateEdit) {
+            const [mayInitiate, isHr, isAccounts, isAdminOfficer] = await Promise.all([
+                actorMayCreateOrInitiateVehicleService(req.user),
+                isUserInFlowchart(req.user, 'hr').catch(() => false),
+                isUserInFlowchart(req.user, 'accounts').catch(() => false),
+                userIsFlowchartAdminOfficer(req).catch(() => false),
+            ]);
+            if (!mayInitiate && !isHr && !isAccounts && !isAdminOfficer && !actorFlags.canAct) {
+                return res.status(403).json({
+                    message:
+                        'Access denied. Only Admin Officer, HR, Accounts, or authorized users can update Initiate Service at this stage.',
+                });
+            }
+        } else if (isTireChangePending) {
             const allowed = await actorMayCreateOrInitiateVehicleService(req.user);
             if (!allowed) {
                 return res.status(403).json({
@@ -13425,8 +13461,32 @@ export const updateOilServiceDatesHandler = async (req, res) => {
             });
         }
 
-        const { serviceStartDate, serviceEndDate, garageName, garageLocation, garageContact, zohoVendorId, serviceIssue } =
-            req.body || {};
+        const {
+            serviceStartDate,
+            serviceEndDate,
+            garageName,
+            garageLocation,
+            garageContact,
+            zohoVendorId,
+            serviceIssue,
+            paymentToGarage,
+            paymentToGarageAmount,
+            paymentToGarageAttachments,
+            scheduleDescription,
+            remark: remarkRaw,
+        } = req.body || {};
+
+        let remarkPatch = {};
+        if (typeof remarkRaw === 'string') {
+            try {
+                remarkPatch = JSON.parse(remarkRaw) || {};
+            } catch {
+                remarkPatch = {};
+            }
+        } else if (remarkRaw && typeof remarkRaw === 'object') {
+            remarkPatch = remarkRaw;
+        }
+
         await updateOilServiceDates(
             asset,
             serviceId,
@@ -13438,6 +13498,13 @@ export const updateOilServiceDatesHandler = async (req, res) => {
                 garageContact,
                 zohoVendorId,
                 serviceIssue,
+                paymentToGarage,
+                paymentToGarageAmount,
+                paymentToGarageAttachments: Array.isArray(paymentToGarageAttachments)
+                    ? paymentToGarageAttachments
+                    : undefined,
+                scheduleDescription,
+                remarkPatch,
             },
             req.user,
         );

@@ -44,7 +44,6 @@ import {
     advanceAccidentRepairAfterAccountsApprove,
     advanceAccidentRepairAfterHrApprove,
     isAccidentRepairWorkflow,
-    notifyAccidentRepairStakeholder,
     appendAccidentRepairActivity,
     ACCIDENT_REPAIR_STAGE,
 } from '../utils/accidentRepairWorkflow.js';
@@ -389,6 +388,8 @@ export async function mergeWorkflowServiceRecord(asset, serviceRecordId, body) {
         returnOtherDoc,
         newConditionImages,
         garageBillAttachment,
+        accidentGarageQuotes,
+        paymentToGarageAttachments,
     } = body;
 
     // Return-to-live files: workshop completion report vs shop invoice (legacy invoice key treated as completion when shopInvoice omitted).
@@ -610,12 +611,88 @@ export async function mergeWorkflowServiceRecord(asset, serviceRecordId, body) {
         }
     }
 
+    if (Array.isArray(accidentGarageQuotes) && accidentGarageQuotes.length) {
+        const existing = Array.isArray(remarkMeta.accidentGarageQuotes)
+            ? [...remarkMeta.accidentGarageQuotes]
+            : [];
+        const byKey = new Map(
+            existing
+                .filter((row) => row && ['q1', 'q2', 'q3'].includes(String(row.key || '').toLowerCase()))
+                .map((row) => [String(row.key).toLowerCase(), { ...row }]),
+        );
+        for (const row of accidentGarageQuotes) {
+            const key = String(row?.key || '')
+                .toLowerCase()
+                .trim();
+            if (!['q1', 'q2', 'q3'].includes(key)) continue;
+            const prev = byKey.get(key) || { key };
+            const next = {
+                ...prev,
+                key,
+                name: String(row?.name || prev.name || '').trim() || prev.name || '',
+                amount:
+                    row?.amount !== undefined && row?.amount !== ''
+                        ? Number(row.amount)
+                        : prev.amount,
+            };
+            if (row?.data) {
+                try {
+                    const uploadResult = await uploadDocumentToS3(
+                        row.data,
+                        'asset-service-attachments',
+                        row.name || `accident-garage-quote-${key}-${Date.now()}.pdf`,
+                    );
+                    next.url = uploadResult.publicId;
+                    next.name = String(row.name || next.name || `Quote ${key.slice(1)}`).trim();
+                } catch (error) {
+                    console.error('[mergeWorkflowServiceRecord] accidentGarageQuotes upload:', error);
+                    throw new Error(`Failed to upload accident Quote ${key.slice(1)}`);
+                }
+            } else if (row?.url) {
+                next.url = String(row.url).trim();
+            }
+            byKey.set(key, next);
+        }
+        remarkMeta.accidentGarageQuotes = ['q1', 'q2', 'q3']
+            .map((key) => byKey.get(key))
+            .filter((row) => row && (row.url || row.name));
+    }
+
+    if (Array.isArray(paymentToGarageAttachments) && paymentToGarageAttachments.length) {
+        const uploaded = [];
+        for (const file of paymentToGarageAttachments) {
+            if (!file?.data) continue;
+            try {
+                const uploadResult = await uploadDocumentToS3(
+                    file.data,
+                    'asset-service-attachments',
+                    file.name || `payment-to-garage-${Date.now()}.pdf`,
+                );
+                uploaded.push({
+                    url: uploadResult.publicId,
+                    name: file.name || 'Payment to garage attachment',
+                });
+            } catch (error) {
+                console.error('[mergeWorkflowServiceRecord] paymentToGarageAttachments upload:', error);
+                throw new Error('Failed to upload Payment to Garage attachment');
+            }
+        }
+        if (uploaded.length) {
+            const existing = Array.isArray(remarkMeta.paymentToGarageAttachments)
+                ? remarkMeta.paymentToGarageAttachments
+                : [];
+            remarkMeta.paymentToGarageAttachments = [...existing, ...uploaded];
+        }
+    }
+
     if (
         remark !== undefined ||
         tireCondition?.data ||
         (Array.isArray(bodyWorkImages) && bodyWorkImages.length) ||
         returnOtherDoc?.data ||
         (Array.isArray(newConditionImages) && newConditionImages.length) ||
+        (Array.isArray(accidentGarageQuotes) && accidentGarageQuotes.length) ||
+        (Array.isArray(paymentToGarageAttachments) && paymentToGarageAttachments.length) ||
         Number.isFinite(Number(serviceDurationDays))
     ) {
         sub.remark = JSON.stringify(remarkMeta);
@@ -749,59 +826,6 @@ export async function maybeStartVehicleServiceWorkflow(asset, { serviceRecordId,
         }
 
         const requesterName = await getRequesterName(req.user);
-        const isAccidentRepair = String(serviceType || '').trim() === 'Accident Repair';
-
-        if (isAccidentRepair) {
-            const adminOfficer = await getDepartmentHOD('admincontroller');
-
-            if (asset.activeServiceWorkflow?.serviceRecordId) {
-                persistWorkflowSnapshotToServiceSubdoc(asset);
-            }
-
-            asset.activeServiceWorkflow = {
-                serviceRecordId,
-                stage: ACCIDENT_REPAIR_STAGE.ADMIN_OFFICER,
-                previousStatus: asset.status,
-                serviceTypeLabel: serviceType || '',
-                history: [],
-            };
-            await pushWorkflowHistory(asset, {
-                stage: ACCIDENT_REPAIR_STAGE.ADMIN_OFFICER,
-                action: 'created',
-                note: 'Accident repair assignment submitted',
-                byName: requesterName,
-            });
-
-            const requesterEmp = req?.user ? await resolveActorEmployee(req.user) : null;
-            await logVehicleServiceWorkflowToAssetHistory(asset, {
-                stage: ACCIDENT_REPAIR_STAGE.ADMIN_OFFICER,
-                workflowAction: 'start',
-                note: 'Accident repair assignment submitted',
-                byName: requesterName,
-                performedById: requesterEmp?._id,
-                serviceTypeLabel: serviceType || '',
-                hasServiceUpdates: false,
-                serviceRecordId,
-            });
-
-            if (adminOfficer?._id) {
-                await notifyAccidentRepairStakeholder({
-                    asset,
-                    serviceRecordId,
-                    recipient: adminOfficer,
-                    requestedByName: requesterName,
-                    extra2: 'Complete Garage / Service Details',
-                    stageLabel: 'Garage details required',
-                    actionLabel: 'Accident repair — garage update',
-                    detailLine: `${requesterName} submitted the Vehicle Accident Form. Please open the Accident Repair page, complete Garage / Service Details, and click Done.`,
-                });
-            }
-
-            persistWorkflowSnapshotToServiceSubdoc(asset);
-            asset.markModified('activeServiceWorkflow');
-            await asset.save();
-            return;
-        }
 
         const cur = asset.activeServiceWorkflow;
         // Snapshot any in-progress (or finished) workflow onto its service row so a new
@@ -848,9 +872,13 @@ export async function maybeStartVehicleServiceWorkflow(asset, { serviceRecordId,
         });
 
         const isTireChange = String(serviceType || '').trim() === 'Tire Change';
-        const isShopQuoteService = ['Tire Change', 'Mechanical Work', 'Body Work'].includes(
-            String(serviceType || '').trim(),
-        );
+        // Oil-style: Schedule + HR open together after Initiate (not Car Wash).
+        const isShopQuoteService = [
+            'Tire Change',
+            'Mechanical Work',
+            'Body Work',
+            'Accident Repair',
+        ].includes(String(serviceType || '').trim());
         const plate = [asset.plateEmirate, asset.plateNumber].filter(Boolean).join(' ').trim();
         const assetLabel = `${asset.assetId || ''}${plate ? ` (${plate})` : ''}`.trim();
         const detailsPath = vehicleServiceDetailsPath(asset._id, serviceRecordId, serviceType);
@@ -1819,21 +1847,33 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
             });
         }
 
-        if (
-            action === 'approve' &&
-            isAccWf &&
-            stage === STAGE.HR
-        ) {
-            persistWorkflowSnapshotToServiceSubdoc(asset);
-            await advanceAccidentRepairAfterHrApprove(asset, asset.activeServiceWorkflow, actorName);
-            const accHrFresh = await AssetItem.findById(asset._id).populate(
-                'assignedTo',
-                'firstName lastName employeeId',
+        if (action === 'approve' && isAccWf) {
+            const accSvc = asset.services?.id?.(asset.activeServiceWorkflow?.serviceRecordId);
+            const accRemark = parseRemarkMeta(accSvc?.remark);
+            const accHrAlreadyDone = Boolean(
+                String(accRemark.hrOnServiceApprovedAt || accRemark.hrApprovedAt || '').trim(),
             );
-            return res.json({
-                message: 'HR approved — vehicle can go On Service on the start date.',
-                asset: accHrFresh,
-            });
+            const mayAccidentHrApprove =
+                stage === STAGE.HR ||
+                (stage === ACCIDENT_REPAIR_STAGE.ADMIN_OFFICER && !accHrAlreadyDone);
+            if (mayAccidentHrApprove) {
+                const accGarageDone = Boolean(
+                    asset.activeServiceWorkflow?.garageSubmittedAt ||
+                        String(accRemark.garageSubmittedByName || '').trim(),
+                );
+                persistWorkflowSnapshotToServiceSubdoc(asset);
+                await advanceAccidentRepairAfterHrApprove(asset, asset.activeServiceWorkflow, actorName);
+                const accHrFresh = await AssetItem.findById(asset._id).populate(
+                    'assignedTo',
+                    'firstName lastName employeeId',
+                );
+                return res.json({
+                    message: accGarageDone
+                        ? 'HR approved — sent to Accounts Approve'
+                        : 'HR approved — Schedule/garage can still be completed by Admin',
+                    asset: accHrFresh,
+                });
+            }
         }
 
         if (

@@ -2497,6 +2497,11 @@ export async function updateOilServiceDates(
         garageContact,
         zohoVendorId,
         serviceIssue,
+        paymentToGarage,
+        paymentToGarageAmount,
+        paymentToGarageAttachments,
+        scheduleDescription,
+        remarkPatch,
     },
     reqUser,
 ) {
@@ -2552,6 +2557,66 @@ export async function updateOilServiceDates(
     }
     if (serviceIssue !== undefined) {
         remark.serviceIssue = String(serviceIssue || '').trim();
+    }
+    if (scheduleDescription !== undefined) {
+        remark.scheduleDescription = String(scheduleDescription || '').trim();
+        remark.garageScheduleDescription = remark.scheduleDescription;
+    }
+    if (paymentToGarage !== undefined) {
+        const yes = String(paymentToGarage || '').toLowerCase() === 'yes';
+        remark.paymentToGarage = yes ? 'yes' : 'no';
+        if (!yes) {
+            remark.paymentToGarageAmount = undefined;
+            remark.paymentToGarageAttachments = [];
+        }
+    }
+    if (paymentToGarageAmount !== undefined && String(remark.paymentToGarage || '') === 'yes') {
+        const amount = Number(paymentToGarageAmount);
+        remark.paymentToGarageAmount =
+            Number.isFinite(amount) && amount > 0 ? Number(amount.toFixed(2)) : undefined;
+    }
+    if (remarkPatch && typeof remarkPatch === 'object') {
+        if (Array.isArray(remarkPatch.paymentToGarageAttachments)) {
+            remark.paymentToGarageAttachments = remarkPatch.paymentToGarageAttachments
+                .map((row) => ({
+                    name: String(row?.name || '').trim(),
+                    url: String(row?.url || '').trim(),
+                }))
+                .filter((row) => row.url);
+        }
+        if (remarkPatch.paymentToGarage != null) {
+            remark.paymentToGarage = String(remarkPatch.paymentToGarage).toLowerCase() === 'yes' ? 'yes' : 'no';
+        }
+        if (remarkPatch.paymentToGarageAmount != null && remark.paymentToGarage === 'yes') {
+            const amount = Number(remarkPatch.paymentToGarageAmount);
+            remark.paymentToGarageAmount =
+                Number.isFinite(amount) && amount > 0 ? Number(amount.toFixed(2)) : undefined;
+        }
+        if (remarkPatch.scheduleDescription != null) {
+            remark.scheduleDescription = String(remarkPatch.scheduleDescription || '').trim();
+            remark.garageScheduleDescription = remark.scheduleDescription;
+        }
+    }
+
+    service.remark = JSON.stringify(remark);
+    asset.markModified('services');
+
+    if (Array.isArray(paymentToGarageAttachments) && paymentToGarageAttachments.length) {
+        const { mergeWorkflowServiceRecord } = await import(
+            '../controllers/vehicleServiceWorkflowController.js'
+        );
+        await mergeWorkflowServiceRecord(asset, serviceId, {
+            remark: JSON.stringify({
+                paymentToGarage: remark.paymentToGarage,
+                paymentToGarageAmount: remark.paymentToGarageAmount,
+                paymentToGarageAttachments: remark.paymentToGarageAttachments || [],
+                scheduleDescription: remark.scheduleDescription,
+                garageScheduleDescription: remark.garageScheduleDescription,
+            }),
+            paymentToGarageAttachments,
+        });
+        // Reload remark after upload merge so later stringify keeps new URLs.
+        Object.assign(remark, parseOilServiceRemark(asset.services.id(serviceId)));
     }
 
     if (

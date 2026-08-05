@@ -2,8 +2,8 @@ import Reward from "../../models/Reward.js";
 
 /**
  * Accounts party payable only — Expense Account / Paid Through / Zoho org
- * on the Reward Parties card (same pattern as Loan/Adv Parties).
- * Uses Reward view permission (not Create).
+ * on the Reward Parties card.
+ * Paid only after Zoho Expense succeeds (does not affect Loan/Advance).
  */
 export const updateRewardPartyPayable = async (req, res) => {
     const { id } = req.params;
@@ -21,37 +21,37 @@ export const updateRewardPartyPayable = async (req, res) => {
             return res.status(404).json({ message: "Reward not found" });
         }
 
-        const status = String(reward.rewardStatus || reward.approvalStatus || "").trim();
         const amount = Number(reward.amount) || 0;
-        const paid = Number(reward.paidAmount) || 0;
         const hasZoho = Boolean(
             String(reward.zohoExpenseId || '').trim() || String(reward.zohoJournalId || '').trim()
         );
         const syncErr = Boolean(String(reward.zohoSyncError || "").trim());
-        const canFixFailedZoho =
+        let status = String(reward.rewardStatus || reward.approvalStatus || "").trim();
+
+        // Heal bad Paid-without-Zoho rows so Accounts can fix & retry
+        if (
             !hasZoho &&
-            syncErr &&
-            (status === "Approved (Paid)" ||
-                status === "Paid" ||
-                (amount > 0 && paid >= amount - 0.01));
+            (status === "Approved (Paid)" || status === "Paid")
+        ) {
+            reward.rewardStatus = "Pending Accounts";
+            reward.approvalStatus = "Pending Accounts";
+            reward.paidAmount = 0;
+            status = "Pending Accounts";
+            const accountsStep = (reward.workflow || []).find((w) => w.role === "Accounts");
+            if (accountsStep) {
+                accountsStep.status = "Pending";
+                accountsStep.actionedAt = null;
+            }
+        }
 
-        const isCashOrGift =
-            reward.rewardType === "Cash Reward" ||
-            reward.rewardType === "Gift Reward" ||
-            amount > 0;
-
+        const canFixFailedZoho = !hasZoho && syncErr && status === "Pending Accounts";
         const canEditAtAccounts = status === "Pending Accounts";
-        const canEditBeforePay =
-            isCashOrGift &&
-            status === "Approved" &&
-            amount > 0 &&
-            amount - paid > 0.01;
 
-        if (!canEditAtAccounts && !canEditBeforePay && !canFixFailedZoho) {
+        if (!canEditAtAccounts && !canFixFailedZoho) {
             return res.status(403).json({
                 message: hasZoho
                     ? "Accounts fields cannot be changed after Zoho is posted."
-                    : "Expense Account / Paid Through can only be set at the Accounts stage or before payment.",
+                    : "Expense Account / Paid Through can only be set at the Accounts stage.",
             });
         }
 
@@ -79,9 +79,55 @@ export const updateRewardPartyPayable = async (req, res) => {
             reward.paidThroughAccountName = "";
         }
 
+        // Retry Zoho when Accounts fields are complete (still Pending Accounts)
+        if (
+            status === "Pending Accounts" &&
+            String(reward.expenseAccountId || "").trim() &&
+            String(reward.paidThroughAccountId || "").trim() &&
+            String(reward.expenseAccountId).trim() !== String(reward.paidThroughAccountId).trim() &&
+            (syncErr || canFixFailedZoho)
+        ) {
+            try {
+                const EmployeeBasic = (await import("../../models/EmployeeBasic.js")).default;
+                const { syncRewardApprovalToZohoExpense } = await import(
+                    "../../utils/syncRewardPaymentToZoho.js"
+                );
+                const employee = await EmployeeBasic.findOne({ employeeId: reward.employeeId })
+                    .select("employeeId company firstName lastName")
+                    .lean();
+                const zohoResult = await syncRewardApprovalToZohoExpense({
+                    reward,
+                    employee,
+                });
+                if (zohoResult?.ok && zohoResult.expenseId) {
+                    reward.zohoExpenseId = zohoResult.expenseId;
+                    reward.zohoExpenseNumber = zohoResult.expenseNumber || "";
+                    reward.zohoOrganizationId =
+                        zohoResult.organizationId || reward.zohoOrganizationId || "";
+                    reward.zohoSyncedAt = new Date();
+                    reward.zohoSyncError = "";
+                    reward.rewardStatus = "Approved (Paid)";
+                    reward.approvalStatus = "Approved (Paid)";
+                    if (amount > 0) reward.paidAmount = amount;
+                    const accountsStep = (reward.workflow || []).find((w) => w.role === "Accounts");
+                    if (accountsStep) {
+                        accountsStep.status = "Approved";
+                        accountsStep.actionedAt = new Date();
+                    }
+                } else if (zohoResult && !zohoResult.ok) {
+                    reward.zohoSyncError = zohoResult.message || "Zoho Expense sync failed";
+                }
+            } catch (zohoErr) {
+                reward.zohoSyncError = zohoErr?.message || "Zoho Expense sync failed";
+                console.error("[updateRewardPartyPayable] Zoho retry error:", zohoErr);
+            }
+        }
+
         const saved = await reward.save();
         return res.status(200).json({
-            message: "Party accounts updated successfully",
+            message: String(saved.zohoExpenseId || "").trim()
+                ? "Party accounts updated and Zoho Expense posted — reward is Approved (Paid)."
+                : "Party accounts updated successfully",
             reward: saved,
         });
     } catch (error) {
