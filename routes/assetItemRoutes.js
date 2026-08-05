@@ -78,13 +78,13 @@ const normEmp = (s) => (s || '').toString().toLowerCase().replace(/\s+/g, '');
 
 /** Vehicle service draft/update/submit/garage paths under /:id/service... */
 const isVehicleServiceMutationPath = (pathNoQuery = '') => {
-    const p = String(pathNoQuery || '');
+    const p = String(pathNoQuery || '').split('?')[0].replace(/\/+$/, '');
     if (!p.includes('/service')) return false;
     if (p.includes('service-workflow')) return false;
     return (
         /\/service\/[^/]+/.test(p) ||
         p.endsWith('/service') ||
-        /\/service$/.test(p.split('?')[0])
+        /\/service$/.test(p)
     );
 };
 
@@ -477,7 +477,7 @@ const requireAssetFullAccess = async (req, res, next) => {
                 .lean()
                 .catch(() => null);
             if (isVehicleAssetLean(assetQuickVehicle)) {
-                const pathNoQuery = String(req.originalUrl || req.url || '').split('?')[0];
+                const pathNoQuery = String(req.originalUrl || req.url || '').split('?')[0].replace(/\/+$/, '');
                 const isDocumentWrite =
                     /\/document/.test(pathNoQuery) && (req.method === 'POST' || req.method === 'PUT');
                 const isAddImage = req.method === 'POST' && pathNoQuery.endsWith('/images');
@@ -489,7 +489,7 @@ const requireAssetFullAccess = async (req, res, next) => {
         // (controller enforces `serviceRequestSource` in `vehicle_fleet_dashboard` | `vehicle_asset_detail`
         // for vehicles). Avoids blocking unassigned fleet vehicles that only AC could touch before.
         if (id && req.method === 'POST') {
-            const pathNoQuery = String(req.originalUrl || req.url || '').split('?')[0];
+            const pathNoQuery = String(req.originalUrl || req.url || '').split('?')[0].replace(/\/+$/, '');
             if (pathNoQuery.endsWith('/service') && !pathNoQuery.includes('service-workflow')) {
                 const AssetItem = (await import('../models/AssetItem.js')).default;
                 const assetQuick = await AssetItem.findById(id)
@@ -503,7 +503,7 @@ const requireAssetFullAccess = async (req, res, next) => {
         // Vehicle service create / draft update / initiate (submit): any authenticated user.
         // Later workflow stages still enforce role checks in their controllers.
         if (id) {
-            const pathNoQuery = String(req.originalUrl || req.url || '').split('?')[0];
+            const pathNoQuery = String(req.originalUrl || req.url || '').split('?')[0].replace(/\/+$/, '');
             if (isVehicleServiceMutationPath(pathNoQuery)) {
                 const AssetItem = (await import('../models/AssetItem.js')).default;
                 const assetForService = await AssetItem.findById(id)
