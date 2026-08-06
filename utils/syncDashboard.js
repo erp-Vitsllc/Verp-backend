@@ -61,6 +61,17 @@ export const syncDashboardAction = async (data) => {
                 if (requestType === 'Vehicle Disposition Request' && extra3) {
                     query.extra3 = String(extra3);
                 }
+                // Vehicle service: never wipe the Admin Officer create-track row on stage approve/reject.
+                // That row stays Pending until closeAdminOfficerServiceTrackNotification (Billed / Zoho).
+                if (requestType === 'Vehicle Service Request') {
+                    if (extra3) {
+                        query.extra3 = String(extra3);
+                    } else {
+                        query.extra3 = {
+                            $not: { $regex: '"adminOfficerServiceTrack"\\s*:\\s*true', $options: 'i' },
+                        };
+                    }
+                }
 
                 await DashboardAction.updateMany(
                     query,
@@ -327,6 +338,7 @@ export const syncDashboardAction = async (data) => {
             requestId: requestId,
             assignedTo: actualAssignedTo,
             status: 'Pending',
+            ...(requestType ? { requestType } : {}),
         };
         // Parallel disposition + inspection handover: separate bell rows per viewer role / task type.
         // Oil service: keep Admin Officer track row separate from stage tasks (HR / Accounts / On Service).

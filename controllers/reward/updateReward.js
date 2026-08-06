@@ -629,6 +629,8 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
 
             if (nextInternalStage === 'Pending Accounts') {
                 console.log(`[UpdateReward] Transitioning to Pending Accounts`);
+                // Management approved — payment awaits Accounts → Zoho Expense
+                reward.paymentStatus = 'Not Paid';
                 const targetHOD = await getDepartmentHOD('accounts', hodContext);
                 if (targetHOD && approverDetails) {
                     const hodUser = await User.findOne({ employeeId: targetHOD.employeeId });
@@ -903,6 +905,7 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
                     publicStatus = 'Pending Accounts';
                     reward.approvalStatus = 'Pending Accounts';
                     reward.rewardStatus = 'Pending Accounts';
+                    reward.paymentStatus = 'Not Paid';
                     reward.paidAmount = 0;
                     console.warn(
                         '[UpdateReward] Accounts approve blocked — Zoho Expense failed; status remains Pending Accounts',

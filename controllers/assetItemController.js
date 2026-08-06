@@ -1385,6 +1385,30 @@ export const getAssetItems = async (req, res) => {
 
 };
 
+/** Short per-user cache for Vehicle Assets list — stops StrictMode/double-fetch spikes. */
+const VEHICLE_LIST_FLEET_CACHE_TTL_MS = 12_000;
+const vehicleListFleetCache = new Map();
+let vehicleTypeIdsCache = { at: 0, ids: null };
+const VEHICLE_TYPE_IDS_CACHE_TTL_MS = 5 * 60 * 1000;
+
+async function getCachedVehicleTypeIds() {
+    if (
+        Array.isArray(vehicleTypeIdsCache.ids) &&
+        Date.now() - vehicleTypeIdsCache.at < VEHICLE_TYPE_IDS_CACHE_TTL_MS
+    ) {
+        return vehicleTypeIdsCache.ids;
+    }
+    const vehicleTypeDocs = await AssetType.find({
+        isActive: true,
+        name: { $regex: /vehicle|car|fleet|truck/i },
+    })
+        .select('_id')
+        .lean();
+    const ids = vehicleTypeDocs.map((t) => t._id);
+    vehicleTypeIdsCache = { at: Date.now(), ids };
+    return ids;
+}
+
 /**
  * Fleet dashboard for vehicle assets: reminders, status, charts (service cost, model years, usage proxy).
  * Pass `?scope=list` for a lightweight vehicle list payload (skips charts and heavy service history).
@@ -1395,20 +1419,27 @@ export const getVehicleFleetDashboard = async (req, res) => {
     try {
         const listOnly = String(req.query.scope || '').trim().toLowerCase() === 'list';
         const draftVis = buildDraftVisibilityQuery(req.user);
+        const listCacheKey = listOnly
+            ? String(req.user?._id || req.user?.id || req.user?.employeeId || 'anon')
+            : '';
+
+        if (listOnly && listCacheKey) {
+            const cached = vehicleListFleetCache.get(listCacheKey);
+            if (cached && Date.now() - cached.at < VEHICLE_LIST_FLEET_CACHE_TTL_MS) {
+                console.log(
+                    `[vehicle-fleet-dashboard] scope=list cache-hit total=${Date.now() - startedAt}ms`,
+                );
+                return res.json(cached.payload);
+            }
+        }
 
         // Parallelize role + type lookups so list paint isn't serial.
-        const [fallbackAssetController, vehicleTypeDocs, handoverAdminOfficer] = await Promise.all([
-            // List table does not need flowchart HOD resolution on every load.
+        // List table does not need HOD / Admin Officer resolution — that was extra Mongo load on every list paint.
+        const [fallbackAssetController, vehicleTypeIds, handoverAdminOfficer] = await Promise.all([
             listOnly ? Promise.resolve(null) : getDepartmentHOD('assetcontroller').catch(() => null),
-            AssetType.find({
-                isActive: true,
-                name: { $regex: /vehicle|car|fleet|truck/i },
-            })
-                .select('_id')
-                .lean(),
-            listOnly ? resolveAdminOfficerEmployee().catch(() => null) : Promise.resolve(null),
+            getCachedVehicleTypeIds(),
+            listOnly ? Promise.resolve(null) : resolveAdminOfficerEmployee().catch(() => null),
         ]);
-        const vehicleTypeIds = vehicleTypeDocs.map((t) => t._id);
         // Exclude tools (VEGA-ASSET-*): shared AssetItem defaults used to match every row.
         const fleetScope = buildFleetVehicleMongoScope({ vehicleTypeIds });
         // List view: skip documents / services — expiry columns use top-level date fields.
@@ -1589,10 +1620,14 @@ export const getVehicleFleetDashboard = async (req, res) => {
         });
 
         if (listOnly) {
+            const payload = { vehicles: fleetRows };
+            if (listCacheKey) {
+                vehicleListFleetCache.set(listCacheKey, { at: Date.now(), payload });
+            }
             console.log(
                 `[vehicle-fleet-dashboard] scope=list vehicles=${vehicles.length} find=${findMs}ms total=${Date.now() - startedAt}ms`,
             );
-            return res.json({ vehicles: fleetRows });
+            return res.json(payload);
         }
 
         const vehicleIds = vehicles.map((v) => v._id);
@@ -4773,37 +4808,8 @@ export const getAssetItemDetail = async (req, res) => {
                 typeName: item?.typeId?.name || '',
             });
 
-            // Service-detail light paint: skip S3 header signing (text shell only).
-            // Full vehicle detail light still signs preview images for the gallery header.
-            if (!focusServiceId) {
-                await Promise.all([
-                    itemObj.imagePreview
-                        ? signOrKeepAttachmentUrl(itemObj.imagePreview).then((u) => {
-                              itemObj.imagePreview = u;
-                          })
-                        : null,
-                    itemObj.photo
-                        ? signOrKeepAttachmentUrl(itemObj.photo).then((u) => {
-                              itemObj.photo = u;
-                          })
-                        : null,
-                    itemObj.typeId?.imagePreview
-                        ? signOrKeepAttachmentUrl(itemObj.typeId.imagePreview).then((u) => {
-                              itemObj.typeId.imagePreview = u;
-                          })
-                        : null,
-                    itemObj.categoryId?.imagePreview
-                        ? signOrKeepAttachmentUrl(itemObj.categoryId.imagePreview).then((u) => {
-                              itemObj.categoryId.imagePreview = u;
-                          })
-                        : null,
-                    Array.isArray(itemObj.images) && itemObj.images[0]?.url
-                        ? signOrKeepAttachmentUrl(itemObj.images[0].url).then((u) => {
-                              itemObj.images[0].url = u;
-                          })
-                        : null,
-                ].filter(Boolean));
-            }
+            // Keep photo/imagePreview as storage keys on light paint.
+            // Vehicle header loads via /storage/file proxy — browser Wasabi signed URLs often break (DNS/CORS).
 
             // Attach GPS from ERP cache (30-min Locator sync) — never block detail on live Locator.
             if (itemObj.locatorDeviceId != null && !itemObj.locator) {
@@ -18250,6 +18256,13 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
             assigneeClauses.push({
                 requestType: 'Asset Assignment',
                 extra3: { $regex: '"handoverViewerRole"\\s*:\\s*"adminOfficer"', $options: 'i' },
+            });
+            // Service create/initiate track — keep visible for flowchart Admin even if
+            // assignedTo still points at a previous Admin Officer until re-route runs.
+            // (Email always uses current getDepartmentHOD; inbox previously required exact assignee.)
+            assigneeClauses.push({
+                requestType: 'Vehicle Service Request',
+                extra3: { $regex: '"adminOfficerServiceTrack"\\s*:\\s*true', $options: 'i' },
             });
         }
         if (isAccountsRoleHolder) {

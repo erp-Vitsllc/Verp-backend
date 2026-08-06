@@ -66,6 +66,12 @@ const rewardSchema = new mongoose.Schema(
             type: Number,
             default: 0
         },
+        /** Cash/Gift: Not Paid after management approval; Paid after Zoho Expense succeeds. Certificate: N/A. */
+        paymentStatus: {
+            type: String,
+            enum: ['Not Paid', 'Paid', 'N/A'],
+            default: 'N/A',
+        },
         description: {
             type: String,
             default: ''

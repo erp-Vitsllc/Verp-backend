@@ -7,15 +7,19 @@ const SNAPSHOT_MIN_INTERVAL_MS = 30 * 60 * 1000;
 const lastSnapshotAtByDevice = new Map();
 
 /** Dashboard charts only need recent windows — full 400-day TTL was loading/precomputing every day. */
-const DASHBOARD_SNAPSHOT_LOOKBACK_DAYS = 92;
+const DASHBOARD_SNAPSHOT_LOOKBACK_DAYS = 45;
 const DASHBOARD_DAY_OPTIONS_MAX = 45;
 const DASHBOARD_WEEK_OPTIONS_MAX = 12;
 const DASHBOARD_MONTH_OPTIONS_MAX = 12;
 const RECONCILE_MIN_INTERVAL_MS = 30 * 60 * 1000;
+/** Avoid re-scanning tens of thousands of GPS rows on every dashboard tab focus. */
+const FLEET_DASHBOARD_CACHE_TTL_MS = 5 * 60 * 1000;
 
 let lastReconcileAt = 0;
 let lastReconcileSummary = null;
 let reconcileInFlight = null;
+let fleetDashboardCache = { at: 0, payload: null };
+let fleetDashboardInFlight = null;
 
 const MONTH_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
@@ -1069,17 +1073,56 @@ function scheduleLocatorReconcile(positions) {
     return { summary: lastReconcileSummary, deferred: true, inFlight: true };
 }
 
-export async function buildLocatorFleetDashboard() {
-    if (!isLocatorConfigured()) {
-        return {
-            configured: false,
-            message: 'Locator GPS is not configured.',
-        };
-    }
+/**
+ * Chart builders only need odometer/state trends — not every 30-min raw row.
+ * One sample per device per hour cuts ~60k → ~15k and keeps Mongo work off the Node heap.
+ */
+async function loadDashboardChartSnapshots(lookbackStart) {
+    return LocatorGpsSnapshot.aggregate([
+        { $match: { capturedAt: { $gte: lookbackStart } } },
+        { $sort: { capturedAt: 1 } },
+        {
+            $group: {
+                _id: {
+                    deviceId: '$deviceId',
+                    y: { $year: { date: '$capturedAt', timezone: 'Asia/Dubai' } },
+                    m: { $month: { date: '$capturedAt', timezone: 'Asia/Dubai' } },
+                    d: { $dayOfMonth: { date: '$capturedAt', timezone: 'Asia/Dubai' } },
+                    h: { $hour: { date: '$capturedAt', timezone: 'Asia/Dubai' } },
+                },
+                deviceId: { $first: '$deviceId' },
+                deviceName: { $last: '$deviceName' },
+                odometer: { $last: '$odometer' },
+                totalDistanceM: { $last: '$totalDistanceM' },
+                expenseAed: { $last: '$expenseAed' },
+                state: { $last: '$state' },
+                speedKmh: { $avg: '$speedKmh' },
+                capturedAt: { $last: '$capturedAt' },
+            },
+        },
+        {
+            $project: {
+                _id: 0,
+                deviceId: 1,
+                deviceName: 1,
+                odometer: 1,
+                totalDistanceM: 1,
+                expenseAed: 1,
+                state: 1,
+                speedKmh: 1,
+                capturedAt: 1,
+            },
+        },
+        { $sort: { capturedAt: 1 } },
+    ])
+        .option({ allowDiskUse: true, maxTimeMS: 20000 })
+        .exec();
+}
 
+async function buildLocatorFleetDashboardUncached() {
     const startedAt = Date.now();
     const now = new Date();
-    // Charts use day/week/month pickers — ~3 months is enough; TTL still retains longer history.
+    // Match day-picker window — loading 92 days of raw rows was saturating Mongo (~60k docs).
     const lookbackStart = new Date(now);
     lookbackStart.setDate(lookbackStart.getDate() - DASHBOARD_SNAPSHOT_LOOKBACK_DAYS);
 
@@ -1116,12 +1159,7 @@ export async function buildLocatorFleetDashboard() {
     );
 
     const [snapshots, resolveLabel, gpsTrackedVehicles] = await Promise.all([
-        LocatorGpsSnapshot.find({
-            capturedAt: { $gte: lookbackStart },
-        })
-            .select('deviceId deviceName odometer totalDistanceM expenseAed state speedKmh capturedAt')
-            .sort({ capturedAt: 1 })
-            .lean(),
+        loadDashboardChartSnapshots(lookbackStart),
         createLocatorChartLabelResolver(positions),
         buildGpsTrackedVehicles(positions),
     ]);
@@ -1175,4 +1213,35 @@ export async function buildLocatorFleetDashboard() {
     );
 
     return payload;
+}
+
+export async function buildLocatorFleetDashboard() {
+    if (!isLocatorConfigured()) {
+        return {
+            configured: false,
+            message: 'Locator GPS is not configured.',
+        };
+    }
+
+    const cached = fleetDashboardCache.payload;
+    if (cached && Date.now() - fleetDashboardCache.at < FLEET_DASHBOARD_CACHE_TTL_MS) {
+        return cached;
+    }
+
+    if (fleetDashboardInFlight) {
+        return fleetDashboardInFlight;
+    }
+
+    fleetDashboardInFlight = buildLocatorFleetDashboardUncached()
+        .then((payload) => {
+            if (payload?.connected) {
+                fleetDashboardCache = { at: Date.now(), payload };
+            }
+            return payload;
+        })
+        .finally(() => {
+            fleetDashboardInFlight = null;
+        });
+
+    return fleetDashboardInFlight;
 }
