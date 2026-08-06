@@ -50,7 +50,7 @@ async function loadAssetWithAssignee(asset) {
 
 /**
  * Open (or refresh) Admin Officer inbox task when any vehicle service is created / initiated.
- * Stays Pending until closeAdminOfficerServiceTrackNotification is called on completion.
+ * Stays Pending until closeAdminOfficerServiceTrackNotification (after Billed / Zoho for cash services).
  *
  * Email to Admin Officer: only when sendEmail is true (callers skip when the actor
  * is already the flowchart Admin Officer).
@@ -169,7 +169,10 @@ export async function notifyAdminOfficerOnVehicleServiceCreated({
     }
 }
 
-/** Close Admin Officer create-track notification for one service (on completion only). */
+/**
+ * Close Admin Officer create-track notification for one service.
+ * Call after Zoho / Billed (cash shop + oil cash). Warranty oil / Car Wash may close on complete.
+ */
 export async function closeAdminOfficerServiceTrackNotification({
     assetId,
     serviceRecordId,

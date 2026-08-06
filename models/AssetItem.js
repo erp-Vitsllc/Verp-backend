@@ -422,6 +422,13 @@ const assetItemSchema = new mongoose.Schema({
     plateNumber: { type: String, trim: true },
     /** Locator GPS device id (MyLocator Plus) for fleet sync. */
     locatorDeviceId: { type: Number, default: null, index: true },
+    /** Last known GPS fields from background Locator→ERP sync (not live API). */
+    locatorGpsStatus: { type: String, trim: true, default: '' },
+    locatorAddress: { type: String, trim: true, default: '' },
+    locatorSpeedKmh: { type: Number, default: null },
+    locatorIgnition: { type: Boolean, default: null },
+    locatorLastUpdate: { type: Date, default: null },
+    locatorSyncedAt: { type: Date, default: null },
     modelYear: { type: String, trim: true },
     currentKilometer: { type: Number, default: 0 },
     /** Lifecycle for fleet reporting — separate from operational `status` (Assigned, etc.). */

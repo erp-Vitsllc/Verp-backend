@@ -3,7 +3,7 @@ import AssetItem from '../models/AssetItem.js';
 import { fetchLatestPositions, isLocatorConfigured } from './locatorService.js';
 import { reconcileLocatorPositionsToErp } from './locatorVehicleListService.js';
 
-const SNAPSHOT_MIN_INTERVAL_MS = 2 * 60 * 1000;
+const SNAPSHOT_MIN_INTERVAL_MS = 30 * 60 * 1000;
 const lastSnapshotAtByDevice = new Map();
 
 /** Dashboard charts only need recent windows — full 400-day TTL was loading/precomputing every day. */
@@ -11,7 +11,7 @@ const DASHBOARD_SNAPSHOT_LOOKBACK_DAYS = 92;
 const DASHBOARD_DAY_OPTIONS_MAX = 45;
 const DASHBOARD_WEEK_OPTIONS_MAX = 12;
 const DASHBOARD_MONTH_OPTIONS_MAX = 12;
-const RECONCILE_MIN_INTERVAL_MS = 5 * 60 * 1000;
+const RECONCILE_MIN_INTERVAL_MS = 30 * 60 * 1000;
 
 let lastReconcileAt = 0;
 let lastReconcileSummary = null;
@@ -131,7 +131,7 @@ export async function recordLocatorSnapshot(rawPosition, source = 'rest') {
 export async function recordLocatorSnapshotsFromLatest() {
     if (!isLocatorConfigured()) return 0;
 
-    const { positions } = await fetchLatestPositions();
+    const { positions } = await fetchLatestPositions({ force: true });
     let saved = 0;
 
     for (const position of positions || []) {
@@ -140,6 +140,34 @@ export async function recordLocatorSnapshotsFromLatest() {
     }
 
     return saved;
+}
+
+/**
+ * Background Locator → ERP DB sync (snapshots + odometer/GPS cache on AssetItem).
+ * Runs on a timer — never from vehicle list/detail HTTP handlers.
+ */
+export async function syncLocatorToErpDatabase() {
+    if (!isLocatorConfigured()) {
+        return { configured: false, saved: 0, reconcile: null };
+    }
+
+    const startedAt = Date.now();
+    const { positions } = await fetchLatestPositions({ force: true });
+    let saved = 0;
+
+    for (const position of positions || []) {
+        // Scheduled sync always captures (bypass in-memory throttle once per run).
+        lastSnapshotAtByDevice.delete(String(position?.deviceId ?? ''));
+        const row = await recordLocatorSnapshot(position, 'rest');
+        if (row) saved += 1;
+    }
+
+    const reconcile = await reconcileLocatorPositionsToErp(positions || [], { force: true });
+    console.log(
+        `[LocatorSync] ERP DB updated in ${Date.now() - startedAt}ms — snapshots=${saved} reconcile=${JSON.stringify(reconcile)}`,
+    );
+
+    return { configured: true, saved, reconcile };
 }
 
 function startOfDay(date) {

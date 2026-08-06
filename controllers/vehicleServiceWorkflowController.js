@@ -385,7 +385,9 @@ export async function mergeWorkflowServiceRecord(asset, serviceRecordId, body) {
         quotation3,
         tireCondition,
         bodyWorkImages,
+        accidentImages,
         returnOtherDoc,
+        returnOtherDocs,
         newConditionImages,
         garageBillAttachment,
         accidentGarageQuotes,
@@ -482,6 +484,7 @@ export async function mergeWorkflowServiceRecord(asset, serviceRecordId, body) {
     if (value !== undefined) sub.value = Number(value) || 0;
 
     let remarkMeta = parseRemarkMeta(sub.remark);
+    let incomingClearedReturnOtherDocs = false;
     if (remark !== undefined) {
         try {
             const incoming = typeof remark === 'string' ? JSON.parse(remark) : remark;
@@ -490,8 +493,19 @@ export async function mergeWorkflowServiceRecord(asset, serviceRecordId, body) {
                 if (Array.isArray(incomingRemark.bodyWorkImages) && incomingRemark.bodyWorkImages.length === 0) {
                     delete incomingRemark.bodyWorkImages;
                 }
+                // Never overwrite stored accident photos from remark payload (often signed URLs
+                // from GET). New uploads are appended via body.accidentImages below.
+                delete incomingRemark.accidentImages;
+                delete incomingRemark.existingAccidentImages;
                 if (Array.isArray(incomingRemark.newConditionImages)) {
                     delete incomingRemark.newConditionImages;
+                }
+                if (
+                    Object.prototype.hasOwnProperty.call(incomingRemark, 'returnOtherDocs') &&
+                    Array.isArray(incomingRemark.returnOtherDocs) &&
+                    incomingRemark.returnOtherDocs.length === 0
+                ) {
+                    incomingClearedReturnOtherDocs = true;
                 }
                 remarkMeta = { ...remarkMeta, ...incomingRemark };
             }
@@ -568,7 +582,95 @@ export async function mergeWorkflowServiceRecord(asset, serviceRecordId, body) {
             remarkMeta.bodyWorkImages = [...existing, ...uploaded];
         }
     }
-    if (returnOtherDoc?.data) {
+    if (Array.isArray(accidentImages) && accidentImages.length) {
+        const uploaded = [];
+        for (const img of accidentImages) {
+            if (!img?.data) continue;
+            try {
+                const uploadResult = await uploadDocumentToS3(
+                    img.data,
+                    'asset-service-attachments',
+                    img.name || `accident-image-${Date.now()}.jpg`,
+                );
+                uploaded.push({
+                    url: uploadResult.publicId,
+                    name: img.name || 'Accident image',
+                });
+            } catch (error) {
+                console.error('[mergeWorkflowServiceRecord] accidentImages upload:', error);
+                throw new Error('Failed to upload accident images');
+            }
+        }
+        if (uploaded.length) {
+            const existing = Array.isArray(remarkMeta.accidentImages) ? remarkMeta.accidentImages : [];
+            remarkMeta.accidentImages = [...existing, ...uploaded];
+        }
+    }
+    let returnOtherDocsTouched = false;
+    if (Array.isArray(returnOtherDocs) && returnOtherDocs.length) {
+        const uploadedById = new Map();
+        for (const row of returnOtherDocs) {
+            if (!row?.data) continue;
+            const rowId = String(row.id || '').trim() || `other-${Date.now()}-${uploadedById.size}`;
+            try {
+                const uploadResult = await uploadDocumentToS3(
+                    row.data,
+                    'asset-service-invoices',
+                    row.name || `return-other-doc-${Date.now()}.pdf`,
+                );
+                uploadedById.set(rowId, {
+                    id: rowId,
+                    docType: String(row.docType || row.type || '').trim(),
+                    name: String(row.name || '').trim(),
+                    url: uploadResult.publicId,
+                });
+            } catch (error) {
+                console.error('[mergeWorkflowServiceRecord] returnOtherDocs upload:', error);
+                throw new Error('Failed to upload other document');
+            }
+        }
+
+        const baseRows = Array.isArray(remarkMeta.returnOtherDocs) ? remarkMeta.returnOtherDocs : [];
+        const merged = baseRows.map((row) => {
+            const id = String(row?.id || '').trim();
+            const uploaded = id ? uploadedById.get(id) : null;
+            if (!uploaded) {
+                return {
+                    id: id || undefined,
+                    docType: String(row?.docType || row?.type || '').trim(),
+                    name: String(row?.name || '').trim(),
+                    url: String(row?.url || '').trim(),
+                };
+            }
+            return {
+                id,
+                docType: uploaded.docType || String(row?.docType || '').trim(),
+                name: uploaded.name || String(row?.name || '').trim(),
+                url: uploaded.url,
+            };
+        });
+        for (const [id, uploaded] of uploadedById.entries()) {
+            if (!merged.some((row) => String(row?.id || '') === id)) {
+                merged.push(uploaded);
+            }
+        }
+        remarkMeta.returnOtherDocs = merged.filter((row) => row.docType || row.name || row.url);
+        returnOtherDocsTouched = true;
+
+        const first = remarkMeta.returnOtherDocs[0];
+        if (first?.url) {
+            sub.invoice = first.url;
+            remarkMeta.returnOtherDocUrl = first.url;
+            remarkMeta.returnOtherDocName = first.name || '';
+            remarkMeta.returnOtherDocType = first.docType || '';
+        }
+    } else if (incomingClearedReturnOtherDocs) {
+        // Explicit clear from Complete Service when all other-doc rows are removed.
+        delete remarkMeta.returnOtherDocUrl;
+        delete remarkMeta.returnOtherDocName;
+        delete remarkMeta.returnOtherDocType;
+        returnOtherDocsTouched = true;
+    } else if (returnOtherDoc?.data) {
         try {
             const uploadResult = await uploadDocumentToS3(
                 returnOtherDoc.data,
@@ -578,6 +680,22 @@ export async function mergeWorkflowServiceRecord(asset, serviceRecordId, body) {
             sub.invoice = uploadResult.publicId;
             remarkMeta.returnOtherDocUrl = uploadResult.publicId;
             remarkMeta.returnOtherDocName = returnOtherDoc.name || '';
+            const legacyRow = {
+                id: 'legacy-other-doc',
+                docType: String(remarkMeta.returnOtherDocType || 'Other').trim() || 'Other',
+                name: returnOtherDoc.name || '',
+                url: uploadResult.publicId,
+            };
+            const existing = Array.isArray(remarkMeta.returnOtherDocs) ? remarkMeta.returnOtherDocs : [];
+            if (!existing.length) {
+                remarkMeta.returnOtherDocs = [legacyRow];
+            } else {
+                remarkMeta.returnOtherDocs = [
+                    { ...existing[0], ...legacyRow, id: existing[0]?.id || legacyRow.id },
+                    ...existing.slice(1),
+                ];
+            }
+            returnOtherDocsTouched = true;
         } catch (error) {
             console.error('[mergeWorkflowServiceRecord] returnOtherDoc upload:', error);
             throw new Error('Failed to upload other document');
@@ -689,7 +807,10 @@ export async function mergeWorkflowServiceRecord(asset, serviceRecordId, body) {
         remark !== undefined ||
         tireCondition?.data ||
         (Array.isArray(bodyWorkImages) && bodyWorkImages.length) ||
+        (Array.isArray(accidentImages) && accidentImages.length) ||
         returnOtherDoc?.data ||
+        returnOtherDocsTouched ||
+        (Array.isArray(returnOtherDocs) && returnOtherDocs.length) ||
         (Array.isArray(newConditionImages) && newConditionImages.length) ||
         (Array.isArray(accidentGarageQuotes) && accidentGarageQuotes.length) ||
         (Array.isArray(paymentToGarageAttachments) && paymentToGarageAttachments.length) ||
@@ -1705,21 +1826,13 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
             isTireWf &&
             stage === STAGE.HR
         ) {
-            persistWorkflowSnapshotToServiceSubdoc(asset);
-            const tireSvc = asset.services?.id?.(asset.activeServiceWorkflow?.serviceRecordId);
-            const tireGarageDone = Boolean(
-                asset.activeServiceWorkflow?.garageSubmittedAt ||
-                    String(parseRemarkMeta(tireSvc?.remark).garageSubmittedByName || '').trim(),
-            );
             await advanceTireChangeAfterHrApprove(asset, asset.activeServiceWorkflow, actorName);
             const tireHrFresh = await AssetItem.findById(asset._id).populate(
                 'assignedTo',
                 'firstName lastName employeeId',
             );
             return res.json({
-                message: tireGarageDone
-                    ? 'HR approved — sent to Accounts Approve'
-                    : 'HR approved — sent to Admin Officer for garage details',
+                message: 'HR approved — sent to Accounts Approve (Schedule may still be open)',
                 asset: tireHrFresh,
             });
         }
@@ -1739,11 +1852,13 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
                 'assignedTo',
                 'firstName lastName employeeId',
             );
-            const zohoBillSync = tireAccResult?.zohoBillSync || null;
+            const waiting = Boolean(tireAccResult?.waitingForSchedule);
             return res.json({
-                message: `Accounts approved — service scheduled. ${zohoBillSync?.message || 'Zoho bill created.'}`,
-                zohoBillMessage: zohoBillSync?.message || '',
-                zohoBillId: zohoBillSync?.billId || '',
+                message: waiting
+                    ? 'Accounts approved — complete Schedule/Reschedule so Ready / On Service can start.'
+                    : 'Accounts approved — service scheduled (Zoho billing after Complete Service).',
+                zohoBillMessage: '',
+                zohoBillId: '',
                 zohoBillOk: true,
                 asset: tireAccFresh,
             });
@@ -1754,21 +1869,13 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
             isMechWf &&
             stage === STAGE.HR
         ) {
-            persistWorkflowSnapshotToServiceSubdoc(asset);
-            const mechSvc = asset.services?.id?.(asset.activeServiceWorkflow?.serviceRecordId);
-            const mechGarageDone = Boolean(
-                asset.activeServiceWorkflow?.garageSubmittedAt ||
-                    String(parseRemarkMeta(mechSvc?.remark).garageSubmittedByName || '').trim(),
-            );
             await advanceMechanicalWorkAfterHrApprove(asset, asset.activeServiceWorkflow, actorName);
             const mechHrFresh = await AssetItem.findById(asset._id).populate(
                 'assignedTo',
                 'firstName lastName employeeId',
             );
             return res.json({
-                message: mechGarageDone
-                    ? 'HR approved — sent to Accounts Approve'
-                    : 'HR approved — sent to Admin Officer for garage details',
+                message: 'HR approved — sent to Accounts Approve (Schedule may still be open)',
                 asset: mechHrFresh,
             });
         }
@@ -1788,11 +1895,13 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
                 'assignedTo',
                 'firstName lastName employeeId',
             );
-            const zohoBillSync = mechAccResult?.zohoBillSync || null;
+            const waiting = Boolean(mechAccResult?.waitingForSchedule);
             return res.json({
-                message: `Accounts approved — service scheduled. ${zohoBillSync?.message || 'Zoho bill created.'}`,
-                zohoBillMessage: zohoBillSync?.message || '',
-                zohoBillId: zohoBillSync?.billId || '',
+                message: waiting
+                    ? 'Accounts approved — complete Schedule/Reschedule so Ready / On Service can start.'
+                    : 'Accounts approved — service scheduled (Zoho billing after Complete Service).',
+                zohoBillMessage: '',
+                zohoBillId: '',
                 zohoBillOk: true,
                 asset: mechAccFresh,
             });
@@ -1803,21 +1912,13 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
             isBodyWf &&
             stage === STAGE.HR
         ) {
-            persistWorkflowSnapshotToServiceSubdoc(asset);
-            const bodySvc = asset.services?.id?.(asset.activeServiceWorkflow?.serviceRecordId);
-            const bodyGarageDone = Boolean(
-                asset.activeServiceWorkflow?.garageSubmittedAt ||
-                    String(parseRemarkMeta(bodySvc?.remark).garageSubmittedByName || '').trim(),
-            );
             await advanceBodyWorkAfterHrApprove(asset, asset.activeServiceWorkflow, actorName);
             const bodyHrFresh = await AssetItem.findById(asset._id).populate(
                 'assignedTo',
                 'firstName lastName employeeId',
             );
             return res.json({
-                message: bodyGarageDone
-                    ? 'HR approved — sent to Accounts Approve'
-                    : 'HR approved — sent to Admin Officer for garage details',
+                message: 'HR approved — sent to Accounts Approve (Schedule may still be open)',
                 asset: bodyHrFresh,
             });
         }
@@ -1837,11 +1938,13 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
                 'assignedTo',
                 'firstName lastName employeeId',
             );
-            const zohoBillSync = bodyAccResult?.zohoBillSync || null;
+            const waiting = Boolean(bodyAccResult?.waitingForSchedule);
             return res.json({
-                message: `Accounts approved — service scheduled. ${zohoBillSync?.message || 'Zoho bill created.'}`,
-                zohoBillMessage: zohoBillSync?.message || '',
-                zohoBillId: zohoBillSync?.billId || '',
+                message: waiting
+                    ? 'Accounts approved — complete Schedule/Reschedule so Ready / On Service can start.'
+                    : 'Accounts approved — service scheduled (Zoho billing after Complete Service).',
+                zohoBillMessage: '',
+                zohoBillId: '',
                 zohoBillOk: true,
                 asset: bodyAccFresh,
             });
@@ -1857,10 +1960,6 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
                 stage === STAGE.HR ||
                 (stage === ACCIDENT_REPAIR_STAGE.ADMIN_OFFICER && !accHrAlreadyDone);
             if (mayAccidentHrApprove) {
-                const accGarageDone = Boolean(
-                    asset.activeServiceWorkflow?.garageSubmittedAt ||
-                        String(accRemark.garageSubmittedByName || '').trim(),
-                );
                 persistWorkflowSnapshotToServiceSubdoc(asset);
                 await advanceAccidentRepairAfterHrApprove(asset, asset.activeServiceWorkflow, actorName);
                 const accHrFresh = await AssetItem.findById(asset._id).populate(
@@ -1868,9 +1967,7 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
                     'firstName lastName employeeId',
                 );
                 return res.json({
-                    message: accGarageDone
-                        ? 'HR approved — sent to Accounts Approve'
-                        : 'HR approved — Schedule/garage can still be completed by Admin',
+                    message: 'HR approved — sent to Accounts Approve (Schedule may still be open)',
                     asset: accHrFresh,
                 });
             }
@@ -1891,11 +1988,13 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
                 'assignedTo',
                 'firstName lastName employeeId',
             );
-            const zohoBillSync = accAccResult?.zohoBillSync || null;
+            const waiting = Boolean(accAccResult?.waitingForSchedule);
             return res.json({
-                message: `Accounts approved — service scheduled. ${zohoBillSync?.message || 'Zoho bill created.'}`,
-                zohoBillMessage: zohoBillSync?.message || '',
-                zohoBillId: zohoBillSync?.billId || '',
+                message: waiting
+                    ? 'Accounts approved — complete Schedule/Reschedule so Ready / On Service can start.'
+                    : 'Accounts approved — service scheduled (Zoho billing after Complete Service).',
+                zohoBillMessage: '',
+                zohoBillId: '',
                 zohoBillOk: true,
                 asset: accAccFresh,
             });

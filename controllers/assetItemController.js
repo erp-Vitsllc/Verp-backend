@@ -1415,7 +1415,7 @@ export const getVehicleFleetDashboard = async (req, res) => {
         // Full dashboard: project only nested fields charts/modals need (skip quotation URLs,
         // workflow history signatures, document attachments — those balloon BSON + JSON).
         const fleetSelect = listOnly
-            ? 'assetId name vehicleBrand plateEmirate plateNumber modelYear assetValue status registrationExpiryDate insuranceExpiryDate nextServiceDate oilChangeDate gearOilDueDate currentKilometer assignedTo assignedCompany acceptanceStatus pendingAction actionRequiredBy createdBy vehicleProfileActivationStatus vehicleDispositionStatus warrantyEnabled warrantyExpiryDate warrantyYears onServiceActive onLeaveActive typeId assignedDate pendingActionDetails updatedAt locatorDeviceId'
+            ? 'assetId name vehicleBrand plateEmirate plateNumber modelYear assetValue status registrationExpiryDate insuranceExpiryDate nextServiceDate oilChangeDate gearOilDueDate currentKilometer assignedTo assignedCompany acceptanceStatus pendingAction actionRequiredBy createdBy vehicleProfileActivationStatus vehicleDispositionStatus warrantyEnabled warrantyExpiryDate warrantyYears onServiceActive onLeaveActive typeId assignedDate pendingActionDetails updatedAt locatorDeviceId locatorGpsStatus locatorAddress locatorSpeedKmh locatorIgnition locatorLastUpdate locatorSyncedAt'
             : [
                 'assetId',
                 'name',
@@ -1563,6 +1563,19 @@ export const getVehicleFleetDashboard = async (req, res) => {
                 warrantyExpiryDate: v.warrantyExpiryDate || null,
                 warrantyYears: v.warrantyYears || null,
                 locatorDeviceId: v.locatorDeviceId ?? null,
+                // GPS fields from 30-min Locator→ERP sync (no live Locator call on list).
+                locator:
+                    v.locatorDeviceId != null
+                        ? {
+                              deviceId: v.locatorDeviceId,
+                              gpsStatus: v.locatorGpsStatus || '',
+                              address: v.locatorAddress || '',
+                              speedKmh: v.locatorSpeedKmh ?? null,
+                              ignition: v.locatorIgnition ?? null,
+                              lastUpdate: v.locatorLastUpdate || v.locatorSyncedAt || null,
+                              currentKilometer: Number(v.currentKilometer) || 0,
+                          }
+                        : null,
                 typeId: v.typeId || null,
                 assetController: controllerPayload,
                 assetControllerId: controllerPayload?._id || null,
@@ -4792,6 +4805,20 @@ export const getAssetItemDetail = async (req, res) => {
                 ].filter(Boolean));
             }
 
+            // Attach GPS from ERP cache (30-min Locator sync) — never block detail on live Locator.
+            if (itemObj.locatorDeviceId != null && !itemObj.locator) {
+                itemObj.locator = {
+                    deviceId: itemObj.locatorDeviceId,
+                    gpsStatus: itemObj.locatorGpsStatus || '',
+                    address: itemObj.locatorAddress || '',
+                    speedKmh: itemObj.locatorSpeedKmh ?? null,
+                    ignition: itemObj.locatorIgnition ?? null,
+                    lastUpdate: itemObj.locatorLastUpdate || itemObj.locatorSyncedAt || null,
+                    currentKilometer: Number(itemObj.currentKilometer) || 0,
+                };
+                itemObj.isLocatorLinked = true;
+            }
+
             res.status(200).json(itemObj);
 
             const assetIdForBg = item._id;
@@ -5875,6 +5902,20 @@ export const getAssetItemDetail = async (req, res) => {
             }
         } catch (healErr) {
             /* non-fatal */
+        }
+
+        // Attach GPS from ERP cache (30-min Locator sync) — never block detail on live Locator.
+        if (itemObj.locatorDeviceId != null && !itemObj.locator) {
+            itemObj.locator = {
+                deviceId: itemObj.locatorDeviceId,
+                gpsStatus: itemObj.locatorGpsStatus || '',
+                address: itemObj.locatorAddress || '',
+                speedKmh: itemObj.locatorSpeedKmh ?? null,
+                ignition: itemObj.locatorIgnition ?? null,
+                lastUpdate: itemObj.locatorLastUpdate || itemObj.locatorSyncedAt || null,
+                currentKilometer: Number(itemObj.currentKilometer) || 0,
+            };
+            itemObj.isLocatorLinked = true;
         }
 
         res.status(200).json(itemObj);

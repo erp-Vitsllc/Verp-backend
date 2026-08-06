@@ -5,7 +5,6 @@ import Fine from '../models/Fine.js';
 import { getDepartmentHOD } from './getDepartmentHOD.js';
 import { syncDashboardAction } from './syncDashboard.js';
 import { sendVehicleServiceWorkflowEmail } from './sendVehicleServiceWorkflowEmail.js';
-import { closeAdminOfficerServiceTrackNotification } from './vehicleServiceAdminOfficerNotification.js';
 import { applyPostServiceOperationalState } from './assetOperationalFlags.js';
 import { actorMayManageTireChangeRequest, getRequesterName } from './oilServiceWorkflow.js';
 import { generateFineIdInternal } from '../controllers/fine/addFine.js';
@@ -131,14 +130,10 @@ export async function resolveAccidentRepairAssigneeForStage(stage) {
 }
 
 export async function advanceAccidentRepairAfterHrApprove(asset, wf, actorName) {
-    // Oil-style parallel: HR may approve while Schedule is still open.
-    // Garage done → Accounts Approve; otherwise → Admin Officer for Schedule.
+    // Oil-style parallel: HR opens Accounts even if Schedule/garage is incomplete.
     const serviceRecordId = wf.serviceRecordId;
     const service = asset.services?.id?.(serviceRecordId);
     const remark = parseRemark(service);
-    const garageDone = Boolean(
-        wf.garageSubmittedAt || String(remark.garageSubmittedByName || '').trim(),
-    );
 
     if (service) {
         remark.hrOnServiceApprovedAt = new Date().toISOString();
@@ -148,56 +143,36 @@ export async function advanceAccidentRepairAfterHrApprove(asset, wf, actorName) 
         appendAccidentRepairActivity(service, {
             type: 'hr_approved',
             byName: actorName,
-            note: garageDone
-                ? 'HR approved — sent to Accounts Approve'
-                : 'HR approved — awaiting Schedule / garage details',
+            note: 'HR approved — Accounts Approve opened (Schedule may still be open)',
         });
         asset.markModified('services');
     }
 
-    if (garageDone) {
-        const { snapshotActiveServiceWorkflow } = await import('./vehicleServiceWorkflowResolve.js');
-        snapshotActiveServiceWorkflow(asset);
-        asset.activeServiceWorkflow = {
-            ...(typeof wf.toObject === 'function' ? wf.toObject() : wf),
-            stage: ACCIDENT_REPAIR_STAGE.ACCOUNTS,
-            serviceRecordId: wf.serviceRecordId || serviceRecordId,
-            serviceTypeLabel: wf.serviceTypeLabel || 'Accident Repair',
-            history: Array.isArray(wf.history) ? [...wf.history] : [],
-            garageSubmittedAt: wf.garageSubmittedAt,
-            scheduledServiceDate: wf.scheduledServiceDate || null,
-            serviceWindowEndDate: wf.serviceWindowEndDate || null,
-        };
-        asset.markModified('activeServiceWorkflow');
-        await asset.save();
-
-        const { routeShopServiceToAccountsApproveAfterGarage } = await import(
-            './vehicleShopServiceScheduled.js'
-        );
-        return routeShopServiceToAccountsApproveAfterGarage(asset, serviceRecordId, {
-            serviceTypeLabel: 'Accident Repair',
-            actorName,
-            linkPath: accidentRepairDetailsPath(asset._id, serviceRecordId),
-            dashboardMeta: accidentRepairDashboardMeta(asset, serviceRecordId),
-            appendActivity: null,
-        });
-    }
-
-    wf.stage = ACCIDENT_REPAIR_STAGE.ADMIN_OFFICER;
-    asset.activeServiceWorkflow = wf;
+    const { snapshotActiveServiceWorkflow } = await import('./vehicleServiceWorkflowResolve.js');
+    snapshotActiveServiceWorkflow(asset);
+    asset.activeServiceWorkflow = {
+        ...(typeof wf.toObject === 'function' ? wf.toObject() : wf),
+        stage: ACCIDENT_REPAIR_STAGE.ACCOUNTS,
+        serviceRecordId: wf.serviceRecordId || serviceRecordId,
+        serviceTypeLabel: wf.serviceTypeLabel || 'Accident Repair',
+        history: Array.isArray(wf.history) ? [...wf.history] : [],
+        garageSubmittedAt: wf.garageSubmittedAt,
+        scheduledServiceDate: wf.scheduledServiceDate || null,
+        serviceWindowEndDate: wf.serviceWindowEndDate || null,
+    };
     asset.markModified('activeServiceWorkflow');
     await asset.save();
 
-    const adminOfficer = await getDepartmentHOD('admincontroller');
-    await notifyAccidentRepairStakeholder({
-        asset,
-        serviceRecordId,
-        recipient: adminOfficer,
-        requestedByName: actorName,
-        extra2: 'Update garage and service dates',
-        stageLabel: 'Garage details required',
-        actionLabel: 'Accident repair — garage update',
-        detailLine: `${actorName} approved accident repair (HR). Please open the Accident Repair page, complete Schedule / garage details, and click Done.`,
+    const { routeShopServiceToAccountsApproveAfterGarage } = await import(
+        './vehicleShopServiceScheduled.js'
+    );
+    return routeShopServiceToAccountsApproveAfterGarage(asset, serviceRecordId, {
+        serviceTypeLabel: 'Accident Repair',
+        actorName,
+        linkPath: accidentRepairDetailsPath(asset._id, serviceRecordId),
+        dashboardMeta: accidentRepairDashboardMeta(asset, serviceRecordId),
+        appendActivity: null,
+        openedBy: 'hr',
     });
 }
 
@@ -268,12 +243,19 @@ export async function submitAccidentRepairGarage(asset, serviceId, serviceUpdate
     const stage = String(wf.stage || '').toLowerCase();
     const remarkBefore = parseRemark(service);
     const garageAlreadySubmitted = Boolean(wf.garageSubmittedAt || remarkBefore.garageSubmittedByName);
-    const mayUpdateGarage =
-        stage === ACCIDENT_REPAIR_STAGE.HR ||
-        stage === ACCIDENT_REPAIR_STAGE.ADMIN_OFFICER ||
-        (stage === ACCIDENT_REPAIR_STAGE.ACCOUNTS && !garageAlreadySubmitted);
-    if (!mayUpdateGarage) {
-        throw new Error('Garage can only be updated while Schedule is open.');
+    // Admin may schedule / reschedule anytime after initiate unlock until Complete Service.
+    const remarkLive = String(remarkBefore.vehicleServiceCompleted || '').toLowerCase() === 'live';
+    const blocked =
+        !stage ||
+        stage === 'pending' ||
+        stage === 'draft' ||
+        stage === ACCIDENT_REPAIR_STAGE.COMPLETE ||
+        stage === ACCIDENT_REPAIR_STAGE.REJECTED ||
+        stage === 'pending_billing' ||
+        stage === 'billed' ||
+        remarkLive;
+    if (blocked) {
+        throw new Error('Garage can only be updated while Schedule is open (before Complete Service).');
     }
 
     const allowed = await actorMayManageTireChangeRequest(req.user, asset);
@@ -300,10 +282,34 @@ export async function submitAccidentRepairGarage(asset, serviceId, serviceUpdate
     appendAccidentRepairActivity(asset.services.id(serviceId), {
         type: 'garage_updated',
         byName: actorName,
-        note: `Garage details submitted · Service start: ${
-            startRaw ? String(startRaw).slice(0, 10) : '—'
-        }`,
+        note: garageAlreadySubmitted
+            ? `Schedule rescheduled · Service window: ${String(startRaw).slice(0, 10)} – ${String(endRaw).slice(0, 10)}`
+            : `Garage details submitted · Service start: ${
+                  startRaw ? String(startRaw).slice(0, 10) : '—'
+              }`,
     });
+
+    // Reschedule after first Done: update dates only, keep current workflow stage.
+    if (garageAlreadySubmitted) {
+        const { snapshotActiveServiceWorkflow } = await import('./vehicleServiceWorkflowResolve.js');
+        if (!bindActive) {
+            snapshotActiveServiceWorkflow(asset);
+        }
+        asset.activeServiceWorkflow = {
+            ...(typeof wf.toObject === 'function' ? wf.toObject() : wf),
+            stage,
+            serviceRecordId: wf.serviceRecordId || serviceId,
+            serviceTypeLabel: wf.serviceTypeLabel || 'Accident Repair',
+            history: Array.isArray(wf.history) ? [...wf.history] : [],
+            garageSubmittedAt: wf.garageSubmittedAt,
+            scheduledServiceDate: wf.scheduledServiceDate || null,
+            serviceWindowEndDate: wf.serviceWindowEndDate || null,
+        };
+        asset.markModified('activeServiceWorkflow');
+        asset.markModified('services');
+        await asset.save();
+        return asset;
+    }
 
     // During pending_hr: save garage only — do not skip HR by advancing to Accounts.
     if (stage === ACCIDENT_REPAIR_STAGE.HR) {
@@ -327,7 +333,57 @@ export async function submitAccidentRepairGarage(asset, serviceId, serviceUpdate
         return asset;
     }
 
-    // Garage done after HR → Accounts Approve (Oil-style).
+    const {
+        routeShopServiceToAccountsApproveAfterGarage,
+        maybeAdvanceShopToScheduledAfterGarageIfAccountsDone,
+    } = await import('./vehicleShopServiceScheduled.js');
+
+    const accountsAlreadyDone = Boolean(String(remark.accountsApprovedAt || '').trim());
+    if (accountsAlreadyDone || stage === ACCIDENT_REPAIR_STAGE.ACCOUNTS) {
+        const { snapshotActiveServiceWorkflow } = await import('./vehicleServiceWorkflowResolve.js');
+        if (!bindActive) {
+            snapshotActiveServiceWorkflow(asset);
+        }
+        asset.activeServiceWorkflow = {
+            ...(typeof wf.toObject === 'function' ? wf.toObject() : wf),
+            stage: accountsAlreadyDone ? stage : ACCIDENT_REPAIR_STAGE.ACCOUNTS,
+            serviceRecordId: wf.serviceRecordId || serviceId,
+            serviceTypeLabel: wf.serviceTypeLabel || 'Accident Repair',
+            history: Array.isArray(wf.history) ? [...wf.history] : [],
+            garageSubmittedAt: wf.garageSubmittedAt,
+            scheduledServiceDate: wf.scheduledServiceDate || null,
+            serviceWindowEndDate: wf.serviceWindowEndDate || null,
+        };
+        asset.markModified('activeServiceWorkflow');
+        asset.markModified('services');
+        await asset.save();
+
+        if (accountsAlreadyDone) {
+            await maybeAdvanceShopToScheduledAfterGarageIfAccountsDone(asset, serviceId, {
+                serviceTypeLabel: 'Accident Repair',
+                actorName,
+                linkPath: accidentRepairDetailsPath(asset._id, serviceId),
+                dashboardMeta: accidentRepairDashboardMeta(asset, serviceId),
+                appendActivity: appendAccidentRepairActivity,
+            });
+        } else {
+            const accounts = await getDepartmentHOD('accounts');
+            if (accounts?._id) {
+                await notifyAccidentRepairStakeholder({
+                    asset,
+                    serviceRecordId: serviceId,
+                    recipient: accounts,
+                    requestedByName: actorName,
+                    extra2: 'Awaiting Accounts Approve',
+                    stageLabel: 'Accounts Approve',
+                    actionLabel: 'Accident repair — Schedule updated',
+                    detailLine: `${actorName} completed Schedule/garage for accident repair. Review and approve so Ready / On Service can start.`,
+                });
+            }
+        }
+        return asset;
+    }
+
     const { snapshotActiveServiceWorkflow } = await import('./vehicleServiceWorkflowResolve.js');
     if (!bindActive) {
         snapshotActiveServiceWorkflow(asset);
@@ -346,15 +402,13 @@ export async function submitAccidentRepairGarage(asset, serviceId, serviceUpdate
     asset.markModified('services');
     await asset.save();
 
-    const { routeShopServiceToAccountsApproveAfterGarage } = await import(
-        './vehicleShopServiceScheduled.js'
-    );
     await routeShopServiceToAccountsApproveAfterGarage(asset, serviceId, {
         serviceTypeLabel: 'Accident Repair',
         actorName,
         linkPath: accidentRepairDetailsPath(asset._id, serviceId),
         dashboardMeta: accidentRepairDashboardMeta(asset, serviceId),
         appendActivity: null,
+        openedBy: 'garage',
     });
 
     return asset;
@@ -518,6 +572,31 @@ export async function completeAccidentRepairService(asset, serviceId, serviceUpd
     }
 
     const completedService = asset.services.id(serviceId);
+    const remarkForDates = parseRemark(completedService);
+    const returnKey = String(remarkForDates.returnDate || '').trim().slice(0, 10);
+    const handOverKey = String(remarkForDates.handOverDate || '').trim().slice(0, 10);
+    if (!returnKey || !handOverKey) {
+        throw new Error('Return date and hand over date are required before completing the service.');
+    }
+    const serviceEndRaw =
+        remarkForDates.serviceEndDate ||
+        remarkForDates.serviceWindowEndDate ||
+        wf.serviceWindowEndDate ||
+        '';
+    const endKey = (() => {
+        const raw = String(serviceEndRaw || '').trim();
+        if (/^\d{4}-\d{2}-\d{2}/.test(raw)) return raw.slice(0, 10);
+        const d = raw ? new Date(raw) : null;
+        if (!d || Number.isNaN(d.getTime())) return '';
+        return d.toISOString().slice(0, 10);
+    })();
+    if (endKey && returnKey < endKey) {
+        throw new Error('Return date must be on or after the service end date.');
+    }
+    if (endKey && handOverKey < endKey) {
+        throw new Error('Hand over date must be on or after the service end date.');
+    }
+
     const {
         applyServiceBodyConditionReplacements,
         resolveMappedNewConditionImages,
@@ -548,14 +627,6 @@ export async function completeAccidentRepairService(asset, serviceId, serviceUpd
 
     await createAccidentRepairEmployeeFines(asset, asset.services.id(serviceId), req.user);
 
-    await closeAdminOfficerServiceTrackNotification({
-        assetId: asset._id,
-        serviceRecordId: serviceId,
-        actionedBy: req.user?.employeeObjectId || req.user?._id,
-        comment: 'Accident repair completed — awaiting Accounts billing',
-        requestedByName: actorName,
-    });
-
     const populated = await AssetItem.findById(asset._id)
         .populate({
             path: 'assignedTo',
@@ -578,14 +649,6 @@ export async function completeAccidentRepairService(asset, serviceId, serviceUpd
             linkPath: accidentRepairDetailsPath(asset._id, serviceId),
         });
     }
-
-    await closeAdminOfficerServiceTrackNotification({
-        assetId: asset._id,
-        serviceRecordId: serviceId,
-        actionedBy: req.user?.employeeObjectId || req.user?._id,
-        comment: 'Accident repair completed',
-        requestedByName: actorName,
-    });
 
     return asset;
 }

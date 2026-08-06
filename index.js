@@ -27,7 +27,7 @@ import storageRoute from "./routes/storageRoutes.js";
 import zohoRoute from "./routes/zohoRoutes.js";
 import locatorRoute from "./routes/locatorRoutes.js";
 import { startLocatorWebSocket } from "./services/locatorWebSocketService.js";
-import { recordLocatorSnapshotsFromLatest } from "./services/locatorSnapshotService.js";
+import { syncLocatorToErpDatabase } from "./services/locatorSnapshotService.js";
 import { commonLimiter } from "./middleware/rateLimitMiddleware.js";
 import { activityAuditMiddleware } from "./middleware/activityAuditMiddleware.js";
 import { resolveFrontendBaseUrl, runWithRequestFrontendBaseUrl } from "./utils/resolveFrontendBaseUrl.js";
@@ -333,18 +333,19 @@ async function startServer() {
         console.log(`Server running at http://localhost:${PORT}`);
         console.log(`Health check: http://localhost:${PORT}/api/health`);
         startLocatorWebSocket();
+        // Locator → ERP Mongo sync every 30 minutes (snapshots + AssetItem GPS cache).
+        // Vehicle list/details must NOT call live Locator — they read ERP DB only.
+        const LOCATOR_ERP_SYNC_MS = 30 * 60 * 1000;
         setTimeout(() => {
-            recordLocatorSnapshotsFromLatest().catch((e) =>
-                console.error('[LocatorSnapshot] startup capture failed:', e?.message || e),
+            syncLocatorToErpDatabase().catch((e) =>
+                console.error('[LocatorSync] startup sync failed:', e?.message || e),
             );
         }, 45 * 1000);
-        // Poll latest positions every 2 min (within Locator's 3 req/min limit) so daily
-        // running-km / idle charts get continuous totalDistance snapshots.
         setInterval(() => {
-            recordLocatorSnapshotsFromLatest().catch((e) =>
-                console.error('[LocatorSnapshot] scheduled capture failed:', e?.message || e),
+            syncLocatorToErpDatabase().catch((e) =>
+                console.error('[LocatorSync] scheduled sync failed:', e?.message || e),
             );
-        }, 2 * 60 * 1000);
+        }, LOCATOR_ERP_SYNC_MS);
     });
 }
 

@@ -3,7 +3,6 @@ import {
     isLocatorConfigured,
     normalizeWebSocketPosition,
 } from './locatorService.js';
-import { recordLocatorSnapshot } from './locatorSnapshotService.js';
 
 const RECONNECT_DELAY_MS = 10 * 1000;
 
@@ -44,8 +43,8 @@ function ingestPositions(positions) {
         if (position.uniqueId) {
             latestByUniqueId.set(String(position.uniqueId), position);
         }
-
-        void recordLocatorSnapshot(position, 'ws');
+        // Intentionally do NOT write Mongo from WS — ERP DB sync runs on a 30-min
+        // REST job so continuous WS traffic never slows Vehicle Asset pages.
     }
 }
 
@@ -125,8 +124,10 @@ export function startLocatorWebSocket() {
         console.log('[LocatorWS] Skipped — LOCATOR_USERNAME / LOCATOR_PASSWORD not set');
         return;
     }
-    if (process.env.LOCATOR_WS_ENABLED === 'false') {
-        console.log('[LocatorWS] Disabled via LOCATOR_WS_ENABLED=false');
+    // Opt-in only. Vehicle pages read ERP DB; scheduled 30-min REST sync owns Mongo updates.
+    // Set LOCATOR_WS_ENABLED=true only if you need an in-memory live cache for admin tools.
+    if (process.env.LOCATOR_WS_ENABLED !== 'true') {
+        console.log('[LocatorWS] Skipped — set LOCATOR_WS_ENABLED=true to enable real-time feed');
         return;
     }
 

@@ -5,7 +5,6 @@ import Fine from '../models/Fine.js';
 import { getDepartmentHOD } from './getDepartmentHOD.js';
 import { syncDashboardAction } from './syncDashboard.js';
 import { sendVehicleServiceWorkflowEmail } from './sendVehicleServiceWorkflowEmail.js';
-import { closeAdminOfficerServiceTrackNotification } from './vehicleServiceAdminOfficerNotification.js';
 import { resolveEmployeeEmail } from './resolveEmployeeEmail.js';
 import { applyPostServiceOperationalState } from './assetOperationalFlags.js';
 import { actorMayManageTireChangeRequest, getRequesterName } from './oilServiceWorkflow.js';
@@ -138,54 +137,44 @@ export async function advanceMechanicalWorkAfterHrApprove(asset, wf, actorName) 
     const serviceRecordId = wf.serviceRecordId;
     const service = asset.services?.id?.(serviceRecordId);
     const remark = parseRemark(service);
-    const garageDone = Boolean(
-        wf.garageSubmittedAt || String(remark.garageSubmittedByName || '').trim(),
-    );
 
-    if (garageDone) {
-        const { snapshotActiveServiceWorkflow } = await import('./vehicleServiceWorkflowResolve.js');
-        snapshotActiveServiceWorkflow(asset);
-        asset.activeServiceWorkflow = {
-            ...(typeof wf.toObject === 'function' ? wf.toObject() : wf),
-            stage: MECHANICAL_WORK_STAGE.ACCOUNTS,
-            serviceRecordId: wf.serviceRecordId || serviceRecordId,
-            serviceTypeLabel: wf.serviceTypeLabel || 'Mechanical Work',
-            history: Array.isArray(wf.history) ? [...wf.history] : [],
-            garageSubmittedAt: wf.garageSubmittedAt,
-            scheduledServiceDate: wf.scheduledServiceDate || null,
-            serviceWindowEndDate: wf.serviceWindowEndDate || null,
-        };
-        asset.markModified('activeServiceWorkflow');
-        await asset.save();
-
-        const { routeShopServiceToAccountsApproveAfterGarage } = await import(
-            './vehicleShopServiceScheduled.js'
-        );
-        await routeShopServiceToAccountsApproveAfterGarage(asset, serviceRecordId, {
-            serviceTypeLabel: 'Mechanical Work',
-            actorName,
-            linkPath: mechanicalWorkDetailsPath(asset._id, serviceRecordId),
-            dashboardMeta: mechanicalWorkDashboardMeta(asset, serviceRecordId),
-            appendActivity: null,
+    if (service) {
+        remark.hrApprovedAt = new Date().toISOString();
+        remark.hrApprovedByName = actorName || '';
+        service.remark = JSON.stringify(remark);
+        appendMechanicalWorkActivity(service, {
+            type: 'hr_approved',
+            byName: actorName,
+            note: 'HR approved — Accounts Approve opened (Schedule may still be open)',
         });
-        return;
+        asset.markModified('services');
     }
 
-    wf.stage = MECHANICAL_WORK_STAGE.ADMIN_OFFICER;
-    asset.activeServiceWorkflow = wf;
+    const { snapshotActiveServiceWorkflow } = await import('./vehicleServiceWorkflowResolve.js');
+    snapshotActiveServiceWorkflow(asset);
+    asset.activeServiceWorkflow = {
+        ...(typeof wf.toObject === 'function' ? wf.toObject() : wf),
+        stage: MECHANICAL_WORK_STAGE.ACCOUNTS,
+        serviceRecordId: wf.serviceRecordId || serviceRecordId,
+        serviceTypeLabel: wf.serviceTypeLabel || 'Mechanical Work',
+        history: Array.isArray(wf.history) ? [...wf.history] : [],
+        garageSubmittedAt: wf.garageSubmittedAt,
+        scheduledServiceDate: wf.scheduledServiceDate || null,
+        serviceWindowEndDate: wf.serviceWindowEndDate || null,
+    };
     asset.markModified('activeServiceWorkflow');
     await asset.save();
 
-    const adminOfficer = await getDepartmentHOD('admincontroller');
-    await notifyMechanicalWorkStakeholder({
-        asset,
-        serviceRecordId,
-        recipient: adminOfficer,
-        requestedByName: actorName,
-        extra2: 'Update garage and service dates',
-        stageLabel: 'Garage details required',
-        actionLabel: 'Mechanical work — garage update',
-        detailLine: `${actorName} submitted mechanical work quotations for HR approval. Please open the Mechanical Work page, complete Garage / Service Details, and click Update Garage.`,
+    const { routeShopServiceToAccountsApproveAfterGarage } = await import(
+        './vehicleShopServiceScheduled.js'
+    );
+    await routeShopServiceToAccountsApproveAfterGarage(asset, serviceRecordId, {
+        serviceTypeLabel: 'Mechanical Work',
+        actorName,
+        linkPath: mechanicalWorkDetailsPath(asset._id, serviceRecordId),
+        dashboardMeta: mechanicalWorkDashboardMeta(asset, serviceRecordId),
+        appendActivity: null,
+        openedBy: 'hr',
     });
 }
 
@@ -318,7 +307,57 @@ export async function submitMechanicalWorkGarage(asset, serviceId, serviceUpdate
         return asset;
     }
 
-    // Garage done after HR → Accounts Approve (Oil-style), then schedule after Accounts approves.
+    const {
+        routeShopServiceToAccountsApproveAfterGarage,
+        maybeAdvanceShopToScheduledAfterGarageIfAccountsDone,
+    } = await import('./vehicleShopServiceScheduled.js');
+
+    const accountsAlreadyDone = Boolean(String(remark.accountsApprovedAt || '').trim());
+    if (accountsAlreadyDone || stage === MECHANICAL_WORK_STAGE.ACCOUNTS) {
+        const { snapshotActiveServiceWorkflow } = await import('./vehicleServiceWorkflowResolve.js');
+        if (!bindActive) {
+            snapshotActiveServiceWorkflow(asset);
+        }
+        asset.activeServiceWorkflow = {
+            ...(typeof wf.toObject === 'function' ? wf.toObject() : wf),
+            stage: accountsAlreadyDone ? stage : MECHANICAL_WORK_STAGE.ACCOUNTS,
+            serviceRecordId: wf.serviceRecordId || serviceId,
+            serviceTypeLabel: wf.serviceTypeLabel || 'Mechanical Work',
+            history: Array.isArray(wf.history) ? [...wf.history] : [],
+            garageSubmittedAt: wf.garageSubmittedAt,
+            scheduledServiceDate: wf.scheduledServiceDate || null,
+            serviceWindowEndDate: wf.serviceWindowEndDate || null,
+        };
+        asset.markModified('activeServiceWorkflow');
+        asset.markModified('services');
+        await asset.save();
+
+        if (accountsAlreadyDone) {
+            await maybeAdvanceShopToScheduledAfterGarageIfAccountsDone(asset, serviceId, {
+                serviceTypeLabel: 'Mechanical Work',
+                actorName,
+                linkPath: mechanicalWorkDetailsPath(asset._id, serviceId),
+                dashboardMeta: mechanicalWorkDashboardMeta(asset, serviceId),
+                appendActivity: appendMechanicalWorkActivity,
+            });
+        } else {
+            const accounts = await getDepartmentHOD('accounts');
+            if (accounts?._id) {
+                await notifyMechanicalWorkStakeholder({
+                    asset,
+                    serviceRecordId: serviceId,
+                    recipient: accounts,
+                    requestedByName: actorName,
+                    extra2: 'Awaiting Accounts Approve',
+                    stageLabel: 'Accounts Approve',
+                    actionLabel: 'Mechanical work — Schedule updated',
+                    detailLine: `${actorName} completed Schedule/garage for mechanical work. Review and approve so Ready / On Service can start.`,
+                });
+            }
+        }
+        return asset;
+    }
+
     const { snapshotActiveServiceWorkflow } = await import('./vehicleServiceWorkflowResolve.js');
     if (!bindActive) {
         snapshotActiveServiceWorkflow(asset);
@@ -337,15 +376,13 @@ export async function submitMechanicalWorkGarage(asset, serviceId, serviceUpdate
     asset.markModified('services');
     await asset.save();
 
-    const { routeShopServiceToAccountsApproveAfterGarage } = await import(
-        './vehicleShopServiceScheduled.js'
-    );
     await routeShopServiceToAccountsApproveAfterGarage(asset, serviceId, {
         serviceTypeLabel: 'Mechanical Work',
         actorName,
         linkPath: mechanicalWorkDetailsPath(asset._id, serviceId),
         dashboardMeta: mechanicalWorkDashboardMeta(asset, serviceId),
         appendActivity: null,
+        openedBy: 'garage',
     });
 
     return asset;
@@ -521,14 +558,6 @@ export async function completeMechanicalWorkService(asset, serviceId, serviceUpd
     });
 
     await createMechanicalWorkEmployeeFines(asset, asset.services.id(serviceId), req.user);
-
-    await closeAdminOfficerServiceTrackNotification({
-        assetId: asset._id,
-        serviceRecordId: serviceId,
-        actionedBy: req.user?.employeeObjectId || req.user?._id,
-        comment: 'Mechanical work completed — awaiting Accounts billing',
-        requestedByName: actorName,
-    });
 
     return asset;
 }

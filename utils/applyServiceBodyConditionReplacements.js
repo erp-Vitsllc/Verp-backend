@@ -278,6 +278,15 @@ export async function applyServiceBodyConditionReplacements(asset, {
         }
 
         const prevRow = existing[key] && typeof existing[key] === 'object' ? existing[key] : {};
+        // Keep the photo that was on Assign/Inspection before this Complete upload
+        // so Compare can show Previous vs New on the same last row.
+        const priorPhoto = prevRow.photo ?? prevRow.image ?? prevRow.attachment ?? null;
+        const serviceBaselinePhoto = hasPhotoValue(prevRow.serviceBaselinePhoto)
+            ? prevRow.serviceBaselinePhoto
+            : hasPhotoValue(priorPhoto)
+              ? priorPhoto
+              : undefined;
+
         existing[key] = {
             ...prevRow,
             comment: String(prevRow.comment || '').trim() || comment,
@@ -288,6 +297,7 @@ export async function applyServiceBodyConditionReplacements(asset, {
             replacedByServiceType: label,
             replacedByServiceId: serviceId ? String(serviceId) : undefined,
             replacedByServiceAt: new Date().toISOString(),
+            ...(serviceBaselinePhoto ? { serviceBaselinePhoto } : {}),
         };
     }
 

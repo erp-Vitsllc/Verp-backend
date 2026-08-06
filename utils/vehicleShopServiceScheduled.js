@@ -325,8 +325,10 @@ export function isShopServiceWorkflowRecord(wf, service) {
 export const SHOP_SERVICE_PENDING_ACCOUNTS = 'pending_accounts';
 
 /**
- * After Admin submits Schedule/Garage — send to Accounts Approve (Oil-style), with email + inbox task.
+ * Open Accounts Approve after HR (Oil-style) — Schedule/garage is NOT required.
+ * Also used after Admin submits garage when Accounts was not opened yet (legacy pending_admin_officer).
  * Accounts approve then calls advanceShopServiceToScheduledAfterAccountsApprove.
+ * Ready / On Service still waits for BOTH Accounts approve + Schedule dates.
  */
 export async function routeShopServiceToAccountsApproveAfterGarage(
     asset,
@@ -337,6 +339,7 @@ export async function routeShopServiceToAccountsApproveAfterGarage(
         linkPath,
         dashboardMeta,
         appendActivity,
+        openedBy = 'garage', // 'hr' | 'garage'
     } = {},
 ) {
     const service = asset.services?.id?.(serviceId);
@@ -345,20 +348,56 @@ export async function routeShopServiceToAccountsApproveAfterGarage(
     const { wf, bindActive } = getWorkflowContextForService(asset, serviceId);
     if (!wf) throw new Error('Workflow not found');
 
+    // Already opened / past Accounts Approve — do not re-open or re-email.
+    const stageNow = String(wf.stage || '').toLowerCase();
+    if (
+        String(remark.accountsOpenedAt || '').trim() ||
+        String(remark.accountsApprovedAt || '').trim() ||
+        stageNow === SHOP_SERVICE_SCHEDULED_STAGE ||
+        stageNow === SHOP_SERVICE_PENDING_BILLING ||
+        stageNow === SHOP_SERVICE_BILLED
+    ) {
+        return asset;
+    }
+
     const accounts = await getDepartmentHOD('accounts');
     if (!accounts?._id) {
         throw new Error('No Accounts assignee is configured in the company flowchart.');
     }
 
+    const hr = await getDepartmentHOD('hr');
+    // Close HR's Schedule/HR open task when Accounts opens (HR already approved).
+    if (hr?._id) {
+        await syncDashboardAction({
+            requestId: asset._id,
+            requestType: 'Vehicle Service Request',
+            status: 'Approved',
+            assignedTo: hr._id,
+            actionedBy: null,
+            comment: 'HR approved — Accounts Approve opened',
+            subjectEmployee: asset.assignedTo,
+            requestedByName: actorName || '',
+            extra1: `${asset.assetId || ''} — ${serviceTypeLabel || 'Service'}`,
+            extra2: 'HR approved',
+            extra3: dashboardMeta || '',
+        });
+    }
+
     remark.workflowStage = SHOP_SERVICE_PENDING_ACCOUNTS;
-    remark.accountsGarageSubmittedAt = new Date().toISOString();
+    if (openedBy === 'garage') {
+        remark.accountsGarageSubmittedAt = new Date().toISOString();
+    }
+    remark.accountsOpenedAt = remark.accountsOpenedAt || new Date().toISOString();
     service.remark = JSON.stringify(remark);
 
     if (typeof appendActivity === 'function') {
         appendActivity(service, {
-            type: 'garage_updated',
+            type: openedBy === 'hr' ? 'hr_approved' : 'garage_updated',
             byName: actorName,
-            note: `${serviceTypeLabel || 'Service'} scheduled details submitted — awaiting Accounts Approve`,
+            note:
+                openedBy === 'hr'
+                    ? `${serviceTypeLabel || 'Service'} HR approved — Accounts Approve opened (Schedule may still be open)`
+                    : `${serviceTypeLabel || 'Service'} scheduled details submitted — awaiting Accounts Approve`,
         });
     }
 
@@ -381,8 +420,11 @@ export async function routeShopServiceToAccountsApproveAfterGarage(
         .lean();
     const plate = [populated?.plateEmirate, populated?.plateNumber].filter(Boolean).join(' ').trim();
     const startLabel =
-        String(remark.serviceStartDate || remark.scheduledServiceDate || '').slice(0, 10) || 'the start date';
-    const detailLine = `${actorName || 'Admin'} submitted schedule/garage details for ${populated?.assetId || ''}${plate ? ` (${plate})` : ''}. Review amount/quotation and approve (start ${startLabel}).`;
+        String(remark.serviceStartDate || remark.scheduledServiceDate || '').slice(0, 10) || '';
+    const detailLine =
+        openedBy === 'hr'
+            ? `HR approved ${serviceTypeLabel || 'service'} for ${populated?.assetId || ''}${plate ? ` (${plate})` : ''}. Review amount/quotation and approve${startLabel ? ` (start ${startLabel})` : ''}. Schedule/Reschedule may still be completed in parallel by Admin.`
+            : `${actorName || 'Admin'} submitted schedule/garage details for ${populated?.assetId || ''}${plate ? ` (${plate})` : ''}. Review amount/quotation and approve${startLabel ? ` (start ${startLabel})` : ''}.`;
     const scheduleRows = buildShopScheduleEmailDetailRows(remark, serviceTypeLabel || 'Vehicle Service');
 
     await syncDashboardAction({
@@ -417,8 +459,14 @@ export async function routeShopServiceToAccountsApproveAfterGarage(
             recipient: adminOfficer,
             asset: populated || asset,
             stageLabel: `${serviceTypeLabel || 'Service'} — sent to Accounts`,
-            actionLabel: `${serviceTypeLabel || 'Service'} — Schedule submitted`,
-            detailLine: `Schedule/garage details for ${populated?.assetId || ''}${plate ? ` (${plate})` : ''} were submitted. Accounts will review next.`,
+            actionLabel:
+                openedBy === 'hr'
+                    ? `${serviceTypeLabel || 'Service'} — HR approved`
+                    : `${serviceTypeLabel || 'Service'} — Schedule submitted`,
+            detailLine:
+                openedBy === 'hr'
+                    ? `HR approved ${serviceTypeLabel || 'service'} for ${populated?.assetId || ''}${plate ? ` (${plate})` : ''}. Accounts will review next. Complete Schedule/Reschedule if not done yet — Ready/On Service needs both.`
+                    : `Schedule/garage details for ${populated?.assetId || ''}${plate ? ` (${plate})` : ''} were submitted. Accounts will review next.`,
             detailRows: scheduleRows,
             serviceReqNo: resolveServiceReqNo(service, remark),
             linkPath: linkPath || undefined,
@@ -426,6 +474,50 @@ export async function routeShopServiceToAccountsApproveAfterGarage(
     }
 
     return asset;
+}
+
+/**
+ * After Schedule/garage is saved while Accounts already approved — move to scheduled_service.
+ * Used when HR opened Accounts first and Admin finishes Schedule later (oil parallel).
+ */
+export async function maybeAdvanceShopToScheduledAfterGarageIfAccountsDone(
+    asset,
+    serviceId,
+    {
+        serviceTypeLabel,
+        actorName,
+        linkPath,
+        dashboardMeta,
+        appendActivity,
+    } = {},
+) {
+    const service = asset.services?.id?.(serviceId);
+    if (!service) return asset;
+    const remark = parseRemark(service);
+    const { wf } = getWorkflowContextForService(asset, serviceId);
+    if (!wf) return asset;
+
+    const accountsDone = Boolean(String(remark.accountsApprovedAt || '').trim());
+    if (!accountsDone) return asset;
+
+    const stage = String(wf.stage || '').toLowerCase();
+    if (stage === SHOP_SERVICE_SCHEDULED_STAGE || stage === SHOP_SERVICE_PENDING_BILLING || stage === SHOP_SERVICE_BILLED) {
+        return asset;
+    }
+
+    const { startD, endD } = resolveServiceWindowDates(wf, remark);
+    if (!startD || !endD) return asset;
+
+    return advanceShopServiceToScheduledAfterAccountsApprove(asset, wf, actorName, {
+        serviceTypeLabel,
+        linkPath,
+        dashboardMeta,
+        appendActivity,
+        scheduleActivityType: 'garage_updated',
+        scheduleActivityNote:
+            'Schedule completed after Accounts Approve — service scheduled (Zoho billing after End Service)',
+        skipAccountsStamp: true,
+    });
 }
 
 /**
@@ -513,7 +605,8 @@ export async function advanceShopServiceToScheduledAfterAccountsApprove(
         appendActivity,
         scheduleActivityType = 'accounts_approved',
         scheduleActivityNote =
-        'Garage and service dates approved — service scheduled (Zoho billing after End Service)',
+        'Accounts approved — service scheduled when Schedule dates are set (Zoho billing after End Service)',
+        skipAccountsStamp = false,
     } = {},
 ) {
     const serviceRecordId = wf.serviceRecordId;
@@ -521,9 +614,87 @@ export async function advanceShopServiceToScheduledAfterAccountsApprove(
     if (!service) throw new Error('Service record not found');
 
     const remark = parseRemark(service);
+    if (!skipAccountsStamp && String(remark.accountsApprovedAt || '').trim()) {
+        throw new Error('Accounts has already approved this service.');
+    }
+    if (!skipAccountsStamp) {
+        remark.accountsApprovedAt = new Date().toISOString();
+        remark.accountsApprovedByName = actorName || '';
+    }
+
     const { startD, endD } = resolveServiceWindowDates(wf, remark);
+
+    // Oil parity: Accounts may approve before Schedule is complete.
+    // Ready / On Service only after BOTH Accounts stamp + start/end dates.
     if (!startD || !endD) {
-        throw new Error('Service start and end dates are required before scheduling.');
+        remark.workflowStage = SHOP_SERVICE_PENDING_ACCOUNTS;
+        service.remark = JSON.stringify(remark);
+        wf.stage = SHOP_SERVICE_PENDING_ACCOUNTS;
+        asset.activeServiceWorkflow = wf;
+        asset.markModified('activeServiceWorkflow');
+        asset.markModified('services');
+        await asset.save();
+
+        if (typeof appendActivity === 'function') {
+            appendActivity(service, {
+                type: scheduleActivityType,
+                byName: actorName,
+                note: 'Accounts approved quotation — awaiting Schedule/Reschedule dates before Ready / On Service',
+            });
+            asset.markModified('services');
+            await asset.save();
+        }
+
+        const accounts = await getDepartmentHOD('accounts');
+        if (accounts?._id) {
+            await syncDashboardAction({
+                requestId: asset._id,
+                requestType: 'Vehicle Service Request',
+                status: 'Approved',
+                assignedTo: accounts._id,
+                comment: 'Accounts approved — awaiting Schedule dates',
+                subjectEmployee: asset.assignedTo,
+                requestedByName: actorName || '',
+                extra1: `${asset.assetId || ''} — ${serviceTypeLabel || 'Service'}`,
+                extra2: 'Accounts approved — awaiting Schedule',
+                extra3: dashboardMeta || '',
+            });
+        }
+
+        const adminOfficer = await getDepartmentHOD('admincontroller');
+        const populated = await AssetItem.findById(asset._id)
+            .populate('assignedTo', 'firstName lastName employeeId companyEmail workEmail')
+            .lean();
+        const plate = [populated?.plateEmirate, populated?.plateNumber].filter(Boolean).join(' ').trim();
+        if (adminOfficer?._id) {
+            await syncDashboardAction({
+                requestId: asset._id,
+                requestType: 'Vehicle Service Request',
+                status: 'Pending',
+                assignedTo: adminOfficer._id,
+                subjectEmployee: populated?.assignedTo,
+                requestedByName: actorName || '',
+                extra1: `${populated?.assetId || ''} — ${serviceTypeLabel || 'Service'}`,
+                extra2: 'Complete Schedule/Reschedule (Accounts already approved)',
+                extra3: dashboardMeta || '',
+            });
+            await sendVehicleServiceWorkflowEmail({
+                recipient: adminOfficer,
+                asset: populated || asset,
+                stageLabel: `${serviceTypeLabel || 'Service'} — Schedule required`,
+                actionLabel: `${serviceTypeLabel || 'Service'} — Schedule required`,
+                detailLine: `Accounts approved ${serviceTypeLabel || 'service'} for ${populated?.assetId || ''}${plate ? ` (${plate})` : ''}. Complete Schedule/Reschedule so the vehicle can go Ready / On Service.`,
+                detailRows: buildShopScheduleEmailDetailRows(remark, serviceTypeLabel || 'Vehicle Service'),
+                serviceReqNo: resolveServiceReqNo(service, remark),
+                linkPath: linkPath || undefined,
+            }).catch(() => {});
+        }
+
+        return {
+            asset,
+            waitingForSchedule: true,
+            zohoBillSync: { ok: true, skipped: true, message: 'Zoho deferred until after End Service.' },
+        };
     }
 
     wf.stage = SHOP_SERVICE_SCHEDULED_STAGE;
@@ -538,8 +709,10 @@ export async function advanceShopServiceToScheduledAfterAccountsApprove(
     wf.accountsReminderAt = null;
 
     remark.workflowStage = SHOP_SERVICE_SCHEDULED_STAGE;
-    remark.accountsApprovedAt = new Date().toISOString();
-    remark.accountsApprovedByName = actorName || '';
+    if (!skipAccountsStamp) {
+        remark.accountsApprovedAt = remark.accountsApprovedAt || new Date().toISOString();
+        remark.accountsApprovedByName = remark.accountsApprovedByName || actorName || '';
+    }
     service.remark = JSON.stringify(remark);
 
     if (typeof appendActivity === 'function') {
@@ -554,6 +727,22 @@ export async function advanceShopServiceToScheduledAfterAccountsApprove(
     asset.markModified('activeServiceWorkflow');
     asset.markModified('services');
     await asset.save();
+
+    const accountsHod = await getDepartmentHOD('accounts');
+    if (accountsHod?._id && !skipAccountsStamp) {
+        await syncDashboardAction({
+            requestId: asset._id,
+            requestType: 'Vehicle Service Request',
+            status: 'Approved',
+            assignedTo: accountsHod._id,
+            comment: 'Accounts approved — service scheduled',
+            subjectEmployee: asset.assignedTo,
+            requestedByName: actorName || '',
+            extra1: `${asset.assetId || ''} — ${serviceTypeLabel || 'Service'}`,
+            extra2: 'Accounts approved',
+            extra3: dashboardMeta || '',
+        });
+    }
 
     await notifyShopServiceScheduled({
         asset,
@@ -601,8 +790,10 @@ export async function activateShopServiceOnStartDate(
     if (!service) return false;
 
     const remark = parseRemark(service);
-    const { startD } = resolveServiceWindowDates(wf, remark);
-    if (!startD) return false;
+    // Ready / On Service only after Accounts Approve + Schedule dates.
+    if (!String(remark.accountsApprovedAt || '').trim()) return false;
+    const { startD, endD } = resolveServiceWindowDates(wf, remark);
+    if (!startD || !endD) return false;
 
     const today = utcDayStart(new Date());
     const startUtc = utcDayStart(startD);
@@ -869,6 +1060,21 @@ export async function advanceShopBillingAfterAccountsApprove(
         extra2: 'Billed',
         extra3: '',
     });
+
+    // Admin Officer create-track notification clears only after Zoho / Billed (not on Complete).
+    try {
+        const { closeAdminOfficerServiceTrackNotification } = await import(
+            './vehicleServiceAdminOfficerNotification.js'
+        );
+        await closeAdminOfficerServiceTrackNotification({
+            assetId: asset._id,
+            serviceRecordId,
+            comment: `${serviceTypeLabel || 'Service'} billed`,
+            requestedByName: actorName || '',
+        });
+    } catch (closeErr) {
+        console.error('[ShopService] Close Admin Officer track failed:', closeErr?.message || closeErr);
+    }
 
     // Oil parity: after Make Payment / Zoho billed → Admin TO, HR + assignee CC.
     try {

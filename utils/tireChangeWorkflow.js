@@ -5,7 +5,6 @@ import Fine from '../models/Fine.js';
 import { getDepartmentHOD } from './getDepartmentHOD.js';
 import { syncDashboardAction } from './syncDashboard.js';
 import { sendVehicleServiceWorkflowEmail } from './sendVehicleServiceWorkflowEmail.js';
-import { closeAdminOfficerServiceTrackNotification } from './vehicleServiceAdminOfficerNotification.js';
 import { resolveEmployeeEmail } from './resolveEmployeeEmail.js';
 import { applyPostServiceOperationalState } from './assetOperationalFlags.js';
 import { actorMayManageTireChangeRequest, getRequesterName } from './oilServiceWorkflow.js';
@@ -138,55 +137,45 @@ export async function advanceTireChangeAfterHrApprove(asset, wf, actorName) {
     const serviceRecordId = wf.serviceRecordId;
     const service = asset.services?.id?.(serviceRecordId);
     const remark = parseRemark(service);
-    const garageDone = Boolean(
-        wf.garageSubmittedAt || String(remark.garageSubmittedByName || '').trim(),
-    );
 
-    // Garage already completed in parallel during pending_hr → Accounts next.
-    if (garageDone) {
-        const { snapshotActiveServiceWorkflow } = await import('./vehicleServiceWorkflowResolve.js');
-        snapshotActiveServiceWorkflow(asset);
-        asset.activeServiceWorkflow = {
-            ...(typeof wf.toObject === 'function' ? wf.toObject() : wf),
-            stage: TIRE_CHANGE_STAGE.ACCOUNTS,
-            serviceRecordId: wf.serviceRecordId || serviceRecordId,
-            serviceTypeLabel: wf.serviceTypeLabel || 'Tire Change',
-            history: Array.isArray(wf.history) ? [...wf.history] : [],
-            garageSubmittedAt: wf.garageSubmittedAt,
-            scheduledServiceDate: wf.scheduledServiceDate || null,
-            serviceWindowEndDate: wf.serviceWindowEndDate || null,
-        };
-        asset.markModified('activeServiceWorkflow');
-        await asset.save();
-
-        const { routeShopServiceToAccountsApproveAfterGarage } = await import(
-            './vehicleShopServiceScheduled.js'
-        );
-        await routeShopServiceToAccountsApproveAfterGarage(asset, serviceRecordId, {
-            serviceTypeLabel: 'Tire Change',
-            actorName,
-            linkPath: tireChangeDetailsPath(asset._id, serviceRecordId),
-            dashboardMeta: tireChangeDashboardMeta(asset, serviceRecordId),
-            appendActivity: null,
+    if (service) {
+        remark.hrApprovedAt = new Date().toISOString();
+        remark.hrApprovedByName = actorName || '';
+        service.remark = JSON.stringify(remark);
+        appendTireChangeActivity(service, {
+            type: 'hr_approved',
+            byName: actorName,
+            note: 'HR approved — Accounts Approve opened (Schedule may still be open)',
         });
-        return;
+        asset.markModified('services');
     }
 
-    wf.stage = TIRE_CHANGE_STAGE.ADMIN_OFFICER;
-    asset.activeServiceWorkflow = wf;
+    // Oil-style: HR opens Accounts even if Schedule/garage is incomplete.
+    const { snapshotActiveServiceWorkflow } = await import('./vehicleServiceWorkflowResolve.js');
+    snapshotActiveServiceWorkflow(asset);
+    asset.activeServiceWorkflow = {
+        ...(typeof wf.toObject === 'function' ? wf.toObject() : wf),
+        stage: TIRE_CHANGE_STAGE.ACCOUNTS,
+        serviceRecordId: wf.serviceRecordId || serviceRecordId,
+        serviceTypeLabel: wf.serviceTypeLabel || 'Tire Change',
+        history: Array.isArray(wf.history) ? [...wf.history] : [],
+        garageSubmittedAt: wf.garageSubmittedAt,
+        scheduledServiceDate: wf.scheduledServiceDate || null,
+        serviceWindowEndDate: wf.serviceWindowEndDate || null,
+    };
     asset.markModified('activeServiceWorkflow');
     await asset.save();
 
-    const adminOfficer = await getDepartmentHOD('admincontroller');
-    await notifyTireChangeStakeholder({
-        asset,
-        serviceRecordId,
-        recipient: adminOfficer,
-        requestedByName: actorName,
-        extra2: 'Update garage and service dates',
-        stageLabel: 'Garage details required',
-        actionLabel: 'Tire change — garage update',
-        detailLine: `${actorName} submitted tire change quotations for HR approval. Please open the Tire Change page, complete Garage / Service Details, and click Update Garage.`,
+    const { routeShopServiceToAccountsApproveAfterGarage } = await import(
+        './vehicleShopServiceScheduled.js'
+    );
+    await routeShopServiceToAccountsApproveAfterGarage(asset, serviceRecordId, {
+        serviceTypeLabel: 'Tire Change',
+        actorName,
+        linkPath: tireChangeDetailsPath(asset._id, serviceRecordId),
+        dashboardMeta: tireChangeDashboardMeta(asset, serviceRecordId),
+        appendActivity: null,
+        openedBy: 'hr',
     });
 }
 
@@ -321,7 +310,60 @@ export async function submitTireChangeGarage(asset, serviceId, serviceUpdates, r
         return asset;
     }
 
-    // Garage done after HR → Accounts Approve (Oil-style), then schedule after Accounts approves.
+    const {
+        routeShopServiceToAccountsApproveAfterGarage,
+        maybeAdvanceShopToScheduledAfterGarageIfAccountsDone,
+    } = await import('./vehicleShopServiceScheduled.js');
+
+    // Accounts already approved, Schedule finished later → go Ready / On Service path.
+    const accountsAlreadyDone = Boolean(String(remark.accountsApprovedAt || '').trim());
+    if (accountsAlreadyDone || stage === TIRE_CHANGE_STAGE.ACCOUNTS) {
+        const { snapshotActiveServiceWorkflow } = await import('./vehicleServiceWorkflowResolve.js');
+        if (!bindActive) {
+            snapshotActiveServiceWorkflow(asset);
+        }
+        asset.activeServiceWorkflow = {
+            ...(typeof wf.toObject === 'function' ? wf.toObject() : wf),
+            stage: accountsAlreadyDone ? stage : TIRE_CHANGE_STAGE.ACCOUNTS,
+            serviceRecordId: wf.serviceRecordId || serviceId,
+            serviceTypeLabel: wf.serviceTypeLabel || 'Tire Change',
+            history: Array.isArray(wf.history) ? [...wf.history] : [],
+            garageSubmittedAt: wf.garageSubmittedAt,
+            scheduledServiceDate: wf.scheduledServiceDate || null,
+            serviceWindowEndDate: wf.serviceWindowEndDate || null,
+        };
+        asset.markModified('activeServiceWorkflow');
+        asset.markModified('services');
+        await asset.save();
+
+        if (accountsAlreadyDone) {
+            await maybeAdvanceShopToScheduledAfterGarageIfAccountsDone(asset, serviceId, {
+                serviceTypeLabel: 'Tire Change',
+                actorName,
+                linkPath: tireChangeDetailsPath(asset._id, serviceId),
+                dashboardMeta: tireChangeDashboardMeta(asset, serviceId),
+                appendActivity: appendTireChangeActivity,
+            });
+        } else {
+            // Refresh Accounts inbox/email with schedule rows (Accounts already open from HR).
+            const accounts = await getDepartmentHOD('accounts');
+            if (accounts?._id) {
+                await notifyTireChangeStakeholder({
+                    asset,
+                    serviceRecordId: serviceId,
+                    recipient: accounts,
+                    requestedByName: actorName,
+                    extra2: 'Awaiting Accounts Approve',
+                    stageLabel: 'Accounts Approve',
+                    actionLabel: 'Tire change — Schedule updated',
+                    detailLine: `${actorName} completed Schedule/garage for tire change. Review and approve so Ready / On Service can start.`,
+                });
+            }
+        }
+        return asset;
+    }
+
+    // Legacy pending_admin_officer → open Accounts Approve.
     const { snapshotActiveServiceWorkflow } = await import('./vehicleServiceWorkflowResolve.js');
     if (!bindActive) {
         snapshotActiveServiceWorkflow(asset);
@@ -340,15 +382,13 @@ export async function submitTireChangeGarage(asset, serviceId, serviceUpdates, r
     asset.markModified('services');
     await asset.save();
 
-    const { routeShopServiceToAccountsApproveAfterGarage } = await import(
-        './vehicleShopServiceScheduled.js'
-    );
     await routeShopServiceToAccountsApproveAfterGarage(asset, serviceId, {
         serviceTypeLabel: 'Tire Change',
         actorName,
         linkPath: tireChangeDetailsPath(asset._id, serviceId),
         dashboardMeta: tireChangeDashboardMeta(asset, serviceId),
         appendActivity: null,
+        openedBy: 'garage',
     });
 
     return asset;
@@ -525,13 +565,7 @@ export async function completeTireChangeService(asset, serviceId, serviceUpdates
 
     await createTireChangeEmployeeFines(asset, asset.services.id(serviceId), req.user);
 
-    await closeAdminOfficerServiceTrackNotification({
-        assetId: asset._id,
-        serviceRecordId: serviceId,
-        actionedBy: req.user?.employeeObjectId || req.user?._id,
-        comment: 'Tire change completed — awaiting Accounts billing',
-        requestedByName: actorName,
-    });
+    // Admin Officer create-track stays open until Zoho / Billed (Make Payment).
 
     return asset;
 }

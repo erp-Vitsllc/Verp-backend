@@ -10,7 +10,7 @@ import { readLocatorTokens } from '../utils/locatorTokenStore.js';
 import { resolveRegistrationExpiryDate } from '../utils/vehicleDocumentRenewal.js';
 
 const ERP_VEHICLE_LIST_SELECT =
-    'assetId name plateEmirate plateNumber modelYear currentKilometer status registrationExpiryDate assignedTo assignedCompany acceptanceStatus vehicleProfileActivationStatus vehicleDispositionStatus onServiceActive onLeaveActive pendingAction actionRequiredBy assignedDate pendingActionDetails updatedAt locatorDeviceId typeId';
+    'assetId name plateEmirate plateNumber modelYear currentKilometer status registrationExpiryDate assignedTo assignedCompany acceptanceStatus vehicleProfileActivationStatus vehicleDispositionStatus onServiceActive onLeaveActive pendingAction actionRequiredBy assignedDate pendingActionDetails updatedAt locatorDeviceId locatorGpsStatus locatorAddress locatorSpeedKmh locatorIgnition locatorLastUpdate locatorSyncedAt typeId';
 
 let lastLocatorLatestFetchAt = 0;
 const LOCATOR_LATEST_MIN_INTERVAL_MS = 60 * 1000;
@@ -514,6 +514,19 @@ async function loadErpFleetVehicles() {
 
 function mapErpVehicleToListRow(erp, locatorOverlay = null) {
     const regExp = resolveRegistrationExpiryDate(erp);
+    const cachedLocator =
+        locatorOverlay ||
+        (erp.locatorDeviceId != null
+            ? {
+                  deviceId: erp.locatorDeviceId,
+                  gpsStatus: erp.locatorGpsStatus || '',
+                  address: erp.locatorAddress || '',
+                  speedKmh: erp.locatorSpeedKmh ?? null,
+                  ignition: erp.locatorIgnition ?? null,
+                  lastUpdate: erp.locatorLastUpdate || erp.locatorSyncedAt || null,
+                  currentKilometer: Number(erp.currentKilometer) || 0,
+              }
+            : null);
 
     return {
         _id: erp._id,
@@ -522,8 +535,8 @@ function mapErpVehicleToListRow(erp, locatorOverlay = null) {
         plateNumber: erp.plateNumber || '',
         modelYear: erp.modelYear || '',
         currentKilometer:
-            locatorOverlay?.currentKilometer != null
-                ? locatorOverlay.currentKilometer
+            cachedLocator?.currentKilometer != null
+                ? cachedLocator.currentKilometer
                 : Number(erp.currentKilometer) || 0,
         registrationExpiryDate: regExp,
         status: erp.status,
@@ -538,8 +551,8 @@ function mapErpVehicleToListRow(erp, locatorOverlay = null) {
         updatedAt: erp.updatedAt || null,
         onServiceActive: erp.onServiceActive === true,
         onLeaveActive: erp.onLeaveActive === true,
-        locator: locatorOverlay,
-        locatorDeviceId: erp.locatorDeviceId ?? locatorOverlay?.deviceId ?? null,
+        locator: cachedLocator,
+        locatorDeviceId: erp.locatorDeviceId ?? cachedLocator?.deviceId ?? null,
         isLocatorOnly: false,
     };
 }
@@ -885,7 +898,7 @@ export async function ensureLocatorErpVehicle({
 
 let lastReconcilePositionsAt = 0;
 let reconcilePositionsInFlight = null;
-const RECONCILE_POSITIONS_MIN_INTERVAL_MS = 5 * 60 * 1000;
+const RECONCILE_POSITIONS_MIN_INTERVAL_MS = 30 * 60 * 1000;
 
 /**
  * For each live Locator position: match/create/patch the ERP vehicle and sync odometer.
@@ -940,14 +953,47 @@ export async function reconcileLocatorPositionsToErp(positions = [], { createdBy
                 else if (Number(existing.locatorDeviceId) !== Number(deviceId)) summary.linked += 1;
 
                 const km = toOdometerKm(position);
+                let dirty = false;
                 if (km != null && Number.isFinite(km) && km >= 0) {
                     const current = Number(asset.currentKilometer);
                     if (!Number.isFinite(current) || current !== km) {
                         asset.currentKilometer = km;
-                        await asset.save();
+                        dirty = true;
                         summary.odometerUpdated += 1;
                     }
                 }
+
+                const attrs = position?.attributes || {};
+                const gpsStatus = formatLocatorGpsStatus(position, null);
+                const address = String(position?.address || '').trim();
+                const speedRaw = position?.speedKmh;
+                const speedKmh =
+                    speedRaw != null && Number.isFinite(Number(speedRaw)) ? Number(speedRaw) : null;
+                const ignition =
+                    attrs.ignition === true ? true : attrs.ignition === false ? false : null;
+                const lastUpdate = position?.deviceTime ? new Date(position.deviceTime) : new Date();
+
+                if (gpsStatus && asset.locatorGpsStatus !== gpsStatus) {
+                    asset.locatorGpsStatus = gpsStatus;
+                    dirty = true;
+                }
+                if (address && asset.locatorAddress !== address) {
+                    asset.locatorAddress = address;
+                    dirty = true;
+                }
+                if (speedKmh != null && asset.locatorSpeedKmh !== speedKmh) {
+                    asset.locatorSpeedKmh = speedKmh;
+                    dirty = true;
+                }
+                if (ignition != null && asset.locatorIgnition !== ignition) {
+                    asset.locatorIgnition = ignition;
+                    dirty = true;
+                }
+                asset.locatorLastUpdate = lastUpdate;
+                asset.locatorSyncedAt = new Date();
+                dirty = true;
+
+                if (dirty) await asset.save();
             } catch (error) {
                 summary.failed += 1;
                 console.warn(

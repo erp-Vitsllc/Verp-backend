@@ -300,7 +300,7 @@ export async function getLocatorStatus() {
         loggedIn,
         tokenUpdatedAt,
         apiBaseUrl: getLocatorConfig().apiBaseUrl,
-        websocketEnabled: process.env.LOCATOR_WS_ENABLED !== 'false',
+        websocketEnabled: process.env.LOCATOR_WS_ENABLED === 'true',
     };
 }
 
