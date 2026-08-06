@@ -18210,7 +18210,7 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
         // Role-aware fallback: a freshly-appointed HR (or AC) should see in-flight Asset Approvals
         // even when DashboardAction.assignedTo is still the previous role holder (until the boot
         // re-route runs). Match by role + fleet flag stored on extra3 (set at creation time).
-        const [isHrRoleHolder, isAcRoleHolder, isAccountsRoleHolder, isManagementRoleHolder, isAdminOfficerHolder] =
+        const [isHrRoleHolder, isAcRoleHolder, isAccountsRoleHolder, isManagementRoleHolder, isAdminOfficerInFlowchart] =
             await Promise.all([
             isUserActiveInFlowchart(roleUser, 'hr'),
             isUserActiveInFlowchart(roleUser, 'assetcontroller'),
@@ -18218,6 +18218,38 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
             isUserInFlowchart(roleUser, 'management').catch(() => false),
             isUserActiveInFlowchart(roleUser, 'admincontroller'),
         ]);
+        // Also treat the current getDepartmentHOD Admin as Admin Officer even if flowchart
+        // category naming differs slightly from the session role check.
+        let isAdminOfficerHolder = isAdminOfficerInFlowchart;
+        if (!isAdminOfficerHolder) {
+            try {
+                const adminHod = await getDepartmentHOD('admincontroller');
+                const norm = (s) => String(s || '').trim().toLowerCase().replace(/\s+/g, '');
+                if (
+                    adminHod?._id &&
+                    relevantIds.some((id) => id && String(id) === String(adminHod._id))
+                ) {
+                    isAdminOfficerHolder = true;
+                } else if (
+                    adminHod?.employeeId &&
+                    targetEmployeeId &&
+                    norm(adminHod.employeeId) === norm(targetEmployeeId)
+                ) {
+                    isAdminOfficerHolder = true;
+                    if (
+                        adminHod._id &&
+                        !relevantIds.some((id) => id && String(id) === String(adminHod._id))
+                    ) {
+                        relevantIds.push(adminHod._id);
+                        // Rebuild base assignee clauses so assignedTo match works too.
+                        assigneeClauses.length = 0;
+                        assigneeClauses.push(...buildAssigneeClauses(relevantIds, targetEmployeeId));
+                    }
+                }
+            } catch {
+                /* keep flowchart-only detection */
+            }
+        }
         if (isHrRoleHolder) {
             assigneeClauses.push({
                 requestType: 'Asset Approval',

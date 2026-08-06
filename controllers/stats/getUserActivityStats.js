@@ -623,8 +623,24 @@ export const getUserActivityStats = async (req, res) => {
         const isCurrentAccountsHolder = await isUserActiveInFlowchart(subjectAuthUser, 'accounts').catch(() => false);
         const isCurrentFinanceHolder = await isUserActiveInFlowchart(subjectAuthUser, 'finance').catch(() => false);
         const isCurrentManagementHolder = await isUserInFlowchart(subjectAuthUser, 'management').catch(() => false);
+        const isCurrentAdminOfficerHolder = await isUserActiveInFlowchart(subjectAuthUser, 'admincontroller').catch(
+            () => false,
+        );
         if (isCurrentAccountsHolder || isCurrentFinanceHolder) isAccounts = true;
         if (isCurrentManagementHolder) isCEO = true;
+
+        // Flowchart Admin Officer: service create/initiate track (same as pending-inbox fallback).
+        if (
+            isCurrentAdminOfficerHolder ||
+            (flowchartAdminEmp?._id &&
+                dashboardAssigneeMongoIds.some((id) => id && String(id) === String(flowchartAdminEmp._id)))
+        ) {
+            dashboardOrConditions.push({
+                requestType: 'Vehicle Service Request',
+                status: 'Pending',
+                extra3: { $regex: '"adminOfficerServiceTrack"\\s*:\\s*true', $options: 'i' },
+            });
+        }
 
         // Flowchart HR sees all in-flight company activations even if `assignedTo` still points at a prior HR holder.
         if (isCurrentHrHolder) {

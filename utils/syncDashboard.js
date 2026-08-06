@@ -358,25 +358,54 @@ export const syncDashboardAction = async (data) => {
             }
         }
 
+        const updateDoc = {
+            assignedTo: actualAssignedTo,
+            assignedToEmpId: assignee.employeeId,
+            requestId: requestId,
+            requestType: requestType,
+            status: 'Pending',
+            subjectEmployeeId: subjectEmployee?.employeeId,
+            subjectName: subjectEmployee
+                ? `${subjectEmployee.firstName || ''} ${subjectEmployee.lastName || ''}`.trim() ||
+                  data.subjectName ||
+                  'Vehicle'
+                : data.subjectName || '',
+            requestedByName: requestedByName || '',
+            requestedDate: new Date(),
+            extra1: extra1,
+            extra2: extra2,
+            ...(pendingExtra3 ? { extra3: pendingExtra3 } : {}),
+        };
+
+        // Never overwrite Admin Officer create-track with a generic same-asset Pending upsert.
+        if (requestType === 'Vehicle Service Request' && !pendingUpsertFilter.extra3) {
+            const candidates = await DashboardAction.find(pendingUpsertFilter).select('_id extra3').lean();
+            const nonTrack = candidates.find((row) => {
+                try {
+                    const raw = row?.extra3;
+                    const meta =
+                        raw && typeof raw === 'object'
+                            ? raw
+                            : raw
+                              ? JSON.parse(String(raw))
+                              : null;
+                    return !meta?.adminOfficerServiceTrack;
+                } catch {
+                    return true;
+                }
+            });
+            if (nonTrack?._id) {
+                await DashboardAction.findByIdAndUpdate(nonTrack._id, { $set: updateDoc }, { new: true });
+            } else {
+                await DashboardAction.create(updateDoc);
+            }
+            return;
+        }
+
         await DashboardAction.findOneAndUpdate(
             pendingUpsertFilter,
-            {
-                assignedToEmpId: assignee.employeeId,
-                requestType: requestType,
-                status: 'Pending',
-                subjectEmployeeId: subjectEmployee?.employeeId,
-                subjectName: subjectEmployee
-                    ? `${subjectEmployee.firstName || ''} ${subjectEmployee.lastName || ''}`.trim() ||
-                      data.subjectName ||
-                      'Vehicle'
-                    : data.subjectName || '',
-                requestedByName: requestedByName || '',
-                requestedDate: new Date(),
-                extra1: extra1,
-                extra2: extra2,
-                ...(pendingExtra3 ? { extra3: pendingExtra3 } : {})
-            },
-            { upsert: true, new: true }
+            { $set: updateDoc },
+            { upsert: true, new: true },
         );
 
     } catch (error) {

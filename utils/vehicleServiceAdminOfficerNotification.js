@@ -115,18 +115,22 @@ export async function notifyAdminOfficerOnVehicleServiceCreated({
             extra3,
         },
         {
-            assignedToEmpId: adminOfficer.employeeId,
-            requestType: 'Vehicle Service Request',
-            status: 'Pending',
-            subjectEmployeeId: subjectEmp?.employeeId,
-            subjectName: subjectEmp
-                ? `${subjectEmp.firstName || ''} ${subjectEmp.lastName || ''}`.trim()
-                : '',
-            requestedByName: actorName,
-            requestedDate: new Date(),
-            extra1: `${asset.assetId || asset.name || ''} — ${serviceTypeLabel}`,
-            extra2: inboxExtra2,
-            extra3,
+            $set: {
+                assignedTo: adminOfficer._id,
+                assignedToEmpId: adminOfficer.employeeId,
+                requestId: asset._id,
+                requestType: 'Vehicle Service Request',
+                status: 'Pending',
+                subjectEmployeeId: subjectEmp?.employeeId,
+                subjectName: subjectEmp
+                    ? `${subjectEmp.firstName || ''} ${subjectEmp.lastName || ''}`.trim()
+                    : '',
+                requestedByName: actorName,
+                requestedDate: new Date(),
+                extra1: `${asset.assetId || asset.name || ''} — ${serviceTypeLabel}`,
+                extra2: inboxExtra2,
+                extra3,
+            },
         },
         { upsert: true, new: true, setDefaultsOnInsert: true },
     );

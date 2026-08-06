@@ -251,8 +251,10 @@ export async function closeOilServicePendingDashboardActions(
 
     const idsToClose = pendingRows
         .filter((row) => {
-            if (!targetServiceId) return true;
             const meta = parseOilServiceDashboardMeta(row.extra3);
+            // Admin Officer create-track stays open until closeAdminOfficerServiceTrackNotification.
+            if (meta?.adminOfficerServiceTrack) return false;
+            if (!targetServiceId) return true;
             if (!meta?.serviceRecordId) return true;
             if (String(meta.serviceRecordId) !== targetServiceId) return false;
             if (
@@ -349,6 +351,9 @@ export async function healStaleOilServicePendingDashboardActions({ assetIds = nu
         if (!asset) continue;
 
         const meta = parseOilServiceDashboardMeta(row.extra3);
+        // Never heal-close Admin Officer create-track (stays until Billed / Zoho).
+        if (meta?.adminOfficerServiceTrack) continue;
+
         const serviceRecordId = meta?.serviceRecordId ? String(meta.serviceRecordId) : '';
         const service = serviceRecordId
             ? (asset.services || []).find((s) => String(s._id) === serviceRecordId)
