@@ -7,7 +7,7 @@ import { syncDashboardAction } from './syncDashboard.js';
 import { sendVehicleServiceWorkflowEmail } from './sendVehicleServiceWorkflowEmail.js';
 import { resolveEmployeeEmail } from './resolveEmployeeEmail.js';
 import { applyPostServiceOperationalState } from './assetOperationalFlags.js';
-import { actorMayManageTireChangeRequest, getRequesterName } from './oilServiceWorkflow.js';
+import { actorMayManageTireChangeRequest, getRequesterName, actorMayAdminScheduleShopService } from './oilServiceWorkflow.js';
 import { generateFineIdInternal } from '../controllers/fine/addFine.js';
 import {
     commitWorkflowContext,
@@ -253,17 +253,24 @@ export async function submitTireChangeGarage(asset, serviceId, serviceUpdates, r
     const stage = String(wf.stage || '').toLowerCase();
     const remarkBefore = parseRemark(service);
     const garageAlreadySubmitted = Boolean(wf.garageSubmittedAt || remarkBefore.garageSubmittedByName);
-    // Oil-style: Schedule open during pending_hr (parallel with HR).
-    const mayUpdateGarage =
-        stage === TIRE_CHANGE_STAGE.HR ||
-        stage === TIRE_CHANGE_STAGE.ADMIN_OFFICER ||
-        (stage === TIRE_CHANGE_STAGE.ACCOUNTS && !garageAlreadySubmitted);
-    if (!mayUpdateGarage) {
-        throw new Error('Garage can only be updated while Schedule is open.');
+    // Admin may schedule / reschedule anytime after initiate until Complete Service.
+    // Accounts Approve does not lock Schedule; Ready / On Service still needs both.
+    const remarkLive = String(remarkBefore.vehicleServiceCompleted || '').toLowerCase() === 'live';
+    const blocked =
+        !stage ||
+        stage === 'pending' ||
+        stage === 'draft' ||
+        stage === TIRE_CHANGE_STAGE.COMPLETE ||
+        stage === TIRE_CHANGE_STAGE.REJECTED ||
+        stage === 'pending_billing' ||
+        stage === 'billed' ||
+        remarkLive;
+    if (blocked) {
+        throw new Error('Garage can only be updated while Schedule is open (before Complete Service).');
     }
 
-    const allowed = await actorMayManageTireChangeRequest(req.user, asset);
-    if (!allowed) throw new Error('Access denied.');
+    const allowed = await actorMayAdminScheduleShopService(req.user);
+    if (!allowed) throw new Error('Only Admin / Admin Officer (or Asset Controller) can update Schedule / Reschedule.');
 
     await mergeService(asset, serviceId, serviceUpdates);
 
@@ -276,6 +283,9 @@ export async function submitTireChangeGarage(asset, serviceId, serviceUpdates, r
     if (endRaw) {
         wf.serviceWindowEndDate = new Date(endRaw);
     }
+    if (!startRaw || !endRaw) {
+        throw new Error('Service start and end dates are required before submitting garage details.');
+    }
     const actorName = await getRequesterName(req.user);
     wf.garageSubmittedAt = new Date().toISOString();
     remark.garageSubmittedByName = actorName;
@@ -283,10 +293,47 @@ export async function submitTireChangeGarage(asset, serviceId, serviceUpdates, r
     appendTireChangeActivity(asset.services.id(serviceId), {
         type: 'garage_updated',
         byName: actorName,
-        note: `Garage details submitted · Service start: ${
-            startRaw ? String(startRaw).slice(0, 10) : '—'
-        }`,
+        note: garageAlreadySubmitted
+            ? `Schedule rescheduled · Service window: ${String(startRaw).slice(0, 10)} – ${String(endRaw).slice(0, 10)}`
+            : `Garage details submitted · Service start: ${
+                  startRaw ? String(startRaw).slice(0, 10) : '—'
+              }`,
     });
+
+    // Reschedule after first Done: update dates; advance to Ready/On Service if Accounts already done.
+    if (garageAlreadySubmitted) {
+        const { snapshotActiveServiceWorkflow } = await import('./vehicleServiceWorkflowResolve.js');
+        if (!bindActive) {
+            snapshotActiveServiceWorkflow(asset);
+        }
+        asset.activeServiceWorkflow = {
+            ...(typeof wf.toObject === 'function' ? wf.toObject() : wf),
+            stage,
+            serviceRecordId: wf.serviceRecordId || serviceId,
+            serviceTypeLabel: wf.serviceTypeLabel || 'Tire Change',
+            history: Array.isArray(wf.history) ? [...wf.history] : [],
+            garageSubmittedAt: wf.garageSubmittedAt,
+            scheduledServiceDate: wf.scheduledServiceDate || null,
+            serviceWindowEndDate: wf.serviceWindowEndDate || null,
+        };
+        asset.markModified('activeServiceWorkflow');
+        asset.markModified('services');
+        await asset.save();
+
+        if (String(remark.accountsApprovedAt || '').trim()) {
+            const { maybeAdvanceShopToScheduledAfterGarageIfAccountsDone } = await import(
+                './vehicleShopServiceScheduled.js'
+            );
+            await maybeAdvanceShopToScheduledAfterGarageIfAccountsDone(asset, serviceId, {
+                serviceTypeLabel: 'Tire Change',
+                actorName,
+                linkPath: tireChangeDetailsPath(asset._id, serviceId),
+                dashboardMeta: tireChangeDashboardMeta(asset, serviceId),
+                appendActivity: appendTireChangeActivity,
+            });
+        }
+        return asset;
+    }
 
     // During pending_hr: save garage only — do not skip HR by advancing to Accounts.
     if (stage === TIRE_CHANGE_STAGE.HR) {
@@ -548,7 +595,32 @@ export async function completeTireChangeService(asset, serviceId, serviceUpdates
         await mergeService(asset, serviceId, serviceUpdates);
     }
 
-    const remark = parseRemark(asset.services.id(serviceId));
+    const completedService = asset.services.id(serviceId);
+    const remarkForDates = parseRemark(completedService);
+    const returnKey = String(remarkForDates.returnDate || '').trim().slice(0, 10);
+    const handOverKey = String(remarkForDates.handOverDate || '').trim().slice(0, 10);
+    if (!returnKey || !handOverKey) {
+        throw new Error('Return date and hand over date are required before completing the service.');
+    }
+    const serviceEndRaw =
+        remarkForDates.serviceEndDate ||
+        remarkForDates.serviceWindowEndDate ||
+        wf.serviceWindowEndDate ||
+        '';
+    const endKey = (() => {
+        const raw = String(serviceEndRaw || '').trim();
+        if (/^\d{4}-\d{2}-\d{2}/.test(raw)) return raw.slice(0, 10);
+        const d = raw ? new Date(raw) : null;
+        if (!d || Number.isNaN(d.getTime())) return '';
+        return d.toISOString().slice(0, 10);
+    })();
+    if (endKey && returnKey < endKey) {
+        throw new Error('Return date must be on or after the service end date.');
+    }
+    if (endKey && handOverKey < endKey) {
+        throw new Error('Hand over date must be on or after the service end date.');
+    }
+
     const actorName = await getRequesterName(req.user);
 
     const { routeShopServiceToBillingAfterComplete } = await import('./vehicleShopServiceScheduled.js');

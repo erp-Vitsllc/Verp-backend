@@ -665,6 +665,18 @@ export async function actorMayManageTireChangeRequest(reqUser, asset) {
     return actorMayManageOilService(reqUser, asset);
 }
 
+/** Schedule / Reschedule — Admin / Admin Officer / Asset Controller / super user (not HR/Accounts alone). */
+export async function actorMayAdminScheduleShopService(reqUser) {
+    if (await isReqUserSystemSuperUser(reqUser)) return true;
+    // Admin Officer (admincontroller), Admin, Administrator, Admin Officer label, Asset Controller
+    if (await userIsOilServiceAdminOfficer(reqUser)) return true;
+    if (await userMatchesFlowchartRole(reqUser, 'admin')) return true;
+    if (await userMatchesFlowchartRole(reqUser, 'administrator')) return true;
+    if (await userMatchesFlowchartRole(reqUser, 'adminofficer')) return true;
+    if (await userIsOilServiceAssetController(reqUser)) return true;
+    return false;
+}
+
 export async function userMayEditOilServiceDates(reqUser, asset, serviceId) {
     if (await isReqUserSystemSuperUser(reqUser)) return true;
     if (!asset || !serviceId) return false;
@@ -689,7 +701,8 @@ export async function userMayEditOilServiceDates(reqUser, asset, serviceId) {
     const remark = parseOilServiceRemark(service);
     if (String(remark.requestStatus || '').toLowerCase() !== 'submitted') return false;
 
-    if (await userIsOilServiceAdminOfficer(reqUser)) return true;
+    // Same roles as shop Schedule: Admin / Admin Officer / Asset Controller / super user
+    if (await actorMayAdminScheduleShopService(reqUser)) return true;
 
     if (stage === STAGE_SCHEDULED && isOilServiceWaitingForStartDate(asset, service)) {
         return actorMayManageOilService(reqUser, asset);

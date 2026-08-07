@@ -24,14 +24,19 @@ function money(value) {
 }
 
 function resolveAmount(service, remark) {
+    const company = money(remark.hrReviewCompanyPay ?? remark.companyPayAmount);
+    const employee = money(remark.hrReviewEmployeePay ?? remark.employeePayAmount);
+    const splitSum = company + employee;
     return (
         money(remark.billingTotalAmount) ||
         money(remark.garageBillAmount) ||
-        money(remark.hrReviewCompanyPay) ||
         money(remark.hrReviewApprovedAmount) ||
-        money(service?.value) ||
+        money(remark.estimatedCost) ||
         money(remark.approvedAmount) ||
         money(remark.totalServiceCharge) ||
+        money(service?.value) ||
+        (splitSum > 0 ? splitSum : 0) ||
+        company ||
         0
     );
 }
@@ -56,7 +61,7 @@ export function resolveGarageZohoPayableLines(service, remark = {}) {
                 accountId,
                 amount,
                 name,
-                description,
+                description: description || name || String(row?.partyName || '').trim(),
                 quantity,
                 // Zoho Item Table: rate × quantity = line amount
                 rate: Number((amount / quantity).toFixed(6)),

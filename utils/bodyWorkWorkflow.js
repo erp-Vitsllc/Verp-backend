@@ -7,7 +7,7 @@ import { syncDashboardAction } from './syncDashboard.js';
 import { sendVehicleServiceWorkflowEmail } from './sendVehicleServiceWorkflowEmail.js';
 import { resolveEmployeeEmail } from './resolveEmployeeEmail.js';
 import { applyPostServiceOperationalState } from './assetOperationalFlags.js';
-import { actorMayManageTireChangeRequest, getRequesterName } from './oilServiceWorkflow.js';
+import { actorMayManageTireChangeRequest, getRequesterName, actorMayAdminScheduleShopService } from './oilServiceWorkflow.js';
 import { generateFineIdInternal } from '../controllers/fine/addFine.js';
 import {
     commitWorkflowContext,
@@ -251,16 +251,24 @@ export async function submitBodyWorkGarage(asset, serviceId, serviceUpdates, req
     const stage = String(wf.stage || '').toLowerCase();
     const remarkBefore = parseRemark(service);
     const garageAlreadySubmitted = Boolean(wf.garageSubmittedAt || remarkBefore.garageSubmittedByName);
-    const mayUpdateGarage =
-        stage === BODY_WORK_STAGE.HR ||
-        stage === BODY_WORK_STAGE.ADMIN_OFFICER ||
-        (stage === BODY_WORK_STAGE.ACCOUNTS && !garageAlreadySubmitted);
-    if (!mayUpdateGarage) {
-        throw new Error('Garage can only be updated while Schedule is open.');
+    // Admin may schedule / reschedule anytime after initiate until Complete Service.
+    // Accounts Approve does not lock Schedule; Ready / On Service still needs both.
+    const remarkLive = String(remarkBefore.vehicleServiceCompleted || '').toLowerCase() === 'live';
+    const blocked =
+        !stage ||
+        stage === 'pending' ||
+        stage === 'draft' ||
+        stage === BODY_WORK_STAGE.COMPLETE ||
+        stage === BODY_WORK_STAGE.REJECTED ||
+        stage === 'pending_billing' ||
+        stage === 'billed' ||
+        remarkLive;
+    if (blocked) {
+        throw new Error('Garage can only be updated while Schedule is open (before Complete Service).');
     }
 
-    const allowed = await actorMayManageTireChangeRequest(req.user, asset);
-    if (!allowed) throw new Error('Access denied.');
+    const allowed = await actorMayAdminScheduleShopService(req.user);
+    if (!allowed) throw new Error('Only Admin / Admin Officer (or Asset Controller) can update Schedule / Reschedule.');
 
     await mergeService(asset, serviceId, serviceUpdates);
 
@@ -273,6 +281,9 @@ export async function submitBodyWorkGarage(asset, serviceId, serviceUpdates, req
     if (endRaw) {
         wf.serviceWindowEndDate = new Date(endRaw);
     }
+    if (!startRaw || !endRaw) {
+        throw new Error('Service start and end dates are required before submitting garage details.');
+    }
     const actorName = await getRequesterName(req.user);
     wf.garageSubmittedAt = new Date().toISOString();
     remark.garageSubmittedByName = actorName;
@@ -280,10 +291,47 @@ export async function submitBodyWorkGarage(asset, serviceId, serviceUpdates, req
     appendBodyWorkActivity(asset.services.id(serviceId), {
         type: 'garage_updated',
         byName: actorName,
-        note: `Garage details submitted · Service start: ${
-            startRaw ? String(startRaw).slice(0, 10) : '—'
-        }`,
+        note: garageAlreadySubmitted
+            ? `Schedule rescheduled · Service window: ${String(startRaw).slice(0, 10)} – ${String(endRaw).slice(0, 10)}`
+            : `Garage details submitted · Service start: ${
+                  startRaw ? String(startRaw).slice(0, 10) : '—'
+              }`,
     });
+
+    // Reschedule after first Done: update dates; advance to Ready/On Service if Accounts already done.
+    if (garageAlreadySubmitted) {
+        const { snapshotActiveServiceWorkflow } = await import('./vehicleServiceWorkflowResolve.js');
+        if (!bindActive) {
+            snapshotActiveServiceWorkflow(asset);
+        }
+        asset.activeServiceWorkflow = {
+            ...(typeof wf.toObject === 'function' ? wf.toObject() : wf),
+            stage,
+            serviceRecordId: wf.serviceRecordId || serviceId,
+            serviceTypeLabel: wf.serviceTypeLabel || 'Body Work',
+            history: Array.isArray(wf.history) ? [...wf.history] : [],
+            garageSubmittedAt: wf.garageSubmittedAt,
+            scheduledServiceDate: wf.scheduledServiceDate || null,
+            serviceWindowEndDate: wf.serviceWindowEndDate || null,
+        };
+        asset.markModified('activeServiceWorkflow');
+        asset.markModified('services');
+        await asset.save();
+
+        if (String(remark.accountsApprovedAt || '').trim()) {
+            const { maybeAdvanceShopToScheduledAfterGarageIfAccountsDone } = await import(
+                './vehicleShopServiceScheduled.js'
+            );
+            await maybeAdvanceShopToScheduledAfterGarageIfAccountsDone(asset, serviceId, {
+                serviceTypeLabel: 'Body Work',
+                actorName,
+                linkPath: bodyWorkDetailsPath(asset._id, serviceId),
+                dashboardMeta: bodyWorkDashboardMeta(asset, serviceId),
+                appendActivity: appendBodyWorkActivity,
+            });
+        }
+        return asset;
+    }
 
     // During pending_hr: save garage only — do not skip HR by advancing to Accounts.
     if (stage === BODY_WORK_STAGE.HR) {

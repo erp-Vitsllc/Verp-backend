@@ -10948,6 +10948,22 @@ const HANDOVER_LIST_DETAIL_KEYS = [
     'performedByName',
 ];
 
+/** Table / status list — no photo maps (those bloated the Handover tab to multi‑MB responses). */
+const HANDOVER_LIST_META_DETAIL_KEYS = HANDOVER_LIST_DETAIL_KEYS.filter(
+    (key) =>
+        key !== 'receiverAssessment' &&
+        key !== 'vehicleAssessmentReportByReceiver' &&
+        key !== 'bodyConditionReport' &&
+        key !== 'bodyCondition',
+);
+
+const HANDOVER_MEDIA_DETAIL_KEYS = [
+    'receiverAssessment',
+    'vehicleAssessmentReportByReceiver',
+    'bodyConditionReport',
+    'bodyCondition',
+];
+
 /** Drop inline base64 from handover list payloads — keeps assign page responsive. */
 function stripInlinePhotoDataFromMap(map) {
     if (!map || typeof map !== 'object' || Array.isArray(map)) return map;
@@ -10969,11 +10985,12 @@ function stripInlinePhotoDataFromMap(map) {
     return next;
 }
 
-function slimHandoverHistoryForList(recordObj, assetMeta, handoverHistoryId, activeAssignmentReason) {
+function slimHandoverHistoryForList(recordObj, assetMeta, handoverHistoryId, activeAssignmentReason, detailKeys) {
+    const keys = Array.isArray(detailKeys) && detailKeys.length ? detailKeys : HANDOVER_LIST_DETAIL_KEYS;
     const rawDetails =
         recordObj.details && typeof recordObj.details === 'object' ? recordObj.details : {};
     const details = {};
-    HANDOVER_LIST_DETAIL_KEYS.forEach((key) => {
+    keys.forEach((key) => {
         if (rawDetails[key] === undefined || rawDetails[key] === null) return;
         const value = rawDetails[key];
         if (
@@ -11019,21 +11036,51 @@ function slimHandoverHistoryForList(recordObj, assetMeta, handoverHistoryId, act
     };
 }
 
+/** Keep photo maps only on the newest few report rows — older rows stay metadata-only. */
+function stripOlderHandoverReportMedia(slimmed, keepWithMedia = 2) {
+    if (!Array.isArray(slimmed) || slimmed.length === 0 || keepWithMedia <= 0) return slimmed;
+
+    let kept = 0;
+    return slimmed.map((row) => {
+        const details = row?.details;
+        if (!details || typeof details !== 'object') return row;
+        const hasMedia = HANDOVER_MEDIA_DETAIL_KEYS.some((key) => {
+            const map = details[key];
+            return map && typeof map === 'object' && Object.keys(map).length > 0;
+        });
+        if (!hasMedia) return row;
+        if (kept < keepWithMedia) {
+            kept += 1;
+            return row;
+        }
+        const nextDetails = { ...details };
+        HANDOVER_MEDIA_DETAIL_KEYS.forEach((key) => {
+            delete nextDetails[key];
+        });
+        return { ...row, details: nextDetails };
+    });
+}
+
 export const getAssetHistory = async (req, res) => {
     try {
         const { id } = req.params;
         const forHandoverList =
             String(req.query.forHandover || '').toLowerCase() === '1' ||
             String(req.query.forHandover || '').toLowerCase() === 'true';
+        // Assign page needs previous report photos; Handover tab table does not.
+        const includeReports =
+            String(req.query.includeReports || '').toLowerCase() === '1' ||
+            String(req.query.includeReports || '').toLowerCase() === 'true';
 
         const assetMeta = await AssetItem.findById(id)
             .select('pendingActionDetails assignmentType assignedDays')
             .lean();
 
         if (forHandoverList) {
-            const handoverDetailProjection = HANDOVER_LIST_DETAIL_KEYS.map(
-                (key) => `details.${key}`,
-            ).join(' ');
+            const detailKeys = includeReports
+                ? HANDOVER_LIST_DETAIL_KEYS
+                : HANDOVER_LIST_META_DETAIL_KEYS;
+            const handoverDetailProjection = detailKeys.map((key) => `details.${key}`).join(' ');
 
             const history = await AssetHistory.find({ assetId: id })
                 .select(
@@ -11050,28 +11097,21 @@ export const getAssetHistory = async (req, res) => {
                 assetMeta?.pendingActionDetails?.assignmentReason || '',
             ).trim();
 
-            const slimmed = await Promise.all(
-                history.map(async (recordObj) => {
-                    const slim = slimHandoverHistoryForList(
-                        recordObj,
-                        assetMeta,
-                        handoverHistoryId,
-                        activeAssignmentReason,
-                    );
-                    const details = slim?.details;
-                    const hasHandoverMedia =
-                        details?.bodyConditionReport ||
-                        details?.bodyCondition ||
-                        details?.receiverAssessment ||
-                        details?.vehicleAssessmentReportByReceiver;
-                    if (hasHandoverMedia && details) {
-                        await signHandoverAssessmentMediaInDetails(details, signOrKeepAttachmentUrl);
-                    }
-                    return slim;
-                }),
+            // Keep storage keys — do NOT S3-sign photos. UI loads via /storage/file.
+            let slimmed = history.map((recordObj) =>
+                slimHandoverHistoryForList(
+                    recordObj,
+                    assetMeta,
+                    handoverHistoryId,
+                    activeAssignmentReason,
+                    detailKeys,
+                ),
             );
 
-            await attachAssigneeDrivingLicenseIssueDates(slimmed);
+            if (includeReports) {
+                slimmed = stripOlderHandoverReportMedia(slimmed, 2);
+                await attachAssigneeDrivingLicenseIssueDates(slimmed);
+            }
 
             return res.status(200).json(slimmed);
         }
@@ -11313,7 +11353,8 @@ export const getHistoryRecord = async (req, res) => {
             const d = recordObj.details;
             if (d.invoice) d.invoice = await signOrKeepAttachmentUrl(d.invoice);
             if (d.invoiceFile) d.invoiceFile = await signOrKeepAttachmentUrl(d.invoiceFile);
-            await signHandoverAssessmentMediaInDetails(d, signOrKeepAttachmentUrl);
+            // Keep assessment/body photos as storage keys — assign UI proxies via /storage/file.
+            // Signing every accessory + body photo here made handover detail open very slowly.
         }
         if (recordObj.performedBy?.signature?.url) {
             recordObj.performedBy.signature.url = await signOrKeepAttachmentUrl(recordObj.performedBy.signature.url);
@@ -11701,9 +11742,7 @@ export const updateHistoryReceiverAssessment = async (req, res) => {
             .populate('assignedTo', 'firstName lastName employeeId');
 
         const recordObj = populated.toObject();
-        if (recordObj.details) {
-            await signHandoverAssessmentMediaInDetails(recordObj.details, signOrKeepAttachmentUrl);
-        }
+        // Keep assessment photos as storage keys — UI proxies via /storage/file.
 
         res.status(200).json(recordObj);
     } catch (error) {
@@ -11908,9 +11947,7 @@ export const updateHistoryBodyCondition = async (req, res) => {
             .populate('assignedTo', 'firstName lastName employeeId');
 
         const responseBody = populated.toObject();
-        if (responseBody.details) {
-            await signHandoverAssessmentMediaInDetails(responseBody.details, signOrKeepAttachmentUrl);
-        }
+        // Keep body-condition photos as storage keys — UI proxies via /storage/file.
         if (inspectionSubmitResult?.asset) {
             responseBody.vehicleAsset = inspectionSubmitResult.asset;
             responseBody.inspectionSubmittedForHr = inspectionSubmitResult.submitted === true;
@@ -12021,9 +12058,7 @@ export const updateHistoryHandoverItemFineWaiver = async (req, res) => {
             .populate('assignedTo', 'firstName lastName employeeId');
 
         const responseBody = populated.toObject();
-        if (responseBody.details) {
-            await signHandoverAssessmentMediaInDetails(responseBody.details, signOrKeepAttachmentUrl);
-        }
+        // Keep assessment/body photos as storage keys — UI proxies via /storage/file.
 
         return res.status(200).json(responseBody);
     } catch (error) {

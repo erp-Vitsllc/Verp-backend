@@ -6,7 +6,7 @@ import { getDepartmentHOD } from './getDepartmentHOD.js';
 import { syncDashboardAction } from './syncDashboard.js';
 import { sendVehicleServiceWorkflowEmail } from './sendVehicleServiceWorkflowEmail.js';
 import { applyPostServiceOperationalState } from './assetOperationalFlags.js';
-import { actorMayManageTireChangeRequest, getRequesterName } from './oilServiceWorkflow.js';
+import { actorMayManageTireChangeRequest, getRequesterName, actorMayAdminScheduleShopService } from './oilServiceWorkflow.js';
 import { generateFineIdInternal } from '../controllers/fine/addFine.js';
 import {
     commitWorkflowContext,
@@ -258,8 +258,8 @@ export async function submitAccidentRepairGarage(asset, serviceId, serviceUpdate
         throw new Error('Garage can only be updated while Schedule is open (before Complete Service).');
     }
 
-    const allowed = await actorMayManageTireChangeRequest(req.user, asset);
-    if (!allowed) throw new Error('Access denied.');
+    const allowed = await actorMayAdminScheduleShopService(req.user);
+    if (!allowed) throw new Error('Only Admin / Admin Officer (or Asset Controller) can update Schedule / Reschedule.');
 
     await mergeService(asset, serviceId, serviceUpdates);
 
@@ -289,7 +289,7 @@ export async function submitAccidentRepairGarage(asset, serviceId, serviceUpdate
               }`,
     });
 
-    // Reschedule after first Done: update dates only, keep current workflow stage.
+    // Reschedule after first Done: update dates; advance to Ready/On Service if Accounts already done.
     if (garageAlreadySubmitted) {
         const { snapshotActiveServiceWorkflow } = await import('./vehicleServiceWorkflowResolve.js');
         if (!bindActive) {
@@ -308,6 +308,19 @@ export async function submitAccidentRepairGarage(asset, serviceId, serviceUpdate
         asset.markModified('activeServiceWorkflow');
         asset.markModified('services');
         await asset.save();
+
+        if (String(remark.accountsApprovedAt || '').trim()) {
+            const { maybeAdvanceShopToScheduledAfterGarageIfAccountsDone } = await import(
+                './vehicleShopServiceScheduled.js'
+            );
+            await maybeAdvanceShopToScheduledAfterGarageIfAccountsDone(asset, serviceId, {
+                serviceTypeLabel: 'Accident Repair',
+                actorName,
+                linkPath: accidentRepairDetailsPath(asset._id, serviceId),
+                dashboardMeta: accidentRepairDashboardMeta(asset, serviceId),
+                appendActivity: appendAccidentRepairActivity,
+            });
+        }
         return asset;
     }
 
