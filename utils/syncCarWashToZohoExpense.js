@@ -159,6 +159,16 @@ function buildCarWashExpenseName({ asset, remark = {}, service } = {}) {
     return parts.join(' · ').slice(0, 100);
 }
 
+function attachmentRefFromServiceFile(ref, name = 'car-wash-invoice.pdf') {
+    const raw = String(ref || '').trim();
+    if (!raw) return null;
+    const fileName = String(name || '').trim() || 'car-wash-invoice.pdf';
+    if (/^https?:\/\//i.test(raw) || raw.startsWith('data:')) {
+        return { url: raw, name: fileName, mimeType: '' };
+    }
+    return { publicId: raw, name: fileName, mimeType: '' };
+}
+
 /**
  * Car Wash only → Zoho Books Expense (NOT Bill).
  * Same core fields as Accounts → Expenses → Add Expense:
@@ -263,14 +273,19 @@ export async function syncCarWashToZohoExpense({
 
             // Soft-fail invoice attachment when present on the car wash request.
             let attachmentResult = { ok: true, skipped: true };
+            const invoiceName =
+                clean(remark.invoiceName || remark.attachmentName, 'car-wash-invoice.pdf') ||
+                'car-wash-invoice.pdf';
             const invoice =
+                attachmentRefFromServiceFile(service.invoice, invoiceName) ||
+                attachmentRefFromServiceFile(service.attachment, invoiceName) ||
                 remark.invoiceFile ||
                 remark.invoice ||
                 (remark.invoiceUrl || remark.invoicePublicId
                     ? {
                           url: remark.invoiceUrl,
                           publicId: remark.invoicePublicId,
-                          name: remark.invoiceName || 'car-wash-invoice.pdf',
+                          name: invoiceName,
                           mimeType: remark.invoiceMime || '',
                       }
                     : null);
@@ -280,6 +295,11 @@ export async function syncCarWashToZohoExpense({
                     if (file) {
                         await uploadExpenseAttachment(expenseId, file);
                         attachmentResult = { ok: true, filename: file.filename };
+                    } else {
+                        attachmentResult = {
+                            ok: false,
+                            message: 'Invoice file could not be read for Zoho attachment',
+                        };
                     }
                 } catch (attachErr) {
                     attachmentResult = {

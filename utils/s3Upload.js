@@ -59,7 +59,8 @@ export function normalizeS3Key(keyOrUrl) {
                     break;
                 }
             }
-            if (pathKey && !pathKey.includes(' ')) return pathKey;
+            // Filenames may include spaces / parentheses (e.g. "Report (2).pdf").
+            if (pathKey) return pathKey;
         } catch {
             return null;
         }

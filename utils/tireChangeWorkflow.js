@@ -277,6 +277,8 @@ export async function submitTireChangeGarage(asset, serviceId, serviceUpdates, r
     const remark = parseRemark(asset.services.id(serviceId));
     const startRaw = remark.serviceStartDate || remark.scheduledServiceDate;
     const endRaw = remark.serviceEndDate || remark.serviceWindowEndDate;
+    const { assertServiceScheduleDates } = await import('./vehicleServiceScheduleDates.js');
+    assertServiceScheduleDates(startRaw, endRaw);
     if (startRaw) {
         wf.scheduledServiceDate = new Date(startRaw);
     }
@@ -602,6 +604,14 @@ export async function completeTireChangeService(asset, serviceId, serviceUpdates
     if (!returnKey || !handOverKey) {
         throw new Error('Return date and hand over date are required before completing the service.');
     }
+    const hasGarageInvoice =
+        Boolean(String(completedService?.shopInvoice || '').trim()) ||
+        Boolean(String(remarkForDates.garageInvoiceUrl || '').trim()) ||
+        Boolean(String(remarkForDates.garageInvoiceName || '').trim()) ||
+        Boolean(String(remarkForDates.shopInvoiceName || '').trim());
+    if (!hasGarageInvoice) {
+        throw new Error('Garage invoice is required before completing the service.');
+    }
     const serviceEndRaw =
         remarkForDates.serviceEndDate ||
         remarkForDates.serviceWindowEndDate ||
@@ -621,6 +631,22 @@ export async function completeTireChangeService(asset, serviceId, serviceUpdates
         throw new Error('Hand over date must be on or after the service end date.');
     }
 
+    const {
+        applyServiceBodyConditionReplacements,
+        resolveMappedNewConditionImages,
+    } = await import('./applyServiceBodyConditionReplacements.js');
+    const mappedImages = resolveMappedNewConditionImages({
+        requestImages: serviceUpdates?.newConditionImages,
+        service: completedService,
+    });
+    if (mappedImages.length) {
+        await applyServiceBodyConditionReplacements(asset, {
+            images: mappedImages,
+            serviceTypeLabel: 'Tire Change',
+            serviceId,
+        });
+    }
+
     const actorName = await getRequesterName(req.user);
 
     const { routeShopServiceToBillingAfterComplete } = await import('./vehicleShopServiceScheduled.js');
@@ -635,7 +661,7 @@ export async function completeTireChangeService(asset, serviceId, serviceUpdates
         appendActivity: appendTireChangeActivity,
     });
 
-    await createTireChangeEmployeeFines(asset, asset.services.id(serviceId), req.user);
+    // Vehicle Damage fines are created after Zoho bill success (Make Payment), not on Complete.
 
     // Admin Officer create-track stays open until Zoho / Billed (Make Payment).
 

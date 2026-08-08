@@ -266,6 +266,8 @@ export async function submitAccidentRepairGarage(asset, serviceId, serviceUpdate
     const remark = parseRemark(asset.services.id(serviceId));
     const startRaw = remark.serviceStartDate || remark.scheduledServiceDate;
     const endRaw = remark.serviceEndDate || remark.serviceWindowEndDate;
+    const { assertServiceScheduleDates } = await import('./vehicleServiceScheduleDates.js');
+    assertServiceScheduleDates(startRaw, endRaw);
     if (startRaw) {
         wf.scheduledServiceDate = new Date(startRaw);
     }
@@ -638,7 +640,7 @@ export async function completeAccidentRepairService(asset, serviceId, serviceUpd
         appendActivity: appendAccidentRepairActivity,
     });
 
-    await createAccidentRepairEmployeeFines(asset, asset.services.id(serviceId), req.user);
+    // Vehicle Damage fines are created after Zoho bill success (Make Payment), not on Complete.
 
     const populated = await AssetItem.findById(asset._id)
         .populate({

@@ -9,6 +9,36 @@ function parseDocDescription(doc) {
     }
 }
 
+function isExpiryPast(value) {
+    if (!value) return false;
+    const d = new Date(value);
+    if (Number.isNaN(d.getTime())) return false;
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    d.setHours(0, 0, 0, 0);
+    return d.getTime() < today.getTime();
+}
+
+function isDocumentOld(doc) {
+    const meta = parseDocDescription(doc);
+    return Boolean(meta?.isOld || meta?.lifecycle === 'old' || meta?.status === 'old');
+}
+
+function liveDocsOfType(asset, type) {
+    const docs = Array.isArray(asset?.documents) ? asset.documents : [];
+    const want = normDocType(type);
+    return docs.filter((d) => normDocType(d.type) === want && !isDocumentOld(d));
+}
+
+function pickPrimaryLiveDoc(docs) {
+    if (!docs?.length) return null;
+    return [...docs].sort((a, b) => {
+        const ta = new Date(a.issueDate || a.expiryDate || a.createdAt || 0).getTime();
+        const tb = new Date(b.issueDate || b.expiryDate || b.createdAt || 0).getTime();
+        return tb - ta;
+    })[0];
+}
+
 export function isVehicleBasicDetailsComplete(asset) {
     if (!asset) return false;
     const brand = String(asset.vehicleBrand || asset.typeId?.name || asset.type || '').trim();
@@ -19,11 +49,16 @@ export function isVehicleBasicDetailsComplete(asset) {
 }
 
 export function isVehicleRegistrationCardComplete(asset) {
-    const docs = Array.isArray(asset?.documents) ? asset.documents : [];
-    const registrationDoc = docs.find((d) => normDocType(d.type) === 'registration') || null;
-    const registrationAttachments = docs.filter((d) => normDocType(d.type) === 'registration attachment');
-    const registrationMeta = parseDocDescription(registrationDoc);
+    const registrationDocs = liveDocsOfType(asset, 'registration');
+    const registrationAttachments = liveDocsOfType(asset, 'registration attachment');
+    const registrationDoc = pickPrimaryLiveDoc(registrationDocs);
+    if (!registrationDoc && registrationAttachments.length === 0) return false;
 
+    if (registrationDoc && isExpiryPast(registrationDoc.expiryDate || asset?.registrationExpiryDate)) {
+        return false;
+    }
+
+    const registrationMeta = parseDocDescription(registrationDoc);
     return Boolean(
         registrationDoc?.issueDate ||
             registrationDoc?.expiryDate ||
@@ -34,11 +69,16 @@ export function isVehicleRegistrationCardComplete(asset) {
 }
 
 export function isVehicleInsuranceCardComplete(asset) {
-    const docs = Array.isArray(asset?.documents) ? asset.documents : [];
-    const insuranceDoc = docs.find((d) => normDocType(d.type) === 'insurance') || null;
-    const insuranceAttachments = docs.filter((d) => normDocType(d.type) === 'insurance attachment');
-    const insuranceMeta = parseDocDescription(insuranceDoc);
+    const insuranceDocs = liveDocsOfType(asset, 'insurance');
+    const insuranceAttachments = liveDocsOfType(asset, 'insurance attachment');
+    const insuranceDoc = pickPrimaryLiveDoc(insuranceDocs);
+    if (!insuranceDoc && insuranceAttachments.length === 0) return false;
 
+    if (insuranceDoc && isExpiryPast(insuranceDoc.expiryDate || asset?.insuranceExpiryDate)) {
+        return false;
+    }
+
+    const insuranceMeta = parseDocDescription(insuranceDoc);
     return Boolean(
         insuranceDoc?.issueDate ||
             insuranceDoc?.expiryDate ||
@@ -55,9 +95,14 @@ export function isVehicleProfilePictureComplete(asset) {
     return Boolean(asset?.imagePreview || asset?.photo || asset?.images?.[0]?.url);
 }
 
+/** Progress bar: HR-approved / active inspection only (matches frontend). */
 export function isVehicleInspectionComplete(asset) {
-    const status = String(asset?.vehicleInspectionStatus || '').toLowerCase();
-    if (status === 'active') return true;
+    return String(asset?.vehicleInspectionStatus || '').toLowerCase() === 'active';
+}
+
+/** Activation gate: also accept a Vehicle Inspection document (legacy). */
+export function isVehicleInspectionCompleteForActivation(asset) {
+    if (isVehicleInspectionComplete(asset)) return true;
     return (asset?.documents || []).some(
         (doc) => String(doc?.type || '').trim().toLowerCase() === 'vehicle inspection',
     );
@@ -76,6 +121,27 @@ export const VEHICLE_PROFILE_ACTIVATION_SECTION_IDS = [
     'mortgage',
 ];
 
+export function buildVehicleProfileCompletionChecks(asset) {
+    return [
+        { label: 'Basic Details', completed: isVehicleBasicDetailsComplete(asset) },
+        { label: 'Mulkia (Registration)', completed: isVehicleRegistrationCardComplete(asset) },
+        { label: 'Insurance Details', completed: isVehicleInsuranceCardComplete(asset) },
+        { label: 'Profile Picture', completed: isVehicleProfilePictureComplete(asset) },
+        { label: 'Vehicle Inspection', completed: isVehicleInspectionComplete(asset) },
+    ];
+}
+
+export function computeVehicleProfileCompletionPercent(asset) {
+    const checks = buildVehicleProfileCompletionChecks(asset);
+    const total = checks.length || 1;
+    const completed = checks.filter((c) => c.completed).length;
+    return {
+        profilePct: Math.round((completed / total) * 100),
+        completionChecks: checks,
+        pendingChecks: checks.filter((c) => !c.completed),
+    };
+}
+
 /** Returns first missing requirement message, or null when profile is 100% ready. */
 export function assertVehicleProfileActivationReady(asset) {
     if (!isVehicleBasicDetailsComplete(asset)) {
@@ -90,7 +156,7 @@ export function assertVehicleProfileActivationReady(asset) {
     if (!isVehicleProfilePictureComplete(asset)) {
         return 'Upload a profile picture before submitting.';
     }
-    if (!isVehicleInspectionComplete(asset)) {
+    if (!isVehicleInspectionCompleteForActivation(asset)) {
         return 'Complete vehicle inspection (Admin Officer request and HR approval) before submitting for activation.';
     }
     return null;

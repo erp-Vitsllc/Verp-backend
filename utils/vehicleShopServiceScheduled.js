@@ -980,7 +980,7 @@ export async function advanceShopBillingAfterAccountsApprove(
     asset,
     wf,
     actorName,
-    { serviceTypeLabel, appendActivity } = {},
+    { serviceTypeLabel, appendActivity, reqUser = null } = {},
 ) {
     const serviceRecordId = wf.serviceRecordId;
     const service = asset.services?.id?.(serviceRecordId);
@@ -1020,6 +1020,29 @@ export async function advanceShopBillingAfterAccountsApprove(
         );
     }
 
+    // Vehicle Damage fine(s) from bill payables — only after Zoho success.
+    let vehicleDamageFineSync = null;
+    try {
+        const { createGarageZohoBillVehicleDamageFines } = await import(
+            './createGarageZohoBillVehicleDamageFines.js'
+        );
+        vehicleDamageFineSync = await createGarageZohoBillVehicleDamageFines({
+            asset,
+            service,
+            reqUser,
+            serviceTypeLabel,
+        });
+    } catch (fineErr) {
+        console.error(
+            '[GarageZohoFine] post-bill Vehicle Damage create failed:',
+            fineErr?.message || fineErr,
+        );
+        vehicleDamageFineSync = {
+            ok: false,
+            message: fineErr?.message || 'Vehicle Damage fine create failed',
+        };
+    }
+
     const remark = parseRemark(service);
     remark.workflowStage = SHOP_SERVICE_BILLED;
     remark.billingStatus = 'billed';
@@ -1038,6 +1061,15 @@ export async function advanceShopBillingAfterAccountsApprove(
             byName: actorName,
             note: zohoBillSync.message || 'Zoho bill created — Billed',
         });
+        if (vehicleDamageFineSync?.count > 0) {
+            appendActivity(service, {
+                type: 'vehicle_damage_fines_created',
+                byName: actorName,
+                note:
+                    vehicleDamageFineSync.message ||
+                    `Vehicle Damage fine(s) created (${vehicleDamageFineSync.count})`,
+            });
+        }
     }
 
     wf.stage = SHOP_SERVICE_BILLED;
@@ -1113,5 +1145,5 @@ export async function advanceShopBillingAfterAccountsApprove(
         console.error('[ShopService] Post-billed completion email failed:', err?.message || err);
     }
 
-    return { asset, zohoBillSync };
+    return { asset, zohoBillSync, vehicleDamageFineSync };
 }

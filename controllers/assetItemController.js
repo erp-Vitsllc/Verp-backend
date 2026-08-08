@@ -4832,7 +4832,7 @@ export const getAssetItemDetail = async (req, res) => {
                 void (async () => {
                     try {
                         const bgItem = await AssetItem.findById(assetIdForBg).select(
-                            'services activeServiceWorkflow onServiceActive status assignedTo plateEmirate plateNumber assetId currentKilometer nextServiceDate vehicleProfileActivationStatus typeId',
+                            'services activeServiceWorkflow onServiceActive status assignedTo plateEmirate plateNumber assetId name currentKilometer nextServiceDate vehicleProfileActivationStatus vehicleInspectionStatus vehicleBrand modelYear imagePreview photo images documents registrationExpiryDate insuranceExpiryDate typeId',
                         );
                         if (!bgItem) return;
                         await healStaleOilServicePendingDashboardActions({ assetIds: [assetIdForBg] });
@@ -4841,6 +4841,18 @@ export const getAssetItemDetail = async (req, res) => {
                         await maybeAutoCreateOilServiceDue(bgItem);
                         // Use cached Zoho bills only — live Zoho on every detail view starved the API.
                         await syncVehicleServicePaymentStatusFromZoho(bgItem, { fetchLive: false });
+                        if (
+                            String(bgItem.vehicleProfileActivationStatus || '').toLowerCase() ===
+                            'active'
+                        ) {
+                            const { syncVehicleProfileIncompleteNotifications } = await import(
+                                '../utils/syncVehicleProfileIncompleteNotifications.js'
+                            );
+                            await syncVehicleProfileIncompleteNotifications(bgItem, {
+                                reason: 'Vehicle detail opened while profile incomplete',
+                                sendEmail: true,
+                            });
+                        }
                     } catch (bgErr) {
                         console.warn(
                             '[getAssetItemDetail] light background sync failed:',
@@ -10901,6 +10913,18 @@ export const deleteAssetImage = async (req, res) => {
         item.images = item.images.filter(img => img._id.toString() !== imageId);
         await item.save();
 
+        try {
+            const { syncVehicleProfileIncompleteNotifications } = await import(
+                '../utils/syncVehicleProfileIncompleteNotifications.js'
+            );
+            await syncVehicleProfileIncompleteNotifications(item.toObject?.() || item, {
+                reason: 'Vehicle profile image deleted',
+                sendEmail: true,
+            });
+        } catch (syncErr) {
+            console.warn('[deleteAssetImage] incomplete sync failed:', syncErr?.message || syncErr);
+        }
+
         res.status(200).json({ message: 'Image deleted' });
     } catch (error) {
         res.status(500).json({ message: 'Server Error' });
@@ -11429,10 +11453,8 @@ function buildHandoverDeleteAssetPatch(asset, record, historyId) {
 
     if (isInspectionLinked) {
         assetPatch.vehicleInspectionHandoverHistoryId = null;
-        const inspStatus = String(asset.vehicleInspectionStatus || '').toLowerCase();
-        if (inspStatus === 'pending_hr' || inspStatus === 'draft') {
-            assetPatch.vehicleInspectionStatus = null;
-        }
+        // Always clear inspection status so Profile Status % drops; keep profile Active.
+        assetPatch.vehicleInspectionStatus = null;
     }
 
     return {
@@ -11501,7 +11523,7 @@ export const deleteVehicleHandoverHistory = async (req, res) => {
         await AssetHistory.findByIdAndDelete(historyId);
 
         const asset = await AssetItem.findById(record.assetId).select(
-            'pendingActionDetails vehicleInspectionHandoverHistoryId vehicleInspectionStatus vehicleAccessoriesListEntries acceptanceStatus assignedTo assignedCompany assignedToType',
+            'pendingActionDetails vehicleInspectionHandoverHistoryId vehicleInspectionStatus vehicleAccessoriesListEntries acceptanceStatus assignedTo assignedCompany assignedToType assetId name plateNumber vehicleBrand modelYear imagePreview photo images documents vehicleProfileActivationStatus registrationExpiryDate insuranceExpiryDate',
         );
 
         let isActiveFlow = false;
@@ -11525,6 +11547,24 @@ export const deleteVehicleHandoverHistory = async (req, res) => {
                 await AssetItem.findByIdAndUpdate(asset._id, { $set: assetPatch });
             }
         }
+
+        // Management email on Super User delete (handover / inspection history).
+        scheduleManagementAdminDeletionEmail(req, {
+            moduleName: isInspectionHandover
+                ? 'Vehicle Inspection History'
+                : 'Vehicle Handover History',
+            recordId: asset?.assetId || String(record.assetId),
+            details: `${action} history (${historyId}) on ${asset?.name || asset?.assetId || 'vehicle'}`,
+            deletedPayload: {
+                assetId: asset?.assetId,
+                mongoAssetId: record.assetId,
+                assetName: asset?.name,
+                historyId,
+                action,
+                isInspectionHandover,
+                record,
+            },
+        });
 
         res.status(200).json({
             message: 'Handover record deleted successfully.',
@@ -11560,6 +11600,20 @@ export const deleteVehicleHandoverHistory = async (req, res) => {
 
                 if (record.file) {
                     await deleteDocumentFromS3(record.file);
+                }
+
+                // Progress may have dropped — notify admins; keep profile Active.
+                if (asset?._id) {
+                    const fresh = await AssetItem.findById(asset._id).lean();
+                    const { syncVehicleProfileIncompleteNotifications } = await import(
+                        '../utils/syncVehicleProfileIncompleteNotifications.js'
+                    );
+                    await syncVehicleProfileIncompleteNotifications(fresh, {
+                        reason: isInspectionHandover
+                            ? 'Inspection / handover history deleted by Super User'
+                            : 'Handover history deleted by Super User',
+                        sendEmail: true,
+                    });
                 }
             } catch (cleanupError) {
                 console.warn('[deleteVehicleHandoverHistory] cleanup failed:', cleanupError?.message || cleanupError);
@@ -12261,11 +12315,10 @@ export const deleteAssetDocument = async (req, res) => {
 
         const fleetVehicle = isFleetVehicleAssetFields({ plateNumber: asset.plateNumber });
         if (fleetVehicle) {
-            // Inactive fleet profile: any authenticated user may delete cards/documents.
-            // Active fleet profile: portal Super User only (not Flowchart Admin Officer).
-            if (isFleetVehicleProfileActive(asset) && !isAdminUser) {
+            // Fleet vehicle: portal Super User only (never Flowchart Admin Officer).
+            if (!isAdminUser) {
                 return res.status(403).json({
-                    message: 'Only administrator can delete vehicle documents on an active profile.',
+                    message: 'Only the system Super User can delete vehicle documents.',
                 });
             }
         } else if (!isAdminUser && !hasAssetDeletePerm) {
@@ -12320,6 +12373,19 @@ export const deleteAssetDocument = async (req, res) => {
                 details: { type: 'DocumentDelete', docName }
             });
         } catch (historyErr) {
+        }
+
+        // Active profile stays Active; notify if progress dropped below 100%.
+        try {
+            const { syncVehicleProfileIncompleteNotifications } = await import(
+                '../utils/syncVehicleProfileIncompleteNotifications.js'
+            );
+            await syncVehicleProfileIncompleteNotifications(asset.toObject?.() || asset, {
+                reason: `Document deleted: ${docName || 'card'}`,
+                sendEmail: true,
+            });
+        } catch (syncErr) {
+            console.warn('[deleteAssetDocument] incomplete sync failed:', syncErr?.message || syncErr);
         }
 
         res.status(200).json({
@@ -12493,6 +12559,14 @@ export const addAssetService = async (req, res) => {
                 return res.status(500).json({ message: 'Failed to upload attachment' });
             }
         }
+        // Car Wash: invoice is the request attachment when no separate attachment is sent.
+        if (
+            String(serviceType || '').trim() === 'Car Wash' &&
+            invoiceUrl &&
+            !attachmentUrl
+        ) {
+            attachmentUrl = invoiceUrl;
+        }
 
         let quotation2Url = null;
         if (quotation2 && quotation2.data) {
@@ -12607,6 +12681,13 @@ export const addAssetService = async (req, res) => {
         remarkObj.requestedByUserId = req.user?.id || req.user?._id || null;
         if (String(serviceType || '').trim() === 'Car Wash' && !isDraft) {
             remarkObj.carWashPaymentStatus = 'pending';
+        }
+        if (String(serviceType || '').trim() === 'Car Wash' && invoiceUrl) {
+            remarkObj.invoicePublicId = invoiceUrl;
+            remarkObj.invoiceName = String(invoice?.name || remarkObj.invoiceName || '').trim();
+            remarkObj.attachmentName = String(
+                attachment?.name || invoice?.name || remarkObj.attachmentName || '',
+            ).trim();
         }
         const newService = {
             _id: new mongoose.Types.ObjectId(),
@@ -12826,14 +12907,12 @@ export const deleteAssetService = async (req, res) => {
         const isFleetVehicle =
             String(asset.plateNumber || '').trim() !== '' ||
             String(asset.vehicleProfileActivationStatus || '').trim() !== '';
-        const fleetProfileActive =
-            String(asset.vehicleProfileActivationStatus || '').toLowerCase() === 'active';
 
         if (isFleetVehicle) {
-            // Inactive: any authenticated user. Active: portal Super User only.
-            if (fleetProfileActive && !isAdminUser) {
+            // Fleet vehicle: portal Super User only (never Flowchart Admin Officer).
+            if (!isAdminUser) {
                 return res.status(403).json({
-                    message: 'Only administrator can delete service records on an active vehicle profile.',
+                    message: 'Only the system Super User can delete vehicle service records.',
                 });
             }
         } else if (!isAdminUser) {
@@ -12920,10 +12999,23 @@ export const updateAssetServiceDraft = async (req, res) => {
         )
             .toLowerCase()
             .trim();
-        // HR / Accounts / Zoho Make Payment — allow Initiate Service field updates after Send.
-        const initiateEditableStage = ['pending_hr', 'pending_accounts', 'pending_billing'].includes(
-            workflowStage,
-        );
+        // After Send, until Zoho bill accepted — HR only may update Initiate Service fields.
+        const billingStatus = String(remarkObj?.billingStatus || '').toLowerCase();
+        const multiBills = Array.isArray(remarkObj?.zohoBills) ? remarkObj.zohoBills : [];
+        const multiAllBilled =
+            multiBills.length > 0 &&
+            multiBills.every((bill) => String(bill?.zohoBillId || '').trim());
+        const zohoBillAccepted =
+            ['billed', 'complete', 'rejected'].includes(workflowStage) ||
+            billingStatus === 'billed' ||
+            Boolean(String(remarkObj?.zohoBillId || '').trim()) ||
+            multiAllBilled;
+        const initiateEditableStage =
+            !zohoBillAccepted &&
+            (reqStatus === 'submitted' ||
+                Boolean(String(remarkObj?.oilServiceInitiatedAt || '').trim()) ||
+                Boolean(String(remarkObj?.tireChangeInitiatedAt || '').trim()) ||
+                Boolean(workflowStage));
         const mayUpdateDraft = ['draft', 'pending'].includes(reqStatus);
         const mayUpdateAtHrAccounts =
             initiateEditableStage &&
@@ -12931,7 +13023,11 @@ export const updateAssetServiceDraft = async (req, res) => {
                 reqStatus === 'pending' ||
                 Boolean(String(remarkObj?.oilServiceInitiatedAt || '').trim()));
         if (!mayUpdateDraft && !mayUpdateAtHrAccounts) {
-            return res.status(400).json({ message: 'Only pending service requests can be updated.' });
+            return res.status(400).json({
+                message: zohoBillAccepted
+                    ? 'Initiate Service cannot be updated after the Zoho bill is accepted.'
+                    : 'Only pending service requests can be updated.',
+            });
         }
 
         const isVehicleAssetForServiceGate = () => {
@@ -12960,16 +13056,11 @@ export const updateAssetServiceDraft = async (req, res) => {
                 isVehicleServiceTabRequestType(service.serviceType) ||
                 isTireChangeServiceType(service.serviceType));
         if (isHrAccountsInitiateEdit) {
-            const [mayInitiate, isHr, isAccounts, isAdminOfficer] = await Promise.all([
-                actorMayCreateOrInitiateVehicleService(req.user),
-                isUserInFlowchart(req.user, 'hr').catch(() => false),
-                isUserInFlowchart(req.user, 'accounts').catch(() => false),
-                userIsFlowchartAdminOfficer(req).catch(() => false),
-            ]);
-            if (!mayInitiate && !isHr && !isAccounts && !isAdminOfficer && !actorFlags.canAct) {
+            const isHr = await isUserInFlowchart(req.user, 'hr').catch(() => false);
+            if (!isHr) {
                 return res.status(403).json({
                     message:
-                        'Access denied. Only Admin Officer, HR, Accounts, or authorized users can update Initiate Service at this stage.',
+                        'Access denied. Only HR can update Initiate Service after submit until the Zoho bill is accepted.',
                 });
             }
         } else if (isTireChangePending) {
@@ -13514,6 +13605,7 @@ export const retryGarageZohoBillHandler = async (req, res) => {
         const { retryVehicleGarageZohoBill } = await import('../utils/retryVehicleGarageZohoBill.js');
         const result = await retryVehicleGarageZohoBill(asset, serviceId, {
             serviceTypeLabel: req.body?.serviceTypeLabel || '',
+            reqUser: req.user,
         });
         const fresh = await AssetItem.findById(asset._id).populate('assignedTo', 'firstName lastName employeeId');
         return res.json({

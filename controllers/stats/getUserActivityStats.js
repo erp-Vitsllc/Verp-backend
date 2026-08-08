@@ -687,6 +687,7 @@ export const getUserActivityStats = async (req, res) => {
             'Employee Document Not Renew',
             'Vehicle Profile Activation',
             'Vehicle Profile Edit',
+            'Vehicle Profile Incomplete',
             'Vehicle Inspection',
             'Vehicle Mortgage Close',
             'Vehicle Disposition Request',
@@ -743,7 +744,14 @@ export const getUserActivityStats = async (req, res) => {
                 .lean()
                 .maxTimeMS(6000),
             DashboardAction.find({
-                requestType: { $in: ['Vehicle Profile Activation', 'Vehicle Profile Edit', 'Vehicle Inspection'] },
+                requestType: {
+                    $in: [
+                        'Vehicle Profile Activation',
+                        'Vehicle Profile Edit',
+                        'Vehicle Profile Incomplete',
+                        'Vehicle Inspection',
+                    ],
+                },
                 status: { $in: ['Approved', 'Rejected', 'On Hold'] },
                 $or: profileActivationOutcomeOr,
             })
@@ -786,6 +794,7 @@ export const getUserActivityStats = async (req, res) => {
                         'Vehicle Inspection',
                         'Vehicle Profile Activation',
                         'Vehicle Profile Edit',
+                        'Vehicle Profile Incomplete',
                         'Vehicle Mortgage Close',
                         'Vehicle Delete Request',
                     ].includes(item.requestType)

@@ -2559,6 +2559,13 @@ export async function updateOilServiceDates(
         wf.oilServiceOverdueNotifiedAt = null;
     }
 
+    const { assertServiceScheduleDates } = await import('./vehicleServiceScheduleDates.js');
+    assertServiceScheduleDates(
+        remark.serviceStartDate || remark.scheduledServiceDate,
+        remark.serviceEndDate || remark.nextChangeMonth || remark.serviceWindowEndDate,
+        { requireBoth: true, requireStartFromToday: true },
+    );
+
     if (garageName !== undefined) {
         const name = String(garageName || '').trim();
         remark.garageName = name;
@@ -2736,6 +2743,13 @@ export async function updateOilServiceEndDateExtend(asset, serviceId, { serviceE
     wf.serviceWindowEndDate = new Date(endDate);
     wf.serviceDurationEmailSentAt = null;
     wf.oilServiceOverdueNotifiedAt = null;
+
+    const { assertServiceScheduleDates } = await import('./vehicleServiceScheduleDates.js');
+    assertServiceScheduleDates(
+        remark.serviceStartDate || remark.scheduledServiceDate,
+        endDate,
+        { requireBoth: false, requireStartFromToday: false },
+    );
 
     if (String(prevEnd).slice(0, 10) !== endDate) {
         const entry = {

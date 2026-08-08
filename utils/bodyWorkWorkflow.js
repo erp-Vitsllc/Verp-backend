@@ -275,6 +275,8 @@ export async function submitBodyWorkGarage(asset, serviceId, serviceUpdates, req
     const remark = parseRemark(asset.services.id(serviceId));
     const startRaw = remark.serviceStartDate || remark.scheduledServiceDate;
     const endRaw = remark.serviceEndDate || remark.serviceWindowEndDate;
+    const { assertServiceScheduleDates } = await import('./vehicleServiceScheduleDates.js');
+    assertServiceScheduleDates(startRaw, endRaw);
     if (startRaw) {
         wf.scheduledServiceDate = new Date(startRaw);
     }
@@ -600,6 +602,14 @@ export async function completeBodyWorkService(asset, serviceId, serviceUpdates, 
     if (!returnKey || !handOverKey) {
         throw new Error('Return date and hand over date are required before completing the service.');
     }
+    const hasGarageInvoice =
+        Boolean(String(completedService?.shopInvoice || '').trim()) ||
+        Boolean(String(remarkForDates.garageInvoiceUrl || '').trim()) ||
+        Boolean(String(remarkForDates.garageInvoiceName || '').trim()) ||
+        Boolean(String(remarkForDates.shopInvoiceName || '').trim());
+    if (!hasGarageInvoice) {
+        throw new Error('Garage invoice is required before completing the service.');
+    }
     const serviceEndRaw =
         remarkForDates.serviceEndDate ||
         remarkForDates.serviceWindowEndDate ||
@@ -647,7 +657,7 @@ export async function completeBodyWorkService(asset, serviceId, serviceUpdates, 
         appendActivity: appendBodyWorkActivity,
     });
 
-    await createBodyWorkEmployeeFines(asset, asset.services.id(serviceId), req.user);
+    // Vehicle Damage fines are created after Zoho bill success (Make Payment), not on Complete.
 
     return asset;
 }

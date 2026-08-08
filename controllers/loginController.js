@@ -234,9 +234,10 @@ export const login = async (req, res) => {
                 isAdministrator: isSystemAdmin
             },
             permissions: permissions,
-            isSystemSuperUser: isSystemAdmin || permissionData?.isAdministrator || false,
-            isAdmin: isSystemAdmin || permissionData?.isAdmin || false,
-            isAdministrator: isSystemAdmin || permissionData?.isAdministrator || false,
+            // Top-level flags must match portal Super User only (never Flowchart Admin Officer).
+            isSystemSuperUser: isSystemAdmin,
+            isAdmin: isSystemAdmin,
+            isAdministrator: isSystemAdmin,
         });
     } catch (error) {
         console.error('Login error:', error);

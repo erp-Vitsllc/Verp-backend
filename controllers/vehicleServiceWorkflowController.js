@@ -392,12 +392,37 @@ export async function mergeWorkflowServiceRecord(asset, serviceRecordId, body) {
         garageBillAttachment,
         accidentGarageQuotes,
         paymentToGarageAttachments,
+        garageBillAttachments,
     } = body;
 
     // Return-to-live files: workshop completion report vs shop invoice (legacy invoice key treated as completion when shopInvoice omitted).
-    const completionBlob =
-        completionReport?.data ? completionReport : !shopInvoice?.data && invoice?.data ? invoice : null;
+    // Car Wash is different: invoice/attachment are the request invoice (Zoho Expense receipt), not a completion report.
+    const isCarWashService = String(sub.serviceType || '').trim() === 'Car Wash';
+    const completionBlob = isCarWashService
+        ? completionReport?.data
+            ? completionReport
+            : null
+        : completionReport?.data
+          ? completionReport
+          : !shopInvoice?.data && invoice?.data
+            ? invoice
+            : null;
     const shopBlob = shopInvoice?.data ? shopInvoice : null;
+
+    let carWashInvoiceUrl = String(sub.invoice || '').trim() || null;
+    if (isCarWashService && invoice?.data) {
+        try {
+            const uploadResult = await uploadDocumentToS3(
+                invoice.data,
+                'asset-service-invoices',
+                invoice.name || `car-wash-invoice-${Date.now()}.pdf`,
+            );
+            carWashInvoiceUrl = uploadResult.publicId;
+        } catch (error) {
+            console.error('[mergeWorkflowServiceRecord] car wash invoice upload:', error);
+            throw new Error('Failed to upload car wash invoice');
+        }
+    }
 
     let serviceCompletionReportUrl =
         String(sub.serviceCompletionReport || '').trim() || null;
@@ -439,6 +464,10 @@ export async function mergeWorkflowServiceRecord(asset, serviceRecordId, body) {
             console.error('[mergeWorkflowServiceRecord] attachment upload:', error);
             throw new Error('Failed to upload attachment');
         }
+    }
+    // Car Wash: keep request attachment aligned with invoice when only invoice is uploaded.
+    if (isCarWashService && carWashInvoiceUrl && (!attachmentUrl || invoice?.data) && !attachment?.data) {
+        attachmentUrl = carWashInvoiceUrl;
     }
 
     let quotation2Url = sub.quotation2 || null;
@@ -524,6 +553,14 @@ export async function mergeWorkflowServiceRecord(asset, serviceRecordId, body) {
     }
     if (serviceCompletionReportUrl != null) sub.serviceCompletionReport = serviceCompletionReportUrl;
     if (shopInvoiceDocUrl != null) sub.shopInvoice = shopInvoiceDocUrl;
+    if (isCarWashService && carWashInvoiceUrl != null) {
+        sub.invoice = carWashInvoiceUrl;
+        remarkMeta.invoicePublicId = carWashInvoiceUrl;
+        if (invoice?.name) {
+            remarkMeta.invoiceName = String(invoice.name).trim();
+            remarkMeta.attachmentName = String(invoice.name).trim();
+        }
+    }
     if (attachmentUrl != null) sub.attachment = attachmentUrl;
     if (quotation2Url != null) sub.quotation2 = quotation2Url;
     if (quotation3Url != null) sub.quotation3 = quotation3Url;
@@ -542,7 +579,7 @@ export async function mergeWorkflowServiceRecord(asset, serviceRecordId, body) {
             throw new Error('Failed to upload tire condition file');
         }
     }
-    if (garageBillAttachment?.data) {
+    if (garageBillAttachment?.data && !(Array.isArray(garageBillAttachments) && garageBillAttachments.length)) {
         try {
             const uploadResult = await uploadDocumentToS3(
                 garageBillAttachment.data,
@@ -556,6 +593,61 @@ export async function mergeWorkflowServiceRecord(asset, serviceRecordId, body) {
         } catch (error) {
             console.error('[mergeWorkflowServiceRecord] garageBillAttachment upload:', error);
             throw new Error('Failed to upload garage bill attachment');
+        }
+    }
+    // Accident Repair multi Zoho Bill: upload each bill invoice and stamp onto remark.zohoBills[].
+    if (Array.isArray(garageBillAttachments) && garageBillAttachments.length) {
+        const bills = Array.isArray(remarkMeta.zohoBills) ? [...remarkMeta.zohoBills] : [];
+        for (const item of garageBillAttachments) {
+            if (!item?.data) continue;
+            try {
+                const uploadResult = await uploadDocumentToS3(
+                    item.data,
+                    'asset-service-attachments',
+                    item.name || `garage-bill-attachment-${Date.now()}.pdf`,
+                );
+                const billId = String(item.billId || item.id || '').trim();
+                const publicId = uploadResult.publicId;
+                const fileName = String(item.name || '').trim() || 'garage-invoice.pdf';
+                let matched = false;
+                for (let i = 0; i < bills.length; i += 1) {
+                    const row = bills[i] || {};
+                    if (billId && String(row.id || '').trim() === billId) {
+                        bills[i] = {
+                            ...row,
+                            garageAttachmentUrl: publicId,
+                            garageBillAttachmentUrl: publicId,
+                            garageAttachmentName: fileName,
+                        };
+                        matched = true;
+                        break;
+                    }
+                }
+                if (!matched && bills.length) {
+                    // Fall back: first bill without an attachment URL.
+                    const emptyIdx = bills.findIndex(
+                        (row) => !String(row?.garageAttachmentUrl || row?.garageBillAttachmentUrl || '').trim(),
+                    );
+                    const idx = emptyIdx >= 0 ? emptyIdx : 0;
+                    bills[idx] = {
+                        ...(bills[idx] || {}),
+                        garageAttachmentUrl: publicId,
+                        garageBillAttachmentUrl: publicId,
+                        garageAttachmentName: fileName,
+                    };
+                }
+                if (!remarkMeta.garageAttachmentUrl) {
+                    remarkMeta.garageAttachmentUrl = publicId;
+                    remarkMeta.garageBillAttachmentUrl = publicId;
+                    remarkMeta.garageAttachmentName = fileName;
+                }
+            } catch (error) {
+                console.error('[mergeWorkflowServiceRecord] garageBillAttachments upload:', error);
+                throw new Error('Failed to upload garage bill attachment');
+            }
+        }
+        if (bills.length) {
+            remarkMeta.zohoBills = bills;
         }
     }
     if (Array.isArray(bodyWorkImages) && bodyWorkImages.length) {
@@ -1805,7 +1897,7 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
                 asset,
                 asset.activeServiceWorkflow,
                 actorName,
-                { serviceTypeLabel: label, appendActivity: append },
+                { serviceTypeLabel: label, appendActivity: append, reqUser: req.user },
             );
             const billFresh = await AssetItem.findById(asset._id).populate(
                 'assignedTo',

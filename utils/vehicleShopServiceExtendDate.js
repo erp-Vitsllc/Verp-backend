@@ -82,6 +82,20 @@ export async function updateShopServiceExtendDate(asset, serviceId, { serviceEnd
     const parsedEnd = new Date(endDate);
     if (Number.isNaN(parsedEnd.getTime())) throw new Error('Invalid extend date');
 
+    const { assertServiceScheduleDates, normalizeServiceScheduleDate } = await import(
+        './vehicleServiceScheduleDates.js'
+    );
+    const existingRemark = parseRemark(service);
+    const startKey = normalizeServiceScheduleDate(
+        existingRemark.serviceStartDate ||
+            existingRemark.scheduledServiceDate ||
+            wf.scheduledServiceDate,
+    );
+    assertServiceScheduleDates(startKey, endDate, {
+        requireBoth: Boolean(startKey),
+        requireStartFromToday: false,
+    });
+
     if (String(wf.serviceTypeLabel || '').trim() === 'Oil Service') {
         if (!isOilServiceWorkflowRecord(wf, service)) {
             throw new Error('Not an oil service workflow.');

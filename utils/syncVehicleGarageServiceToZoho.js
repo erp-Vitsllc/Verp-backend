@@ -132,7 +132,7 @@ function garageBillPrefix(serviceTypeLabel = '') {
  * VEGA org uses manual bill numbers (same as Fine / Utility).
  * Omitting bill_number → Zoho: "Invalid value passed for bill_number".
  */
-function buildGarageZohoBillNumber({ asset, service, serviceTypeLabel = '' } = {}) {
+function buildGarageZohoBillNumber({ asset, service, serviceTypeLabel = '', billIndex = 0 } = {}) {
     const prefix = garageBillPrefix(serviceTypeLabel || service?.serviceType);
     const assetId = sanitizeZohoBillNumber(asset?.assetId || '');
     const serviceKey = String(service?._id || '')
@@ -140,26 +140,27 @@ function buildGarageZohoBillNumber({ asset, service, serviceTypeLabel = '' } = {
         .slice(-8)
         .toUpperCase();
     const stamp = Date.now().toString(36).toUpperCase().slice(-4);
+    const suffix = billIndex > 0 ? `-B${billIndex + 1}` : '';
 
     const candidates = [
-        assetId && serviceKey ? `${prefix}-${assetId}-${serviceKey}` : '',
-        assetId ? `${prefix}-${assetId}-${stamp}` : '',
-        serviceKey ? `${prefix}-${serviceKey}-${stamp}` : '',
-        `${prefix}-${stamp}${String(Date.now()).slice(-6)}`,
+        assetId && serviceKey ? `${prefix}-${assetId}-${serviceKey}${suffix}` : '',
+        assetId ? `${prefix}-${assetId}-${stamp}${suffix}` : '',
+        serviceKey ? `${prefix}-${serviceKey}-${stamp}${suffix}` : '',
+        `${prefix}-${stamp}${String(Date.now()).slice(-6)}${suffix}`,
     ];
 
     for (const raw of candidates) {
         const num = sanitizeZohoBillNumber(raw);
         if (num) return num;
     }
-    return sanitizeZohoBillNumber(`VHCL-${Date.now()}`) || `VHCL${Date.now()}`;
+    return sanitizeZohoBillNumber(`VHCL-${Date.now()}${suffix}`) || `VHCL${Date.now()}`;
 }
 
-async function buildAttachmentFromService(service, remark) {
-    // Prefer dedicated garage bill attachment — never overwrite Quote 1 (service.attachment).
-    // Fall back to Service Details garage invoice (shopInvoice) so Accounts Zoho bill gets it automatically.
+async function buildAttachmentFromBillOrService(service, remark, bill = null) {
     const key = String(
-        remark.garageAttachmentUrl ||
+        bill?.garageAttachmentUrl ||
+            bill?.garageBillAttachmentUrl ||
+            remark.garageAttachmentUrl ||
             remark.garageBillAttachmentUrl ||
             service?.shopInvoice ||
             remark.garageInvoiceUrl ||
@@ -168,7 +169,8 @@ async function buildAttachmentFromService(service, remark) {
     if (!key) return null;
     const name =
         String(
-            remark.garageAttachmentName ||
+            bill?.garageAttachmentName ||
+                remark.garageAttachmentName ||
                 remark.garageInvoiceName ||
                 remark.shopInvoiceName ||
                 '',
@@ -199,9 +201,179 @@ async function buildAttachmentFromService(service, remark) {
     }
 }
 
+async function buildAttachmentFromService(service, remark) {
+    return buildAttachmentFromBillOrService(service, remark, null);
+}
+
+async function createOneGarageZohoBill({
+    asset,
+    service,
+    remark,
+    billRemark = null,
+    serviceTypeLabel = '',
+    orgId,
+    billIndex = 0,
+} = {}) {
+    const billSource = billRemark && typeof billRemark === 'object' ? billRemark : remark;
+    const garageName = String(billSource.garageName || billSource.vendorName || remark.garageName || remark.vendorName || '').trim();
+    const payableLines = resolveGarageZohoPayableLines(service, {
+        ...remark,
+        billingPayables: billSource.billingPayables || remark.billingPayables,
+        payAccountId: billSource.payAccountId || remark.payAccountId,
+        payAccountName: billSource.payAccountName || remark.payAccountName,
+        garagePayAccountId: billSource.payAccountId || remark.garagePayAccountId,
+        garagePayAccountName: billSource.payAccountName || remark.garagePayAccountName,
+        billingTotalAmount: billSource.billingTotalAmount || remark.billingTotalAmount,
+        garageBillAmount: billSource.garageBillAmount || remark.garageBillAmount,
+    });
+    const amount =
+        payableLines.reduce((sum, line) => sum + line.amount, 0) ||
+        money(billSource.billingTotalAmount) ||
+        money(billSource.garageBillAmount) ||
+        resolveAmount(service, remark);
+
+    if (!garageName) {
+        throw new Error('Garage name (vendor) is required for Zoho bill.');
+    }
+    if (!payableLines.length) {
+        throw new Error(
+            'Each payable-from line needs a Chart of Accounts and amount greater than zero for the Zoho bill.',
+        );
+    }
+    if (!(amount > 0)) {
+        throw new Error('Bill amount must be greater than 0.');
+    }
+
+    const label = String(serviceTypeLabel || service.serviceType || 'Vehicle Service').trim();
+    const plate = [asset?.plateEmirate, asset?.plateNumber].filter(Boolean).join(' ').trim();
+    const assetId = String(asset?.assetId || asset?._id || '').trim();
+    const today = new Date().toISOString().slice(0, 10);
+
+    let vendorId = String(billSource.zohoVendorId || remark.zohoVendorId || '').trim();
+    if (!vendorId) {
+        vendorId = await resolveZohoVendorIdByProvider(garageName, orgId);
+    }
+    if (!vendorId) {
+        throw new Error(
+            `Zoho vendor not found for garage "${garageName}". Add/sync the vendor in Zoho Books.`,
+        );
+    }
+
+    const description = [label, assetId, plate ? `(${plate})` : '', garageName, billIndex > 0 ? `#${billIndex + 1}` : '']
+        .filter(Boolean)
+        .join(' · ')
+        .slice(0, 200);
+
+    const billNumber = buildGarageZohoBillNumber({
+        asset,
+        service,
+        serviceTypeLabel: label,
+        billIndex,
+    });
+    const referenceNumber =
+        sanitizeZohoBillNumber(assetId) ||
+        String(service._id || '')
+            .replace(/[^a-zA-Z0-9-]/g, '')
+            .slice(-20) ||
+        undefined;
+
+    const line_items = payableLines.map((line) => {
+        const qty = Number(line.quantity) > 0 ? Number(line.quantity) : 1;
+        const rate =
+            Number(line.rate) > 0 ? Number(line.rate) : Number((line.amount / qty).toFixed(6));
+        const lineDescription =
+            String(line.description || '').trim() ||
+            [description, line.name].filter(Boolean).join(' · ').slice(0, 200) ||
+            label;
+        return {
+            account_id: line.accountId,
+            name: line.name || lineDescription || label,
+            description: lineDescription.slice(0, 200),
+            quantity: qty,
+            rate,
+        };
+    });
+
+    const billPayload = {
+        vendor_id: vendorId,
+        bill_number: billNumber,
+        date: today,
+        due_date: today,
+        notes: description,
+        line_items,
+    };
+    if (referenceNumber) billPayload.reference_number = referenceNumber;
+
+    let bill;
+    try {
+        bill = await createBill(billPayload);
+    } catch (createErr) {
+        const msg = String(createErr?.message || createErr || '');
+        if (/bill_number|already|exist|duplicate|unique/i.test(msg)) {
+            const retryNumber = sanitizeZohoBillNumber(
+                `${billNumber}-${Date.now().toString(36).toUpperCase().slice(-5)}`,
+            );
+            bill = await createBill({
+                ...billPayload,
+                bill_number: retryNumber || `${billNumber}-${Date.now()}`.slice(0, 45),
+            });
+        } else {
+            throw createErr;
+        }
+    }
+
+    const billId = String(bill?.bill_id || bill?.billId || bill?.id || '').trim();
+    if (!billId) {
+        throw new Error('Zoho bill created but bill id was missing in response.');
+    }
+
+    try {
+        await markBillAsOpen(billId);
+    } catch (openErr) {
+        console.warn('[GarageZoho] markBillAsOpen failed:', openErr?.message || openErr);
+    }
+
+    const file = await buildAttachmentFromBillOrService(service, remark, billSource);
+    if (file) {
+        try {
+            await uploadBillAttachment(billId, file);
+        } catch (attErr) {
+            console.warn('[GarageZoho] attachment upload failed:', attErr?.message || attErr);
+        }
+    }
+
+    let billForUpsert = bill;
+    try {
+        billForUpsert = (await fetchBillById(billId)) || bill;
+    } catch {
+        /* use create response */
+    }
+    try {
+        await upsertZohoBillFromApi(billForUpsert);
+    } catch (upsertErr) {
+        console.warn(
+            '[GarageZoho] Zoho create ok; ERP ZohoBill upsert failed:',
+            upsertErr?.message || upsertErr,
+        );
+    }
+
+    return {
+        billId,
+        vendorId,
+        billNumber: String(
+            billForUpsert?.bill_number ||
+                billForUpsert?.billNumber ||
+                bill?.bill_number ||
+                bill?.billNumber ||
+                '',
+        ).trim(),
+    };
+}
+
 /**
- * After Accounts approves garage details — create Zoho Bill:
+ * After Accounts approves garage details — create Zoho Bill(s):
  * Vendor = Garage Name, Account = Pay Account, Amount from service, optional attachment.
+ * Accident Repair may send remark.zohoBills[] → one Zoho bill per entry.
  */
 export async function syncVehicleGarageServiceToZoho({
     asset,
@@ -214,7 +386,10 @@ export async function syncVehicleGarageServiceToZoho({
     }
 
     const remark = parseRemark(service);
-    if (String(remark.zohoBillId || '').trim()) {
+    const multiBills = Array.isArray(remark.zohoBills) ? remark.zohoBills.filter(Boolean) : [];
+    const useMulti = multiBills.length > 0;
+
+    if (!useMulti && String(remark.zohoBillId || '').trim()) {
         return {
             ok: true,
             skipped: true,
@@ -223,168 +398,120 @@ export async function syncVehicleGarageServiceToZoho({
         };
     }
 
-    const garageName = String(remark.garageName || remark.vendorName || '').trim();
-    const payableLines = resolveGarageZohoPayableLines(service, remark);
-    const amount = payableLines.reduce((sum, line) => sum + line.amount, 0) || resolveAmount(service, remark);
-
-    if (!garageName) {
-        return { ok: false, message: 'Garage name (vendor) is required for Zoho bill.' };
-    }
-    if (!payableLines.length) {
+    if (useMulti && multiBills.every((b) => String(b?.zohoBillId || '').trim())) {
         return {
-            ok: false,
-            message:
-                'Each payable-from line needs a Chart of Accounts and amount greater than zero for the Zoho bill.',
+            ok: true,
+            skipped: true,
+            billId: String(multiBills[0].zohoBillId).trim(),
+            billIds: multiBills.map((b) => String(b.zohoBillId).trim()),
+            message: 'Zoho bills already linked for this garage service.',
         };
-    }
-    if (!(amount > 0)) {
-        return { ok: false, message: 'Bill amount must be greater than 0.' };
     }
 
     const orgId = String(organizationId || '').trim() || getZohoOrganizationId();
     const label = String(serviceTypeLabel || service.serviceType || 'Vehicle Service').trim();
-    const plate = [asset?.plateEmirate, asset?.plateNumber].filter(Boolean).join(' ').trim();
-    const assetId = String(asset?.assetId || asset?._id || '').trim();
-    const today = new Date().toISOString().slice(0, 10);
 
     try {
-        const result = await withZohoOrganization(orgId, async () => {
-            let vendorId = String(remark.zohoVendorId || '').trim();
-            if (!vendorId) {
-                vendorId = await resolveZohoVendorIdByProvider(garageName, orgId);
+        if (useMulti) {
+            const results = [];
+            const updatedBills = [...multiBills];
+            let firstError = '';
+
+            await withZohoOrganization(orgId, async () => {
+                for (let i = 0; i < updatedBills.length; i += 1) {
+                    const row = updatedBills[i] || {};
+                    if (String(row.zohoBillId || '').trim()) {
+                        results.push({
+                            ok: true,
+                            skipped: true,
+                            billId: String(row.zohoBillId).trim(),
+                            billNumber: String(row.zohoBillNumber || '').trim(),
+                            index: i,
+                        });
+                        continue;
+                    }
+                    try {
+                        const created = await createOneGarageZohoBill({
+                            asset,
+                            service,
+                            remark,
+                            billRemark: row,
+                            serviceTypeLabel: label,
+                            orgId,
+                            billIndex: i,
+                        });
+                        updatedBills[i] = {
+                            ...row,
+                            zohoBillId: created.billId,
+                            zohoBillNumber: created.billNumber || '',
+                            zohoVendorId: created.vendorId || row.zohoVendorId || '',
+                            zohoSyncError: '',
+                        };
+                        results.push({ ok: true, ...created, index: i });
+                    } catch (err) {
+                        const message = err?.message || 'Failed to create Zoho bill.';
+                        updatedBills[i] = {
+                            ...row,
+                            zohoSyncError: message,
+                        };
+                        if (!firstError) firstError = `Zoho Bill #${i + 1}: ${message}`;
+                        results.push({ ok: false, message, index: i });
+                        console.error('[GarageZoho] multi bill failed:', message);
+                    }
+                }
+            });
+
+            remark.zohoBills = updatedBills;
+            const succeeded = results.filter((r) => r.ok);
+            const failed = results.filter((r) => !r.ok);
+            if (succeeded.length) {
+                remark.zohoBillId = succeeded[0].billId || remark.zohoBillId || '';
+                remark.zohoBillNumber = succeeded[0].billNumber || remark.zohoBillNumber || '';
+                remark.zohoVendorId = succeeded[0].vendorId || remark.zohoVendorId || '';
+                remark.zohoBillStatus = 'open';
+                remark.zohoOrganizationId = orgId;
+                remark.zohoSyncedAt = new Date().toISOString();
             }
-            if (!vendorId) {
-                throw new Error(
-                    `Zoho vendor not found for garage "${garageName}". Add/sync the vendor in Zoho Books.`,
-                );
+            remark.zohoSyncError = failed.length ? firstError : '';
+            service.remark = JSON.stringify(remark);
+
+            if (failed.length) {
+                return {
+                    ok: false,
+                    message:
+                        firstError ||
+                        `${failed.length} of ${results.length} Zoho bill(s) failed. Fix and retry.`,
+                    billIds: succeeded.map((r) => r.billId).filter(Boolean),
+                    results,
+                };
             }
 
-            const description = [
-                label,
-                assetId,
-                plate ? `(${plate})` : '',
-                garageName,
-            ]
-                .filter(Boolean)
-                .join(' · ')
-                .slice(0, 200);
+            const billIds = succeeded.map((r) => r.billId).filter(Boolean);
+            return {
+                ok: true,
+                billId: billIds[0] || '',
+                billIds,
+                billNumber: succeeded.map((r) => r.billNumber).filter(Boolean).join(', '),
+                message:
+                    billIds.length > 1
+                        ? `${billIds.length} Zoho bills created.`
+                        : succeeded[0]?.billNumber
+                          ? `Zoho bill ${succeeded[0].billNumber} created.`
+                          : 'Zoho bill created.',
+            };
+        }
 
-            const billNumber = buildGarageZohoBillNumber({
+        const result = await withZohoOrganization(orgId, async () =>
+            createOneGarageZohoBill({
                 asset,
                 service,
+                remark,
+                billRemark: null,
                 serviceTypeLabel: label,
-            });
-            const referenceNumber =
-                sanitizeZohoBillNumber(assetId) ||
-                String(service._id || '')
-                    .replace(/[^a-zA-Z0-9-]/g, '')
-                    .slice(-20) ||
-                undefined;
-
-            // One Zoho Item Table row per payable line: Description, Account, Qty, Amount (via rate×qty).
-            const line_items = payableLines.map((line) => {
-                const qty = Number(line.quantity) > 0 ? Number(line.quantity) : 1;
-                const rate =
-                    Number(line.rate) > 0
-                        ? Number(line.rate)
-                        : Number((line.amount / qty).toFixed(6));
-                const lineDescription =
-                    String(line.description || '').trim() ||
-                    [description, line.name].filter(Boolean).join(' · ').slice(0, 200) ||
-                    label;
-                return {
-                    account_id: line.accountId,
-                    name: line.name || lineDescription || label,
-                    description: lineDescription.slice(0, 200),
-                    quantity: qty,
-                    rate,
-                };
-            });
-
-            const billPayload = {
-                vendor_id: vendorId,
-                bill_number: billNumber,
-                date: today,
-                due_date: today,
-                notes: description,
-                line_items,
-            };
-            if (referenceNumber) billPayload.reference_number = referenceNumber;
-
-            let bill;
-            try {
-                bill = await createBill(billPayload);
-            } catch (createErr) {
-                const msg = String(createErr?.message || createErr || '');
-                // Duplicate / series clash — retry once with a unique suffix.
-                if (/bill_number|already|exist|duplicate|unique/i.test(msg)) {
-                    const retryNumber = sanitizeZohoBillNumber(
-                        `${billNumber}-${Date.now().toString(36).toUpperCase().slice(-5)}`,
-                    );
-                    bill = await createBill({
-                        ...billPayload,
-                        bill_number: retryNumber || `${billNumber}-${Date.now()}`.slice(0, 45),
-                    });
-                } else {
-                    throw createErr;
-                }
-            }
-
-            const billId = String(
-                bill?.bill_id || bill?.billId || bill?.id || '',
-            ).trim();
-            if (!billId) {
-                throw new Error('Zoho bill created but bill id was missing in response.');
-            }
-
-            try {
-                await markBillAsOpen(billId);
-            } catch (openErr) {
-                console.warn(
-                    '[GarageZoho] markBillAsOpen failed:',
-                    openErr?.message || openErr,
-                );
-            }
-
-            const file = await buildAttachmentFromService(service, remark);
-            if (file) {
-                try {
-                    await uploadBillAttachment(billId, file);
-                } catch (attErr) {
-                    console.warn(
-                        '[GarageZoho] attachment upload failed:',
-                        attErr?.message || attErr,
-                    );
-                }
-            }
-
-            let billForUpsert = bill;
-            try {
-                billForUpsert = (await fetchBillById(billId)) || bill;
-            } catch {
-                /* use create response */
-            }
-            try {
-                await upsertZohoBillFromApi(billForUpsert);
-            } catch (upsertErr) {
-                console.warn(
-                    '[GarageZoho] Zoho create ok; ERP ZohoBill upsert failed:',
-                    upsertErr?.message || upsertErr,
-                );
-            }
-
-            return {
-                billId,
-                vendorId,
-                billNumber: String(
-                    billForUpsert?.bill_number ||
-                        billForUpsert?.billNumber ||
-                        bill?.bill_number ||
-                        bill?.billNumber ||
-                        '',
-                ).trim(),
-            };
-        });
+                orgId,
+                billIndex: 0,
+            }),
+        );
 
         remark.zohoBillId = result.billId;
         remark.zohoVendorId = result.vendorId;
