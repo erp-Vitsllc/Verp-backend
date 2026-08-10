@@ -31,13 +31,19 @@ import {
     isExpiryHrTaskDueForDoc,
 } from "./documentExpiryReminderStages.js";
 import AssetItem from "../models/AssetItem.js";
-import { resolveFrontendBaseUrl } from "./resolveFrontendBaseUrl.js";
 import {
     collectVehicleExpiryDocuments,
     isFleetVehicleAsset,
     resolveVehicleExpiryFocusCard,
     resolveVehicleExpiryTab,
 } from "./vehicleExpiryScanUtils.js";
+import {
+    buildCompanyExpiryEmailLocation,
+    buildEmployeeExpiryEmailLocation,
+    buildVehicleExpiryEmailLocation,
+    escapeExpiryEmailHtml,
+    renderExpiryEmailLocationBlock,
+} from "./documentExpiryEmailLocation.js";
 
 const STAGE_1_MARKER = 30;
 const STAGE_2_MARKER = 20;
@@ -503,7 +509,7 @@ const processCompanyReminders = async () => {
             const days = getDaysUntil(doc.expiryDate);
             if (days == null) continue;
 
-            const { skipDuplicateOwnerReminder } = resolveOwnerExpiryReminderMeta(
+            const { skipDuplicateOwnerReminder, ownerTabMeta } = resolveOwnerExpiryReminderMeta(
                 company,
                 doc,
                 canonicalOwnerTargets
@@ -523,14 +529,20 @@ const processCompanyReminders = async () => {
             if (alreadySent) continue;
 
             const stageLabel = getReminderStageLabel(emailStage);
+            const location = buildCompanyExpiryEmailLocation({
+                company,
+                doc,
+                ownerTabMeta,
+            });
             const subject = `Company document expiry ${stageLabel}: ${company.name}`;
             const html = `
-                <div style="font-family: Arial, sans-serif; line-height: 1.6;">
-                    <h3>Company Document Expiry Reminder (${stageLabel})</h3>
-                    <p><strong>Company:</strong> ${company.name || "N/A"} (${company.companyId || "N/A"})</p>
-                    <p><strong>Document:</strong> ${doc.label}</p>
-                    <p><strong>Expiry Date:</strong> ${new Date(doc.expiryDate).toLocaleDateString("en-GB")}</p>
-                    <p><strong>Current lead time:</strong> ${days} day(s) before expiry.</p>
+                <div style="font-family: Arial, sans-serif; line-height: 1.6; color:#0f172a;">
+                    <h3 style="margin:0 0 12px;">Company Document Expiry Reminder (${escapeExpiryEmailHtml(stageLabel)})</h3>
+                    <p style="margin:0 0 8px;"><strong>Company:</strong> ${escapeExpiryEmailHtml(company.name || "N/A")} (${escapeExpiryEmailHtml(company.companyId || "N/A")})</p>
+                    <p style="margin:0 0 8px;"><strong>Document:</strong> ${escapeExpiryEmailHtml(doc.label)}</p>
+                    <p style="margin:0 0 8px;"><strong>Expiry Date:</strong> ${escapeExpiryEmailHtml(new Date(doc.expiryDate).toLocaleDateString("en-GB"))}</p>
+                    <p style="margin:0 0 8px;"><strong>Current lead time:</strong> ${escapeExpiryEmailHtml(days)} day(s) before expiry.</p>
+                    ${renderExpiryEmailLocationBlock(location)}
                     <p style="margin-top:12px;color:#555;font-size:13px;"><em>This email is sent to the designated <strong>Admin Officer</strong> and <strong>HR</strong> on the organizational flowchart. Follow-up tasks are assigned only to designated HR.</em></p>
                 </div>
             `;
@@ -547,7 +559,11 @@ const processCompanyReminders = async () => {
                 docKey: doc.key,
                 daysBefore: emailStage,
                 expiryDate: doc.expiryDate,
-                metadata: { companyName: company.name, docLabel: doc.label },
+                metadata: {
+                    companyName: company.name,
+                    docLabel: doc.label,
+                    detailUrl: location.detailUrl,
+                },
             });
         }
     }
@@ -633,6 +649,7 @@ const syncOneEmployeeExpiryDashboardTasks = async (employee) => {
             label: buildEmployeeManualDocumentExpiryLabel(d),
             expiryDate: d.expiryDate,
             isCertificate: String(d?.context || "").toLowerCase() === "certificate",
+            documentRow: d,
         });
     });
     if (employee?.contractExpiryDate) {
@@ -715,6 +732,7 @@ const processEmployeeReminders = async () => {
                 label: buildEmployeeManualDocumentExpiryLabel(d),
                 expiryDate: d.expiryDate,
                 isCertificate: String(d?.context || "").toLowerCase() === "certificate",
+                documentRow: d,
             });
         });
         if (employee?.contractExpiryDate) {
@@ -785,14 +803,16 @@ const processEmployeeReminders = async () => {
             if (alreadySent) continue;
 
             const stageLabel = getReminderStageLabel(emailStage);
+            const location = buildEmployeeExpiryEmailLocation({ employee, doc });
             const subject = `Employee document expiry ${stageLabel}: ${subjectName}`;
             const html = `
-                <div style="font-family: Arial, sans-serif; line-height: 1.6;">
-                    <h3>Employee Document Expiry Reminder (${stageLabel})</h3>
-                    <p><strong>Employee:</strong> ${subjectName} (${employee.employeeId})</p>
-                    <p><strong>Document:</strong> ${doc.label}</p>
-                    <p><strong>Expiry Date:</strong> ${new Date(doc.expiryDate).toLocaleDateString("en-GB")}</p>
-                    <p><strong>Current lead time:</strong> ${days} day(s) before expiry.</p>
+                <div style="font-family: Arial, sans-serif; line-height: 1.6; color:#0f172a;">
+                    <h3 style="margin:0 0 12px;">Employee Document Expiry Reminder (${escapeExpiryEmailHtml(stageLabel)})</h3>
+                    <p style="margin:0 0 8px;"><strong>Employee:</strong> ${escapeExpiryEmailHtml(subjectName)} (${escapeExpiryEmailHtml(employee.employeeId)})</p>
+                    <p style="margin:0 0 8px;"><strong>Document:</strong> ${escapeExpiryEmailHtml(doc.label)}</p>
+                    <p style="margin:0 0 8px;"><strong>Expiry Date:</strong> ${escapeExpiryEmailHtml(new Date(doc.expiryDate).toLocaleDateString("en-GB"))}</p>
+                    <p style="margin:0 0 8px;"><strong>Current lead time:</strong> ${escapeExpiryEmailHtml(days)} day(s) before expiry.</p>
+                    ${renderExpiryEmailLocationBlock(location)}
                     <p style="margin-top:12px;color:#555;font-size:13px;"><em>This email is sent to <strong>Admin</strong>, designated <strong>HR</strong> on the organizational flowchart, and the employee&rsquo;s <strong>primary reportee</strong>. Follow-up tasks are assigned only to designated HR.</em></p>
                 </div>
             `;
@@ -809,7 +829,11 @@ const processEmployeeReminders = async () => {
                 docKey,
                 daysBefore: emailStage,
                 expiryDate: doc.expiryDate,
-                metadata: { employeeId: employee.employeeId, docLabel: doc.label },
+                metadata: {
+                    employeeId: employee.employeeId,
+                    docLabel: doc.label,
+                    detailUrl: location.detailUrl,
+                },
             });
         }
     }
@@ -940,17 +964,17 @@ const processVehicleReminders = async () => {
             if (alreadySent) continue;
 
             const stageLabel = getReminderStageLabel(emailStage);
-            const detailUrl = `${resolveFrontendBaseUrl()}/HRM/Asset/Vehicle/details/${asset._id}?tab=${encodeURIComponent(resolveVehicleExpiryTab(doc.docType))}&focusCard=${encodeURIComponent(resolveVehicleExpiryFocusCard(doc.docType))}`;
+            const location = buildVehicleExpiryEmailLocation({ asset, doc });
             const subject = `Vehicle document expiry ${stageLabel}: ${vehicleLabel}`;
             const html = `
-                <div style="font-family: Arial, sans-serif; line-height: 1.6;">
-                    <h3>Vehicle Document Expiry Reminder (${stageLabel})</h3>
-                    <p><strong>Vehicle:</strong> ${vehicleLabel}</p>
-                    <p><strong>Document:</strong> ${doc.label}</p>
-                    <p><strong>Expiry Date:</strong> ${new Date(doc.expiryDate).toLocaleDateString("en-GB")}</p>
-                    <p><strong>Current lead time:</strong> ${days} day(s) before expiry.</p>
+                <div style="font-family: Arial, sans-serif; line-height: 1.6; color:#0f172a;">
+                    <h3 style="margin:0 0 12px;">Vehicle Document Expiry Reminder (${escapeExpiryEmailHtml(stageLabel)})</h3>
+                    <p style="margin:0 0 8px;"><strong>Vehicle:</strong> ${escapeExpiryEmailHtml(vehicleLabel)}</p>
+                    <p style="margin:0 0 8px;"><strong>Document:</strong> ${escapeExpiryEmailHtml(doc.label)}</p>
+                    <p style="margin:0 0 8px;"><strong>Expiry Date:</strong> ${escapeExpiryEmailHtml(new Date(doc.expiryDate).toLocaleDateString("en-GB"))}</p>
+                    <p style="margin:0 0 8px;"><strong>Current lead time:</strong> ${escapeExpiryEmailHtml(days)} day(s) before expiry.</p>
+                    ${renderExpiryEmailLocationBlock(location)}
                     <p style="margin-top:12px;color:#555;font-size:13px;"><em>This email is sent to the designated <strong>Admin Officer</strong> and <strong>HR</strong> on the organizational flowchart. Follow-up tasks are assigned only to designated HR.</em></p>
-                    <p><a href="${detailUrl}">Open vehicle profile</a></p>
                 </div>
             `;
 
@@ -966,7 +990,11 @@ const processVehicleReminders = async () => {
                 docKey,
                 daysBefore: emailStage,
                 expiryDate: doc.expiryDate,
-                metadata: { assetId: asset.assetId, docLabel: doc.label },
+                metadata: {
+                    assetId: asset.assetId,
+                    docLabel: doc.label,
+                    detailUrl: location.detailUrl,
+                },
             });
         }
     }

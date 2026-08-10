@@ -72,7 +72,11 @@ import {
 } from '../utils/getDepartmentHOD.js';
 import { isUserAdministrator, hasPermission } from '../services/permissionService.js';
 import { isJwtSystemSuperUser } from '../utils/systemSuperUser.js';
-import { actorMayManageOilService, actorMayCreateOrInitiateVehicleService } from '../utils/oilServiceWorkflow.js';
+import {
+    actorMayManageOilService,
+    actorMayCreateOrInitiateVehicleService,
+    userIsOilServiceAccounts,
+} from '../utils/oilServiceWorkflow.js';
 
 const normEmp = (s) => (s || '').toString().toLowerCase().replace(/\s+/g, '');
 
@@ -532,6 +536,20 @@ const requireAssetFullAccess = async (req, res, next) => {
                         () => false,
                     );
                     if (mayManage) return next();
+
+                    // Flowchart Accounts is not in actorMayManageOilService (by design — that
+                    // gate is initiate/manage). Without this, Accounts Approve hit the assigned
+                    // employee / primary-reportee 403 before the controller could authorize.
+                    // Controllers still enforce stage + Accounts role.
+                    const isAccountsServiceAction =
+                        /\/oil-accounts-quote-approve$/i.test(pathNoQuery) ||
+                        /\/garage-zoho-bill$/i.test(pathNoQuery);
+                    if (isAccountsServiceAction) {
+                        const isAccountsUser = await userIsOilServiceAccounts(req.user).catch(
+                            () => false,
+                        );
+                        if (isAccountsUser) return next();
+                    }
                 }
             }
         }

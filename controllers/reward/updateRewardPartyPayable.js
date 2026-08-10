@@ -108,6 +108,7 @@ export const updateRewardPartyPayable = async (req, res) => {
                     reward.zohoSyncError = "";
                     reward.rewardStatus = "Approved (Paid)";
                     reward.approvalStatus = "Approved (Paid)";
+                    reward.paymentStatus = "Billed";
                     if (amount > 0) reward.paidAmount = amount;
                     const accountsStep = (reward.workflow || []).find((w) => w.role === "Accounts");
                     if (accountsStep) {

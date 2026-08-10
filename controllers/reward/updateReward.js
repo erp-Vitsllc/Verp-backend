@@ -629,8 +629,8 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
 
             if (nextInternalStage === 'Pending Accounts') {
                 console.log(`[UpdateReward] Transitioning to Pending Accounts`);
-                // Management approved — payment awaits Accounts → Zoho Expense
-                reward.paymentStatus = 'Not Paid';
+                // Management approved — payment awaits Accounts → Zoho Expense (Billed)
+                reward.paymentStatus = 'Pending';
                 const targetHOD = await getDepartmentHOD('accounts', hodContext);
                 if (targetHOD && approverDetails) {
                     const hodUser = await User.findOne({ employeeId: targetHOD.employeeId });
@@ -905,7 +905,7 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
                     publicStatus = 'Pending Accounts';
                     reward.approvalStatus = 'Pending Accounts';
                     reward.rewardStatus = 'Pending Accounts';
-                    reward.paymentStatus = 'Not Paid';
+                    reward.paymentStatus = 'Pending';
                     reward.paidAmount = 0;
                     console.warn(
                         '[UpdateReward] Accounts approve blocked — Zoho Expense failed; status remains Pending Accounts',
@@ -947,6 +947,7 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
                     if (finalStatus === 'Approved (Paid)') {
                         reward.rewardStatus = 'Approved (Paid)';
                         reward.approvalStatus = 'Approved (Paid)';
+                        reward.paymentStatus = 'Billed';
                         const dueAmount = parseFloat(reward.amount || 0);
                         if (dueAmount > 0) {
                             reward.paidAmount = dueAmount;
@@ -954,6 +955,17 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
                     } else {
                         finalStatus = 'Approved';
                         reward.rewardStatus = 'Approved';
+                        if (
+                            reward.rewardType === 'Cash Reward' ||
+                            reward.rewardType === 'Gift Reward' ||
+                            parseFloat(reward.amount || 0) > 0
+                        ) {
+                            if (!String(reward.zohoExpenseId || '').trim()) {
+                                reward.paymentStatus = reward.paymentStatus || 'Pending';
+                            }
+                        } else {
+                            reward.paymentStatus = 'N/A';
+                        }
                     }
 
                     // Update skipped/pending workflows to Approved
