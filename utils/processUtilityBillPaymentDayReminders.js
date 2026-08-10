@@ -1,3 +1,5 @@
+import crypto from 'crypto';
+import mongoose from 'mongoose';
 import UtilityBillPaymentDay from '../models/UtilityBillPaymentDay.js';
 import UtilityBillPaymentDayReminderLog from '../models/UtilityBillPaymentDayReminderLog.js';
 import DashboardAction from '../models/DashboardAction.js';
@@ -7,6 +9,12 @@ import { sendUtilityBillPaymentDayEmail } from './sendUtilityBillPaymentDayEmail
 const REQUEST_TYPE = 'Utility Bill Payment Reminder';
 /** Only fire when payable date == today (no T-10 / T-5 advance emails). */
 const DUE_TODAY_STAGE = 0;
+
+/** DashboardAction.requestId is ObjectId — derive a stable id from the reminder key. */
+function requestObjectId(key) {
+    const hex = crypto.createHash('md5').update(String(key)).digest('hex').slice(0, 24);
+    return new mongoose.Types.ObjectId(hex);
+}
 
 function startOfDay(d) {
     const x = new Date(d);
@@ -18,6 +26,12 @@ function yearMonthKey(d) {
     const y = d.getFullYear();
     const m = String(d.getMonth() + 1).padStart(2, '0');
     return `${y}-${m}`;
+}
+
+export function utilityBillPaymentDayRequestId(entryId, yearMonth, daysBefore = DUE_TODAY_STAGE) {
+    return requestObjectId(
+        `utility-bill-payment-day:${String(entryId || '').trim()}:${yearMonth}:${daysBefore}`,
+    );
 }
 
 /** Clamp payment day to last day of month. */
@@ -68,10 +82,14 @@ async function markSent(entryId, yearMonth, daysBefore, dueDate) {
     }
 }
 
-async function createHrBell({ record, dueDate, hr }) {
+async function createHrBell({ record, dueDate, hr, yearMonth }) {
     if (!hr?._id) return;
     const dueLabel = dueDate.toLocaleDateString('en-GB');
-    const requestId = `${record.entryId}:${yearMonthKey(dueDate)}:${DUE_TODAY_STAGE}`;
+    const requestId = utilityBillPaymentDayRequestId(
+        record.entryId,
+        yearMonth || yearMonthKey(dueDate),
+        DUE_TODAY_STAGE,
+    );
 
     await DashboardAction.findOneAndUpdate(
         { requestId, requestType: REQUEST_TYPE },
@@ -79,8 +97,9 @@ async function createHrBell({ record, dueDate, hr }) {
             requestId,
             requestType: REQUEST_TYPE,
             assignedTo: hr._id,
+            assignedToEmpId: hr.employeeId || undefined,
             status: 'Pending',
-            subjectEmployee: hr._id,
+            subjectEmployeeId: hr.employeeId || undefined,
             subjectName: `${hr.firstName || ''} ${hr.lastName || ''}`.trim() || 'HR',
             requestedByName: 'System',
             extra1: `${record.utilityType || 'Utility'} · Day ${record.paymentDay}`,
@@ -89,7 +108,7 @@ async function createHrBell({ record, dueDate, hr }) {
                 entryId: record.entryId,
                 paymentDay: record.paymentDay,
                 daysBefore: DUE_TODAY_STAGE,
-                yearMonth: yearMonthKey(dueDate),
+                yearMonth: yearMonth || yearMonthKey(dueDate),
                 detailsPath: `/HRM/Asset/UtilityBills/details/${encodeURIComponent(String(record.entryId))}`,
             }),
         },
@@ -111,31 +130,40 @@ export async function processUtilityBillPaymentDayReminders() {
         }
 
         for (const record of records) {
-            const { daysUntil, dueDate, yearMonth } = daysUntilPaymentDay(record.paymentDay);
-            if (daysUntil !== DUE_TODAY_STAGE) continue;
+            try {
+                const { daysUntil, dueDate, yearMonth } = daysUntilPaymentDay(record.paymentDay);
+                if (daysUntil !== DUE_TODAY_STAGE) continue;
 
-            const already = await wasSent(record.entryId, yearMonth, DUE_TODAY_STAGE);
-            if (already) continue;
+                const already = await wasSent(record.entryId, yearMonth, DUE_TODAY_STAGE);
+                if (already) continue;
 
-            const dueDateLabel = dueDate.toLocaleDateString('en-GB');
+                const dueDateLabel = dueDate.toLocaleDateString('en-GB');
 
-            if (hr) {
-                await sendUtilityBillPaymentDayEmail({
-                    recipient: hr,
-                    record,
-                    dueDateLabel,
-                });
-                await createHrBell({
-                    record,
-                    dueDate,
-                    hr,
-                });
+                if (hr) {
+                    // Bell first — if this fails, do not mark sent / spam email without a notification.
+                    await createHrBell({
+                        record,
+                        dueDate,
+                        hr,
+                        yearMonth,
+                    });
+                    await sendUtilityBillPaymentDayEmail({
+                        recipient: hr,
+                        record,
+                        dueDateLabel,
+                    });
+                }
+
+                await markSent(record.entryId, yearMonth, DUE_TODAY_STAGE, dueDate);
+                console.log(
+                    `[UtilityBillPaymentDayReminders] due-today sent for entry ${record.entryId} (day ${record.paymentDay})`,
+                );
+            } catch (entryErr) {
+                console.error(
+                    `[processUtilityBillPaymentDayReminders] entry ${record?.entryId}:`,
+                    entryErr?.message || entryErr,
+                );
             }
-
-            await markSent(record.entryId, yearMonth, DUE_TODAY_STAGE, dueDate);
-            console.log(
-                `[UtilityBillPaymentDayReminders] due-today sent for entry ${record.entryId} (day ${record.paymentDay})`,
-            );
         }
     } catch (err) {
         console.error('[processUtilityBillPaymentDayReminders] Non-fatal error:', err?.message || err);

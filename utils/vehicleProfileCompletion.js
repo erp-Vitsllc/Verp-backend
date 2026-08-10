@@ -9,16 +9,6 @@ function parseDocDescription(doc) {
     }
 }
 
-function isExpiryPast(value) {
-    if (!value) return false;
-    const d = new Date(value);
-    if (Number.isNaN(d.getTime())) return false;
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    d.setHours(0, 0, 0, 0);
-    return d.getTime() < today.getTime();
-}
-
 function isDocumentOld(doc) {
     const meta = parseDocDescription(doc);
     return Boolean(meta?.isOld || meta?.lifecycle === 'old' || meta?.status === 'old');
@@ -54,10 +44,7 @@ export function isVehicleRegistrationCardComplete(asset) {
     const registrationDoc = pickPrimaryLiveDoc(registrationDocs);
     if (!registrationDoc && registrationAttachments.length === 0) return false;
 
-    if (registrationDoc && isExpiryPast(registrationDoc.expiryDate || asset?.registrationExpiryDate)) {
-        return false;
-    }
-
+    // Progress only requires a live card. Expiry is handled by card status + notifications.
     const registrationMeta = parseDocDescription(registrationDoc);
     return Boolean(
         registrationDoc?.issueDate ||
@@ -74,10 +61,7 @@ export function isVehicleInsuranceCardComplete(asset) {
     const insuranceDoc = pickPrimaryLiveDoc(insuranceDocs);
     if (!insuranceDoc && insuranceAttachments.length === 0) return false;
 
-    if (insuranceDoc && isExpiryPast(insuranceDoc.expiryDate || asset?.insuranceExpiryDate)) {
-        return false;
-    }
-
+    // Progress only requires a live card. Expiry is handled by card status + notifications.
     const insuranceMeta = parseDocDescription(insuranceDoc);
     return Boolean(
         insuranceDoc?.issueDate ||

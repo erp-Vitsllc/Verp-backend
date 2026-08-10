@@ -6,12 +6,18 @@ import {
 
 /**
  * Routes fine-approved notifications to the correct email + PDF pipeline.
- * Loss & Damage asset fines use the new Asset Loss Fine Report PDF module.
+ * Loss & Damage asset fines use the Asset Loss Fine Report PDF module.
+ * Garage Vehicle Damage fines (auto-approved after Zoho bill) use the confirmed email.
  */
-export async function dispatchFineApprovedNotification(fine, assignedEmployees, req = null) {
+export async function dispatchFineApprovedNotification(
+    fine,
+    assignedEmployees,
+    req = null,
+    options = {},
+) {
     if (isAssetLossFineReportApplicable(fine)) {
-        await sendAssetLossFineReportEmail(fine, assignedEmployees, req);
+        await sendAssetLossFineReportEmail(fine, assignedEmployees, req, options);
         return;
     }
-    await sendFineConfirmedEmail(fine, assignedEmployees, req);
+    await sendFineConfirmedEmail(fine, assignedEmployees, req, options);
 }

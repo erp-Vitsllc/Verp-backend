@@ -629,22 +629,6 @@ export async function completeMechanicalWorkService(asset, serviceId, serviceUpd
         throw new Error('Hand over date must be on or after the service end date.');
     }
 
-    const {
-        applyServiceBodyConditionReplacements,
-        resolveMappedNewConditionImages,
-    } = await import('./applyServiceBodyConditionReplacements.js');
-    const mappedImages = resolveMappedNewConditionImages({
-        requestImages: serviceUpdates?.newConditionImages,
-        service: completedService,
-    });
-    if (mappedImages.length) {
-        await applyServiceBodyConditionReplacements(asset, {
-            images: mappedImages,
-            serviceTypeLabel: 'Mechanical Work',
-            serviceId,
-        });
-    }
-
     const actorName = await getRequesterName(req.user);
 
     const { routeShopServiceToBillingAfterComplete } = await import('./vehicleShopServiceScheduled.js');

@@ -29,8 +29,8 @@ export function buildFineConfirmedEmailHtml({ greetingName, fineId, fallbackNote
                             ${noteBlock}
                             <p style="margin:0 0 12px;">Dear ${esc(greetingName)},</p>
                             <p style="margin:0 0 12px;">
-                                Your fine has been <strong>approved by Management</strong>.
-                                Please review the Asset Loss Fine Report in the attached PDF for your records.
+                                A fine has been <strong>approved</strong> for you.
+                                Please review the attached PDF for your records.
                             </p>
                             <p style="margin:0;font-size:12px;color:#888;">Fine reference: <strong>${esc(fineId)}</strong></p>
                             <p style="margin:24px 0 0;font-size:11px;color:#999;border-top:1px solid #eee;padding-top:12px;">

@@ -12,15 +12,31 @@ import { resolveCompanyFineAdminRecipient } from './resolveCompanyFineAdminRecip
 
 /**
  * Sends a confirmation email to assigned employees when a fine is fully approved.
- * Email body is a short message; the Asset Loss Fine Report PDF is attached.
+ * TO: each assigned employee; CC: all other assigned employees + HR + Admin (+ stakeholders).
+ * Email body is a short message; the fine report PDF is attached when available.
+ *
+ * @param {object} [options]
+ * @param {Array} [options.ccAssignedEmployees] Extra assignees to CC (e.g. garage bill group parties).
  */
-export const sendFineConfirmedEmail = async (fine, assignedEmployees, req = null) => {
+export const sendFineConfirmedEmail = async (fine, assignedEmployees, req = null, options = {}) => {
     try {
         console.log(`[FineConfirmedEmail] Preparing email for Fine #${fine.fineId}`);
 
-        const employeeIds = assignedEmployees.map((e) => e.employeeId);
+        const fineAssignees = Array.isArray(fine?.assignedEmployees) ? fine.assignedEmployees : [];
+        const extraCcAssignees = Array.isArray(options?.ccAssignedEmployees)
+            ? options.ccAssignedEmployees
+            : [];
+        const allAssigneeRows = [...(assignedEmployees || []), ...fineAssignees, ...extraCcAssignees];
+
+        const employeeIds = [
+            ...new Set(
+                allAssigneeRows
+                    .map((e) => e?.employeeId)
+                    .filter((id) => id && !['VEGA-HR-0000', 'VEGA_INTERNAL'].includes(String(id))),
+            ),
+        ];
         const fullEmployees = await EmployeeBasic.find({ employeeId: { $in: employeeIds } })
-            .select('employeeId firstName lastName companyEmail personalEmail primaryReportee secondaryReportee reportingAuthority')
+            .select('employeeId firstName lastName companyEmail workEmail personalEmail primaryReportee secondaryReportee reportingAuthority')
             .populate('primaryReportee', 'companyEmail workEmail firstName lastName employeeId')
             .populate('secondaryReportee', 'companyEmail workEmail')
             .populate('reportingAuthority', 'companyEmail workEmail');
@@ -30,7 +46,9 @@ export const sendFineConfirmedEmail = async (fine, assignedEmployees, req = null
 
         const ccEmails = new Set();
 
+        // CC every employee assigned on the fine (and any group co-assignees).
         fullEmployees.forEach((emp) => {
+            addEmployeeEmailToSet(ccEmails, emp);
             addEmployeeEmailToSet(ccEmails, emp.primaryReportee);
             addEmployeeEmailToSet(ccEmails, emp.secondaryReportee);
             addEmployeeEmailToSet(ccEmails, emp.reportingAuthority);
@@ -55,6 +73,9 @@ export const sendFineConfirmedEmail = async (fine, assignedEmployees, req = null
 
                 hrHOD = await getDepartmentHOD('hr');
                 addEmployeeEmailToSet(ccEmails, hrHOD);
+
+                const adminHOD = await getDepartmentHOD('admincontroller');
+                addEmployeeEmailToSet(ccEmails, adminHOD);
 
                 accountsHOD = await getDepartmentHOD('finance');
                 addEmployeeEmailToSet(ccEmails, accountsHOD);
@@ -83,7 +104,10 @@ export const sendFineConfirmedEmail = async (fine, assignedEmployees, req = null
             }
         }
 
-        const ccRecipients = Array.from(ccEmails);
+        const buildCcForRecipient = (toMail) => {
+            const skip = String(toMail || '').trim().toLowerCase();
+            return Array.from(ccEmails).filter((email) => String(email).trim().toLowerCase() !== skip);
+        };
 
         const transporter = nodemailer.createTransport({
             host: process.env.SMTP_HOST || 'smtp.office365.com',
@@ -194,7 +218,7 @@ export const sendFineConfirmedEmail = async (fine, assignedEmployees, req = null
                 await transporter.sendMail({
                     fromName: req?.user ? `${req.user.firstName || ''} ${req.user.lastName || ''}`.trim() : 'VERP System',
                     to: adminRecipient.email,
-                    cc: ccRecipients,
+                    cc: buildCcForRecipient(adminRecipient.email),
                     subject: `Company Fine Notification: #${fine.fineId} Approved`,
                     html,
                     attachments: emailAttachments,
@@ -258,7 +282,7 @@ export const sendFineConfirmedEmail = async (fine, assignedEmployees, req = null
             await transporter.sendMail({
                 fromName: req?.user ? `${req.user.firstName || ''} ${req.user.lastName || ''}`.trim() : 'VERP System',
                 to: toMail,
-                cc: ccRecipients,
+                cc: buildCcForRecipient(toMail),
                 subject: `Fine Notification: #${fine.fineId} Approved`,
                 html,
                 attachments: emailAttachments,

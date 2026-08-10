@@ -27,6 +27,10 @@ export const HR_DASHBOARD_REQUEST_TYPES = [
     "Employee Document Not Renew",
     // Vehicle handover assignment inbox (HR stage)
     "Asset Assignment",
+    // Utility Bills (HR stages + sticky payment-day reminders)
+    "Utility Bill Payment",
+    "Utility Bill Payment Reminder",
+    "Utility Entry Status Change",
 ];
 
 const toObjectId = (value) => {
@@ -331,7 +335,13 @@ export async function reroutePendingAccountsResponsibilities({
         {
             assignedTo: oldId,
             status: "Pending",
-            requestType: { $in: ["Vehicle Service Request", "Utility Bill Payment"] },
+            requestType: {
+                $in: [
+                    "Vehicle Service Request",
+                    "Utility Bill Payment",
+                    "Utility Contract Expiry",
+                ],
+            },
         },
         { $set: { assignedTo: newId, ...(newEmpId ? { assignedToEmpId: newEmpId } : {}) } },
     );

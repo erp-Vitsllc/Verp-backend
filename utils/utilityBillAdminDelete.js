@@ -3,6 +3,7 @@ import UtilityBillPayment from '../models/UtilityBillPayment.js';
 import UtilityBillPaymentDay from '../models/UtilityBillPaymentDay.js';
 import UtilityBillPaymentDayReminderLog from '../models/UtilityBillPaymentDayReminderLog.js';
 import UtilityEntryStatusChange from '../models/UtilityEntryStatusChange.js';
+import UtilityEntryAssignmentHistory from '../models/UtilityEntryAssignmentHistory.js';
 import UtilityConfig from '../models/UtilityConfig.js';
 import DashboardAction from '../models/DashboardAction.js';
 import { isJwtSystemSuperUser } from './systemSuperUser.js';
@@ -68,11 +69,12 @@ export async function buildUtilityEntryDeletionSnapshot(entryId) {
     const entry = await UtilityEntry.findById(id).lean();
     if (!entry) return null;
 
-    const [bills, paymentDays, statusChanges, reminderLogs] = await Promise.all([
+    const [bills, paymentDays, statusChanges, reminderLogs, assignmentHistory] = await Promise.all([
         UtilityBillPayment.find({ entryId: id }).lean(),
         UtilityBillPaymentDay.find({ entryId: id }).lean(),
         UtilityEntryStatusChange.find({ entryId: id }).lean(),
         UtilityBillPaymentDayReminderLog.find({ entryId: id }).lean(),
+        UtilityEntryAssignmentHistory.find({ entryId: id }).lean(),
     ]);
 
     const accountNo =
@@ -87,6 +89,7 @@ export async function buildUtilityEntryDeletionSnapshot(entryId) {
         paymentDays,
         statusChanges,
         reminderLogs,
+        assignmentHistory,
         entryId: id,
         utilityType: entry.type || '',
         accountNo,
@@ -167,6 +170,7 @@ export async function cascadeDeleteUtilityEntry(entryId, { req, skipArchive = fa
         UtilityBillPaymentDay.deleteMany({ entryId: id }),
         UtilityBillPaymentDayReminderLog.deleteMany({ entryId: id }),
         UtilityEntryStatusChange.deleteMany({ entryId: id }),
+        UtilityEntryAssignmentHistory.deleteMany({ entryId: id }),
         UtilityEntry.deleteOne({ _id: entry._id }),
         clearBillBatchDashboard(batchIds),
         clearStatusChangeDashboard(statusChanges.map((s) => s._id)),

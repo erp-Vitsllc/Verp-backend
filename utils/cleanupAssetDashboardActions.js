@@ -156,9 +156,10 @@ const HANDOVER_HISTORY_LINKED_INBOX_TYPES = new Set(['Vehicle Inspection', 'Asse
 /**
  * Drop (and permanently dismiss) pending inbox rows whose extra3.historyId
  * points at a handover that no longer exists (e.g. Super User deleted the row).
+ * Always returns a new array — callers often clear the input with `.length = 0`.
  */
 export async function dismissOrphanedHandoverHistoryInboxRows(rows, parseExtra3) {
-    if (!Array.isArray(rows) || !rows.length) return rows || [];
+    if (!Array.isArray(rows) || !rows.length) return [];
     const parse =
         typeof parseExtra3 === 'function'
             ? parseExtra3
@@ -171,7 +172,9 @@ export async function dismissOrphanedHandoverHistoryInboxRows(rows, parseExtra3)
         const hid = meta?.historyId != null ? String(meta.historyId).trim() : '';
         if (hid && mongoose.Types.ObjectId.isValid(hid)) historyIds.push(hid);
     }
-    if (!historyIds.length) return rows;
+    // CRITICAL: copy the array. Returning `rows` then doing `rows.length = 0` in the
+    // caller would wipe Tools / Utility / bulk-assignment bells (same reference).
+    if (!historyIds.length) return rows.slice();
 
     const existing = await AssetHistory.find({
         _id: { $in: [...new Set(historyIds)].map((id) => new mongoose.Types.ObjectId(id)) },

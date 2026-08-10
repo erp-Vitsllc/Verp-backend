@@ -1,6 +1,8 @@
 import UtilityEntry from '../../models/UtilityEntry.js';
 import UtilityConfig from '../../models/UtilityConfig.js';
 import UtilityBillPaymentDay from '../../models/UtilityBillPaymentDay.js';
+import UtilityEntryAssignmentHistory from '../../models/UtilityEntryAssignmentHistory.js';
+import EmployeeBasic from '../../models/EmployeeBasic.js';
 import {
     cascadeDeleteUtilityEntry,
     isUtilityAdminSuperUser,
@@ -21,6 +23,30 @@ function nameRegex(name) {
 
 function userId(req) {
     return req.user?.id || req.user?._id || null;
+}
+
+function empDisplayName(emp) {
+    if (!emp) return '';
+    return `${emp.firstName || ''} ${emp.lastName || ''}`.trim() || emp.employeeId || 'User';
+}
+
+async function resolveActorName(req) {
+    const select = 'firstName lastName employeeId';
+    try {
+        const user = req.user || {};
+        if (user.employeeObjectId) {
+            const emp = await EmployeeBasic.findById(user.employeeObjectId).select(select).lean();
+            if (emp) return empDisplayName(emp);
+        }
+        const rawId = user.id || user._id;
+        if (rawId) {
+            const byOid = await EmployeeBasic.findById(rawId).select(select).lean();
+            if (byOid) return empDisplayName(byOid);
+        }
+    } catch {
+        // fall through
+    }
+    return String(req.user?.name || '').trim() || 'User';
 }
 
 function normalizePaymentDay(values = {}) {
@@ -62,6 +88,65 @@ function mapEntry(doc) {
     };
 }
 
+function mapAssignmentHistory(doc) {
+    if (!doc) return null;
+    const o = doc.toObject ? doc.toObject() : doc;
+    return {
+        id: String(o._id),
+        entryId: String(o.entryId || ''),
+        utilityType: o.utilityType || '',
+        action: o.action || '',
+        fromAssignedTo: o.fromAssignedTo || '',
+        fromAssignedToType: o.fromAssignedToType || '',
+        fromAssignedToId: o.fromAssignedToId || '',
+        toAssignedTo: o.toAssignedTo || '',
+        toAssignedToType: o.toAssignedToType || '',
+        toAssignedToId: o.toAssignedToId || '',
+        performedBy: o.performedBy || null,
+        performedByName: o.performedByName || '',
+        note: o.note || '',
+        occurredAt: o.occurredAt || o.createdAt || null,
+        createdAt: o.createdAt || null,
+    };
+}
+
+async function recordAssignmentHistory({
+    entry,
+    action,
+    fromAssignedTo = '',
+    fromAssignedToType = '',
+    fromAssignedToId = '',
+    toAssignedTo = '',
+    toAssignedToType = '',
+    toAssignedToId = '',
+    performedBy = null,
+    performedByName = '',
+    note = '',
+    occurredAt = null,
+}) {
+    return UtilityEntryAssignmentHistory.create({
+        entryId: String(entry?.id || entry?._id || ''),
+        utilityType: entry?.type || '',
+        action,
+        fromAssignedTo: String(fromAssignedTo || '').trim(),
+        fromAssignedToType:
+            fromAssignedToType === 'Company' || fromAssignedToType === 'Employee'
+                ? fromAssignedToType
+                : '',
+        fromAssignedToId: String(fromAssignedToId || '').trim(),
+        toAssignedTo: String(toAssignedTo || '').trim(),
+        toAssignedToType:
+            toAssignedToType === 'Company' || toAssignedToType === 'Employee'
+                ? toAssignedToType
+                : '',
+        toAssignedToId: String(toAssignedToId || '').trim(),
+        performedBy: performedBy || null,
+        performedByName: String(performedByName || '').trim(),
+        note: String(note || '').trim(),
+        occurredAt: occurredAt ? new Date(occurredAt) : new Date(),
+    });
+}
+
 async function syncPaymentDay(entry) {
     const mapped = mapEntry(entry);
     const paymentDay = Number(mapped?.values?.paymentDay);
@@ -100,6 +185,25 @@ export async function listUtilityEntries(req, res) {
     } catch (err) {
         console.error('[listUtilityEntries]', err);
         return res.status(500).json({ message: err?.message || 'Failed to load entries' });
+    }
+}
+
+/** GET /api/UtilityBill/entries/:id/assignment-history */
+export async function listUtilityEntryAssignmentHistory(req, res) {
+    try {
+        const entryId = String(req.params.id || '').trim();
+        if (!entryId) {
+            return res.status(400).json({ message: 'Entry id is required.' });
+        }
+
+        const rows = await UtilityEntryAssignmentHistory.find({ entryId })
+            .sort({ occurredAt: -1, createdAt: -1 })
+            .lean();
+
+        return res.json({ history: rows.map(mapAssignmentHistory) });
+    } catch (err) {
+        console.error('[listUtilityEntryAssignmentHistory]', err);
+        return res.status(500).json({ message: err?.message || 'Failed to load assignment history' });
     }
 }
 
@@ -175,6 +279,7 @@ export async function updateUtilityEntry(req, res) {
         if (!doc) return res.status(404).json({ message: 'Entry not found.' });
 
         const body = req.body || {};
+        const prevAssignedTo = String(doc.assignedTo || '').trim();
         const prevAssignedToId = String(doc.assignedToId || '').trim();
         const prevAssignedToType = String(doc.assignedToType || '').trim();
 
@@ -220,24 +325,58 @@ export async function updateUtilityEntry(req, res) {
             );
         }
 
+        const nextAssignedTo = String(mapped.assignedTo || '').trim();
         const nextAssignedToId = String(mapped.assignedToId || '').trim();
         const nextAssignedToType = String(mapped.assignedToType || '').trim();
+        const assignmentTouched =
+            body.assignedTo !== undefined ||
+            body.assignedToId !== undefined ||
+            body.assignedToType !== undefined ||
+            body.assignedAt !== undefined;
         const assignmentChanged =
-            nextAssignedToId &&
+            assignmentTouched &&
             (nextAssignedToId !== prevAssignedToId ||
-                nextAssignedToType !== prevAssignedToType);
+                nextAssignedToType !== prevAssignedToType ||
+                nextAssignedTo !== prevAssignedTo);
 
         if (assignmentChanged) {
-            const isReassign = Boolean(prevAssignedToId);
-            sendUtilityAssignmentEmail({
+            let action = 'assign';
+            if (prevAssignedToId && !nextAssignedToId) action = 'return';
+            else if (prevAssignedToId && nextAssignedToId) action = 'reassign';
+
+            const performedByName = await resolveActorName(req);
+            recordAssignmentHistory({
                 entry: mapped,
-                assignedToType: nextAssignedToType || 'Employee',
-                assignedToId: nextAssignedToId,
-                assignedToName: mapped.assignedTo || '',
-                isReassign,
+                action,
+                fromAssignedTo: prevAssignedTo,
+                fromAssignedToType: prevAssignedToType,
+                fromAssignedToId: prevAssignedToId,
+                toAssignedTo: nextAssignedTo,
+                toAssignedToType: nextAssignedToType,
+                toAssignedToId: nextAssignedToId,
+                performedBy: userId(req),
+                performedByName,
+                note: String(body.assignmentNote || body.note || '').trim(),
+                occurredAt: mapped.assignedAt || new Date(),
             }).catch((e) =>
-                console.error('[updateUtilityEntry] assignment email', e?.message || e),
+                console.error('[updateUtilityEntry] assignment history', e?.message || e),
             );
+
+            if (nextAssignedToId || action === 'return') {
+                sendUtilityAssignmentEmail({
+                    entry: mapped,
+                    assignedToType: nextAssignedToType || 'Employee',
+                    assignedToId: nextAssignedToId,
+                    assignedToName: mapped.assignedTo || '',
+                    previousAssignedToType: prevAssignedToType,
+                    previousAssignedToId: prevAssignedToId,
+                    previousAssignedToName: prevAssignedTo,
+                    isReassign: action === 'reassign',
+                    action,
+                }).catch((e) =>
+                    console.error('[updateUtilityEntry] assignment email', e?.message || e),
+                );
+            }
         }
 
         return res.json({ ok: true, entry: mapped });

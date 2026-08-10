@@ -14,8 +14,11 @@
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import User from '../models/User.js';
 import Fine from '../models/Fine.js';
+import Company from '../models/Company.js';
 import { getDepartmentHOD } from './getDepartmentHOD.js';
 import { generateFineIdInternal } from '../controllers/fine/addFine.js';
+import { dispatchFineApprovedNotification } from './dispatchFineApprovedNotification.js';
+import { isCompanyFineParty } from './fineGroupClassification.js';
 
 const COMPANY_PARTY_ID = 'VEGA-HR-0000';
 const SUPPORTED_LABELS = new Set([
@@ -218,6 +221,31 @@ async function createFineGroupForBillUnit({
     let companyObjectId = null;
     let companyName = '';
 
+    const partyCompanyId = String(remark.companyPayPartyId || '').trim();
+    const partyCompanyName = String(
+        remark.companyPayPartyName || remark.companyName || '',
+    ).trim();
+    if (partyCompanyId && /^[a-fA-F0-9]{24}$/.test(partyCompanyId)) {
+        const companyDoc = await Company.findById(partyCompanyId)
+            .select('name nickName companyName companyShortName tradeName')
+            .lean()
+            .catch(() => null);
+        if (companyDoc?._id) {
+            companyObjectId = companyDoc._id;
+            companyName =
+                companyDoc.nickName ||
+                companyDoc.companyShortName ||
+                companyDoc.companyName ||
+                companyDoc.tradeName ||
+                companyDoc.name ||
+                partyCompanyName ||
+                '';
+        }
+    }
+    if (!companyName && partyCompanyName && !/^Company$/i.test(partyCompanyName)) {
+        companyName = partyCompanyName;
+    }
+
     for (let i = 0; i < parties.length; i += 1) {
         const party = parties[i];
         let emp = null;
@@ -247,14 +275,17 @@ async function createFineGroupForBillUnit({
         }
 
         const empName = party.isCompany
-            ? party.partyName || 'Company'
+            ? party.partyName || companyName || 'Company'
             : `${emp?.firstName || ''} ${emp?.lastName || ''}`.trim() ||
               party.partyName ||
               party.employeeId;
 
         if (!companyObjectId && emp?.company?._id) {
             companyObjectId = emp.company._id;
-            companyName = emp.company.nickName || emp.company.companyName || emp.company.name || '';
+            if (!companyName) {
+                companyName =
+                    emp.company.nickName || emp.company.companyName || emp.company.name || '';
+            }
         }
 
         // Company share settled by Zoho bill → Paid.
@@ -402,6 +433,32 @@ export async function createGarageZohoBillVehicleDamageFines({
         remark.vehicleDamageFinesCreatedAt = new Date().toISOString();
         service.remark = JSON.stringify(remark);
         asset.markModified('services');
+    }
+
+    // Notify each fined employee; CC all co-assigned employees + HR + Admin.
+    const reqLike = reqUser ? { user: reqUser } : null;
+    const groupEmployeeParties = [];
+    for (const fine of allCreated) {
+        const parties = Array.isArray(fine.assignedEmployees) ? fine.assignedEmployees : [];
+        for (const party of parties) {
+            if (!isCompanyFineParty(party)) groupEmployeeParties.push(party);
+        }
+    }
+    for (const fine of allCreated) {
+        const parties = Array.isArray(fine.assignedEmployees) ? fine.assignedEmployees : [];
+        const employeeParties = parties.filter((p) => !isCompanyFineParty(p));
+        if (!employeeParties.length) continue;
+        try {
+            await dispatchFineApprovedNotification(fine, employeeParties, reqLike, {
+                ccAssignedEmployees: groupEmployeeParties,
+            });
+        } catch (err) {
+            console.error(
+                '[GarageZohoFine] Fine approved email failed for',
+                fine.fineId,
+                err?.message || err,
+            );
+        }
     }
 
     return {

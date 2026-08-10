@@ -41,6 +41,7 @@ import {
     createUtilityEntry,
     updateUtilityEntry,
     deleteUtilityEntry,
+    listUtilityEntryAssignmentHistory,
 } from '../controllers/utilityBill/utilityEntryController.js';
 
 const router = express.Router();
@@ -62,6 +63,7 @@ router.delete('/configs/:id', deleteUtilityConfig);
 
 router.get('/entries', listUtilityEntries);
 router.post('/entries', createUtilityEntry);
+router.get('/entries/:id/assignment-history', listUtilityEntryAssignmentHistory);
 router.get('/entries/:id', getUtilityEntry);
 router.put('/entries/:id', updateUtilityEntry);
 router.delete('/entries/:id', deleteUtilityEntry);

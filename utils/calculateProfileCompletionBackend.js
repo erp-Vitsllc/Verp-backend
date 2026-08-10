@@ -311,12 +311,7 @@ export const calculateProfileCompletionBackend = (employee = {}) => {
         pendingFields.push({ section: 'Work Details', field: 'Date of Joining' });
     }
 
-    totalFields++;
-    if (checkField(employee.contractJoiningDate)) {
-        completedFields++;
-    } else {
-        pendingFields.push({ section: 'Work Details', field: 'Contract Joining Date' });
-    }
+    // Contract Joining Date is auto-derived from visa — not required for 100% profile progress.
 
     // Skip Primary Reportee check for General Manager or CEO (Management)
     const isManagementExempt = (employee.department && /management/i.test(employee.department)) &&

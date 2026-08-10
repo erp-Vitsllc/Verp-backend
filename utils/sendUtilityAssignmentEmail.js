@@ -2,10 +2,12 @@ import nodemailer from 'nodemailer';
 import { emailFrontendUrl } from './resolveFrontendBaseUrl.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import Company from '../models/Company.js';
+import { getDepartmentHOD } from './getDepartmentHOD.js';
 import {
     resolveEmployeeEmailWithReporteeLoaded,
     employeeDisplayName,
     getFallbackEmailNote,
+    resolveEmployeeEmail,
 } from './resolveEmployeeEmail.js';
 
 function createTransport() {
@@ -31,106 +33,101 @@ function entrySummaryLines(entry = {}) {
     };
 }
 
-/**
- * Notify the assignment target when a utility entry is assigned / reassigned.
- * Employee: company email → else primary reportee business email.
- * Company: company.email.
- */
-export async function sendUtilityAssignmentEmail({
-    entry,
-    assignedToType = 'Employee',
-    assignedToId = '',
-    assignedToName = '',
-    isReassign = false,
-} = {}) {
-    try {
-        const transporter = createTransport();
-        if (!transporter) {
-            console.warn('[UtilityAssignmentEmail] SMTP credentials missing.');
-            return;
-        }
+function normalizeAction(action, isReassign) {
+    const key = String(action || '').trim().toLowerCase();
+    if (key === 'return' || key === 'reassign' || key === 'assign') return key;
+    return isReassign ? 'reassign' : 'assign';
+}
 
-        const type = String(assignedToType || 'Employee').trim();
-        const id = String(assignedToId || '').trim();
-        if (!id) {
-            console.warn('[UtilityAssignmentEmail] No assignedToId — skip email.');
-            return;
-        }
+function actionLabels(action) {
+    if (action === 'return') {
+        return { word: 'Returned', lower: 'returned', subjectVerb: 'Returned (Unassigned)' };
+    }
+    if (action === 'reassign') {
+        return { word: 'Reassigned', lower: 'reassigned', subjectVerb: 'Reassigned' };
+    }
+    return { word: 'Assigned', lower: 'assigned', subjectVerb: 'Assigned' };
+}
 
-        let recipientEmail = null;
-        let greetName = assignedToName || 'there';
-        let fallbackNoteHtml = '';
-        let subjectTarget = assignedToName || 'assignee';
+async function resolvePartyEmail({ type, id, name }) {
+    const kind = String(type || 'Employee').trim();
+    const partyId = String(id || '').trim();
+    if (!partyId) return null;
 
-        if (type === 'Company') {
-            const company = await Company.findById(id).select('name companyId email').lean();
-            recipientEmail = String(company?.email || '').trim() || null;
-            greetName = company?.name || assignedToName || 'Company';
-            subjectTarget = greetName;
-            if (!recipientEmail) {
-                console.warn(
-                    `[UtilityAssignmentEmail] Company ${id} has no email — skip.`,
-                );
-                return;
-            }
-        } else {
-            const employee = await EmployeeBasic.findById(id)
-                .select(
-                    'firstName lastName employeeId companyEmail workEmail primaryReportee status profileStatus',
-                )
-                .populate(
-                    'primaryReportee',
-                    'firstName lastName employeeId companyEmail workEmail status profileStatus',
-                )
-                .lean();
+    if (kind === 'Company') {
+        const company = await Company.findById(partyId).select('name companyId email').lean();
+        const email = String(company?.email || '').trim() || null;
+        if (!email) return null;
+        return {
+            email,
+            greetName: company?.name || name || 'Company',
+            subjectTarget: company?.name || name || 'Company',
+            fallbackNoteHtml: '',
+        };
+    }
 
-            if (!employee) {
-                console.warn(`[UtilityAssignmentEmail] Employee ${id} not found — skip.`);
-                return;
-            }
+    const employee = await EmployeeBasic.findById(partyId)
+        .select(
+            'firstName lastName employeeId companyEmail workEmail primaryReportee status profileStatus',
+        )
+        .populate(
+            'primaryReportee',
+            'firstName lastName employeeId companyEmail workEmail status profileStatus',
+        )
+        .lean();
 
-            const { email, isFallbackToReportee, employee: resolved } =
-                await resolveEmployeeEmailWithReporteeLoaded(employee);
+    if (!employee) return null;
 
-            recipientEmail = email;
-            if (!recipientEmail) {
-                console.warn(
-                    `[UtilityAssignmentEmail] No company/work email for ${employee.employeeId} and no primary reportee business email — skip.`,
-                );
-                return;
-            }
+    const { email, isFallbackToReportee, employee: resolved } =
+        await resolveEmployeeEmailWithReporteeLoaded(employee);
+    if (!email) return null;
 
-            const empName = employeeDisplayName(employee);
-            subjectTarget = empName;
-            greetName = isFallbackToReportee
-                ? employeeDisplayName(resolved?.primaryReportee || employee.primaryReportee)
-                : empName;
+    const empName = employeeDisplayName(employee);
+    const greetName = isFallbackToReportee
+        ? employeeDisplayName(resolved?.primaryReportee || employee.primaryReportee)
+        : empName;
 
-            if (isFallbackToReportee) {
-                fallbackNoteHtml = getFallbackEmailNote(
-                    empName,
-                    greetName,
-                );
-            }
-        }
+    return {
+        email,
+        greetName,
+        subjectTarget: empName,
+        fallbackNoteHtml: isFallbackToReportee ? getFallbackEmailNote(empName, greetName) : '',
+    };
+}
 
-        const summary = entrySummaryLines(entry);
-        const actionWord = isReassign ? 'Reassigned' : 'Assigned';
-        const frontendUrl = emailFrontendUrl();
-        const detailsPath = `/HRM/Asset/UtilityBills/details/${encodeURIComponent(String(entry.id || entry._id || ''))}`;
-        const buttonUrl = `${frontendUrl}${detailsPath}`;
+async function collectHrAndAdminOfficerEmails() {
+    const emails = new Set();
+    const [hr, adminOfficer] = await Promise.all([
+        getDepartmentHOD('hr'),
+        getDepartmentHOD('admincontroller'),
+    ]);
+    for (const emp of [hr, adminOfficer]) {
+        if (!emp) continue;
+        const { email } = resolveEmployeeEmail(emp);
+        if (email) emails.add(email);
+    }
+    return [...emails];
+}
 
-        const html = `
+function buildAssignmentHtml({
+    greetName,
+    fallbackNoteHtml = '',
+    summary,
+    labels,
+    assigneeLine,
+    buttonUrl,
+}) {
+    return `
             <div style="font-family: Segoe UI, Tahoma, sans-serif; color: #1e293b; max-width: 600px; margin: 0 auto; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden;">
                 <div style="background:#0d9488; color:#fff; padding:24px; text-align:center;">
-                    <h1 style="margin:0; font-size:22px;">Utility ${actionWord}</h1>
+                    <h1 style="margin:0; font-size:22px;">Utility ${labels.word}</h1>
                 </div>
                 <div style="padding:28px;">
                     <p>Hello <strong>${greetName}</strong>,</p>
                     ${fallbackNoteHtml}
                     <p style="margin:12px 0 20px;">
-                        A <strong>${summary.type}</strong> utility has been <strong>${actionWord.toLowerCase()}</strong>
-                        to <strong>${subjectTarget}</strong>.
+                        A <strong>${summary.type}</strong> utility has been <strong>${labels.lower}</strong>
+                        ${assigneeLine}.
                     </p>
                     <div style="background:#f8fafc; border:1px solid #f1f5f9; border-radius:10px; padding:18px;">
                         <p style="margin:0 0 8px;"><strong>Type:</strong> ${summary.type}</p>
@@ -147,17 +144,107 @@ export async function sendUtilityAssignmentEmail({
                 </div>
             </div>
         `;
+}
 
-        await transporter.sendMail({
-            from: process.env.EMAIL_USER,
-            to: recipientEmail,
-            subject: `${summary.type} ${actionWord}: ${subjectTarget}`,
-            html,
-        });
+/**
+ * Notify parties when a utility entry is assigned / reassigned / returned.
+ * Always emails flowchart HR + Admin Officer.
+ * Assign/reassign also emails the assignment target (employee or company).
+ */
+export async function sendUtilityAssignmentEmail({
+    entry,
+    assignedToType = 'Employee',
+    assignedToId = '',
+    assignedToName = '',
+    previousAssignedToName = '',
+    isReassign = false,
+    action = '',
+} = {}) {
+    try {
+        const transporter = createTransport();
+        if (!transporter) {
+            console.warn('[UtilityAssignmentEmail] SMTP credentials missing.');
+            return;
+        }
 
-        console.log(
-            `[UtilityAssignmentEmail] Sent ${actionWord.toLowerCase()} notice to ${recipientEmail}`,
-        );
+        const normalizedAction = normalizeAction(action, isReassign);
+        const labels = actionLabels(normalizedAction);
+        const summary = entrySummaryLines(entry);
+        const frontendUrl = emailFrontendUrl();
+        const detailsPath = `/HRM/Asset/UtilityBills/details/${encodeURIComponent(String(entry.id || entry._id || ''))}`;
+        const buttonUrl = `${frontendUrl}${detailsPath}`;
+
+        const nextName = String(assignedToName || '').trim() || 'assignee';
+        const prevName = String(previousAssignedToName || '').trim() || 'previous assignee';
+
+        let assigneeLine = `to <strong>${nextName}</strong>`;
+        if (normalizedAction === 'return') {
+            assigneeLine = `and is now <strong>unassigned</strong> (previously ${prevName})`;
+        } else if (normalizedAction === 'reassign') {
+            assigneeLine = `from <strong>${prevName}</strong> to <strong>${nextName}</strong>`;
+        }
+
+        const sentTo = new Set();
+
+        if (normalizedAction !== 'return') {
+            const target = await resolvePartyEmail({
+                type: assignedToType,
+                id: assignedToId,
+                name: assignedToName,
+            });
+            if (target?.email) {
+                await transporter.sendMail({
+                    from: process.env.EMAIL_USER,
+                    to: target.email,
+                    subject: `${summary.type} ${labels.subjectVerb}: ${target.subjectTarget}`,
+                    html: buildAssignmentHtml({
+                        greetName: target.greetName,
+                        fallbackNoteHtml: target.fallbackNoteHtml,
+                        summary,
+                        labels,
+                        assigneeLine,
+                        buttonUrl,
+                    }),
+                });
+                sentTo.add(target.email);
+                console.log(
+                    `[UtilityAssignmentEmail] Sent ${labels.lower} notice to assignee ${target.email}`,
+                );
+            } else if (String(assignedToId || '').trim()) {
+                console.warn(
+                    `[UtilityAssignmentEmail] No email for assignee ${assignedToId} — skip target notice.`,
+                );
+            }
+        }
+
+        const stakeholderEmails = await collectHrAndAdminOfficerEmails();
+        for (const email of stakeholderEmails) {
+            if (sentTo.has(email)) continue;
+            await transporter.sendMail({
+                from: process.env.EMAIL_USER,
+                to: email,
+                subject: `${summary.type} ${labels.subjectVerb}${
+                    normalizedAction === 'return' ? '' : `: ${nextName}`
+                }`,
+                html: buildAssignmentHtml({
+                    greetName: 'there',
+                    summary,
+                    labels,
+                    assigneeLine,
+                    buttonUrl,
+                }),
+            });
+            sentTo.add(email);
+            console.log(
+                `[UtilityAssignmentEmail] Sent ${labels.lower} notice to HR/Admin Officer ${email}`,
+            );
+        }
+
+        if (!sentTo.size) {
+            console.warn(
+                '[UtilityAssignmentEmail] No recipients resolved (assignee / HR / Admin Officer).',
+            );
+        }
     } catch (err) {
         console.error('[UtilityAssignmentEmail]', err?.message || err);
     }

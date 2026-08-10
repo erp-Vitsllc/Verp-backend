@@ -172,6 +172,7 @@ import {
     canEditInspectionHandoverContent,
     closeVehicleInspectionDashboardActions,
     VEHICLE_INSPECTION_HANDOVER_KIND,
+    VEHICLE_INSPECTION_DOC_TYPE,
 } from './vehicleInspectionController.js';
 import { ASSET_HANDOVER_PDF_SELECTOR, VEHICLE_HANDOVER_PDF_SELECTOR } from '../utils/assetHandoverPdfConstants.js';
 import {
@@ -978,6 +979,10 @@ export const healMisroutedAssignmentInboxTasks = async () => {
 
         if (!pendingAssets.length) return;
 
+        // One re-route email per bulk group per heal pass (avoid N emails for N batch members).
+        const bulkGroupsNotified = new Set();
+        const bulkGroupsEnsured = new Set();
+
         for (const asset of pendingAssets) {
             if (!isAssetAssignmentAcknowledgmentPending(asset)) continue;
             if (getVehicleHandoverFlow(asset)?.stage) continue;
@@ -1005,6 +1010,158 @@ export const healMisroutedAssignmentInboxTasks = async () => {
                 asset.actionRequiredBy?._id?.toString?.() ||
                 asset.actionRequiredBy?.toString?.() ||
                 '';
+            const arNeedsHeal = currentAr !== expectedId;
+
+            const bulkMeta = asset.pendingActionDetails?.bulkAssignment;
+            const bulkGroupId = bulkMeta?.groupId ? String(bulkMeta.groupId) : '';
+            const bulkAssetIds = Array.isArray(bulkMeta?.assetIds)
+                ? bulkMeta.assetIds.map((id) => String(id)).filter(Boolean)
+                : [];
+
+            // Bulk batch: keep the single group inbox row — never upsert per-asset bells.
+            // (Tools pending-inbox runs this heal; previously that exploded bulk into N notifications.)
+            if (bulkGroupId) {
+                const healed = await EmployeeBasic.findById(expectedId)
+                    .select('firstName lastName employeeId companyEmail workEmail primaryReportee')
+                    .populate('primaryReportee', 'firstName lastName employeeId companyEmail workEmail')
+                    .lean();
+                if (!healed) continue;
+
+                if (arNeedsHeal) {
+                    await AssetItem.updateOne(
+                        { _id: asset._id },
+                        { $set: { actionRequiredBy: expectedId } },
+                    );
+                }
+
+                const parseExtra = (raw) => {
+                    if (raw == null || raw === '') return null;
+                    if (typeof raw === 'object') return raw;
+                    if (typeof raw !== 'string') return null;
+                    try {
+                        return JSON.parse(raw);
+                    } catch {
+                        return null;
+                    }
+                };
+
+                const anchorId =
+                    bulkAssetIds.find((id) => mongoose.Types.ObjectId.isValid(id)) ||
+                    asset._id?.toString?.();
+                const bulkRows = await DashboardAction.find({
+                    status: 'Pending',
+                    requestType: { $in: ['Asset', 'Asset Assignment'] },
+                    extra3: { $exists: true, $nin: [null, ''] },
+                    ...(anchorId && mongoose.Types.ObjectId.isValid(anchorId)
+                        ? { requestId: new mongoose.Types.ObjectId(anchorId) }
+                        : {}),
+                })
+                    .select('_id assignedTo extra3 requestId')
+                    .lean();
+
+                let bulkDashNeedsHeal = false;
+                let foundBulkRow = false;
+                for (const da of bulkRows) {
+                    const parsed = parseExtra(da.extra3);
+                    if (
+                        parsed?.isBulkAssignment !== true ||
+                        String(parsed?.bulkAssignmentGroupId || '') !== bulkGroupId
+                    ) {
+                        continue;
+                    }
+                    foundBulkRow = true;
+                    const cur =
+                        da.assignedTo?._id?.toString?.() || da.assignedTo?.toString?.() || '';
+                    if (cur !== expectedId) {
+                        bulkDashNeedsHeal = true;
+                        await DashboardAction.updateOne(
+                            { _id: da._id },
+                            {
+                                $set: {
+                                    assignedTo: expectedId,
+                                    ...(healed.employeeId
+                                        ? { assignedToEmpId: healed.employeeId }
+                                        : {}),
+                                },
+                            },
+                        );
+                    }
+                }
+
+                // Email can succeed while DashboardAction.create failed — recreate the missing bell.
+                if (!foundBulkRow && !bulkGroupsEnsured.has(bulkGroupId)) {
+                    bulkGroupsEnsured.add(bulkGroupId);
+                    const subjectEmp = asset.assignedTo;
+                    const assignerEmp = asset.assignedBy
+                        ? await EmployeeBasic.findById(asset.assignedBy)
+                              .select('firstName lastName')
+                              .lean()
+                              .catch(() => null)
+                        : null;
+                    try {
+                        await ensureBulkAssignmentDashboardRow({
+                            bulkGroupId,
+                            bulkAssetIds: bulkAssetIds.length ? bulkAssetIds : [String(asset._id)],
+                            actionRequiredBy: expectedId,
+                            assignedToEmpId: healed.employeeId,
+                            subjectEmployeeId: subjectEmp?.employeeId,
+                            subjectName:
+                                `${subjectEmp?.firstName || ''} ${subjectEmp?.lastName || ''}`.trim(),
+                            requestedByName:
+                                `${assignerEmp?.firstName || 'System'} ${assignerEmp?.lastName || ''}`.trim(),
+                            assignmentType: asset.assignmentType,
+                            extra1: `Bulk assignment (${bulkAssetIds.length || 1} assets)`,
+                        });
+                        foundBulkRow = true;
+                        // Do not re-email: assign path already sent; this only restores the inbox row.
+                    } catch (ensureErr) {
+                        console.error(
+                            '[healMisroutedAssignmentInboxTasks] Failed to recreate bulk assignment notification:',
+                            ensureErr?.message || ensureErr,
+                        );
+                    }
+                }
+
+                // Drop individual Accept bells heal previously created for batch members.
+                const individualPending = await DashboardAction.find({
+                    requestId: asset._id,
+                    requestType: 'Asset Assignment',
+                    status: 'Pending',
+                })
+                    .select('_id extra3')
+                    .lean();
+                for (const da of individualPending) {
+                    const parsed = parseExtra(da.extra3);
+                    if (parsed?.isBulkAssignment === true) continue;
+                    await DashboardAction.updateOne(
+                        { _id: da._id },
+                        {
+                            $set: {
+                                status: 'Dismissed',
+                                comment:
+                                    'Superseded: asset belongs to a bulk assignment group (single Accept All row).',
+                            },
+                        },
+                    );
+                }
+
+                if (
+                    (arNeedsHeal || bulkDashNeedsHeal) &&
+                    !bulkGroupsNotified.has(bulkGroupId)
+                ) {
+                    bulkGroupsNotified.add(bulkGroupId);
+                    await sendAssetAssignmentEmail({
+                        asset,
+                        employee: asset.assignedTo,
+                        recipient: healed,
+                        pendingAssignment: true,
+                        isBulk: true,
+                        assetCount: bulkAssetIds.length || 1,
+                        bulkAssignmentGroupId: bulkGroupId,
+                    }).catch(() => null);
+                }
+                continue;
+            }
 
             const pendingDash = await DashboardAction.find({
                 requestId: asset._id,
@@ -1018,7 +1175,6 @@ export const healMisroutedAssignmentInboxTasks = async () => {
                 const cur = da.assignedTo?._id?.toString?.() || da.assignedTo?.toString?.() || '';
                 return cur !== expectedId;
             });
-            const arNeedsHeal = currentAr !== expectedId;
             if (!arNeedsHeal && !dashNeedsHeal && pendingDash.length > 0) continue;
 
             const healed = await EmployeeBasic.findById(expectedId)
@@ -1446,7 +1602,7 @@ export const getVehicleFleetDashboard = async (req, res) => {
         // Full dashboard: project only nested fields charts/modals need (skip quotation URLs,
         // workflow history signatures, document attachments — those balloon BSON + JSON).
         const fleetSelect = listOnly
-            ? 'assetId name vehicleBrand plateEmirate plateNumber modelYear assetValue status registrationExpiryDate insuranceExpiryDate nextServiceDate oilChangeDate gearOilDueDate currentKilometer assignedTo assignedCompany acceptanceStatus pendingAction actionRequiredBy createdBy vehicleProfileActivationStatus vehicleDispositionStatus warrantyEnabled warrantyExpiryDate warrantyYears onServiceActive onLeaveActive typeId assignedDate pendingActionDetails updatedAt locatorDeviceId locatorGpsStatus locatorAddress locatorSpeedKmh locatorIgnition locatorLastUpdate locatorSyncedAt'
+            ? 'assetId name vehicleBrand plateEmirate plateNumber modelYear assetValue status registrationExpiryDate insuranceExpiryDate nextServiceDate oilChangeDate gearOilDueDate currentKilometer assignedTo assignedCompany acceptanceStatus pendingAction actionRequiredBy createdBy vehicleProfileActivationStatus vehicleDispositionStatus warrantyEnabled warrantyExpiryDate warrantyYears onServiceActive onLeaveActive typeId assignedDate pendingActionDetails updatedAt locatorDeviceId locatorGpsStatus locatorAddress locatorSpeedKmh locatorIgnition locatorLastUpdate locatorSyncedAt activeServiceWorkflow.stage activeServiceWorkflow.serviceRecordId activeServiceWorkflow.serviceTypeLabel activeServiceWorkflow.serviceType'
             : [
                 'assetId',
                 'name',
@@ -1590,6 +1746,16 @@ export const getVehicleFleetDashboard = async (req, res) => {
                 actionRequiredBy: v.actionRequiredBy,
                 onServiceActive: v.onServiceActive === true,
                 onLeaveActive: v.onLeaveActive === true,
+                activeServiceWorkflow: v.activeServiceWorkflow
+                    ? {
+                          stage: v.activeServiceWorkflow.stage || '',
+                          serviceRecordId: v.activeServiceWorkflow.serviceRecordId || '',
+                          serviceTypeLabel:
+                              v.activeServiceWorkflow.serviceTypeLabel ||
+                              v.activeServiceWorkflow.serviceType ||
+                              '',
+                      }
+                    : null,
                 warrantyEnabled: v.warrantyEnabled === true,
                 warrantyExpiryDate: v.warrantyExpiryDate || null,
                 warrantyYears: v.warrantyYears || null,
@@ -4808,6 +4974,31 @@ export const getAssetItemDetail = async (req, res) => {
                 typeName: item?.typeId?.name || '',
             });
 
+            // Heal stuck inspection status before light paint so Profile Status % is correct.
+            const inspStatusLight = String(item.vehicleInspectionStatus || '').toLowerCase();
+            if (['active', 'draft', 'pending_hr'].includes(inspStatusLight)) {
+                try {
+                    const { healOrphanedVehicleInspectionStatus } = await import(
+                        '../utils/healOrphanedVehicleInspectionStatus.js'
+                    );
+                    const healResult = await healOrphanedVehicleInspectionStatus(item._id);
+                    if (healResult?.healed && healResult.asset) {
+                        item.vehicleInspectionStatus =
+                            healResult.asset.vehicleInspectionStatus ?? null;
+                        item.vehicleInspectionHandoverHistoryId =
+                            healResult.asset.vehicleInspectionHandoverHistoryId ?? null;
+                        if (Array.isArray(healResult.asset.documents)) {
+                            item.documents = healResult.asset.documents;
+                        }
+                    }
+                } catch (healInspErr) {
+                    console.warn(
+                        '[getAssetItemDetail] inspection heal (light) failed:',
+                        healInspErr?.message || healInspErr,
+                    );
+                }
+            }
+
             // Keep photo/imagePreview as storage keys on light paint.
             // Vehicle header loads via /storage/file proxy — browser Wasabi signed URLs often break (DNS/CORS).
 
@@ -4825,12 +5016,91 @@ export const getAssetItemDetail = async (req, res) => {
                 itemObj.isLocatorLinked = true;
             }
 
+            // Re-assign after possible inspection heal so light payload has corrected fields.
+            itemObj.vehicleInspectionStatus = item.vehicleInspectionStatus ?? null;
+            itemObj.vehicleInspectionHandoverHistoryId =
+                item.vehicleInspectionHandoverHistoryId ?? null;
+            if (Array.isArray(item.documents)) {
+                itemObj.documents = item.documents.map((d) => ({
+                    _id: d._id,
+                    type: d.type,
+                    name: d.name,
+                    documentType: d.documentType,
+                    title: d.title,
+                    description: d.description,
+                    issueDate: d.issueDate,
+                    expiryDate: d.expiryDate,
+                    fee: d.fee,
+                    amount: d.amount,
+                    status: d.status,
+                    isLive: d.isLive,
+                    archiveReason: d.archiveReason,
+                    meta: d.meta,
+                    createdAt: d.createdAt,
+                    updatedAt: d.updatedAt,
+                    attachment: d.attachment || null,
+                    hasAttachment: Boolean(d.attachment),
+                }));
+            }
+
+            // Cache-only pay status for first paint (Mongo ZohoBill). Live Zoho must NOT
+            // block light responses — unpaid bill fan-out was stalling service detail pages.
+            try {
+                const paySyncDoc = await AssetItem.findById(item._id).select('services');
+                if (paySyncDoc) {
+                    const { updatedCount } = await syncVehicleServicePaymentStatusFromZoho(paySyncDoc, {
+                        fetchLive: false,
+                    });
+                    if (updatedCount > 0 && Array.isArray(itemObj.services)) {
+                        const remarkById = new Map(
+                            (paySyncDoc.services || []).map((s) => [String(s._id), s.remark]),
+                        );
+                        itemObj.services = itemObj.services.map((s) => {
+                            const freshRemark = remarkById.get(String(s._id));
+                            if (freshRemark == null) return s;
+                            let remark = freshRemark;
+                            if (typeof remark === 'string' && remark.length > 0) {
+                                try {
+                                    const parsed = JSON.parse(remark);
+                                    if (parsed && typeof parsed === 'object') {
+                                        const {
+                                            images,
+                                            photos,
+                                            attachments,
+                                            remarkImages,
+                                            garagePhotos,
+                                            beforePhotos,
+                                            afterPhotos,
+                                            ...rest
+                                        } = parsed;
+                                        remark = JSON.stringify(rest);
+                                    }
+                                } catch {
+                                    /* keep fresh remark as-is */
+                                }
+                            }
+                            return { ...s, remark };
+                        });
+                    }
+                }
+            } catch (paySyncErr) {
+                console.warn(
+                    '[getAssetItemDetail] Zoho pay cache sync (light) failed:',
+                    paySyncErr?.message || paySyncErr,
+                );
+            }
+
             res.status(200).json(itemObj);
 
             const assetIdForBg = item._id;
             setImmediate(() => {
                 void (async () => {
                     try {
+                        const { healOrphanedVehicleInspectionStatus } = await import(
+                            '../utils/healOrphanedVehicleInspectionStatus.js'
+                        );
+                        await healOrphanedVehicleInspectionStatus(assetIdForBg);
+
                         const bgItem = await AssetItem.findById(assetIdForBg).select(
                             'services activeServiceWorkflow onServiceActive status assignedTo plateEmirate plateNumber assetId name currentKilometer nextServiceDate vehicleProfileActivationStatus vehicleInspectionStatus vehicleBrand modelYear imagePreview photo images documents registrationExpiryDate insuranceExpiryDate typeId',
                         );
@@ -4839,8 +5109,16 @@ export const getAssetItemDetail = async (req, res) => {
                         await ensureOilAccountsMakePaymentNotification(bgItem);
                         await activateOilServiceOnStartDate(bgItem, { byName: 'System' });
                         await maybeAutoCreateOilServiceDue(bgItem);
-                        // Use cached Zoho bills only — live Zoho on every detail view starved the API.
-                        await syncVehicleServicePaymentStatusFromZoho(bgItem, { fetchLive: false });
+                        try {
+                            await syncVehicleServicePaymentStatusFromZoho(bgItem, {
+                                fetchLive: 'unpaidOnly',
+                            });
+                        } catch (payBgErr) {
+                            console.warn(
+                                '[getAssetItemDetail] unpaid Zoho pay sync (light bg) failed:',
+                                payBgErr?.message || payBgErr,
+                            );
+                        }
                         if (
                             String(bgItem.vehicleProfileActivationStatus || '').toLowerCase() ===
                             'active'
@@ -5936,10 +6214,28 @@ export const getAssetItemDetail = async (req, res) => {
             itemObj.isLocatorLinked = true;
         }
 
+        // Cache-only pay status before response; live Zoho unpaid checks run after send.
+        try {
+            const paySyncDoc = await AssetItem.findById(item._id).select('services');
+            if (paySyncDoc) {
+                const { updatedCount } = await syncVehicleServicePaymentStatusFromZoho(paySyncDoc, {
+                    fetchLive: false,
+                });
+                if (updatedCount > 0) {
+                    itemObj.services = paySyncDoc.services;
+                }
+            }
+        } catch (paySyncErr) {
+            console.warn(
+                '[getAssetItemDetail] Zoho pay cache sync failed:',
+                paySyncErr?.message || paySyncErr,
+            );
+        }
+
         res.status(200).json(itemObj);
 
         // After response: background oil/shop sync so UI is not blocked (data unchanged; next visit sees updates).
-        if (deferLightDetail || deferHeavyServiceSigning) {
+        {
             const assetIdForBg = item._id;
             setImmediate(() => {
                 void (async () => {
@@ -5948,6 +6244,17 @@ export const getAssetItemDetail = async (req, res) => {
                             'services activeServiceWorkflow onServiceActive status assignedTo plateEmirate plateNumber assetId currentKilometer nextServiceDate vehicleProfileActivationStatus typeId',
                         );
                         if (!bgItem) return;
+                        try {
+                            await syncVehicleServicePaymentStatusFromZoho(bgItem, {
+                                fetchLive: 'unpaidOnly',
+                            });
+                        } catch (payBgErr) {
+                            console.warn(
+                                '[getAssetItemDetail] unpaid Zoho pay sync (bg) failed:',
+                                payBgErr?.message || payBgErr,
+                            );
+                        }
+                        if (!(deferLightDetail || deferHeavyServiceSigning)) return;
                         await healStaleOilServicePendingDashboardActions({ assetIds: [assetIdForBg] });
                         await ensureOilAccountsMakePaymentNotification(bgItem);
                         await activateOilServiceOnStartDate(bgItem, { byName: 'System' });
@@ -5981,8 +6288,6 @@ export const getAssetItemDetail = async (req, res) => {
                             });
                         }
                         await maybeAutoCreateOilServiceDue(bgItem);
-                        // Cached Zoho only on page load; live fetch is for explicit payment sync paths.
-                        await syncVehicleServicePaymentStatusFromZoho(bgItem, { fetchLive: false });
                     } catch (bgErr) {
                         console.warn(
                             '[getAssetItemDetail] background oil/shop sync failed:',
@@ -7128,22 +7433,16 @@ export const bulkAssignAssetItems = async (req, res) => {
                         assetIdStrings,
                         req.user.employeeObjectId,
                     );
-                    await DashboardAction.create({
-                        assignedTo: actionRequiredBy,
+                    await ensureBulkAssignmentDashboardRow({
+                        bulkGroupId: bulkAssignmentGroupId.toString(),
+                        bulkAssetIds: assetIdStrings,
+                        actionRequiredBy,
                         assignedToEmpId: dashboardActor?.employeeId,
-                        requestId: assetIds[0],
-                        requestType: 'Asset Assignment',
                         subjectEmployeeId: subjectEmp?.employeeId,
                         subjectName: `${subjectEmp?.firstName || ''} ${subjectEmp?.lastName || ''}`.trim(),
                         requestedByName: `${assigner?.firstName || 'System'} ${assigner?.lastName || ''}`.trim(),
+                        assignmentType,
                         extra1: `Bulk assignment (${assetIds.length} assets)`,
-                        extra2: assignmentType,
-                        extra3: JSON.stringify({
-                            isBulkAssignment: true,
-                            bulkAssignmentGroupId: bulkAssignmentGroupId.toString(),
-                            bulkAssetIds: assetIdStrings,
-                        }),
-                        status: 'Pending',
                     });
                 } else if (assets.length === 1) {
                     const one = assets[0];
@@ -7162,6 +7461,10 @@ export const bulkAssignAssetItems = async (req, res) => {
                 }
                 await healMisroutedAssignmentInboxTasks().catch(() => null);
             } catch (err) {
+                console.error(
+                    '[bulkAssignAssetItems] Failed to create assignment notification:',
+                    err?.message || err,
+                );
             }
         }
 
@@ -7252,6 +7555,10 @@ export const bulkAssignAssetItems = async (req, res) => {
                 }
             }
         } catch (emailErr) {
+            console.error(
+                '[bulkAssignAssetItems] Failed to send assignment email:',
+                emailErr?.message || emailErr,
+            );
         }
 
         res.status(200).json({
@@ -7422,24 +7729,20 @@ export const bulkAssignAssetItemsToCompany = async (req, res) => {
             const assets = await AssetItem.find({ _id: { $in: assetIds } }).select('assetId name assignmentType');
             if (assetIds.length > 1) {
                 await supersedeOverlappingPendingBulkAssignmentRows(assetIdStrings, req.user.employeeObjectId);
-                await DashboardAction.create({
-                    assignedTo: actionRequiredBy,
+                await ensureBulkAssignmentDashboardRow({
+                    bulkGroupId: bulkAssignmentGroupId.toString(),
+                    bulkAssetIds: assetIdStrings,
+                    actionRequiredBy,
                     assignedToEmpId: companyCoordinator.employeeId,
-                    requestId: assetIds[0],
-                    requestType: 'Asset',
                     subjectEmployeeId: targetCompany.companyId,
                     subjectName: companyName,
                     requestedByName: `${assigner?.firstName || 'System'} ${assigner?.lastName || ''}`.trim(),
+                    assignmentType,
                     extra1: `Bulk company assignment (${assetIds.length} assets)`,
-                    extra2: assignmentType,
-                    extra3: JSON.stringify({
-                        isBulkAssignment: true,
-                        bulkAssignmentGroupId: bulkAssignmentGroupId.toString(),
-                        bulkAssetIds: assetIdStrings,
+                    extraMeta: {
                         assignedToType: 'Company',
                         companyId: String(targetCompany._id),
-                    }),
-                    status: 'Pending',
+                    },
                 });
             } else if (assets.length === 1) {
                 const one = assets[0];
@@ -7466,6 +7769,10 @@ export const bulkAssignAssetItemsToCompany = async (req, res) => {
                 await healDuplicatePendingAssignmentDashboardRows(one._id).catch(() => null);
             }
         } catch (err) {
+            console.error(
+                '[bulkAssignAssetItemsToCompany] Failed to create assignment notification:',
+                err?.message || err,
+            );
         }
 
         const populatedAssets = await AssetItem.find({ _id: { $in: assetIds } })
@@ -7512,6 +7819,10 @@ export const bulkAssignAssetItemsToCompany = async (req, res) => {
                 });
             }
         } catch (emailErr) {
+            console.error(
+                '[bulkAssignAssetItemsToCompany] Failed to send assignment email:',
+                emailErr?.message || emailErr,
+            );
         }
 
         res.status(200).json({
@@ -8425,19 +8736,9 @@ export const respondToAssignment = async (req, res) => {
                 );
             } else if (action === 'Accept' || action === 'Reject') {
                 // Close every pending Accept task for this asset (not only the actor's row).
-                // Outcome FYI rows (assignmentOutcome) are created after this and must stay Pending.
+                // Outcome FYI + bulk-assignment batch bells must stay Pending.
                 await DashboardAction.updateMany(
-                    {
-                        requestId: item._id,
-                        requestType: { $in: ['Asset Assignment', 'Asset'] },
-                        status: 'Pending',
-                        $or: [
-                            { extra3: { $exists: false } },
-                            { extra3: null },
-                            { extra3: '' },
-                            { extra3: { $not: { $regex: '"assignmentOutcome"\\s*:\\s*true', $options: 'i' } } },
-                        ],
-                    },
+                    pendingPerAssetAssignmentDashboardFilter(item._id),
                     {
                         $set: {
                             status: action === 'Reject' ? 'Rejected' : 'Approved',
@@ -8967,18 +9268,9 @@ export const bulkRespondToAssignment = async (req, res) => {
                 await item.save();
 
                 // Clear every pending Accept task for this asset (not only the actor's row).
+                // Do not close bulk-assignment batch bells — those resolve with the whole group.
                 await DashboardAction.updateMany(
-                    {
-                        requestId: item._id,
-                        requestType: { $in: ['Asset Assignment', 'Asset'] },
-                        status: 'Pending',
-                        $or: [
-                            { extra3: { $exists: false } },
-                            { extra3: null },
-                            { extra3: '' },
-                            { extra3: { $not: { $regex: '"assignmentOutcome"\\s*:\\s*true', $options: 'i' } } },
-                        ],
-                    },
+                    pendingPerAssetAssignmentDashboardFilter(item._id),
                     {
                         status: action === 'Accept' ? 'Approved' : 'Rejected',
                         actionedDate: new Date(),
@@ -9084,6 +9376,98 @@ const parseDashboardExtra3 = (raw) => {
     }
 };
 
+/**
+ * Close per-asset Accept bells only.
+ * Keep assignmentOutcome FYI rows and bulk-assignment batch bells (those close when the whole group resolves).
+ */
+const pendingPerAssetAssignmentDashboardFilter = (requestId) => ({
+    requestId,
+    requestType: { $in: ['Asset Assignment', 'Asset'] },
+    status: 'Pending',
+    $nor: [
+        { extra3: { $regex: '"assignmentOutcome"\\s*:\\s*true', $options: 'i' } },
+        { extra3: { $regex: '"isBulkAssignment"\\s*:\\s*true', $options: 'i' } },
+    ],
+});
+
+const findPendingBulkAssignmentDashboardRows = async (bulkGroupId) => {
+    const gid = String(bulkGroupId || '').trim();
+    if (!gid) return [];
+    const escaped = gid.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const rows = await DashboardAction.find({
+        status: 'Pending',
+        requestType: { $in: ['Asset', 'Asset Assignment'] },
+        extra3: { $regex: escaped },
+    })
+        .select('_id assignedTo assignedToEmpId extra3 requestId requestType')
+        .lean();
+    return rows.filter((da) => {
+        const p = parseDashboardExtra3(da.extra3);
+        return p?.isBulkAssignment === true && String(p.bulkAssignmentGroupId || '') === gid;
+    });
+};
+
+/** Create or re-attach the single inbox notification for an AC bulk assignment batch. */
+const ensureBulkAssignmentDashboardRow = async ({
+    bulkGroupId,
+    bulkAssetIds = [],
+    actionRequiredBy,
+    assignedToEmpId,
+    subjectEmployeeId,
+    subjectName,
+    requestedByName,
+    assignmentType,
+    extra1,
+    extraMeta = null,
+}) => {
+    const gid = String(bulkGroupId || '').trim();
+    const assetIdStrings = [...new Set((bulkAssetIds || []).map((id) => String(id).trim()).filter(Boolean))];
+    if (!gid || !actionRequiredBy || assetIdStrings.length < 2) return null;
+
+    const existing = await findPendingBulkAssignmentDashboardRows(gid);
+    if (existing.length) {
+        const expected = String(actionRequiredBy);
+        for (const da of existing) {
+            const cur = da.assignedTo?._id?.toString?.() || da.assignedTo?.toString?.() || '';
+            const patch = {};
+            if (cur !== expected) {
+                patch.assignedTo = actionRequiredBy;
+                if (assignedToEmpId) patch.assignedToEmpId = assignedToEmpId;
+            }
+            // Older company/employee bulk rows used requestType 'Asset' — normalize so Tools/Vehicle filters treat them as assignments.
+            if (String(da.requestType || '').trim() === 'Asset') {
+                patch.requestType = 'Asset Assignment';
+            }
+            if (Object.keys(patch).length) {
+                await DashboardAction.updateOne({ _id: da._id }, { $set: patch });
+            }
+        }
+        return existing[0];
+    }
+
+    const anchorId = assetIdStrings.find((id) => mongoose.Types.ObjectId.isValid(id));
+    if (!anchorId) return null;
+
+    return DashboardAction.create({
+        assignedTo: actionRequiredBy,
+        assignedToEmpId: assignedToEmpId || undefined,
+        requestId: anchorId,
+        requestType: 'Asset Assignment',
+        subjectEmployeeId: subjectEmployeeId || undefined,
+        subjectName: subjectName || '',
+        requestedByName: requestedByName || 'System',
+        extra1: extra1 || `Bulk assignment (${assetIdStrings.length} assets)`,
+        extra2: assignmentType || '',
+        extra3: JSON.stringify({
+            isBulkAssignment: true,
+            bulkAssignmentGroupId: gid,
+            bulkAssetIds: assetIdStrings,
+            ...(extraMeta && typeof extraMeta === 'object' ? extraMeta : {}),
+        }),
+        status: 'Pending',
+    });
+};
+
 const bulkAssignmentAssetSetKey = (bulkAssetIds = []) =>
     [...new Set(bulkAssetIds.map((x) => String(x).trim()).filter(Boolean))].sort().join(',');
 
@@ -9171,6 +9555,7 @@ const BULK_ACTION_INBOX_TYPES = new Set([
     'Asset Return',
     'Asset End of Life',
     'Asset Loss Damage',
+    'Asset Transfer',
 ]);
 
 const resolveBulkInboxAssetIds = (row) => {
@@ -9411,8 +9796,63 @@ const syncPendingAssignmentDashboardRowsForUser = async (relevantIds, targetEmpl
         .populate('assignedBy', 'firstName lastName')
         .lean();
 
+    const ensuredBulkGroups = new Set();
+
     for (const item of pendingAssets) {
-        if (item.pendingActionDetails?.bulkAssignment?.groupId) continue;
+        const bulkMeta = item.pendingActionDetails?.bulkAssignment;
+        const bulkGroupId = bulkMeta?.groupId ? String(bulkMeta.groupId) : '';
+        if (bulkGroupId) {
+            if (ensuredBulkGroups.has(bulkGroupId)) continue;
+            ensuredBulkGroups.add(bulkGroupId);
+
+            const bulkAssetIds = Array.isArray(bulkMeta?.assetIds)
+                ? bulkMeta.assetIds.map((id) => String(id)).filter(Boolean)
+                : [String(item._id)];
+            const actorRef = item.actionRequiredBy;
+            const actorId = actorRef?._id || actorRef;
+            if (!actorId) continue;
+
+            let subjectName = '';
+            let subjectEmpId = '';
+            if (item.assignedToType === 'Company') {
+                subjectName = item.assignedCompany?.name || 'Company';
+                subjectEmpId = item.assignedCompany?.companyId || '';
+            } else if (item.assignedTo) {
+                subjectName = `${item.assignedTo.firstName || ''} ${item.assignedTo.lastName || ''}`.trim();
+                subjectEmpId = item.assignedTo.employeeId || '';
+            }
+            const assigner = item.assignedBy;
+            const requestedByName = assigner
+                ? `${assigner.firstName || 'System'} ${assigner.lastName || ''}`.trim()
+                : 'System';
+
+            try {
+                await ensureBulkAssignmentDashboardRow({
+                    bulkGroupId,
+                    bulkAssetIds,
+                    actionRequiredBy: actorId,
+                    assignedToEmpId: actorRef?.employeeId || targetEmployeeId || '',
+                    subjectEmployeeId: subjectEmpId,
+                    subjectName,
+                    requestedByName,
+                    assignmentType: item.assignmentType,
+                    extra1: `Bulk assignment (${bulkAssetIds.length} assets)`,
+                    extraMeta:
+                        item.assignedToType === 'Company'
+                            ? {
+                                  assignedToType: 'Company',
+                                  companyId: String(item.assignedCompany?._id || item.assignedCompany || ''),
+                              }
+                            : null,
+                });
+            } catch (syncBulkErr) {
+                console.error(
+                    '[syncPendingAssignmentDashboardRowsForUser] Failed to ensure bulk assignment notification:',
+                    syncBulkErr?.message || syncBulkErr,
+                );
+            }
+            continue;
+        }
 
         let subjectName = '';
         let subjectEmpId = '';
@@ -11430,15 +11870,20 @@ function isActivePendingAssignedHandover(asset, record) {
     return handoverAssigneeKey(asset) === handoverAssigneeKey(record);
 }
 
-function buildHandoverDeleteAssetPatch(asset, record, historyId) {
+function buildHandoverDeleteAssetPatch(asset, record, historyId, { isInspectionHandover = false } = {}) {
     const assetPatch = {};
     const flow = asset.pendingActionDetails?.vehicleHandoverFlow;
     const flowMatchesDeleted =
         flow?.historyId && String(flow.historyId) === String(historyId);
     const isPendingAssigned = isActivePendingAssignedHandover(asset, record);
+    const linkedInspId = asset.vehicleInspectionHandoverHistoryId;
     const isInspectionLinked =
-        !!asset.vehicleInspectionHandoverHistoryId &&
-        String(asset.vehicleInspectionHandoverHistoryId) === String(historyId);
+        !!linkedInspId && String(linkedInspId) === String(historyId);
+    // Also clear when deleting an inspection row while the link is already gone
+    // (older deletes cleared the link but left status=active — bar stuck at 100%).
+    const shouldClearInspection =
+        isInspectionLinked ||
+        (isInspectionHandover && !linkedInspId);
 
     if (flowMatchesDeleted || isPendingAssigned) {
         assetPatch.pendingAction = null;
@@ -11451,17 +11896,28 @@ function buildHandoverDeleteAssetPatch(asset, record, historyId) {
         }
     }
 
-    if (isInspectionLinked) {
+    if (shouldClearInspection) {
         assetPatch.vehicleInspectionHandoverHistoryId = null;
         // Always clear inspection status so Profile Status % drops; keep profile Active.
         assetPatch.vehicleInspectionStatus = null;
+        const inspDocType = String(VEHICLE_INSPECTION_DOC_TYPE || 'vehicle inspection')
+            .toLowerCase()
+            .trim();
+        if (Array.isArray(asset.documents)) {
+            const filtered = asset.documents.filter(
+                (d) => String(d?.type || '').toLowerCase().trim() !== inspDocType,
+            );
+            if (filtered.length !== asset.documents.length) {
+                assetPatch.documents = filtered;
+            }
+        }
     }
 
     return {
         assetPatch,
         // Assignment bells: active flowchart OR pending acceptance on this Assigned row
         isActiveFlow: flowMatchesDeleted || isPendingAssigned,
-        isInspectionLinked,
+        isInspectionLinked: shouldClearInspection,
     };
 }
 
@@ -11529,7 +11985,9 @@ export const deleteVehicleHandoverHistory = async (req, res) => {
         let isActiveFlow = false;
         let isInspectionLinked = false;
         if (asset) {
-            const patchResult = buildHandoverDeleteAssetPatch(asset, record, historyId);
+            const patchResult = buildHandoverDeleteAssetPatch(asset, record, historyId, {
+                isInspectionHandover,
+            });
             const { assetPatch } = patchResult;
             isActiveFlow = patchResult.isActiveFlow;
             isInspectionLinked = patchResult.isInspectionLinked;
@@ -11546,6 +12004,12 @@ export const deleteVehicleHandoverHistory = async (req, res) => {
             if (Object.keys(assetPatch).length) {
                 await AssetItem.findByIdAndUpdate(asset._id, { $set: assetPatch });
             }
+
+            // Heal stuck Active inspection when link was cleared earlier but status remained.
+            const { healOrphanedVehicleInspectionStatus } = await import(
+                '../utils/healOrphanedVehicleInspectionStatus.js'
+            );
+            await healOrphanedVehicleInspectionStatus(asset._id);
         }
 
         // Management email on Super User delete (handover / inspection history).
@@ -18378,30 +18842,36 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
             }
         }
         if (isHrRoleHolder) {
-            assigneeClauses.push({
-                requestType: 'Asset Approval',
-                extra3: { $regex: '"isFleetVehicle"\\s*:\\s*true', $options: 'i' },
-            });
-            assigneeClauses.push({
-                requestType: 'Vehicle Inspection',
-                extra3: { $regex: '"inspectionReview"\\s*:\\s*true', $options: 'i' },
-            });
-            assigneeClauses.push({
-                requestType: 'Vehicle Inspection',
-                extra3: { $regex: '"activationViewerRole"\\s*:\\s*"flowchart_hr"', $options: 'i' },
-            });
-            assigneeClauses.push({ requestType: 'Vehicle Profile Activation' });
-            assigneeClauses.push({ requestType: 'Vehicle Profile Edit' });
-            assigneeClauses.push({ requestType: 'Vehicle Mortgage Close' });
-            assigneeClauses.push({ requestType: 'Vehicle Delete Request' });
+            // Fleet / vehicle HR tasks — only for vehicle/all scopes (fleet Approvals flood tools limit(200)).
+            if (scope !== 'tools') {
+                assigneeClauses.push({
+                    requestType: 'Asset Approval',
+                    extra3: { $regex: '"isFleetVehicle"\\s*:\\s*true', $options: 'i' },
+                });
+                assigneeClauses.push({
+                    requestType: 'Vehicle Inspection',
+                    extra3: { $regex: '"inspectionReview"\\s*:\\s*true', $options: 'i' },
+                });
+                assigneeClauses.push({
+                    requestType: 'Vehicle Inspection',
+                    extra3: { $regex: '"activationViewerRole"\\s*:\\s*"flowchart_hr"', $options: 'i' },
+                });
+                assigneeClauses.push({ requestType: 'Vehicle Profile Activation' });
+                assigneeClauses.push({ requestType: 'Vehicle Profile Edit' });
+                assigneeClauses.push({ requestType: 'Vehicle Mortgage Close' });
+                assigneeClauses.push({ requestType: 'Vehicle Delete Request' });
+                assigneeClauses.push({
+                    requestType: 'Asset Assignment',
+                    extra3: {
+                        $regex: '"isFleetVehicle"\\s*:\\s*true.*"handoverViewerRole"\\s*:\\s*"actor"',
+                        $options: 'i',
+                    },
+                });
+            }
+            // Utility Bills (tools-scope feed) — emails resolve current HR; bells need role fallback when assignedTo is stale.
             assigneeClauses.push({ requestType: 'Utility Entry Status Change' });
-            assigneeClauses.push({
-                requestType: 'Asset Assignment',
-                extra3: {
-                    $regex: '"isFleetVehicle"\\s*:\\s*true.*"handoverViewerRole"\\s*:\\s*"actor"',
-                    $options: 'i',
-                },
-            });
+            assigneeClauses.push({ requestType: 'Utility Bill Payment' });
+            assigneeClauses.push({ requestType: 'Utility Bill Payment Reminder' });
         }
         if (isAdminOfficerHolder) {
             assigneeClauses.push({
@@ -18444,6 +18914,9 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
                     $options: 'i',
                 },
             });
+            // Utility Bills — Accounts stages (payment + contract expiry sticky).
+            assigneeClauses.push({ requestType: 'Utility Bill Payment' });
+            assigneeClauses.push({ requestType: 'Utility Contract Expiry' });
         }
         if (isAcRoleHolder) {
             assigneeClauses.push({
@@ -18456,6 +18929,20 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
             return res.json({ count: 0, items: [] });
         }
         match.$or = assigneeClauses;
+
+        // Tools inbox: never let fleet shared Asset* rows consume the 200-row cap (filtered out later anyway).
+        if (scope === 'tools') {
+            match.$and = [
+                {
+                    $nor: [
+                        {
+                            requestType: { $in: ['Asset Approval', 'Asset Assignment', 'Asset Return'] },
+                            extra3: { $regex: '"isFleetVehicle"\\s*:\\s*true', $options: 'i' },
+                        },
+                    ],
+                },
+            ];
+        }
 
         // Default: skip expensive sync/heal on read. Pass sync=1 only when a background job wants it.
         const wantSync = ['1', 'true', 'yes'].includes(String(req.query.sync || '').trim().toLowerCase());
@@ -18514,9 +19001,11 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
         }
 
         // Heal stale bells after Super User deleted the underlying handover history row.
+        // Copy result into `unique` safely (helper must not return the same array reference).
         const healedRows = await dismissOrphanedHandoverHistoryInboxRows(unique, parseExtra3);
+        const healedList = Array.isArray(healedRows) ? healedRows : [];
         unique.length = 0;
-        unique.push(...healedRows);
+        unique.push(...healedList);
 
         const hrInspectionSeen = new Set();
         const dedupedInspectionHr = [];
@@ -19102,7 +19591,6 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
             assignmentInboxSeen.add(assetKey);
             return true;
         });
-
         res.json({ count: items.length, items });
     } catch (error) {
         res.status(500).json({ message: 'Failed to load pending asset requests' });

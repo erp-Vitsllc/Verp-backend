@@ -20,6 +20,8 @@ import { resolveCompanyFineAdminRecipient } from './resolveCompanyFineAdminRecip
 export function isAssetLossFineReportApplicable(fine) {
     if (!fine) return false;
     const ft = String(fine.fineType || '').toLowerCase();
+    // Garage billed Vehicle Damage uses the standard fine-approved email (employee + HR + Admin).
+    if (ft === 'vehicle damage') return false;
     const hasAsset = !!(fine.assetId && String(fine.assetId).trim()) || !!fine.assetObjectId;
     if (!hasAsset) return false;
     return (
@@ -37,6 +39,7 @@ async function loadStakeholders(fine, employeeIds) {
     const { resolveAssetControllerEmployee } = await import('./assetApprovalHelpers.js');
 
     const hrHOD = await getDepartmentHOD('hr');
+    const adminHOD = await getDepartmentHOD('admincontroller');
     const accountsHOD = await getDepartmentHOD('finance');
     const managementHOD = employeeIds.length > 0 ? await getManagementHOD(employeeIds[0]) : null;
     const acRaw = await getDepartmentHOD('assetcontroller');
@@ -44,6 +47,7 @@ async function loadStakeholders(fine, employeeIds) {
 
     return {
         hrHOD,
+        adminHOD,
         accountsHOD,
         managementHOD,
         assetController,
@@ -89,7 +93,7 @@ async function resolveAssetOwnerEmployee(fine, assignedEmployees) {
         .lean();
 }
 
-function buildCcEmails(stakeholders, assetOwner, skipEmail) {
+function buildCcEmails(stakeholders, assetOwner, skipEmail, coAssignedEmployees = []) {
     const cc = new Set();
     const skip = String(skipEmail || '').toLowerCase();
 
@@ -99,27 +103,42 @@ function buildCcEmails(stakeholders, assetOwner, skipEmail) {
     };
 
     add(stakeholders.hrHOD);
+    add(stakeholders.adminHOD);
     add(stakeholders.accountsHOD);
     add(stakeholders.managementHOD);
     add(stakeholders.assetController);
     add(assetOwner);
+
+    for (const emp of coAssignedEmployees || []) {
+        add(emp);
+    }
 
     return Array.from(cc);
 }
 
 /**
  * Sends Asset Loss Fine Report PDF when management fully approves a Loss & Damage asset fine.
- * Recipients: fined employee (or primary reportee), Asset Controller, asset owner, Management, HR, Accounts.
+ * Recipients: fined employee (or primary reportee); CC: co-assigned employees, Admin, HR, Accounts, etc.
  */
-export async function sendAssetLossFineReportEmail(fine, assignedEmployees, req = null) {
+export async function sendAssetLossFineReportEmail(fine, assignedEmployees, req = null, options = {}) {
     if (!isAssetLossFineReportApplicable(fine)) return;
 
     try {
         console.log(`[AssetLossFineReportEmail] Preparing for Fine #${fine.fineId}`);
 
-        const employeeIds = (assignedEmployees || [])
-            .map((e) => e.employeeId)
-            .filter((id) => id && !['VEGA-HR-0000', 'VEGA_INTERNAL'].includes(id));
+        const fineAssignees = Array.isArray(fine?.assignedEmployees) ? fine.assignedEmployees : [];
+        const extraCcAssignees = Array.isArray(options?.ccAssignedEmployees)
+            ? options.ccAssignedEmployees
+            : [];
+        const allAssigneeRows = [...(assignedEmployees || []), ...fineAssignees, ...extraCcAssignees];
+
+        const employeeIds = [
+            ...new Set(
+                allAssigneeRows
+                    .map((e) => e?.employeeId)
+                    .filter((id) => id && !['VEGA-HR-0000', 'VEGA_INTERNAL'].includes(String(id))),
+            ),
+        ];
 
         const fullEmployees = await EmployeeBasic.find({ employeeId: { $in: employeeIds } })
             .select('employeeId firstName lastName companyEmail workEmail primaryReportee status profileStatus')
@@ -204,7 +223,7 @@ export async function sendAssetLossFineReportEmail(fine, assignedEmployees, req 
                 fallbackNote,
             });
 
-            const ccRecipients = buildCcEmails(stakeholders, assetOwner, toMail);
+            const ccRecipients = buildCcEmails(stakeholders, assetOwner, toMail, fullEmployees);
 
             await transporter.sendMail({
                 fromName,
@@ -266,7 +285,12 @@ export async function sendAssetLossFineReportEmail(fine, assignedEmployees, req 
                 continue;
             }
 
-            const ccRecipients = buildCcEmails(stakeholders, assetOwner, adminRecipient.email);
+            const ccRecipients = buildCcEmails(
+                stakeholders,
+                assetOwner,
+                adminRecipient.email,
+                fullEmployees,
+            );
 
             await transporter.sendMail({
                 fromName,
@@ -338,6 +362,7 @@ export async function sendAssetLossFineReportEmail(fine, assignedEmployees, req 
 
                     const stakeholderCc = new Set();
                     addEmployeeEmailToSet(stakeholderCc, stakeholders.hrHOD);
+                    addEmployeeEmailToSet(stakeholderCc, stakeholders.adminHOD);
                     addEmployeeEmailToSet(stakeholderCc, stakeholders.accountsHOD);
                     addEmployeeEmailToSet(stakeholderCc, stakeholders.managementHOD);
                     addEmployeeEmailToSet(stakeholderCc, stakeholders.assetController);

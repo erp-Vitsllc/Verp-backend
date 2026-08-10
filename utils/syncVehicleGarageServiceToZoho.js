@@ -469,6 +469,8 @@ export async function syncVehicleGarageServiceToZoho({
                 remark.zohoBillNumber = succeeded[0].billNumber || remark.zohoBillNumber || '';
                 remark.zohoVendorId = succeeded[0].vendorId || remark.zohoVendorId || '';
                 remark.zohoBillStatus = 'open';
+                remark.billingStatus = 'billed';
+                remark.zohoPaymentStatus = remark.zohoPaymentStatus || 'unpaid';
                 remark.zohoOrganizationId = orgId;
                 remark.zohoSyncedAt = new Date().toISOString();
             }
@@ -517,6 +519,8 @@ export async function syncVehicleGarageServiceToZoho({
         remark.zohoVendorId = result.vendorId;
         remark.zohoBillNumber = result.billNumber || '';
         remark.zohoBillStatus = 'open';
+        remark.billingStatus = 'billed';
+        remark.zohoPaymentStatus = remark.zohoPaymentStatus || 'unpaid';
         remark.zohoOrganizationId = orgId;
         remark.zohoSyncedAt = new Date().toISOString();
         remark.zohoSyncError = '';

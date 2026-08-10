@@ -159,6 +159,33 @@ export async function syncZohoBillsChunk(query = {}) {
         entity: 'bills',
     });
 
+    // Reflect Zoho paid bills onto vehicle service Amount Status.
+    try {
+        const paidIds = (chunk.rows || [])
+            .map((row) => {
+                const doc = mapZohoBillToDoc(row, organizationId, syncedAt);
+                if (!doc?.zohoBillId) return '';
+                const status = String(doc.status || row?.status || '').toLowerCase();
+                const balance = Number(doc.balance ?? row?.balance ?? NaN);
+                const paid =
+                    status === 'paid' ||
+                    (Number.isFinite(balance) && Math.abs(balance) < 0.01 && status !== 'draft' && status !== 'void');
+                return paid ? doc.zohoBillId : '';
+            })
+            .filter(Boolean);
+        if (paidIds.length) {
+            const { markVehicleGarageServicesPaidFromZohoBillIds } = await import(
+                '../utils/markVehicleGarageServicesPaidFromZoho.js'
+            );
+            await markVehicleGarageServicesPaidFromZohoBillIds(paidIds);
+        }
+    } catch (err) {
+        console.warn(
+            '[ZohoPurchaseSync] Vehicle service Paid stamp after bills chunk failed:',
+            err?.message || err,
+        );
+    }
+
     return {
         organizationId,
         ...stats,
@@ -257,6 +284,25 @@ export async function upsertZohoBillFromApi(bill, extras = {}) {
         { $set: { ...doc, ...utilityExtras } },
         { upsert: true, new: true },
     );
+
+    // When Zoho shows the bill as paid, reflect Amount Status on linked vehicle services.
+    try {
+        const status = String(doc.status || bill?.status || '').toLowerCase();
+        const balance = Number(doc.balance ?? bill?.balance ?? NaN);
+        const paid =
+            status === 'paid' || (Number.isFinite(balance) && Math.abs(balance) < 0.01 && status !== 'draft');
+        if (paid && doc.zohoBillId) {
+            const { markVehicleGarageServicesPaidFromZohoBillIds } = await import(
+                '../utils/markVehicleGarageServicesPaidFromZoho.js'
+            );
+            await markVehicleGarageServicesPaidFromZohoBillIds([doc.zohoBillId]);
+        }
+    } catch (err) {
+        console.warn(
+            '[ZohoPurchaseSync] Vehicle service Paid stamp after bill upsert failed:',
+            err?.message || err,
+        );
+    }
 
     return { ...doc, ...utilityExtras };
 }
