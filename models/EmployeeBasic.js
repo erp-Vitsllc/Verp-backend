@@ -13,6 +13,12 @@ const employeeBasicSchema = new mongoose.Schema(
         role: { type: String, default: '' }, // HR Manager, Developer…
         department: { type: String, default: '' }, // Administration, HR, IT…
         designation: { type: String, default: '' },
+        /** Attendance grouping: office staff vs site staffs */
+        staffType: {
+            type: String,
+            enum: ['office', 'site'],
+            default: 'office',
+        },
         company: { type: mongoose.Schema.Types.ObjectId, ref: "Company", default: null },
         status: {
             type: String,
@@ -290,6 +296,7 @@ employeeBasicSchema.index({ department: 1 });
 employeeBasicSchema.index({ status: 1 });
 employeeBasicSchema.index({ designation: 1 });
 employeeBasicSchema.index({ profileStatus: 1 });
+employeeBasicSchema.index({ staffType: 1 });
 employeeBasicSchema.index({ createdAt: -1 }); // For sorting
 // Critical for Company.aggregate $lookup employee count — avoids COLLSCAN per company
 employeeBasicSchema.index({ company: 1, employeeId: 1 });

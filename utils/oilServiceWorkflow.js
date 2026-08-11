@@ -683,11 +683,25 @@ export async function userMayEditOilServiceDates(reqUser, asset, serviceId) {
 
     const service = asset.services?.id?.(serviceId);
     if (!service) return false;
+
+    const remark = parseOilServiceRemark(service);
+    const reqStatus = String(remark.requestStatus || '').toLowerCase();
+    const initiated =
+        reqStatus === 'submitted' || Boolean(String(remark.oilServiceInitiatedAt || '').trim());
+    if (!initiated) return false;
+    if (!['draft', 'pending', 'submitted'].includes(reqStatus)) return false;
+
     const { wf } = getWorkflowContextForService(asset, serviceId);
-    if (!wf || !isOilServiceWorkflowRecord(wf, service)) return false;
+    // Warranty / pre-bootstrap: Admin may save garage+dates onto remark before submit-request.
+    if (!wf || !isOilServiceWorkflowRecord(wf, service)) {
+        return (
+            ['draft', 'pending'].includes(reqStatus) &&
+            (await actorMayAdminScheduleShopService(reqUser))
+        );
+    }
 
     const stage = String(wf.stage || '').toLowerCase();
-    // Admin Officer may reschedule anytime until Complete Service / billed.
+    // Admin Officer may schedule/reschedule anytime until Complete Service / billed.
     if (
         stage === STAGE_COMPLETE ||
         stage === STAGE_PENDING_ACCOUNTS ||
@@ -698,13 +712,14 @@ export async function userMayEditOilServiceDates(reqUser, asset, serviceId) {
     }
     if (stage !== STAGE_SCHEDULED && stage !== STAGE_PENDING_HR) return false;
 
-    const remark = parseOilServiceRemark(service);
-    if (String(remark.requestStatus || '').toLowerCase() !== 'submitted') return false;
-
     // Same roles as shop Schedule: Admin / Admin Officer / Asset Controller / super user
     if (await actorMayAdminScheduleShopService(reqUser)) return true;
 
-    if (stage === STAGE_SCHEDULED && isOilServiceWaitingForStartDate(asset, service)) {
+    if (
+        reqStatus === 'submitted' &&
+        stage === STAGE_SCHEDULED &&
+        isOilServiceWaitingForStartDate(asset, service)
+    ) {
         return actorMayManageOilService(reqUser, asset);
     }
 
@@ -2526,37 +2541,50 @@ export async function updateOilServiceDates(
     const service = asset.services?.id?.(serviceId);
     if (!service) throw new Error('Service record not found');
     const { wf, bindActive } = getWorkflowContextForService(asset, serviceId);
-    if (!wf || !isOilServiceWorkflowRecord(wf, service)) {
-        throw new Error('Not an oil service workflow.');
-    }
-    const stage = String(wf.stage || '').toLowerCase();
-    if (
-        stage === STAGE_COMPLETE ||
-        stage === STAGE_PENDING_ACCOUNTS ||
-        stage === STAGE_BILLED ||
-        stage === 'rejected'
-    ) {
-        throw new Error('Schedule cannot be updated after the service is complete.');
-    }
-    if (stage !== STAGE_SCHEDULED && stage !== STAGE_PENDING_HR) {
-        throw new Error('Service schedule can only be updated before Complete Service.');
+    const remark = parseOilServiceRemark(service);
+    const reqStatus = String(remark.requestStatus || '').toLowerCase();
+    const initiated =
+        reqStatus === 'submitted' || Boolean(String(remark.oilServiceInitiatedAt || '').trim());
+    const hasOilWorkflow = Boolean(wf && isOilServiceWorkflowRecord(wf, service));
+
+    // Pre-submit (often warranty): allow Admin to persist garage/dates before submit-request.
+    if (!hasOilWorkflow) {
+        if (!initiated || !['draft', 'pending'].includes(reqStatus)) {
+            throw new Error('Not an oil service workflow.');
+        }
+    } else {
+        const stage = String(wf.stage || '').toLowerCase();
+        if (
+            stage === STAGE_COMPLETE ||
+            stage === STAGE_PENDING_ACCOUNTS ||
+            stage === STAGE_BILLED ||
+            stage === 'rejected'
+        ) {
+            throw new Error('Schedule cannot be updated after the service is complete.');
+        }
+        if (stage !== STAGE_SCHEDULED && stage !== STAGE_PENDING_HR) {
+            throw new Error('Service schedule can only be updated before Complete Service.');
+        }
     }
 
-    const remark = parseOilServiceRemark(service);
     const prevStart = remark.serviceStartDate || '';
     const prevEnd = remark.serviceEndDate || '';
     const actorName = await getRequesterName(reqUser);
 
     if (serviceStartDate) {
         remark.serviceStartDate = serviceStartDate;
-        wf.scheduledServiceDate = new Date(serviceStartDate);
+        if (hasOilWorkflow) {
+            wf.scheduledServiceDate = new Date(serviceStartDate);
+        }
     }
     if (serviceEndDate) {
         remark.serviceEndDate = serviceEndDate;
         remark.nextChangeMonth = String(serviceEndDate).slice(0, 7);
-        wf.serviceWindowEndDate = new Date(serviceEndDate);
-        wf.serviceDurationEmailSentAt = null;
-        wf.oilServiceOverdueNotifiedAt = null;
+        if (hasOilWorkflow) {
+            wf.serviceWindowEndDate = new Date(serviceEndDate);
+            wf.serviceDurationEmailSentAt = null;
+            wf.oilServiceOverdueNotifiedAt = null;
+        }
     }
 
     const { assertServiceScheduleDates } = await import('./vehicleServiceScheduleDates.js');
@@ -2657,7 +2685,9 @@ export async function updateOilServiceDates(
             to: serviceStartDate,
         };
         appendOilServiceActivity(service, entry);
-        syncOilActivityToWorkflowHistory(asset, serviceId, entry);
+        if (hasOilWorkflow) {
+            syncOilActivityToWorkflowHistory(asset, serviceId, entry);
+        }
     }
     if (serviceEndDate && String(prevEnd).slice(0, 10) !== String(serviceEndDate).slice(0, 10)) {
         const entry = {
@@ -2669,7 +2699,9 @@ export async function updateOilServiceDates(
             to: serviceEndDate,
         };
         appendOilServiceActivity(service, entry);
-        syncOilActivityToWorkflowHistory(asset, serviceId, entry);
+        if (hasOilWorkflow) {
+            syncOilActivityToWorkflowHistory(asset, serviceId, entry);
+        }
     }
 
     service.remark = JSON.stringify(remark);
@@ -2687,11 +2719,13 @@ export async function updateOilServiceDates(
     // Keep vehicle oil change / next service dates aligned with Admin reschedule.
     applyOilChangeDatesFromSchedule(asset, remark);
 
-    commitWorkflowContext(asset, serviceId, { wf, bindActive });
+    if (hasOilWorkflow) {
+        commitWorkflowContext(asset, serviceId, { wf, bindActive });
+    }
     asset.markModified('services');
     await asset.save();
 
-    if (startChanged || endChanged) {
+    if (hasOilWorkflow && (startChanged || endChanged)) {
         const populated = await AssetItem.findById(asset._id)
             .populate('assignedTo', OIL_EMP_EMAIL_SELECT)
             .lean();

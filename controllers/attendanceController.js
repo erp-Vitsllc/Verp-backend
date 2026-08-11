@@ -144,6 +144,7 @@ function buildDayStatsFromRecords(records, totalStaff = 0) {
         on_office: 0,
         on_leave: 0,
         sick_leave: 0,
+        authorized_leave: 0,
         work_from_home: 0,
         late_arrived: 0,
         not_marked: 0,
@@ -160,11 +161,12 @@ function buildDayStatsFromRecords(records, totalStaff = 0) {
     const markedCount = rows.length;
     const implicitNotMarked = Math.max(0, totalStaff - markedCount);
     const notMarked = counts.not_marked + counts.unauthorized_leave + implicitNotMarked;
+    const authorizedLeaveTotal = counts.on_leave + counts.authorized_leave;
 
     return {
         activeEmployees: totalStaff,
         present: counts.on_office,
-        onLeave: counts.on_leave,
+        onLeave: authorizedLeaveTotal,
         lateArrived: counts.late_arrived,
         sickLeave: counts.sick_leave,
         workFromHome: counts.work_from_home,
@@ -174,14 +176,37 @@ function buildDayStatsFromRecords(records, totalStaff = 0) {
         sitePresent: 0,
         siteTotal: 0,
         totalPresent: counts.on_office,
-        absentAuthorized: counts.on_leave,
+        absentAuthorized: authorizedLeaveTotal,
         // Same value as notMarked — unauthorized and not marked are one category.
         absentUnauthorized: notMarked,
     };
 }
 
-async function countActiveEmployees() {
-    return EmployeeBasic.countDocuments({ profileStatus: 'active' });
+function resolveStaffTypeFilter(raw) {
+    const value = String(raw || '').trim().toLowerCase();
+    if (value === 'site') return 'site';
+    if (value === 'office') return 'office';
+    return null;
+}
+
+async function getActiveEmployeeIdsByStaffType(staffType) {
+    const filter = { profileStatus: 'active' };
+    if (staffType === 'site') {
+        filter.staffType = 'site';
+    } else if (staffType === 'office') {
+        // Default missing staffType to office so existing employees stay on Office tab.
+        filter.$or = [{ staffType: 'office' }, { staffType: { $exists: false } }, { staffType: null }, { staffType: '' }];
+    }
+    const rows = await EmployeeBasic.find(filter).select('_id').lean();
+    return rows.map((r) => String(r._id));
+}
+
+async function countActiveEmployees(staffType = null) {
+    if (!staffType) {
+        return EmployeeBasic.countDocuments({ profileStatus: 'active' });
+    }
+    const ids = await getActiveEmployeeIdsByStaffType(staffType);
+    return ids.length;
 }
 
 /** GET /api/Attendance?date=yyyy-MM-dd */
@@ -211,6 +236,7 @@ export async function getAttendanceByDate(req, res) {
 /**
  * GET /api/Attendance/calendar?month=yyyy-MM
  * Optional: from=yyyy-MM-dd&to=yyyy-MM-dd (overrides month bounds when both valid).
+ * Optional: staffType=office|site — filter calendar to that staff group.
  * Returns per-day attendance summary for the HR attendance calendar.
  */
 export async function getAttendanceCalendarSummary(req, res) {
@@ -222,6 +248,7 @@ export async function getAttendanceCalendarSummary(req, res) {
         const month = String(req.query.month || '').trim();
         const fromQuery = String(req.query.from || '').trim();
         const toQuery = String(req.query.to || '').trim();
+        const staffType = resolveStaffTypeFilter(req.query.staffType);
 
         let from;
         let to;
@@ -253,13 +280,17 @@ export async function getAttendanceCalendarSummary(req, res) {
             monthKey = `${year}-${String(monthNum).padStart(2, '0')}`;
         }
 
-        const [totalStaff, records] = await Promise.all([
-            countActiveEmployees(),
+        const [staffIds, totalStaff, records] = await Promise.all([
+            staffType ? getActiveEmployeeIdsByStaffType(staffType) : Promise.resolve(null),
+            countActiveEmployees(staffType),
             Attendance.find({ date: { $gte: from, $lte: to } }).lean(),
         ]);
 
+        const staffIdSet = staffIds ? new Set(staffIds) : null;
+
         const byDate = new Map();
         for (const row of records) {
+            if (staffIdSet && !staffIdSet.has(String(row?.employeeMongoId || ''))) continue;
             const key = String(row?.date || '').trim();
             if (!isValidDateKey(key)) continue;
             if (!byDate.has(key)) byDate.set(key, []);
@@ -272,10 +303,25 @@ export async function getAttendanceCalendarSummary(req, res) {
         for (let cursor = start; cursor <= end; cursor.setUTCDate(cursor.getUTCDate() + 1)) {
             const dateKey = cursor.toISOString().slice(0, 10);
             const dayRecords = byDate.get(dateKey) || [];
-            days[dateKey] =
+            const stats =
                 dayRecords.length > 0
                     ? buildDayStatsFromRecords(dayRecords, totalStaff)
                     : emptyDayStats(totalStaff);
+
+            // When filtered to one staff group, mirror totals into that group's present/total fields.
+            if (staffType === 'office') {
+                stats.officePresent = stats.totalPresent;
+                stats.officeTotal = totalStaff;
+                stats.sitePresent = 0;
+                stats.siteTotal = 0;
+            } else if (staffType === 'site') {
+                stats.sitePresent = stats.totalPresent;
+                stats.siteTotal = totalStaff;
+                stats.officePresent = 0;
+                stats.officeTotal = 0;
+            }
+
+            days[dateKey] = stats;
         }
 
         return res.status(200).json({
@@ -283,6 +329,7 @@ export async function getAttendanceCalendarSummary(req, res) {
             month: monthKey,
             from,
             to,
+            staffType: staffType || 'all',
             totalStaff,
             days,
         });
@@ -320,6 +367,22 @@ export async function markAttendance(req, res) {
             if (!employeeMongoId) {
                 return res.status(400).json({ message: 'employeeMongoId is required for each mark.' });
             }
+
+            // Clear attendance → remove the day record so status shows blank.
+            if (statusKey === 'clear_attendance' || statusKey === 'clear') {
+                await Attendance.deleteOne({ date, employeeMongoId });
+                saved.push({
+                    date,
+                    employeeMongoId,
+                    cleared: true,
+                    statusKey: '',
+                    statusLabel: '',
+                    timeIn: '',
+                    timeOut: '',
+                });
+                continue;
+            }
+
             if (!ATTENDANCE_STATUS_KEYS.includes(statusKey)) {
                 return res.status(400).json({ message: `Invalid statusKey: ${statusKey}` });
             }
@@ -555,7 +618,7 @@ export async function checkInMyAttendance(req, res) {
             });
         }
 
-        const leaveKeys = new Set(['on_leave', 'sick_leave', 'unauthorized_leave']);
+        const leaveKeys = new Set(['on_leave', 'sick_leave', 'authorized_leave', 'unauthorized_leave']);
         if (existing && leaveKeys.has(existing.statusKey)) {
             return res.status(400).json({
                 message: 'Cannot check in — leave is already marked for today.',
@@ -666,7 +729,8 @@ export async function markTeamAttendance(req, res) {
 
         const statusKey = String(req.body?.statusKey || req.body?.markKey || '').trim();
         const statusLabel = String(req.body?.statusLabel || req.body?.markLabel || '').trim();
-        if (!ATTENDANCE_STATUS_KEYS.includes(statusKey) || !statusLabel) {
+        const isClear = statusKey === 'clear_attendance' || statusKey === 'clear';
+        if (!isClear && (!ATTENDANCE_STATUS_KEYS.includes(statusKey) || !statusLabel)) {
             return res.status(400).json({ message: 'Valid statusKey and statusLabel are required.' });
         }
 
@@ -717,6 +781,18 @@ export async function markTeamAttendance(req, res) {
                 });
             }
 
+            if (isClear) {
+                await Attendance.deleteOne({ date, employeeMongoId });
+                saved.push({
+                    date,
+                    employeeMongoId,
+                    cleared: true,
+                    statusKey: '',
+                    statusLabel: '',
+                });
+                continue;
+            }
+
             const emp = await EmployeeBasic.findById(employeeMongoId)
                 .select('_id employeeId firstName lastName')
                 .lean();
@@ -745,7 +821,9 @@ export async function markTeamAttendance(req, res) {
         }
 
         return res.status(200).json({
-            message: 'Team attendance marked successfully',
+            message: isClear
+                ? 'Team attendance cleared successfully'
+                : 'Team attendance marked successfully',
             date,
             count: saved.length,
             records: saved,

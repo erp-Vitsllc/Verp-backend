@@ -17,7 +17,7 @@ export const deleteWorkDetailsCard = async (req, res) => {
 
         const workSnapshot = await EmployeeBasic.findOne({ employeeId: employee.employeeId })
             .select(
-                "employeeId reportingAuthority primaryReportee secondaryReportee overtime department designation role company companyEmail contractJoiningDate dateOfJoining probationPeriod profileStatus profileApprovalStatus"
+                "employeeId reportingAuthority primaryReportee secondaryReportee overtime department designation role company companyEmail contractJoiningDate dateOfJoining probationPeriod staffType profileStatus profileApprovalStatus"
             )
             .lean();
         const denied = await denyEmployeeCardDeleteUnlessAllowed(req, workSnapshot, "work details", "workDetails");
@@ -49,6 +49,7 @@ export const deleteWorkDetailsCard = async (req, res) => {
                     contractJoiningDate: null,
                     dateOfJoining: null,
                     probationPeriod: null,
+                    staffType: "office",
                 },
             }
         );

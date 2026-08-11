@@ -31,6 +31,7 @@ export const updateWorkDetails = async (req, res) => {
             "dateOfJoining",
             "companyEmail",
             "enablePortalAccess",
+            "staffType",
         ];
 
         const normalizeObjectIdField = (value) => {
@@ -164,6 +165,13 @@ export const updateWorkDetails = async (req, res) => {
                 .toLowerCase();
         }
 
+        if (updatePayload.staffType !== undefined) {
+            const nextStaffType = String(updatePayload.staffType || "")
+                .trim()
+                .toLowerCase();
+            updatePayload.staffType = nextStaffType === "site" ? "site" : "office";
+        }
+
         // Contract joining date is set from the first visa issue date only — not editable here.
 
         // 4. Probation workflow policy:
@@ -214,6 +222,8 @@ export const updateWorkDetails = async (req, res) => {
                 contractExpiryDate: employee.contractExpiryDate || null,
                 dateOfJoining: employee.dateOfJoining || null,
                 companyEmail: employee.companyEmail || "",
+                enablePortalAccess: employee.enablePortalAccess,
+                staffType: employee.staffType === "site" ? "site" : "office",
                 profileStatus: employee.profileStatus,
                 profileApprovalStatus: employee.profileApprovalStatus,
             },
