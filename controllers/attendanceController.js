@@ -113,6 +113,77 @@ function buildTeamTree(manager, flatList) {
     ];
 }
 
+/** Empty day bucket used by calendar summary aggregation. */
+function emptyDayStats(totalStaff = 0) {
+    return {
+        activeEmployees: totalStaff,
+        present: 0,
+        onLeave: 0,
+        lateArrived: 0,
+        sickLeave: 0,
+        workFromHome: 0,
+        // No marks yet — calendar shows total staff only until attendance is recorded.
+        notMarked: 0,
+        officePresent: 0,
+        officeTotal: totalStaff,
+        sitePresent: 0,
+        siteTotal: 0,
+        totalPresent: 0,
+        absentAuthorized: 0,
+        absentUnauthorized: 0,
+    };
+}
+
+/**
+ * Aggregate attendance marks for one calendar day.
+ * unauthorized_leave counts with not_marked (same bucket).
+ */
+function buildDayStatsFromRecords(records, totalStaff = 0) {
+    const rows = Array.isArray(records) ? records : [];
+    const counts = {
+        on_office: 0,
+        on_leave: 0,
+        sick_leave: 0,
+        work_from_home: 0,
+        late_arrived: 0,
+        not_marked: 0,
+        unauthorized_leave: 0,
+    };
+
+    for (const row of rows) {
+        const key = String(row?.statusKey || '').trim();
+        if (Object.prototype.hasOwnProperty.call(counts, key)) {
+            counts[key] += 1;
+        }
+    }
+
+    const markedCount = rows.length;
+    const implicitNotMarked = Math.max(0, totalStaff - markedCount);
+    const notMarked = counts.not_marked + counts.unauthorized_leave + implicitNotMarked;
+
+    return {
+        activeEmployees: totalStaff,
+        present: counts.on_office,
+        onLeave: counts.on_leave,
+        lateArrived: counts.late_arrived,
+        sickLeave: counts.sick_leave,
+        workFromHome: counts.work_from_home,
+        notMarked,
+        officePresent: counts.on_office,
+        officeTotal: totalStaff,
+        sitePresent: 0,
+        siteTotal: 0,
+        totalPresent: counts.on_office,
+        absentAuthorized: counts.on_leave,
+        // Same value as notMarked — unauthorized and not marked are one category.
+        absentUnauthorized: notMarked,
+    };
+}
+
+async function countActiveEmployees() {
+    return EmployeeBasic.countDocuments({ profileStatus: 'active' });
+}
+
 /** GET /api/Attendance?date=yyyy-MM-dd */
 export async function getAttendanceByDate(req, res) {
     try {
@@ -134,6 +205,90 @@ export async function getAttendanceByDate(req, res) {
     } catch (error) {
         console.error('[getAttendanceByDate]', error);
         return res.status(500).json({ message: error.message || 'Failed to fetch attendance.' });
+    }
+}
+
+/**
+ * GET /api/Attendance/calendar?month=yyyy-MM
+ * Optional: from=yyyy-MM-dd&to=yyyy-MM-dd (overrides month bounds when both valid).
+ * Returns per-day attendance summary for the HR attendance calendar.
+ */
+export async function getAttendanceCalendarSummary(req, res) {
+    try {
+        if (mongoose.connection.readyState !== 1) {
+            return res.status(503).json({ message: 'Database not connected.' });
+        }
+
+        const month = String(req.query.month || '').trim();
+        const fromQuery = String(req.query.from || '').trim();
+        const toQuery = String(req.query.to || '').trim();
+
+        let from;
+        let to;
+        let monthKey;
+
+        if (isValidDateKey(fromQuery) && isValidDateKey(toQuery) && fromQuery <= toQuery) {
+            from = fromQuery;
+            to = toQuery;
+            monthKey = from.slice(0, 7);
+        } else {
+            let year;
+            let monthNum;
+            if (/^\d{4}-\d{2}$/.test(month)) {
+                year = Number(month.slice(0, 4));
+                monthNum = Number(month.slice(5, 7));
+            } else {
+                const p = getDubaiNowParts();
+                year = p.year;
+                monthNum = p.month;
+            }
+
+            if (!Number.isFinite(year) || !Number.isFinite(monthNum) || monthNum < 1 || monthNum > 12) {
+                return res.status(400).json({ message: 'Valid month (yyyy-MM) is required.' });
+            }
+
+            from = `${year}-${String(monthNum).padStart(2, '0')}-01`;
+            const lastDay = new Date(Date.UTC(year, monthNum, 0)).getUTCDate();
+            to = `${year}-${String(monthNum).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
+            monthKey = `${year}-${String(monthNum).padStart(2, '0')}`;
+        }
+
+        const [totalStaff, records] = await Promise.all([
+            countActiveEmployees(),
+            Attendance.find({ date: { $gte: from, $lte: to } }).lean(),
+        ]);
+
+        const byDate = new Map();
+        for (const row of records) {
+            const key = String(row?.date || '').trim();
+            if (!isValidDateKey(key)) continue;
+            if (!byDate.has(key)) byDate.set(key, []);
+            byDate.get(key).push(row);
+        }
+
+        const days = {};
+        const start = new Date(`${from}T12:00:00.000Z`);
+        const end = new Date(`${to}T12:00:00.000Z`);
+        for (let cursor = start; cursor <= end; cursor.setUTCDate(cursor.getUTCDate() + 1)) {
+            const dateKey = cursor.toISOString().slice(0, 10);
+            const dayRecords = byDate.get(dateKey) || [];
+            days[dateKey] =
+                dayRecords.length > 0
+                    ? buildDayStatsFromRecords(dayRecords, totalStaff)
+                    : emptyDayStats(totalStaff);
+        }
+
+        return res.status(200).json({
+            message: 'Attendance calendar fetched successfully',
+            month: monthKey,
+            from,
+            to,
+            totalStaff,
+            days,
+        });
+    } catch (error) {
+        console.error('[getAttendanceCalendarSummary]', error);
+        return res.status(500).json({ message: error.message || 'Failed to fetch attendance calendar.' });
     }
 }
 

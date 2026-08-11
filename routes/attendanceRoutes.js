@@ -3,6 +3,7 @@ import { protect } from '../middleware/authMiddleware.js';
 import { checkPermission, checkPermissionAny } from '../middleware/permissionMiddleware.js';
 import {
     getAttendanceByDate,
+    getAttendanceCalendarSummary,
     markAttendance,
     getMyAttendanceMonth,
     checkInMyAttendance,
@@ -22,6 +23,11 @@ router.post('/me/check-in', checkInMyAttendance);
 router.post('/me/check-out', checkOutMyAttendance);
 router.post('/team/mark', markTeamAttendance);
 
+router.get(
+    '/calendar',
+    checkPermission('hrm_attendance', 'view'),
+    getAttendanceCalendarSummary,
+);
 router.get('/', checkPermission('hrm_attendance', 'view'), getAttendanceByDate);
 router.post(
     '/mark',
