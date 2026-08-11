@@ -419,13 +419,18 @@ export const createAssetType = async (req, res) => {
             }
 
             // Handle Image Upload
-            let imageS3Key = imagePreview;
-            if (imagePreview && imagePreview.startsWith('data:image')) {
+            let imageS3Key = imagePreview || null;
+            if (imagePreview && String(imagePreview).startsWith('data:image')) {
                 try {
                     const uploadResult = await uploadDocumentToS3(imagePreview, 'asset-photos');
                     imageS3Key = uploadResult.publicId;
                 } catch (error) {
+                    console.error('[createAssetType] photo upload failed:', error?.message || error);
+                    return res.status(500).json({ message: 'Failed to upload asset photo. Please try again.' });
                 }
+            } else if (imagePreview) {
+                // Type/category preview may arrive as a signed URL or storage key — persist the key.
+                imageS3Key = normalizeS3Key(String(imagePreview)) || String(imagePreview).trim() || null;
             }
 
             let invoiceS3Key = invoiceFile || null;
@@ -962,6 +967,14 @@ export const getAssetTypes = async (req, res) => {
                         const signIf = async (key) => (key ? signOrKeepAttachmentUrl(key) : null);
                         const imagePreview = await signIf(a.imagePreview);
                         const photo = await signIf(a.photo);
+                        const images = Array.isArray(a.images)
+                            ? await Promise.all(
+                                a.images.map(async (img) => ({
+                                    ...img,
+                                    url: img?.url ? await signIf(img.url) : img?.url,
+                                })),
+                            )
+                            : [];
                         return {
                             _id: a._id,
                             assetId: a.assetId,
@@ -977,8 +990,9 @@ export const getAssetTypes = async (req, res) => {
                             warrantyYears: a.warrantyYears,
                             warrantyAttachment: toolsOnly ? a.warrantyAttachment : await signIf(a.warrantyAttachment),
                             invoiceNumber: a.invoiceNumber,
-                            imagePreview,
-                            photo,
+                            imagePreview: imagePreview || photo || images[0]?.url || null,
+                            photo: photo || imagePreview || images[0]?.url || null,
+                            images,
                             status: a.status,
                             acceptanceStatus: a.acceptanceStatus,
                             assignedToType: a.assignedToType,
@@ -1913,13 +1927,21 @@ export const updateAssetItem = async (req, res) => {
                         } catch (err) {
                         }
                     }
-                } else if ((key === 'photo' || key === 'imagePreview') && updates[key] && updates[key].startsWith('data:image')) {
-                    // Handle Image Upload to S3
-                    try {
-                        const uploadResult = await uploadDocumentToS3(updates[key], 'asset-photos');
-                        asset[key] = uploadResult.publicId;
-                    } catch (error) {
-                        asset[key] = updates[key];
+                } else if (key === 'photo' || key === 'imagePreview') {
+                    const raw = updates[key];
+                    if (raw && typeof raw === 'string' && raw.startsWith('data:image')) {
+                        try {
+                            const uploadResult = await uploadDocumentToS3(raw, 'asset-photos');
+                            asset.photo = uploadResult.publicId;
+                            asset.imagePreview = uploadResult.publicId;
+                        } catch (error) {
+                            console.error('[updateAssetType] photo upload failed:', error?.message || error);
+                            return res.status(500).json({ message: 'Failed to upload asset photo. Please try again.' });
+                        }
+                    } else if (raw && typeof raw === 'string' && raw.trim()) {
+                        const keyNorm = normalizeS3Key(raw.trim()) || raw.trim();
+                        asset.photo = keyNorm;
+                        asset.imagePreview = keyNorm;
                     }
                 } else if (key === 'invoiceFile' && updates[key]) {
                     const rawInvoice = String(updates[key] || '');

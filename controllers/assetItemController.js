@@ -1531,6 +1531,18 @@ export const getAssetItems = async (req, res) => {
             if (itemObj.imagePreview) {
                 itemObj.imagePreview = await signOrKeepAttachmentUrl(itemObj.imagePreview);
             }
+            if (Array.isArray(itemObj.images) && itemObj.images.length) {
+                itemObj.images = await Promise.all(
+                    itemObj.images.map(async (img) => ({
+                        ...img,
+                        url: img?.url ? await signOrKeepAttachmentUrl(img.url) : img?.url,
+                    })),
+                );
+            }
+            if (!itemObj.photo && !itemObj.imagePreview && itemObj.images?.[0]?.url) {
+                itemObj.photo = itemObj.images[0].url;
+                itemObj.imagePreview = itemObj.images[0].url;
+            }
             return itemObj;
         }));
 
@@ -3959,13 +3971,17 @@ export const createAssetItem = async (req, res) => {
         const requesterDisplayName = await getAssetRequesterDisplayName(req);
 
         // Handle Photo Upload
-        let photoS3Key = photo;
-        if (photo && photo.startsWith('data:image')) {
+        let photoS3Key = photo || null;
+        if (photo && String(photo).startsWith('data:image')) {
             try {
                 const uploadResult = await uploadDocumentToS3(photo, 'asset-photos');
                 photoS3Key = uploadResult.publicId;
             } catch (error) {
+                console.error('[createAssetItem] photo upload failed:', error?.message || error);
+                return res.status(500).json({ message: 'Failed to upload asset photo. Please try again.' });
             }
+        } else if (photo) {
+            photoS3Key = normalizeS3Key(String(photo)) || String(photo).trim() || null;
         }
 
         // Fetch the starting numeric part for IDs
@@ -4724,13 +4740,19 @@ export const updateAssetItem = async (req, res) => {
         }
 
         // Handle Photo Upload if changed
-        if (photo && photo.startsWith('data:image')) {
+        if (photo && String(photo).startsWith('data:image')) {
             try {
                 const uploadResult = await uploadDocumentToS3(photo, 'asset-photos');
                 item.photo = uploadResult.publicId;
                 item.imagePreview = uploadResult.publicId;
             } catch (error) {
+                console.error('[updateAssetItem] photo upload failed:', error?.message || error);
+                return res.status(500).json({ message: 'Failed to upload asset photo. Please try again.' });
             }
+        } else if (photo && typeof photo === 'string' && photo.trim()) {
+            const keyNorm = normalizeS3Key(photo.trim()) || photo.trim();
+            item.photo = keyNorm;
+            item.imagePreview = keyNorm;
         } else if (photo === null) {
             // they removed the photo? maybe not support deleting this way.
         }
@@ -5969,6 +5991,12 @@ export const getAssetItemDetail = async (req, res) => {
         }
 
         await Promise.all(signTasks.filter(Boolean));
+
+        // Gallery-only assets: expose first gallery image as header photo when main fields empty.
+        if (!itemObj.photo && !itemObj.imagePreview && itemObj.images?.[0]?.url) {
+            itemObj.photo = itemObj.images[0].url;
+            itemObj.imagePreview = itemObj.images[0].url;
+        }
 
         // Reuse assetController from visibility check above
         if (assetController) {
@@ -11323,17 +11351,29 @@ export const addAssetImage = async (req, res) => {
             'image'
         );
 
+        if (!Array.isArray(item.images)) item.images = [];
         item.images.push({
             url: uploadResult.publicId,
             caption: caption || '',
             date: date ? new Date(date) : new Date()
         });
+
+        // Keep header photo in sync when the asset had no main photo yet.
+        if (!item.photo && !item.imagePreview) {
+            item.photo = uploadResult.publicId;
+            item.imagePreview = uploadResult.publicId;
+        }
+
         await item.save();
 
         const savedImage = item.images[item.images.length - 1].toObject();
         savedImage.url = await signOrKeepAttachmentUrl(savedImage.url);
 
-        res.status(200).json(savedImage);
+        res.status(200).json({
+            ...savedImage,
+            photo: item.photo ? await signOrKeepAttachmentUrl(item.photo) : null,
+            imagePreview: item.imagePreview ? await signOrKeepAttachmentUrl(item.imagePreview) : null,
+        });
     } catch (error) {
         console.error('Error in addAssetImage:', error);
         res.status(500).json({ message: 'Server Error', error: error.message });

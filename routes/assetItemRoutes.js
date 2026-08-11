@@ -473,20 +473,15 @@ const requireAssetFullAccess = async (req, res, next) => {
         // Admin / designated Asset Controller always have full access.
         if (isAdminUser || isAssetControllerUser) return next();
 
+        // Tools + Vehicle: Add Image / document writes from the detail page.
+        // UI enables Add Image for assigned assets; previously only vehicles bypassed this gate,
+        // so tools uploads returned 403 and the Images tab stayed empty.
         if (id) {
-            const AssetItem = (await import('../models/AssetItem.js')).default;
-            const assetQuickVehicle = await AssetItem.findById(id)
-                .populate('typeId', 'name')
-                .select('plateNumber typeId')
-                .lean()
-                .catch(() => null);
-            if (isVehicleAssetLean(assetQuickVehicle)) {
-                const pathNoQuery = String(req.originalUrl || req.url || '').split('?')[0].replace(/\/+$/, '');
-                const isDocumentWrite =
-                    /\/document/.test(pathNoQuery) && (req.method === 'POST' || req.method === 'PUT');
-                const isAddImage = req.method === 'POST' && pathNoQuery.endsWith('/images');
-                if (isDocumentWrite || isAddImage) return next();
-            }
+            const pathNoQuery = String(req.originalUrl || req.url || '').split('?')[0].replace(/\/+$/, '');
+            const isDocumentWrite =
+                /\/document/.test(pathNoQuery) && (req.method === 'POST' || req.method === 'PUT');
+            const isAddImage = req.method === 'POST' && pathNoQuery.endsWith('/images');
+            if (isDocumentWrite || isAddImage) return next();
         }
 
         // Vehicle fleet / vehicle asset detail "Add service request": any logged-in user may POST

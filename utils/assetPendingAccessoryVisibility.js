@@ -60,5 +60,14 @@ export function computeCanSeePendingAddsForAsset(ctx, asset) {
     if (curNorm && arRef?.employeeId) {
         if (curNorm === normEmpIdStr(arRef.employeeId)) return true;
     }
+
+    // Requester of a pending Add should still see their own pending accessory rows.
+    const accessories = Array.isArray(asset.accessories) ? asset.accessories : [];
+    for (const acc of accessories) {
+        if (!isEmbeddedAccessoryPendingAddApproval(acc)) continue;
+        const reqRef = acc?.pendingActionDetails?.requestedBy;
+        const reqId = reqRef?._id?.toString?.() || (reqRef && reqRef.toString?.());
+        if (reqId && reqId === cur) return true;
+    }
     return false;
 }
