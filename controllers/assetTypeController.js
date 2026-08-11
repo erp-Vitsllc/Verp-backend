@@ -799,7 +799,7 @@ export const getAssetTypes = async (req, res) => {
                     await AssetType.updateMany(
                         { _id: { $in: leakedAutoCreatedIds } },
                         { $set: { isActive: false } },
-                    ).catch(() => {});
+                    ).catch(() => { });
                 }
             }
 
@@ -939,8 +939,8 @@ export const getAssetTypes = async (req, res) => {
                             null;
 
                         const accList = (a.accessories || []).map((acc) => {
-                            const accFine = assetFines.find(f => 
-                                (acc.accessoryId && f.accessoryId === acc.accessoryId) || 
+                            const accFine = assetFines.find(f =>
+                                (acc.accessoryId && f.accessoryId === acc.accessoryId) ||
                                 (acc._id && f.accessoryObjectId?.toString() === acc._id.toString())
                             );
                             return {
@@ -951,8 +951,8 @@ export const getAssetTypes = async (req, res) => {
                             };
                         });
                         const lostList = (a.lostDetachedAccessories || []).map((x) => {
-                            const accFine = assetFines.find(f => 
-                                (x.accessoryId && f.accessoryId === x.accessoryId) || 
+                            const accFine = assetFines.find(f =>
+                                (x.accessoryId && f.accessoryId === x.accessoryId) ||
                                 (x._id && f.accessoryObjectId?.toString() === x._id.toString()) ||
                                 (x.fineId && f.fineId === x.fineId)
                             );

@@ -26,6 +26,7 @@ import activityLogRoute from "./routes/activityLogRoutes.js";
 import storageRoute from "./routes/storageRoutes.js";
 import zohoRoute from "./routes/zohoRoutes.js";
 import locatorRoute from "./routes/locatorRoutes.js";
+import attendanceRoute from "./routes/attendanceRoutes.js";
 import { startLocatorWebSocket } from "./services/locatorWebSocketService.js";
 import { syncLocatorToErpDatabase } from "./services/locatorSnapshotService.js";
 import { commonLimiter } from "./middleware/rateLimitMiddleware.js";
@@ -51,6 +52,7 @@ import { scheduleDailyAtMidnight, getScheduledEmailTimeZone } from "./utils/sche
 import { setupEmailSubjectTag } from "./utils/setupEmailSubjectTag.js";
 import { purgeExpiredAdminDeletionArchives } from "./services/adminDeletionArchiveService.js";
 import { rerouteAllPendingAssetCreationApprovals } from "./utils/assetApprovalHelpers.js";
+import { processAttendanceDailyRoutine } from "./utils/processAttendanceDailyRoutine.js";
 
 // Always load VERP_backend/.env (not process.cwd()), so Zoho/Locator keys work
 // whether the server is started from repo root or from VERP_backend.
@@ -187,6 +189,17 @@ scheduleDailyAtMidnight(
     { name: "AdminDeletionArchive" },
 );
 
+// Attendance daily routine: close previous day (marks stay in DB), open new day empty for marking.
+setTimeout(() => {
+    processAttendanceDailyRoutine().catch((e) =>
+        console.error("[AttendanceDailyRoutine] startup failed:", e?.message || e),
+    );
+}, 140 * 1000);
+scheduleDailyAtMidnight(
+    () => processAttendanceDailyRoutine(),
+    { name: "AttendanceDailyRoutine" },
+);
+
 setTimeout(() => {
     rerouteAllPendingAssetCreationApprovals()
         .then((counts) => {
@@ -317,6 +330,7 @@ app.use("/api/ActivityLog", activityLogRoute);
 app.use("/api/storage", storageRoute);
 app.use("/api/zoho", zohoRoute);
 app.use("/api/locator", locatorRoute);
+app.use("/api/Attendance", attendanceRoute);
 
 const PORT = process.env.PORT || 5000;
 
