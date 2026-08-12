@@ -276,65 +276,13 @@ export const approveFine = async (req, res) => {
                     zohoVendorName || fine.zohoVendorName || fine.fineSource || '',
                 ).trim();
 
-                // Accounts set Fine Source / Vendor name — resolve Zoho contact id if missing
-                if (!vendorId && vendorNameHint) {
-                    try {
-                        const { fetchVendors } = await import('../../services/zohoService.js');
-                        const { withZohoOrganization } = await import('../../utils/zohoOrgContext.js');
-                        const orgId = String(
-                            zohoOrganizationId || fine.zohoOrganizationId || '',
-                        ).trim();
-                        const vendors = orgId
-                            ? await withZohoOrganization(orgId, () => fetchVendors())
-                            : await fetchVendors();
-                        const normalize = (s) =>
-                            String(s || '')
-                                .trim()
-                                .toLowerCase()
-                                .replace(/\u00a0/g, ' ')
-                                .replace(/\s+/g, ' ')
-                                .replace(/\s*&\s*/g, ' and ')
-                                .replace(/[^a-z0-9\u0600-\u06FF\s]/g, ' ')
-                                .replace(/\s+/g, ' ')
-                                .trim();
-                        const hint = normalize(vendorNameHint);
-                        const list = Array.isArray(vendors) ? vendors : [];
-                        let match = list.find((v) => {
-                            const names = [
-                                v.contact_name,
-                                v.vendor_name,
-                                v.company_name,
-                            ].map(normalize).filter(Boolean);
-                            return names.some((n) => n === hint);
-                        });
-                        if (!match) {
-                            match = list.find((v) => {
-                                const names = [
-                                    v.contact_name,
-                                    v.vendor_name,
-                                    v.company_name,
-                                ].map(normalize).filter(Boolean);
-                                return names.some((n) => n.includes(hint) || hint.includes(n));
-                            });
-                        }
-                        vendorId = String(
-                            match?.contact_id || match?.vendor_id || match?.id || '',
-                        ).trim();
-                    } catch (lookupErr) {
-                        console.warn(
-                            '[approveFine] Vendor lookup by Fine Source failed:',
-                            lookupErr?.message || lookupErr,
-                        );
-                    }
-                }
-
+                // Status first — do not block Approved on live Zoho vendor fetch (resolve in background).
                 const accountId = String(expenseAccountId || fine.expenseAccountId || '').trim();
                 const allPartiesHavePayable = fines.every((f) => String(f.expenseAccountId || '').trim());
-                if (!vendorId) {
+                if (!vendorId && !vendorNameHint) {
                     return res.status(400).json({
-                        message: vendorNameHint
-                            ? `Vendor "${vendorNameHint}" is set (Accounts), but no matching Zoho Books vendor was found.`
-                            : 'Management approval requires a Zoho vendor. Set Vendor (Fine Source) in Accounts on the Group Fine Parties card first.',
+                        message:
+                            'Management approval requires a Zoho vendor. Set Vendor (Fine Source) in Accounts on the Group Fine Parties card first.',
                     });
                 }
                 if (!accountId && !allPartiesHavePayable) {
@@ -397,15 +345,70 @@ export const approveFine = async (req, res) => {
                 modified = true;
                 Object.assign(fine, fines[0].toObject?.() ? fines[0].toObject() : fines[0]);
 
-                // Zoho + PDF + approval email: same work, after response (status already Approved).
+                // Zoho + vendor resolve + PDF + email — after response (status already Approved).
                 const fineIdsForZoho = fines.map((f) => f._id);
                 const primaryFineId = fines[0]._id;
                 const reqSnapshot = req;
+                const vendorNameForBg = vendorNameHint;
+                const orgIdForBg = String(zohoOrganizationId || fine.zohoOrganizationId || '').trim();
                 runAfterResponse('approveFine-zoho-pdf-email', async () => {
                     const freshFines = await Fine.find({ _id: { $in: fineIdsForZoho } });
                     if (!freshFines.length) return;
                     const primary =
                         freshFines.find((f) => String(f._id) === String(primaryFineId)) || freshFines[0];
+
+                    if (!String(primary.zohoVendorId || '').trim() && vendorNameForBg) {
+                        try {
+                            const { fetchVendors } = await import('../../services/zohoService.js');
+                            const { withZohoOrganization } = await import('../../utils/zohoOrgContext.js');
+                            const vendors = orgIdForBg
+                                ? await withZohoOrganization(orgIdForBg, () => fetchVendors())
+                                : await fetchVendors();
+                            const normalize = (s) =>
+                                String(s || '')
+                                    .trim()
+                                    .toLowerCase()
+                                    .replace(/\u00a0/g, ' ')
+                                    .replace(/\s+/g, ' ')
+                                    .replace(/\s*&\s*/g, ' and ')
+                                    .replace(/[^a-z0-9\u0600-\u06FF\s]/g, ' ')
+                                    .replace(/\s+/g, ' ')
+                                    .trim();
+                            const hint = normalize(vendorNameForBg);
+                            const list = Array.isArray(vendors) ? vendors : [];
+                            let match = list.find((v) => {
+                                const names = [v.contact_name, v.vendor_name, v.company_name]
+                                    .map(normalize)
+                                    .filter(Boolean);
+                                return names.some((n) => n === hint);
+                            });
+                            if (!match) {
+                                match = list.find((v) => {
+                                    const names = [v.contact_name, v.vendor_name, v.company_name]
+                                        .map(normalize)
+                                        .filter(Boolean);
+                                    return names.some((n) => n.includes(hint) || hint.includes(n));
+                                });
+                            }
+                            const resolvedId = String(
+                                match?.contact_id || match?.vendor_id || match?.id || '',
+                            ).trim();
+                            if (resolvedId) {
+                                for (const f of freshFines) {
+                                    f.zohoVendorId = resolvedId;
+                                    if (!f.zohoVendorName) f.zohoVendorName = vendorNameForBg;
+                                    await f.save();
+                                }
+                                primary.zohoVendorId = resolvedId;
+                            }
+                        } catch (lookupErr) {
+                            console.warn(
+                                '[approveFine] Background vendor lookup failed:',
+                                lookupErr?.message || lookupErr,
+                            );
+                        }
+                    }
+
                     const { syncApprovedFineToZoho } = await import('../../utils/syncApprovedFineToZoho.js');
                     const zohoResult = await syncApprovedFineToZoho(primary, freshFines);
                     if (zohoResult && zohoResult.ok === false && !zohoResult.skipped) {

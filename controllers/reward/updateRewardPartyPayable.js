@@ -26,25 +26,13 @@ export const updateRewardPartyPayable = async (req, res) => {
             String(reward.zohoExpenseId || '').trim() || String(reward.zohoJournalId || '').trim()
         );
         const syncErr = Boolean(String(reward.zohoSyncError || "").trim());
-        let status = String(reward.rewardStatus || reward.approvalStatus || "").trim();
+        const status = String(reward.rewardStatus || reward.approvalStatus || "").trim();
 
-        // Heal bad Paid-without-Zoho rows so Accounts can fix & retry
-        if (
+        // Allow Accounts field edit at Pending Accounts, or Zoho retry while already Paid but sync failed.
+        const canFixFailedZoho =
             !hasZoho &&
-            (status === "Approved (Paid)" || status === "Paid")
-        ) {
-            reward.rewardStatus = "Pending Accounts";
-            reward.approvalStatus = "Pending Accounts";
-            reward.paidAmount = 0;
-            status = "Pending Accounts";
-            const accountsStep = (reward.workflow || []).find((w) => w.role === "Accounts");
-            if (accountsStep) {
-                accountsStep.status = "Pending";
-                accountsStep.actionedAt = null;
-            }
-        }
-
-        const canFixFailedZoho = !hasZoho && syncErr && status === "Pending Accounts";
+            syncErr &&
+            (status === "Pending Accounts" || status === "Approved (Paid)" || status === "Paid");
         const canEditAtAccounts = status === "Pending Accounts";
 
         if (!canEditAtAccounts && !canFixFailedZoho) {
@@ -79,14 +67,15 @@ export const updateRewardPartyPayable = async (req, res) => {
             reward.paidThroughAccountName = "";
         }
 
-        // Retry Zoho when Accounts fields are complete (still Pending Accounts)
-        if (
-            status === "Pending Accounts" &&
+        // Retry Zoho when Accounts fields are complete (Pending Accounts or Paid-with-sync-error)
+        const canRetryZoho =
             String(reward.expenseAccountId || "").trim() &&
             String(reward.paidThroughAccountId || "").trim() &&
             String(reward.expenseAccountId).trim() !== String(reward.paidThroughAccountId).trim() &&
-            (syncErr || canFixFailedZoho)
-        ) {
+            !hasZoho &&
+            (syncErr || status === "Pending Accounts" || status === "Approved (Paid)" || status === "Paid");
+
+        if (canRetryZoho && (syncErr || canFixFailedZoho || status === "Approved (Paid)" || status === "Paid")) {
             try {
                 const EmployeeBasic = (await import("../../models/EmployeeBasic.js")).default;
                 const { syncRewardApprovalToZohoExpense } = await import(

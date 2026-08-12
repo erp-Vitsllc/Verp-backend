@@ -43,6 +43,7 @@ export const updateReward = async (req, res) => {
         }
 
         let __deferredFinalRewardEmail = null;
+        let __deferredZohoExpenseSync = null;
 
         const approvedStatuses = new Set(['Approved', 'Approved (Paid)', 'Paid', 'Completed', 'Active']);
         const certFieldsProvided = [
@@ -824,100 +825,16 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
                     currentStatus === 'Pending Accounts' &&
                     finalStatus === 'Approved (Paid)';
 
-                // Cash/Gift: Zoho Expense MUST succeed before status can become Approved (Paid)
-                let zohoOkForPaid = !isAccountsPaidAttempt;
-                if (
-                    isAccountsPaidAttempt &&
-                    !String(reward.zohoExpenseId || '').trim()
-                ) {
-                    try {
-                        let certificatePdfForZoho = req.body.certificatePdf || '';
-                        if (
-                            certificatePdfForZoho &&
-                            !(reward.certificateAttachment?.url || reward.certificateAttachment?.publicId)
-                        ) {
-                            try {
-                                let base64Data = String(certificatePdfForZoho);
-                                if (base64Data.includes(',')) base64Data = base64Data.split(',')[1];
-                                const certName = `Certificate-${reward.rewardId || reward._id}.pdf`;
-                                reward.certificateAttachment = await ensureAttachmentPersistedToS3(
-                                    {
-                                        data: `data:application/pdf;base64,${base64Data}`,
-                                        name: certName,
-                                        mimeType: 'application/pdf',
-                                    },
-                                    {
-                                        folder: 'rewards',
-                                        fileName: certName,
-                                    },
-                                );
-                                console.log(
-                                    '[UpdateReward] Certificate saved before Zoho Expense upload',
-                                );
-                            } catch (certStoreErr) {
-                                console.warn(
-                                    '[UpdateReward] Certificate pre-store for Zoho failed:',
-                                    certStoreErr?.message || certStoreErr,
-                                );
-                            }
-                        }
-
-                        const { syncRewardApprovalToZohoExpense } = await import(
-                            '../../utils/syncRewardPaymentToZoho.js'
-                        );
-                        const employeeForZoho = await EmployeeBasic.findOne({
-                            employeeId: reward.employeeId,
-                        })
-                            .select('employeeId company firstName lastName')
-                            .lean();
-                        const zohoResult = await syncRewardApprovalToZohoExpense({
-                            reward,
-                            employee: employeeForZoho,
-                            certificatePdfBase64: certificatePdfForZoho,
-                        });
-                        if (zohoResult?.ok && zohoResult.expenseId) {
-                            reward.zohoExpenseId = zohoResult.expenseId;
-                            reward.zohoExpenseNumber = zohoResult.expenseNumber || '';
-                            reward.zohoOrganizationId =
-                                zohoResult.organizationId || reward.zohoOrganizationId || '';
-                            reward.zohoSyncedAt = new Date();
-                            reward.zohoSyncError = '';
-                            zohoOkForPaid = true;
-                            console.log(
-                                '[UpdateReward] Zoho Expense on Accounts approve:',
-                                zohoResult.message || zohoResult.expenseId,
-                                zohoResult.attachment?.uploaded || zohoResult.attachment?.filename || '',
-                            );
-                        } else {
-                            reward.zohoSyncError = zohoResult?.message || 'Zoho Expense sync failed';
-                            zohoOkForPaid = false;
-                            console.warn('[UpdateReward] Zoho Expense failed:', reward.zohoSyncError);
-                        }
-                    } catch (zohoErr) {
-                        reward.zohoSyncError = zohoErr?.message || 'Zoho Expense sync failed';
-                        zohoOkForPaid = false;
-                        console.error('[UpdateReward] Zoho Expense error:', zohoErr);
-                    }
-                } else if (
-                    isAccountsPaidAttempt &&
-                    String(reward.zohoExpenseId || '').trim()
-                ) {
-                    zohoOkForPaid = true;
+                // Queue Zoho after response — do not block Paid status on certificate upload or Zoho API.
+                if (isAccountsPaidAttempt && !String(reward.zohoExpenseId || '').trim()) {
                     reward.zohoSyncError = '';
+                    __deferredZohoExpenseSync = {
+                        rewardId: reward._id,
+                        certificatePdfBase64: req.body.certificatePdf || '',
+                    };
                 }
 
-                // Zoho failed → stay Pending Accounts (NOT Paid). Fix accounts & approve again.
-                if (isAccountsPaidAttempt && !zohoOkForPaid) {
-                    finalStatus = 'Pending Accounts';
-                    publicStatus = 'Pending Accounts';
-                    reward.approvalStatus = 'Pending Accounts';
-                    reward.rewardStatus = 'Pending Accounts';
-                    reward.paymentStatus = 'Pending';
-                    reward.paidAmount = 0;
-                    console.warn(
-                        '[UpdateReward] Accounts approve blocked — Zoho Expense failed; status remains Pending Accounts',
-                    );
-                } else if (reward.workflow?.length) {
+                if (reward.workflow?.length) {
                     console.log(
                         `[UpdateReward] Management Workflow Update Check: User=${req.user?._id}`
                     );
@@ -950,7 +867,7 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
                         reward.accountsApprovedBy = req.user?.id || reward.accountsApprovedBy || null;
                     }
 
-                    // Cash/Gift Paid only after Zoho; certificate stays Approved
+                    // Cash/Gift → Paid immediately; Zoho posts after HTTP response
                     if (finalStatus === 'Approved (Paid)') {
                         reward.rewardStatus = 'Approved (Paid)';
                         reward.approvalStatus = 'Approved (Paid)';
@@ -1387,11 +1304,6 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
 
         await reward.save();
 
-        const zohoBlockedPaid =
-            reward.rewardStatus === 'Pending Accounts' &&
-            Boolean(String(reward.zohoSyncError || '').trim()) &&
-            !String(reward.zohoExpenseId || '').trim();
-
         // === SYNC DASHBOARD ACTION ===
         try {
             const { syncDashboardAction } = await import("../../utils/syncDashboard.js");
@@ -1434,26 +1346,6 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
                     }),
                     extra2: reward.amount ? `AED ${reward.amount}` : reward.title
                 });
-            } else if (zohoBlockedPaid) {
-                // Keep Accounts bell open after Zoho failure
-                const accountsStep = reward.workflow?.find((w) => w.role === 'Accounts');
-                if (accountsStep?.assignedTo) {
-                    if (accountsStep.status !== 'Pending') {
-                        accountsStep.status = 'Pending';
-                        accountsStep.actionedAt = null;
-                        await reward.save();
-                    }
-                    await syncDashboardAction({
-                        requestId: reward._id,
-                        requestType: 'Reward',
-                        assignedTo: accountsStep.assignedTo,
-                        status: 'Pending',
-                        subjectEmployee: employee,
-                        requestedByName: req.user?.name,
-                        extra1: 'Pending Accounts review — Zoho failed',
-                        extra2: reward.amount ? `AED ${reward.amount}` : reward.title,
-                    });
-                }
             }
         } catch (syncErr) {
             console.error("[UpdateReward] Dashboard Sync Error:", syncErr);
@@ -1465,13 +1357,92 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
             runAfterResponse('updateReward-final-email', __deferredFinalRewardEmail);
         }
 
+        if (__deferredZohoExpenseSync?.rewardId) {
+            const zohoJob = __deferredZohoExpenseSync;
+            runAfterResponse('updateReward-zoho-expense', async () => {
+                const RewardModel = (await import('../../models/Reward.js')).default;
+                const live = await RewardModel.findById(zohoJob.rewardId);
+                if (!live) return;
+                if (String(live.zohoExpenseId || '').trim()) return;
+
+                try {
+                    const certificatePdfForZoho = zohoJob.certificatePdfBase64 || '';
+                    if (
+                        certificatePdfForZoho &&
+                        !(live.certificateAttachment?.url || live.certificateAttachment?.publicId)
+                    ) {
+                        try {
+                            let base64Data = String(certificatePdfForZoho);
+                            if (base64Data.includes(',')) base64Data = base64Data.split(',')[1];
+                            const certName = `Certificate-${live.rewardId || live._id}.pdf`;
+                            live.certificateAttachment = await ensureAttachmentPersistedToS3(
+                                {
+                                    data: `data:application/pdf;base64,${base64Data}`,
+                                    name: certName,
+                                    mimeType: 'application/pdf',
+                                },
+                                {
+                                    folder: 'rewards',
+                                    fileName: certName,
+                                },
+                            );
+                            await live.save();
+                        } catch (certStoreErr) {
+                            console.warn(
+                                '[UpdateReward] Deferred certificate store failed:',
+                                certStoreErr?.message || certStoreErr,
+                            );
+                        }
+                    }
+
+                    const { syncRewardApprovalToZohoExpense } = await import(
+                        '../../utils/syncRewardPaymentToZoho.js'
+                    );
+                    const employeeForZoho = await EmployeeBasic.findOne({
+                        employeeId: live.employeeId,
+                    })
+                        .select('employeeId company firstName lastName')
+                        .lean();
+                    const zohoResult = await syncRewardApprovalToZohoExpense({
+                        reward: live,
+                        employee: employeeForZoho,
+                        certificatePdfBase64: certificatePdfForZoho,
+                    });
+                    if (zohoResult?.ok && zohoResult.expenseId) {
+                        live.zohoExpenseId = zohoResult.expenseId;
+                        live.zohoExpenseNumber = zohoResult.expenseNumber || '';
+                        live.zohoOrganizationId =
+                            zohoResult.organizationId || live.zohoOrganizationId || '';
+                        live.zohoSyncedAt = new Date();
+                        live.zohoSyncError = '';
+                        await live.save();
+                        console.log(
+                            '[UpdateReward] Zoho Expense after Paid:',
+                            zohoResult.message || zohoResult.expenseId,
+                        );
+                    } else {
+                        live.zohoSyncError = zohoResult?.message || 'Zoho Expense sync failed';
+                        await live.save();
+                        console.warn(
+                            '[UpdateReward] Zoho Expense failed after Paid (status stays Paid):',
+                            live.zohoSyncError,
+                        );
+                    }
+                } catch (zohoErr) {
+                    live.zohoSyncError = zohoErr?.message || 'Zoho Expense sync failed';
+                    await live.save();
+                    console.error(
+                        '[UpdateReward] Zoho Expense error after Paid:',
+                        zohoErr?.message || zohoErr,
+                    );
+                }
+            });
+        }
+
         return res.status(200).json({
-            message: zohoBlockedPaid
-                ? `Zoho Expense failed — reward stays Pending Accounts. Fix Expense Account / Paid Through and approve again. ${reward.zohoSyncError || ''}`.trim()
-                : "Reward updated successfully",
+            message: "Reward updated successfully",
             reward,
-            zohoSyncFailed: zohoBlockedPaid || undefined,
-            zohoSyncError: zohoBlockedPaid ? reward.zohoSyncError : undefined,
+            zohoSyncQueued: Boolean(__deferredZohoExpenseSync?.rewardId) || undefined,
         });
     } catch (error) {
         console.error('Error updating reward:', error);

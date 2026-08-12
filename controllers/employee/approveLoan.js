@@ -142,7 +142,7 @@ export const approveLoan = async (req, res) => {
                         }
 
                         nextStage = 'Pending Accounts';
-                        publicStatus = 'Pending'; // Keep visible status as Pending for Accounts
+                        publicStatus = 'Pending Accounts';
 
                         loan.hrApprovedBy = approverBasic?._id || requestingUserId;
                         nextApprover = accountsHOD;
@@ -190,7 +190,7 @@ export const approveLoan = async (req, res) => {
                         }
 
                         nextStage = 'Pending Authorization';
-                        publicStatus = 'Pending'; // Keep visible status as Pending for CEO
+                        publicStatus = 'Pending Authorization';
 
                         loan.accountsApprovedBy = approverBasic?._id || requestingUserId;
                         nextApprover = managementHOD;
@@ -413,7 +413,7 @@ export const approveLoan = async (req, res) => {
 
         res.status(200).json({
             message: `Loan ${finalStatus === 'Pending Authorization' ? 'submitted for authorization' : status.toLowerCase()}`,
-            loan,
+            loan: typeof loan.toObject === 'function' ? loan.toObject() : loan,
         });
 
         // Same notification emails — after response so UI status updates immediately
