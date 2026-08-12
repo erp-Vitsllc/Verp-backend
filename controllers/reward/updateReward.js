@@ -11,6 +11,7 @@ import { generatePdf } from "../../utils/generatePdf.js";
 import { ensureAttachmentPersistedToS3 } from "../../utils/s3Upload.js";
 import { resolveEmployeeEmail, getFallbackEmailNote, addEmployeeEmailToSet } from "../../utils/resolveEmployeeEmail.js";
 import { isUsernameSystemSuperUser, isReqUserSystemSuperUser } from "../../utils/systemSuperUser.js";
+import { runAfterResponse } from "../../utils/runAfterResponse.js";
 
 export const updateReward = async (req, res) => {
     try {
@@ -40,6 +41,8 @@ export const updateReward = async (req, res) => {
         if (!reward) {
             return res.status(404).json({ message: "Reward not found" });
         }
+
+        let __deferredFinalRewardEmail = null;
 
         const approvedStatuses = new Set(['Approved', 'Approved (Paid)', 'Paid', 'Completed', 'Active']);
         const certFieldsProvided = [
@@ -715,7 +718,7 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
                                         Number(reward.amount || 0) > 0
                                             ? `<p>Amount: <strong>AED ${Number(reward.amount).toLocaleString()}</strong></p>`
                                             : '';
-                                    await transporter.sendMail({
+                                    const stageMailPayload = {
                                         from: `"VeRP Notification" <${emailUser}>`,
                                         to: recipients,
                                         subject: `Reward Management Approved — Pending Accounts: ${reward.rewardType} — ${employeeForStageMail.firstName || ''} ${employeeForStageMail.lastName || ''}`.trim(),
@@ -729,9 +732,13 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
                                                 <p>Best Regards,<br/>VeRP System</p>
                                             </div>
                                         `,
-                                    });
-                                    console.log(
-                                        `[UpdateReward] Management→Accounts info email sent to: ${recipients.join(', ')}`,
+                                    };
+                                    runAfterResponse('updateReward-mgmt-accounts-email', () =>
+                                        transporter.sendMail(stageMailPayload).then(() => {
+                                            console.log(
+                                                `[UpdateReward] Management→Accounts info email sent to: ${recipients.join(', ')}`,
+                                            );
+                                        }),
                                     );
                                 }
                             }
@@ -743,7 +750,7 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
                         }
 
                         try {
-                            await sendHODAuthorizationEmail('Reward', reward, targetHOD, approverDetails);
+                            runAfterResponse('updateReward-hod-email', () => sendHODAuthorizationEmail('Reward', reward.toObject?.() ? reward.toObject() : reward, targetHOD, approverDetails));
                         } catch (mailErr) {
                             console.error('[UpdateReward] Accounts stage email failed:', mailErr);
                         }
@@ -792,7 +799,7 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
                             reward.managerApprovedBy = approverDetails.id;
                         }
 
-                        await sendHODAuthorizationEmail('Reward', reward, targetHOD, approverDetails);
+                        runAfterResponse('updateReward-hod-email', () => sendHODAuthorizationEmail('Reward', reward.toObject?.() ? reward.toObject() : reward, targetHOD, approverDetails));
                     } else {
                         console.error(`[UpdateReward] CRITICAL: Found Management Employee but NO LINKED USER ACCOUNT found for ID ${targetHOD.employeeId}.`);
                     }
@@ -980,12 +987,32 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
                 }
             }
 
-            // If status is being approved (Final), send email to recipient
+            // If status is being approved (Final), send email to recipient (scheduled after status save below)
             if (
                 (finalStatus === 'Approved' || finalStatus === 'Approved (Paid)') &&
                 currentStatus !== 'Approved' &&
                 currentStatus !== 'Approved (Paid)'
             ) {
+                const __finalStatus = finalStatus;
+                const __currentStatus = currentStatus;
+                const __certificatePdf = req.body.certificatePdf;
+                const __hodContext = hodContext;
+                const __req = req;
+                const __rewardId = reward._id;
+                __deferredFinalRewardEmail = async () => {
+                    const finalStatus = __finalStatus;
+                    const currentStatus = __currentStatus;
+                    const hodContext = __hodContext;
+                    const req = __req;
+                    if (__certificatePdf) req.body.certificatePdf = __certificatePdf;
+                    const reward = await Reward.findById(__rewardId);
+                    if (!reward) return;
+                    if (
+                (finalStatus === 'Approved' || finalStatus === 'Approved (Paid)') &&
+                currentStatus !== 'Approved' &&
+                currentStatus !== 'Approved (Paid)'
+            ) {
+
                 const isCashOrGiftFinal =
                     reward.rewardType === 'Cash Reward' ||
                     reward.rewardType === 'Gift Reward' ||
@@ -1224,7 +1251,10 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
                 } catch (emailError) {
                     console.error("[UpdateReward] EXCEPTION: Failed to send reward approval email:", emailError);
                 }
-            } else if (rewardStatus === 'Rejected') {
+                    }
+                };
+            }
+            if (rewardStatus === 'Rejected') {
                 // Update Workflow to Rejected
                 if (!reward.workflow) reward.workflow = [];
                 const pendingStep = reward.workflow.find(w => w.status === 'Pending' && (w.assignedTo?.toString() === (req.user?._id || approverUserId)?.toString() || w.role === 'Management')); // Management usually is the one rejecting at final stage, or Manager/HR
@@ -1430,6 +1460,10 @@ ${reward.workflow ? reward.workflow.map((w, i) => `│ ${i + 1}. Role: ${w.role.
         }
 
         await reward.save();
+
+        if (typeof __deferredFinalRewardEmail === 'function') {
+            runAfterResponse('updateReward-final-email', __deferredFinalRewardEmail);
+        }
 
         return res.status(200).json({
             message: zohoBlockedPaid

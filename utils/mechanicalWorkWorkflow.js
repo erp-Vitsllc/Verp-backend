@@ -300,6 +300,20 @@ export async function submitMechanicalWorkGarage(asset, serviceId, serviceUpdate
               }`,
     });
 
+    // Formal scheduled letter when Admin completes / reschedules Schedule card (not Accounts).
+    asset.markModified('services');
+    await asset.save();
+    {
+        const { sendFormalVehicleServiceScheduledAfterAdminSchedule } = await import(
+            './vehicleShopServiceScheduled.js'
+        );
+        await sendFormalVehicleServiceScheduledAfterAdminSchedule({
+            asset,
+            serviceRecordId: serviceId,
+            serviceTypeLabel: 'Mechanical Work',
+        });
+    }
+
     // Reschedule after first Done: update dates; advance to Ready/On Service if Accounts already done.
     if (garageAlreadySubmitted) {
         const { snapshotActiveServiceWorkflow } = await import('./vehicleServiceWorkflowResolve.js');

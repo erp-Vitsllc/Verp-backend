@@ -9,6 +9,7 @@ const ATTENDANCE_STATUS_KEYS = [
     'unauthorized_leave',
     'late_arrived',
     'not_marked',
+    'holiday',
 ];
 
 /**

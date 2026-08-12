@@ -10,7 +10,7 @@ import { readLocatorTokens } from '../utils/locatorTokenStore.js';
 import { resolveRegistrationExpiryDate } from '../utils/vehicleDocumentRenewal.js';
 
 const ERP_VEHICLE_LIST_SELECT =
-    'assetId name plateEmirate plateNumber modelYear currentKilometer status registrationExpiryDate assignedTo assignedCompany acceptanceStatus vehicleProfileActivationStatus vehicleDispositionStatus onServiceActive onLeaveActive pendingAction actionRequiredBy assignedDate pendingActionDetails updatedAt locatorDeviceId locatorGpsStatus locatorAddress locatorSpeedKmh locatorIgnition locatorLastUpdate locatorSyncedAt typeId';
+    'assetId name plateEmirate plateNumber modelYear currentKilometer status registrationExpiryDate assignedTo assignedCompany acceptanceStatus vehicleProfileActivationStatus vehicleDispositionStatus onServiceActive onLeaveActive pendingAction actionRequiredBy assignedDate pendingActionDetails updatedAt locatorDeviceId locatorGpsStatus locatorAddress locatorSpeedKmh locatorIgnition locatorLastUpdate locatorSyncedAt typeId documents.type documents.expiryDate documents.status documents.documentStatus documents.description documents.issueDate documents.createdAt';
 
 let lastLocatorLatestFetchAt = 0;
 const LOCATOR_LATEST_MIN_INTERVAL_MS = 60 * 1000;

@@ -6,6 +6,7 @@ import { sendHODAuthorizationEmail } from "../../utils/sendHODAuthorizationEmail
 import { sendFineStageEmail } from "../../utils/sendFineStageEmail.js";
 import { isValidStorageUrl } from "../../utils/validationHelper.js";
 import { canUserActOnFineStageAsync } from "../../utils/fineStageAuth.js";
+import { runAfterResponse } from "../../utils/runAfterResponse.js";
 
 /**
  * Approve Fine - Sequential Workflow
@@ -141,7 +142,11 @@ export const approveFine = async (req, res) => {
 
                 console.log(`[Fine ${fine.fineId}] HR Approved. Next Finance: ${nextApproverFound}`);
                 const allAssignedEmployees = fines.flatMap(f => f.assignedEmployees);
-                await sendFineStageEmail(fine, accEmails, 'Accounts', allAssignedEmployees);
+                const fineSnapshot = fine.toObject?.() ? fine.toObject() : { ...fine };
+                const accEmailsCopy = [...accEmails];
+                runAfterResponse('approveFine-hr-email', () =>
+                    sendFineStageEmail(fineSnapshot, accEmailsCopy, 'Accounts', allAssignedEmployees),
+                );
             } else {
                 return res.status(403).json({ message: "Only the assigned HR approver can approve at this stage." });
             }
@@ -241,7 +246,13 @@ export const approveFine = async (req, res) => {
                 }
 
                 console.log(`[Fine ${fine.fineId}] Finance Approved. Management:`, managementHOD ? `${managementHOD.firstName} ${managementHOD.lastName}` : 'NOT FOUND');
-                await sendHODAuthorizationEmail('Fine', fine, managementHOD, { name: 'Accounts Department', designation: 'Finance' });
+                const fineSnapshot = fine.toObject?.() ? fine.toObject() : { ...fine };
+                runAfterResponse('approveFine-accounts-email', () =>
+                    sendHODAuthorizationEmail('Fine', fineSnapshot, managementHOD, {
+                        name: 'Accounts Department',
+                        designation: 'Finance',
+                    }),
+                );
             } else {
                 return res.status(403).json({ message: "Only the assigned Accounts approver can approve at this stage." });
             }
@@ -333,7 +344,6 @@ export const approveFine = async (req, res) => {
                     });
                 }
 
-                const syncResults = [];
                 // Update ALL siblings
                 for (const f of fines) {
                     const { snapshotDeductionScheduleOnApproval } = await import('../../utils/fineDeductionScheduleSnapshot.js');
@@ -384,15 +394,30 @@ export const approveFine = async (req, res) => {
                     await f.save();
                 }
 
-                // One Zoho bill for the group: vendor = Fine Source, line items = parties with Payable COA
-                const { syncApprovedFineToZoho } = await import('../../utils/syncApprovedFineToZoho.js');
-                syncResults.push(await syncApprovedFineToZoho(fines[0], fines));
-
                 modified = true;
                 Object.assign(fine, fines[0].toObject?.() ? fines[0].toObject() : fines[0]);
-                if (syncResults.some((r) => r && r.ok === false && !r.skipped)) {
-                    console.warn('[ApproveFine] Zoho bill sync issues:', syncResults);
-                }
+
+                // Zoho + PDF + approval email: same work, after response (status already Approved).
+                const fineIdsForZoho = fines.map((f) => f._id);
+                const primaryFineId = fines[0]._id;
+                const reqSnapshot = req;
+                runAfterResponse('approveFine-zoho-pdf-email', async () => {
+                    const freshFines = await Fine.find({ _id: { $in: fineIdsForZoho } });
+                    if (!freshFines.length) return;
+                    const primary =
+                        freshFines.find((f) => String(f._id) === String(primaryFineId)) || freshFines[0];
+                    const { syncApprovedFineToZoho } = await import('../../utils/syncApprovedFineToZoho.js');
+                    const zohoResult = await syncApprovedFineToZoho(primary, freshFines);
+                    if (zohoResult && zohoResult.ok === false && !zohoResult.skipped) {
+                        console.warn('[ApproveFine] Zoho bill sync issues:', zohoResult);
+                    }
+                    const allAssignedEmployees = freshFines.flatMap((f) => f.assignedEmployees);
+                    const { persistFineApprovalAttachments } = await import(
+                        '../../utils/persistFineApprovalAttachments.js'
+                    );
+                    await persistFineApprovalAttachments(primary, { req: reqSnapshot });
+                    await dispatchFineApprovedNotification(primary, allAssignedEmployees, reqSnapshot);
+                });
 
                 // Update Asset Status if Loss & Damage — only for the main asset case.
                 // Accessory L&D fines store accessoryId / accessoryName; parent asset must stay unchanged
@@ -451,25 +476,20 @@ export const approveFine = async (req, res) => {
                         }
 
                         if (isLossDamageFine && ownerBeforeLost) {
-                            try {
-                                const { sendAssetLostFromFineEmail } = await import('../../utils/sendAssetLostFromFineEmail.js');
-                                await sendAssetLostFromFineEmail({
-                                    asset: { _id: asset._id, assetId: asset.assetId, name: asset.name },
-                                    fine,
-                                    owner: ownerBeforeLost,
-                                });
-                            } catch (ownerMailErr) {
-                                console.error('[ApproveFine] Asset owner lost notification failed:', ownerMailErr?.message || ownerMailErr);
-                            }
+                            const assetMailPayload = {
+                                asset: { _id: asset._id, assetId: asset.assetId, name: asset.name },
+                                fine: fine.toObject?.() ? fine.toObject() : fine,
+                                owner: ownerBeforeLost,
+                            };
+                            runAfterResponse('approveFine-asset-lost-email', async () => {
+                                const { sendAssetLostFromFineEmail } = await import(
+                                    '../../utils/sendAssetLostFromFineEmail.js'
+                                );
+                                await sendAssetLostFromFineEmail(assetMailPayload);
+                            });
                         }
                     }
                 }
-
-                // Combine all employees from all siblings for the email
-                const allAssignedEmployees = fines.flatMap(f => f.assignedEmployees);
-                const { persistFineApprovalAttachments } = await import('../../utils/persistFineApprovalAttachments.js');
-                await persistFineApprovalAttachments(fine, { req });
-                await dispatchFineApprovedNotification(fine, allAssignedEmployees, req);
             } else {
                 return res.status(403).json({ message: "Only the assigned Management approver can approve at this stage." });
             }
@@ -488,10 +508,11 @@ export const approveFine = async (req, res) => {
             const subjectName = isGroup ? `Group Fine - ${fines.length} Employees` : undefined;
 
             const isFinalStatus = fine.fineStatus === 'Approved' || fine.fineStatus === 'Rejected';
+            // Clear current stage Pending immediately (HR/Accounts), not only on final Management.
             await syncDashboardAction({
                 requestId: fine._id,
                 requestType: reqType,
-                assignedTo: isFinalStatus ? null : req.user?._id,
+                assignedTo: null,
                 status: isFinalStatus ? fine.fineStatus : 'Approved',
                 subjectEmployee: subjectEmp,
                 subjectName: subjectName,
@@ -518,6 +539,19 @@ export const approveFine = async (req, res) => {
 
         if (modified && fine.fineStatus !== 'Approved') {
             await fine.save();
+        }
+
+        try {
+            await fine.populate([
+                { path: 'createdBy', select: 'name firstName lastName' },
+                { path: 'hrApprovedBy', select: 'name firstName lastName employeeId' },
+                { path: 'accountsApprovedBy', select: 'name firstName lastName employeeId' },
+                { path: 'approvedBy', select: 'name firstName lastName employeeId' },
+                { path: 'submittedTo', select: 'name firstName lastName employeeId' },
+                { path: 'workflow.assignedTo', select: 'name firstName lastName employeeId' },
+            ]);
+        } catch (popErr) {
+            console.warn('[ApproveFine] Populate names for response failed:', popErr?.message || popErr);
         }
 
         return res.status(200).json({

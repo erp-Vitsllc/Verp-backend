@@ -10,6 +10,7 @@ import { getDepartmentHOD } from "../../utils/getDepartmentHOD.js";
 import { getCompleteEmployee } from "../../services/employeeService.js";
 import { resolveEmployeeEmail, getFallbackEmailNote, addEmployeeEmailToSet } from "../../utils/resolveEmployeeEmail.js";
 import { LOAN_PENDING_PAYMENT_STATUS } from "../../utils/loanStatusConstants.js";
+import { runAfterResponse } from "../../utils/runAfterResponse.js";
 
 export const approveLoan = async (req, res) => {
     try {
@@ -365,11 +366,11 @@ export const approveLoan = async (req, res) => {
             isManagementAuthorized &&
             parseFloat(loan.amount || 0) - parseFloat(loan.paidAmount || 0) > 0.01;
 
+        // Clear current stage Pending immediately (HR/Accounts), not only on final Management.
         await syncDashboardAction({
             requestId: loan._id,
             requestType: 'Loan',
-            // Specifically clear the acting user's task
-            assignedTo: isFinalStatus ? null : req.user?._id,
+            assignedTo: null,
             status: isManagementAuthorized ? 'Approved' : (isFinalStatus ? finalStatus : 'Approved'),
             subjectEmployee: applicant,
             requestedByName: req.user.name
@@ -408,9 +409,38 @@ export const approveLoan = async (req, res) => {
             }
         }
 
-        // Handle Notifications
+        await loan.save();
+
+        res.status(200).json({
+            message: `Loan ${finalStatus === 'Pending Authorization' ? 'submitted for authorization' : status.toLowerCase()}`,
+            loan,
+        });
+
+        // Same notification emails — after response so UI status updates immediately
         const emailUser = process.env.EMAIL_USER?.trim();
         const emailPass = process.env.EMAIL_PASS?.trim();
+        const loanDoc = loan;
+        const nextApproverDoc = nextApprover;
+        const emailSubjectDoc = emailSubject;
+        const emailTypeDoc = emailType;
+        const finalStatusDoc = finalStatus;
+        const nextStageDoc = nextStage;
+        const needsAccountsDisbursementDoc = needsAccountsDisbursement;
+        const paymentDueAccountsHodDoc = paymentDueAccountsHod;
+        const reqDoc = req;
+        const applicantDoc = applicant;
+
+        runAfterResponse('approveLoan-emails', async () => {
+        const loan = loanDoc;
+        const nextApprover = nextApproverDoc;
+        const emailSubject = emailSubjectDoc;
+        const emailType = emailTypeDoc;
+        const finalStatus = finalStatusDoc;
+        const nextStage = nextStageDoc;
+        const needsAccountsDisbursement = needsAccountsDisbursementDoc;
+        const paymentDueAccountsHod = paymentDueAccountsHodDoc;
+        const req = reqDoc;
+        let applicant = applicantDoc;
 
         if (emailUser && emailPass) {
             const transporter = nodemailer.createTransport({
@@ -803,10 +833,9 @@ export const approveLoan = async (req, res) => {
                 }
             }
         }
+        });
 
-        await loan.save();
-
-        res.status(200).json({ message: `Loan ${finalStatus === 'Pending Authorization' ? 'submitted for authorization' : status.toLowerCase()}`, loan });
+        return;
 
     } catch (error) {
         console.error("Error approving loan:", error);

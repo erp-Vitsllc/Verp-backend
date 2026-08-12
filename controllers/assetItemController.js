@@ -1242,7 +1242,8 @@ export const healMisroutedAssignmentInboxTasks = async () => {
     }
 };
 
-/** Bell/inbox rows for assigner (+ counterpart) when assignment is accepted or rejected. */
+/** Bell/inbox rows for assigner (+ counterpart) when assignment is rejected.
+ *  Accept is email-only — no outcome notification. */
 const notifyAssignmentOutcomeDashboard = async ({
     asset,
     action,
@@ -1251,9 +1252,10 @@ const notifyAssignmentOutcomeDashboard = async ({
     comments = '',
 }) => {
     try {
-        if (!asset?._id || (action !== 'Accept' && action !== 'Reject')) return;
+        // Accept: email only (callers still send sendAssetResponseEmail). Reject: inbox + email.
+        if (!asset?._id || action !== 'Reject') return;
         const actorId = String(actorEmp?._id || currentUserId || '');
-        const outcomeLabel = action === 'Reject' ? 'rejected' : 'accepted';
+        const outcomeLabel = 'rejected';
         const assetLabel = `${asset.assetId || ''} — ${asset.name || ''}`.trim();
         const actorName = empAckDisplayName(actorEmp) || 'User';
 
@@ -1323,10 +1325,10 @@ const notifyAssignmentOutcomeDashboard = async ({
                     '',
                 requestedByName: actorName,
                 extra1: `Assignment ${outcomeLabel}: ${assetLabel}`,
-                extra2: action === 'Reject' ? 'Assignment Rejected' : 'Assignment Accepted',
+                extra2: 'Assignment Rejected',
                 extra3: JSON.stringify({
                     assignmentOutcome: true,
-                    outcome: action,
+                    outcome: 'Reject',
                     assetMongoId: String(asset._id),
                 }),
                 comment: comments || '',
@@ -1610,11 +1612,13 @@ export const getVehicleFleetDashboard = async (req, res) => {
         ]);
         // Exclude tools (VEGA-ASSET-*): shared AssetItem defaults used to match every row.
         const fleetScope = buildFleetVehicleMongoScope({ vehicleTypeIds });
-        // List view: skip documents / services — expiry columns use top-level date fields.
+        // List view: skip heavy nested payloads (attachments, services). Keep minimal
+        // document fields so registration/insurance expiry can resolve when top-level
+        // dates were never synced (e.g. older first-time card adds).
         // Full dashboard: project only nested fields charts/modals need (skip quotation URLs,
         // workflow history signatures, document attachments — those balloon BSON + JSON).
         const fleetSelect = listOnly
-            ? 'assetId name vehicleBrand plateEmirate plateNumber modelYear assetValue status registrationExpiryDate insuranceExpiryDate nextServiceDate oilChangeDate gearOilDueDate currentKilometer assignedTo assignedCompany acceptanceStatus pendingAction actionRequiredBy createdBy vehicleProfileActivationStatus vehicleDispositionStatus warrantyEnabled warrantyExpiryDate warrantyYears onServiceActive onLeaveActive typeId assignedDate pendingActionDetails updatedAt locatorDeviceId locatorGpsStatus locatorAddress locatorSpeedKmh locatorIgnition locatorLastUpdate locatorSyncedAt activeServiceWorkflow.stage activeServiceWorkflow.serviceRecordId activeServiceWorkflow.serviceTypeLabel activeServiceWorkflow.serviceType'
+            ? 'assetId name vehicleBrand plateEmirate plateNumber modelYear assetValue status registrationExpiryDate insuranceExpiryDate nextServiceDate oilChangeDate gearOilDueDate currentKilometer assignedTo assignedCompany acceptanceStatus pendingAction actionRequiredBy createdBy vehicleProfileActivationStatus vehicleDispositionStatus warrantyEnabled warrantyExpiryDate warrantyYears onServiceActive onLeaveActive typeId assignedDate pendingActionDetails updatedAt locatorDeviceId locatorGpsStatus locatorAddress locatorSpeedKmh locatorIgnition locatorLastUpdate locatorSyncedAt activeServiceWorkflow.stage activeServiceWorkflow.serviceRecordId activeServiceWorkflow.serviceTypeLabel activeServiceWorkflow.serviceType documents.type documents.expiryDate documents.status documents.documentStatus documents.description documents.issueDate documents.createdAt'
             : [
                 'assetId',
                 'name',
@@ -12666,9 +12670,14 @@ export const addAssetDocument = async (req, res) => {
 
         const addedDoc = asset.documents[asset.documents.length - 1];
         const renewFromId = String(renewFromDocumentId || '').trim();
+        const { finalizeVehicleDocumentRenewal, syncVehicleExpiryFieldsFromLiveDocuments } =
+            await import('../utils/vehicleDocumentRenewal.js');
         if (renewFromId && addedDoc?._id) {
-            const { finalizeVehicleDocumentRenewal } = await import('../utils/vehicleDocumentRenewal.js');
             finalizeVehicleDocumentRenewal(asset, renewFromId, addedDoc._id);
+        } else {
+            // First-time add must also copy live card expiry onto top-level fields
+            // (vehicle list uses registrationExpiryDate / insuranceExpiryDate only).
+            syncVehicleExpiryFieldsFromLiveDocuments(asset);
         }
 
         await asset.save();

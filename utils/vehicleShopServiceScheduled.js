@@ -197,13 +197,8 @@ async function notifyShopServiceScheduled({
         ) || null;
     const remark = parseRemark(service);
 
-    // Formal letter-style email: TO assigned user, CC Admin Officer + HR + Accounts + driven-by.
-    await sendVehicleServiceScheduledNotificationEmail({
-        asset: populated,
-        remark,
-        service,
-        serviceTypeLabel: serviceTypeLabel || service?.serviceType || 'Vehicle Service',
-    });
+    // Formal "Vehicle Service Scheduled Notification" is sent when Admin completes
+    // Schedule/Reschedule (see sendFormalVehicleServiceScheduledAfterAdminSchedule) — not here after Accounts.
 
     const adminOfficer = await getDepartmentHOD('admincontroller');
     const plate = [populated.plateEmirate, populated.plateNumber].filter(Boolean).join(' ').trim();
@@ -517,6 +512,45 @@ export async function maybeAdvanceShopToScheduledAfterGarageIfAccountsDone(
         scheduleActivityNote:
             'Schedule completed after Accounts Approve — service scheduled (Zoho billing after End Service)',
         skipAccountsStamp: true,
+    });
+}
+
+/**
+ * Formal "Vehicle Service Scheduled Notification" after Admin completes Schedule / Reschedule.
+ * TO assigned · CC Admin Officer + HR + Accounts + driven-by.
+ * (Not sent after Accounts approval.)
+ */
+export async function sendFormalVehicleServiceScheduledAfterAdminSchedule({
+    asset,
+    serviceRecordId,
+    serviceTypeLabel = 'Vehicle Service',
+} = {}) {
+    const populated = await AssetItem.findById(asset._id || asset)
+        .populate({
+            path: 'assignedTo',
+            select: 'firstName lastName employeeId companyEmail workEmail personalEmail email company',
+            populate: [
+                {
+                    path: 'primaryReportee',
+                    select: 'firstName lastName employeeId companyEmail workEmail',
+                },
+                { path: 'company', select: 'name' },
+            ],
+        })
+        .lean();
+    if (!populated) return { ok: false, reason: 'no-asset' };
+
+    const service =
+        (Array.isArray(populated.services) ? populated.services : []).find(
+            (s) => String(s?._id) === String(serviceRecordId),
+        ) || null;
+    const remark = parseRemark(service);
+
+    return sendVehicleServiceScheduledNotificationEmail({
+        asset: populated,
+        remark,
+        service,
+        serviceTypeLabel: serviceTypeLabel || service?.serviceType || 'Vehicle Service',
     });
 }
 

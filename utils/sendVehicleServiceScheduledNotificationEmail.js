@@ -95,7 +95,7 @@ function dayLabel(value) {
 }
 
 /**
- * Formal scheduled-service email (Accounts Approve for cash, or Admin schedule for warranty).
+ * Formal scheduled-service email — after Admin completes Schedule / Reschedule.
  * TO: vehicle assigned user
  * CC: Admin Officer, HR, Accounts, car driven by
  */

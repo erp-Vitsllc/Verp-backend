@@ -898,18 +898,8 @@ export async function approveOilAccountsQuote(asset, serviceId, reqUser, payment
         .trim();
     const startLabel = startD ? new Date(startD).toISOString().slice(0, 10) : '';
 
-    // Formal scheduled letter after Accounts Approve (not Admin) — Ready to Service or On Service.
-    // TO assigned · CC Admin + HR + driven-by.
-    const serviceForMail =
-        (populatedForMail?.services || []).find((s) => String(s?._id) === String(serviceId)) ||
-        service ||
-        null;
-    await sendVehicleServiceScheduledNotificationEmail({
-        asset: populatedForMail || asset,
-        remark,
-        service: serviceForMail,
-        serviceTypeLabel: 'Oil Service',
-    });
+    // Formal "Vehicle Service Scheduled Notification" is sent when Admin completes
+    // Schedule/Reschedule — not after Accounts approval.
 
     // If start date is in the future, Admin dashboard only: Ready to Service (awaits start date).
     if (!wentLive) {
@@ -1830,6 +1820,15 @@ export async function submitOilServiceAssignment(asset, serviceId, req) {
     const plate = [populated?.plateEmirate, populated?.plateNumber].filter(Boolean).join(' ').trim();
     const startLabel = startD.toISOString().slice(0, 10);
 
+    // Formal scheduled letter when Admin completes Schedule/Reschedule (cash + warranty).
+    // TO assigned · CC Admin + HR + Accounts + driven-by — not after Accounts approval.
+    await sendVehicleServiceScheduledNotificationEmail({
+        asset: populated,
+        remark,
+        service,
+        serviceTypeLabel: 'Oil Service',
+    });
+
     if (isCash) {
         if (!hrAlreadyApproved && !scheduleHrAlreadyOpen) {
             if (!hr?._id) {
@@ -1852,14 +1851,6 @@ export async function submitOilServiceAssignment(asset, serviceId, req) {
         const detailLine = isLive
             ? `${requesterName} submitted an oil service request for ${populated?.assetId || ''}${plate ? ` (${plate})` : ''}. The vehicle is now on service.`
             : `${requesterName} scheduled an oil service for ${populated?.assetId || ''}${plate ? ` (${plate})` : ''}. Service starts on ${startLabel}.`;
-
-        // Warranty has no Accounts step — formal scheduled letter when Admin schedules (Ready / On Service).
-        await sendVehicleServiceScheduledNotificationEmail({
-            asset: populated,
-            remark,
-            service,
-            serviceTypeLabel: 'Oil Service',
-        });
 
         if (isLive) {
             await notifyOilServiceWentLiveIfNeeded(populated, service._id, { detailLine });
@@ -2724,6 +2715,31 @@ export async function updateOilServiceDates(
     }
     asset.markModified('services');
     await asset.save();
+
+    const scheduleAlreadySubmitted =
+        String(remark.requestStatus || '').toLowerCase() === 'submitted' ||
+        Boolean(String(remark.assignmentSubmittedAt || remark.oilServiceScheduledAt || '').trim());
+
+    // Reschedule: formal scheduled letter when Admin updates Schedule after first Done.
+    if (scheduleAlreadySubmitted && isOilScheduleFieldsComplete(remark)) {
+        const populatedForMail = await AssetItem.findById(asset._id)
+            .populate({
+                path: 'assignedTo',
+                select: `${OIL_EMP_EMAIL_SELECT} company`,
+                populate: { path: 'company', select: 'name' },
+            })
+            .lean();
+        const serviceForMail =
+            (populatedForMail?.services || []).find((s) => String(s?._id) === String(serviceId)) ||
+            service ||
+            null;
+        await sendVehicleServiceScheduledNotificationEmail({
+            asset: populatedForMail || asset,
+            remark,
+            service: serviceForMail,
+            serviceTypeLabel: 'Oil Service',
+        });
+    }
 
     if (hasOilWorkflow && (startChanged || endChanged)) {
         const populated = await AssetItem.findById(asset._id)

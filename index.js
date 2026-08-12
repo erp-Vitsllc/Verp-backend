@@ -27,6 +27,7 @@ import storageRoute from "./routes/storageRoutes.js";
 import zohoRoute from "./routes/zohoRoutes.js";
 import locatorRoute from "./routes/locatorRoutes.js";
 import attendanceRoute from "./routes/attendanceRoutes.js";
+import holidayRoute from "./routes/holidayRoutes.js";
 import { startLocatorWebSocket } from "./services/locatorWebSocketService.js";
 import { syncLocatorToErpDatabase } from "./services/locatorSnapshotService.js";
 import { commonLimiter } from "./middleware/rateLimitMiddleware.js";
@@ -331,6 +332,7 @@ app.use("/api/storage", storageRoute);
 app.use("/api/zoho", zohoRoute);
 app.use("/api/locator", locatorRoute);
 app.use("/api/Attendance", attendanceRoute);
+app.use("/api/Holiday", holidayRoute);
 
 const PORT = process.env.PORT || 5000;
 

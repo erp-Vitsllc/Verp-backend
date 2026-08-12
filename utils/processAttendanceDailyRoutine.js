@@ -17,8 +17,9 @@ function shiftCalendarDay(parts, deltaDays) {
 
 /**
  * Daily attendance routine (runs at Asia/Dubai midnight):
- * 1) Close previous calendar day — marks already stored in Attendance stay as-is.
- * 2) Open the new day empty — no statuses are copied forward; users mark again.
+ * 1) Close previous calendar day.
+ * 2) Auto-mark check-in without check-out as mispunched → Unauthorized.
+ * 3) Open the new day empty — timers reset on the client.
  */
 export async function processAttendanceDailyRoutine() {
     const timeZone = getScheduledEmailTimeZone();
@@ -28,6 +29,38 @@ export async function processAttendanceDailyRoutine() {
     const todayKey = formatDateKey(todayParts);
     const yesterdayKey = formatDateKey(yesterdayParts);
     const now = new Date();
+
+    // Forgot check-out → mispunched / Unauthorized for the closed day
+    const mispunchResult = await Attendance.updateMany(
+        {
+            date: yesterdayKey,
+            timeIn: { $exists: true, $nin: ['', null] },
+            $or: [{ timeOut: '' }, { timeOut: null }, { timeOut: { $exists: false } }],
+        },
+        {
+            $set: {
+                statusKey: 'unauthorized_leave',
+                statusLabel: 'Unauthorized',
+                reason: 'Mispunched — forgot to check out (auto at midnight)',
+            },
+        },
+    );
+
+    // Checked out days → Present
+    await Attendance.updateMany(
+        {
+            date: yesterdayKey,
+            timeIn: { $exists: true, $nin: ['', null] },
+            timeOut: { $exists: true, $nin: ['', null] },
+            statusKey: { $in: ['not_marked', 'checked_in', ''] },
+        },
+        {
+            $set: {
+                statusKey: 'on_office',
+                statusLabel: 'On work',
+            },
+        },
+    );
 
     const yesterdayMarkedCount = await Attendance.countDocuments({ date: yesterdayKey });
 
@@ -39,7 +72,7 @@ export async function processAttendanceDailyRoutine() {
                 status: 'closed',
                 closedAt: now,
                 markedCount: yesterdayMarkedCount,
-                note: 'Closed at midnight — marks remain stored for this date.',
+                note: `Closed at midnight — mispunched without checkout: ${mispunchResult.modifiedCount || 0}.`,
             },
             $setOnInsert: {
                 openedAt: zonedWallTimeToUtc(
@@ -52,7 +85,6 @@ export async function processAttendanceDailyRoutine() {
     );
 
     // New day starts empty: do not create / copy employee marks.
-    // Any accidental same-day leftover would only exist if users marked today already.
     await AttendanceDay.findOneAndUpdate(
         { date: todayKey },
         {
@@ -69,7 +101,7 @@ export async function processAttendanceDailyRoutine() {
     );
 
     console.log(
-        `[AttendanceDailyRoutine] ${timeZone} rollover complete — closed ${yesterdayKey} (marks=${yesterdayMarkedCount}), opened ${todayKey} empty`,
+        `[AttendanceDailyRoutine] ${timeZone} rollover — closed ${yesterdayKey} (marks=${yesterdayMarkedCount}, mispunched=${mispunchResult.modifiedCount || 0}), opened ${todayKey} empty`,
     );
 
     return {
@@ -77,5 +109,6 @@ export async function processAttendanceDailyRoutine() {
         closedDate: yesterdayKey,
         openedDate: todayKey,
         closedMarkedCount: yesterdayMarkedCount,
+        mispunchedCount: mispunchResult.modifiedCount || 0,
     };
 }

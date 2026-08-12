@@ -95,23 +95,24 @@ export const getFineById = async (req, res) => {
             fine = await Fine.findOne({
                 $or: [{ _id: id }, { fineId: id }]
             })
-                .populate('createdBy', 'firstName lastName email department designation')
-                .populate('managerApprovedBy', 'firstName lastName email department designation employeeId')
-                .populate('hrApprovedBy', 'firstName lastName email department designation employeeId')
-                .populate('accountsApprovedBy', 'firstName lastName email department designation employeeId')
-                .populate('approvedBy', 'firstName lastName email department designation employeeId')
-                .populate('rejectedBy', 'firstName lastName email department designation')
-                .populate('submittedTo', 'firstName lastName email department designation')
-                .populate('workflow.assignedTo', 'firstName lastName employeeId')
+                .populate('createdBy', 'name firstName lastName email department designation')
+                .populate('managerApprovedBy', 'name firstName lastName email department designation employeeId')
+                .populate('hrApprovedBy', 'name firstName lastName email department designation employeeId')
+                .populate('accountsApprovedBy', 'name firstName lastName email department designation employeeId')
+                .populate('approvedBy', 'name firstName lastName email department designation employeeId')
+                .populate('rejectedBy', 'name firstName lastName email department designation')
+                .populate('submittedTo', 'name firstName lastName email department designation employeeId')
+                .populate('workflow.assignedTo', 'name firstName lastName employeeId')
                 .populate('company', 'companyId _id name') // Populate company to get companyId and name
                 .lean();
         } else {
             fine = await Fine.findOne({ fineId: id })
-                .populate('createdBy', 'firstName lastName email department designation')
-                .populate('hrApprovedBy', 'firstName lastName email department designation employeeId')
-                .populate('accountsApprovedBy', 'firstName lastName email department designation employeeId')
-                .populate('approvedBy', 'firstName lastName email department designation employeeId')
-                .populate('workflow.assignedTo', 'firstName lastName employeeId')
+                .populate('createdBy', 'name firstName lastName email department designation')
+                .populate('hrApprovedBy', 'name firstName lastName email department designation employeeId')
+                .populate('accountsApprovedBy', 'name firstName lastName email department designation employeeId')
+                .populate('approvedBy', 'name firstName lastName email department designation employeeId')
+                .populate('submittedTo', 'name firstName lastName email department designation employeeId')
+                .populate('workflow.assignedTo', 'name firstName lastName employeeId')
                 .populate('company', 'companyId _id name') // Populate company to get companyId and name
                 .lean();
         }
@@ -127,13 +128,13 @@ export const getFineById = async (req, res) => {
 
         const baseIdRegex = new RegExp(`^${baseIdToUse}(-[A-Z0-9]+)?$`, 'i');
         relatedFines = await Fine.find({ fineId: baseIdRegex })
-            .populate('createdBy', 'firstName lastName email department designation')
-            .populate('hrApprovedBy', 'firstName lastName email department designation employeeId')
-            .populate('accountsApprovedBy', 'firstName lastName email department designation employeeId')
-            .populate('approvedBy', 'firstName lastName email department designation employeeId')
-            .populate('rejectedBy', 'firstName lastName email department designation')
-            .populate('submittedTo', 'firstName lastName email department designation')
-            .populate('workflow.assignedTo', 'firstName lastName employeeId')
+            .populate('createdBy', 'name firstName lastName email department designation')
+            .populate('hrApprovedBy', 'name firstName lastName email department designation employeeId')
+            .populate('accountsApprovedBy', 'name firstName lastName email department designation employeeId')
+            .populate('approvedBy', 'name firstName lastName email department designation employeeId')
+            .populate('rejectedBy', 'name firstName lastName email department designation')
+            .populate('submittedTo', 'name firstName lastName email department designation employeeId')
+            .populate('workflow.assignedTo', 'name firstName lastName employeeId')
             .populate('company', 'companyId _id name') // Populate company to get companyId and name
             .sort({ fineId: 1 })
             .lean();
@@ -400,8 +401,8 @@ export const getFineById = async (req, res) => {
                 if (freshDoc) {
                     await syncPendingFineAssigneeFromFlowchart(freshDoc);
                     const synced = await FineModel.findById(fine._id)
-                        .populate('workflow.assignedTo', 'firstName lastName employeeId')
-                        .populate('submittedTo', 'firstName lastName email department designation employeeId')
+                        .populate('workflow.assignedTo', 'name firstName lastName employeeId')
+                        .populate('submittedTo', 'name firstName lastName email department designation employeeId')
                         .lean();
                     if (synced) {
                         fine.workflow = synced.workflow;

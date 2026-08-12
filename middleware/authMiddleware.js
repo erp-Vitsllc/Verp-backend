@@ -59,10 +59,28 @@ export const protect = async (req, res, next) => {
             if (emp) employeeObjectId = emp._id;
         }
 
+        // Fallback: link by company / portal email when User.employeeId is missing
+        if (!employeeObjectId) {
+            const emails = [user.companyEmail, user.email]
+                .map((e) => String(e || '').trim().toLowerCase())
+                .filter(Boolean);
+            if (emails.length) {
+                const empByEmail = await EmployeeBasic.findOne({
+                    $or: [
+                        { companyEmail: { $in: emails } },
+                        { workEmail: { $in: emails } },
+                        { email: { $in: emails } },
+                    ],
+                }).select('_id');
+                if (empByEmail) employeeObjectId = empByEmail._id;
+            }
+        }
+
         const isSystemSuperUser = isUsernameSystemSuperUser(user.username);
 
-        // Attach user info to request
+        // Attach user info to request (decoded last would overwrite live fields — keep it first)
         req.user = {
+            ...decoded,
             id: user._id.toString(),
             _id: user._id,
             name: user.name,
@@ -76,7 +94,6 @@ export const protect = async (req, res, next) => {
             employeeObjectId: employeeObjectId, // Linked EmployeeBasic ObjectId
             role: user.groupName || decoded.role || null,
             groupName: user.groupName,
-            ...decoded
         };
 
         next();

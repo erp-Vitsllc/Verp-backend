@@ -28,21 +28,60 @@ function getDubaiClockTime(date = new Date()) {
 
 async function resolveLinkedEmployee(req) {
     let employee = null;
+
+    const selectFields = '_id employeeId firstName lastName companyEmail workEmail email';
+
     if (req.user?.employeeObjectId) {
-        employee = await EmployeeBasic.findById(req.user.employeeObjectId)
-            .select('_id employeeId firstName lastName')
-            .lean();
+        try {
+            employee = await EmployeeBasic.findById(req.user.employeeObjectId)
+                .select(selectFields)
+                .lean();
+        } catch {
+            employee = null;
+        }
     }
+
     if (!employee && req.user?.employeeId) {
         employee = await EmployeeBasic.findOne({ employeeId: req.user.employeeId })
-            .select('_id employeeId firstName lastName')
+            .select(selectFields)
             .lean();
     }
-    if (!employee && req.user?.companyEmail) {
-        employee = await EmployeeBasic.findOne({ companyEmail: req.user.companyEmail })
-            .select('_id employeeId firstName lastName')
+
+    const emailCandidates = [
+        req.user?.companyEmail,
+        req.user?.email,
+    ]
+        .map((e) => String(e || '').trim().toLowerCase())
+        .filter(Boolean);
+
+    if (!employee && emailCandidates.length) {
+        employee = await EmployeeBasic.findOne({
+            $or: [
+                { companyEmail: { $in: emailCandidates } },
+                { workEmail: { $in: emailCandidates } },
+                { email: { $in: emailCandidates } },
+            ],
+        })
+            .select(selectFields)
             .lean();
+
+        // Case-insensitive fallback
+        if (!employee) {
+            const escaped = emailCandidates.map((e) =>
+                e.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
+            );
+            employee = await EmployeeBasic.findOne({
+                $or: escaped.flatMap((e) => [
+                    { companyEmail: { $regex: `^${e}$`, $options: 'i' } },
+                    { workEmail: { $regex: `^${e}$`, $options: 'i' } },
+                    { email: { $regex: `^${e}$`, $options: 'i' } },
+                ]),
+            })
+                .select(selectFields)
+                .lean();
+        }
     }
+
     return employee;
 }
 
@@ -618,14 +657,8 @@ export async function checkInMyAttendance(req, res) {
             });
         }
 
-        const leaveKeys = new Set(['on_leave', 'sick_leave', 'authorized_leave', 'unauthorized_leave']);
-        if (existing && leaveKeys.has(existing.statusKey)) {
-            return res.status(400).json({
-                message: 'Cannot check in — leave is already marked for today.',
-                record: existing,
-            });
-        }
-
+        // Self check-in is allowed even if HR previously marked leave for the day —
+        // checking in means the employee is present and starts the timer.
         const doc = await Attendance.findOneAndUpdate(
             { date, employeeMongoId },
             {
@@ -634,11 +667,12 @@ export async function checkInMyAttendance(req, res) {
                     employeeMongoId,
                     employeeId: String(employee.employeeId || ''),
                     employeeName,
-                    statusKey: 'on_office',
-                    statusLabel: 'On office',
+                    // Present only after check-out; provisional until then.
+                    statusKey: 'not_marked',
+                    statusLabel: 'Checked in',
                     timeIn,
-                    timeOut: existing?.timeOut || '',
-                    reason: existing?.reason || '',
+                    timeOut: '',
+                    reason: '',
                     attachmentName: existing?.attachmentName || '',
                     markedBy: req.user?.id || null,
                 },
@@ -688,9 +722,11 @@ export async function checkOutMyAttendance(req, res) {
 
         existing.timeOut = timeOut;
         existing.markedBy = req.user?.id || existing.markedBy || null;
-        if (!existing.statusKey || existing.statusKey === 'not_marked') {
-            existing.statusKey = 'on_office';
-            existing.statusLabel = 'On office';
+        // Complete day → Present (On work)
+        existing.statusKey = 'on_office';
+        existing.statusLabel = 'On work';
+        if (String(existing.reason || '').toLowerCase().includes('mispunch')) {
+            existing.reason = '';
         }
         await existing.save();
 

@@ -21,6 +21,7 @@ import {
 } from "../../utils/fineDeductionScheduleSnapshot.js";
 import { normalizeFineSourceSchedule } from "../../utils/normalizeFineSourceSchedule.js";
 import { ensureAttachmentPersistedToS3 } from "../../utils/s3Upload.js";
+import { runAfterResponse } from "../../utils/runAfterResponse.js";
 
 export const updateFine = async (req, res) => {
     try {
@@ -805,39 +806,61 @@ export const updateFine = async (req, res) => {
             sendFineApprovalEmail(updatedFine, allAssigned).catch(err => console.error("[UpdateFine] Failed to send approval email:", err));
         }
 
-        // If newly approved, send confirmation email with attachments
+        // If newly approved, send confirmation email with attachments (after response)
         if (oldStatus !== 'Approved' && updates.fineStatus === 'Approved') {
-            try {
-                const { persistFineApprovalAttachments } = await import('../../utils/persistFineApprovalAttachments.js');
-                await persistFineApprovalAttachments(updatedFine, { req });
-                const { dispatchFineApprovedNotification } = await import("../../utils/dispatchFineApprovedNotification.js");
-                const allAssigned = fines.flatMap(f => f.assignedEmployees);
-                await dispatchFineApprovedNotification(updatedFine, allAssigned, req);
-                console.log(`[UpdateFine] Confirmed email sent for fine ${updatedFine.fineId}`);
-            } catch (err) {
-                console.error("[UpdateFine] Failed to send confirmed email:", err);
-            }
+            const fineIdForMail = updatedFine._id;
+            const siblingIds = fines.map((f) => f._id);
+            const reqSnapshot = req;
+            runAfterResponse('updateFine-approved-email', async () => {
+                const FineModel = (await import('../../models/Fine.js')).default;
+                const primary = await FineModel.findById(fineIdForMail);
+                if (!primary) return;
+                const siblings = await FineModel.find({ _id: { $in: siblingIds } });
+                const { persistFineApprovalAttachments } = await import(
+                    '../../utils/persistFineApprovalAttachments.js'
+                );
+                await persistFineApprovalAttachments(primary, { req: reqSnapshot });
+                const { dispatchFineApprovedNotification } = await import(
+                    '../../utils/dispatchFineApprovedNotification.js'
+                );
+                const allAssigned = siblings.flatMap((f) => f.assignedEmployees);
+                await dispatchFineApprovedNotification(primary, allAssigned, reqSnapshot);
+                console.log(`[UpdateFine] Confirmed email sent for fine ${primary.fineId}`);
+            });
         } else if (isApprovedFineStatus(oldStatus)) {
-            try {
-                const { persistFineApprovalAttachments } = await import('../../utils/persistFineApprovalAttachments.js');
-                const regenTrigger = updates.excludedAccessoryIds !== undefined ? 'accessory-edit' : 'schedule-edit';
-                for (const f of fines) {
+            const fineIdForMail = updatedFine._id;
+            const siblingIds = fines.map((f) => f._id);
+            const regenTrigger = updates.excludedAccessoryIds !== undefined ? 'accessory-edit' : 'schedule-edit';
+            const scheduleChanges = fines.map((f) => f.scheduleChangeForHistory || null);
+            for (const f of fines) {
+                delete f.scheduleChangeForHistory;
+            }
+            const reqSnapshot = req;
+            runAfterResponse('updateFine-regen-email', async () => {
+                const FineModel = (await import('../../models/Fine.js')).default;
+                const siblings = await FineModel.find({ _id: { $in: siblingIds } });
+                const { persistFineApprovalAttachments } = await import(
+                    '../../utils/persistFineApprovalAttachments.js'
+                );
+                for (let i = 0; i < siblings.length; i++) {
+                    const f = siblings[i];
                     await persistFineApprovalAttachments(f, {
-                        req,
+                        req: reqSnapshot,
                         forceRegenerate: true,
                         trigger: regenTrigger,
-                        scheduleChange:
-                            regenTrigger === 'schedule-edit' ? f.scheduleChangeForHistory || null : null,
+                        scheduleChange: regenTrigger === 'schedule-edit' ? scheduleChanges[i] : null,
                     });
-                    delete f.scheduleChangeForHistory;
                 }
-                const { dispatchFineApprovedNotification } = await import("../../utils/dispatchFineApprovedNotification.js");
-                const allAssigned = fines.flatMap(f => f.assignedEmployees);
-                await dispatchFineApprovedNotification(updatedFine, allAssigned, req);
-                console.log(`[UpdateFine] Updated confirmed email sent for fine ${updatedFine.fineId}`);
-            } catch (err) {
-                console.error("[UpdateFine] Failed to update and send confirmed email:", err);
-            }
+                const primary =
+                    siblings.find((f) => String(f._id) === String(fineIdForMail)) || siblings[0];
+                if (!primary) return;
+                const { dispatchFineApprovedNotification } = await import(
+                    '../../utils/dispatchFineApprovedNotification.js'
+                );
+                const allAssigned = siblings.flatMap((f) => f.assignedEmployees);
+                await dispatchFineApprovedNotification(primary, allAssigned, reqSnapshot);
+                console.log(`[UpdateFine] Updated confirmed email sent for fine ${primary.fineId}`);
+            });
         }
 
         // If newly rejected, send notification
