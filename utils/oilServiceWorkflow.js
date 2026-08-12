@@ -975,7 +975,6 @@ function buildOilCompletedEmailDetailRows(asset = {}, remark = {}) {
         formatOilDueDateLabel(resolveServiceEndDate(remark));
     const nextDate =
         String(remark.nextServiceDate || '').trim().slice(0, 10) ||
-        String(remark.nextChangeMonth || '').trim() ||
         formatOilDueDateLabel(asset.nextServiceDate);
     const handOver = String(remark.handOverDate || '').trim().slice(0, 10);
     const returnDate = String(remark.returnDate || '').trim().slice(0, 10);
@@ -1047,7 +1046,7 @@ async function notifyOilServiceCompletedOwnerAndAssignee({
     const plate = [populated.plateEmirate, populated.plateNumber].filter(Boolean).join(' ').trim();
     const detailRows = buildOilCompletedEmailDetailRows(populated, remark);
     const linkPath = oilServiceDetailsPath(populated._id, serviceRecordId);
-    const detailLine = `Oil service for ${populated.assetId || 'your vehicle'}${plate ? ` (${plate})` : ''} is complete. Next oil change details are below — if the current KM is not correct, please update it.`;
+    const detailLine = `Oil service for ${populated.assetId || 'your vehicle'}${plate ? ` (${plate})` : ''} is complete. Next oil change details are below — on that next service date VeRP will auto-create a new oil service request and email a service-due reminder to complete further procedures. If the current KM is not correct, please update it.`;
 
     for (const recipient of recipients) {
         await sendOilEmail({
@@ -1068,8 +1067,10 @@ async function notifyOilServiceCompletedOwnerAndAssignee({
 }
 
 /**
- * Sync vehicle oilChangeDate / lastServiceDate / nextServiceDate from the oil schedule.
- * Start → oil change / last service; end / nextChangeMonth → next service due.
+ * Sync vehicle oilChangeDate / lastServiceDate from the oil schedule start.
+ * nextServiceDate is only updated from an explicit remark.nextServiceDate
+ * (Complete Service) — never from nextChangeMonth / service end (those are the
+ * garage visit window, not the next oil due).
  */
 function applyOilChangeDatesFromSchedule(asset, remark = {}) {
     if (!asset) return false;
@@ -1080,10 +1081,13 @@ function applyOilChangeDatesFromSchedule(asset, remark = {}) {
         asset.lastServiceDate = start;
         changed = true;
     }
-    const next = resolveNextOilServiceDateFromRemark(remark, asset);
-    if (next && !Number.isNaN(next.getTime())) {
-        asset.nextServiceDate = next;
-        changed = true;
+    const remarkNext = String(remark?.nextServiceDate || '').trim();
+    if (/^\d{4}-\d{2}-\d{2}/.test(remarkNext)) {
+        const next = new Date(remarkNext.slice(0, 10));
+        if (!Number.isNaN(next.getTime())) {
+            asset.nextServiceDate = next;
+            changed = true;
+        }
     }
     return changed;
 }
@@ -1225,6 +1229,7 @@ async function sendOilEmail({
     serviceReqNo = '',
     linkPath,
     cc = [],
+    stageLabel = 'Oil service',
 }) {
     const who = `${recipient?.firstName || ''} ${recipient?.lastName || ''}`.trim() || recipient?.employeeId || 'Unknown';
     const { email } = resolveEmployeeEmail(recipient || {});
@@ -1251,7 +1256,7 @@ async function sendOilEmail({
     await sendVehicleServiceWorkflowEmail({
         recipient,
         asset,
-        stageLabel: 'Oil service',
+        stageLabel,
         actionLabel,
         detailLine,
         detailRows: rows,
@@ -1338,6 +1343,7 @@ async function notifyStakeholders({
     detailLine,
     detailRows = [],
     oilStage = '',
+    stageLabel = 'Oil service',
 }) {
     const linkPath = oilServiceDetailsPath(asset._id, serviceRecordId);
     const list = uniqRecipients(recipients);
@@ -1350,6 +1356,7 @@ async function notifyStakeholders({
             detailRows,
             serviceRecordId,
             linkPath,
+            stageLabel,
         });
         if (recipient?._id) {
             await syncDashboardAction({
@@ -1995,23 +2002,25 @@ export async function submitOilServiceDetails(asset, serviceId, serviceUpdates, 
         throw new Error('Return date must be on or after the service end date.');
     }
 
-    const nextServiceRaw =
-        remark.nextServiceDate ||
-        remark.nextChangeMonth ||
-        serviceUpdates?.nextServiceDate ||
-        serviceUpdates?.nextServiceMonth ||
-        '';
+    const nextServiceRaw = String(
+        remark.nextServiceDate || serviceUpdates?.nextServiceDate || '',
+    ).trim();
     const nextKey = (() => {
-        const raw = String(nextServiceRaw || '').trim();
+        const raw = nextServiceRaw;
         if (/^\d{4}-\d{2}-\d{2}/.test(raw)) return raw.slice(0, 10);
-        if (/^\d{4}-\d{2}$/.test(raw)) return `${raw}-01`;
         const d = raw ? new Date(raw) : null;
         if (!d || Number.isNaN(d.getTime())) return '';
         return d.toISOString().slice(0, 10);
     })();
-    if (endKey && nextKey && nextKey <= endKey) {
+    if (!nextKey) {
+        throw new Error('Next service date is required on Complete Service.');
+    }
+    if (endKey && nextKey <= endKey) {
         throw new Error('Next service date must be after the service end date.');
     }
+
+    // Keep remark.nextServiceDate as the canonical due date for auto-create + email.
+    remark.nextServiceDate = nextKey;
 
     const currentKmCandidates = [
         remark.currentKm,
@@ -2084,15 +2093,16 @@ export async function submitOilServiceDetails(asset, serviceId, serviceUpdates, 
         asset.onServiceActive = false;
     }
 
-    // Persist next oil change on the vehicle from Complete Service form.
-    const completedNext =
-        String(remark.nextServiceDate || '').trim().slice(0, 10) ||
-        (/^\d{4}-\d{2}$/.test(String(remark.nextChangeMonth || '').trim())
-            ? `${String(remark.nextChangeMonth).trim()}-01`
-            : '');
+    // Persist next oil change on the vehicle from Complete Service form only.
+    // This date drives oil-service-due auto-create + service-due email (not document expiry).
+    const completedNext = String(remark.nextServiceDate || '').trim().slice(0, 10);
     if (completedNext) {
         const nextD = new Date(completedNext);
         if (!Number.isNaN(nextD.getTime())) asset.nextServiceDate = nextD;
+    }
+    // Keep remark in sync before save paths below.
+    if (serviceRow) {
+        serviceRow.remark = JSON.stringify(remark);
     }
     const handOverOrEnd =
         String(remark.handOverDate || remark.serviceEndDate || '').trim().slice(0, 10);
@@ -2983,8 +2993,9 @@ function hasOpenOilServiceRequest(asset) {
 }
 
 /**
- * Next oil due date for auto-create — must NOT use serviceEndDate / schedule end.
- * Those are when the current garage visit ends, not when the next oil change is due.
+ * Next oil due date for auto-create — must NOT use serviceEndDate / schedule end /
+ * nextChangeMonth (legacy alias for service-end month). Those are when the current
+ * garage visit ends, not when the next oil change is due.
  */
 function resolveNextOilDueDateFromRemark(remark, asset) {
     const remarkNext = String(remark?.nextServiceDate || '').trim();
@@ -2994,11 +3005,6 @@ function resolveNextOilDueDateFromRemark(remark, asset) {
     if (asset?.nextServiceDate) {
         const assetNext = new Date(asset.nextServiceDate);
         if (!Number.isNaN(assetNext.getTime())) return assetNext;
-    }
-    // Legacy month-only field (first day of that month).
-    const month = String(remark?.nextChangeMonth || '').trim();
-    if (/^\d{4}-\d{2}$/.test(month)) {
-        return new Date(`${month}-01`);
     }
     return null;
 }
@@ -3026,10 +3032,32 @@ function hasOpenAutoCreatedOilService(asset) {
     return false;
 }
 
+/** Pending/draft oil requests that still need procedures (blocks another auto-create). */
+function hasPendingOilServiceRequest(asset) {
+    for (const service of asset?.services || []) {
+        if (String(service?.serviceType || '').trim() !== 'Oil Service') continue;
+        const remark = parseOilServiceRemark(service);
+        const requestStatus = String(remark?.requestStatus || '').toLowerCase();
+        if (['draft', 'pending', 'submitted'].includes(requestStatus)) return true;
+        const wf = asset?.activeServiceWorkflow || {};
+        const wfStage = String(wf.stage || '').toLowerCase();
+        if (
+            String(wf.serviceRecordId || '') === String(service._id || '') &&
+            isOilServiceWorkflowRecord(wf, service) &&
+            wfStage &&
+            !['complete', 'rejected', 'billed', 'pending_accounts'].includes(wfStage)
+        ) {
+            return true;
+        }
+    }
+    return false;
+}
+
 /**
  * Due when:
  * 1) vehicle current km == previous completed row next oil change km, or
- * 2) previous completed row next oil service date == today.
+ * 2) previous completed row next oil service date is today or earlier
+ *    (Complete Service nextServiceDate — not schedule end).
  * Never uses service end / schedule end as the due date.
  */
 function evaluateOilServiceDue(asset, previousRow) {
@@ -3041,7 +3069,8 @@ function evaluateOilServiceDue(asset, previousRow) {
     const today = utcDayStart(new Date());
     const nextDate = resolveNextOilDueDateFromRemark(previousRemark, asset);
     const nextDateDay = nextDate != null ? utcDayStart(nextDate) : null;
-    const dateDue = nextDateDay != null && today != null && nextDateDay === today;
+    // Due on the Complete Service next-date day (and catch-up if cron missed that day).
+    const dateDue = nextDateDay != null && today != null && nextDateDay <= today;
 
     const nextKm = Number(previousRemark?.nextChangeKm);
     const currentKm = Number(asset?.currentKilometer);
@@ -3078,16 +3107,18 @@ function evaluateOilServiceDue(asset, previousRow) {
 }
 
 /**
- * When the previous completed oil service has next service date == today
+ * When the previous completed oil service has next service date == today (or earlier)
  * or current km == next change km, create a pending oil service row and email
- * Admin Officer, assigned user, and Management.
+ * Admin Officer, assigned user, and Management as a service-due notice (not document expiry).
  */
 export async function maybeAutoCreateOilServiceDue(assetDoc) {
     if (!assetDoc) return false;
     if (!String(assetDoc.plateNumber || '').trim()) return false;
     if (!isFleetVehicleProfileActive(assetDoc)) return false;
-    // Only block when an auto-created due request is already open (not by previous-row status).
+    // Mid-visit / already have a request to process — don't spawn another.
+    if (assetDoc.onServiceActive) return false;
     if (hasOpenAutoCreatedOilService(assetDoc)) return false;
+    if (hasPendingOilServiceRequest(assetDoc)) return false;
 
     const previousRow = findPreviousCompletedOilServiceRowForDue(assetDoc);
     if (!previousRow) return false;
@@ -3114,14 +3145,18 @@ export async function maybeAutoCreateOilServiceDue(assetDoc) {
         amountMode: 'amount',
         requestStatus: 'pending',
         currentKm: Number.isFinite(currentKm) ? currentKm : 0,
-        nextChangeKm: completedMeta?.nextChangeKm ?? 0,
+        // Due trigger used previous nextChangeKm/date; do not stamp those as this
+        // visit's "next service" until Complete Service collects the real next values.
+        nextChangeKm: '',
         serviceEndDate: '',
-        nextChangeMonth: completedMeta?.nextChangeMonth || '',
+        nextChangeMonth: '',
         oilServiceTypeText: '',
         autoCreated: true,
         autoCreatedReason: dueInfo.reason,
         autoCreatedAt: new Date().toISOString(),
         ...(previousRow?._id ? { autoCreatedFromServiceId: String(previousRow._id) } : {}),
+        ...(dueInfo.nextKm != null ? { dueFromNextChangeKm: dueInfo.nextKm } : {}),
+        ...(dueInfo.nextDate ? { dueFromNextServiceDate: formatOilDueDateLabel(dueInfo.nextDate) } : {}),
     };
 
     const newService = {
@@ -3140,7 +3175,7 @@ export async function maybeAutoCreateOilServiceDue(assetDoc) {
     appendOilServiceActivity(newService, {
         type: 'service_created',
         byName: 'System',
-        note: 'Oil service request auto-created — change due',
+        note: 'Oil service request auto-created — service due',
     });
 
     if (previousRow) {
@@ -3163,24 +3198,40 @@ export async function maybeAutoCreateOilServiceDue(assetDoc) {
 
     const adminOfficer = await getDepartmentHOD('admincontroller');
     const management = await getDepartmentHOD('management');
+    const hr = await getDepartmentHOD('hr');
     const plate = [populated.plateEmirate, populated.plateNumber].filter(Boolean).join(' ').trim();
+    const dueDateLabel = formatOilDueDateLabel(dueInfo.nextDate) || 'today';
     const detailParts = [];
     if (dueInfo.dateDue) {
-        detailParts.push(`next oil service date is today (${formatOilDueDateLabel(dueInfo.nextDate)})`);
+        detailParts.push(`next oil service date is due (${dueDateLabel})`);
     }
     if (dueInfo.kmDue) {
         detailParts.push(
             `current odometer ${dueInfo.currentKm} km equals next oil change ${dueInfo.nextKm} km`,
         );
     }
-    const detailLine = `Oil change is due for ${populated.assetId || ''}${plate ? ` (${plate})` : ''}. ${detailParts.join('; ')}. A pending oil service request was created automatically.`;
+    const detailLine = `Oil service is due for ${populated.assetId || ''}${
+        plate ? ` (${plate})` : ''
+    }. ${detailParts.join('; ')}. A new oil service request was created automatically. Please open the Service tab and complete further procedures (Initiate → Schedule → On Service → Complete Service).`;
+
+    const detailRows = [
+        { label: 'Reminder type', value: 'Oil service due (auto-generated request)' },
+        { label: 'Due date', value: dueDateLabel },
+        ...(dueInfo.nextKm != null
+            ? [{ label: 'Next service KM', value: `${Number(dueInfo.nextKm).toLocaleString()} KM` }]
+            : []),
+        { label: 'Action required', value: 'Open the new oil service request and complete further procedures' },
+    ];
 
     await notifyStakeholders({
         asset: populated,
         serviceRecordId: serviceId,
-        recipients: [adminOfficer, populated.assignedTo, management],
-        actionLabel: 'Oil change due — service request created',
+        recipients: [adminOfficer, populated.assignedTo, management, hr],
+        actionLabel: 'Oil service due — please complete further procedures',
         detailLine,
+        detailRows,
+        oilStage: 'service_due',
+        stageLabel: 'Oil service due',
     });
 
     try {
@@ -3209,7 +3260,7 @@ export async function processOilServiceDueAutoCreate() {
             vehicleProfileActivationStatus: 'active',
         })
             .select(
-                'assetId plateNumber plateEmirate services activeServiceWorkflow currentKilometer nextServiceDate assignedTo vehicleProfileActivationStatus typeId',
+                'assetId plateNumber plateEmirate services activeServiceWorkflow currentKilometer nextServiceDate assignedTo vehicleProfileActivationStatus typeId onServiceActive',
             )
             .populate('typeId', 'name')
             .limit(500);

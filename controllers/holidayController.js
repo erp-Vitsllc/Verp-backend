@@ -1,6 +1,7 @@
 import Holiday from '../models/Holiday.js';
 import Attendance from '../models/Attendance.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
+import { applyWeeklyOffForDate } from '../utils/workingTimeHelpers.js';
 
 function isValidDateKey(value) {
     return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value);
@@ -124,6 +125,13 @@ export async function deleteHoliday(req, res) {
         const deleted = await Holiday.findOneAndDelete({ date });
         if (!deleted) {
             return res.status(404).json({ message: 'Holiday not found.' });
+        }
+
+        // Restore Site/Office weekly offs on that date if the schedule says so.
+        try {
+            await applyWeeklyOffForDate(date, req.user?.id || null);
+        } catch (syncErr) {
+            console.error('[deleteHoliday] weekly-off restore failed:', syncErr);
         }
 
         return res.status(200).json({

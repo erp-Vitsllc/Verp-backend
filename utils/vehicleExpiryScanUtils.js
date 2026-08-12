@@ -98,22 +98,9 @@ export function collectVehicleExpiryDocuments(asset) {
         });
     }
 
-    if (asset.nextServiceDate) {
-        docs.push({
-            key: 'asset:nextServiceDate',
-            label: 'Next Service',
-            expiryDate: asset.nextServiceDate,
-            docType: 'service',
-        });
-    }
-    if (asset.gearOilDueDate) {
-        docs.push({
-            key: 'asset:gearOilDueDate',
-            label: 'Gear Oil Service',
-            expiryDate: asset.gearOilDueDate,
-            docType: 'service',
-        });
-    }
+    // nextServiceDate / gearOilDueDate are service schedule fields — not documents.
+    // Oil/service due is handled by oilServiceWorkflow (auto-create + service notifications),
+    // not the vehicle document-expiry email/task pipeline.
 
     return docs;
 }

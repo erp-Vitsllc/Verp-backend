@@ -1866,7 +1866,11 @@ export const getVehicleFleetDashboard = async (req, res) => {
             }
 
             const oilDueRaw = v.gearOilDueDate || v.nextServiceDate || null;
-            if (oilDueRaw) {
+            // Already in an active oil visit — due date is being handled; don't count as due.
+            const oilServiceInProgress =
+                Boolean(v.onServiceActive) ||
+                String(v.activeServiceWorkflow?.serviceTypeLabel || '').trim() === 'Oil Service';
+            if (oilDueRaw && !oilServiceInProgress) {
                 const oilDiff = dayDiff(oilDueRaw);
                 if (oilDiff != null && oilDiff <= 0) {
                     oilServiceDue++;

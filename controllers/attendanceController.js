@@ -2,6 +2,12 @@ import mongoose from 'mongoose';
 import Attendance, { ATTENDANCE_STATUS_KEYS } from '../models/Attendance.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import { getScheduledEmailTimeZone, getZonedParts } from '../utils/scheduleDailyAtMidnight.js';
+import {
+    getOffWeekdayKeys,
+    isWeekOffForStaff,
+    loadWorkingTimeDoc,
+    normalizeStaffType,
+} from '../utils/workingTimeHelpers.js';
 
 function isValidDateKey(value) {
     return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value);
@@ -163,6 +169,9 @@ function emptyDayStats(totalStaff = 0) {
         workFromHome: 0,
         // No marks yet — calendar shows total staff only until attendance is recorded.
         notMarked: 0,
+        holiday: 0,
+        weeklyOff: 0,
+        isWeeklyOff: false,
         officePresent: 0,
         officeTotal: totalStaff,
         sitePresent: 0,
@@ -177,7 +186,7 @@ function emptyDayStats(totalStaff = 0) {
  * Aggregate attendance marks for one calendar day.
  * unauthorized_leave counts with not_marked (same bucket).
  */
-function buildDayStatsFromRecords(records, totalStaff = 0) {
+function buildDayStatsFromRecords(records, totalStaff = 0, { isWeeklyOffDay = false } = {}) {
     const rows = Array.isArray(records) ? records : [];
     const counts = {
         on_office: 0,
@@ -188,6 +197,8 @@ function buildDayStatsFromRecords(records, totalStaff = 0) {
         late_arrived: 0,
         not_marked: 0,
         unauthorized_leave: 0,
+        holiday: 0,
+        weekly_off: 0,
     };
 
     for (const row of rows) {
@@ -198,9 +209,15 @@ function buildDayStatsFromRecords(records, totalStaff = 0) {
     }
 
     const markedCount = rows.length;
+    const offOrHolidayCount = counts.holiday + counts.weekly_off;
     const implicitNotMarked = Math.max(0, totalStaff - markedCount);
-    const notMarked = counts.not_marked + counts.unauthorized_leave + implicitNotMarked;
+    // Weekly off / holiday staff are not "not marked".
+    const notMarked = isWeeklyOffDay
+        ? counts.not_marked + counts.unauthorized_leave
+        : counts.not_marked + counts.unauthorized_leave + Math.max(0, implicitNotMarked - offOrHolidayCount);
     const authorizedLeaveTotal = counts.on_leave + counts.authorized_leave;
+    const weeklyOff = isWeeklyOffDay ? Math.max(offOrHolidayCount, totalStaff) : counts.weekly_off;
+    const holiday = counts.holiday;
 
     return {
         activeEmployees: totalStaff,
@@ -209,7 +226,10 @@ function buildDayStatsFromRecords(records, totalStaff = 0) {
         lateArrived: counts.late_arrived,
         sickLeave: counts.sick_leave,
         workFromHome: counts.work_from_home,
-        notMarked,
+        notMarked: isWeeklyOffDay ? 0 : notMarked,
+        holiday,
+        weeklyOff,
+        isWeeklyOff: Boolean(isWeeklyOffDay),
         officePresent: counts.on_office,
         officeTotal: totalStaff,
         sitePresent: 0,
@@ -217,7 +237,7 @@ function buildDayStatsFromRecords(records, totalStaff = 0) {
         totalPresent: counts.on_office,
         absentAuthorized: authorizedLeaveTotal,
         // Same value as notMarked — unauthorized and not marked are one category.
-        absentUnauthorized: notMarked,
+        absentUnauthorized: isWeeklyOffDay ? 0 : notMarked,
     };
 }
 
@@ -319,13 +339,15 @@ export async function getAttendanceCalendarSummary(req, res) {
             monthKey = `${year}-${String(monthNum).padStart(2, '0')}`;
         }
 
-        const [staffIds, totalStaff, records] = await Promise.all([
+        const [staffIds, totalStaff, records, workingTime] = await Promise.all([
             staffType ? getActiveEmployeeIdsByStaffType(staffType) : Promise.resolve(null),
             countActiveEmployees(staffType),
             Attendance.find({ date: { $gte: from, $lte: to } }).lean(),
+            loadWorkingTimeDoc(),
         ]);
 
         const staffIdSet = staffIds ? new Set(staffIds) : null;
+        const scheduleWeek = staffType === 'site' ? workingTime.site : workingTime.office;
 
         const byDate = new Map();
         for (const row of records) {
@@ -342,10 +364,20 @@ export async function getAttendanceCalendarSummary(req, res) {
         for (let cursor = start; cursor <= end; cursor.setUTCDate(cursor.getUTCDate() + 1)) {
             const dateKey = cursor.toISOString().slice(0, 10);
             const dayRecords = byDate.get(dateKey) || [];
+            const isWeeklyOffDay = staffType
+                ? isWeekOffForStaff(scheduleWeek, dateKey)
+                : false;
             const stats =
-                dayRecords.length > 0
-                    ? buildDayStatsFromRecords(dayRecords, totalStaff)
+                dayRecords.length > 0 || isWeeklyOffDay
+                    ? buildDayStatsFromRecords(dayRecords, totalStaff, { isWeeklyOffDay })
                     : emptyDayStats(totalStaff);
+
+            if (isWeeklyOffDay) {
+                stats.isWeeklyOff = true;
+                stats.weeklyOff = Math.max(Number(stats.weeklyOff) || 0, totalStaff);
+                stats.notMarked = 0;
+                stats.absentUnauthorized = 0;
+            }
 
             // When filtered to one staff group, mirror totals into that group's present/total fields.
             if (staffType === 'office') {
@@ -370,6 +402,7 @@ export async function getAttendanceCalendarSummary(req, res) {
             to,
             staffType: staffType || 'all',
             totalStaff,
+            offWeekdays: staffType ? getOffWeekdayKeys(scheduleWeek) : [],
             days,
         });
     } catch (error) {
@@ -486,12 +519,17 @@ export async function getMyAttendanceMonth(req, res) {
                 return res.status(403).json({ message: 'You can only view attendance for your team.' });
             }
             const target = await EmployeeBasic.findById(forEmployeeId)
-                .select('_id employeeId firstName lastName')
+                .select('_id employeeId firstName lastName staffType')
                 .lean();
             if (!target) {
                 return res.status(404).json({ message: 'Employee not found.' });
             }
             employee = target;
+        } else {
+            employee = await EmployeeBasic.findById(self._id)
+                .select('_id employeeId firstName lastName staffType')
+                .lean();
+            if (!employee) employee = self;
         }
 
         const month = String(req.query.month || '').trim();
@@ -512,12 +550,18 @@ export async function getMyAttendanceMonth(req, res) {
         const todayKey = getDubaiDateKey();
         const employeeMongoId = String(employee._id);
         const isSelf = employeeMongoId === String(self._id);
+        const staffType = normalizeStaffType(employee.staffType);
 
-        const records = await Attendance.find({
-            employeeMongoId,
-            date: { $gte: from, $lte: to },
-        }).lean();
+        const [records, workingTime] = await Promise.all([
+            Attendance.find({
+                employeeMongoId,
+                date: { $gte: from, $lte: to },
+            }).lean(),
+            loadWorkingTimeDoc(),
+        ]);
 
+        const scheduleWeek = staffType === 'site' ? workingTime.site : workingTime.office;
+        const offWeekdays = getOffWeekdayKeys(scheduleWeek);
         const todayRecord = records.find((r) => r.date === todayKey) || null;
 
         return res.status(200).json({
@@ -531,6 +575,12 @@ export async function getMyAttendanceMonth(req, res) {
                 id: employeeMongoId,
                 employeeId: employee.employeeId,
                 name: [employee.firstName, employee.lastName].filter(Boolean).join(' ').trim(),
+                staffType,
+            },
+            offWeekdays,
+            workingTime: {
+                site: workingTime.site,
+                office: workingTime.office,
             },
             records,
             todayRecord,

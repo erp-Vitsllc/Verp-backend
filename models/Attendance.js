@@ -10,6 +10,7 @@ const ATTENDANCE_STATUS_KEYS = [
     'late_arrived',
     'not_marked',
     'holiday',
+    'weekly_off',
 ];
 
 /**

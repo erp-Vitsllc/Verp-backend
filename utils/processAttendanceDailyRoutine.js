@@ -5,6 +5,7 @@ import {
     getScheduledEmailTimeZone,
     zonedWallTimeToUtc,
 } from './scheduleDailyAtMidnight.js';
+import { applyWeeklyOffForDate } from './workingTimeHelpers.js';
 
 function formatDateKey({ year, month, day }) {
     return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
@@ -20,6 +21,7 @@ function shiftCalendarDay(parts, deltaDays) {
  * 1) Close previous calendar day.
  * 2) Auto-mark check-in without check-out as mispunched → Unauthorized.
  * 3) Open the new day empty — timers reset on the client.
+ * 4) Apply Site/Office weekly off days for today from Working Time.
  */
 export async function processAttendanceDailyRoutine() {
     const timeZone = getScheduledEmailTimeZone();
@@ -36,6 +38,7 @@ export async function processAttendanceDailyRoutine() {
             date: yesterdayKey,
             timeIn: { $exists: true, $nin: ['', null] },
             $or: [{ timeOut: '' }, { timeOut: null }, { timeOut: { $exists: false } }],
+            statusKey: { $nin: ['holiday', 'weekly_off'] },
         },
         {
             $set: {
@@ -84,7 +87,6 @@ export async function processAttendanceDailyRoutine() {
         { upsert: true, new: true },
     );
 
-    // New day starts empty: do not create / copy employee marks.
     await AttendanceDay.findOneAndUpdate(
         { date: todayKey },
         {
@@ -100,8 +102,15 @@ export async function processAttendanceDailyRoutine() {
         { upsert: true, new: true },
     );
 
+    let weeklyOffSync = { upserted: 0, cleared: 0 };
+    try {
+        weeklyOffSync = await applyWeeklyOffForDate(todayKey);
+    } catch (err) {
+        console.error('[AttendanceDailyRoutine] weekly-off apply failed:', err);
+    }
+
     console.log(
-        `[AttendanceDailyRoutine] ${timeZone} rollover — closed ${yesterdayKey} (marks=${yesterdayMarkedCount}, mispunched=${mispunchResult.modifiedCount || 0}), opened ${todayKey} empty`,
+        `[AttendanceDailyRoutine] ${timeZone} rollover — closed ${yesterdayKey} (marks=${yesterdayMarkedCount}, mispunched=${mispunchResult.modifiedCount || 0}), opened ${todayKey} empty, weeklyOff=${weeklyOffSync.upserted || 0}`,
     );
 
     return {
@@ -110,5 +119,6 @@ export async function processAttendanceDailyRoutine() {
         openedDate: todayKey,
         closedMarkedCount: yesterdayMarkedCount,
         mispunchedCount: mispunchResult.modifiedCount || 0,
+        weeklyOffSync,
     };
 }
