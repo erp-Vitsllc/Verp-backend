@@ -2107,6 +2107,7 @@ export async function submitOilServiceDetails(asset, serviceId, serviceUpdates, 
     // --- Cash: End Service (complete) → Accounts → Zoho → billed ---
     if (isCash) {
         wf.stage = STAGE_PENDING_ACCOUNTS;
+        wf.serviceWorkCompleted = true;
         remark.workflowStage = STAGE_PENDING_ACCOUNTS;
         remark.vehicleServiceCompleted = 'live';
         remark.vehicleServiceCompletedAt = new Date().toISOString();

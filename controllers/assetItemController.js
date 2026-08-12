@@ -1622,7 +1622,7 @@ export const getVehicleFleetDashboard = async (req, res) => {
         // Full dashboard: project only nested fields charts/modals need (skip quotation URLs,
         // workflow history signatures, document attachments — those balloon BSON + JSON).
         const fleetSelect = listOnly
-            ? 'assetId name vehicleBrand plateEmirate plateNumber modelYear assetValue status registrationExpiryDate insuranceExpiryDate nextServiceDate oilChangeDate gearOilDueDate currentKilometer assignedTo assignedCompany acceptanceStatus pendingAction actionRequiredBy createdBy vehicleProfileActivationStatus vehicleDispositionStatus warrantyEnabled warrantyExpiryDate warrantyYears onServiceActive onLeaveActive typeId assignedDate pendingActionDetails updatedAt locatorDeviceId locatorGpsStatus locatorAddress locatorSpeedKmh locatorIgnition locatorLastUpdate locatorSyncedAt activeServiceWorkflow.stage activeServiceWorkflow.serviceRecordId activeServiceWorkflow.serviceTypeLabel activeServiceWorkflow.serviceType documents.type documents.expiryDate documents.status documents.documentStatus documents.description documents.issueDate documents.createdAt'
+            ? 'assetId name vehicleBrand plateEmirate plateNumber modelYear assetValue status registrationExpiryDate insuranceExpiryDate nextServiceDate oilChangeDate gearOilDueDate currentKilometer assignedTo assignedCompany acceptanceStatus pendingAction actionRequiredBy createdBy vehicleProfileActivationStatus vehicleDispositionStatus warrantyEnabled warrantyExpiryDate warrantyYears onServiceActive onLeaveActive typeId assignedDate pendingActionDetails updatedAt locatorDeviceId locatorGpsStatus locatorAddress locatorSpeedKmh locatorIgnition locatorLastUpdate locatorSyncedAt activeServiceWorkflow.stage activeServiceWorkflow.serviceRecordId activeServiceWorkflow.serviceTypeLabel activeServiceWorkflow.serviceWorkCompleted documents.type documents.expiryDate documents.status documents.documentStatus documents.description documents.issueDate documents.createdAt'
             : [
                 'assetId',
                 'name',
@@ -1774,6 +1774,7 @@ export const getVehicleFleetDashboard = async (req, res) => {
                             v.activeServiceWorkflow.serviceTypeLabel ||
                             v.activeServiceWorkflow.serviceType ||
                             '',
+                        serviceWorkCompleted: v.activeServiceWorkflow.serviceWorkCompleted === true,
                     }
                     : null,
                 warrantyEnabled: v.warrantyEnabled === true,

@@ -944,6 +944,7 @@ export async function routeShopServiceToBillingAfterComplete(
     }
 
     wf.stage = SHOP_SERVICE_PENDING_BILLING;
+    wf.serviceWorkCompleted = true;
     asset.activeServiceWorkflow = wf;
     if (bindActive) {
         const { applyPostServiceOperationalState } = await import('./assetOperationalFlags.js');

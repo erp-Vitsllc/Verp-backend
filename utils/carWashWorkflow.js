@@ -298,7 +298,7 @@ export async function advanceCarWashBillingAfterAccountsApprove(asset, wf, actor
         await asset.save();
         throw new Error(
             zohoExpenseSync?.message ||
-                'Zoho Expense must be created successfully before status becomes Complete.',
+                'Zoho Expense must be created successfully before status becomes Billed.',
         );
     }
 

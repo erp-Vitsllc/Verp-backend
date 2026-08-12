@@ -1162,8 +1162,8 @@ export async function maybeStartVehicleServiceWorkflow(asset, { serviceRecordId,
 }
 
 /**
- * Car Wash: submit → Accounts gets email + task to store Zoho Expense.
- * Remains Incomplete until Zoho Expense succeeds.
+ * Car Wash: submit → Completed immediately; Accounts still gets email + task for Zoho Expense.
+ * Billing/expense continues after Completed (does not wait on expense to mark Completed).
  */
 export async function maybeStartCarWashWorkflow(asset, { serviceRecordId, req }) {
     try {
@@ -1184,8 +1184,10 @@ export async function maybeStartCarWashWorkflow(asset, { serviceRecordId, req })
         setCarWashPaymentStatusOnService(serviceSub, CAR_WASH_PAYMENT_PENDING);
         const remark = parseRemarkMeta(serviceSub.remark);
         remark.workflowStage = CAR_WASH_STAGE_PENDING_BILLING;
-        // Incomplete until Accounts successfully creates Zoho Expense.
-        remark.vehicleServiceCompleted = 'incomplete';
+        // Completed on Send — Accounts Zoho Expense still open after this.
+        remark.vehicleServiceCompleted = 'live';
+        remark.vehicleServiceCompletedAt = new Date().toISOString();
+        remark.serviceWorkStatus = 'complete';
         remark.billingStatus = 'pending';
         serviceSub.remark = JSON.stringify(remark);
 
@@ -1195,7 +1197,9 @@ export async function maybeStartCarWashWorkflow(asset, { serviceRecordId, req })
             previousStatus: asset.status,
             serviceTypeLabel: 'Car Wash',
             history: [],
+            serviceWorkCompleted: true,
         };
+        asset.onServiceActive = false;
 
         const requesterName = await getRequesterName(req.user);
         const requesterEmp = req?.user ? await resolveActorEmployee(req.user) : null;
@@ -1203,14 +1207,14 @@ export async function maybeStartCarWashWorkflow(asset, { serviceRecordId, req })
         await pushWorkflowHistory(asset, {
             stage: CAR_WASH_STAGE_PENDING_BILLING,
             action: 'created',
-            note: 'Car wash submitted — awaiting Accounts Zoho Expense',
+            note: 'Car wash submitted — Completed; awaiting Accounts Zoho Expense',
             byName: requesterName,
         });
 
         await logVehicleServiceWorkflowToAssetHistory(asset, {
             stage: CAR_WASH_STAGE_PENDING_BILLING,
             workflowAction: 'start',
-            note: 'Car wash submitted — awaiting Accounts Zoho Expense',
+            note: 'Car wash submitted — Completed; awaiting Accounts Zoho Expense',
             byName: requesterName,
             performedById: requesterEmp?._id,
             serviceTypeLabel: 'Car Wash',
@@ -1235,7 +1239,7 @@ export async function maybeStartCarWashWorkflow(asset, { serviceRecordId, req })
             asset,
             stageLabel: 'Accounts Zoho Expense required',
             actionLabel: 'Car wash — store Zoho Expense',
-            detailLine: `${requesterName} submitted a car wash request for ${asset.assetId || 'vehicle'}. Open VeRP, enter Expense Account / Amount / Paid Through, then Store to Zoho Expense. Status stays Incomplete until Zoho succeeds.`,
+            detailLine: `${requesterName} submitted a car wash request for ${asset.assetId || 'vehicle'} (Completed). Open VeRP, enter Expense Account / Amount / Paid Through, then Store to Zoho Expense.`,
             linkPath: carWashDetailsPath(asset._id, serviceRecordId),
         });
 
