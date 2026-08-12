@@ -291,13 +291,18 @@ export async function submitTireChangeGarage(asset, serviceId, serviceUpdates, r
     const actorName = await getRequesterName(req.user);
     wf.garageSubmittedAt = new Date().toISOString();
     remark.garageSubmittedByName = actorName;
+    const { applyScheduleSubmitStatus } = await import('./vehicleServiceScheduleSubmitStatus.js');
+    const submitMeta = applyScheduleSubmitStatus(remark, {
+        alreadySubmitted: garageAlreadySubmitted,
+        actorName,
+    });
     asset.services.id(serviceId).remark = JSON.stringify(remark);
     appendTireChangeActivity(asset.services.id(serviceId), {
-        type: 'garage_updated',
+        type: submitMeta.isResubmit ? 'schedule_resubmitted' : 'schedule_submitted',
         byName: actorName,
-        note: garageAlreadySubmitted
-            ? `Schedule rescheduled · Service window: ${String(startRaw).slice(0, 10)} – ${String(endRaw).slice(0, 10)}`
-            : `Garage details submitted · Service start: ${
+        note: submitMeta.isResubmit
+            ? `Schedule resubmitted · Service window: ${String(startRaw).slice(0, 10)} – ${String(endRaw).slice(0, 10)}`
+            : `Schedule submitted · Service start: ${
                   startRaw ? String(startRaw).slice(0, 10) : '—'
               }`,
     });

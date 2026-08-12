@@ -1477,6 +1477,9 @@ function syncOilActivityToWorkflowHistory(asset, serviceId, { type, byName, note
         service_scheduled: STAGE_SCHEDULED,
         on_service: STAGE_SCHEDULED,
         date_change: STAGE_SCHEDULED,
+        schedule_submitted: STAGE_SCHEDULED,
+        schedule_resubmitted: STAGE_SCHEDULED,
+        initiate_edited: 'pending',
         service_completed: STAGE_SCHEDULED,
         hr_approved: STAGE_PENDING_HR,
         accounts_approved: STAGE_PENDING_ACCOUNTS,
@@ -1488,6 +1491,9 @@ function syncOilActivityToWorkflowHistory(asset, serviceId, { type, byName, note
         service_scheduled: 'scheduled',
         on_service: 'on_service',
         date_change: 'date_change',
+        schedule_submitted: 'schedule_submitted',
+        schedule_resubmitted: 'schedule_resubmitted',
+        initiate_edited: 'initiate_edited',
         service_completed: 'completed',
         hr_approved: 'approve',
         accounts_approved: 'approve',
@@ -1726,12 +1732,24 @@ export async function submitOilServiceAssignment(asset, serviceId, req) {
     remark.assignmentSubmittedAt = new Date().toISOString();
     remark.oilServiceScheduledAt = remark.assignmentSubmittedAt;
     remark.requestedByName = requesterName;
+    {
+        const { applyScheduleSubmitStatus } = await import('./vehicleServiceScheduleSubmitStatus.js');
+        applyScheduleSubmitStatus(remark, {
+            alreadySubmitted: false,
+            actorName: requesterName,
+        });
+    }
     if (isCash) {
         remark.workflowStage = hrAlreadyApproved ? STAGE_SCHEDULED : STAGE_PENDING_HR;
     } else {
         remark.workflowStage = STAGE_SCHEDULED;
     }
     service.remark = JSON.stringify(remark);
+    appendOilServiceActivity(service, {
+        type: 'schedule_submitted',
+        byName: requesterName,
+        note: `Schedule submitted · Service window: ${String(startD).slice(0, 10)} – ${String(endD).slice(0, 10)}`,
+    });
 
     if (priorWf?.serviceRecordId && String(priorWf.serviceRecordId) !== String(service._id)) {
         persistWorkflowSnapshot(asset);
@@ -2710,15 +2728,51 @@ export async function updateOilServiceDates(
     // Keep vehicle oil change / next service dates aligned with Admin reschedule.
     applyOilChangeDatesFromSchedule(asset, remark);
 
+    const scheduleAlreadySubmitted =
+        ['submitted', 'resubmitted'].includes(
+            String(remark.scheduleSubmitStatus || '')
+                .trim()
+                .toLowerCase(),
+        ) ||
+        Boolean(String(remark.scheduleSubmittedAt || '').trim()) ||
+        Boolean(String(remark.garageSubmittedByName || '').trim()) ||
+        // Legacy: schedule was completed before scheduleSubmitStatus existed.
+        (Boolean(String(remark.oilServiceScheduledAt || '').trim()) &&
+            isOilScheduleFieldsComplete(remark));
+
+    // Mark resubmitted when Admin updates Schedule after first submit.
+    if (scheduleAlreadySubmitted) {
+        const { applyScheduleSubmitStatus } = await import('./vehicleServiceScheduleSubmitStatus.js');
+        const submitMeta = applyScheduleSubmitStatus(remark, {
+            alreadySubmitted: true,
+            actorName,
+        });
+        service.remark = JSON.stringify(remark);
+        appendOilServiceActivity(service, {
+            type: 'schedule_resubmitted',
+            byName: actorName,
+            note: `Schedule resubmitted${
+                startChanged || endChanged
+                    ? ` · Window: ${String(remark.serviceStartDate || remark.scheduledServiceDate || '').slice(0, 10)} – ${String(remark.serviceEndDate || remark.serviceWindowEndDate || '').slice(0, 10)}`
+                    : ''
+            }`,
+        });
+        if (hasOilWorkflow && submitMeta.isResubmit) {
+            syncOilActivityToWorkflowHistory(asset, serviceId, {
+                type: 'schedule_resubmitted',
+                byName: actorName,
+                note: 'Schedule resubmitted',
+            });
+        }
+    } else {
+        service.remark = JSON.stringify(remark);
+    }
+
     if (hasOilWorkflow) {
         commitWorkflowContext(asset, serviceId, { wf, bindActive });
     }
     asset.markModified('services');
     await asset.save();
-
-    const scheduleAlreadySubmitted =
-        String(remark.requestStatus || '').toLowerCase() === 'submitted' ||
-        Boolean(String(remark.assignmentSubmittedAt || remark.oilServiceScheduledAt || '').trim());
 
     // Reschedule: formal scheduled letter when Admin updates Schedule after first Done.
     if (scheduleAlreadySubmitted && isOilScheduleFieldsComplete(remark)) {

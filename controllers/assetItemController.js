@@ -280,16 +280,19 @@ import {
 import {
     submitMechanicalWorkGarage,
     completeMechanicalWorkService,
+    appendMechanicalWorkActivity,
     updateMechanicalWorkQuoteEmployeeRows,
 } from '../utils/mechanicalWorkWorkflow.js';
 import {
     submitBodyWorkGarage,
     completeBodyWorkService,
+    appendBodyWorkActivity,
     updateBodyWorkQuoteEmployeeRows,
 } from '../utils/bodyWorkWorkflow.js';
 import {
     submitAccidentRepairGarage,
     completeAccidentRepairService,
+    appendAccidentRepairActivity,
     updateAccidentRepairQuoteEmployeeRows,
 } from '../utils/accidentRepairWorkflow.js';
 import {
@@ -13634,6 +13637,66 @@ export const updateAssetServiceDraft = async (req, res) => {
                 note: 'Assignment details updated',
             });
             asset.markModified('services');
+        }
+
+        // After first Initiate is done: HR edits must appear on Service Workflow History
+        // between Schedule and HR Approval (all types except Car Wash).
+        if (isHrAccountsInitiateEdit && !mayUpdateDraft) {
+            const serviceTypeLabel = String(service.serviceType || '').trim();
+            const isCarWash = serviceTypeLabel === 'Car Wash';
+            if (!isCarWash) {
+                const editorName = await getRequesterName(req.user);
+                const note = `Initiate Service edited · Done by HR: ${editorName}`;
+                if (serviceTypeLabel === 'Oil Service') {
+                    appendOilServiceActivity(service, {
+                        type: 'initiate_edited',
+                        byName: editorName,
+                        note,
+                    });
+                    if (
+                        asset.activeServiceWorkflow &&
+                        String(asset.activeServiceWorkflow.serviceRecordId) === String(serviceId)
+                    ) {
+                        const hist = Array.isArray(asset.activeServiceWorkflow.history)
+                            ? asset.activeServiceWorkflow.history
+                            : [];
+                        hist.push({
+                            stage: 'pending',
+                            action: 'initiate_edited',
+                            note,
+                            byName: editorName,
+                            at: new Date().toISOString(),
+                        });
+                        asset.activeServiceWorkflow.history = hist;
+                        asset.markModified('activeServiceWorkflow');
+                    }
+                } else if (isTireChangeServiceType(serviceTypeLabel)) {
+                    appendTireChangeActivity(service, {
+                        type: 'initiate_edited',
+                        byName: editorName,
+                        note,
+                    });
+                } else if (serviceTypeLabel === 'Mechanical Work') {
+                    appendMechanicalWorkActivity(service, {
+                        type: 'initiate_edited',
+                        byName: editorName,
+                        note,
+                    });
+                } else if (serviceTypeLabel === 'Body Work') {
+                    appendBodyWorkActivity(service, {
+                        type: 'initiate_edited',
+                        byName: editorName,
+                        note,
+                    });
+                } else if (serviceTypeLabel === 'Accident Repair') {
+                    appendAccidentRepairActivity(service, {
+                        type: 'initiate_edited',
+                        byName: editorName,
+                        note,
+                    });
+                }
+                asset.markModified('services');
+            }
         }
 
         if (isVehicleAssetForServiceGate() && body.serviceType === 'Oil Service' && body.date) {
