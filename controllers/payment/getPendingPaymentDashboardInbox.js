@@ -1,5 +1,6 @@
 import DashboardAction from '../../models/DashboardAction.js';
 import Payment from '../../models/Payment.js';
+import { purgeOrphanDashboardActionRows } from '../../utils/clearDashboardActionsForRequest.js';
 import { isJwtSystemSuperUser } from '../../utils/systemSuperUser.js';
 import {
     buildAssigneeClauses,
@@ -45,11 +46,12 @@ export const getPendingPaymentDashboardInbox = async (req, res) => {
                   .lean()
             : [];
         const paymentById = Object.fromEntries(payments.map((p) => [String(p._id), p]));
+        const liveRows = await purgeOrphanDashboardActionRows(rows, paymentById);
 
-        const items = rows
+        const items = liveRows
             .map((da) => {
-                const payment = paymentById[String(da.requestId)] || null;
-                if (payment && !['Processing', 'Pending'].includes(payment.status)) {
+                const payment = paymentById[String(da.requestId)];
+                if (!['Processing', 'Pending'].includes(payment.status)) {
                     return null;
                 }
                 return {
@@ -61,19 +63,17 @@ export const getPendingPaymentDashboardInbox = async (req, res) => {
                     extra1: da.extra1 || payment?.paymentType || '',
                     extra2: da.extra2 || (payment?.amount != null ? `AED ${Number(payment.amount).toLocaleString()}` : ''),
                     requestObjectId: da.requestId,
-                    payment: payment
-                        ? {
-                              _id: payment._id,
-                              paymentId: payment.paymentId,
-                              paymentType: payment.paymentType,
-                              amount: payment.amount,
-                              status: payment.status,
-                              paidByName: payment.paidByName,
-                              paymentDate: payment.paymentDate,
-                              paymentSource: payment.paymentSource,
-                              referenceId: payment.referenceId,
-                          }
-                        : null,
+                    payment: {
+                        _id: payment._id,
+                        paymentId: payment.paymentId,
+                        paymentType: payment.paymentType,
+                        amount: payment.amount,
+                        status: payment.status,
+                        paidByName: payment.paidByName,
+                        paymentDate: payment.paymentDate,
+                        paymentSource: payment.paymentSource,
+                        referenceId: payment.referenceId,
+                    },
                 };
             })
             .filter(Boolean);

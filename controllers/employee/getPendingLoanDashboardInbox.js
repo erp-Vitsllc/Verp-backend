@@ -1,5 +1,6 @@
 import DashboardAction from '../../models/DashboardAction.js';
 import Loan from '../../models/Loan.js';
+import { purgeOrphanDashboardActionRows } from '../../utils/clearDashboardActionsForRequest.js';
 import {
     buildAssigneeClauses,
     resolveDashboardAssigneeContext,
@@ -43,9 +44,10 @@ export const getPendingLoanDashboardInbox = async (req, res) => {
                   .lean()
             : [];
         const loanById = Object.fromEntries(loans.map((l) => [String(l._id), l]));
+        const liveRows = await purgeOrphanDashboardActionRows(rows, loanById);
 
-        const items = rows.map((da) => {
-            const loan = loanById[String(da.requestId)] || null;
+        const items = liveRows.map((da) => {
+            const loan = loanById[String(da.requestId)];
             const subjectLabel =
                 da.subjectName ||
                 loan?.applicantName ||
@@ -70,18 +72,16 @@ export const getPendingLoanDashboardInbox = async (req, res) => {
                         : ''),
                 extra3: da.extra3,
                 requestObjectId: da.requestId,
-                loan: loan
-                    ? {
-                          _id: loan._id,
-                          loanId: loan.loanId,
-                          type: loan.type,
-                          amount: loan.amount,
-                          status: loan.status,
-                          approvalStatus: loan.approvalStatus,
-                          employeeId: loan.employeeId,
-                          applicantName: loan.applicantName,
-                      }
-                    : null,
+                loan: {
+                    _id: loan._id,
+                    loanId: loan.loanId,
+                    type: loan.type,
+                    amount: loan.amount,
+                    status: loan.status,
+                    approvalStatus: loan.approvalStatus,
+                    employeeId: loan.employeeId,
+                    applicantName: loan.applicantName,
+                },
             };
         });
 

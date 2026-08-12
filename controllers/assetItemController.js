@@ -60,6 +60,7 @@ import DashboardAction from '../models/DashboardAction.js';
 import { sendAssetActionApprovalEmail } from '../utils/sendAssetActionApprovalEmail.js';
 import { sendAssetActionFinalAcknowledgeEmail } from '../utils/sendAssetActionFinalAcknowledgeEmail.js';
 import Fine from '../models/Fine.js';
+import { clearDashboardActionsForRequest } from '../utils/clearDashboardActionsForRequest.js';
 import AssetCategory from '../models/AssetCategory.js';
 import Flowchart from '../models/Flowchart.js';
 import {
@@ -12606,7 +12607,11 @@ export const updateHistoryHandoverItemFineWaiver = async (req, res) => {
                 'handoverApprovalContext.itemKey': itemKey,
             });
             if (linkedFine) {
-                await Fine.findByIdAndDelete(linkedFine._id);
+                const linkedFineId = linkedFine._id;
+                await Fine.findByIdAndDelete(linkedFineId);
+                await clearDashboardActionsForRequest(linkedFineId, {
+                    requestTypes: ['Fine', 'Group Fine Request'],
+                });
             }
         } else if (include || decisionRaw === 'include') {
             nextInclusions.push({ itemType, itemKey });

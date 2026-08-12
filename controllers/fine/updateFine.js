@@ -253,7 +253,33 @@ export const updateFine = async (req, res) => {
             if (recovered >= 0.01) mergedVehicleFine.companyAmount = recovered;
         }
 
-        if (isVehicleFinePayload(mergedVehicleFine)) {
+        // Field checks (description, amounts, attachment, …) belong on Add Fine / Edit Fine
+        // (POST /Fine or PUT /Fine/:id). Fine Form workflow actions use /status, /reject,
+        // /party-payable — do not surface those validations on the view page.
+        const requestPath = String(req.originalUrl || req.url || '');
+        const isWorkflowStatusRoute = /\/(status|reject|party-payable)(\?|$)/i.test(requestPath);
+        const WORKFLOW_ONLY_KEYS = new Set([
+            'fineStatus',
+            'finePdf',
+            'hrApprovedBy',
+            'accountsApprovedBy',
+            'approvedBy',
+            'rejectionReason',
+            'resubmit',
+            'partyPayables',
+            'expenseAccountId',
+            'expenseAccountName',
+            'payableConfirmed',
+            'zohoVendorId',
+            'zohoVendorName',
+            'zohoOrganizationId',
+        ]);
+        const updateKeys = Object.keys(updates || {}).filter((k) => updates[k] !== undefined);
+        const isWorkflowOnlyBody =
+            updateKeys.length > 0 && updateKeys.every((k) => WORKFLOW_ONLY_KEYS.has(k));
+        const skipFormFieldValidation = isWorkflowStatusRoute || isWorkflowOnlyBody;
+
+        if (isVehicleFinePayload(mergedVehicleFine) && !skipFormFieldValidation) {
             const strictSubmit =
                 updates.resubmit === true ||
                 updates.fineStatus === 'Pending' ||

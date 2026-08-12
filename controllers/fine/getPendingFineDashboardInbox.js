@@ -1,5 +1,6 @@
 import DashboardAction from '../../models/DashboardAction.js';
 import Fine from '../../models/Fine.js';
+import { purgeOrphanDashboardActionRows } from '../../utils/clearDashboardActionsForRequest.js';
 import {
     buildAssigneeClauses,
     resolveDashboardAssigneeContext,
@@ -40,6 +41,7 @@ export const getPendingFineDashboardInbox = async (req, res) => {
                   .lean()
             : [];
         const fineById = Object.fromEntries(fines.map((f) => [String(f._id), f]));
+        const liveRows = await purgeOrphanDashboardActionRows(rows, fineById);
 
         const getBaseFineId = (fid = '') => {
             const parts = String(fid).split('-');
@@ -47,8 +49,8 @@ export const getPendingFineDashboardInbox = async (req, res) => {
             return fid;
         };
 
-        const items = rows.map((da) => {
-            const fine = fineById[String(da.requestId)] || null;
+        const items = liveRows.map((da) => {
+            const fine = fineById[String(da.requestId)];
             const isGroup = da.requestType === 'Group Fine Request';
             const subjectLabel =
                 da.subjectName ||
@@ -67,15 +69,13 @@ export const getPendingFineDashboardInbox = async (req, res) => {
                 requestObjectId: da.requestId,
                 primaryFineId: da.requestId,
                 isGroup,
-                fine: fine
-                    ? {
-                          _id: fine._id,
-                          fineId: fine.fineId,
-                          baseFineId: getBaseFineId(fine.fineId),
-                          fineType: fine.fineType,
-                          fineStatus: fine.fineStatus,
-                      }
-                    : null,
+                fine: {
+                    _id: fine._id,
+                    fineId: fine.fineId,
+                    baseFineId: getBaseFineId(fine.fineId),
+                    fineType: fine.fineType,
+                    fineStatus: fine.fineStatus,
+                },
             };
         });
 

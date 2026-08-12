@@ -1,5 +1,6 @@
 import DashboardAction from '../../models/DashboardAction.js';
 import Reward from '../../models/Reward.js';
+import { purgeOrphanDashboardActionRows } from '../../utils/clearDashboardActionsForRequest.js';
 import {
     buildAssigneeClauses,
     resolveDashboardAssigneeContext,
@@ -38,9 +39,10 @@ export const getPendingRewardDashboardInbox = async (req, res) => {
                   .lean()
             : [];
         const rewardById = Object.fromEntries(rewards.map((r) => [String(r._id), r]));
+        const liveRows = await purgeOrphanDashboardActionRows(rows, rewardById);
 
-        const items = rows.map((da) => {
-            const reward = rewardById[String(da.requestId)] || null;
+        const items = liveRows.map((da) => {
+            const reward = rewardById[String(da.requestId)];
             const subjectLabel =
                 da.subjectName ||
                 reward?.employeeName ||
@@ -56,16 +58,14 @@ export const getPendingRewardDashboardInbox = async (req, res) => {
                 extra2: da.extra2 || (reward?.amount ? `AED ${reward.amount}` : reward?.title || ''),
                 extra3: da.extra3,
                 requestObjectId: da.requestId,
-                reward: reward
-                    ? {
-                          _id: reward._id,
-                          rewardId: reward.rewardId,
-                          rewardType: reward.rewardType,
-                          rewardStatus: reward.rewardStatus,
-                          employeeId: reward.employeeId,
-                          employeeName: reward.employeeName,
-                      }
-                    : null,
+                reward: {
+                    _id: reward._id,
+                    rewardId: reward.rewardId,
+                    rewardType: reward.rewardType,
+                    rewardStatus: reward.rewardStatus,
+                    employeeId: reward.employeeId,
+                    employeeName: reward.employeeName,
+                },
             };
         });
 
