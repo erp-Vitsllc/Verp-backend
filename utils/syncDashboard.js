@@ -61,8 +61,8 @@ export const syncDashboardAction = async (data) => {
                 if (requestType === 'Vehicle Disposition Request' && extra3) {
                     query.extra3 = String(extra3);
                 }
-                // Vehicle service: never wipe the Admin Officer create-track row on stage approve/reject.
-                // That row stays Pending until closeAdminOfficerServiceTrackNotification (Billed / Zoho).
+                // Vehicle service: never wipe the Admin Officer create-track row on mid-stage approve/reject.
+                // That row clears on Complete via closeAdminOfficerServiceTrackNotification (billing is Accounts-only).
                 if (requestType === 'Vehicle Service Request') {
                     if (extra3) {
                         query.extra3 = String(extra3);

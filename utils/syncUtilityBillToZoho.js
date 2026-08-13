@@ -348,6 +348,20 @@ async function openExistingZohoBill(billDoc) {
         console.log(
             `[UtilityBillZoho] Opened ${zohoBillIds.length} Zoho bill(s): ${zohoBillIds.join(', ')}`,
         );
+        try {
+            const { clearUtilityBillPaymentDayRemindersForBills } = await import(
+                './processUtilityBillPaymentDayReminders.js'
+            );
+            await clearUtilityBillPaymentDayRemindersForBills(
+                [billDoc],
+                'Month bill sent to Zoho — payment day reminder cleared',
+            );
+        } catch (remErr) {
+            console.warn(
+                '[UtilityBillZoho] payment-day reminder clear failed:',
+                remErr?.message || remErr,
+            );
+        }
         return {
             ok: true,
             zohoBillId: zohoBillIds[0],
@@ -399,6 +413,20 @@ async function syncApprovedUtilityBillToZohoInner(billDoc, { markAsOpen = true }
             billDoc.zohoSyncError = `Attachment not uploaded: ${attachResult.message}`;
         }
         await billDoc.save();
+        try {
+            const { clearUtilityBillPaymentDayRemindersForBills } = await import(
+                './processUtilityBillPaymentDayReminders.js'
+            );
+            await clearUtilityBillPaymentDayRemindersForBills(
+                [billDoc],
+                'Month bill sent to Zoho — payment day reminder cleared',
+            );
+        } catch (remErr) {
+            console.warn(
+                '[UtilityBillZoho] payment-day reminder clear failed:',
+                remErr?.message || remErr,
+            );
+        }
         return {
             ok: true,
             skipped: true,
@@ -633,6 +661,21 @@ async function syncApprovedUtilityBillToZohoInner(billDoc, { markAsOpen = true }
         await billDoc.save();
 
         console.log(`[UtilityBillZoho] Created Zoho bill ${zohoBillId} with ${lineItems.length} line(s)`);
+
+        try {
+            const { clearUtilityBillPaymentDayRemindersForBills } = await import(
+                './processUtilityBillPaymentDayReminders.js'
+            );
+            await clearUtilityBillPaymentDayRemindersForBills(
+                [billDoc],
+                'Month bill sent to Zoho — payment day reminder cleared',
+            );
+        } catch (remErr) {
+            console.warn(
+                '[UtilityBillZoho] payment-day reminder clear failed:',
+                remErr?.message || remErr,
+            );
+        }
 
         return {
             ok: true,

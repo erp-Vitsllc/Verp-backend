@@ -132,17 +132,16 @@ export async function updateShopServiceExtendDate(asset, serviceId, { serviceEnd
     asset.markModified('services');
     await asset.save();
 
-    // Oil parity: email Admin, HR, assignee (+ driven-by when present) on extend/reschedule.
+    // One formal scheduled letter (same as Schedule/Reschedule) — no duplicate workflow blast.
     if (prevEnd && prevEnd !== endDate) {
         try {
-            const { notifyShopScheduleStakeholders } = await import('./vehicleShopServiceScheduled.js');
-            await notifyShopScheduleStakeholders({
+            const { sendFormalVehicleServiceScheduledAfterAdminSchedule } = await import(
+                './vehicleShopServiceScheduled.js'
+            );
+            await sendFormalVehicleServiceScheduledAfterAdminSchedule({
                 asset,
                 serviceRecordId: serviceId,
-                remark,
                 serviceTypeLabel: String(wf.serviceTypeLabel || service.serviceType || 'Vehicle Service'),
-                actionLabel: `${wf.serviceTypeLabel || 'Service'} — Schedule updated`,
-                detailLine: `Service end date was extended from ${prevEnd} to ${endDate} by ${actorName}.`,
             });
         } catch (err) {
             console.error('[ShopService] Extend date email failed:', err?.message || err);

@@ -17,6 +17,7 @@ import {
 } from '../../utils/recordPartyExpenseFromZohoPayment.js';
 import { markUtilityVendorBillsPaidFromZohoPayment } from '../../utils/markUtilityVendorBillsPaidFromZoho.js';
 import { markVehicleGarageServicesPaidFromZohoPayment } from '../../utils/markVehicleGarageServicesPaidFromZoho.js';
+import { markFineVendorBillsPaidFromZohoPayment } from '../../utils/markFineVendorBillsPaidFromZoho.js';
 import { getZohoOrgContext, withZohoOrganization } from '../../utils/zohoOrgContext.js';
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -582,6 +583,20 @@ export const postZohoVendorPayment = async (req, res) => {
                     );
                 }
             }
+
+            try {
+                await markFineVendorBillsPaidFromZohoPayment({
+                    body: req.body || {},
+                    payload,
+                    zohoPayment: data && typeof data === 'object' ? data : {},
+                    userId: req.user?._id || null,
+                });
+            } catch (fineBillErr) {
+                console.warn(
+                    '[ZohoVendorPaymentCreate] Fine bill-id mark-Paid failed:',
+                    fineBillErr?.message || fineBillErr,
+                );
+            }
         }
 
         return res.status(201).json({
@@ -728,6 +743,20 @@ export const putZohoVendorPayment = async (req, res) => {
                         fineErr?.message || fineErr,
                     );
                 }
+            }
+
+            try {
+                await markFineVendorBillsPaidFromZohoPayment({
+                    body: req.body || {},
+                    payload,
+                    zohoPayment: data && typeof data === 'object' ? data : {},
+                    userId: req.user?._id || null,
+                });
+            } catch (fineBillErr) {
+                console.warn(
+                    '[ZohoVendorPaymentUpdate] Fine bill-id mark-Paid failed:',
+                    fineBillErr?.message || fineBillErr,
+                );
             }
         }
 

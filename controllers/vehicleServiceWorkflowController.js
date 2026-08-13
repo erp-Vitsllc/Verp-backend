@@ -1243,6 +1243,18 @@ export async function maybeStartCarWashWorkflow(asset, { serviceRecordId, req })
             linkPath: carWashDetailsPath(asset._id, serviceRecordId),
         });
 
+        // Car Wash never uses Admin Officer track — clear any stale Admin inbox row.
+        try {
+            await closeAdminOfficerServiceTrackNotification({
+                assetId: asset._id,
+                serviceRecordId,
+                comment: 'Car wash — Accounts Zoho Expense only',
+                requestedByName: requesterName,
+            });
+        } catch (closeErr) {
+            console.error('[CarWashWorkflow] Clear Admin Officer track failed:', closeErr?.message || closeErr);
+        }
+
         persistWorkflowSnapshotToServiceSubdoc(asset);
         asset.markModified('activeServiceWorkflow');
         asset.markModified('services');

@@ -252,7 +252,7 @@ export async function closeOilServicePendingDashboardActions(
     const idsToClose = pendingRows
         .filter((row) => {
             const meta = parseOilServiceDashboardMeta(row.extra3);
-            // Admin Officer create-track stays open until closeAdminOfficerServiceTrackNotification.
+            // Admin Officer create-track: close when service work is done (billing is Accounts-only).
             if (meta?.adminOfficerServiceTrack) return false;
             if (!targetServiceId) return true;
             if (!meta?.serviceRecordId) return true;
@@ -351,17 +351,43 @@ export async function healStaleOilServicePendingDashboardActions({ assetIds = nu
         if (!asset) continue;
 
         const meta = parseOilServiceDashboardMeta(row.extra3);
-        // Never heal-close Admin Officer create-track (stays until Billed / Zoho).
-        if (meta?.adminOfficerServiceTrack) continue;
-
         const serviceRecordId = meta?.serviceRecordId ? String(meta.serviceRecordId) : '';
         const service = serviceRecordId
             ? (asset.services || []).find((s) => String(s._id) === serviceRecordId)
             : null;
         const wf = asset.activeServiceWorkflow || {};
+        const remarkForHeal = service ? parseOilServiceRemark(service) : {};
+        const serviceWorkDone =
+            ['live', 'complete', 'completed'].includes(
+                String(remarkForHeal.vehicleServiceCompleted || '').toLowerCase(),
+            ) ||
+            ['complete', 'completed'].includes(
+                String(remarkForHeal.serviceWorkStatus || remarkForHeal.serviceStatus || remarkForHeal.accidentServiceStatus || '')
+                    .toLowerCase()
+                    .replace(/\s+/g, '_'),
+            ) ||
+            ['complete', 'completed', 'billed', 'pending_billing'].includes(
+                String(
+                    remarkForHeal.workflowStage ||
+                        (service && String(wf.serviceRecordId || '') === String(service._id || '')
+                            ? wf.stage
+                            : '') ||
+                        service?.workflowSnapshot?.stage ||
+                        '',
+                )
+                    .toLowerCase()
+                    .trim(),
+            );
+
+        // Admin Officer create-track: clear once service work is complete (not while still in progress).
+        // Accounts Make Payment / Zoho billing remains Accounts-only.
+        if (meta?.adminOfficerServiceTrack) {
+            if (serviceWorkDone) staleIds.push(row._id);
+            continue;
+        }
 
         if (service) {
-            const remark = parseOilServiceRemark(service);
+            const remark = remarkForHeal;
             const serviceType = String(
                 meta?.serviceType || service?.serviceType || remark?.serviceType || '',
             ).trim();
@@ -1266,11 +1292,10 @@ async function sendOilEmail({
     });
 }
 
+/** Company / work email only — never personalEmail or generic email (birthday-only). */
 function pickOilServiceNotifyEmail(emp) {
     if (!emp) return null;
-    const { email } = resolveEmployeeEmail(emp);
-    if (email) return email;
-    return String(emp.companyEmail || emp.workEmail || emp.email || '').trim() || null;
+    return resolveEmployeeEmail(emp).email || null;
 }
 
 /** Collect unique company/work emails for CC, excluding the primary TO address. */
@@ -1290,38 +1315,15 @@ function collectCcEmails(employees, excludeTo = null) {
 }
 
 /**
- * Service details submitted — one email to Admin Officer (TO), assignee + HR (CC) on company email.
+ * Close inbox/dashboard after warranty Complete Service.
+ * Formal completed letter already notifies stakeholders — no second email here.
  */
 async function notifyOilServiceDetailsCompleted({
     asset,
     serviceRecordId,
-    adminOfficer,
-    hr,
-    assignee,
     detailLine,
     actionedBy = null,
 }) {
-    const linkPath = oilServiceDetailsPath(asset._id, serviceRecordId);
-    const adminTo = pickOilServiceNotifyEmail(adminOfficer);
-    if (!adminTo) {
-        console.warn('[OilService] Admin Officer has no company email — skipping completion email.');
-    } else {
-        const cc = collectCcEmails([hr, assignee], adminTo);
-        await sendOilEmail({
-            recipient: adminOfficer,
-            asset,
-            actionLabel: 'Oil service completed',
-            detailLine,
-            serviceRecordId,
-            linkPath,
-            cc,
-        });
-
-        console.log(
-            `[OilService][Email] Oil service completed -> TO: ${adminTo}${cc.length ? `, CC: ${cc.join(', ')}` : ''}`,
-        );
-    }
-
     await closeOilServicePendingDashboardActions(asset._id, serviceRecordId, {
         comment: detailLine || 'Oil service completed',
         actionedBy,
@@ -1344,20 +1346,24 @@ async function notifyStakeholders({
     detailRows = [],
     oilStage = '',
     stageLabel = 'Oil service',
+    skipEmail = false,
 }) {
     const linkPath = oilServiceDetailsPath(asset._id, serviceRecordId);
     const list = uniqRecipients(recipients);
     for (const recipient of list) {
-        await sendOilEmail({
-            recipient,
-            asset,
-            actionLabel,
-            detailLine,
-            detailRows,
-            serviceRecordId,
-            linkPath,
-            stageLabel,
-        });
+        // When formal scheduled/completed letter already went out, keep inbox tasks only.
+        if (!skipEmail) {
+            await sendOilEmail({
+                recipient,
+                asset,
+                actionLabel,
+                detailLine,
+                detailRows,
+                serviceRecordId,
+                linkPath,
+                stageLabel,
+            });
+        }
         if (recipient?._id) {
             await syncDashboardAction({
                 requestId: asset._id,
@@ -1379,7 +1385,11 @@ async function notifyStakeholders({
  * Assignees already get the formal "Vehicle Service Scheduled Notification" on Accounts Approve
  * (cash) or Admin schedule (warranty) — do not send the short On Service letter to them again.
  */
-async function notifyOilServiceWentLiveIfNeeded(asset, serviceRecordId, { detailLine } = {}) {
+async function notifyOilServiceWentLiveIfNeeded(
+    asset,
+    serviceRecordId,
+    { detailLine, skipEmail = false } = {},
+) {
     const wf = asset?.activeServiceWorkflow;
     if (!wf || wf.oilServiceLiveNotifiedAt) return false;
 
@@ -1418,6 +1428,7 @@ async function notifyOilServiceWentLiveIfNeeded(asset, serviceRecordId, { detail
             detailLine: message,
             detailRows: scheduleRows,
             oilStage: 'on_service',
+            skipEmail,
         });
     }
 
@@ -1866,6 +1877,7 @@ export async function submitOilServiceAssignment(asset, serviceId, req) {
                 actionLabel: 'Oil service — Schedule & HR Approval',
                 detailLine: `${requesterName} scheduled an oil service for ${populated?.assetId || ''}${plate ? ` (${plate})` : ''} (start ${startLabel}). HR Approval is open.`,
                 oilStage: 'schedule_hr_open',
+                skipEmail: true,
             });
         }
     } else {
@@ -1878,7 +1890,10 @@ export async function submitOilServiceAssignment(asset, serviceId, req) {
             : `${requesterName} scheduled an oil service for ${populated?.assetId || ''}${plate ? ` (${plate})` : ''}. Service starts on ${startLabel}.`;
 
         if (isLive) {
-            await notifyOilServiceWentLiveIfNeeded(populated, service._id, { detailLine });
+            await notifyOilServiceWentLiveIfNeeded(populated, service._id, {
+                detailLine,
+                skipEmail: true,
+            });
         } else {
             await notifyStakeholders({
                 asset: populated,
@@ -1887,6 +1902,7 @@ export async function submitOilServiceAssignment(asset, serviceId, req) {
                 actionLabel: 'Oil service — Ready to Service',
                 detailLine,
                 oilStage: 'ready_to_service',
+                skipEmail: true,
             });
         }
     }
@@ -2150,12 +2166,6 @@ export async function submitOilServiceDetails(asset, serviceId, serviceUpdates, 
             actionedBy: req.user?.employeeObjectId || req.user?._id || null,
         });
 
-        await notifyOilServiceCompletedOwnerAndAssignee({
-            asset: populated || asset,
-            serviceRecordId: serviceId,
-            remark,
-        });
-
         await sendVehicleServiceCompletedNotificationEmail({
             asset: populated || asset,
             remark,
@@ -2170,6 +2180,14 @@ export async function submitOilServiceDetails(asset, serviceId, serviceUpdates, 
             actionLabel: 'Oil service — Make Payment (Zoho)',
             detailLine,
             oilStage: 'accounts_payment',
+        });
+
+        // Complete Service → clear Admin inbox; Make Payment / Zoho stays Accounts-only.
+        await closeAdminOfficerServiceTrackNotification({
+            assetId: asset._id,
+            serviceRecordId: serviceId,
+            actionedBy: req.user?.employeeObjectId || req.user?._id || null,
+            comment: 'Oil service complete — Accounts Make Payment',
         });
 
         console.log(
@@ -2197,17 +2215,8 @@ export async function submitOilServiceDetails(asset, serviceId, serviceUpdates, 
             populate: { path: 'company', select: 'name' },
         })
         .lean();
-    const hr = await getDepartmentHOD('hr');
-    const adminOfficer = await getDepartmentHOD('admincontroller');
-    const assignee = populated?.assignedTo || null;
 
     const detailLine = `Oil service for ${populated?.assetId || ''} has been completed. The vehicle status has been restored.`;
-
-    await notifyOilServiceCompletedOwnerAndAssignee({
-        asset: populated || asset,
-        serviceRecordId: serviceId,
-        remark,
-    });
 
     await sendVehicleServiceCompletedNotificationEmail({
         asset: populated || asset,
@@ -2218,9 +2227,6 @@ export async function submitOilServiceDetails(asset, serviceId, serviceUpdates, 
     await notifyOilServiceDetailsCompleted({
         asset: populated,
         serviceRecordId: serviceId,
-        adminOfficer,
-        hr,
-        assignee,
         detailLine,
         actionedBy: req.user?.employeeObjectId || req.user?._id || null,
     });
@@ -2518,17 +2524,11 @@ export async function advanceOilCashAfterAccountsApprove(asset, wf, actorName) {
     const populated = await AssetItem.findById(asset._id)
         .populate('assignedTo', 'firstName lastName employeeId companyEmail workEmail personalEmail email')
         .lean();
-    const hr = await getDepartmentHOD('hr');
-    const adminOfficer = await getDepartmentHOD('admincontroller');
-    const assignee = populated?.assignedTo || null;
     const detailLine = `Oil service billed. ${zohoBillSync.message || 'Zoho bill created.'}`;
 
     await notifyOilServiceDetailsCompleted({
         asset: populated,
         serviceRecordId: serviceId,
-        adminOfficer,
-        hr,
-        assignee,
         detailLine,
         actionedBy: null,
     });
@@ -2806,34 +2806,6 @@ export async function updateOilServiceDates(
         });
     }
 
-    if (hasOilWorkflow && (startChanged || endChanged)) {
-        const populated = await AssetItem.findById(asset._id)
-            .populate('assignedTo', OIL_EMP_EMAIL_SELECT)
-            .lean();
-        const plate = [populated?.plateEmirate, populated?.plateNumber]
-            .filter(Boolean)
-            .join(' ')
-            .trim();
-        const startLabel = String(remark.serviceStartDate || '').slice(0, 10);
-        const endLabel = String(remark.serviceEndDate || '').slice(0, 10);
-        const parts = [];
-        if (startChanged) {
-            parts.push(
-                `start ${String(prevStart).slice(0, 10) || '—'} → ${startLabel || '—'}`,
-            );
-        }
-        if (endChanged) {
-            parts.push(`end ${String(prevEnd).slice(0, 10) || '—'} → ${endLabel || '—'}`);
-        }
-        await notifyOilScheduleStakeholders({
-            asset: populated || asset,
-            serviceRecordId: serviceId,
-            remark,
-            actionLabel: 'Oil service — schedule updated',
-            detailLine: `Your vehicle${plate ? ` (${plate})` : ''} oil service schedule was updated by Admin. Please review the garage details and dates below${parts.length ? ` (${parts.join('; ')})` : ''}.`,
-        });
-    }
-
     return asset;
 }
 
@@ -2887,18 +2859,22 @@ export async function updateOilServiceEndDateExtend(asset, serviceId, { serviceE
 
     if (String(prevEnd).slice(0, 10) !== endDate) {
         const populated = await AssetItem.findById(asset._id)
-            .populate('assignedTo', OIL_EMP_EMAIL_SELECT)
+            .populate({
+                path: 'assignedTo',
+                select: `${OIL_EMP_EMAIL_SELECT} company`,
+                populate: { path: 'company', select: 'name' },
+            })
             .lean();
-        const plate = [populated?.plateEmirate, populated?.plateNumber]
-            .filter(Boolean)
-            .join(' ')
-            .trim();
-        await notifyOilScheduleStakeholders({
+        const serviceForMail =
+            (populated?.services || []).find((s) => String(s?._id) === String(serviceId)) ||
+            service ||
+            null;
+        // One formal scheduled letter (not multi-recipient workflow mail).
+        await sendVehicleServiceScheduledNotificationEmail({
             asset: populated || asset,
-            serviceRecordId: serviceId,
             remark,
-            actionLabel: 'Oil service — schedule updated',
-            detailLine: `Your vehicle${plate ? ` (${plate})` : ''} oil service end date was extended by Admin. Please review the garage details and dates below (end ${String(prevEnd).slice(0, 10) || '—'} → ${endDate}).`,
+            service: serviceForMail,
+            serviceTypeLabel: 'Oil Service',
         });
     }
 

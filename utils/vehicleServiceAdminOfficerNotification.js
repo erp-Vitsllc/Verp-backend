@@ -50,7 +50,8 @@ async function loadAssetWithAssignee(asset) {
 
 /**
  * Open (or refresh) Admin Officer inbox task when any vehicle service is created / initiated.
- * Stays Pending until closeAdminOfficerServiceTrackNotification (after Billed / Zoho for cash services).
+ * Stays Pending until closeAdminOfficerServiceTrackNotification (on Complete Service —
+ * Accounts Zoho / Make Payment is Accounts-only after that).
  *
  * Email to Admin Officer: only when sendEmail is true (callers skip when the actor
  * is already the flowchart Admin Officer).
@@ -174,8 +175,9 @@ export async function notifyAdminOfficerOnVehicleServiceCreated({
 }
 
 /**
- * Close Admin Officer create-track notification for one service.
- * Call after Zoho / Billed (cash shop + oil cash). Warranty oil / Car Wash may close on complete.
+ * Close Admin Officer inbox rows for one service (create-track + schedule/ready/on-service).
+ * Call on Complete Service — Accounts Make Payment / Zoho billing stays Accounts-only.
+ * Also safe to call again after Billed (idempotent).
  */
 export async function closeAdminOfficerServiceTrackNotification({
     assetId,
@@ -191,20 +193,32 @@ export async function closeAdminOfficerServiceTrackNotification({
     const adminOfficer = await getDepartmentHOD('admincontroller');
     if (!adminOfficer?._id) return;
 
+    // Match by assignee OR create-track marker (inbox may show track via role fallback
+    // when assignedTo still points at a previous Admin Officer).
     const pendingRows = await DashboardAction.find({
         requestId: assetObjectId,
-        assignedTo: adminOfficer._id,
         requestType: 'Vehicle Service Request',
         status: 'Pending',
+        $or: [
+            { assignedTo: adminOfficer._id },
+            { extra3: { $regex: '"adminOfficerServiceTrack"\\s*:\\s*true', $options: 'i' } },
+        ],
     })
-        .select('_id extra3')
+        .select('_id extra3 assignedTo')
         .lean();
 
     const idsToClose = pendingRows
         .filter((row) => {
             const meta = parseDashboardMeta(row.extra3);
-            if (!meta?.adminOfficerServiceTrack) return false;
-            if (!targetServiceId) return true;
+            const isAdminAssignee = String(row.assignedTo || '') === String(adminOfficer._id);
+            const isCreateTrack = Boolean(meta?.adminOfficerServiceTrack);
+            // Only Admin Officer rows — never touch Accounts Make Payment / billing bells.
+            if (!isAdminAssignee && !isCreateTrack) return false;
+            // Accounts-only oil stages must stay open even if somehow assigned wrongly.
+            const oilStage = String(meta?.oilStage || '').toLowerCase();
+            if (oilStage === 'accounts_payment' || oilStage === 'accounts_quote') return false;
+            if (!targetServiceId) return isCreateTrack || isAdminAssignee;
+            if (!meta?.serviceRecordId) return isCreateTrack || isAdminAssignee;
             return String(meta.serviceRecordId) === targetServiceId;
         })
         .map((row) => row._id);

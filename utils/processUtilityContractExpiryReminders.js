@@ -5,9 +5,18 @@ import mongoose from 'mongoose';
 import crypto from 'crypto';
 import { getDepartmentHOD } from './getDepartmentHOD.js';
 import { sendUtilityContractExpiryEmail } from './sendUtilityContractExpiryEmail.js';
+import {
+    getCalendarPartsInTz,
+    getScheduledEmailTimeZone,
+    zonedWallTimeToUtc,
+} from './scheduleDailyAtMidnight.js';
 
 const REQUEST_TYPE = 'Utility Contract Expiry';
 /** No advance T-10 / T-5 emails — only due/overdue (one email + sticky Accounts task). */
+
+function reminderTz() {
+    return getScheduledEmailTimeZone();
+}
 
 /** DashboardAction.requestId is ObjectId — derive a stable id from the reminder key. */
 function requestObjectId(key) {
@@ -15,17 +24,14 @@ function requestObjectId(key) {
     return new mongoose.Types.ObjectId(hex);
 }
 
-function startOfDay(d) {
-    const x = new Date(d);
-    x.setHours(0, 0, 0, 0);
-    return x;
+function todayStartInReminderTz(now = new Date()) {
+    const { year, month, day } = getCalendarPartsInTz(now, reminderTz());
+    return zonedWallTimeToUtc({ year, month, day, hour: 0, minute: 0, second: 0 }, reminderTz());
 }
 
 function yearMonthDayKey(d) {
-    const y = d.getFullYear();
-    const m = String(d.getMonth() + 1).padStart(2, '0');
-    const day = String(d.getDate()).padStart(2, '0');
-    return `${y}-${m}-${day}`;
+    const { year, month, day } = getCalendarPartsInTz(d, reminderTz());
+    return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
 }
 
 function escapeRegex(s) {
@@ -37,30 +43,36 @@ export function utilityContractAccountsRequestId(entryId) {
     return requestObjectId(`utility-contract-accounts:${String(entryId || '').trim()}`);
 }
 
-/** Parse stored contractEnd (YYYY-MM-DD or Date) → start-of-day local Date, or null. */
+/**
+ * Parse stored contractEnd (YYYY-MM-DD or Date) → midnight in reminder TZ (Asia/Dubai), or null.
+ * Avoids UTC/server-local off-by-one on date-only strings.
+ */
 export function parseContractEndDate(raw) {
     if (!raw) return null;
+    const tz = reminderTz();
     if (raw instanceof Date && !Number.isNaN(raw.getTime())) {
-        return startOfDay(raw);
+        const { year, month, day } = getCalendarPartsInTz(raw, tz);
+        return zonedWallTimeToUtc({ year, month, day, hour: 0, minute: 0, second: 0 }, tz);
     }
     const s = String(raw).trim();
     if (!s) return null;
     if (/^\d{4}-\d{2}-\d{2}/.test(s)) {
         const [y, m, d] = s.slice(0, 10).split('-').map(Number);
         if (!y || !m || !d) return null;
-        return startOfDay(new Date(y, m - 1, d));
+        return zonedWallTimeToUtc({ year: y, month: m, day: d, hour: 0, minute: 0, second: 0 }, tz);
     }
     const parsed = new Date(s);
     if (Number.isNaN(parsed.getTime())) return null;
-    return startOfDay(parsed);
+    const { year, month, day } = getCalendarPartsInTz(parsed, tz);
+    return zonedWallTimeToUtc({ year, month, day, hour: 0, minute: 0, second: 0 }, tz);
 }
 
 export function daysUntilContractEnd(contractEnd, today = new Date()) {
     const end = parseContractEndDate(contractEnd);
     if (!end) return null;
-    const t = startOfDay(today);
+    const t = todayStartInReminderTz(today);
     return {
-        daysUntil: Math.round((end - t) / (1000 * 60 * 60 * 24)),
+        daysUntil: Math.round((end.getTime() - t.getTime()) / (1000 * 60 * 60 * 24)),
         contractEnd: end,
         contractEndKey: yearMonthDayKey(end),
     };
@@ -126,7 +138,7 @@ async function upsertAccountsSticky({ entry, contractEnd, daysUntil, accounts })
     const entryId = String(entry._id || entry.id || '');
     if (!entryId) return;
 
-    const endLabel = contractEnd.toLocaleDateString('en-GB');
+    const endLabel = contractEnd.toLocaleDateString('en-GB', { timeZone: reminderTz() });
     const overdueDays = Math.abs(Number(daysUntil) || 0);
     const stageLabel =
         daysUntil < 0
@@ -163,22 +175,127 @@ async function upsertAccountsSticky({ entry, contractEnd, daysUntil, accounts })
 }
 
 /**
+ * Drop every Pending contract-expiry bell that is not a valid due/overdue Active account:
+ * deleted utilities, inactive, no contract end, or old advance (T-5 / T-10) leftovers.
+ */
+export async function clearStaleUtilityContractExpiryNotifications(now = new Date()) {
+    const pending = await DashboardAction.find({
+        requestType: REQUEST_TYPE,
+        status: 'Pending',
+    })
+        .select('_id requestId extra2 extra3')
+        .lean();
+
+    if (!pending.length) return 0;
+
+    const entryIds = [];
+    const parsed = pending.map((row) => {
+        let meta = {};
+        try {
+            meta = JSON.parse(row.extra3 || '{}');
+        } catch {
+            meta = {};
+        }
+        const entryId = String(meta.entryId || '').trim();
+        if (entryId) entryIds.push(entryId);
+        return { row, meta, entryId };
+    });
+
+    const entries = entryIds.length
+        ? await UtilityEntry.find({ _id: { $in: entryIds } })
+              .select('_id status values.contractEnd type')
+              .lean()
+        : [];
+    const byId = new Map(entries.map((e) => [String(e._id), e]));
+
+    let closed = 0;
+    for (const { row, meta, entryId } of parsed) {
+        let reason = '';
+
+        if (!entryId) {
+            reason = 'Utility contract reminder missing account — cleared';
+        } else {
+            const entry = byId.get(entryId);
+            if (!entry) {
+                reason = 'Utility account deleted — contract reminder cleared';
+            } else if (String(entry.status || '') !== 'Active') {
+                reason = 'Utility account inactive — contract reminder cleared';
+            } else {
+                const timing = daysUntilContractEnd(entry?.values?.contractEnd, now);
+                if (!timing) {
+                    reason = 'No contract end date — contract reminder cleared';
+                } else if (timing.daysUntil > 0) {
+                    // Old “expires in 5 days” advance leftovers — not allowed anymore.
+                    reason = 'Contract not due yet — advance reminder cleared';
+                }
+            }
+        }
+
+        if (
+            !reason &&
+            (!meta.sticky ||
+                Number(meta.daysBefore) > 0 ||
+                /expires in\s+\d+\s+day/i.test(String(row.extra2 || '')))
+        ) {
+            // Leftover T-5 / T-10 advance bells (even if that account is now overdue sticky).
+            if (
+                Number(meta.daysBefore) > 0 ||
+                Number(meta.daysUntil) > 0 ||
+                /expires in\s+\d+\s+day/i.test(String(row.extra2 || ''))
+            ) {
+                reason = 'Advance contract reminder cleared';
+            }
+        }
+
+        if (!reason) continue;
+
+        await DashboardAction.updateOne(
+            { _id: row._id, status: 'Pending' },
+            {
+                $set: {
+                    status: 'Approved',
+                    actionedDate: new Date(),
+                    comment: reason,
+                },
+            },
+        );
+        closed += 1;
+    }
+
+    return closed;
+}
+
+/**
  * Daily scan: contractEnd <= today → one email + sticky Accounts notification
  * until renewed or deactivated. No advance (10/5 day) emails.
+ * Also heals stale / deleted-account / advance leftovers.
  */
 export async function processUtilityContractExpiryReminders() {
     try {
+        const now = new Date();
+        const staleClosed = await clearStaleUtilityContractExpiryNotifications(now);
+        if (staleClosed > 0) {
+            console.log(
+                `[UtilityContractExpiryReminders] cleared ${staleClosed} stale/advance/deleted reminder(s)`,
+            );
+        }
+
         const entries = await UtilityEntry.find({ status: 'Active' }).lean();
         const accounts = await getDepartmentHOD('accounts');
         if (!accounts?._id) {
             console.warn('[UtilityContractExpiryReminders] Accounts HOD not found in flowchart.');
         }
 
+        const dubaiParts = getCalendarPartsInTz(now, reminderTz());
+        console.log(
+            `[UtilityContractExpiryReminders] scanning ${entries.length} Active entr(y/ies) for ${dubaiParts.year}-${String(dubaiParts.month).padStart(2, '0')}-${String(dubaiParts.day).padStart(2, '0')} (${reminderTz()})`,
+        );
+
         const activeOpenIds = new Set();
 
         for (const entry of entries) {
             const endRaw = entry?.values?.contractEnd;
-            const timing = daysUntilContractEnd(endRaw);
+            const timing = daysUntilContractEnd(endRaw, now);
             if (!timing) continue;
 
             const entryId = String(entry._id || '');
@@ -204,7 +321,9 @@ export async function processUtilityContractExpiryReminders() {
                         recipient: accounts,
                         entry,
                         kind,
-                        contractEndLabel: timing.contractEnd.toLocaleDateString('en-GB'),
+                        contractEndLabel: timing.contractEnd.toLocaleDateString('en-GB', {
+                            timeZone: reminderTz(),
+                        }),
                     });
                     await markSent(
                         entryId,
@@ -219,27 +338,39 @@ export async function processUtilityContractExpiryReminders() {
             }
         }
 
-        // Drop sticky tasks when contract is no longer due (renewed / deactivated / missing).
-        const pendingSticky = await DashboardAction.find({
+        // Drop any remaining Pending rows not in the due set (safety net).
+        const pendingLeft = await DashboardAction.find({
             requestType: REQUEST_TYPE,
             status: 'Pending',
-            extra3: { $regex: '"sticky"\\s*:\\s*true' },
         })
-            .select('_id requestId extra3')
+            .select('_id extra3')
             .lean();
 
-        for (const row of pendingSticky) {
+        for (const row of pendingLeft) {
             let entryId = '';
             try {
                 entryId = String(JSON.parse(row.extra3 || '{}')?.entryId || '').trim();
             } catch {
                 entryId = '';
             }
-            if (!entryId || activeOpenIds.has(entryId)) continue;
-            await clearUtilityContractExpiryNotifications(
-                entryId,
-                'Contract no longer due (renewed or account inactive)',
-            );
+            if (entryId && activeOpenIds.has(entryId)) continue;
+            if (entryId) {
+                await clearUtilityContractExpiryNotifications(
+                    entryId,
+                    'Contract no longer due (renewed, inactive, or deleted)',
+                );
+            } else {
+                await DashboardAction.updateOne(
+                    { _id: row._id, status: 'Pending' },
+                    {
+                        $set: {
+                            status: 'Approved',
+                            actionedDate: new Date(),
+                            comment: 'Orphan utility contract reminder cleared',
+                        },
+                    },
+                );
+            }
         }
     } catch (err) {
         console.error('[processUtilityContractExpiryReminders] Non-fatal error:', err?.message || err);

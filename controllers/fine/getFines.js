@@ -138,6 +138,21 @@ export const getFines = async (req, res) => {
             return fine;
         }));
 
+        // Refresh Paid to Vendor from Zoho (cache + live for unpaid / already-paid bills).
+        try {
+            const { syncFineListVendorBillStatusFromZoho } = await import(
+                '../../utils/markFineVendorBillsPaidFromZoho.js'
+            );
+            await syncFineListVendorBillStatusFromZoho(signedFines, {
+                fetchLive: 'unpaidOnly',
+            });
+        } catch (vendorListSyncErr) {
+            console.warn(
+                '[getFines] Vendor bill Paid/Not Paid sync skipped:',
+                vendorListSyncErr?.message || vendorListSyncErr,
+            );
+        }
+
         const total = await Fine.countDocuments(query);
 
         return res.status(200).json({

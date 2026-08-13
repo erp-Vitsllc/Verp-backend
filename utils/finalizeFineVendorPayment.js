@@ -52,6 +52,21 @@ export async function finalizeFineVendorPayment({
     const zohoOrganizationId = clean(zohoPayment.organization_id || fine.zohoOrganizationId);
     const paymentAmount = money(zohoPayment.amount ?? fine.fineAmount);
 
+    // Already settled from Zoho — refresh payment refs only, skip duplicate side effects.
+    if (String(fine.vendorBillStatus || '').toLowerCase() === 'paid') {
+        let touched = false;
+        if (zohoPaymentId && !fine.zohoVendorPaymentId) {
+            fine.zohoVendorPaymentId = zohoPaymentId;
+            touched = true;
+        }
+        if (zohoPaymentNumber && !fine.zohoVendorPaymentNumber) {
+            fine.zohoVendorPaymentNumber = zohoPaymentNumber;
+            touched = true;
+        }
+        if (touched) await fine.save();
+        return { fine: fine.toObject(), partyExpenses: [], alreadyPaid: true };
+    }
+
     let ledgerLines = [];
     if (zohoPaymentId) {
         const zohoLedger = await fetchZohoPaymentLedgerLines(zohoPaymentId);

@@ -414,6 +414,32 @@ export const getFineById = async (req, res) => {
             }
         }
 
+        // Reflect Zoho bill Paid / Not Paid → Fine "Paid to Vendor" on every refresh.
+        if (fine?._id && String(fine.zohoBillId || '').trim()) {
+            try {
+                const { syncFineVendorBillStatusFromZoho } = await import(
+                    '../../utils/markFineVendorBillsPaidFromZoho.js'
+                );
+                // unpaidOnly: live-check when ERP still shows Not Paid (heals already-paid Zoho bills).
+                await syncFineVendorBillStatusFromZoho(fine, { fetchLive: 'unpaidOnly' });
+                const FineModel = (await import('../../models/Fine.js')).default;
+                const paidDoc = await FineModel.findById(fine._id)
+                    .select('vendorBillStatus vendorBillPaidAt zohoVendorPaymentId zohoVendorPaymentNumber')
+                    .lean();
+                if (paidDoc) {
+                    fine.vendorBillStatus = paidDoc.vendorBillStatus;
+                    fine.vendorBillPaidAt = paidDoc.vendorBillPaidAt;
+                    fine.zohoVendorPaymentId = paidDoc.zohoVendorPaymentId;
+                    fine.zohoVendorPaymentNumber = paidDoc.zohoVendorPaymentNumber;
+                }
+            } catch (vendorSyncErr) {
+                console.error(
+                    '[getFineById] Vendor bill Paid/Not Paid sync failed:',
+                    vendorSyncErr?.message || vendorSyncErr,
+                );
+            }
+        }
+
         const hrHODName = hrHOD ? `${hrHOD.firstName} ${hrHOD.lastName}` : 'Unknown';
         const accountsHODName = accountsHOD ? `${accountsHOD.firstName} ${accountsHOD.lastName}` : 'Unknown';
         const ceoName = ceoHOD ? `${ceoHOD.firstName} ${ceoHOD.lastName}` : 'Unknown';

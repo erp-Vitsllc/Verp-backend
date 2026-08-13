@@ -29,7 +29,8 @@ async function resolveRecipient(person) {
 }
 
 /**
- * HR monthly payment-day email — only when payable date == today.
+ * Accounts payment-day email — only when payable date == today.
+ * Urgent: bill overdue / please clear this month's bill.
  */
 export async function sendUtilityBillPaymentDayEmail({
     recipient,
@@ -48,7 +49,7 @@ export async function sendUtilityBillPaymentDayEmail({
         const frontendUrl = emailFrontendUrl();
         const path = `/HRM/Asset/UtilityBills/details/${encodeURIComponent(String(record.entryId))}`;
         const buttonUrl = `${frontendUrl}${path}`;
-        const title = 'Utility Bill — Payment due today';
+        const title = 'Utility Bill Overdue — Please Clear';
         const accent = '#dc2626';
 
         const html = `
@@ -58,8 +59,12 @@ export async function sendUtilityBillPaymentDayEmail({
                 </div>
                 <div style="padding:28px;">
                     <p>Hello <strong>${to.firstName || ''} ${to.lastName || ''}</strong>,</p>
-                    <p style="margin:12px 0 20px;">Today is the scheduled utility payment day for this account. Please process the bill.</p>
-                    <div style="background:#f8fafc; border:1px solid #f1f5f9; border-radius:10px; padding:18px;">
+                    <p style="margin:12px 0 20px;">
+                        Today is the utility <strong>payment day</strong>. This month's bill is
+                        <strong>overdue</strong> — please clear the bill as soon as possible
+                        (pay or send to Zoho).
+                    </p>
+                    <div style="background:#fef2f2; border:1px solid #fecaca; border-radius:10px; padding:18px;">
                         <p style="margin:0 0 8px;"><strong>Type:</strong> ${record.utilityType || '—'}</p>
                         <p style="margin:0 0 8px;"><strong>Provider:</strong> ${record.provider || '—'}</p>
                         <p style="margin:0 0 8px;"><strong>Account:</strong> ${record.accountNo || '—'}</p>
@@ -68,7 +73,7 @@ export async function sendUtilityBillPaymentDayEmail({
                     </div>
                     <div style="text-align:center; margin-top:28px;">
                         <a href="${buttonUrl}" style="background:${accent}; color:#fff; text-decoration:none; padding:12px 28px; border-radius:8px; font-weight:600; display:inline-block;">
-                            Open Utility Account
+                            Clear Utility Bill
                         </a>
                     </div>
                 </div>

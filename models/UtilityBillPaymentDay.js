@@ -2,7 +2,8 @@ import mongoose from 'mongoose';
 
 /**
  * Monthly payment-day registry for utility accounts (day 1–31).
- * Used by the daily reminder job (T-10 / T-5 / due day) for HR email + bell.
+ * Daily job: on payment day == today → Accounts urgent email + bell;
+ * clears when that month's bill is Paid or sent to Zoho.
  */
 const utilityBillPaymentDaySchema = new mongoose.Schema(
     {

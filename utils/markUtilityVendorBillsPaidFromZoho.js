@@ -88,6 +88,21 @@ async function persistUtilityBillsAsPaid(bills, { paidBy = null, comment = '' } 
     }
 
     try {
+        const { clearUtilityBillPaymentDayRemindersForBills } = await import(
+            './processUtilityBillPaymentDayReminders.js'
+        );
+        await clearUtilityBillPaymentDayRemindersForBills(
+            bills,
+            'Month bill paid — payment day reminder cleared',
+        );
+    } catch (remErr) {
+        console.warn(
+            '[persistUtilityBillsAsPaid] payment-day reminder clear failed:',
+            remErr?.message || remErr,
+        );
+    }
+
+    try {
         for (const bid of batchIds) {
             if (!mongoose.Types.ObjectId.isValid(bid)) continue;
             const remainingApproved = await UtilityBillPayment.countDocuments({

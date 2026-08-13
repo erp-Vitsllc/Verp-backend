@@ -1,5 +1,6 @@
 import AssetItem from '../models/AssetItem.js';
 import { getDepartmentHOD } from './getDepartmentHOD.js';
+import { resolveEmployeeEmail } from './resolveEmployeeEmail.js';
 import { sendVehicleServiceWorkflowEmail } from './sendVehicleServiceWorkflowEmail.js';
 import { sendVehicleServiceScheduledNotificationEmail } from './sendVehicleServiceScheduledNotificationEmail.js';
 import { sendVehicleServiceCompletedNotificationEmail } from './sendVehicleServiceCompletedNotificationEmail.js';
@@ -39,9 +40,10 @@ function resolveServiceWindowDates(wf, remark) {
     };
 }
 
+/** Company / work only — never personalEmail (birthday mails only). */
 function resolveRecipientEmail(emp) {
     if (!emp) return '';
-    return String(emp.companyEmail || emp.workEmail || emp.personalEmail || emp.email || '').trim();
+    return String(resolveEmployeeEmail(emp).email || '').trim();
 }
 
 function uniqRecipients(list) {
@@ -1005,6 +1007,24 @@ export async function routeShopServiceToBillingAfterComplete(
         console.error('[ShopService] Accounts Make Payment email failed:', err?.message || err);
     });
 
+    // Complete Service → clear Admin inbox; Zoho / Make Payment stays Accounts-only.
+    try {
+        const { closeAdminOfficerServiceTrackNotification } = await import(
+            './vehicleServiceAdminOfficerNotification.js'
+        );
+        await closeAdminOfficerServiceTrackNotification({
+            assetId: asset._id,
+            serviceRecordId: serviceId,
+            comment: `${serviceTypeLabel || 'Service'} complete — Accounts billing`,
+            requestedByName: actorName || '',
+        });
+    } catch (closeErr) {
+        console.error(
+            '[ShopService] Close Admin Officer on complete failed:',
+            closeErr?.message || closeErr,
+        );
+    }
+
     return asset;
 }
 
@@ -1128,7 +1148,7 @@ export async function advanceShopBillingAfterAccountsApprove(
         extra3: '',
     });
 
-    // Admin Officer create-track notification clears only after Zoho / Billed (not on Complete).
+    // Idempotent — Admin track already cleared on Complete; safe if still open.
     try {
         const { closeAdminOfficerServiceTrackNotification } = await import(
             './vehicleServiceAdminOfficerNotification.js'

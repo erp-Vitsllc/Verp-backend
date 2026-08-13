@@ -2047,6 +2047,21 @@ export async function payUtilityBillBatch(req, res) {
             await bill.save();
         }
 
+        try {
+            const { clearUtilityBillPaymentDayRemindersForBills } = await import(
+                '../../utils/processUtilityBillPaymentDayReminders.js'
+            );
+            await clearUtilityBillPaymentDayRemindersForBills(
+                bills,
+                'Month bill paid — payment day reminder cleared',
+            );
+        } catch (remErr) {
+            console.warn(
+                '[payUtilityBillBatch] payment-day reminder clear failed:',
+                remErr?.message || remErr,
+            );
+        }
+
         const remaining = await UtilityBillPayment.countDocuments({
             batchId,
             status: 'Approved',

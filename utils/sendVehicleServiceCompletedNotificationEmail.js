@@ -19,9 +19,8 @@ const EMP_SELECT =
 
 function pickEmpEmail(emp) {
     if (!emp) return null;
-    const { email } = resolveEmployeeEmail(emp);
-    if (email) return email;
-    return String(emp.companyEmail || emp.workEmail || emp.email || '').trim() || null;
+    // Company / work only — never personalEmail (birthday mails only).
+    return resolveEmployeeEmail(emp).email || null;
 }
 
 function formatKm(value) {

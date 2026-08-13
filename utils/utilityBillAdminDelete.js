@@ -12,6 +12,7 @@ import { clearUtilityContractExpiryNotifications } from './processUtilityContrac
 
 const BILL_REQUEST_TYPE = 'Utility Bill Payment';
 const STATUS_CHANGE_REQUEST_TYPE = 'Utility Entry Status Change';
+const PAYMENT_DAY_REQUEST_TYPE = 'Utility Bill Payment Reminder';
 
 export function isUtilityAdminSuperUser(req) {
     if (isJwtSystemSuperUser(req?.user)) return true;
@@ -51,6 +52,26 @@ async function clearStatusChangeDashboard(statusChangeIds = []) {
             status: 'Approved',
             actionedDate: new Date(),
             comment: 'Deleted by admin',
+        },
+    );
+}
+
+async function clearPaymentDayRemindersForEntry(entryId) {
+    const id = String(entryId || '').trim();
+    if (!id) return;
+    const escape = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    await DashboardAction.updateMany(
+        {
+            requestType: PAYMENT_DAY_REQUEST_TYPE,
+            status: 'Pending',
+            extra3: { $regex: `"entryId"\\s*:\\s*"${escape(id)}"` },
+        },
+        {
+            $set: {
+                status: 'Approved',
+                actionedDate: new Date(),
+                comment: 'Utility account deleted — payment day reminder cleared',
+            },
         },
     );
 }
@@ -175,6 +196,7 @@ export async function cascadeDeleteUtilityEntry(entryId, { req, skipArchive = fa
         clearBillBatchDashboard(batchIds),
         clearStatusChangeDashboard(statusChanges.map((s) => s._id)),
         clearUtilityContractExpiryNotifications(id, 'Utility account deleted'),
+        clearPaymentDayRemindersForEntry(id),
     ]);
 
     return {

@@ -1,7 +1,6 @@
 import DashboardAction from '../models/DashboardAction.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import { actorMayManageOilService } from './oilServiceWorkflow.js';
-import { getDepartmentHOD } from './getDepartmentHOD.js';
 import { sendVehicleServiceWorkflowEmail } from './sendVehicleServiceWorkflowEmail.js';
 import { resolveEmployeeEmail } from './resolveEmployeeEmail.js';
 
@@ -184,7 +183,7 @@ function uniqCarWashNotifyRecipients(list) {
     return out;
 }
 
-/** Notify vehicle assignee and Admin Officer after Accounts approves a car wash request. */
+/** Notify vehicle assignee after Accounts stores Zoho Expense (no Admin Officer notify). */
 export async function notifyCarWashAccountsApproved({
     asset,
     serviceRecordId,
@@ -219,8 +218,7 @@ export async function notifyCarWashAccountsApproved({
                 .lean();
         }
 
-        const adminOfficer = await getDepartmentHOD('admincontroller');
-        const recipients = uniqCarWashNotifyRecipients([assignee, adminOfficer]);
+        const recipients = uniqCarWashNotifyRecipients([assignee]);
 
         for (const recipient of recipients) {
             const { email } = resolveEmployeeEmail(recipient || {});

@@ -118,7 +118,7 @@ scheduleDailyAtMidnight(
     { name: "DocumentExpiryReminders" },
 );
 
-// Utility bill monthly payment-day reminders (T-10 / T-5 / due day → HR email + bell).
+// Utility bill monthly payment-day reminders (only when payment day == today → HR email + bell).
 setTimeout(() => {
     processUtilityBillPaymentDayReminders().catch((e) =>
         console.error("[UtilityBillPaymentDayReminders] startup failed:", e?.message || e),

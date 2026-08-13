@@ -2008,8 +2008,16 @@ export const getVehicleFleetDashboard = async (req, res) => {
             const serviceStatus = String(remark.serviceStatus || remark.accidentServiceStatus || '')
                 .toLowerCase()
                 .replace(/\s+/g, '_');
-            if (String(remark.vehicleServiceCompleted || '').toLowerCase() === 'live') return false;
+            const workStatus = String(remark.serviceWorkStatus || '')
+                .toLowerCase()
+                .replace(/\s+/g, '_');
+            // Service work done / Complete — do not count (Accounts Zoho bill pending is Accounts-only).
+            const completedFlag = String(remark.vehicleServiceCompleted || '').toLowerCase();
+            if (completedFlag === 'live' || completedFlag === 'complete' || completedFlag === 'completed') {
+                return false;
+            }
             if (serviceStatus === 'complete' || serviceStatus === 'completed') return false;
+            if (workStatus === 'complete' || workStatus === 'completed') return false;
 
             const activeWf = asset?.activeServiceWorkflow || {};
             const activeMatch =
@@ -2024,7 +2032,24 @@ export const getVehicleFleetDashboard = async (req, res) => {
             )
                 .toLowerCase()
                 .trim();
-            if (stage === 'complete' || stage === 'rejected') return false;
+            // Payment / Zoho only (all service types) — not "service pending" on fleet dashboard.
+            if (
+                [
+                    'complete',
+                    'completed',
+                    'rejected',
+                    'billed',
+                    'pending_billing',
+                    'pending_accounts',
+                    'accounts',
+                ].includes(stage)
+            ) {
+                return false;
+            }
+            const billingStatus = String(remark.billingStatus || '').toLowerCase();
+            if (billingStatus === 'pending' || billingStatus === 'billed') {
+                return false;
+            }
             if (['draft', 'pending', 'submitted'].includes(requestStatus)) return true;
             if (activeMatch && stage) return true;
             if (stage && !['complete', 'rejected'].includes(stage)) return true;
@@ -13319,9 +13344,11 @@ export const addAssetService = async (req, res) => {
 
         if (isVehicleAssetForServiceGate()) {
             const createStatus = String(remarkObj.requestStatus || '').toLowerCase();
-            // Notify Admin on create for any non-empty draft/pending/live row (including Oil pending shell).
+            // Notify Admin on create for vehicle services — Car Wash is Accounts-only (Zoho Expense).
+            const isCarWashCreate = String(serviceType || '').trim() === 'Car Wash';
             const notifyAdminOnCreate =
-                !isDraft || createStatus === 'pending' || createStatus === 'draft' || createStatus === 'submitted';
+                !isCarWashCreate &&
+                (!isDraft || createStatus === 'pending' || createStatus === 'draft' || createStatus === 'submitted');
             if (notifyAdminOnCreate && lastServiceDoc?._id) {
                 try {
                     const creatorName =
@@ -13839,19 +13866,22 @@ export const submitAssetServiceDraft = async (req, res) => {
         await asset.save();
 
         try {
-            const initiatorName = await getRequesterName(req.user);
-            const initiatorIsAdminOfficer =
-                await userIsFlowchartAdminOfficerEmployeeOnly(req).catch(() => false);
-            await notifyAdminOfficerOnVehicleServiceCreated({
-                asset,
-                serviceRecordId: service._id,
-                serviceType: service.serviceType,
-                requestedByName: initiatorName,
-                sendEmail: !initiatorIsAdminOfficer,
-                notifyAssignee: true,
-                event: 'initiated',
-                serviceReqNo: service.serviceReqNo || '',
-            });
+            // Car Wash: Accounts Zoho Expense only — no Admin Officer inbox/email.
+            if (String(service.serviceType || '').trim() !== 'Car Wash') {
+                const initiatorName = await getRequesterName(req.user);
+                const initiatorIsAdminOfficer =
+                    await userIsFlowchartAdminOfficerEmployeeOnly(req).catch(() => false);
+                await notifyAdminOfficerOnVehicleServiceCreated({
+                    asset,
+                    serviceRecordId: service._id,
+                    serviceType: service.serviceType,
+                    requestedByName: initiatorName,
+                    sendEmail: !initiatorIsAdminOfficer,
+                    notifyAssignee: true,
+                    event: 'initiated',
+                    serviceReqNo: service.serviceReqNo || '',
+                });
+            }
         } catch (notifyErr) {
             console.error('[submitAssetServiceRequest] Admin officer initiate notify failed:', notifyErr);
         }
