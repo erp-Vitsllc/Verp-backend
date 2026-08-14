@@ -2,6 +2,66 @@ import Payment from '../models/Payment.js';
 import { syncDashboardAction } from './syncDashboard.js';
 import { getDepartmentHOD } from './getDepartmentHOD.js';
 
+const CLOSED_REWARD_INBOX_STATUSES = new Set([
+    'Rejected',
+    'Cancelled',
+    'Approved (Paid)',
+    'Paid',
+    'Completed',
+]);
+
+/** True once Accounts has posted Zoho Expense (payment column = Billed). */
+export function isRewardAccountsBilled(reward) {
+    if (!reward) return false;
+    const payment = String(reward.paymentStatus || '').trim();
+    if (payment === 'Billed' || payment === 'Paid') return true;
+    if (
+        String(reward.zohoExpenseId || '').trim() ||
+        String(reward.zohoJournalId || '').trim()
+    ) {
+        return true;
+    }
+    const status = String(reward.rewardStatus || reward.approvalStatus || '').trim();
+    return status === 'Approved (Paid)' || status === 'Paid' || status === 'Completed';
+}
+
+/**
+ * Whether a pending Reward dashboard row should stay in the bell inbox.
+ * Billed / Paid rewards must not keep the old "Pay reward" task.
+ */
+export function rewardStillNeedsInboxAction(reward) {
+    if (!reward) return false;
+    if (isRewardAccountsBilled(reward)) return false;
+
+    const status = String(reward.rewardStatus || reward.approvalStatus || '').trim();
+    if (!status || CLOSED_REWARD_INBOX_STATUSES.has(status)) return false;
+    if (status === 'Draft') return true;
+    if (/pending/i.test(status)) return true;
+    if (status === 'Approved (Not Paid)') return true;
+
+    const amount = parseFloat(reward.amount || 0);
+    const isCashOrGift =
+        reward.rewardType === 'Cash Reward' ||
+        reward.rewardType === 'Gift Reward' ||
+        amount > 0;
+    // Certificate Approved is final; cash/gift Approved without a bill still needs Accounts.
+    return status === 'Approved' && isCashOrGift;
+}
+
+/** Mark all pending Reward dashboard rows for this request as done. */
+export async function clearRewardDashboardBell(reward) {
+    if (!reward?._id) return;
+    await syncDashboardAction({
+        requestId: reward._id,
+        requestType: 'Reward',
+        assignedTo: null,
+        status: 'Approved',
+        subjectEmployee: null,
+        extra1: reward.rewardType,
+        extra2: reward.amount ? `AED ${reward.amount}` : reward.title,
+    });
+}
+
 /**
  * Recompute reward.paidAmount from completed payments.
  * When fully paid (cash/gift), set status to Approved (Paid) and clear Accounts pay bell.
@@ -37,15 +97,7 @@ export async function applyRewardPaymentTotals(reward, { clearPayBell = true } =
 
         if (clearPayBell) {
             try {
-                await syncDashboardAction({
-                    requestId: reward._id,
-                    requestType: 'Reward',
-                    assignedTo: null,
-                    status: 'Approved',
-                    subjectEmployee: null,
-                    extra1: reward.rewardType,
-                    extra2: reward.amount ? `AED ${reward.amount}` : reward.title,
-                });
+                await clearRewardDashboardBell(reward);
             } catch (err) {
                 console.error('[applyRewardPaymentTotals] Failed to clear pay bell:', err);
             }

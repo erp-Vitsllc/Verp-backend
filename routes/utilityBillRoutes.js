@@ -1,6 +1,7 @@
 import express from 'express';
 import { protect } from '../middleware/authMiddleware.js';
 import {
+    checkUtilityBillDuplicates,
     listUtilityBillPayments,
     createUtilityBillPayment,
     createUtilityBillBatch,
@@ -69,6 +70,7 @@ router.put('/entries/:id', updateUtilityEntry);
 router.delete('/entries/:id', deleteUtilityEntry);
 
 router.get('/', listUtilityBillPayments);
+router.post('/check-duplicates', checkUtilityBillDuplicates);
 router.post('/payment-day', upsertUtilityBillPaymentDay);
 router.put('/payment-day/:entryId/status', updateUtilityBillPaymentDayStatus);
 

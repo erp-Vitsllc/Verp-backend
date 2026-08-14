@@ -8,6 +8,8 @@ const ATTENDANCE_STATUS_KEYS = [
     'authorized_leave',
     'unauthorized_leave',
     'late_arrived',
+    'early_go',
+    'mispunch',
     'not_marked',
     'holiday',
     'weekly_off',
@@ -70,6 +72,71 @@ const attendanceSchema = new mongoose.Schema(
             type: String,
             default: '',
             trim: true,
+        },
+        /** HR review queue — pending marks show on Attendance bell + sidebar badge. */
+        approvalStatus: {
+            type: String,
+            enum: ['', 'pending', 'approved', 'rejected'],
+            default: '',
+            trim: true,
+            index: true,
+        },
+        /**
+         * Employee leave change request (red day → Unauthorized / Authorized / Sick).
+         * Status on the day stays unchanged until primary reportee approves.
+         */
+        leaveRequestStatus: {
+            type: String,
+            enum: ['', 'pending', 'approved', 'rejected'],
+            default: '',
+            trim: true,
+            index: true,
+        },
+        requestedStatusKey: {
+            type: String,
+            default: '',
+            trim: true,
+        },
+        requestedStatusLabel: {
+            type: String,
+            default: '',
+            trim: true,
+        },
+        previousStatusKey: {
+            type: String,
+            default: '',
+            trim: true,
+        },
+        previousStatusLabel: {
+            type: String,
+            default: '',
+            trim: true,
+        },
+        leaveRequestReason: {
+            type: String,
+            default: '',
+            trim: true,
+        },
+        /** 'leave' = red-day leave change; 'yellow' = late/early/mispunch → Present;
+         *  future_* = planned request on an upcoming working day */
+        leaveRequestKind: {
+            type: String,
+            enum: ['', 'leave', 'yellow', 'future_leave', 'future_late', 'future_early'],
+            default: '',
+            trim: true,
+        },
+        leaveRequestedAt: {
+            type: Date,
+            default: null,
+        },
+        leaveDecidedAt: {
+            type: Date,
+            default: null,
+        },
+        leaveDecidedBy: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'EmployeeBasic',
+            default: null,
         },
         markedBy: {
             type: mongoose.Schema.Types.ObjectId,

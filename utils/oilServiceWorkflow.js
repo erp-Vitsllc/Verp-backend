@@ -1094,9 +1094,8 @@ async function notifyOilServiceCompletedOwnerAndAssignee({
 
 /**
  * Sync vehicle oilChangeDate / lastServiceDate from the oil schedule start.
- * nextServiceDate is only updated from an explicit remark.nextServiceDate
- * (Complete Service) — never from nextChangeMonth / service end (those are the
- * garage visit window, not the next oil due).
+ * nextServiceDate is only written on Complete Service — never from schedule /
+ * reschedule (those dates are the garage visit window, not the next oil due).
  */
 function applyOilChangeDatesFromSchedule(asset, remark = {}) {
     if (!asset) return false;
@@ -1106,14 +1105,6 @@ function applyOilChangeDatesFromSchedule(asset, remark = {}) {
         asset.oilChangeDate = start;
         asset.lastServiceDate = start;
         changed = true;
-    }
-    const remarkNext = String(remark?.nextServiceDate || '').trim();
-    if (/^\d{4}-\d{2}-\d{2}/.test(remarkNext)) {
-        const next = new Date(remarkNext.slice(0, 10));
-        if (!Number.isNaN(next.getTime())) {
-            asset.nextServiceDate = next;
-            changed = true;
-        }
     }
     return changed;
 }
@@ -2736,7 +2727,7 @@ export async function updateOilServiceDates(
         Boolean(serviceEndDate) &&
         String(prevEnd).slice(0, 10) !== String(serviceEndDate).slice(0, 10);
 
-    // Keep vehicle oil change / next service dates aligned with Admin reschedule.
+    // Keep vehicle oil change date aligned with Admin reschedule.
     applyOilChangeDatesFromSchedule(asset, remark);
 
     const scheduleAlreadySubmitted =
@@ -2924,6 +2915,24 @@ function findPreviousCompletedOilServiceRowForDue(asset) {
     );
 }
 
+/**
+ * User initiated a new oil request before the previous next-service date.
+ * Drop that old due (banner + auto-create) until this new visit is completed.
+ * Oil Service only — does not change other service types.
+ */
+export function supersedePreviousOilNextDueForNewRequest(asset, newServiceId) {
+    if (!asset) return false;
+    asset.nextServiceDate = null;
+    const previousRow = findPreviousCompletedOilServiceRowForDue(asset);
+    if (!previousRow || String(previousRow._id) === String(newServiceId || '')) return true;
+    const sourceRemark = parseOilServiceRemark(previousRow);
+    sourceRemark.autoOilFollowUpServiceId = String(newServiceId);
+    sourceRemark.autoOilFollowUpCreatedAt = new Date().toISOString();
+    sourceRemark.nextDueSupersededByManualRequest = true;
+    previousRow.remark = JSON.stringify(sourceRemark);
+    return true;
+}
+
 function isCompletedOilService(asset, service) {
     return isApprovedOilServiceRow(asset, service);
 }
@@ -3103,6 +3112,8 @@ export async function maybeAutoCreateOilServiceDue(assetDoc) {
     if (!dueInfo.due) return false;
 
     const previousRemark = parseOilServiceRemark(previousRow);
+    // User already opened a new request before this due date — do not auto-create from it.
+    if (previousRemark.nextDueSupersededByManualRequest) return false;
     const followId = previousRemark.autoOilFollowUpServiceId;
     if (followId) {
         const followUp =
@@ -3161,6 +3172,8 @@ export async function maybeAutoCreateOilServiceDue(assetDoc) {
         previousRow.remark = JSON.stringify(sourceRemark);
     }
 
+    // Open request owns the cycle — hide the previous visit's due date until this one is completed.
+    assetDoc.nextServiceDate = null;
     assetDoc.markModified('services');
     await assetDoc.save();
 

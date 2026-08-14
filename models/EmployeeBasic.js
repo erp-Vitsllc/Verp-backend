@@ -159,6 +159,7 @@ const employeeBasicSchema = new mongoose.Schema(
         documents: [
             {
                 type: { type: String },
+                documentName: { type: String },
                 description: { type: String },
                 issueDate: { type: Date },
                 expiryDate: { type: Date },
@@ -184,6 +185,7 @@ const employeeBasicSchema = new mongoose.Schema(
         oldDocuments: [
             {
                 type: { type: String },
+                documentName: { type: String },
                 description: { type: String },
                 issueDate: { type: Date },
                 expiryDate: { type: Date },

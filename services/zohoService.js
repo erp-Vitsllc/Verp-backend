@@ -1155,6 +1155,33 @@ export async function fetchBills(query = {}) {
     };
 }
 
+/** Targeted lookup by Zoho bill_number and/or reference_number (vendor invoice). */
+export async function searchZohoBillsByNumber(billNumber) {
+    const number = String(billNumber || '').trim();
+    if (!number) return [];
+
+    const seen = new Map();
+    const queries = [{ bill_number: number }, { reference_number: number }];
+    for (const params of queries) {
+        try {
+            const chunk = await fetchZohoBooksChunk('/bills', 'bills', {
+                params,
+                startPage: 1,
+                maxRows: 25,
+                perPage: 25,
+                timeout: 15000,
+            });
+            for (const row of chunk.rows || []) {
+                const id = String(row?.bill_id || row?.id || '').trim();
+                if (id && !seen.has(id)) seen.set(id, row);
+            }
+        } catch (err) {
+            console.warn('[searchZohoBillsByNumber]', err?.message || err);
+        }
+    }
+    return [...seen.values()];
+}
+
 function isOpenVendorExpense(expense) {
     if (!expense || typeof expense !== 'object') return false;
 

@@ -281,6 +281,8 @@ export const HRM_MODULE = {
         },
         { id: 'hrm_attendance', label: 'Attendance', parent: 'hrm', hasDownload: true },
         { id: 'hrm_leave', label: 'Leave', parent: 'hrm', hasDownload: true },
+        { id: 'hrm_salary', label: 'Salary', parent: 'hrm', hasDownload: true },
+        { id: 'hrm_leave_salary', label: 'Leave Salary', parent: 'hrm', hasDownload: true },
         { id: 'hrm_ncr', label: 'NCR', parent: 'hrm', hasDownload: true },
         {
             id: 'hrm_fine',

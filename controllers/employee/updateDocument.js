@@ -16,6 +16,7 @@ export const updateDocument = async (req, res) => {
         const { id, index } = req.params;
         const {
             type,
+            documentName,
             description,
             issueDate,
             expiryDate,
@@ -53,6 +54,7 @@ export const updateDocument = async (req, res) => {
         const validation = validateEmployeeDocumentPayload(
             {
                 type: type ?? currentDoc?.type,
+                documentName: documentName ?? currentDoc?.documentName,
                 description: description ?? currentDoc?.description,
                 issueDate: issueDate ?? currentDoc?.issueDate,
                 expiryDate: expiryDate ?? currentDoc?.expiryDate,
@@ -71,6 +73,7 @@ export const updateDocument = async (req, res) => {
 
         const proposedDoc = currentDoc?.toObject ? currentDoc.toObject() : JSON.parse(JSON.stringify(currentDoc || {}));
         if (type !== undefined) proposedDoc.type = type;
+        if (documentName !== undefined) proposedDoc.documentName = documentName;
         if (description !== undefined) proposedDoc.description = description;
         if (issueDate !== undefined) proposedDoc.issueDate = issueDate || null;
         if (expiryDate !== undefined) proposedDoc.expiryDate = expiryDate;
@@ -137,6 +140,7 @@ export const updateDocument = async (req, res) => {
             await archiveEmployeeDocument({
                 employeeId: employee.employeeId,
                 type: currentDoc.type || "Document",
+                documentName: currentDoc.documentName || "",
                 description: currentDoc.description || "",
                 issueDate: currentDoc.issueDate || null,
                 expiryDate: currentDoc.expiryDate || null,
@@ -172,7 +176,7 @@ export const updateDocument = async (req, res) => {
             req,
             employeeId: employee.employeeId,
             sectionKey: "documents",
-            sectionLabel: proposedDoc.type || proposedDoc.description || "Document",
+            sectionLabel: proposedDoc.documentName || proposedDoc.type || proposedDoc.description || "Document",
             action: isRenewMode === true ? "renewed" : "edited",
             attachments: proposedDoc.document,
             actor: req.user,

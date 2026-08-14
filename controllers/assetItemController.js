@@ -99,6 +99,7 @@ import {
     activateOilServiceOnStartDate,
     processOilServiceStartDateActivation,
     maybeAutoCreateOilServiceDue,
+    supersedePreviousOilNextDueForNewRequest,
     bootstrapOilCashAfterInitiate,
 } from '../utils/oilServiceWorkflow.js';
 import { activateShopServiceOnStartDate } from '../utils/vehicleShopServiceScheduled.js';
@@ -263,6 +264,7 @@ import {
     ASSET_TOOLS_INBOX_TYPES,
     VEHICLE_DASHBOARD_INBOX_TYPES,
 } from '../utils/cleanupAssetDashboardActions.js';
+import { listPendingHubInboxItems } from '../utils/employeeHubRequestInbox.js';
 import { notifyAdminOfficerOnVehicleServiceCreated } from '../utils/vehicleServiceAdminOfficerNotification.js';
 import {
     maybeStartVehicleServiceWorkflow,
@@ -1866,10 +1868,28 @@ export const getVehicleFleetDashboard = async (req, res) => {
             }
 
             const oilDueRaw = v.gearOilDueDate || v.nextServiceDate || null;
-            // Already in an active oil visit — due date is being handled; don't count as due.
+            // Already in an active / initiated oil visit — due date is not shown until Complete Service.
             const oilServiceInProgress =
                 Boolean(v.onServiceActive) ||
-                String(v.activeServiceWorkflow?.serviceTypeLabel || '').trim() === 'Oil Service';
+                String(v.activeServiceWorkflow?.serviceTypeLabel || '').trim() === 'Oil Service' ||
+                (Array.isArray(v.services) &&
+                    v.services.some((s) => {
+                        if (String(s?.serviceType || '').trim() !== 'Oil Service') return false;
+                        try {
+                            const remark =
+                                typeof s.remark === 'string' ? JSON.parse(s.remark || '{}') : s.remark || {};
+                            const status = String(remark.requestStatus || '').toLowerCase();
+                            if (status === 'pending' || status === 'draft' || status === 'submitted') {
+                                return true;
+                            }
+                            const stage = String(
+                                remark.workflowStage || s.workflowSnapshot?.stage || '',
+                            ).toLowerCase();
+                            return Boolean(stage) && !['complete', 'billed', 'rejected'].includes(stage);
+                        } catch {
+                            return false;
+                        }
+                    }));
             if (oilDueRaw && !oilServiceInProgress) {
                 const oilDiff = dayDiff(oilDueRaw);
                 if (oilDiff != null && oilDiff <= 0) {
@@ -13317,10 +13337,12 @@ export const addAssetService = async (req, res) => {
             asset.currentKilometer = Number(currentKm);
         }
 
-        // Update specialized dates if it's an Oil Service
+        // Update last oil visit date on create — do not copy an older next-service due
+        // date. Next service is written only when Admin completes this visit.
         if (serviceType === 'Oil Service') {
             asset.oilChangeDate = date || new Date();
             asset.lastServiceDate = date || new Date();
+            supersedePreviousOilNextDueForNewRequest(asset, newService._id);
         } else if (serviceType === 'Accident Repair') {
             const accidentStatus = parsedRemark?.accidentStatus || 'Active';
             if (accidentStatus === 'Active') {
@@ -19743,6 +19765,18 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
             assignmentInboxSeen.add(assetKey);
             return true;
         });
+
+        const hubKinds =
+            scope === 'vehicle'
+                ? ['vehicle']
+                : scope === 'tools'
+                    ? ['assets', 'utility']
+                    : ['assets', 'vehicle', 'utility'];
+        const hubItems = await listPendingHubInboxItems({
+            assigneeIds: relevantIds,
+            kinds: hubKinds,
+        });
+        items = [...hubItems, ...items];
         res.json({ count: items.length, items });
     } catch (error) {
         res.status(500).json({ message: 'Failed to load pending asset requests' });

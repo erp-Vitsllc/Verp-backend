@@ -26,6 +26,13 @@ function billHref(bill) {
     return `/HRM/Asset/UtilityBills/details/${encodeURIComponent(entryId)}`;
 }
 
+/** Company rows: Zoho billed (no Pay deduction). Employee rows: Not Paid until deduction is paid. */
+function partyRowStatus({ paid, zohoBillId, forEmployee }) {
+    if (paid) return 'Paid';
+    if (!forEmployee && clean(zohoBillId)) return 'Zoho billed';
+    return 'Not Paid';
+}
+
 /**
  * Over-contract balance owed by Pay By party (not the full vendor bill).
  * Contract − Actual < 0 ⇒ bill higher than contract ⇒ abs(diff) is balance due.
@@ -273,13 +280,19 @@ export async function listPartyExpenses(req, res) {
             const expense = byBillId.get(billId);
             const vendorPaid = clean(bill.status).toLowerCase() === 'paid';
             const balancePaid = expense?.status === 'Paid';
+            const forEmployee = Boolean(employeeId);
+            const zohoBillId = clean(bill.zohoBillId || expense?.zohoBillId);
 
             if (payableShare > 0) {
                 rows.push({
                     id: `share:${billId}`,
-                    partyType: employeeId ? 'employee' : 'company',
+                    partyType: forEmployee ? 'employee' : 'company',
                     kind: 'utility_share',
-                    status: vendorPaid ? 'Paid' : 'Not Paid',
+                    status: partyRowStatus({
+                        paid: vendorPaid,
+                        zohoBillId,
+                        forEmployee,
+                    }),
                     amount: payableShare,
                     description:
                         `Utility payable share · ${clean(bill.utilityType)} ${clean(bill.billMonth)} · Acc ${clean(bill.accountNo)}`.trim(),
@@ -289,7 +302,7 @@ export async function listPartyExpenses(req, res) {
                     utilityType: clean(bill.utilityType || expense?.utilityType),
                     billMonth: clean(bill.billMonth || expense?.billMonth),
                     entryId: clean(bill.entryId || expense?.entryId),
-                    zohoBillId: clean(bill.zohoBillId || expense?.zohoBillId),
+                    zohoBillId,
                     zohoPaymentId: clean(expense?.zohoPaymentId),
                     zohoPaymentNumber: clean(expense?.zohoPaymentNumber),
                     zohoOrganizationId: clean(expense?.zohoOrganizationId || bill.zohoOrganizationId),
@@ -319,9 +332,13 @@ export async function listPartyExpenses(req, res) {
 
             rows.push({
                 id: expense?._id ? String(expense._id) : `balance:${billId}`,
-                partyType: employeeId ? 'employee' : 'company',
+                partyType: forEmployee ? 'employee' : 'company',
                 kind: 'balance',
-                status: balancePaid ? 'Paid' : 'Not Paid',
+                status: partyRowStatus({
+                    paid: balancePaid,
+                    zohoBillId,
+                    forEmployee,
+                }),
                 amount: balancePaid && expense?.amount > 0 ? money(expense.amount) : balanceShare,
                 description:
                     expense?.description ||
@@ -332,7 +349,7 @@ export async function listPartyExpenses(req, res) {
                 utilityType: clean(bill.utilityType || expense?.utilityType),
                 billMonth: clean(bill.billMonth || expense?.billMonth),
                 entryId: clean(bill.entryId || expense?.entryId),
-                zohoBillId: clean(bill.zohoBillId || expense?.zohoBillId),
+                zohoBillId,
                 zohoPaymentId: clean(expense?.zohoPaymentId),
                 zohoPaymentNumber: clean(expense?.zohoPaymentNumber),
                 zohoOrganizationId: clean(expense?.zohoOrganizationId || bill.zohoOrganizationId),
@@ -347,7 +364,7 @@ export async function listPartyExpenses(req, res) {
                 ledger: Array.isArray(expense?.ledger) ? expense.ledger : [],
                 billLink: billHref(bill),
                 paymentLink: balancePaid ? paymentHref(expense || {}) : '',
-                canPay: !balancePaid,
+                canPay: forEmployee && !balancePaid,
                 employeeId: clean(expense?.employeeId || bill.payByEmployeeId || employeeId),
                 employeeName: clean(expense?.employeeName || bill.payByEmployeeName),
                 companyId: clean(expense?.companyId || bill.payByCompanyId || companyId),
@@ -444,11 +461,16 @@ export async function listPartyExpenses(req, res) {
             }
             if (kind !== 'balance') continue;
             const isPaid = expense.status === 'Paid';
+            const forEmployeeStored = clean(expense.partyType) === 'employee';
             rows.push({
                 id: String(expense._id),
                 partyType: expense.partyType,
                 kind: 'balance',
-                status: isPaid ? 'Paid' : 'Not Paid',
+                status: partyRowStatus({
+                    paid: isPaid,
+                    zohoBillId: expense.zohoBillId,
+                    forEmployee: forEmployeeStored,
+                }),
                 amount: money(expense.amount),
                 description: expense.description || '',
                 utilityBillId: billId,
@@ -474,7 +496,7 @@ export async function listPartyExpenses(req, res) {
                     ? billHref({ entryId: expense.entryId, _id: expense.utilityBillId })
                     : '/HRM/Asset/UtilityBills',
                 paymentLink: isPaid ? paymentHref(expense) : '',
-                canPay: !isPaid,
+                canPay: forEmployeeStored && !isPaid,
                 employeeId: clean(expense.employeeId),
                 employeeName: clean(expense.employeeName),
                 companyId: clean(expense.companyId),

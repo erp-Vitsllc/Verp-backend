@@ -5,6 +5,7 @@ import {
     buildAssigneeClauses,
     resolveDashboardAssigneeContext,
 } from '../../utils/resolveDashboardAssigneeContext.js';
+import { listPendingHubInboxItems } from '../../utils/employeeHubRequestInbox.js';
 
 const FINE_INBOX_TYPES = ['Fine', 'Group Fine Request'];
 
@@ -22,7 +23,11 @@ export const getPendingFineDashboardInbox = async (req, res) => {
         const assigneeClauses = buildAssigneeClauses(ctx.relevantIds, ctx.employeeIdCode);
 
         if (assigneeClauses.length === 0) {
-            return res.json({ count: 0, items: [] });
+            const hubItems = await listPendingHubInboxItems({
+                assigneeIds: ctx.relevantIds,
+                kinds: ['fine'],
+            });
+            return res.json({ count: hubItems.length, items: hubItems });
         }
 
         const rows = await DashboardAction.find({
@@ -79,7 +84,13 @@ export const getPendingFineDashboardInbox = async (req, res) => {
             };
         });
 
-        res.json({ count: items.length, items });
+        const hubItems = await listPendingHubInboxItems({
+            assigneeIds: ctx.relevantIds,
+            kinds: ['fine'],
+        });
+
+        const merged = [...hubItems, ...items];
+        res.json({ count: merged.length, items: merged });
     } catch (error) {
         console.error('getPendingFineDashboardInbox:', error);
         res.status(500).json({ message: 'Failed to load fine notifications' });

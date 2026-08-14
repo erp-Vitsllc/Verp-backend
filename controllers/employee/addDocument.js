@@ -14,6 +14,7 @@ export const addDocument = async (req, res) => {
         const { id } = req.params;
         const {
             type,
+            documentName,
             description,
             issueDate,
             expiryDate,
@@ -84,6 +85,7 @@ export const addDocument = async (req, res) => {
 
         const newDocument = {
             type,
+            documentName: documentName || '',
             description,
             issueDate: issueDate || null,
             expiryDate,
@@ -108,7 +110,7 @@ export const addDocument = async (req, res) => {
             req,
             employeeId: employee.employeeId,
             sectionKey: "documents",
-            sectionLabel: type || description || "Document",
+            sectionLabel: documentName || type || description || "Document",
             action: "added",
             attachments: documentData,
             actor: req.user,

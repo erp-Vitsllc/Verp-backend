@@ -181,8 +181,9 @@ const applyApprovedEmployeeArchive = async (employee, entry) => {
 
         pushOldDocumentRow(employee, {
             type: plain.type || "",
+            documentName: plain.documentName || "",
             description: historyDescription(
-                `Not Renewed - ${plain.description || plain.type || "Document"}`,
+                `Not Renewed - ${plain.description || plain.documentName || plain.type || "Document"}`,
                 reason
             ),
             issueDate: plain.issueDate || null,
@@ -201,7 +202,7 @@ const applyApprovedEmployeeArchive = async (employee, entry) => {
         });
 
         employee.documents.splice(idx, 1);
-        return { cleanedLabel: String(plain.type || "Employee Document") };
+        return { cleanedLabel: String(plain.documentName || plain.type || "Employee Document") };
     }
 
     if (entry.kind === "passport") {

@@ -80,6 +80,12 @@ import { approveLoan } from "../controllers/employee/approveLoan.js";
 import { updateLoanDetails, updateLoanPartyPayable } from "../controllers/employee/updateLoanDetails.js";
 import { retryLoanZohoExpense } from "../controllers/employee/retryLoanZohoExpense.js";
 import { getPendingLoanDashboardInbox } from "../controllers/employee/getPendingLoanDashboardInbox.js";
+import { getMyHrDashboardCards } from "../controllers/employee/getMyHrDashboardCards.js";
+import {
+    createEmployeeHubRequest,
+    getEmployeeHubRequest,
+    decideEmployeeHubRequest,
+} from "../controllers/employee/employeeHubRequest.js";
 import { getLoanPdf } from "../controllers/employee/getLoanPdf.js";
 import { downloadLoanAcknowledgmentPdf } from "../controllers/employee/downloadLoanAcknowledgmentPdf.js";
 import { downloadEmployeeAssetListPdf } from "../controllers/employee/downloadEmployeeAssetListPdf.js";
@@ -129,6 +135,12 @@ router.get("/me", async (req, res) => {
         res.status(500).json({ message: "Server Error", error: error.message });
     }
 });
+
+// Logged-in employee's own loan / advance / reward / fine totals (home dashboard)
+router.get("/dashboard/my-hr-cards", getMyHrDashboardCards);
+router.post("/dashboard/hub-request", createEmployeeHubRequest);
+router.get("/dashboard/hub-request/:id", getEmployeeHubRequest);
+router.post("/dashboard/hub-request/:id/decide", decideEmployeeHubRequest);
 
 // Get loan eligible employees — needed when creating Loan/Advance
 router.get("/loan-eligible", checkLoanMutatePermission(), getLoanEligibleEmployees);

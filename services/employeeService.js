@@ -337,6 +337,7 @@ export const getCompleteEmployee = async (id) => {
             documents: basicDocuments ? basicDocuments.map(doc => ({
                 _id: doc._id,
                 type: doc.type,
+                documentName: doc.documentName,
                 description: doc.description,
                 issueDate: doc.issueDate,
                 expiryDate: doc.expiryDate,
@@ -919,7 +920,8 @@ export const saveEmployeeData = async (employeeId, updatePayload) => {
             'employeeId', 'firstName', 'lastName', 'role', 'department', 'designation', 'company',
             'status', 'probationPeriod', 'reportingAuthority', 'primaryReportee', 'secondaryReportee', 'overtime',
             'profileApprovalStatus', 'profileStatus', 'email', 'companyEmail', 'password',
-            'enablePortalAccess', 'dateOfJoining', 'contractJoiningDate', 'profilePicture', 'documents', 'oldDocuments', 'trainingDetails'
+            'enablePortalAccess', 'dateOfJoining', 'contractJoiningDate', 'staffType',
+            'profilePicture', 'documents', 'oldDocuments', 'trainingDetails'
         ];
 
         const contactFields = [
@@ -970,6 +972,12 @@ export const saveEmployeeData = async (employeeId, updatePayload) => {
                 bankUpdate[field] = updatePayload[field];
             }
         });
+
+        // HR approval applies queued work details via this path — normalize Office/Site so the toggle sticks.
+        if (Object.prototype.hasOwnProperty.call(basicUpdate, 'staffType')) {
+            const next = String(basicUpdate.staffType || '').trim().toLowerCase();
+            basicUpdate.staffType = next === 'site' ? 'site' : 'office';
+        }
 
         // Update collections in parallel
         const updatePromises = [];

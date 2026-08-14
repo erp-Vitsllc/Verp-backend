@@ -380,7 +380,8 @@ export async function archiveEmployeeProfileForLeftUserReturn(employeeDoc) {
         }
         pushOldDocumentRow(employeeDoc, {
             type: plain.type || "Document",
-            description: archiveDescription(plain.description || plain.type || "Document"),
+            documentName: plain.documentName || "",
+            description: archiveDescription(plain.description || plain.documentName || plain.type || "Document"),
             issueDate: plain.issueDate || null,
             expiryDate: plain.expiryDate || null,
             cost: plain.cost ?? null,

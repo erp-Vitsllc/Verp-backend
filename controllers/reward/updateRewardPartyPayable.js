@@ -104,6 +104,17 @@ export const updateRewardPartyPayable = async (req, res) => {
                         accountsStep.status = "Approved";
                         accountsStep.actionedAt = new Date();
                     }
+                    try {
+                        const { clearRewardDashboardBell } = await import(
+                            "../../utils/rewardPaymentStatus.js"
+                        );
+                        await clearRewardDashboardBell(reward);
+                    } catch (bellErr) {
+                        console.error(
+                            "[updateRewardPartyPayable] Failed to clear billed reward bell:",
+                            bellErr,
+                        );
+                    }
                 } else if (zohoResult && !zohoResult.ok) {
                     reward.zohoSyncError = zohoResult.message || "Zoho Expense sync failed";
                 }

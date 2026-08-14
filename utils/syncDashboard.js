@@ -402,6 +402,16 @@ export const syncDashboardAction = async (data) => {
             return;
         }
 
+        const pendingDupes = await DashboardAction.find(pendingUpsertFilter)
+            .select('_id')
+            .sort({ requestedDate: 1 })
+            .lean();
+        if (pendingDupes.length > 1) {
+            await DashboardAction.deleteMany({
+                _id: { $in: pendingDupes.slice(1).map((row) => row._id) },
+            });
+        }
+
         await DashboardAction.findOneAndUpdate(
             pendingUpsertFilter,
             { $set: updateDoc },

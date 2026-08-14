@@ -302,7 +302,8 @@ export const updateWorkDetails = async (req, res) => {
 
         res.status(200).json({
             message,
-            employeePatch: { ...updatePayload },
+            // Only fields written live — queued Office/Site (etc.) must not patch the UI until HR approves.
+            employeePatch: skipLive ? { ...liveAdminStatusPatch } : { ...updatePayload },
         });
 
         postResponseTasks.push(() =>

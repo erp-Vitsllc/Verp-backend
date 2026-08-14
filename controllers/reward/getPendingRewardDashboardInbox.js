@@ -1,6 +1,7 @@
 import DashboardAction from '../../models/DashboardAction.js';
 import Reward from '../../models/Reward.js';
 import { purgeOrphanDashboardActionRows } from '../../utils/clearDashboardActionsForRequest.js';
+import { rewardStillNeedsInboxAction } from '../../utils/rewardPaymentStatus.js';
 import {
     buildAssigneeClauses,
     resolveDashboardAssigneeContext,
@@ -35,13 +36,39 @@ export const getPendingRewardDashboardInbox = async (req, res) => {
         const rewardIds = [...new Set(rows.map((r) => String(r.requestId)).filter(Boolean))];
         const rewards = rewardIds.length
             ? await Reward.find({ _id: { $in: rewardIds } })
-                  .select('_id rewardId rewardType rewardStatus employeeId employeeName amount title')
+                  .select(
+                      '_id rewardId rewardType rewardStatus approvalStatus paymentStatus employeeId employeeName amount title zohoExpenseId zohoJournalId',
+                  )
                   .lean()
             : [];
         const rewardById = Object.fromEntries(rewards.map((r) => [String(r._id), r]));
         const liveRows = await purgeOrphanDashboardActionRows(rows, rewardById);
 
-        const items = liveRows.map((da) => {
+        const idsToDismiss = [];
+        const actionableRows = [];
+        for (const da of liveRows) {
+            const reward = rewardById[String(da.requestId)];
+            if (!rewardStillNeedsInboxAction(reward)) {
+                if (da._id) idsToDismiss.push(da._id);
+                continue;
+            }
+            actionableRows.push(da);
+        }
+
+        if (idsToDismiss.length) {
+            await DashboardAction.updateMany(
+                { _id: { $in: idsToDismiss }, status: 'Pending' },
+                {
+                    $set: {
+                        status: 'Dismissed',
+                        actionedDate: new Date(),
+                        comment: 'Closed: reward is billed / no longer waiting on this inbox action',
+                    },
+                },
+            );
+        }
+
+        const items = actionableRows.map((da) => {
             const reward = rewardById[String(da.requestId)];
             const subjectLabel =
                 da.subjectName ||

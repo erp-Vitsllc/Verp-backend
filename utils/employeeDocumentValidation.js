@@ -14,15 +14,24 @@ function validateDocumentType(value) {
     const normalized = stripDangerousText(value);
     if (!normalized) return "Document Type is required";
     if (normalized.length < 2) return "Document Type must be at least 2 characters";
-    if (normalized.length > 50) return "Document Type must be no more than 50 characters";
+    if (normalized.length > 120) return "Document Type must be no more than 120 characters";
     if (!TYPE_REGEX.test(normalized)) return "Document Type contains invalid characters";
+    return null;
+}
+
+function validateDocumentName(value, { required = true } = {}) {
+    const normalized = stripDangerousText(value);
+    if (!normalized) return required ? "Document Name is required" : null;
+    if (normalized.length < 2) return "Document Name must be at least 2 characters";
+    if (normalized.length > 150) return "Document Name must be no more than 150 characters";
+    if (!TYPE_REGEX.test(normalized)) return "Document Name contains invalid characters";
     return null;
 }
 
 function validateDescription(value) {
     const normalized = stripDangerousText(value);
-    if (!normalized) return "Description is required";
-    if (normalized.length < 5) return "Description must be at least 5 characters";
+    if (!normalized) return null;
+    if (normalized.length < 2) return "Description must be at least 2 characters when provided";
     if (normalized.length > 500) return "Description must be no more than 500 characters";
     if (!NOTE_REGEX.test(normalized)) return "Description contains invalid characters";
     return null;
@@ -93,6 +102,7 @@ export function validateEmployeeDocumentPayload(body = {}, options = {}) {
 
     if (!isLabourModal) {
         push(validateDocumentType(body.type));
+        push(validateDocumentName(body.documentName, { required: true }));
         push(validateDescription(body.description));
         push(validateIssueDate(body.issueDate));
         const hasExpiry = body.expiryDate !== null && body.expiryDate !== undefined && String(body.expiryDate).trim() !== "";

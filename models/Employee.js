@@ -182,6 +182,7 @@ const employeeSchema = new mongoose.Schema(
         documents: [
             {
                 type: { type: String },
+                documentName: { type: String },
                 description: { type: String },
                 document: {
                     url: { type: String }, // Cloudinary URL (preferred)

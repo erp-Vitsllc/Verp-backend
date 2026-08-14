@@ -61,6 +61,157 @@ export function isWeekOffForStaff(week, dateKey) {
     return Boolean(source?.[dayKey]?.isOffDay);
 }
 
+/** Parse HH:mm or HH:mm:ss → minutes since midnight (or null). */
+export function clockTimeToMinutes(clock) {
+    if (clock == null || clock === '') return null;
+    const parts = String(clock)
+        .trim()
+        .split(':')
+        .map((n) => Number(n));
+    if (parts.length < 2 || parts.slice(0, 2).some((n) => Number.isNaN(n))) return null;
+    const [h, m] = parts;
+    if (h < 0 || h > 23 || m < 0 || m > 59) return null;
+    return h * 60 + m;
+}
+
+/** Convert Flowchart WorkingTime day start/end (12h + meridiem) → minutes since midnight. */
+export function dayScheduleToMinutes(day, which = 'start') {
+    if (!day || typeof day !== 'object') return null;
+    const isStart = which !== 'end';
+    let hour = Number(isStart ? day.startHour : day.endHour);
+    let minute = Number(isStart ? day.startMinute : day.endMinute);
+    const meridiem = String(isStart ? day.startMeridiem : day.endMeridiem || 'AM')
+        .trim()
+        .toUpperCase();
+    if (Number.isNaN(hour) || Number.isNaN(minute)) return null;
+    if (meridiem === 'AM') {
+        if (hour === 12) hour = 0;
+    } else if (meridiem === 'PM') {
+        if (hour !== 12) hour += 12;
+    }
+    if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return null;
+    return hour * 60 + minute;
+}
+
+/** Scheduled punch-in / punch-out minutes for a staff week + date (yyyy-MM-dd). */
+export function getScheduledPunchMinutes(week, dateKey) {
+    const dayKey = weekdayKeyFromDateKey(dateKey);
+    if (!dayKey) return { startMinutes: null, endMinutes: null, isOffDay: false };
+    const source = week && typeof week === 'object' ? week : defaultWeek();
+    const day = source?.[dayKey] || null;
+    return {
+        startMinutes: dayScheduleToMinutes(day, 'start'),
+        endMinutes: dayScheduleToMinutes(day, 'end'),
+        isOffDay: Boolean(day?.isOffDay),
+    };
+}
+
+const PUNCH_RULE_SKIP_KEYS = new Set([
+    'on_leave',
+    'sick_leave',
+    'authorized_leave',
+    'unauthorized_leave',
+    'holiday',
+    'weekly_off',
+    'mispunch',
+]);
+
+/**
+ * Apply Flowchart HR Working Time punch rules (15-min grace / early go)
+ * when timeIn/timeOut are present. Leave/holiday marks are left unchanged.
+ */
+export function resolveStatusFromPunches({
+    timeIn,
+    timeOut,
+    startMinutes,
+    endMinutes,
+    isOffDay = false,
+    baseStatusKey = 'on_office',
+    baseStatusLabel = 'On work',
+    baseReason = '',
+} = {}) {
+    const key = String(baseStatusKey || '').trim();
+    if (PUNCH_RULE_SKIP_KEYS.has(key)) {
+        return {
+            statusKey: key,
+            statusLabel: baseStatusLabel,
+            reason: baseReason,
+        };
+    }
+
+    const actualIn = clockTimeToMinutes(timeIn);
+    const actualOut = clockTimeToMinutes(timeOut);
+    let late = false;
+    let lateMinutes = 0;
+    let earlyGo = false;
+
+    if (!isOffDay && startMinutes != null && actualIn != null) {
+        const graceLimit = startMinutes + 15;
+        if (actualIn > graceLimit) {
+            late = true;
+            // Minutes past grace (09:16 with 09:00 schedule → 1 minute late)
+            lateMinutes = actualIn - graceLimit;
+        }
+    }
+    if (!isOffDay && endMinutes != null && actualOut != null && actualOut < endMinutes) {
+        earlyGo = true;
+    }
+
+    const lateReason = late
+        ? `${lateMinutes} minute${lateMinutes === 1 ? '' : 's'} late`
+        : '';
+
+    if (actualIn != null && actualOut != null) {
+        if (earlyGo) {
+            return {
+                statusKey: 'early_go',
+                statusLabel: 'Early Go',
+                reason: lateReason ? `${lateReason}; Early go` : 'Punched out before scheduled punch-out',
+            };
+        }
+        if (late) {
+            return {
+                statusKey: 'late_arrived',
+                statusLabel: 'Late Arrival',
+                reason: lateReason,
+            };
+        }
+        if (key === 'work_from_home') {
+            return {
+                statusKey: 'work_from_home',
+                statusLabel: baseStatusLabel || 'Work from home',
+                reason: '',
+            };
+        }
+        return {
+            statusKey: 'on_office',
+            statusLabel: 'On work',
+            reason: '',
+        };
+    }
+
+    if (actualIn != null && actualOut == null) {
+        if (late) {
+            return {
+                statusKey: 'late_arrived',
+                statusLabel: 'Late Arrival',
+                reason: lateReason,
+            };
+        }
+        return {
+            statusKey: 'not_marked',
+            statusLabel: 'On time',
+            reason: '',
+        };
+    }
+
+    return {
+        statusKey: key || 'on_office',
+        statusLabel: baseStatusLabel || 'On work',
+        reason: baseReason,
+    };
+}
+
 export async function loadWorkingTimeDoc() {
     let doc = await WorkingTime.findOne({ key: 'default' }).lean();
     if (!doc) {

@@ -33,6 +33,7 @@ const isDuplicateReplacedArchive = async (employeeId, type, document) => {
 export const archiveEmployeeDocument = async ({
     employeeId,
     type,
+    documentName = "",
     description = "",
     issueDate = null,
     expiryDate = null,
@@ -67,6 +68,7 @@ export const archiveEmployeeDocument = async ({
             $push: {
                 oldDocuments: {
                     type: type || "Document",
+                    documentName: documentName || "",
                     description,
                     issueDate: issueDate || null,
                     expiryDate: expiryDate || null,
