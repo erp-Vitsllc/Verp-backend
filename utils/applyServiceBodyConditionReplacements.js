@@ -87,12 +87,53 @@ export function hasBodyConditionReportData(entry) {
     });
 }
 
-async function loadHistoryIfBodyCondition(historyId) {
+async function loadHistoryById(historyId) {
     const id = asObjectId(historyId);
     if (!id) return null;
-    const row = await AssetHistory.findById(id).exec();
+    return AssetHistory.findById(id).exec();
+}
+
+async function loadHistoryIfBodyCondition(historyId) {
+    const row = await loadHistoryById(historyId);
     if (!row || !hasBodyConditionReportData(row)) return null;
     return row;
+}
+
+/**
+ * Always prefer the live assignment row — even if body-condition photos are not filled yet.
+ * Service Complete must replace photos on the assignment the UI is showing, not an older report.
+ */
+export async function resolveTargetHandoverHistoryForServicePhotos(asset) {
+    const assetId = asObjectId(asset?._id || asset?.id);
+    if (!assetId) return null;
+
+    const openIds = [
+        asset?.pendingActionDetails?.vehicleHandoverFlow?.historyId,
+        asset?.pendingActionDetails?.historyId,
+    ];
+    for (const preferredId of openIds) {
+        const row = await loadHistoryById(preferredId);
+        if (row && String(row.assetId) === String(assetId) && !isInspectionHandoverHistoryRecord(row)) {
+            return row;
+        }
+    }
+
+    const assigneeId = asObjectId(asset?.assignedTo);
+    if (assigneeId) {
+        const currentAssigneeRow = await AssetHistory.findOne({
+            assetId,
+            assignedTo: assigneeId,
+            action: { $in: HANDOVER_HISTORY_ACTIONS },
+            'details.handoverKind': { $ne: VEHICLE_INSPECTION_HANDOVER_KIND },
+            'details.firstInspection': { $ne: true },
+            'details.reinspection': { $ne: true },
+        })
+            .sort({ createdAt: -1, _id: -1 })
+            .exec();
+        if (currentAssigneeRow) return currentAssigneeRow;
+    }
+
+    return findLatestBodyConditionHistoryRecord(asset);
 }
 
 /**
@@ -234,11 +275,11 @@ export async function applyServiceBodyConditionReplacements(asset, {
     if (!replacements.length) return { updated: 0, historyId: null };
 
     const record = historyId
-        ? await loadHistoryIfBodyCondition(historyId)
-        : await findLatestBodyConditionHistoryRecord(asset);
+        ? await loadHistoryById(historyId)
+        : await resolveTargetHandoverHistoryForServicePhotos(asset);
     if (!record) {
         throw new Error(
-            'No handover body condition report found to replace. Complete a handover body condition first.',
+            'No current vehicle assignment found to replace body photos. Assign the vehicle first.',
         );
     }
     if (String(record.assetId) !== String(asset._id || asset.id)) {
@@ -270,7 +311,7 @@ export async function applyServiceBodyConditionReplacements(asset, {
                     ? img.data
                     : `data:${img.mimeType || 'image/jpeg'};base64,${img.data}`,
                 'asset-history',
-                `${key}-body-condition-service`,
+                `${record._id}-${key}-body-condition-service.jpg`,
             );
             if (typeof photo === 'string' && photo.startsWith('http')) {
                 photo = normalizeS3Key(photo) || photo;
@@ -347,7 +388,7 @@ export async function syncServiceNewConditionImagesToHandover(asset, serviceId, 
     });
 }
 
-async function persistQueuedPhoto(img, bodyPartKey) {
+async function persistQueuedPhoto(img, bodyPartKey, historyId = '') {
     let photo = img.photo || img.url || null;
     if (img.data) {
         photo = await persistStoredAttachmentValue(
@@ -355,7 +396,7 @@ async function persistQueuedPhoto(img, bodyPartKey) {
                 ? img.data
                 : `data:${img.mimeType || 'image/jpeg'};base64,${img.data}`,
             'asset-history',
-            `${bodyPartKey}-body-condition-service-pending`,
+            `${historyId || 'pending'}-${bodyPartKey}-body-condition-service-pending.jpg`,
         );
         if (typeof photo === 'string' && photo.startsWith('http')) {
             photo = normalizeS3Key(photo) || photo;
@@ -378,10 +419,10 @@ export async function queuePendingServicePhotoReview(asset, {
     const replacements = (Array.isArray(images) ? images : []).filter(isMappedConditionImage);
     if (!replacements.length) return { queued: 0, historyId: null };
 
-    const record = await findLatestBodyConditionHistoryRecord(asset);
+    const record = await resolveTargetHandoverHistoryForServicePhotos(asset);
     if (!record) {
         throw new Error(
-            'No handover body condition report found to review. Complete a handover body condition first.',
+            'No current vehicle assignment found to review body photos. Assign the vehicle first.',
         );
     }
 
@@ -393,7 +434,7 @@ export async function queuePendingServicePhotoReview(asset, {
             throw new Error(`Body part "${key}" can only be selected once.`);
         }
         usedKeys.add(key);
-        const photo = await persistQueuedPhoto(img, key);
+        const photo = await persistQueuedPhoto(img, key, String(record._id));
         if (!photo) {
             throw new Error(`Missing photo data for body part "${key}".`);
         }
@@ -437,7 +478,7 @@ export function readPendingServicePhotoReview(historyEntry) {
  * HR approve: replace assignment photos. Reject: keep the previous images.
  */
 export async function resolvePendingServicePhotoReview(asset, historyId, { approve = true, actorName = '' } = {}) {
-    const record = await loadHistoryIfBodyCondition(historyId);
+    const record = await loadHistoryById(historyId);
     if (!record) throw new Error('Assignment body condition report not found.');
     if (String(record.assetId) !== String(asset._id || asset.id)) {
         throw new Error('Assignment does not belong to this vehicle.');

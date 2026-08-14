@@ -7050,19 +7050,26 @@ export const assignAssetItem = async (req, res) => {
                                 previousAssignee: fleetPreviousAssigneeEmp,
                                 adminOfficer: fleetAdminOfficerEmp,
                             });
+                            const snapshotObj = snapshotForHistory.toObject?.() || {};
+                            delete snapshotObj.assignedBy;
+                            delete snapshotObj.vehicleInspectionApprovedAt;
+                            delete snapshotObj.vehicleInspectionHandoverHistoryId;
+                            delete snapshotObj.vehicleInspectionStatus;
+                            delete snapshotObj.pendingActionDetails;
                             await AssetHistory.findByIdAndUpdate(fleetHandoverHistoryId, {
                                 comments: assignmentReason || undefined,
                                 details: {
-                                    ...snapshotForHistory.toObject(),
+                                    ...snapshotObj,
                                     assignmentReason,
                                     assignmentType: item.assignmentType,
                                     assignedDays: item.assignedDays ?? null,
+                                    assignedTo: employeeToAssign,
                                     ...(existingHistory?.details?.vehicleHandoverWorkflow
                                         ? {
                                             vehicleHandoverWorkflow:
                                                 existingHistory.details.vehicleHandoverWorkflow,
                                         }
-                                        : {}),
+                                        : { vehicleHandoverWorkflow: workflowMeta }),
                                     handoverLifecycleStatus: HANDOVER_LIFECYCLE.PENDING,
                                     handoverByDisplay,
                                     handoverToDisplay,
@@ -11502,6 +11509,7 @@ const HANDOVER_LIST_DETAIL_KEYS = [
     'assignedTo',
     'assignedToType',
     'assignedCompany',
+    'pendingServicePhotoReview',
     'reason',
     'rejectionReason',
     'extensionReason',
@@ -12478,6 +12486,12 @@ export const updateHistoryBodyCondition = async (req, res) => {
                 photo,
                 ...(photoSource ? { photoSource } : {}),
                 ...(userSelected ? { userSelected: true } : {}),
+                ...(existingRow.serviceBaselinePhoto || row.serviceBaselinePhoto
+                    ? {
+                          serviceBaselinePhoto:
+                              row.serviceBaselinePhoto || existingRow.serviceBaselinePhoto,
+                      }
+                    : {}),
                 ...(row.replacedByService === true || existingRow.replacedByService === true
                     ? {
                         replacedByService: true,

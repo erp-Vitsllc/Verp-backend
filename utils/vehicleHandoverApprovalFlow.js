@@ -123,6 +123,10 @@ const HANDOVER_HISTORY_IMMUTABLE_DETAIL_KEYS = [
     'inspectionFormStatus',
     'inspectionReview',
     'reportsCopiedFromPreviousAssignment',
+    'bodyConditionReport',
+    'bodyCondition',
+    'bodyConditionCompleted',
+    'pendingServicePhotoReview',
 ];
 
 export function preserveHandoverHistoryImmutableDetails(existingDetails = {}, mergedDetails = {}) {
@@ -198,7 +202,11 @@ export function buildInitialHandoverWorkflowMeta({
         ),
         wasAssignedFromPool: !!wasAssignedFromPool,
         ...(previousAssignee?._id
-            ? { previousAssigneeId: previousAssignee._id.toString() }
+            ? {
+                  previousAssigneeId: previousAssignee._id.toString(),
+                  previousAssigneeName: formatEmployeeDisplayName(previousAssignee),
+                  previousAssigneeEmployeeId: String(previousAssignee.employeeId || '').trim(),
+              }
             : {}),
         stages: {
             assigner: {
