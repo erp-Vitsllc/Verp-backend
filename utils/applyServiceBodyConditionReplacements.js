@@ -228,15 +228,21 @@ export async function applyServiceBodyConditionReplacements(asset, {
     images = [],
     serviceTypeLabel = '',
     serviceId = '',
+    historyId = '',
 } = {}) {
     const replacements = (Array.isArray(images) ? images : []).filter(isMappedConditionImage);
     if (!replacements.length) return { updated: 0, historyId: null };
 
-    const record = await findLatestBodyConditionHistoryRecord(asset);
+    const record = historyId
+        ? await loadHistoryIfBodyCondition(historyId)
+        : await findLatestBodyConditionHistoryRecord(asset);
     if (!record) {
         throw new Error(
             'No handover body condition report found to replace. Complete a handover body condition first.',
         );
+    }
+    if (String(record.assetId) !== String(asset._id || asset.id)) {
+        throw new Error('Assignment does not belong to this vehicle.');
     }
 
     const existing =
@@ -339,4 +345,145 @@ export async function syncServiceNewConditionImagesToHandover(asset, serviceId, 
         serviceTypeLabel: label,
         serviceId,
     });
+}
+
+async function persistQueuedPhoto(img, bodyPartKey) {
+    let photo = img.photo || img.url || null;
+    if (img.data) {
+        photo = await persistStoredAttachmentValue(
+            img.data.startsWith?.('data:')
+                ? img.data
+                : `data:${img.mimeType || 'image/jpeg'};base64,${img.data}`,
+            'asset-history',
+            `${bodyPartKey}-body-condition-service-pending`,
+        );
+        if (typeof photo === 'string' && photo.startsWith('http')) {
+            photo = normalizeS3Key(photo) || photo;
+        }
+    } else if (typeof photo === 'string' && photo.startsWith('http')) {
+        photo = normalizeS3Key(photo) || photo;
+    }
+    return photo;
+}
+
+/**
+ * Store new-condition photos for HR review on the current assignment.
+ * Does not replace live body-condition photos until HR approves.
+ */
+export async function queuePendingServicePhotoReview(asset, {
+    images = [],
+    serviceTypeLabel = '',
+    serviceId = '',
+} = {}) {
+    const replacements = (Array.isArray(images) ? images : []).filter(isMappedConditionImage);
+    if (!replacements.length) return { queued: 0, historyId: null };
+
+    const record = await findLatestBodyConditionHistoryRecord(asset);
+    if (!record) {
+        throw new Error(
+            'No handover body condition report found to review. Complete a handover body condition first.',
+        );
+    }
+
+    const queuedImages = [];
+    const usedKeys = new Set();
+    for (const img of replacements) {
+        const key = String(img.bodyPartKey).trim();
+        if (usedKeys.has(key)) {
+            throw new Error(`Body part "${key}" can only be selected once.`);
+        }
+        usedKeys.add(key);
+        const photo = await persistQueuedPhoto(img, key);
+        if (!photo) {
+            throw new Error(`Missing photo data for body part "${key}".`);
+        }
+        queuedImages.push({
+            bodyPartKey: key,
+            photo,
+            name: img.name || `${key}.jpg`,
+            mimeType: img.mimeType || 'image/jpeg',
+        });
+    }
+
+    const detailsBase =
+        record.details && typeof record.details === 'object' ? { ...record.details } : {};
+    detailsBase.pendingServicePhotoReview = {
+        status: 'pending',
+        serviceId: serviceId ? String(serviceId) : '',
+        serviceTypeLabel: String(serviceTypeLabel || 'Service').trim() || 'Service',
+        images: queuedImages,
+        requestedAt: new Date().toISOString(),
+    };
+    record.details = detailsBase;
+    record.markModified('details');
+    await record.save();
+
+    return {
+        queued: queuedImages.length,
+        historyId: String(record._id),
+        images: queuedImages,
+    };
+}
+
+export function readPendingServicePhotoReview(historyEntry) {
+    const pending = historyEntry?.details?.pendingServicePhotoReview;
+    if (!pending || typeof pending !== 'object') return null;
+    if (String(pending.status || '').toLowerCase() !== 'pending') return null;
+    if (!Array.isArray(pending.images) || !pending.images.length) return null;
+    return pending;
+}
+
+/**
+ * HR approve: replace assignment photos. Reject: keep the previous images.
+ */
+export async function resolvePendingServicePhotoReview(asset, historyId, { approve = true, actorName = '' } = {}) {
+    const record = await loadHistoryIfBodyCondition(historyId);
+    if (!record) throw new Error('Assignment body condition report not found.');
+    if (String(record.assetId) !== String(asset._id || asset.id)) {
+        throw new Error('Assignment does not belong to this vehicle.');
+    }
+
+    const pending = record.details?.pendingServicePhotoReview;
+    if (!pending || String(pending.status || '').toLowerCase() !== 'pending') {
+        throw new Error('No pending assignment photo review.');
+    }
+
+    const serviceId = String(pending.serviceId || '').trim();
+    const serviceTypeLabel = String(pending.serviceTypeLabel || 'Service').trim() || 'Service';
+
+    if (approve) {
+        await applyServiceBodyConditionReplacements(asset, {
+            images: pending.images || [],
+            serviceTypeLabel,
+            serviceId,
+            historyId: String(record._id),
+        });
+        const fresh = await AssetHistory.findById(record._id).exec();
+        if (fresh) {
+            const details =
+                fresh.details && typeof fresh.details === 'object' ? { ...fresh.details } : {};
+            details.pendingServicePhotoReview = {
+                ...pending,
+                status: 'approved',
+                resolvedAt: new Date().toISOString(),
+                resolvedByName: actorName || '',
+            };
+            fresh.details = details;
+            fresh.markModified('details');
+            await fresh.save();
+        }
+        return { action: 'approved', historyId: String(record._id) };
+    }
+
+    const details = record.details && typeof record.details === 'object' ? { ...record.details } : {};
+    details.pendingServicePhotoReview = {
+        ...pending,
+        status: 'rejected',
+        resolvedAt: new Date().toISOString(),
+        resolvedByName: actorName || '',
+    };
+    record.details = details;
+    record.markModified('details');
+    await record.save();
+    return { action: 'rejected', historyId: String(record._id) };
 }

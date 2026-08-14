@@ -22,6 +22,15 @@ function parseRemark(service) {
     }
 }
 
+/** Accident other-party: no HR quote approval, no Accounts approval, no Zoho. */
+export function shopServiceSkipsHrAndAccounts(remark) {
+    if (!remark || typeof remark !== 'object') return false;
+    if (remark.hrApprovalNotRequired === true || remark.accountsApprovalNotRequired === true) {
+        return true;
+    }
+    return String(remark.accidentOwnerType || '').trim().toLowerCase() === 'thirdparty';
+}
+
 function utcDayStart(value) {
     const d = value instanceof Date ? value : new Date(value);
     if (Number.isNaN(d.getTime())) return null;
@@ -826,8 +835,11 @@ export async function activateShopServiceOnStartDate(
     if (!service) return false;
 
     const remark = parseRemark(service);
-    // Ready / On Service only after Accounts Approve + Schedule dates.
-    if (!String(remark.accountsApprovedAt || '').trim()) return false;
+    // Ready / On Service only after Accounts Approve + Schedule dates
+    // (other-party accident repair skips Accounts).
+    if (!String(remark.accountsApprovedAt || '').trim() && !shopServiceSkipsHrAndAccounts(remark)) {
+        return false;
+    }
     const { startD, endD } = resolveServiceWindowDates(wf, remark);
     if (!startD || !endD) return false;
 

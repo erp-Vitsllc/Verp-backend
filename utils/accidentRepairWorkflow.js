@@ -32,6 +32,14 @@ export function isAccidentRepairWorkflow(wf, serviceSub) {
     return isAccidentRepairServiceType(wf?.serviceTypeLabel || serviceSub?.serviceType);
 }
 
+export function isAccidentOtherParty(remarkOrType) {
+    const raw =
+        typeof remarkOrType === 'string'
+            ? remarkOrType
+            : remarkOrType?.accidentOwnerType;
+    return String(raw || '').trim().toLowerCase() === 'thirdparty';
+}
+
 export function accidentRepairDetailsPath(vehicleId, serviceRecordId) {
     if (!vehicleId || !serviceRecordId) return null;
     return `/HRM/Asset/Vehicle/details/${vehicleId}/accident-repair/${serviceRecordId}`;
@@ -235,6 +243,51 @@ export async function updateAccidentRepairQuoteEmployeeRows(asset, serviceId, em
     return asset;
 }
 
+async function advanceAccidentRepairOtherPartyAfterSchedule(asset, serviceId, actorName) {
+    const service = asset.services?.id?.(serviceId);
+    const remark = parseRemark(service);
+    remark.hrApprovalNotRequired = true;
+    remark.accountsApprovalNotRequired = true;
+    if (service) {
+        service.remark = JSON.stringify(remark);
+        asset.markModified('services');
+        await asset.save();
+    }
+
+    const hr = await getDepartmentHOD('hr');
+    if (hr?._id) {
+        await syncDashboardAction({
+            requestId: asset._id,
+            requestType: 'Vehicle Service Request',
+            status: 'Approved',
+            assignedTo: hr._id,
+            actionedBy: null,
+            comment: 'Other party damage — HR approval not required',
+            subjectEmployee: asset.assignedTo,
+            requestedByName: actorName || '',
+            extra1: `${asset.assetId || ''} — Accident Repair`,
+            extra2: 'HR approval not required',
+            extra3: accidentRepairDashboardMeta(asset, serviceId),
+        });
+    }
+
+    const { advanceShopServiceToScheduledAfterAccountsApprove } = await import(
+        './vehicleShopServiceScheduled.js'
+    );
+    const { wf } = getWorkflowContextForService(asset, serviceId);
+    if (!wf) return asset;
+    return advanceShopServiceToScheduledAfterAccountsApprove(asset, wf, actorName, {
+        serviceTypeLabel: 'Accident Repair',
+        linkPath: accidentRepairDetailsPath(asset._id, serviceId),
+        dashboardMeta: accidentRepairDashboardMeta(asset, serviceId),
+        appendActivity: appendAccidentRepairActivity,
+        skipAccountsStamp: true,
+        scheduleActivityType: 'schedule_submitted',
+        scheduleActivityNote:
+            'Other party damage — Ready / On Service after Schedule (HR and Accounts approval not required)',
+    });
+}
+
 export async function submitAccidentRepairGarage(asset, serviceId, serviceUpdates, req) {
     const service = asset.services?.id?.(serviceId);
     if (!service) throw new Error('Service record not found');
@@ -330,6 +383,11 @@ export async function submitAccidentRepairGarage(asset, serviceId, serviceUpdate
         asset.markModified('services');
         await asset.save();
 
+        if (isAccidentOtherParty(remark)) {
+            await advanceAccidentRepairOtherPartyAfterSchedule(asset, serviceId, actorName);
+            return asset;
+        }
+
         if (String(remark.accountsApprovedAt || '').trim()) {
             const { maybeAdvanceShopToScheduledAfterGarageIfAccountsDone } = await import(
                 './vehicleShopServiceScheduled.js'
@@ -342,6 +400,28 @@ export async function submitAccidentRepairGarage(asset, serviceId, serviceUpdate
                 appendActivity: appendAccidentRepairActivity,
             });
         }
+        return asset;
+    }
+
+    if (isAccidentOtherParty(remark)) {
+        const { snapshotActiveServiceWorkflow } = await import('./vehicleServiceWorkflowResolve.js');
+        if (!bindActive) {
+            snapshotActiveServiceWorkflow(asset);
+        }
+        asset.activeServiceWorkflow = {
+            ...(typeof wf.toObject === 'function' ? wf.toObject() : wf),
+            stage,
+            serviceRecordId: wf.serviceRecordId || serviceId,
+            serviceTypeLabel: wf.serviceTypeLabel || 'Accident Repair',
+            history: Array.isArray(wf.history) ? [...wf.history] : [],
+            garageSubmittedAt: wf.garageSubmittedAt,
+            scheduledServiceDate: wf.scheduledServiceDate || null,
+            serviceWindowEndDate: wf.serviceWindowEndDate || null,
+        };
+        asset.markModified('activeServiceWorkflow');
+        asset.markModified('services');
+        await asset.save();
+        await advanceAccidentRepairOtherPartyAfterSchedule(asset, serviceId, actorName);
         return asset;
     }
 
@@ -580,6 +660,131 @@ export async function createAccidentRepairEmployeeFines(asset, service, reqUser)
     return created;
 }
 
+async function completeAccidentRepairWithoutZohoBilling(asset, serviceId, { actorName, wf, bindActive }) {
+    const service = asset.services?.id?.(serviceId);
+    if (!service) throw new Error('Service record not found');
+    const remark = parseRemark(service);
+    remark.vehicleServiceCompleted = 'live';
+    remark.vehicleServiceCompletedAt = new Date().toISOString();
+    remark.serviceWorkStatus = 'complete';
+    remark.workflowStage = ACCIDENT_REPAIR_STAGE.COMPLETE;
+    remark.billingStatus = 'not_required';
+    remark.serviceCompletedByName = actorName || remark.serviceCompletedByName || '';
+    service.remark = JSON.stringify(remark);
+    appendAccidentRepairActivity(service, {
+        type: 'service_completed',
+        byName: actorName,
+        note: 'Accident repair complete — other party damage (no Zoho bill)',
+    });
+
+    wf.stage = ACCIDENT_REPAIR_STAGE.COMPLETE;
+    wf.serviceWorkCompleted = true;
+    asset.activeServiceWorkflow = wf;
+    if (bindActive) {
+        applyPostServiceOperationalState(asset, { statusBeforeService: wf.previousStatus || null });
+        asset.onServiceActive = false;
+    }
+    asset.markModified('activeServiceWorkflow');
+    asset.markModified('services');
+    await asset.save();
+
+    const populated = await AssetItem.findById(asset._id)
+        .populate({
+            path: 'assignedTo',
+            select: 'firstName lastName employeeId companyEmail workEmail personalEmail email company',
+            populate: { path: 'company', select: 'name' },
+        })
+        .lean();
+
+    const { sendVehicleServiceCompletedNotificationEmail } = await import(
+        './sendVehicleServiceCompletedNotificationEmail.js'
+    );
+    await sendVehicleServiceCompletedNotificationEmail({
+        asset: populated || asset,
+        remark,
+        service,
+    }).catch((err) => {
+        console.error('[AccidentRepair] completed email failed:', err?.message || err);
+    });
+
+    try {
+        const { closeAdminOfficerServiceTrackNotification } = await import(
+            './vehicleServiceAdminOfficerNotification.js'
+        );
+        await closeAdminOfficerServiceTrackNotification({
+            assetId: asset._id,
+            serviceRecordId: serviceId,
+            comment: 'Accident repair complete — other party (no Zoho bill)',
+            requestedByName: actorName || '',
+        });
+    } catch (closeErr) {
+        console.error(
+            '[AccidentRepair] Close Admin Officer on complete failed:',
+            closeErr?.message || closeErr,
+        );
+    }
+
+    return asset;
+}
+
+async function notifyHrAccidentAssignmentPhotoReview({
+    asset,
+    serviceId,
+    historyId,
+    actorName,
+    photoCount = 0,
+}) {
+    const hr = await getDepartmentHOD('hr');
+    if (!hr?._id || !historyId) return;
+
+    const populated = await AssetItem.findById(asset._id)
+        .populate('assignedTo', 'firstName lastName employeeId companyEmail workEmail')
+        .lean();
+    const assigned = populated?.assignedTo;
+    const assignedName = assigned
+        ? `${assigned.firstName || ''} ${assigned.lastName || ''}`.trim() || assigned.employeeId || 'Assigned user'
+        : 'Unassigned';
+    const assignedId = assigned?.employeeId ? ` (${assigned.employeeId})` : '';
+    const plate = [populated?.plateEmirate, populated?.plateNumber].filter(Boolean).join(' ').trim();
+    const vehicleLabel = `${populated?.assetId || asset.assetId || ''}${plate ? ` (${plate})` : ''}`.trim();
+    const assignPath = `/HRM/Asset/Vehicle/details/${asset._id}/assign/${historyId}`;
+    const detailLine = `Current vehicle assignment photos changed after Accident Repair complete. Vehicle: ${vehicleLabel}. Assigned user: ${assignedName}${assignedId}. Please review and Approve to replace images or Reject to keep the previous photos.`;
+
+    const photoNote =
+        photoCount > 0 ? ` ${photoCount} assignment photo(s) pending review.` : '';
+    const reviewDetail = `${detailLine}${photoNote}`;
+
+    await syncDashboardAction({
+        requestId: asset._id,
+        requestType: 'Vehicle Assignment Photo Review',
+        status: 'Pending',
+        assignedTo: hr._id,
+        subjectEmployee: assigned || null,
+        requestedByName: actorName || '',
+        extra1: `${vehicleLabel} — Assignment photo review`,
+        extra2: 'Accident repair — photos changed, please review',
+        extra3: JSON.stringify({
+            vehicleId: String(asset._id),
+            vehicleMongoId: String(asset._id),
+            historyId: String(historyId),
+            serviceRecordId: String(serviceId || ''),
+            photoReview: true,
+            isFleetVehicle: true,
+            detailsPath: assignPath,
+        }),
+        comment: reviewDetail,
+    });
+
+    await sendTireEmail({
+        recipient: hr,
+        asset: populated || asset,
+        stageLabel: 'Assignment photo review',
+        actionLabel: 'Vehicle assignment photos changed — please review',
+        detailLine: reviewDetail,
+        linkPath: assignPath,
+    });
+}
+
 export async function completeAccidentRepairService(asset, serviceId, serviceUpdates, req) {
     const service = asset.services?.id?.(serviceId);
     if (!service) throw new Error('Service record not found');
@@ -632,15 +837,16 @@ export async function completeAccidentRepairService(asset, serviceId, serviceUpd
     }
 
     const {
-        applyServiceBodyConditionReplacements,
         resolveMappedNewConditionImages,
+        queuePendingServicePhotoReview,
     } = await import('./applyServiceBodyConditionReplacements.js');
     const mappedImages = resolveMappedNewConditionImages({
         requestImages: serviceUpdates?.newConditionImages,
         service: completedService,
     });
+    let photoReview = null;
     if (mappedImages.length) {
-        await applyServiceBodyConditionReplacements(asset, {
+        photoReview = await queuePendingServicePhotoReview(asset, {
             images: mappedImages,
             serviceTypeLabel: 'Accident Repair',
             serviceId,
@@ -649,17 +855,37 @@ export async function completeAccidentRepairService(asset, serviceId, serviceUpd
 
     const remark = parseRemark(completedService);
     const actorName = await getRequesterName(req.user);
+    const otherParty = isAccidentOtherParty(remark);
 
-    const { routeShopServiceToBillingAfterComplete } = await import('./vehicleShopServiceScheduled.js');
-    await routeShopServiceToBillingAfterComplete(asset, serviceId, {
-        serviceTypeLabel: 'Accident Repair',
-        actorName,
-        linkPath: `/HRM/Asset/Vehicle/details/${asset._id}/accident-repair/${serviceId}`,
-        dashboardMeta: accidentRepairDashboardMeta(asset, serviceId),
-        appendActivity: appendAccidentRepairActivity,
-    });
+    if (otherParty) {
+        await completeAccidentRepairWithoutZohoBilling(asset, serviceId, {
+            actorName,
+            wf,
+            bindActive,
+        });
+    } else {
+        const { routeShopServiceToBillingAfterComplete } = await import('./vehicleShopServiceScheduled.js');
+        await routeShopServiceToBillingAfterComplete(asset, serviceId, {
+            serviceTypeLabel: 'Accident Repair',
+            actorName,
+            linkPath: `/HRM/Asset/Vehicle/details/${asset._id}/accident-repair/${serviceId}`,
+            dashboardMeta: accidentRepairDashboardMeta(asset, serviceId),
+            appendActivity: appendAccidentRepairActivity,
+        });
+    }
+
+    if (photoReview?.historyId) {
+        await notifyHrAccidentAssignmentPhotoReview({
+            asset,
+            serviceId,
+            historyId: photoReview.historyId,
+            actorName,
+            photoCount: photoReview.queued || 0,
+        });
+    }
 
     // Vehicle Damage fines are created after Zoho bill success (Make Payment), not on Complete.
+    // Other-party damage skips Zoho — no bill, no post-bill fines.
 
     const populated = await AssetItem.findById(asset._id)
         .populate({

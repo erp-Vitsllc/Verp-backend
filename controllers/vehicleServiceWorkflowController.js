@@ -44,6 +44,7 @@ import {
     advanceAccidentRepairAfterAccountsApprove,
     advanceAccidentRepairAfterHrApprove,
     isAccidentRepairWorkflow,
+    isAccidentOtherParty,
     appendAccidentRepairActivity,
     ACCIDENT_REPAIR_STAGE,
 } from '../utils/accidentRepairWorkflow.js';
@@ -1047,8 +1048,20 @@ export async function maybeStartVehicleServiceWorkflow(asset, { serviceRecordId,
             persistWorkflowSnapshotToServiceSubdoc(asset);
         }
 
-        const hr = await resolveAssigneeForStage(STAGE.HR);
-        if (!hr?._id) {
+        const serviceSub = asset.services?.id?.(serviceRecordId);
+        const startRemark = parseRemarkMeta(serviceSub?.remark);
+        const accidentOtherParty =
+            String(serviceType || '').trim() === 'Accident Repair' && isAccidentOtherParty(startRemark);
+
+        if (accidentOtherParty && serviceSub) {
+            startRemark.hrApprovalNotRequired = true;
+            startRemark.accountsApprovalNotRequired = true;
+            serviceSub.remark = JSON.stringify(startRemark);
+            asset.markModified('services');
+        }
+
+        const hr = accidentOtherParty ? null : await resolveAssigneeForStage(STAGE.HR);
+        if (!accidentOtherParty && !hr?._id) {
             console.warn('[VehicleServiceWorkflow] No Flowchart HR — workflow not started');
             return;
         }
@@ -1058,25 +1071,30 @@ export async function maybeStartVehicleServiceWorkflow(asset, { serviceRecordId,
         const populated = await AssetItem.findById(asset._id).populate('assignedTo', 'firstName lastName employeeId').lean();
         const subjectEmp = populated?.assignedTo || null;
 
+        const startStage = accidentOtherParty ? ACCIDENT_REPAIR_STAGE.ADMIN_OFFICER : STAGE.HR;
+        const startNote = accidentOtherParty
+            ? `Service logged: ${serviceType} — other party damage (Schedule only; HR and Accounts approval not required)`
+            : `Service logged: ${serviceType} — Schedule and HR Approval open together`;
+
         asset.activeServiceWorkflow = {
             serviceRecordId,
-            stage: STAGE.HR,
+            stage: startStage,
             previousStatus: asset.status,
             serviceTypeLabel: serviceType || '',
             history: []
         };
         await pushWorkflowHistory(asset, {
-            stage: STAGE.HR,
+            stage: startStage,
             action: 'created',
-            note: `Service logged: ${serviceType} — Schedule and HR Approval open together`,
+            note: startNote,
             byName: await getRequesterName(req.user)
         });
 
         const requesterEmp = req?.user ? await resolveActorEmployee(req.user) : null;
         await logVehicleServiceWorkflowToAssetHistory(asset, {
-            stage: STAGE.HR,
+            stage: startStage,
             workflowAction: 'start',
-            note: `Service logged: ${serviceType} — Schedule and HR Approval open together`,
+            note: startNote,
             byName: await getRequesterName(req.user),
             performedById: requesterEmp?._id,
             serviceTypeLabel: serviceType || '',
@@ -1097,40 +1115,50 @@ export async function maybeStartVehicleServiceWorkflow(asset, { serviceRecordId,
         const detailsPath = vehicleServiceDetailsPath(asset._id, serviceRecordId, serviceType);
 
         // Oil-style: Schedule (Admin) + HR open together after Initiate (Tire / Mech / Body).
-        const scheduleHrExtra2 = isTireChange
-            ? 'Tire change submitted — Schedule & HR Approval open'
-            : 'Schedule and HR Approval open together';
-        const scheduleHrDetail = isTireChange
-            ? `${requesterName} submitted a tire change request for ${assetLabel}. Schedule/Reschedule (Admin) and HR Approval are open together — Admin may complete garage/dates; HR reviews quotations.`
-            : `${requesterName} logged a service (${serviceType}) for ${assetLabel}. Schedule/Reschedule (Admin) and HR Approval are open together.`;
+        const scheduleHrExtra2 = accidentOtherParty
+            ? 'Other party damage — complete Schedule / Reschedule'
+            : isTireChange
+              ? 'Tire change submitted — Schedule & HR Approval open'
+              : 'Schedule and HR Approval open together';
+        const scheduleHrDetail = accidentOtherParty
+            ? `${requesterName} logged accident repair (other party) for ${assetLabel}. Complete Schedule/Reschedule — HR and Accounts approval are not required.`
+            : isTireChange
+              ? `${requesterName} submitted a tire change request for ${assetLabel}. Schedule/Reschedule (Admin) and HR Approval are open together — Admin may complete garage/dates; HR reviews quotations.`
+              : `${requesterName} logged a service (${serviceType}) for ${assetLabel}. Schedule/Reschedule (Admin) and HR Approval are open together.`;
 
-        await syncDashboardAction({
-            requestId: asset._id,
-            requestType: 'Vehicle Service Request',
-            status: 'Pending',
-            assignedTo: hr._id,
-            subjectEmployee: subjectEmp,
-            subjectName: asset.name || asset.assetId || 'Vehicle',
-            requestedByName: requesterName,
-            extra1: `${asset.assetId} — ${serviceType || 'Service'}`,
-            extra2: isShopQuoteService ? scheduleHrExtra2 : 'Awaiting HR approval',
-            extra3: vehicleServiceDashboardMeta(asset, serviceRecordId, serviceType),
-        });
+        if (hr?._id) {
+            await syncDashboardAction({
+                requestId: asset._id,
+                requestType: 'Vehicle Service Request',
+                status: 'Pending',
+                assignedTo: hr._id,
+                subjectEmployee: subjectEmp,
+                subjectName: asset.name || asset.assetId || 'Vehicle',
+                requestedByName: requesterName,
+                extra1: `${asset.assetId} — ${serviceType || 'Service'}`,
+                extra2: isShopQuoteService ? scheduleHrExtra2 : 'Awaiting HR approval',
+                extra3: vehicleServiceDashboardMeta(asset, serviceRecordId, serviceType),
+            });
 
-        await sendWorkflowEmailWithConsole({
-            recipient: hr,
-            asset,
-            stageLabel: isShopQuoteService ? 'Schedule & HR Approval open' : 'HR approval required',
-            actionLabel: isShopQuoteService
-                ? `${serviceType} — Schedule & HR Approval`
-                : 'New vehicle service request',
-            detailLine: isShopQuoteService
-                ? scheduleHrDetail
-                : `${requesterName} logged a service (${serviceType}). Please approve or reject in your dashboard.`,
-            linkPath: detailsPath,
-        });
+            await sendWorkflowEmailWithConsole({
+                recipient: hr,
+                asset,
+                stageLabel: isShopQuoteService ? 'Schedule & HR Approval open' : 'HR approval required',
+                actionLabel: isShopQuoteService
+                    ? `${serviceType} — Schedule & HR Approval`
+                    : 'New vehicle service request',
+                detailLine: isShopQuoteService
+                    ? scheduleHrDetail
+                    : `${requesterName} logged a service (${serviceType}). Please approve or reject in your dashboard.`,
+                linkPath: detailsPath,
+            });
+        }
 
-        if (isShopQuoteService && adminOfficer?._id && String(adminOfficer._id) !== String(hr._id)) {
+        if (
+            isShopQuoteService &&
+            adminOfficer?._id &&
+            (!hr?._id || String(adminOfficer._id) !== String(hr._id))
+        ) {
             await syncDashboardAction({
                 requestId: asset._id,
                 requestType: 'Vehicle Service Request',
@@ -1146,8 +1174,10 @@ export async function maybeStartVehicleServiceWorkflow(asset, { serviceRecordId,
             await sendWorkflowEmailWithConsole({
                 recipient: adminOfficer,
                 asset,
-                stageLabel: 'Schedule & HR Approval open',
-                actionLabel: `${serviceType} — Schedule & HR Approval`,
+                stageLabel: accidentOtherParty ? 'Schedule open' : 'Schedule & HR Approval open',
+                actionLabel: accidentOtherParty
+                    ? `${serviceType} — Schedule`
+                    : `${serviceType} — Schedule & HR Approval`,
                 detailLine: scheduleHrDetail,
                 linkPath: detailsPath,
             });
@@ -2061,6 +2091,11 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
         if (action === 'approve' && isAccWf) {
             const accSvc = asset.services?.id?.(asset.activeServiceWorkflow?.serviceRecordId);
             const accRemark = parseRemarkMeta(accSvc?.remark);
+            if (isAccidentOtherParty(accRemark)) {
+                return res.status(400).json({
+                    message: 'HR and Accounts approval are not required for other party damage.',
+                });
+            }
             const accHrAlreadyDone = Boolean(
                 String(accRemark.hrOnServiceApprovedAt || accRemark.hrApprovedAt || '').trim(),
             );

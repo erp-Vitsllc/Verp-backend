@@ -14195,6 +14195,66 @@ export const completeAccidentRepairHandler = async (req, res) => {
     }
 };
 
+/** Flowchart HR: approve (replace) or reject (keep previous) assignment photos queued after Accident Repair complete. */
+export const resolveServicePhotoReviewHandler = async (req, res) => {
+    try {
+        const { id, historyId } = req.params;
+        const action = String(req.body?.action || '').trim().toLowerCase();
+        if (action !== 'approve' && action !== 'reject') {
+            return res.status(400).json({ message: 'Action must be approve or reject.' });
+        }
+
+        const isHr = await isUserInFlowchart(req.user, 'hr').catch(() => false);
+        const isAdminUser =
+            isJwtSystemSuperUser(req.user) || (await isUserAdministrator(req.user?.id).catch(() => false));
+        if (!isHr && !isAdminUser) {
+            return res.status(403).json({ message: 'Only flowchart HR can review assignment photos.' });
+        }
+
+        const asset = await AssetItem.findById(id).populate('assignedTo', 'firstName lastName employeeId');
+        if (!asset) return res.status(404).json({ message: 'Asset not found' });
+
+        const { resolvePendingServicePhotoReview } = await import(
+            '../utils/applyServiceBodyConditionReplacements.js'
+        );
+        const actorName = await getRequesterName(req.user);
+        const result = await resolvePendingServicePhotoReview(asset, historyId, {
+            approve: action === 'approve',
+            actorName,
+        });
+
+        const { syncDashboardAction } = await import('../utils/syncDashboard.js');
+        await syncDashboardAction({
+            requestId: asset._id,
+            requestType: 'Vehicle Assignment Photo Review',
+            status: action === 'approve' ? 'Approved' : 'Rejected',
+            actionedBy: req.user?.employeeObjectId || null,
+            requestedByName: actorName || '',
+            comment:
+                action === 'approve'
+                    ? 'HR approved — assignment photos replaced'
+                    : 'HR rejected — previous assignment photos kept',
+        });
+
+        const history = await AssetHistory.findById(historyId)
+            .populate('performedBy', 'firstName lastName employeeId')
+            .populate('assignedTo', 'firstName lastName employeeId');
+        const fresh = await AssetItem.findById(asset._id).populate('assignedTo', 'firstName lastName employeeId');
+        return res.json({
+            message:
+                action === 'approve'
+                    ? 'Assignment photos replaced.'
+                    : 'Previous assignment photos kept.',
+            action: result?.action || action,
+            historyId: result?.historyId || historyId,
+            history,
+            asset: fresh,
+        });
+    } catch (error) {
+        return res.status(400).json({ message: error.message || 'Could not resolve photo review' });
+    }
+};
+
 /** Re-apply completed service new-condition photos onto the current handover body report. */
 export const syncServiceBodyConditionPhotosHandler = async (req, res) => {
     try {
@@ -19030,6 +19090,7 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
                     requestType: 'Vehicle Inspection',
                     extra3: { $regex: '"activationViewerRole"\\s*:\\s*"flowchart_hr"', $options: 'i' },
                 });
+                assigneeClauses.push({ requestType: 'Vehicle Assignment Photo Review' });
                 assigneeClauses.push({ requestType: 'Vehicle Profile Activation' });
                 assigneeClauses.push({ requestType: 'Vehicle Profile Edit' });
                 assigneeClauses.push({ requestType: 'Vehicle Mortgage Close' });
