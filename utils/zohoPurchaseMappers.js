@@ -38,6 +38,7 @@ export function mapZohoExpenseToDoc(expense, organizationId, syncedAt = new Date
     return {
         zohoExpenseId,
         organizationId,
+        expenseNumber: cleanText(expense.expense_number || expense.expenseNumber),
         date: cleanText(expense.date),
         accountName: cleanText(expense.account_name),
         vendorId: cleanText(expense.vendor_id),

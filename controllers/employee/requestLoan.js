@@ -332,3 +332,50 @@ export const requestLoan = async (req, res) => {
         res.status(500).json({ message: "Failed to submit application." });
     }
 };
+
+async function resolveLinkedSelf(req) {
+    if (req.user?.employeeObjectId) {
+        const byOid = await EmployeeBasic.findById(req.user.employeeObjectId)
+            .select('_id employeeId')
+            .lean();
+        if (byOid) return byOid;
+    }
+    if (req.user?.employeeId) {
+        return EmployeeBasic.findOne({ employeeId: req.user.employeeId })
+            .select('_id employeeId')
+            .lean();
+    }
+    return null;
+}
+
+/**
+ * POST /api/Employee/dashboard/self-loan-request
+ * Dashboard Request hub: always creates a Draft for the signed-in employee.
+ */
+export const createSelfLoanDraft = async (req, res) => {
+    try {
+        const self = await resolveLinkedSelf(req);
+        if (!self) {
+            return res.status(404).json({
+                message: 'No linked employee profile found for this user.',
+            });
+        }
+
+        const typeRaw = String(req.body?.type || '').trim();
+        const isAdvance = typeRaw.toLowerCase().includes('advance');
+        const isLoan = typeRaw.toLowerCase() === 'loan' || typeRaw.toLowerCase().includes('loan');
+        if (!isAdvance && !isLoan) {
+            return res.status(400).json({ message: 'Choose Loan or Advance.' });
+        }
+
+        req.body.employeeObjectId = self._id;
+        req.body.employeeId = self.employeeId;
+        req.body.status = 'Draft';
+        req.body.type = isAdvance ? 'Advance' : 'Loan';
+        req.body.resubmit = false;
+        return requestLoan(req, res);
+    } catch (error) {
+        console.error('Error creating self loan draft:', error);
+        return res.status(500).json({ message: 'Failed to save draft.' });
+    }
+};

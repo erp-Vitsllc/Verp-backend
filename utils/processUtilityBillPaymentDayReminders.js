@@ -290,9 +290,10 @@ async function createAccountsBell({ record, dueDate, accounts, yearMonth }) {
                 paymentDay: record.paymentDay,
                 daysBefore: DUE_TODAY_STAGE,
                 yearMonth: ym,
+                billMonth: ym,
                 dueDateKey: `${ym}-${String(record.paymentDay).padStart(2, '0')}`,
                 stickyUntilSettled: true,
-                detailsPath: `/HRM/Asset/UtilityBills/details/${encodeURIComponent(String(record.entryId))}`,
+                detailsPath: `/HRM/Asset/UtilityBills/details/${encodeURIComponent(String(record.entryId))}?addBill=1&billMonth=${encodeURIComponent(ym)}`,
             }),
         },
         { upsert: true, new: true, setDefaultsOnInsert: true },
@@ -363,6 +364,7 @@ export async function processUtilityBillPaymentDayReminders() {
                         recipient: accounts,
                         record,
                         dueDateLabel,
+                        yearMonth,
                     });
                 }
 

@@ -28,6 +28,12 @@ function personName(person) {
     return `${person?.firstName || ''} ${person?.lastName || ''}`.trim() || 'Employee';
 }
 
+function hubLabel(kind, assetType = '') {
+    const base = HUB_KIND_LABEL[kind] || 'Request';
+    const area = String(assetType || '').trim();
+    return area ? `${base} · ${area}` : base;
+}
+
 function dashboardUrl(requestId, requesterId) {
     const base = emailFrontendUrl();
     const qs = new URLSearchParams({ hubRequestId: String(requestId || '') });
@@ -55,6 +61,7 @@ export async function sendEmployeeHubRequestEmails({
     manager,
     employee,
     kind,
+    assetType = '',
     description = '',
     attachmentName = '',
     requestId,
@@ -62,7 +69,7 @@ export async function sendEmployeeHubRequestEmails({
     try {
         const mail = createTransport();
         if (!mail) return;
-        const label = HUB_KIND_LABEL[kind] || 'Request';
+        const label = hubLabel(kind, assetType);
         const empName = personName(employee);
         const mgrName = personName(manager);
         const url = dashboardUrl(requestId, employee?._id);
@@ -116,6 +123,7 @@ export async function sendEmployeeHubDecisionEmails({
     manager,
     employee,
     kind,
+    assetType = '',
     decision,
     description = '',
     decisionNote = '',
@@ -124,7 +132,7 @@ export async function sendEmployeeHubDecisionEmails({
     try {
         const mail = createTransport();
         if (!mail) return;
-        const label = HUB_KIND_LABEL[kind] || 'Request';
+        const label = hubLabel(kind, assetType);
         const empName = personName(employee);
         const mgrName = personName(manager);
         const approved = String(decision || '') === 'Approved';

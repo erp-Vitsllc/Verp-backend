@@ -1,5 +1,5 @@
 import EmployeeBasic from "../../models/EmployeeBasic.js";
-import { sendProbationWorkflowEmail, ensureProbationRequestForEmployee, ensureProbationDashboardTask } from "../../utils/sendProbationWorkflowEmail.js";
+import { sendProbationWorkflowEmail, ensureProbationRequestForEmployee, ensureProbationDashboardTask, closePendingProbationChangeTasks } from "../../utils/sendProbationWorkflowEmail.js";
 import { resolveEmployeeProfileStatusWrite } from "../../utils/employeeProfileStatusLock.js";
 
 const toObjIdString = (v) => (v == null ? "" : String(v));
@@ -59,6 +59,10 @@ export const confirmProbationByHOD = async (req, res) => {
             comment: "Awaiting employee approval for probation status change.",
         });
         await employee.save();
+
+        await closePendingProbationChangeTasks(employee, {
+            comment: "Closed: primary reportee confirmed probation change",
+        });
 
         await sendProbationWorkflowEmail({
             employee,
@@ -179,6 +183,12 @@ export const finalizeProbationByHR = async (req, res) => {
         }
 
         await employee.save();
+
+        await closePendingProbationChangeTasks(employee, {
+            comment: isApprove
+                ? "Closed: HR finalized probation to Permanent"
+                : "Closed: HR rejected probation change",
+        });
 
         if (isApprove) {
             await ensureProbationDashboardTask({

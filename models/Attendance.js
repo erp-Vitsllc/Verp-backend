@@ -53,6 +53,13 @@ const attendanceSchema = new mongoose.Schema(
             required: true,
             trim: true,
         },
+        /** Paid / unpaid only applies to authorized_leave. */
+        leavePayType: {
+            type: String,
+            enum: ['', 'paid', 'unpaid'],
+            default: '',
+            trim: true,
+        },
         timeIn: {
             type: String,
             default: '',
@@ -124,6 +131,41 @@ const attendanceSchema = new mongoose.Schema(
             enum: ['', 'leave', 'yellow', 'future_leave', 'future_late', 'future_early'],
             default: '',
             trim: true,
+        },
+        /** Full day, or a half day bounded by leaveRequestTimeIn / leaveRequestTimeOut. */
+        leaveRequestDayPart: {
+            type: String,
+            enum: ['', 'full', 'half'],
+            default: '',
+            trim: true,
+        },
+        leaveRequestTimeIn: {
+            type: String,
+            default: '',
+            trim: true,
+        },
+        leaveRequestTimeOut: {
+            type: String,
+            default: '',
+            trim: true,
+        },
+        /** Range the employee asked for; every working day in it gets its own record. */
+        leaveRequestFromDate: {
+            type: String,
+            default: '',
+            trim: true,
+        },
+        leaveRequestToDate: {
+            type: String,
+            default: '',
+            trim: true,
+        },
+        /** Shared by all days of one multi-day request so a decision applies to the whole range. */
+        leaveRequestGroupId: {
+            type: String,
+            default: '',
+            trim: true,
+            index: true,
         },
         leaveRequestedAt: {
             type: Date,

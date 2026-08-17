@@ -266,17 +266,37 @@ export async function clearStaleUtilityContractExpiryNotifications(now = new Dat
 }
 
 /**
- * Daily scan: contractEnd <= today → one email + sticky Accounts notification
- * until renewed or deactivated. No advance (10/5 day) emails.
- * Also heals stale / deleted-account / advance leftovers.
+ * Close leftover Utility Contract Expiry inbox bells.
+ * Dashboard pending requests no longer show contract expiry (other utility
+ * payment / status-change notifications are unchanged).
+ */
+export async function closeAllPendingUtilityContractExpiryNotifications(
+    reason = 'Utility contract expiry inbox notifications disabled',
+) {
+    const result = await DashboardAction.updateMany(
+        { requestType: REQUEST_TYPE, status: 'Pending' },
+        {
+            $set: {
+                status: 'Approved',
+                actionedDate: new Date(),
+                comment: reason,
+            },
+        },
+    );
+    return result?.modifiedCount || result?.nModified || 0;
+}
+
+/**
+ * Daily scan: contract expiry inbox bells are disabled.
+ * Closes any leftover Pending rows so they do not return. Emails still send once.
  */
 export async function processUtilityContractExpiryReminders() {
     try {
         const now = new Date();
-        const staleClosed = await clearStaleUtilityContractExpiryNotifications(now);
-        if (staleClosed > 0) {
+        const closed = await closeAllPendingUtilityContractExpiryNotifications();
+        if (closed > 0) {
             console.log(
-                `[UtilityContractExpiryReminders] cleared ${staleClosed} stale/advance/deleted reminder(s)`,
+                `[UtilityContractExpiryReminders] closed ${closed} leftover contract-expiry inbox row(s)`,
             );
         }
 
@@ -284,14 +304,13 @@ export async function processUtilityContractExpiryReminders() {
         const accounts = await getDepartmentHOD('accounts');
         if (!accounts?._id) {
             console.warn('[UtilityContractExpiryReminders] Accounts HOD not found in flowchart.');
+            return;
         }
 
         const dubaiParts = getCalendarPartsInTz(now, reminderTz());
         console.log(
             `[UtilityContractExpiryReminders] scanning ${entries.length} Active entr(y/ies) for ${dubaiParts.year}-${String(dubaiParts.month).padStart(2, '0')}-${String(dubaiParts.day).padStart(2, '0')} (${reminderTz()})`,
         );
-
-        const activeOpenIds = new Set();
 
         for (const entry of entries) {
             const endRaw = entry?.values?.contractEnd;
@@ -304,71 +323,21 @@ export async function processUtilityContractExpiryReminders() {
             // Only when contract end date is today or past — skip future dates.
             if (timing.daysUntil > 0) continue;
 
-            activeOpenIds.add(entryId);
-            if (accounts) {
-                await upsertAccountsSticky({
+            // Email once per contract-end date when first seen as due/past.
+            const already = await wasSent(entryId, timing.contractEndKey, 0);
+            if (!already) {
+                const kind = timing.daysUntil < 0 ? 'overdue' : 'due';
+                await sendUtilityContractExpiryEmail({
+                    recipient: accounts,
                     entry,
-                    contractEnd: timing.contractEnd,
-                    daysUntil: timing.daysUntil,
-                    accounts,
+                    kind,
+                    contractEndLabel: timing.contractEnd.toLocaleDateString('en-GB', {
+                        timeZone: reminderTz(),
+                    }),
                 });
-
-                // Email once per contract-end date when first seen as due/past.
-                const already = await wasSent(entryId, timing.contractEndKey, 0);
-                if (!already) {
-                    const kind = timing.daysUntil < 0 ? 'overdue' : 'due';
-                    await sendUtilityContractExpiryEmail({
-                        recipient: accounts,
-                        entry,
-                        kind,
-                        contractEndLabel: timing.contractEnd.toLocaleDateString('en-GB', {
-                            timeZone: reminderTz(),
-                        }),
-                    });
-                    await markSent(
-                        entryId,
-                        timing.contractEndKey,
-                        0,
-                        timing.contractEnd,
-                    );
-                    console.log(
-                        `[UtilityContractExpiryReminders] ${kind} → Accounts for entry ${entryId} (end ${timing.contractEndKey})`,
-                    );
-                }
-            }
-        }
-
-        // Drop any remaining Pending rows not in the due set (safety net).
-        const pendingLeft = await DashboardAction.find({
-            requestType: REQUEST_TYPE,
-            status: 'Pending',
-        })
-            .select('_id extra3')
-            .lean();
-
-        for (const row of pendingLeft) {
-            let entryId = '';
-            try {
-                entryId = String(JSON.parse(row.extra3 || '{}')?.entryId || '').trim();
-            } catch {
-                entryId = '';
-            }
-            if (entryId && activeOpenIds.has(entryId)) continue;
-            if (entryId) {
-                await clearUtilityContractExpiryNotifications(
-                    entryId,
-                    'Contract no longer due (renewed, inactive, or deleted)',
-                );
-            } else {
-                await DashboardAction.updateOne(
-                    { _id: row._id, status: 'Pending' },
-                    {
-                        $set: {
-                            status: 'Approved',
-                            actionedDate: new Date(),
-                            comment: 'Orphan utility contract reminder cleared',
-                        },
-                    },
+                await markSent(entryId, timing.contractEndKey, 0, timing.contractEnd);
+                console.log(
+                    `[UtilityContractExpiryReminders] ${kind} email → Accounts for entry ${entryId} (end ${timing.contractEndKey})`,
                 );
             }
         }

@@ -3,9 +3,10 @@ import EmployeeBasic from '../../models/EmployeeBasic.js';
 import EmployeeHubRequest from '../../models/EmployeeHubRequest.js';
 import { syncDashboardAction } from '../../utils/syncDashboard.js';
 import {
-    HUB_KINDS,
+    HUB_MENU_KINDS,
+    HUB_ASSET_TYPES,
     HUB_DASHBOARD_TYPE,
-    HUB_KIND_LABEL,
+    hubRequestDisplayLabel,
 } from '../../utils/employeeHubRequestTypes.js';
 import {
     sendEmployeeHubRequestEmails,
@@ -30,12 +31,17 @@ function personName(emp) {
     return `${emp?.firstName || ''} ${emp?.lastName || ''}`.trim() || 'Employee';
 }
 
+function hubRequestLabel(kind, assetType = '') {
+    return hubRequestDisplayLabel(kind, assetType);
+}
+
 function serialize(row) {
     if (!row) return null;
     return {
         id: String(row._id),
         kind: row.kind,
-        label: HUB_KIND_LABEL[row.kind] || 'Request',
+        assetType: row.assetType || '',
+        label: hubRequestLabel(row.kind, row.assetType),
         description: row.description || '',
         attachmentName: row.attachmentName || '',
         status: row.status,
@@ -66,9 +72,13 @@ export async function createEmployeeHubRequest(req, res) {
         const kind = String(req.body?.kind || '').trim();
         const description = String(req.body?.description || '').trim();
         const attachmentName = String(req.body?.attachmentName || '').trim();
+        const assetType = kind === 'assets' ? String(req.body?.assetType || '').trim() : '';
 
-        if (!HUB_KINDS.includes(kind)) {
+        if (!HUB_MENU_KINDS.includes(kind)) {
             return res.status(400).json({ message: 'Select a valid request type.' });
+        }
+        if (kind === 'assets' && !HUB_ASSET_TYPES.includes(assetType)) {
+            return res.status(400).json({ message: 'Choose which asset this request is about.' });
         }
         if (!description) {
             return res.status(400).json({ message: 'Description is required.' });
@@ -88,6 +98,7 @@ export async function createEmployeeHubRequest(req, res) {
 
         const row = await EmployeeHubRequest.create({
             kind,
+            assetType,
             description,
             attachmentName,
             requester: employee._id,
@@ -107,10 +118,11 @@ export async function createEmployeeHubRequest(req, res) {
             subjectEmployee: employee,
             requestedByName: personName(employee),
             extra1: description.slice(0, 180),
-            extra2: HUB_KIND_LABEL[kind],
+            extra2: hubRequestLabel(kind, assetType),
             extra3: JSON.stringify({
                 hubRequest: true,
                 kind,
+                assetType,
                 requesterMongoId: String(employee._id),
             }),
         });
@@ -119,13 +131,14 @@ export async function createEmployeeHubRequest(req, res) {
             manager,
             employee,
             kind,
+            assetType,
             description,
             attachmentName,
             requestId: row._id,
         }).catch(() => null);
 
         return res.status(201).json({
-            message: `${HUB_KIND_LABEL[kind]} request sent to ${personName(manager)}.`,
+            message: `${hubRequestLabel(kind, assetType)} request sent to ${personName(manager)}.`,
             request: serialize(row),
         });
     } catch (error) {
@@ -207,6 +220,7 @@ export async function decideEmployeeHubRequest(req, res) {
             manager,
             employee,
             kind: row.kind,
+            assetType: row.assetType,
             decision,
             description: row.description,
             decisionNote: row.decisionNote,
@@ -214,7 +228,7 @@ export async function decideEmployeeHubRequest(req, res) {
         }).catch(() => null);
 
         return res.status(200).json({
-            message: `${HUB_KIND_LABEL[row.kind]} request ${decision.toLowerCase()}.`,
+            message: `${hubRequestLabel(row.kind, row.assetType)} request ${decision.toLowerCase()}.`,
             request: serialize(row),
         });
     } catch (error) {

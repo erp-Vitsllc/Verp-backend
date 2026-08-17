@@ -1002,6 +1002,17 @@ export async function fetchBillById(billId) {
     return data.bill || null;
 }
 
+export async function fetchExpenseById(expenseId) {
+    const id = String(expenseId || '').trim();
+    if (!id) return null;
+
+    const data = await requestZohoBooks(`/expenses/${encodeURIComponent(id)}`, {
+        timeout: 30000,
+    });
+
+    return data.expense || null;
+}
+
 export async function updateBill(billId, payload = {}) {
     const id = String(billId || '').trim();
     if (!id) throw new Error('Bill id is required.');

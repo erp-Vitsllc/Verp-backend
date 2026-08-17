@@ -4,6 +4,7 @@ const zohoExpenseSchema = new mongoose.Schema(
     {
         zohoExpenseId: { type: String, required: true },
         organizationId: { type: String, required: true },
+        expenseNumber: { type: String, default: '' },
         date: { type: String, default: '' },
         accountName: { type: String, default: '' },
         vendorId: { type: String, default: '' },

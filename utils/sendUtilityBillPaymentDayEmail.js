@@ -36,6 +36,7 @@ export async function sendUtilityBillPaymentDayEmail({
     recipient,
     record,
     dueDateLabel = '',
+    yearMonth = '',
 }) {
     try {
         const transporter = createTransport();
@@ -47,7 +48,10 @@ export async function sendUtilityBillPaymentDayEmail({
         }
 
         const frontendUrl = emailFrontendUrl();
-        const path = `/HRM/Asset/UtilityBills/details/${encodeURIComponent(String(record.entryId))}`;
+        const ym = String(yearMonth || '').trim();
+        const qs = new URLSearchParams({ addBill: '1' });
+        if (/^\d{4}-\d{2}$/.test(ym)) qs.set('billMonth', ym);
+        const path = `/HRM/Asset/UtilityBills/details/${encodeURIComponent(String(record.entryId))}?${qs.toString()}`;
         const buttonUrl = `${frontendUrl}${path}`;
         const title = 'Utility Bill Overdue — Please Clear';
         const accent = '#dc2626';

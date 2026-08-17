@@ -44,7 +44,7 @@ export const getPendingLoanDashboardInbox = async (req, res) => {
         if (assigneeClauses.length === 0) {
             const hubItems = await listPendingHubInboxItems({
                 assigneeIds: ctx.relevantIds,
-                kinds: ['advance'],
+                kinds: ['advance', 'loan'],
             });
             return res.json({ count: hubItems.length, items: hubItems });
         }
@@ -140,7 +140,7 @@ export const getPendingLoanDashboardInbox = async (req, res) => {
 
         const hubItems = await listPendingHubInboxItems({
             assigneeIds: ctx.relevantIds,
-            kinds: ['advance'],
+            kinds: ['advance', 'loan'],
         });
         const merged = [...hubItems, ...items];
         res.json({ count: merged.length, items: merged });

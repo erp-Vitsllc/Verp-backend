@@ -27,9 +27,8 @@ export const HR_DASHBOARD_REQUEST_TYPES = [
     "Employee Document Not Renew",
     // Vehicle handover assignment inbox (HR stage)
     "Asset Assignment",
-    // Utility Bills (HR stages + sticky payment-day reminders)
+    // Utility Bills (HR stages only — payment-day reminders stay on Accounts)
     "Utility Bill Payment",
-    "Utility Bill Payment Reminder",
     "Utility Entry Status Change",
 ];
 
@@ -339,6 +338,7 @@ export async function reroutePendingAccountsResponsibilities({
                 $in: [
                     "Vehicle Service Request",
                     "Utility Bill Payment",
+                    "Utility Bill Payment Reminder",
                     "Utility Contract Expiry",
                 ],
             },

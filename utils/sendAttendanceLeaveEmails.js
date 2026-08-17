@@ -34,6 +34,7 @@ export async function sendAttendanceLeaveRequestEmail({
     manager,
     employee,
     date,
+    dateLabel = '',
     requestedLabel,
     currentLabel,
     reason = '',
@@ -60,6 +61,7 @@ export async function sendAttendanceLeaveRequestEmail({
             String(employee._id || ''),
         )}&attendanceDate=${encodeURIComponent(String(date || ''))}`;
         const buttonUrl = `${base}${path}`;
+        const shownDate = dateLabel || date;
         const title = isFutureLate
             ? 'Late Arrival Request'
             : isFutureEarly
@@ -71,7 +73,7 @@ export async function sendAttendanceLeaveRequestEmail({
                   : 'Attendance Leave Request';
         const accent = isYellow ? '#F1C40F' : isFutureLate || isFutureEarly ? '#2ECC71' : '#EA3D2F';
         const headerColor = isYellow ? '#1e293b' : '#fff';
-        const subjectLine = `${title}: ${empName} — ${date}`;
+        const subjectLine = `${title}: ${empName} — ${shownDate}`;
         const intro =
             isFutureLate || isFutureEarly || isFutureLeave
                 ? `has sent a request for a future working day:`
@@ -79,7 +81,7 @@ export async function sendAttendanceLeaveRequestEmail({
                   ? `has asked you to confirm their attendance day as <strong>Present</strong>:`
                   : `has asked you to change their leave status:`;
         const confirmLine = isFutureLeave
-            ? 'If you <strong>Approve</strong>, the day becomes Authorized Leave. If you <strong>Reject</strong>, it stays upcoming.'
+            ? 'If you <strong>Approve</strong>, choose Paid or Unpaid Authorized Leave. If you <strong>Reject</strong>, it stays upcoming.'
             : isFutureLate
               ? 'If you <strong>Approve</strong>, the day shows green as Late arrival approved. If you <strong>Reject</strong>, it stays upcoming.'
               : isFutureEarly
@@ -101,7 +103,7 @@ export async function sendAttendanceLeaveRequestEmail({
                         <p>Dear <strong>${mgrName}</strong>,</p>
                         <p><strong>${empName}</strong> (${employee.employeeId || '—'}) ${intro}</p>
                         <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:16px;margin:16px 0;">
-                            <p style="margin:0 0 8px;"><strong>Date:</strong> ${date}</p>
+                            <p style="margin:0 0 8px;"><strong>Date:</strong> ${shownDate}</p>
                             <p style="margin:0 0 8px;"><strong>Currently marked:</strong> ${currentLabel || '—'}</p>
                             <p style="margin:0 0 8px;"><strong>Asking for:</strong> ${requestedLabel || '—'}</p>
                             ${reason ? `<p style="margin:0 0 8px;"><strong>Reason:</strong> ${reason}</p>` : ''}
@@ -128,6 +130,7 @@ export async function sendAttendanceLeaveRequestEmail({
 export async function sendAttendanceLeaveDecisionEmail({
     employee,
     date,
+    dateLabel = '',
     decision,
     requestedLabel,
     finalLabel,
@@ -144,14 +147,15 @@ export async function sendAttendanceLeaveDecisionEmail({
         const approved = String(decision || '').toLowerCase() === 'approved';
         const accent = approved ? '#16a34a' : '#EA3D2F';
         const title = approved ? 'Leave Request Approved' : 'Leave Request Rejected';
+        const shownDate = dateLabel || date;
         const body = approved
-            ? `Your leave request for <strong>${date}</strong> was <strong>approved</strong>. Status set to <strong>${finalLabel || requestedLabel}</strong>.`
-            : `Your leave request for <strong>${date}</strong> was <strong>rejected</strong>. Status remains <strong>${finalLabel || 'unchanged'}</strong>.`;
+            ? `Your leave request for <strong>${shownDate}</strong> was <strong>approved</strong>. Status set to <strong>${finalLabel || requestedLabel}</strong>.`
+            : `Your leave request for <strong>${shownDate}</strong> was <strong>rejected</strong>. Status remains <strong>${finalLabel || 'unchanged'}</strong>.`;
 
         await mail.transporter.sendMail({
             from: `"VeRP System" <${mail.from}>`,
             to,
-            subject: `Attendance leave ${approved ? 'approved' : 'rejected'}: ${date}`,
+            subject: `Attendance leave ${approved ? 'approved' : 'rejected'}: ${shownDate}`,
             html: `
                 <div style="font-family:Segoe UI,Tahoma,sans-serif;color:#1e293b;max-width:600px;margin:0 auto;border:1px solid #e2e8f0;border-radius:12px;overflow:hidden;">
                     <div style="background:${accent};color:#fff;padding:20px;text-align:center;">

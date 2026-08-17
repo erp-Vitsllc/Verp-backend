@@ -1,7 +1,51 @@
 import Fine from "../../models/Fine.js";
 import mongoose from "mongoose";
-import { getSignedFileUrl } from "../../utils/s3Upload.js";
 import { isUserAdministrator } from "../../services/permissionService.js";
+
+/** List views don't need attachments, workflow, or approval PDFs. */
+const FINE_LIST_SELECT = [
+    'fineId',
+    'category',
+    'subCategory',
+    'fineType',
+    'assignedEmployees',
+    'responsibleFor',
+    'employeeAmount',
+    'companyAmount',
+    'company',
+    'companyName',
+    'payableDuration',
+    'monthStart',
+    'originalMonthStart',
+    'originalPayableDuration',
+    'fineStatus',
+    'fineAmount',
+    'totalFineAmount',
+    'serviceCharge',
+    'sourceOfIncome',
+    'paidAmount',
+    'awardedDate',
+    'zohoBillId',
+    'vendorBillStatus',
+    'zohoVendorPaymentId',
+    'zohoOrganizationId',
+    'createdAt',
+    'updatedAt',
+    'createdBy',
+    'vehicleId',
+    'assetId',
+    'assetName',
+    'projectId',
+    'projectName',
+].join(' ');
+
+function fillCompanyNameFromPopulate(fine) {
+    if (!fine) return;
+    const populatedName = fine.company?.name;
+    if (populatedName && (!fine.companyName || fine.companyName === 'N/A')) {
+        fine.companyName = populatedName;
+    }
+}
 
 export const getFines = async (req, res) => {
     try {
@@ -16,7 +60,8 @@ export const getFines = async (req, res) => {
             employeeId,
             vehicleId,
             assetId,
-            companyId
+            companyId,
+            vehicleLinked,
         } = req.query;
 
         const query = {};
@@ -75,6 +120,16 @@ export const getFines = async (req, res) => {
         }
         if (vehicleId) query.vehicleId = vehicleId;
         if (assetId) query.assetId = assetId;
+        if (String(vehicleLinked || '') === '1' || String(vehicleLinked || '').toLowerCase() === 'true') {
+            const vehicleLinkedOr = [
+                { vehicleId: { $exists: true, $nin: [null, ''] } },
+                { assetId: { $exists: true, $nin: [null, ''] } },
+                { assetObjectId: { $exists: true, $ne: null } },
+                { fineType: { $in: ['Vehicle Fine', 'Vehicle Damage'] } },
+            ];
+            query.$and = query.$and || [];
+            query.$and.push({ $or: vehicleLinkedOr });
+        }
 
         if (startDate || endDate) {
             query.awardedDate = {};
@@ -93,58 +148,66 @@ export const getFines = async (req, res) => {
             });
         }
 
-        const skip = (parseInt(page) - 1) * parseInt(limit);
+        const pageNum = parseInt(page, 10) || 1;
+        const limitNum = Math.min(Math.max(parseInt(limit, 10) || 1000, 1), 1000);
+        const skip = (pageNum - 1) * limitNum;
 
-        const fines = await Fine.find(query)
-            .populate('company', 'companyId _id name')
-            .sort({ createdAt: -1 })
-            .skip(skip)
-            .limit(parseInt(limit))
-            .lean();
+        const [fines, total] = await Promise.all([
+            Fine.find(query)
+                .select(FINE_LIST_SELECT)
+                .populate('company', 'companyId _id name')
+                .sort({ createdAt: -1 })
+                .skip(skip)
+                .limit(limitNum)
+                .lean()
+                .maxTimeMS(15000),
+            Fine.countDocuments(query).maxTimeMS(15000),
+        ]);
 
-        const EmployeeBasic = (await import('../../models/EmployeeBasic.js')).default;
+        fines.forEach(fillCompanyNameFromPopulate);
 
-        const signedFines = await Promise.all(fines.map(async (fine) => {
-            if (fine.attachment?.publicId) {
-                const signedUrl = await getSignedFileUrl(fine.attachment.publicId);
-                if (signedUrl) fine.attachment.url = signedUrl;
-            }
-
-            if (Array.isArray(fine.attachments) && fine.attachments.length > 0) {
-                fine.attachments = await Promise.all(
-                    fine.attachments.map(async (attachment) => {
-                        if (!attachment) return attachment;
-                        if (attachment.publicId) {
-                            const signedUrl = await getSignedFileUrl(attachment.publicId);
-                            return { ...attachment, url: signedUrl || attachment.url };
-                        }
-                        return attachment;
-                    }),
+        const missingCompany = fines.filter(
+            (fine) =>
+                (!fine.companyName || fine.companyName === 'N/A') &&
+                fine.assignedEmployees?.[0]?.employeeId &&
+                fine.assignedEmployees[0].employeeId !== 'VEGA-HR-0000',
+        );
+        if (missingCompany.length > 0) {
+            try {
+                const EmployeeBasic = (await import('../../models/EmployeeBasic.js')).default;
+                const empIds = [...new Set(
+                    missingCompany.map((fine) => fine.assignedEmployees[0].employeeId).filter(Boolean),
+                )];
+                const employees = await EmployeeBasic.find({ employeeId: { $in: empIds } })
+                    .select('employeeId company')
+                    .populate('company', 'name')
+                    .lean()
+                    .maxTimeMS(8000);
+                const companyByEmpId = new Map(
+                    employees.map((emp) => [emp.employeeId, emp.company]),
                 );
-            }
-
-            if ((!fine.companyName || fine.companyName === 'N/A') && fine.assignedEmployees?.length > 0) {
-                const empId = fine.assignedEmployees[0].employeeId;
-                if (empId && empId !== 'VEGA-HR-0000') {
-                    const emp = await EmployeeBasic.findOne({ employeeId: empId }).populate('company').lean();
-                    if (emp?.company && emp.company.name) {
-                        fine.companyName = emp.company.name;
-                        fine.company = emp.company._id;
-                        await Fine.updateOne({ _id: fine._id }, { companyName: fine.companyName, company: fine.company });
+                for (const fine of missingCompany) {
+                    const company = companyByEmpId.get(fine.assignedEmployees[0].employeeId);
+                    if (company?.name) {
+                        fine.companyName = company.name;
+                        if (!fine.company) fine.company = company._id;
                     }
                 }
+            } catch (companyFillErr) {
+                console.warn(
+                    '[getFines] Company name backfill skipped:',
+                    companyFillErr?.message || companyFillErr,
+                );
             }
+        }
 
-            return fine;
-        }));
-
-        // Refresh Paid to Vendor from Zoho (cache + live for unpaid / already-paid bills).
+        // Use ZohoBill cache only — live Zoho on every list load made Fine list lag.
         try {
             const { syncFineListVendorBillStatusFromZoho } = await import(
                 '../../utils/markFineVendorBillsPaidFromZoho.js'
             );
-            await syncFineListVendorBillStatusFromZoho(signedFines, {
-                fetchLive: 'unpaidOnly',
+            await syncFineListVendorBillStatusFromZoho(fines, {
+                fetchLive: false,
             });
         } catch (vendorListSyncErr) {
             console.warn(
@@ -153,15 +216,13 @@ export const getFines = async (req, res) => {
             );
         }
 
-        const total = await Fine.countDocuments(query);
-
         return res.status(200).json({
-            fines: signedFines,
+            fines,
             pagination: {
                 total,
-                page: parseInt(page),
-                limit: parseInt(limit),
-                pages: Math.ceil(total / limit)
+                page: pageNum,
+                limit: limitNum,
+                pages: Math.ceil(total / limitNum)
             }
         });
     } catch (error) {

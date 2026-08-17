@@ -5,6 +5,7 @@ import { getDepartmentHOD } from "../../utils/getDepartmentHOD.js";
 import { getManagementHOD } from "../../utils/getManagementHOD.js";
 import { isUserAdministrator } from "../../services/permissionService.js";
 import { synthesizeSingleRecordGroupFineView } from "../../utils/fineGroupClassification.js";
+import { attachZohoBillNumbers } from "../../utils/attachZohoDocumentNumbers.js";
 
 /** Per-party service charge (sibling rows store their share; group view has full SC on parent). */
 function partyServiceShare(fine, entry = {}) {
@@ -68,6 +69,33 @@ function normalizeFineBaseAmounts(fine) {
     return fine;
 }
 
+function applyFineDetailPopulate(query) {
+    return query
+        .populate('createdBy', 'name firstName lastName email department designation')
+        .populate('managerApprovedBy', 'name firstName lastName email department designation employeeId')
+        .populate('hrApprovedBy', 'name firstName lastName email department designation employeeId')
+        .populate('accountsApprovedBy', 'name firstName lastName email department designation employeeId')
+        .populate('approvedBy', 'name firstName lastName email department designation employeeId')
+        .populate('rejectedBy', 'name firstName lastName email department designation')
+        .populate('submittedTo', 'name firstName lastName email department designation employeeId')
+        .populate('workflow.assignedTo', 'name firstName lastName employeeId')
+        .populate('company', 'companyId _id name');
+}
+
+function stripHeavyAttachmentPayload(file) {
+    if (!file || typeof file !== 'object') return;
+    if (file.data) delete file.data;
+    if (file.base64) delete file.base64;
+}
+
+function stripFineAttachmentPayloads(fine) {
+    if (!fine) return;
+    stripHeavyAttachmentPayload(fine.attachment);
+    (fine.attachments || []).forEach(stripHeavyAttachmentPayload);
+    (fine.approvalAttachments || []).forEach(stripHeavyAttachmentPayload);
+    (fine.approvalAttachmentHistory || []).forEach(stripHeavyAttachmentPayload);
+}
+
 export const getFineById = async (req, res) => {
     try {
         let { id } = req.params;
@@ -92,52 +120,33 @@ export const getFineById = async (req, res) => {
         const isValidObjectId = /^[0-9a-fA-F]{24}$/.test(id);
 
         if (isValidObjectId) {
-            fine = await Fine.findOne({
-                $or: [{ _id: id }, { fineId: id }]
-            })
-                .populate('createdBy', 'name firstName lastName email department designation')
-                .populate('managerApprovedBy', 'name firstName lastName email department designation employeeId')
-                .populate('hrApprovedBy', 'name firstName lastName email department designation employeeId')
-                .populate('accountsApprovedBy', 'name firstName lastName email department designation employeeId')
-                .populate('approvedBy', 'name firstName lastName email department designation employeeId')
-                .populate('rejectedBy', 'name firstName lastName email department designation')
-                .populate('submittedTo', 'name firstName lastName email department designation employeeId')
-                .populate('workflow.assignedTo', 'name firstName lastName employeeId')
-                .populate('company', 'companyId _id name') // Populate company to get companyId and name
-                .lean();
+            fine = await applyFineDetailPopulate(
+                Fine.findOne({ $or: [{ _id: id }, { fineId: id }] }),
+            ).lean();
         } else {
-            fine = await Fine.findOne({ fineId: id })
-                .populate('createdBy', 'name firstName lastName email department designation')
-                .populate('hrApprovedBy', 'name firstName lastName email department designation employeeId')
-                .populate('accountsApprovedBy', 'name firstName lastName email department designation employeeId')
-                .populate('approvedBy', 'name firstName lastName email department designation employeeId')
-                .populate('submittedTo', 'name firstName lastName email department designation employeeId')
-                .populate('workflow.assignedTo', 'name firstName lastName employeeId')
-                .populate('company', 'companyId _id name') // Populate company to get companyId and name
-                .lean();
+            fine = await applyFineDetailPopulate(Fine.findOne({ fineId: id })).lean();
         }
 
         // --- SYNTHESIZE GROUPED FINE IF SIBLINGS EXIST ---
-        // Determine the base ID
         let baseIdToUse = id;
-        if (fine) {
+        if (fine?.fineId) {
             baseIdToUse = fine.fineId.split('-').length > 3 ? fine.fineId.split('-').slice(0, 3).join('-') : fine.fineId;
-        } else {
+        } else if (id) {
             baseIdToUse = id.split('-').length > 3 ? id.split('-').slice(0, 3).join('-') : id;
         }
 
         const baseIdRegex = new RegExp(`^${baseIdToUse}(-[A-Z0-9]+)?$`, 'i');
-        relatedFines = await Fine.find({ fineId: baseIdRegex })
-            .populate('createdBy', 'name firstName lastName email department designation')
-            .populate('hrApprovedBy', 'name firstName lastName email department designation employeeId')
-            .populate('accountsApprovedBy', 'name firstName lastName email department designation employeeId')
-            .populate('approvedBy', 'name firstName lastName email department designation employeeId')
-            .populate('rejectedBy', 'name firstName lastName email department designation')
-            .populate('submittedTo', 'name firstName lastName email department designation employeeId')
-            .populate('workflow.assignedTo', 'name firstName lastName employeeId')
-            .populate('company', 'companyId _id name') // Populate company to get companyId and name
-            .sort({ fineId: 1 })
+        const siblingProbe = await Fine.find({ fineId: baseIdRegex })
+            .select('fineId')
             .lean();
+
+        if (!fine || siblingProbe.length > 1) {
+            relatedFines = await applyFineDetailPopulate(Fine.find({ fineId: baseIdRegex }))
+                .sort({ fineId: 1 })
+                .lean();
+        } else if (fine) {
+            relatedFines = [fine];
+        }
 
         if (relatedFines.length > 1) {
             // Group Fine synthesized view
@@ -232,6 +241,9 @@ export const getFineById = async (req, res) => {
                 if (!fine.zohoOrganizationId && rf.zohoOrganizationId) {
                     fine.zohoOrganizationId = rf.zohoOrganizationId;
                 }
+                if (!fine.zohoBillId && rf.zohoBillId) fine.zohoBillId = rf.zohoBillId;
+                if (!fine.zohoBillNumber && rf.zohoBillNumber) fine.zohoBillNumber = rf.zohoBillNumber;
+                if (!fine.billNumber && rf.billNumber) fine.billNumber = rf.billNumber;
             }
         } else if (relatedFines.length === 1 && !fine) {
             fine = relatedFines[0];
@@ -386,52 +398,19 @@ export const getFineById = async (req, res) => {
         const realEmployee = fine.assignedEmployees?.find(e => e.employeeId && e.employeeId !== 'VEGA-HR-0000');
         const targetEmployeeId = realEmployee?.employeeId || (fine.assignedEmployees?.[0]?.employeeId) || fine.employeeId;
 
-        // Fetch current HODs for display fallbacks in tracker
-        // Passes the employee ID to find THEIR company's specific responsibilities
-        const hrHOD = await getDepartmentHOD('hr', targetEmployeeId);
-        const accountsHOD = await getDepartmentHOD('finance', targetEmployeeId);
-        const ceoHOD = await getManagementHOD(targetEmployeeId);
+        const [hrHOD, accountsHOD, ceoHOD] = await Promise.all([
+            getDepartmentHOD('hr', targetEmployeeId),
+            getDepartmentHOD('finance', targetEmployeeId),
+            getManagementHOD(targetEmployeeId),
+        ]);
 
-        // Reassign flowchart HR/Accounts/Management → update pending workflow + task bar to new assignee
-        if (fine?._id) {
-            try {
-                const { syncPendingFineAssigneeFromFlowchart } = await import('../../utils/fineStageAuth.js');
-                const FineModel = (await import('../../models/Fine.js')).default;
-                const freshDoc = await FineModel.findById(fine._id);
-                if (freshDoc) {
-                    await syncPendingFineAssigneeFromFlowchart(freshDoc);
-                    const synced = await FineModel.findById(fine._id)
-                        .populate('workflow.assignedTo', 'name firstName lastName employeeId')
-                        .populate('submittedTo', 'name firstName lastName email department designation employeeId')
-                        .lean();
-                    if (synced) {
-                        fine.workflow = synced.workflow;
-                        fine.submittedTo = synced.submittedTo;
-                    }
-                }
-            } catch (syncErr) {
-                console.error('[getFineById] Flowchart assignee sync failed:', syncErr?.message || syncErr);
-            }
-        }
-
-        // Reflect Zoho bill Paid / Not Paid → Fine "Paid to Vendor" on every refresh.
+        // Vendor Paid/Not Paid from ZohoBill cache only — live Zoho on every detail load caused lag.
         if (fine?._id && String(fine.zohoBillId || '').trim()) {
             try {
                 const { syncFineVendorBillStatusFromZoho } = await import(
                     '../../utils/markFineVendorBillsPaidFromZoho.js'
                 );
-                // unpaidOnly: live-check when ERP still shows Not Paid (heals already-paid Zoho bills).
-                await syncFineVendorBillStatusFromZoho(fine, { fetchLive: 'unpaidOnly' });
-                const FineModel = (await import('../../models/Fine.js')).default;
-                const paidDoc = await FineModel.findById(fine._id)
-                    .select('vendorBillStatus vendorBillPaidAt zohoVendorPaymentId zohoVendorPaymentNumber')
-                    .lean();
-                if (paidDoc) {
-                    fine.vendorBillStatus = paidDoc.vendorBillStatus;
-                    fine.vendorBillPaidAt = paidDoc.vendorBillPaidAt;
-                    fine.zohoVendorPaymentId = paidDoc.zohoVendorPaymentId;
-                    fine.zohoVendorPaymentNumber = paidDoc.zohoVendorPaymentNumber;
-                }
+                await syncFineVendorBillStatusFromZoho(fine, { fetchLive: false });
             } catch (vendorSyncErr) {
                 console.error(
                     '[getFineById] Vendor bill Paid/Not Paid sync failed:',
@@ -457,8 +436,15 @@ export const getFineById = async (req, res) => {
             console.error('[getFineById] formSummary build failed:', summaryErr?.message || summaryErr);
         }
 
+        stripFineAttachmentPayloads(fine);
+
+        const [fineWithZohoNo] = await attachZohoBillNumbers([fine], {
+            persistModel: Fine,
+            fetchLive: true,
+        });
+
         return res.status(200).json({
-            ...fine,
+            ...fineWithZohoNo,
             hrHODName,
             hrHODId: hrHOD ? hrHOD.employeeId : null,
             accountsHODName,

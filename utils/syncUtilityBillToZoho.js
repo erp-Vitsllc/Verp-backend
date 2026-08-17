@@ -590,6 +590,9 @@ async function syncApprovedUtilityBillToZohoInner(billDoc, { markAsOpen = true }
                 billDoc.billDate = billDate;
                 billDoc.zohoVendorId = vendorId;
                 billDoc.zohoBillId = zohoBillId;
+                billDoc.zohoBillNumber = String(
+                    zohoBill?.bill_number || zohoBill?.billNumber || billNumber || '',
+                ).trim();
                 billDoc.zohoBillIds = [zohoBillId];
                 if (lineDocs.length) billDoc.zohoLineItems = lineDocs;
                 try {
@@ -643,6 +646,13 @@ async function syncApprovedUtilityBillToZohoInner(billDoc, { markAsOpen = true }
         billDoc.billDate = billDate;
         billDoc.zohoVendorId = vendorId;
         billDoc.zohoBillId = zohoBillId;
+        billDoc.zohoBillNumber = String(
+            zohoBillForUpsert?.bill_number ||
+                zohoBill?.bill_number ||
+                zohoBill?.billNumber ||
+                billNumber ||
+                '',
+        ).trim();
         billDoc.zohoBillIds = [zohoBillId];
         if (lineDocs.length) {
             billDoc.zohoLineItems = lineDocs;

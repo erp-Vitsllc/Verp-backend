@@ -1929,7 +1929,10 @@ export const updateAssetItem = async (req, res) => {
                     }
                 } else if (key === 'photo' || key === 'imagePreview') {
                     const raw = updates[key];
-                    if (raw && typeof raw === 'string' && raw.startsWith('data:image')) {
+                    if (raw === '' || raw === null) {
+                        asset.photo = null;
+                        asset.imagePreview = null;
+                    } else if (raw && typeof raw === 'string' && raw.startsWith('data:image')) {
                         try {
                             const uploadResult = await uploadDocumentToS3(raw, 'asset-photos');
                             asset.photo = uploadResult.publicId;

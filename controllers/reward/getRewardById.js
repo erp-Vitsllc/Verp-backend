@@ -2,6 +2,7 @@ import Reward from "../../models/Reward.js";
 import { getDepartmentHOD } from "../../utils/getDepartmentHOD.js";
 import { getManagementHOD } from "../../utils/getManagementHOD.js";
 import { getSignedFileUrl } from "../../utils/s3Upload.js";
+import { attachZohoExpenseNumber } from "../../utils/attachZohoDocumentNumbers.js";
 
 async function withFreshSignedUrl(fileMeta) {
     if (!fileMeta?.publicId) return fileMeta || null;
@@ -116,10 +117,15 @@ export const getRewardById = async (req, res) => {
             withFreshSignedUrl(reward.certificateAttachment),
         ]);
 
+        const rewardWithZohoNo = await attachZohoExpenseNumber(reward, {
+            persistModel: Reward,
+            fetchLive: true,
+        });
+
         return res.status(200).json({
             message: "Reward fetched successfully",
             reward: {
-                ...reward,
+                ...rewardWithZohoNo,
                 attachment,
                 certificateAttachment,
                 hrHODName: hrHOD ? `${hrHOD.firstName} ${hrHOD.lastName}` : 'Unknown',

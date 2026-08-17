@@ -78,6 +78,90 @@ export const ensureProbationDashboardTask = async ({
     });
 };
 
+const probationTaskEmployeeFilter = (employeeLike) => {
+    const or = [];
+    if (employeeLike?._id) or.push({ requestId: employeeLike._id });
+    if (employeeLike?.employeeId) or.push({ subjectEmployeeId: employeeLike.employeeId });
+    return or;
+};
+
+/** Close leftover inbox tasks once the employee is no longer on Probation. */
+export const closePendingProbationChangeTasks = async (
+    employeeLike,
+    { comment = "Closed: employee is already Permanent" } = {},
+) => {
+    const or = probationTaskEmployeeFilter(employeeLike);
+    if (!or.length) return 0;
+    const result = await DashboardAction.updateMany(
+        {
+            requestType: "Probation Change",
+            status: "Pending",
+            $or: or,
+        },
+        {
+            $set: {
+                status: "Approved",
+                actionedDate: new Date(),
+                comment,
+            },
+        },
+    );
+    return Number(result?.modifiedCount) || 0;
+};
+
+/** Inbox heal: drop confirm-status tasks whose subject is already Permanent. */
+export const closeStaleProbationChangeTasksFromPendingRows = async (pendingItems = []) => {
+    if (!Array.isArray(pendingItems) || pendingItems.length === 0) return pendingItems;
+    const probationItems = pendingItems.filter(
+        (it) => it?.requestType === "Probation Change" && String(it?.status || "Pending") === "Pending",
+    );
+    if (!probationItems.length) return pendingItems;
+
+    const mongoIds = [...new Set(probationItems.map((it) => String(it.requestId || "")).filter(Boolean))];
+    const humanIds = [
+        ...new Set(probationItems.map((it) => String(it.subjectEmployeeId || "")).filter(Boolean)),
+    ];
+    const lookupOr = [];
+    if (mongoIds.length) lookupOr.push({ _id: { $in: mongoIds } });
+    if (humanIds.length) lookupOr.push({ employeeId: { $in: humanIds } });
+    if (!lookupOr.length) return pendingItems;
+
+    const employees = await EmployeeBasic.find({ $or: lookupOr })
+        .select("_id employeeId status")
+        .lean();
+    const doneMongoIds = new Set();
+    const doneHumanIds = new Set();
+    employees.forEach((emp) => {
+        if (String(emp.status || "").trim() === "Probation") return;
+        doneMongoIds.add(String(emp._id));
+        if (emp.employeeId) doneHumanIds.add(String(emp.employeeId));
+    });
+
+    const staleIds = probationItems
+        .filter(
+            (it) =>
+                doneMongoIds.has(String(it.requestId || "")) ||
+                doneHumanIds.has(String(it.subjectEmployeeId || "")),
+        )
+        .map((it) => it._id)
+        .filter(Boolean);
+    if (!staleIds.length) return pendingItems;
+
+    await DashboardAction.updateMany(
+        { _id: { $in: staleIds } },
+        {
+            $set: {
+                status: "Approved",
+                actionedDate: new Date(),
+                comment: "Closed: employee is already Permanent",
+            },
+        },
+    );
+
+    const staleIdSet = new Set(staleIds.map((id) => String(id)));
+    return pendingItems.filter((it) => !staleIdSet.has(String(it._id || "")));
+};
+
 export const sendProbationWorkflowEmail = async ({
     employee,
     phase,
@@ -178,7 +262,10 @@ export const sendProbationWorkflowEmail = async ({
 
 export const ensureProbationRequestForEmployee = async (employeeDoc) => {
     if (!employeeDoc || !isEmployeeActiveForNotifications(employeeDoc)) return false;
-    if (employeeDoc.status !== "Probation") return false;
+    if (employeeDoc.status !== "Probation") {
+        await closePendingProbationChangeTasks(employeeDoc);
+        return false;
+    }
 
     const EmployeeVisa = (await import("../models/EmployeeVisa.js")).default;
     const visa = await EmployeeVisa.findOne({ employeeId: employeeDoc.employeeId })

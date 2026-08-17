@@ -11,6 +11,7 @@ import { isUserAdministrator } from "../../services/permissionService.js";
 import { isJwtSystemSuperUser } from "../../utils/systemSuperUser.js";
 import { resolveEmployeeProfileStatusWrite } from "../../utils/employeeProfileStatusLock.js";
 import { isLeftUserStatus } from "../../utils/applyEmployeeLeftUserStatus.js";
+import { closePendingProbationChangeTasks } from "../../utils/sendProbationWorkflowEmail.js";
 
 export const updateWorkDetails = async (req, res) => {
     try {
@@ -309,6 +310,18 @@ export const updateWorkDetails = async (req, res) => {
         postResponseTasks.push(() =>
             markProfileActivationHoldResolvedForSection(employeeId, "workDetails").catch(() => null),
         );
+
+        const nextLiveStatus = skipLive
+            ? liveAdminStatusPatch.status
+            : updatePayload.status;
+        if (nextLiveStatus === "Permanent" && employee.status !== "Permanent") {
+            postResponseTasks.push(() =>
+                closePendingProbationChangeTasks(
+                    { _id: employee._id, employeeId },
+                    { comment: "Closed: work status already set to Permanent" },
+                ),
+            );
+        }
 
         void (async () => {
             for (const task of postResponseTasks) {

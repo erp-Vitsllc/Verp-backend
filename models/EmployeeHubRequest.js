@@ -8,6 +8,12 @@ const employeeHubRequestSchema = new mongoose.Schema(
             required: true,
             enum: HUB_KINDS,
         },
+        /** Which asset area the request is about. Only set for the 'assets' kind. */
+        assetType: {
+            type: String,
+            default: '',
+            trim: true,
+        },
         description: {
             type: String,
             required: true,

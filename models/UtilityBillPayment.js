@@ -131,6 +131,8 @@ const utilityBillPaymentSchema = new mongoose.Schema(
         partyAccountCode: { type: String, default: '' },
         zohoVendorId: { type: String, default: '' },
         zohoBillId: { type: String, default: '', index: true },
+        /** Zoho Books bill_number returned after the vendor bill is created. */
+        zohoBillNumber: { type: String, default: '' },
         /** All Zoho bill ids when Add more created multiple item rows (1 row → 1 Zoho bill). */
         zohoBillIds: { type: [String], default: [] },
         /** draft = created in Zoho but not payable; open = Accounts can pay in Payments Made */

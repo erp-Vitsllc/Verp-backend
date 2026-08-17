@@ -1698,9 +1698,35 @@ export const getVehicleFleetDashboard = async (req, res) => {
         const registrationExpiry = (v) => resolveRegistrationExpiryDate(v);
 
         const fleetRows = vehicles.map((v) => {
+            const serviceCosts = listOnly
+                ? []
+                : (v.services || [])
+                    .map((s) => {
+                        let serviceType = String(s.serviceType || '').trim();
+                        if (!serviceType && s.remark) {
+                            try {
+                                const remark = typeof s.remark === 'string' ? JSON.parse(s.remark) : s.remark;
+                                serviceType = String(remark?.serviceType || remark?.serviceSubtype || '').trim();
+                            } catch {
+                                serviceType = '';
+                            }
+                        }
+                        return {
+                            date: s.date || null,
+                            value: Number(s.value || 0),
+                            serviceType: serviceType || 'Other',
+                        };
+                    })
+                    .filter((s) => s.value > 0 && s.date);
+            const serviceEventDates = listOnly
+                ? []
+                : (v.services || [])
+                    .map((s) => s.date || null)
+                    .filter(Boolean);
             const total = listOnly
                 ? 0
-                : (v.services || []).reduce((sum, s) => sum + Number(s.value || 0), 0);
+                : serviceCosts.reduce((sum, s) => sum + s.value, 0)
+                    || (v.services || []).reduce((sum, s) => sum + Number(s.value || 0), 0);
             const workflowController = v.actionRequiredBy && typeof v.actionRequiredBy === 'object' ? v.actionRequiredBy : null;
             const resolvedController = workflowController || ((!v.assignedTo && fallbackAssetController) ? fallbackAssetController : null);
             const hasControllerObjectId = !!resolvedController?._id;
@@ -1753,6 +1779,7 @@ export const getVehicleFleetDashboard = async (req, res) => {
                 plateNumber: v.plateNumber,
                 label: (v.plateNumber || v.assetId || 'Asset').toString().slice(0, 18),
                 totalServiceCost: total,
+                ...(listOnly ? {} : { serviceCosts, serviceEventDates }),
                 assetValue: Number(v.assetValue || 0),
                 modelYear: v.modelYear || '',
                 status: v.status,
@@ -1839,6 +1866,7 @@ export const getVehicleFleetDashboard = async (req, res) => {
         let oilServiceDue = 0;
         let registrationExpiresWithin30 = 0;
         const oilServiceDueRows = [];
+        const upcomingOilServiceRows = [];
         const registrationExpiresWithin30Rows = [];
 
         const dayDiff = (dateVal) => {
@@ -1895,6 +1923,16 @@ export const getVehicleFleetDashboard = async (req, res) => {
                 if (oilDiff != null && oilDiff <= 0) {
                     oilServiceDue++;
                     oilServiceDueRows.push({
+                        ...vehicleModalBase(v),
+                        cardName: v.gearOilDueDate ? 'Gear Oil Service' : 'Oil / Next Service',
+                        expiryDate: oilDueRaw,
+                        daysRemaining: oilDiff,
+                        focusCard: 'vehicleService',
+                        tab: 'service',
+                    });
+                } else if (oilDiff != null) {
+                    // Still ahead of its due date — feeds the Upcoming events card.
+                    upcomingOilServiceRows.push({
                         ...vehicleModalBase(v),
                         cardName: v.gearOilDueDate ? 'Gear Oil Service' : 'Oil / Next Service',
                         expiryDate: oilDueRaw,
@@ -2031,13 +2069,14 @@ export const getVehicleFleetDashboard = async (req, res) => {
             const workStatus = String(remark.serviceWorkStatus || '')
                 .toLowerCase()
                 .replace(/\s+/g, '_');
-            // Service work done / Complete — do not count (Accounts Zoho bill pending is Accounts-only).
+            const billingStatus = String(remark.billingStatus || '').toLowerCase();
+            const zohoPaymentStatus = String(remark.zohoPaymentStatus || '').toLowerCase();
+            const zohoBillStatus = String(remark.zohoBillStatus || '').toLowerCase();
+            const carWashPay = String(remark.carWashPaymentStatus || '').toLowerCase();
             const completedFlag = String(remark.vehicleServiceCompleted || '').toLowerCase();
-            if (completedFlag === 'live' || completedFlag === 'complete' || completedFlag === 'completed') {
-                return false;
-            }
-            if (serviceStatus === 'complete' || serviceStatus === 'completed') return false;
-            if (workStatus === 'complete' || workStatus === 'completed') return false;
+            const isCarWash =
+                String(service.serviceType || '').trim() === 'Car Wash' ||
+                String(remark.serviceTypeLabel || '').trim() === 'Car Wash';
 
             const activeWf = asset?.activeServiceWorkflow || {};
             const activeMatch =
@@ -2052,33 +2091,58 @@ export const getVehicleFleetDashboard = async (req, res) => {
             )
                 .toLowerCase()
                 .trim();
-            // Payment / Zoho only (all service types) — not "service pending" on fleet dashboard.
+
+            if (stage === 'rejected') return false;
+
+            // Paid — Zoho vendor payment settled.
             if (
-                [
-                    'complete',
-                    'completed',
-                    'rejected',
-                    'billed',
-                    'pending_billing',
-                    'pending_accounts',
-                    'accounts',
-                ].includes(stage)
+                billingStatus === 'paid' ||
+                zohoPaymentStatus === 'paid' ||
+                zohoBillStatus === 'paid' ||
+                carWashPay === 'paid'
             ) {
                 return false;
             }
-            const billingStatus = String(remark.billingStatus || '').toLowerCase();
-            if (billingStatus === 'pending' || billingStatus === 'billed') {
+
+            // Billed initiated — Zoho bill created (or billed status).
+            const zohoBills = Array.isArray(remark.zohoBills) ? remark.zohoBills : [];
+            const hasZohoBill =
+                Boolean(String(remark.zohoBillId || remark.zohoBillNumber || '').trim()) ||
+                zohoBills.some((row) =>
+                    Boolean(
+                        String(row?.zohoBillId || row?.bill_id || row?.billId || row?.zohoBillNumber || '').trim(),
+                    ),
+                );
+            if (
+                billingStatus === 'billed' ||
+                stage === 'billed' ||
+                carWashPay === 'billed' ||
+                hasZohoBill
+            ) {
                 return false;
             }
+
+            // Completed — work done / return complete / sent to billing after complete.
+            // Do not treat pending_accounts as completed: shop services use that stage
+            // for Accounts quote approval before On Service.
+            if (['live', 'complete', 'completed'].includes(completedFlag)) return false;
+            if (['complete', 'completed', 'pending_billing'].includes(stage)) return false;
+            if (serviceStatus === 'complete' || serviceStatus === 'completed') return false;
+            if (workStatus === 'complete' || workStatus === 'completed') return false;
+
+            // Car wash work is Completed on Send — anything left is the Accounts Zoho
+            // Expense, which is payment work rather than a pending service.
+            if (isCarWash && (stage === 'pending_accounts' || Boolean(carWashPay))) return false;
+
             if (['draft', 'pending', 'submitted'].includes(requestStatus)) return true;
             if (activeMatch && stage) return true;
-            if (stage && !['complete', 'rejected'].includes(stage)) return true;
+            if (stage) return true;
             return false;
         };
 
         // Parallel secondary reads — previously serial and contended with Locator dashboard.
         const secondaryStartedAt = Date.now();
-        const [historyStarts, pendingServiceActions, daPending, daApproved] = await Promise.all([
+        const [historyStarts, pendingServiceActions, daPending, daApproved, vehicleFineDocs] = await Promise.all([
             assignedMissingDateIds.length
                 ? AssetHistory.aggregate([
                     {
@@ -2116,6 +2180,20 @@ export const getVehicleFleetDashboard = async (req, res) => {
                     requestType: { $in: ASSET_DASHBOARD_INBOX_TYPES },
                 })
                 : Promise.resolve(0),
+            Fine.find({
+                $or: [
+                    { vehicleId: { $exists: true, $nin: [null, ''] } },
+                    { assetId: { $exists: true, $nin: [null, ''] } },
+                    { assetObjectId: { $exists: true, $ne: null } },
+                    { fineType: { $in: ['Vehicle Fine', 'Vehicle Damage'] } },
+                ],
+                fineStatus: { $nin: ['Draft', 'Cancelled', 'Rejected'] },
+            })
+                .select(
+                    'fineId fineType fineAmount totalFineAmount awardedDate fineStatus assignedEmployees vehicleId assetId assetName assetObjectId',
+                )
+                .lean()
+                .catch(() => []),
         ]);
         const secondaryMs = Date.now() - secondaryStartedAt;
 
@@ -2274,6 +2352,62 @@ export const getVehicleFleetDashboard = async (req, res) => {
         const monthKeys = Object.keys(monthTotals).sort();
         const serviceCostByMonth = monthKeys.slice(-12).map((k) => ({ label: k, total: monthTotals[k] }));
 
+        const vehicleByMongoId = new Map(vehicles.map((v) => [String(v._id), v]));
+        const vehicleByAssetCode = new Map();
+        for (const v of vehicles) {
+            const code = String(v.assetId || '').trim();
+            if (code) vehicleByAssetCode.set(code, v);
+        }
+        const resolveVehicleForFine = (fine) => {
+            const objectId = fine?.assetObjectId ? String(fine.assetObjectId) : '';
+            if (objectId && vehicleByMongoId.has(objectId)) return vehicleByMongoId.get(objectId);
+            const vehicleKey = String(fine?.vehicleId || '').trim();
+            if (vehicleKey && vehicleByMongoId.has(vehicleKey)) return vehicleByMongoId.get(vehicleKey);
+            if (vehicleKey && vehicleByAssetCode.has(vehicleKey)) return vehicleByAssetCode.get(vehicleKey);
+            const assetCode = String(fine?.assetId || '').trim();
+            if (assetCode && vehicleByAssetCode.has(assetCode)) return vehicleByAssetCode.get(assetCode);
+            if (assetCode && vehicleByMongoId.has(assetCode)) return vehicleByMongoId.get(assetCode);
+            return null;
+        };
+        const finesGrouped = new Map();
+        for (const fine of vehicleFineDocs || []) {
+            const amount = Number(fine.totalFineAmount || fine.fineAmount || 0) || 0;
+            const vehicle = resolveVehicleForFine(fine);
+            const unmatchedKey = String(fine.vehicleId || fine.assetId || fine.assetName || 'unknown').trim() || 'unknown';
+            const key = vehicle ? String(vehicle._id) : `unmatched:${unmatchedKey}`;
+            if (!finesGrouped.has(key)) {
+                const label = vehicle
+                    ? (vehicle.plateNumber || vehicle.assetId || 'Asset').toString().slice(0, 18)
+                    : String(fine.assetName || fine.assetId || fine.vehicleId || 'Unknown').slice(0, 18);
+                finesGrouped.set(key, {
+                    vehicleId: vehicle ? String(vehicle._id) : '',
+                    assetId: vehicle?.assetId || fine.assetId || '',
+                    label,
+                    plate: vehicle ? plateOf(vehicle) : (fine.assetName || label || '—'),
+                    total: 0,
+                    fines: [],
+                });
+            }
+            const group = finesGrouped.get(key);
+            group.total += amount;
+            group.fines.push({
+                _id: String(fine._id),
+                fineRecordId: String(fine._id),
+                fineId: fine.fineId || '',
+                fineType: fine.fineType || '',
+                amount,
+                awardedDate: fine.awardedDate || null,
+                fineStatus: fine.fineStatus || '',
+                offender: fine?.assignedEmployees?.[0]?.employeeName || '—',
+                vehicleId: vehicle ? String(vehicle._id) : '',
+                plate: group.plate,
+                modalKind: 'vehicleFine',
+            });
+        }
+        const finesByVehicle = [...finesGrouped.values()]
+            .filter((g) => g.fines.length > 0)
+            .sort((a, b) => b.total - a.total);
+
         const yearCounts = {};
         for (const v of vehicles) {
             const y = (v.modelYear || 'Unknown').toString().trim() || 'Unknown';
@@ -2360,6 +2494,7 @@ export const getVehicleFleetDashboard = async (req, res) => {
                 oilServiceDue,
                 registrationExpiresWithin30,
                 oilServiceDueRows: sortExpiryRows(oilServiceDueRows),
+                upcomingOilServiceRows: sortExpiryRows(upcomingOilServiceRows),
                 registrationExpiresWithin30Rows: sortExpiryRows(registrationExpiresWithin30Rows),
             },
             vehicleStatus: {
@@ -2376,6 +2511,7 @@ export const getVehicleFleetDashboard = async (req, res) => {
             serviceRequest: { pending: daPending, confirmed: daApproved },
             handoverRequest: { pending: handoverPending, confirmed: handoverConfirmed },
             serviceCostByMonth,
+            finesByVehicle,
             vehicles: fleetRows,
             modelYearDistribution,
             fleetAnalytics,
@@ -4893,7 +5029,9 @@ export const getAssetItemDetail = async (req, res) => {
             })
             .populate('typeId', 'name imagePreview')
             .populate('actionRequiredBy', 'firstName lastName employeeId')
-            .populate('categoryId', 'name imagePreview');
+            .populate('categoryId', 'name imagePreview')
+            // Lets the service tracker name the initiator on rows saved before the name was stored.
+            .populate('services.requestedBy', 'firstName lastName employeeId');
         // Lean light reads skip mongoose document overhead on large embedded arrays.
         if (deferLightDetail) itemQuery = itemQuery.lean();
         const item = await itemQuery;
@@ -13886,17 +14024,17 @@ export const submitAssetServiceDraft = async (req, res) => {
         if (String(service.serviceType || '').trim() === 'Car Wash') {
             remarkObj.carWashPaymentStatus = 'pending';
         }
+        // Every service type records who initiated it, so the tracker shows that person
+        // instead of falling back to the flowchart Admin Officer.
+        const requesterName = await getRequesterName(req.user);
+        remarkObj.requestedByName = requesterName;
+        service.remark = JSON.stringify(remarkObj);
         if (isTireChangeServiceType(service.serviceType)) {
-            const requesterName = await getRequesterName(req.user);
-            remarkObj.requestedByName = requesterName;
-            service.remark = JSON.stringify(remarkObj);
             appendTireChangeActivity(service, {
                 type: 'request_submitted',
                 byName: requesterName,
                 note: 'Tire change request submitted',
             });
-        } else {
-            service.remark = JSON.stringify(remarkObj);
         }
         asset.markModified('services');
         await asset.save();
@@ -13904,14 +14042,13 @@ export const submitAssetServiceDraft = async (req, res) => {
         try {
             // Car Wash: Accounts Zoho Expense only — no Admin Officer inbox/email.
             if (String(service.serviceType || '').trim() !== 'Car Wash') {
-                const initiatorName = await getRequesterName(req.user);
                 const initiatorIsAdminOfficer =
                     await userIsFlowchartAdminOfficerEmployeeOnly(req).catch(() => false);
                 await notifyAdminOfficerOnVehicleServiceCreated({
                     asset,
                     serviceRecordId: service._id,
                     serviceType: service.serviceType,
-                    requestedByName: initiatorName,
+                    requestedByName: requesterName,
                     sendEmail: !initiatorIsAdminOfficer,
                     notifyAssignee: true,
                     event: 'initiated',
@@ -19117,10 +19254,9 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
                     },
                 });
             }
-            // Utility Bills (tools-scope feed) — emails resolve current HR; bells need role fallback when assignedTo is stale.
+            // Utility Bills (tools-scope feed) — HR stages only. Payment-day reminders are Accounts-only.
             assigneeClauses.push({ requestType: 'Utility Entry Status Change' });
             assigneeClauses.push({ requestType: 'Utility Bill Payment' });
-            assigneeClauses.push({ requestType: 'Utility Bill Payment Reminder' });
         }
         if (isAdminOfficerHolder) {
             assigneeClauses.push({
@@ -19163,9 +19299,9 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
                     $options: 'i',
                 },
             });
-            // Utility Bills — Accounts stages (payment + contract expiry sticky).
+            // Utility Bills — Accounts payment + payment-day reminders (not HR / other roles).
             assigneeClauses.push({ requestType: 'Utility Bill Payment' });
-            assigneeClauses.push({ requestType: 'Utility Contract Expiry' });
+            assigneeClauses.push({ requestType: 'Utility Bill Payment Reminder' });
         }
         if (isAcRoleHolder) {
             assigneeClauses.push({
@@ -19797,6 +19933,12 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
             });
         }
 
+        // Payment-day reminders are Accounts-only (not HR / Admin Officer / Management).
+        items = items.filter((row) => {
+            if (String(row.requestType || '').trim() !== 'Utility Bill Payment Reminder') return true;
+            return isAccountsRoleHolder;
+        });
+
         // Sold / Total loss: Accounts and Management each have their own bell row (parallel).
         // Only show the row that matches the viewer's flowchart role so one approval does not
         // imply the other role's task disappeared from their inbox incorrectly.
@@ -19841,15 +19983,11 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
             return true;
         });
 
-        const hubKinds =
-            scope === 'vehicle'
-                ? ['vehicle']
-                : scope === 'tools'
-                    ? ['assets', 'utility']
-                    : ['assets', 'vehicle', 'utility'];
         const hubItems = await listPendingHubInboxItems({
             assigneeIds: relevantIds,
-            kinds: hubKinds,
+            ...(scope === 'vehicle' || scope === 'tools'
+                ? { assetScope: scope }
+                : { kinds: ['assets', 'vehicle', 'utility'] }),
         });
         items = [...hubItems, ...items];
         res.json({ count: items.length, items });

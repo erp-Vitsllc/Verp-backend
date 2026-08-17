@@ -27,6 +27,7 @@ import storageRoute from "./routes/storageRoutes.js";
 import zohoRoute from "./routes/zohoRoutes.js";
 import locatorRoute from "./routes/locatorRoutes.js";
 import attendanceRoute from "./routes/attendanceRoutes.js";
+import leaveRoute from "./routes/leaveRoutes.js";
 import holidayRoute from "./routes/holidayRoutes.js";
 import workingTimeRoute from "./routes/workingTimeRoutes.js";
 import { startLocatorWebSocket } from "./services/locatorWebSocketService.js";
@@ -333,6 +334,7 @@ app.use("/api/storage", storageRoute);
 app.use("/api/zoho", zohoRoute);
 app.use("/api/locator", locatorRoute);
 app.use("/api/Attendance", attendanceRoute);
+app.use("/api/Leave", leaveRoute);
 app.use("/api/Holiday", holidayRoute);
 app.use("/api/WorkingTime", workingTimeRoute);
 

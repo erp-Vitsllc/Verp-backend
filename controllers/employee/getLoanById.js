@@ -3,6 +3,7 @@ import EmployeeBasic from "../../models/EmployeeBasic.js";
 import { getDepartmentHOD } from "../../utils/getDepartmentHOD.js";
 import { getManagementHOD } from "../../utils/getManagementHOD.js";
 import { refreshStoredAttachmentUrls } from "../../utils/s3Upload.js";
+import { attachZohoExpenseNumber } from "../../utils/attachZohoDocumentNumbers.js";
 
 export const getLoanById = async (req, res) => {
     try {
@@ -135,7 +136,9 @@ export const getLoanById = async (req, res) => {
             zohoSyncError: loan.zohoSyncError || '',
         };
 
-        res.status(200).json(data);
+        res.status(200).json(
+            await attachZohoExpenseNumber(data, { persistModel: Loan, fetchLive: true }),
+        );
 
     } catch (error) {
         console.error("Error fetching loan details:", error);

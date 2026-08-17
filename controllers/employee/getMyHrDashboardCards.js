@@ -8,6 +8,27 @@ function roundMoney(value) {
     return Math.round((Number(value) || 0) * 100) / 100;
 }
 
+/** Dashboard lists: Approved or Paid (and equivalent settled statuses) only. */
+function isApprovedOrPaidStatus(raw) {
+    const s = String(raw || "").trim().toLowerCase();
+    if (!s) return false;
+    if (s === "draft" || s === "pending") return false;
+    if (s.includes("reject") || s.includes("cancel")) return false;
+    if (s.includes("pending hr") || s.includes("pending accounts") || s.includes("pending authorization")) {
+        return false;
+    }
+    return (
+        s === "approved" ||
+        s.startsWith("approved") ||
+        s === "paid" ||
+        s.includes("(paid)") ||
+        s === "active" ||
+        s === "completed" ||
+        s === "recovered" ||
+        s === "pending payment to employee"
+    );
+}
+
 function displayLoanStatus(item) {
     const raw = String(item?.approvalStatus || item?.status || "").trim();
     if (!raw) return "—";
@@ -158,10 +179,20 @@ export const getMyHrDashboardCards = async (req, res) => {
 
         return res.status(200).json({
             employeeId,
-            loans: (loans || []).filter((item) => item.type === "Loan").map(mapLoanItem),
-            advances: (loans || []).filter((item) => item.type === "Advance").map(mapLoanItem),
-            rewards: (rewards || []).map(mapRewardItem).filter(Boolean),
-            fines: (fines || []).map((item) => mapFineItem(item, employeeId)).filter(Boolean),
+            loans: (loans || [])
+                .filter((item) => item.type === "Loan" && isApprovedOrPaidStatus(item.approvalStatus || item.status))
+                .map(mapLoanItem),
+            advances: (loans || [])
+                .filter((item) => item.type === "Advance" && isApprovedOrPaidStatus(item.approvalStatus || item.status))
+                .map(mapLoanItem),
+            rewards: (rewards || [])
+                .filter((item) => isApprovedOrPaidStatus(item.rewardStatus || item.approvalStatus))
+                .map(mapRewardItem)
+                .filter(Boolean),
+            fines: (fines || [])
+                .filter((item) => isApprovedOrPaidStatus(item.fineStatus))
+                .map((item) => mapFineItem(item, employeeId))
+                .filter(Boolean),
         });
     } catch (error) {
         console.error("[getMyHrDashboardCards]", error);

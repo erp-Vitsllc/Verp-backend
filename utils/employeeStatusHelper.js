@@ -3,6 +3,7 @@ import {
     isProbationPeriodComplete,
     resolveProbationStartDate,
 } from "./probationStartDate.js";
+import { closePendingProbationChangeTasks } from "./sendProbationWorkflowEmail.js";
 
 const SYNCABLE_STATUSES = new Set(["Probation", "Permanent"]);
 
@@ -64,6 +65,12 @@ export const syncProbationStatusFromEmploymentVisa = async (employeeBasic, visaR
         console.log(
             `[ProbationSync] Employee ${employeeBasic.employeeId}: ${currentStatus} → ${nextStatus} (visa start ${startDate.toISOString().slice(0, 10)}, ${probationPeriod}mo)`,
         );
+
+        if (nextStatus === "Permanent") {
+            await closePendingProbationChangeTasks(updatedEmployee || employeeBasic, {
+                comment: "Closed: status auto-synced to Permanent",
+            });
+        }
 
         return updatedEmployee || { ...employeeBasic, status: nextStatus, probationPeriod: nextProbationPeriod };
     } catch (error) {

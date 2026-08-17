@@ -21,6 +21,7 @@ import {
     findCurrentBatchVendorBillDuplicate,
     lookupVendorBillDuplicates,
 } from '../../utils/utilityBillDuplicateCheck.js';
+import { attachZohoBillNumbers } from '../../utils/attachZohoDocumentNumbers.js';
 
 const REQUEST_TYPE = 'Utility Bill Payment';
 
@@ -120,6 +121,9 @@ function decorateBill(bill) {
     o.reviewPath = o.batchId
         ? reviewPath(o.batchId, o.utilityType, o.billMonth)
         : `/HRM/Asset/UtilityBills/details/${encodeURIComponent(o.entryId)}?billId=${encodeURIComponent(String(o._id))}`;
+    o.zohoBillNumber =
+        String(o.zohoBillNumber || '').trim() ||
+        (String(o.zohoBillId || '').trim() ? String(o.billNumber || '').trim() : '');
     return o;
 }
 
@@ -402,7 +406,10 @@ export async function listUtilityBillPayments(req, res) {
             const bills = await UtilityBillPayment.find({ batchId: String(batchId) })
                 .sort({ createdAt: 1 })
                 .lean();
-            return res.status(200).json({ bills: bills.map(withPermissions) });
+            const numbered = await attachZohoBillNumbers(bills, {
+                persistModel: UtilityBillPayment,
+            });
+            return res.status(200).json({ bills: numbered.map(withPermissions) });
         }
 
         const filter = {};
@@ -478,7 +485,10 @@ export async function listUtilityBillPayments(req, res) {
                         .populate('actionedBy', 'firstName lastName employeeId')
                         .sort({ createdAt: -1 })
                         .lean();
-                    return res.status(200).json({ bills: refreshed.map(withPermissions) });
+                    const numbered = await attachZohoBillNumbers(refreshed, {
+                        persistModel: UtilityBillPayment,
+                    });
+                    return res.status(200).json({ bills: numbered.map(withPermissions) });
                 }
             } catch (syncErr) {
                 console.warn(
@@ -488,7 +498,10 @@ export async function listUtilityBillPayments(req, res) {
             }
         }
 
-        return res.status(200).json({ bills: bills.map(withPermissions) });
+        const numbered = await attachZohoBillNumbers(bills, {
+            persistModel: UtilityBillPayment,
+        });
+        return res.status(200).json({ bills: numbered.map(withPermissions) });
     } catch (err) {
         return res.status(500).json({ message: err.message || 'Failed to load bills' });
     }
@@ -611,7 +624,9 @@ export async function getUtilityBillBatch(req, res) {
             needsZohoOpen,
             actorIsAccounts: Boolean(accountsGate.isAccounts || accountsGate.isAdminUser),
             actorIsHr: Boolean(hrGate.isHr || hrGate.isAdminUser),
-            bills: bills.map(decorateBill),
+            bills: (
+                await attachZohoBillNumbers(bills, { persistModel: UtilityBillPayment })
+            ).map(decorateBill),
             reviewPath: reviewPath(resolvedBatchId, focus.utilityType, focus.billMonth),
         });
     } catch (err) {
@@ -2075,7 +2090,10 @@ export async function getUtilityBillPayment(req, res) {
     try {
         const bill = await UtilityBillPayment.findById(req.params.id).lean();
         if (!bill) return res.status(404).json({ message: 'Bill not found' });
-        return res.status(200).json({ bill: decorateBill(bill) });
+        const [numbered] = await attachZohoBillNumbers([bill], {
+            persistModel: UtilityBillPayment,
+        });
+        return res.status(200).json({ bill: decorateBill(numbered) });
     } catch (err) {
         return res.status(500).json({ message: err.message || 'Failed to load bill' });
     }

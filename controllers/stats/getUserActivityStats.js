@@ -19,6 +19,7 @@ import {
     pendingChangesIncludeLeftUser,
     LEFT_USER_REQUEST_TYPE,
 } from "../../utils/employeeLeftUserWorkflow.js";
+import { closeStaleProbationChangeTasksFromPendingRows } from "../../utils/sendProbationWorkflowEmail.js";
 import {
     buildProfileActivationApprovedMessage,
     buildProfileActivationEntityLine,
@@ -782,27 +783,29 @@ export const getUserActivityStats = async (req, res) => {
             assetCreationOutcomeItems,
         ] = dashboardSettled.map((r) => (r.status === "fulfilled" ? r.value : []));
 
-        const dashboardPendingItems = await filterStaleExpiryDashboardRows(
-            dedupeOwnerLinkedDocumentExpiryReminders(
-            dashboardPendingItemsRaw.filter((item) => {
-                if (!dispositionRowVisibleToViewer(item)) return false;
-                if (!ASSIGNMENT_STRICT_TYPES.has(item.requestType)) return true;
-                if (
-                    isCurrentHrHolder &&
-                    item.status === 'Pending' &&
-                    [
-                        'Vehicle Inspection',
-                        'Vehicle Profile Activation',
-                        'Vehicle Profile Edit',
-                        'Vehicle Profile Incomplete',
-                        'Vehicle Mortgage Close',
-                        'Vehicle Delete Request',
-                    ].includes(item.requestType)
-                ) {
-                    return true;
-                }
-                return dashboardRowAssignedToViewer(item);
-            })
+        const dashboardPendingItems = await closeStaleProbationChangeTasksFromPendingRows(
+            await filterStaleExpiryDashboardRows(
+                dedupeOwnerLinkedDocumentExpiryReminders(
+                dashboardPendingItemsRaw.filter((item) => {
+                    if (!dispositionRowVisibleToViewer(item)) return false;
+                    if (!ASSIGNMENT_STRICT_TYPES.has(item.requestType)) return true;
+                    if (
+                        isCurrentHrHolder &&
+                        item.status === 'Pending' &&
+                        [
+                            'Vehicle Inspection',
+                            'Vehicle Profile Activation',
+                            'Vehicle Profile Edit',
+                            'Vehicle Profile Incomplete',
+                            'Vehicle Mortgage Close',
+                            'Vehicle Delete Request',
+                        ].includes(item.requestType)
+                    ) {
+                        return true;
+                    }
+                    return dashboardRowAssignedToViewer(item);
+                })
+                )
             )
         );
 

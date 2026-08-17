@@ -318,6 +318,8 @@ const fineSchema = new mongoose.Schema(
         payableConfirmed: { type: Boolean, default: false },
         zohoBillId: { type: String, default: '', index: true },
         billNumber: { type: String, default: '' },
+        /** Zoho Books bill_number returned after the vendor bill is created. */
+        zohoBillNumber: { type: String, default: '' },
         billDate: { type: String, default: '' },
         zohoOrganizationId: { type: String, default: '' },
         zohoSyncedAt: { type: Date, default: null },

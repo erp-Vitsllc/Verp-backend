@@ -388,9 +388,14 @@ async function syncApprovedFineToZohoInner(fineDoc, group) {
             /* ignore */
         }
 
+        const zohoBillNumber = String(
+            zohoBillForUpsert?.bill_number || zohoBill?.bill_number || billNumber || '',
+        ).trim();
+
         for (const f of group) {
             f.billDate = billDate;
             f.billNumber = billNumber;
+            f.zohoBillNumber = zohoBillNumber;
             f.zohoBillId = zohoBillId;
             if (orgId) f.zohoOrganizationId = orgId;
             f.zohoSyncedAt = new Date();

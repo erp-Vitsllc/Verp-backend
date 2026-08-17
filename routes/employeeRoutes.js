@@ -70,10 +70,10 @@ import { getReporteeOptions } from "../controllers/employee/getReporteeOptions.j
 const router = express.Router();
 const blockLeftUserWrites = rejectLeftUserProfileWrite();
 
-import { getLoanEligibleEmployees } from "../controllers/employee/getLoanEligibleEmployees.js";
+import { getLoanEligibleEmployees, getMyLoanProfile } from "../controllers/employee/getLoanEligibleEmployees.js";
 import { requestNotice, updateNoticeStatus } from "../controllers/employee/noticeController.js";
 import { getLeftUserEligibility, markEmployeeLeftUser, returnEmployeeFromLeftUser } from "../controllers/employee/leftUserController.js";
-import { requestLoan } from "../controllers/employee/requestLoan.js";
+import { requestLoan, createSelfLoanDraft } from "../controllers/employee/requestLoan.js";
 import { getLoans } from "../controllers/employee/getLoans.js";
 import { getLoanById } from "../controllers/employee/getLoanById.js";
 import { approveLoan } from "../controllers/employee/approveLoan.js";
@@ -81,6 +81,7 @@ import { updateLoanDetails, updateLoanPartyPayable } from "../controllers/employ
 import { retryLoanZohoExpense } from "../controllers/employee/retryLoanZohoExpense.js";
 import { getPendingLoanDashboardInbox } from "../controllers/employee/getPendingLoanDashboardInbox.js";
 import { getMyHrDashboardCards } from "../controllers/employee/getMyHrDashboardCards.js";
+import { getMyAssetDashboardCards } from "../controllers/employee/getMyAssetDashboardCards.js";
 import {
     createEmployeeHubRequest,
     getEmployeeHubRequest,
@@ -138,6 +139,9 @@ router.get("/me", async (req, res) => {
 
 // Logged-in employee's own loan / advance / reward / fine totals (home dashboard)
 router.get("/dashboard/my-hr-cards", getMyHrDashboardCards);
+router.get("/dashboard/my-asset-cards", getMyAssetDashboardCards);
+router.get("/dashboard/my-loan-profile", getMyLoanProfile);
+router.post("/dashboard/self-loan-request", createSelfLoanDraft);
 router.post("/dashboard/hub-request", createEmployeeHubRequest);
 router.get("/dashboard/hub-request/:id", getEmployeeHubRequest);
 router.post("/dashboard/hub-request/:id/decide", decideEmployeeHubRequest);
