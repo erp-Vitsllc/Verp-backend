@@ -73,6 +73,7 @@ export function validateVehicleFinePayload(body, options = {}) {
 
     const total = parseMoney(body.fineAmount);
     const serviceCharge = parseMoney(body.serviceCharge) ?? 0;
+    const discount = parseMoney(body.discount) ?? 0;
 
     if (!isDraft && (body.fineAmount === '' || body.fineAmount == null)) {
         errors.fineAmount = 'Total fine amount is required';
@@ -87,7 +88,12 @@ export function validateVehicleFinePayload(body, options = {}) {
     if (body.serviceCharge != null && body.serviceCharge !== '') {
         if (!hasAtMostTwoDecimals(body.serviceCharge)) errors.serviceCharge = 'Invalid service charge';
         else if (serviceCharge < 0) errors.serviceCharge = 'Service charge cannot be negative';
-        else if (total !== null && serviceCharge > total) errors.serviceCharge = 'Service charge cannot exceed total fine amount';
+        else if (total !== null && serviceCharge > total + discount) errors.serviceCharge = 'Service charge cannot exceed total fine amount';
+    }
+
+    if (body.discount != null && body.discount !== '') {
+        if (!hasAtMostTwoDecimals(body.discount)) errors.discount = 'Invalid discount';
+        else if (discount < 0) errors.discount = 'Discount cannot be negative';
     }
 
     if (responsibleFor === 'Employee & Company') {
@@ -117,10 +123,12 @@ export function validateVehicleFinePayload(body, options = {}) {
                 const parties = Math.max(2, empRows.length + (companyRow ? 1 : 0));
                 const scShare = serviceCharge > 0 ? serviceCharge / parties : 0;
                 const sum = empAmt + compAmt;
-                const baseTotal = Math.max(0, total - serviceCharge);
+                const baseTotal = Math.max(0, total - serviceCharge + discount);
 
-                // Accept: bases+SC, bases-only, or payables (already include SC share)
+                // Accept: bases+SC, bases+SC−discount, bases-only, or payables (already include SC share)
                 const asBasesPlusSc = Math.abs(sum + serviceCharge - total) <= 0.05;
+                const asBasesPlusScMinusDiscount =
+                    Math.abs(sum + serviceCharge - discount - total) <= 0.05;
                 const asBasesOnly = Math.abs(sum - baseTotal) <= 0.05;
                 const asPayables = Math.abs(sum - total) <= 0.05;
                 // Payables mistakenly treated as bases — strip equal SC shares
@@ -144,11 +152,12 @@ export function validateVehicleFinePayload(body, options = {}) {
                     );
                     partyPayablesOk =
                         Math.abs(payableSum - total) <= 0.05 ||
+                        Math.abs(baseSum + serviceCharge - discount - total) <= 0.05 ||
                         Math.abs(baseSum + serviceCharge - total) <= 0.05 ||
                         Math.abs(baseSum - baseTotal) <= 0.05;
                 }
 
-                if (!asBasesPlusSc && !asBasesOnly && !asPayables && !stripped && !partyPayablesOk) {
+                if (!asBasesPlusSc && !asBasesPlusScMinusDiscount && !asBasesOnly && !asPayables && !stripped && !partyPayablesOk) {
                     errors.amountMismatch = 'Split amounts must equal total fine amount';
                 }
             }

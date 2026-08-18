@@ -69,6 +69,8 @@ const assetHistorySchema = mongoose.Schema({
     timestamps: true
 });
 
+assetHistorySchema.index({ assetId: 1, date: -1 });
+
 const AssetHistory = mongoose.model('AssetHistory', assetHistorySchema);
 
 export default AssetHistory;

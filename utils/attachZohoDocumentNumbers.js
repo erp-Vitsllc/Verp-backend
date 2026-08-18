@@ -1,7 +1,11 @@
 import ZohoBill from '../models/ZohoBill.js';
 import ZohoExpense from '../models/ZohoExpense.js';
 import { fetchBillById, fetchExpenseById, getZohoOrganizationId } from '../services/zohoService.js';
-import { mapZohoExpenseToDoc } from './zohoPurchaseMappers.js';
+import {
+    mapZohoExpenseToDoc,
+    resolveZohoBillSerialNumber,
+    resolveZohoExpenseSerialNumber,
+} from './zohoPurchaseMappers.js';
 import { withZohoOrganization } from './zohoOrgContext.js';
 
 function clean(value) {
@@ -21,27 +25,24 @@ function collectBillIds(record) {
 
 export function expenseNumberFromCache(doc) {
     if (!doc) return '';
+    const fromRaw = resolveZohoExpenseSerialNumber(doc.zohoRaw);
     return (
+        clean(fromRaw) ||
         clean(doc.expenseNumber) ||
         clean(doc.zohoRaw?.expense_number) ||
         clean(doc.zohoRaw?.expenseNumber)
     );
 }
 
-export function zohoReturnedBillNumber(zohoBill, fallback = '') {
-    return clean(zohoBill?.bill_number || zohoBill?.billNumber || fallback);
+/** Zoho Books Serial No. custom field — not Bill# (bill_number). */
+export function zohoReturnedBillSerialNumber(zohoBill) {
+    return resolveZohoBillSerialNumber(zohoBill);
 }
 
-async function persistIfEmpty(persistModel, filter, field, value) {
+async function persistZohoDocumentNumber(persistModel, filter, field, value) {
     if (!persistModel || !value || !filter) return;
     try {
-        await persistModel.updateMany(
-            {
-                ...filter,
-                $or: [{ [field]: '' }, { [field]: null }, { [field]: { $exists: false } }],
-            },
-            { $set: { [field]: value } },
-        );
+        await persistModel.updateMany(filter, { $set: { [field]: value } });
     } catch (err) {
         console.warn(
             `[attachZohoDocumentNumbers] persist ${field} failed:`,
@@ -60,14 +61,14 @@ function resolveOrgId(record) {
     }
 }
 
-async function liveBillNumber(record) {
+async function liveBillSerialNumber(record) {
     const id = clean(record?.zohoBillId);
     if (!id) return '';
     try {
         const live = await withZohoOrganization(record?.zohoOrganizationId || null, () =>
             fetchBillById(id),
         );
-        const number = zohoReturnedBillNumber(live);
+        const number = zohoReturnedBillSerialNumber(live);
         if (live) {
             try {
                 const { upsertZohoBillFromApi } = await import(
@@ -85,14 +86,16 @@ async function liveBillNumber(record) {
     }
 }
 
-async function liveExpenseNumber(record) {
+async function liveExpenseSerialNumber(record) {
     const id = clean(record?.zohoExpenseId);
     if (!id) return '';
     try {
         const live = await withZohoOrganization(record?.zohoOrganizationId || null, () =>
             fetchExpenseById(id),
         );
-        const number = clean(live?.expense_number || live?.expenseNumber);
+        const number =
+            resolveZohoExpenseSerialNumber(live) ||
+            clean(live?.expense_number || live?.expenseNumber);
         if (live) {
             try {
                 const orgId = resolveOrgId(record);
@@ -116,8 +119,8 @@ async function liveExpenseNumber(record) {
 }
 
 /**
- * Fill zohoBillNumber from cache, the number sent to Zoho, or a one-time live Zoho fetch.
- * Already-billed rows without a stored serial get backfilled and persisted.
+ * Fill zohoBillNumber from Zoho Serial No. custom field (cache or live fetch).
+ * Never use Bill# (bill_number) or ERP invoice / account numbers.
  */
 export async function attachZohoBillNumbers(records = [], options = {}) {
     const list = Array.isArray(records) ? records : [];
@@ -125,18 +128,18 @@ export async function attachZohoBillNumbers(records = [], options = {}) {
 
     const missingIds = [];
     for (const rec of list) {
-        if (clean(rec?.zohoBillNumber)) continue;
         missingIds.push(...collectBillIds(rec));
     }
     const unique = [...new Set(missingIds)];
     const map = new Map();
     if (unique.length) {
         const rows = await ZohoBill.find({ zohoBillId: { $in: unique } })
-            .select('zohoBillId billNumber')
+            .select('zohoBillId billNumber zohoRaw')
             .lean();
         for (const row of rows) {
             const id = clean(row.zohoBillId);
-            const number = clean(row.billNumber);
+            const number =
+                resolveZohoBillSerialNumber(row.zohoRaw) || clean(row.billNumber);
             if (id && number) map.set(id, number);
         }
     }
@@ -144,22 +147,20 @@ export async function attachZohoBillNumbers(records = [], options = {}) {
     const out = [];
     for (const rec of list) {
         const id = clean(rec?.zohoBillId);
-        let zohoBillNumber =
-            clean(rec?.zohoBillNumber) ||
-            map.get(id) ||
-            (id ? clean(rec?.billNumber) : '');
+        const cachedSerial = id ? map.get(id) : '';
+        let zohoBillNumber = cachedSerial;
 
-        if (!zohoBillNumber && fetchLive && id) {
-            zohoBillNumber = await liveBillNumber(rec);
+        if (fetchLive && id) {
+            const liveSerial = await liveBillSerialNumber(rec);
+            if (liveSerial) zohoBillNumber = liveSerial;
         }
 
-        if (
-            persistModel &&
-            zohoBillNumber &&
-            !clean(rec?.zohoBillNumber) &&
-            (id || rec?._id)
-        ) {
-            await persistIfEmpty(
+        if (!zohoBillNumber) {
+            zohoBillNumber = clean(rec?.zohoBillNumber);
+        }
+
+        if (persistModel && zohoBillNumber && (id || rec?._id)) {
+            await persistZohoDocumentNumber(
                 persistModel,
                 id ? { zohoBillId: id } : { _id: rec._id },
                 'zohoBillNumber',
@@ -175,7 +176,6 @@ export async function attachZohoBillNumbers(records = [], options = {}) {
 export async function attachZohoExpenseNumber(record, options = {}) {
     if (!record) return record;
     const { persistModel = null, fetchLive = false } = options;
-    if (clean(record.zohoExpenseNumber)) return record;
     const id = clean(record.zohoExpenseId);
     if (!id) return record;
 
@@ -185,13 +185,19 @@ export async function attachZohoExpenseNumber(record, options = {}) {
     let zohoExpenseNumber = expenseNumberFromCache(cached);
 
     if (!zohoExpenseNumber && fetchLive) {
-        zohoExpenseNumber = await liveExpenseNumber(record);
+        zohoExpenseNumber = await liveExpenseSerialNumber(record);
+    } else if (
+        cached &&
+        zohoExpenseNumber &&
+        zohoExpenseNumber !== clean(record.zohoExpenseNumber)
+    ) {
+        /* prefer cache serial over stale stored value */
     }
 
     if (!zohoExpenseNumber) return record;
 
     if (persistModel && record._id) {
-        await persistIfEmpty(
+        await persistZohoDocumentNumber(
             persistModel,
             { _id: record._id },
             'zohoExpenseNumber',

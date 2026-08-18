@@ -306,7 +306,7 @@ export const addFine = async (req, res) => {
             const count = bulkList.length;
 
             // Use fineAmount exactly as sent from frontend (already includes service charge)
-            const totalFine = parseFloat(commonData.fineAmount) || (totalEmp + totalComp + totalServiceCharge);
+            const totalFine = parseFloat(commonData.fineAmount) || Math.max(0, totalEmp + totalComp + totalServiceCharge - (parseFloat(commonData.discount) || 0));
 
             // Divide service charge equally among ALL parties in the bulkList (including company record if present)
             const serviceChargePerParty = count > 0 ? (totalServiceCharge / count) : 0;
@@ -408,6 +408,7 @@ export const addFine = async (req, res) => {
                     fineSource: commonData.fineSource || '',
                     assetDepreciationAmount: parseFloat(commonData.assetDepreciationAmount) || 0,
                     assetPurchaseDate: commonData.assetPurchaseDate || '',
+                    discount: parseFloat(commonData.discount) || 0,
                     createdBy: req.user._id
                 };
 
@@ -528,6 +529,7 @@ export const addFine = async (req, res) => {
             sourceOfIncome,
             assetDepreciationAmount,
             assetPurchaseDate,
+            discount,
         } = req.body;
 
         if (!employeeId) {
@@ -629,6 +631,7 @@ export const addFine = async (req, res) => {
             employeeAmount: employeeAmt, // Store exact employee amount
             companyAmount: companyAmt, // Store exact company amount
             serviceCharge: serviceChargeAmount, // Store exact service charge
+            discount: parseFloat(discount) || 0,
             payableDuration: parseInt(payableDuration) || null,
             monthStart: monthStart || '',
             fineSource: fineSource || '',

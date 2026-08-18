@@ -774,6 +774,24 @@ export async function createBill(payload = {}) {
 }
 
 /**
+ * Create a Zoho bill using Zoho's own serial (auto bill_number).
+ * ERP invoice / account numbers are not sent as bill_number.
+ */
+export async function createBillWithZohoSerial(payload = {}) {
+    const rest = { ...(payload || {}) };
+    delete rest.bill_number;
+    delete rest.billNumber;
+    try {
+        return await createBill(rest);
+    } catch (err) {
+        const msg = String(err?.message || '');
+        if (!/bill_number/i.test(msg)) throw err;
+        const serial = `ERP${Date.now().toString(36).toUpperCase()}`.slice(0, 20);
+        return await createBill({ ...rest, bill_number: serial });
+    }
+}
+
+/**
  * Upload a file to an existing Zoho Books bill.
  * POST /bills/{bill_id}/attachment (multipart field name: attachment).
  * Allowed: gif, png, jpeg, jpg, bmp, pdf.

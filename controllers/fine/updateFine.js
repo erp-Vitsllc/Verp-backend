@@ -12,7 +12,6 @@ import { canUserActOnFineStageAsync } from "../../utils/fineStageAuth.js";
 import {
     isApprovedFineStatus,
     isUserHrForApprovedFineEdit,
-    restrictApprovedFineUpdates,
 } from "../../utils/fineApprovedEditAuth.js";
 import {
     preserveOriginalDeductionScheduleBeforeEdit,
@@ -130,28 +129,8 @@ export const updateFine = async (req, res) => {
                 if (hasNonAccessoryUpdates) {
                     return res.status(400).json({ message: 'Asset Controller can only edit accessories removal on approved fines.' });
                 }
-            } else if (hrOk && !isAssetController) {
-                // HR can only update schedule fields
-                const { error, allowed } = restrictApprovedFineUpdates(updates, fine);
-                if (error) {
-                    return res.status(400).json({ message: error });
-                }
-                for (const key of Object.keys(updates)) {
-                    delete updates[key];
-                }
-                Object.assign(updates, allowed);
-            } else {
-                // Both roles: allow both schedule and accessories removal
-                const { allowed } = restrictApprovedFineUpdates(updates, fine);
-                const finalUpdates = { ...allowed };
-                if (updates.excludedAccessoryIds !== undefined) {
-                    finalUpdates.excludedAccessoryIds = updates.excludedAccessoryIds;
-                }
-                for (const key of Object.keys(updates)) {
-                    delete updates[key];
-                }
-                Object.assign(updates, finalUpdates);
             }
+            // HR may update amounts, discount, and all other allowed fields after approval.
         }
 
         const oldStatus = fine.fineStatus;
@@ -176,7 +155,7 @@ export const updateFine = async (req, res) => {
             'fineStatus', 'description', 'awardedDate', 'remarks',
             'attachment', 'attachments', 'category', 'subCategory', 'vehicleId', 'assetId', 'assetName',
             'projectId', 'projectName', 'engineerName', 'responsibleFor',
-            'fineAmount', 'employeeAmount', 'companyAmount', 'serviceCharge', 'payableDuration', 'monthStart',
+            'fineAmount', 'employeeAmount', 'companyAmount', 'serviceCharge', 'discount', 'payableDuration', 'monthStart',
             'sourceOfIncome', 'fineSource', 'assetDepreciationAmount', 'assetPurchaseDate',
             'employees', 'totalEmployeeFineAmount', 'company', 'companyName', 'companyDescription',
             'excludedAccessoryIds', 'breakdownItems',
@@ -208,6 +187,7 @@ export const updateFine = async (req, res) => {
             employees: updates.employees ?? fine.assignedEmployees,
             fineAmount: updates.fineAmount ?? fine.fineAmount,
             serviceCharge: updates.serviceCharge ?? fine.serviceCharge,
+            discount: updates.discount ?? fine.discount,
             responsibleFor: updates.responsibleFor ?? fine.responsibleFor,
             employeeAmount: updates.employeeAmount ?? fine.employeeAmount,
             companyAmount: updates.companyAmount ?? fine.companyAmount,
@@ -395,7 +375,7 @@ export const updateFine = async (req, res) => {
         // Form sends TOTAL group SC. Each sibling already stores its per-party share —
         // never take fines[0].serviceCharge and divide again (corrupts amounts on schedule edits).
         let serviceChargePerParty = null;
-        const amountFieldsChanging = ['fineAmount', 'employeeAmount', 'companyAmount', 'serviceCharge', 'employees']
+        const amountFieldsChanging = ['fineAmount', 'employeeAmount', 'companyAmount', 'serviceCharge', 'discount', 'employees']
             .some((k) => updates[k] !== undefined);
 
         if (fines.length > 1 && updates.serviceCharge !== undefined) {
@@ -535,9 +515,10 @@ export const updateFine = async (req, res) => {
                             } else {
                                 f.serviceCharge = parseFloat(updates[key]) || 0;
                             }
-                            // Update total balances
+                            // Update total balances (include discount)
                             const baseFine = (parseFloat(f.employeeAmount) || 0) + (parseFloat(f.companyAmount) || 0);
-                            f.fineAmount = baseFine + f.serviceCharge;
+                            const discountAmt = parseFloat(f.discount) || 0;
+                            f.fineAmount = Math.max(0, baseFine + f.serviceCharge - discountAmt);
                             f.totalFineAmount = f.fineAmount;
                         } else if (key === 'fineAmount') {
                             // fineAmount in updates is treated as the BASE fine amount
@@ -570,17 +551,23 @@ export const updateFine = async (req, res) => {
             // Only recalculate payable totals when amount fields are actually changing
             // (schedule-only edits on approved group fines must not rewrite amounts)
             if (amountFieldsChanging && !(empUpdate && fines.length > 1)) {
-            // Recalculate totalFineAmount from components (employeeAmount + companyAmount + serviceCharge)
+            // Recalculate totalFineAmount from components (employeeAmount + companyAmount + serviceCharge − discount)
             const empAmt = parseFloat(f.employeeAmount) || 0;
             const compAmt = parseFloat(f.companyAmount) || 0;
             const servCharge = parseFloat(f.serviceCharge) || 0;
-            f.totalFineAmount = empAmt + compAmt + servCharge;
+            const discountAmt = parseFloat(f.discount) || 0;
+            f.totalFineAmount = Math.max(0, empAmt + compAmt + servCharge - discountAmt);
             f.fineAmount = f.totalFineAmount;
             
             // Sync individualAmount within the specific record for consistency
             if (f.assignedEmployees && f.assignedEmployees.length > 0) {
+                const netPayable = f.totalFineAmount;
                 const serviceChargeForThisEmployee = scParty;
-                f.assignedEmployees[0].individualAmount = empAmt + compAmt + serviceChargeForThisEmployee;
+                const grossParty = empAmt + compAmt + serviceChargeForThisEmployee;
+                f.assignedEmployees[0].individualAmount =
+                    grossParty > 0 && netPayable < grossParty - 0.01
+                        ? netPayable
+                        : grossParty;
                 
                 if (f.assignedEmployees[0].employeeId === 'VEGA-HR-0000' && updates.companyName) {
                     f.assignedEmployees[0].employeeName = updates.companyName;
@@ -650,7 +637,10 @@ export const updateFine = async (req, res) => {
                         f.companyAmount = 0;
                     }
 
-                    f.fineAmount = (f.employeeAmount || 0) + (f.companyAmount || 0) + (f.serviceCharge || 0);
+                    f.fineAmount = Math.max(
+                        0,
+                        (f.employeeAmount || 0) + (f.companyAmount || 0) + (f.serviceCharge || 0) - (f.discount || 0),
+                    );
                     f.totalFineAmount = f.fineAmount;
 
                     if (f.assignedEmployees && f.assignedEmployees.length > 0) {
@@ -916,9 +906,28 @@ export const updateFine = async (req, res) => {
             }
         }
 
+        // === ZOHO BOOKS BILL / PAYMENT UPDATE ON EDIT ===
+        let zohoSyncResult = null;
+        if (
+            (updates.updateZoho === true || updates.updateZoho === 'true') &&
+            fines.some((f) => f.zohoBillId)
+        ) {
+            try {
+                const { updateApprovedFineInZoho } = await import('../../utils/syncApprovedFineToZoho.js');
+                zohoSyncResult = await updateApprovedFineInZoho(updatedFine, fines);
+                console.log('[UpdateFine] Zoho update result:', zohoSyncResult);
+            } catch (zErr) {
+                console.error('[UpdateFine] Failed to update Zoho bill/payment:', zErr);
+                zohoSyncResult = { ok: false, message: zErr?.message || 'Failed to update Zoho Books' };
+            }
+        }
+
         return res.status(200).json({
-            message: "Fine updated successfully",
-            fine: updatedFine
+            message: zohoSyncResult?.ok
+                ? "Fine and Zoho Books bill updated successfully"
+                : "Fine updated successfully",
+            fine: updatedFine,
+            zohoSync: zohoSyncResult
         });
     } catch (error) {
         console.error('Error updating fine:', error);

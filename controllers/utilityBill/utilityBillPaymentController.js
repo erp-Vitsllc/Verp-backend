@@ -121,9 +121,7 @@ function decorateBill(bill) {
     o.reviewPath = o.batchId
         ? reviewPath(o.batchId, o.utilityType, o.billMonth)
         : `/HRM/Asset/UtilityBills/details/${encodeURIComponent(o.entryId)}?billId=${encodeURIComponent(String(o._id))}`;
-    o.zohoBillNumber =
-        String(o.zohoBillNumber || '').trim() ||
-        (String(o.zohoBillId || '').trim() ? String(o.billNumber || '').trim() : '');
+    o.zohoBillNumber = String(o.zohoBillNumber || '').trim();
     return o;
 }
 
@@ -408,6 +406,7 @@ export async function listUtilityBillPayments(req, res) {
                 .lean();
             const numbered = await attachZohoBillNumbers(bills, {
                 persistModel: UtilityBillPayment,
+                fetchLive: true,
             });
             return res.status(200).json({ bills: numbered.map(withPermissions) });
         }
@@ -2092,6 +2091,7 @@ export async function getUtilityBillPayment(req, res) {
         if (!bill) return res.status(404).json({ message: 'Bill not found' });
         const [numbered] = await attachZohoBillNumbers([bill], {
             persistModel: UtilityBillPayment,
+            fetchLive: true,
         });
         return res.status(200).json({ bill: decorateBill(numbered) });
     } catch (err) {

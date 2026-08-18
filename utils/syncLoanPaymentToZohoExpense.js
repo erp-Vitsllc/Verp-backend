@@ -6,7 +6,7 @@ import {
     getZohoOrganizationId,
     uploadExpenseAttachment,
 } from '../services/zohoService.js';
-import { mapZohoExpenseToDoc } from './zohoPurchaseMappers.js';
+import { mapZohoExpenseToDoc, resolveZohoExpenseSerialNumber } from './zohoPurchaseMappers.js';
 import { withZohoOrganization } from './zohoOrgContext.js';
 import { resolveZohoOrganizationIdForRewardEmployee } from './syncRewardPaymentToZoho.js';
 import { downloadS3ObjectBytes } from './s3Upload.js';
@@ -422,7 +422,9 @@ export async function syncLoanPaymentToZohoExpense({
 
             return {
                 expenseId,
-                expenseNumber: clean(expense?.expense_number || expense?.expenseNumber),
+                expenseNumber:
+                    resolveZohoExpenseSerialNumber(expense) ||
+                    clean(expense?.expense_number || expense?.expenseNumber),
                 locationId,
                 locationName,
                 attachment: attachmentResult,

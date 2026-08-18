@@ -267,6 +267,10 @@ import {
 import { listPendingHubInboxItems } from '../utils/employeeHubRequestInbox.js';
 import { notifyAdminOfficerOnVehicleServiceCreated } from '../utils/vehicleServiceAdminOfficerNotification.js';
 import {
+    isPendingVehicleService,
+    countVehicleServicePendingCompleted,
+} from '../utils/vehicleServicePendingStatus.js';
+import {
     maybeStartVehicleServiceWorkflow,
     maybeStartCarWashWorkflow,
     getWorkflowAssigneePayloadForStage,
@@ -1618,13 +1622,13 @@ export const getVehicleFleetDashboard = async (req, res) => {
         ]);
         // Exclude tools (VEGA-ASSET-*): shared AssetItem defaults used to match every row.
         const fleetScope = buildFleetVehicleMongoScope({ vehicleTypeIds });
-        // List view: skip heavy nested payloads (attachments, services). Keep minimal
-        // document fields so registration/insurance expiry can resolve when top-level
-        // dates were never synced (e.g. older first-time card adds).
+        // List view: keep services remark/stage only to compute Pending vs Completed.
+        // Skip attachments and other nested payloads. Keep minimal document fields so
+        // registration/insurance expiry can resolve when top-level dates were never synced.
         // Full dashboard: project only nested fields charts/modals need (skip quotation URLs,
         // workflow history signatures, document attachments — those balloon BSON + JSON).
         const fleetSelect = listOnly
-            ? 'assetId name vehicleBrand plateEmirate plateNumber modelYear assetValue status registrationExpiryDate insuranceExpiryDate nextServiceDate oilChangeDate gearOilDueDate currentKilometer assignedTo assignedCompany acceptanceStatus pendingAction actionRequiredBy createdBy vehicleProfileActivationStatus vehicleDispositionStatus warrantyEnabled warrantyExpiryDate warrantyYears onServiceActive onLeaveActive typeId assignedDate pendingActionDetails updatedAt locatorDeviceId locatorGpsStatus locatorAddress locatorSpeedKmh locatorIgnition locatorLastUpdate locatorSyncedAt activeServiceWorkflow.stage activeServiceWorkflow.serviceRecordId activeServiceWorkflow.serviceTypeLabel activeServiceWorkflow.serviceWorkCompleted documents.type documents.expiryDate documents.status documents.documentStatus documents.description documents.issueDate documents.createdAt'
+            ? 'assetId name vehicleBrand plateEmirate plateNumber modelYear assetValue status registrationExpiryDate insuranceExpiryDate nextServiceDate oilChangeDate gearOilDueDate currentKilometer assignedTo assignedCompany acceptanceStatus pendingAction actionRequiredBy createdBy vehicleProfileActivationStatus vehicleDispositionStatus warrantyEnabled warrantyExpiryDate warrantyYears onServiceActive onLeaveActive typeId assignedDate pendingActionDetails updatedAt locatorDeviceId locatorGpsStatus locatorAddress locatorSpeedKmh locatorIgnition locatorLastUpdate locatorSyncedAt activeServiceWorkflow.stage activeServiceWorkflow.serviceRecordId activeServiceWorkflow.serviceTypeLabel activeServiceWorkflow.serviceWorkCompleted services._id services.serviceType services.remark services.workflowSnapshot.stage documents.type documents.expiryDate documents.status documents.documentStatus documents.description documents.issueDate documents.createdAt'
             : [
                 'assetId',
                 'name',
@@ -1795,6 +1799,7 @@ export const getVehicleFleetDashboard = async (req, res) => {
                 actionRequiredBy: v.actionRequiredBy,
                 onServiceActive: v.onServiceActive === true,
                 onLeaveActive: v.onLeaveActive === true,
+                ...countVehicleServicePendingCompleted(v),
                 activeServiceWorkflow: v.activeServiceWorkflow
                     ? {
                         stage: v.activeServiceWorkflow.stage || '',
@@ -2058,86 +2063,6 @@ export const getVehicleFleetDashboard = async (req, res) => {
             };
             if (!key) return '';
             return map[key] || key.replace(/_/g, ' ');
-        };
-        const isPendingVehicleService = (asset, service) => {
-            if (!service) return false;
-            const remark = parseServiceRemark(service);
-            const requestStatus = String(remark.requestStatus || '').toLowerCase();
-            const serviceStatus = String(remark.serviceStatus || remark.accidentServiceStatus || '')
-                .toLowerCase()
-                .replace(/\s+/g, '_');
-            const workStatus = String(remark.serviceWorkStatus || '')
-                .toLowerCase()
-                .replace(/\s+/g, '_');
-            const billingStatus = String(remark.billingStatus || '').toLowerCase();
-            const zohoPaymentStatus = String(remark.zohoPaymentStatus || '').toLowerCase();
-            const zohoBillStatus = String(remark.zohoBillStatus || '').toLowerCase();
-            const carWashPay = String(remark.carWashPaymentStatus || '').toLowerCase();
-            const completedFlag = String(remark.vehicleServiceCompleted || '').toLowerCase();
-            const isCarWash =
-                String(service.serviceType || '').trim() === 'Car Wash' ||
-                String(remark.serviceTypeLabel || '').trim() === 'Car Wash';
-
-            const activeWf = asset?.activeServiceWorkflow || {};
-            const activeMatch =
-                activeWf?.serviceRecordId &&
-                String(activeWf.serviceRecordId) === String(service._id || '');
-            const stage = String(
-                service?.workflowSnapshot?.stage ||
-                (activeMatch ? activeWf.stage : '') ||
-                remark.workflowStage ||
-                remark.stage ||
-                '',
-            )
-                .toLowerCase()
-                .trim();
-
-            if (stage === 'rejected') return false;
-
-            // Paid — Zoho vendor payment settled.
-            if (
-                billingStatus === 'paid' ||
-                zohoPaymentStatus === 'paid' ||
-                zohoBillStatus === 'paid' ||
-                carWashPay === 'paid'
-            ) {
-                return false;
-            }
-
-            // Billed initiated — Zoho bill created (or billed status).
-            const zohoBills = Array.isArray(remark.zohoBills) ? remark.zohoBills : [];
-            const hasZohoBill =
-                Boolean(String(remark.zohoBillId || remark.zohoBillNumber || '').trim()) ||
-                zohoBills.some((row) =>
-                    Boolean(
-                        String(row?.zohoBillId || row?.bill_id || row?.billId || row?.zohoBillNumber || '').trim(),
-                    ),
-                );
-            if (
-                billingStatus === 'billed' ||
-                stage === 'billed' ||
-                carWashPay === 'billed' ||
-                hasZohoBill
-            ) {
-                return false;
-            }
-
-            // Completed — work done / return complete / sent to billing after complete.
-            // Do not treat pending_accounts as completed: shop services use that stage
-            // for Accounts quote approval before On Service.
-            if (['live', 'complete', 'completed'].includes(completedFlag)) return false;
-            if (['complete', 'completed', 'pending_billing'].includes(stage)) return false;
-            if (serviceStatus === 'complete' || serviceStatus === 'completed') return false;
-            if (workStatus === 'complete' || workStatus === 'completed') return false;
-
-            // Car wash work is Completed on Send — anything left is the Accounts Zoho
-            // Expense, which is payment work rather than a pending service.
-            if (isCarWash && (stage === 'pending_accounts' || Boolean(carWashPay))) return false;
-
-            if (['draft', 'pending', 'submitted'].includes(requestStatus)) return true;
-            if (activeMatch && stage) return true;
-            if (stage) return true;
-            return false;
         };
 
         // Parallel secondary reads — previously serial and contended with Locator dashboard.

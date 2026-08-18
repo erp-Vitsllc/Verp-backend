@@ -655,6 +655,238 @@ export const createAssetType = async (req, res) => {
     }
 };
 
+const TOOLS_LIST_ASSET_SELECT = [
+    'assetId', 'name', 'typeId', 'categoryId', 'assetValue', 'purchaseDate', 'quantity',
+    'warranty', 'warrantyYears', 'warrantyAttachment', 'invoiceNumber', 'invoiceFile',
+    'imagePreview', 'photo', 'images',
+    'status', 'acceptanceStatus', 'assignedToType', 'assignedTo', 'assignedCompany',
+    'actionRequiredBy', 'pendingAction', 'pendingActionDetails',
+    'createdBy', 'accessories', 'lostDetachedAccessories', 'lostAt',
+    'onLeaveActive', 'onServiceActive', 'onLeaveStartDate', 'onLeaveEndDate', 'onLeaveDuration',
+    'plateNumber', 'vehicleCode', 'plateEmirate', 'updatedAt',
+].join(' ');
+
+async function resolveToolsListEmployeeObjectId(req) {
+    let currentEmpId = req.user?.employeeObjectId?.toString();
+    if (!currentEmpId && req.user?.employeeId) {
+        const empRow = await EmployeeBasic.findOne({
+            employeeId: { $regex: new RegExp(`^${String(req.user.employeeId).replace(/\s+/g, '\\s*')}$`, 'i') },
+        })
+            .select('_id')
+            .lean()
+            .catch(() => null);
+        if (empRow?._id) currentEmpId = empRow._id.toString();
+    }
+    return currentEmpId || null;
+}
+
+function buildToolsAssetFindQuery(uid, { view, employeeObjectId }) {
+    const assetQuery = {};
+    if (uid && mongoose.Types.ObjectId.isValid(String(uid))) {
+        assetQuery.$or = [
+            { status: { $ne: 'Draft' } },
+            { createdBy: new mongoose.Types.ObjectId(String(uid)) },
+        ];
+    } else {
+        assetQuery.status = { $ne: 'Draft' };
+    }
+    assetQuery.$and = [
+        { assetId: { $regex: /^VEGA-ASSET-/ } },
+        { $nor: [{ plateNumber: { $type: 'string', $gt: '' } }] },
+    ];
+
+    const canSplitByOwner =
+        (view === 'mine' || view === 'rest') &&
+        employeeObjectId &&
+        mongoose.Types.ObjectId.isValid(employeeObjectId);
+    if (!canSplitByOwner) return assetQuery;
+
+    const mineId = new mongoose.Types.ObjectId(employeeObjectId);
+    const mineWithoutCompany = {
+        assignedTo: mineId,
+        $or: [
+            { assignedCompany: { $exists: false } },
+            { assignedCompany: null },
+        ],
+    };
+    if (view === 'mine') {
+        assetQuery.$and.push({ assignedTo: mineId });
+        assetQuery.$and.push({
+            $or: [
+                { assignedCompany: { $exists: false } },
+                { assignedCompany: null },
+            ],
+        });
+    } else {
+        assetQuery.$and.push({ $nor: [mineWithoutCompany] });
+    }
+    return assetQuery;
+}
+
+function mapToolsListAssetRow(a, designatedAssetController) {
+    const accList = (a.accessories || []).map((acc) => ({
+        ...acc,
+        fineId: acc?.fineId || null,
+        fineStatus: acc?.fineStatus || null,
+        lostAt: acc?.lostAt || acc?.detachedAt || null,
+    }));
+    const lostList = (a.lostDetachedAccessories || []).map((x) => ({
+        ...x,
+        fineId: x?.fineId || null,
+        fineStatus: x?.fineStatus || null,
+        lostAt: x?.detachedAt || x?.lostAt || null,
+    }));
+    const firstImageUrl = Array.isArray(a.images) && a.images[0]?.url ? a.images[0].url : null;
+    const imagePreview = a.imagePreview || a.photo || firstImageUrl || null;
+    const photo = a.photo || a.imagePreview || firstImageUrl || null;
+    const statusLow = String(a.status || '').trim().toLowerCase();
+    return {
+        _id: a._id,
+        assetId: a.assetId,
+        name: a.name,
+        type: a.typeId?.name || '-',
+        category: a.categoryId?.name || '-',
+        typeId: a.typeId ? { _id: a.typeId._id, name: a.typeId.name } : null,
+        categoryId: a.categoryId ? { _id: a.categoryId._id, name: a.categoryId.name } : null,
+        assetValue: a.assetValue,
+        purchaseDate: a.purchaseDate,
+        quantity: a.quantity || 1,
+        warranty: a.warranty,
+        warrantyYears: a.warrantyYears,
+        warrantyAttachment: a.warrantyAttachment || null,
+        invoiceNumber: a.invoiceNumber,
+        imagePreview,
+        photo,
+        images: Array.isArray(a.images) ? a.images : [],
+        status: a.status,
+        acceptanceStatus: a.acceptanceStatus,
+        assignedToType: a.assignedToType,
+        assigned: a.status === 'Assigned' ? 1 : 0,
+        unassigned: a.status === 'Unassigned' ? 1 : 0,
+        invoiceFile: a.invoiceFile || null,
+        actionRequiredBy: a.actionRequiredBy,
+        assignedCompany: a.assignedCompany,
+        designatedAssetController,
+        pendingAction: a.pendingAction,
+        pendingActionDetails: a.pendingActionDetails || null,
+        lossDamageFineId: a.pendingActionDetails?.fineId || null,
+        lossDamageFineStatus: null,
+        lostAt: a.lostAt || (['lost', 'end of life'].includes(statusLow) ? a.updatedAt : null) || null,
+        createdBy: a.createdBy,
+        accessories: accList,
+        lostDetachedAccessories: lostList,
+        assignedTo: a.assignedTo,
+        vehicleCode: a.vehicleCode,
+        plateEmirate: a.plateEmirate,
+        plateNumber: a.plateNumber,
+        onLeaveActive: a.onLeaveActive === true,
+        onServiceActive: a.onServiceActive === true,
+        onLeaveStartDate: a.onLeaveStartDate,
+        onLeaveEndDate: a.onLeaveEndDate,
+        onLeaveDuration: a.onLeaveDuration,
+        services: [],
+    };
+}
+
+function mapToolsCatalogRows(categories, types, typeCategoryCounts) {
+    return [
+        ...categories.map((c) => ({
+            _id: c._id,
+            assetId: c.categoryId,
+            category: c.name,
+            imagePreview: c.imagePreview || null,
+            type: c.typeId?.name || null,
+        })),
+        ...types.map((t) => ({
+            _id: t._id,
+            assetId: t.typeId,
+            type: t.name,
+            category: null,
+            categoryCount: typeCategoryCounts[t._id.toString()] || 0,
+            imagePreview: t.imagePreview || null,
+            description: t.description,
+        })),
+    ];
+}
+
+async function loadToolsAssetUnifiedList(req, toolsView) {
+    const uid = req.user?._id || req.user?.id;
+    const employeeObjectId = await resolveToolsListEmployeeObjectId(req);
+    const includeCatalog = toolsView !== 'rest';
+    const assetQuery = buildToolsAssetFindQuery(uid, { view: toolsView, employeeObjectId });
+
+    const assetsPromise = AssetItem.find(assetQuery)
+        .select(TOOLS_LIST_ASSET_SELECT)
+        .populate('typeId', 'name typeId')
+        .populate('categoryId', 'name categoryId imagePreview')
+        .populate('actionRequiredBy', 'firstName lastName employeeId')
+        .populate('assignedCompany', 'name nickName companyId companyEmail')
+        .populate({
+            path: 'assignedTo',
+            select: 'firstName lastName employeeId department primaryReportee reportingAuthority',
+            populate: [
+                { path: 'primaryReportee', select: 'firstName lastName' },
+                { path: 'reportingAuthority', select: 'firstName lastName' },
+            ],
+        })
+        .lean();
+
+    const catalogPromise = includeCatalog
+        ? Promise.all([
+            AssetCategory.find({ isActive: true })
+                .select('name categoryId typeId imagePreview')
+                .populate('typeId', 'name')
+                .lean(),
+            AssetType.find({ isActive: true })
+                .select('name typeId imagePreview description')
+                .lean(),
+        ])
+        : Promise.resolve([[], []]);
+
+    const [assets, flowAc, catalogPair] = await Promise.all([
+        assetsPromise,
+        getDepartmentHOD('assetcontroller'),
+        catalogPromise,
+    ]);
+    let [categories, types] = catalogPair;
+
+    if (includeCatalog) {
+        categories = categories.filter((c) => !isFleetOrVehicleCatalogName(c.name));
+        types = types.filter((t) => {
+            const name = String(t.name || '').trim();
+            if (/^fleet\s*vehicle$/i.test(name)) return false;
+            if (isAutoCreatedAssetTypeDoc(t)) return false;
+            if (isFleetOrVehicleCatalogName(name)) return false;
+            return true;
+        });
+    }
+
+    let designatedAssetController = null;
+    if (flowAc) {
+        const fn = flowAc.firstName ?? flowAc.employeeName?.split(/\s+/)[0];
+        const ln = flowAc.lastName ?? flowAc.employeeName?.split(/\s+/).slice(1).join(' ');
+        if (fn || ln || flowAc.employeeId) {
+            designatedAssetController = {
+                firstName: fn || 'Unknown',
+                lastName: ln || '',
+                employeeId: flowAc.employeeId,
+            };
+        }
+    }
+
+    const typeCategoryCounts = {};
+    categories.forEach((c) => {
+        if (c.typeId) {
+            const typeIdStr = c.typeId._id.toString();
+            typeCategoryCounts[typeIdStr] = (typeCategoryCounts[typeIdStr] || 0) + 1;
+        }
+    });
+
+    const assetRows = assets.map((a) => mapToolsListAssetRow(a, designatedAssetController));
+    if (!includeCatalog) return assetRows;
+    return [...mapToolsCatalogRows(categories, types, typeCategoryCounts), ...assetRows];
+}
+
 // @desc    Get all asset types
 // @route   GET /api/AssetType
 // @access  Private
@@ -662,12 +894,19 @@ export const getAssetTypes = async (req, res) => {
     const scope = String(req.query.scope || '').toLowerCase().trim();
     const catalogOnly = scope === 'catalog';
     const toolsOnly = scope === 'tools';
+    const toolsView = String(req.query.view || '').toLowerCase().trim();
 
     for (let attempt = 0; attempt < 3; attempt++) {
         try {
             if (!catalogOnly && !toolsOnly) {
                 // Fix: Drop the index causing 500 errors if it was created accidentally
                 try { await AssetType.collection.dropIndex('assetId_1'); } catch (e) { /* ignore */ }
+            }
+
+            if (toolsOnly) {
+                const view = toolsView === 'mine' || toolsView === 'rest' ? toolsView : '';
+                const unifiedList = await loadToolsAssetUnifiedList(req, view);
+                return res.status(200).json(unifiedList);
             }
 
             // We aggregate all 3 collections into a unified list for the frontend
@@ -716,47 +955,6 @@ export const getAssetTypes = async (req, res) => {
                 assetQuery.status = { $ne: 'Draft' };
             }
 
-            if (toolsOnly) {
-                // Align actionRequiredBy + Accept inbox with primary reportee when assignee has no portal User
-                // (same heal as tools dashboard inbox — keeps list "Waiting: …" in sync with asset details).
-                try {
-                    const { healMisroutedAssignmentInboxTasks } = await import('./assetItemController.js');
-                    await healMisroutedAssignmentInboxTasks();
-                } catch {
-                    /* non-fatal */
-                }
-                assetQuery.$and = assetQuery.$and || [];
-                // Tools list: VEGA-ASSET-* only; never fleet IDs or plated/fleet-marked rows.
-                assetQuery.$and.push({ assetId: { $regex: /^VEGA-ASSET-/i } });
-                assetQuery.$and.push({
-                    $or: [
-                        { plateNumber: { $exists: false } },
-                        { plateNumber: null },
-                        { plateNumber: '' },
-                    ],
-                });
-                assetQuery.$and.push({
-                    $or: [
-                        { locatorDeviceId: { $exists: false } },
-                        { locatorDeviceId: null },
-                    ],
-                });
-                assetQuery.$and.push({
-                    $or: [
-                        { plateEmirate: { $exists: false } },
-                        { plateEmirate: null },
-                        { plateEmirate: '' },
-                    ],
-                });
-                assetQuery.$and.push({
-                    $or: [
-                        { vehicleBrand: { $exists: false } },
-                        { vehicleBrand: null },
-                        { vehicleBrand: '' },
-                    ],
-                });
-            }
-
             const assets = await AssetItem.find(assetQuery)
                 .populate('typeId')
                 .populate('categoryId')
@@ -771,37 +969,6 @@ export const getAssetTypes = async (req, res) => {
                     ]
                 })
                 .lean();
-
-            // Tools Type/Category tabs must not show fleet brands (Toyota…) or vehicle catalog rows.
-            if (toolsOnly) {
-                const toolsTypeIds = new Set(
-                    assets.map((a) => a.typeId?._id?.toString()).filter(Boolean),
-                );
-                categories = categories.filter((c) => !isFleetOrVehicleCatalogName(c.name));
-                const toolsCategoryParentIds = new Set(
-                    categories.map((c) => c.typeId?._id?.toString()).filter(Boolean),
-                );
-                const keepType = (t) => {
-                    const id = t._id.toString();
-                    if (toolsTypeIds.has(id) || toolsCategoryParentIds.has(id)) return true;
-                    const name = String(t.name || '').trim();
-                    if (/^fleet\s*vehicle$/i.test(name)) return false;
-                    if (isAutoCreatedAssetTypeDoc(t)) return false;
-                    if (isFleetOrVehicleCatalogName(name)) return false;
-                    return true;
-                };
-                const leakedAutoCreatedIds = types
-                    .filter((t) => !keepType(t) && isAutoCreatedAssetTypeDoc(t))
-                    .map((t) => t._id);
-                types = types.filter(keepType);
-                // Soft-deactivate brand rows that fleet create accidentally wrote into the tools catalog.
-                if (leakedAutoCreatedIds.length) {
-                    await AssetType.updateMany(
-                        { _id: { $in: leakedAutoCreatedIds } },
-                        { $set: { isActive: false } },
-                    ).catch(() => { });
-                }
-            }
 
             const flowAc = await getDepartmentHOD('assetcontroller');
             let designatedAssetController = null;
@@ -988,7 +1155,7 @@ export const getAssetTypes = async (req, res) => {
                             quantity: a.quantity || 1,
                             warranty: a.warranty,
                             warrantyYears: a.warrantyYears,
-                            warrantyAttachment: toolsOnly ? a.warrantyAttachment : await signIf(a.warrantyAttachment),
+                            warrantyAttachment: await signIf(a.warrantyAttachment),
                             invoiceNumber: a.invoiceNumber,
                             imagePreview: imagePreview || photo || images[0]?.url || null,
                             photo: photo || imagePreview || images[0]?.url || null,
@@ -1008,9 +1175,7 @@ export const getAssetTypes = async (req, res) => {
                             lossDamageFineStatus: resolvedFine?.fineStatus || mainFine?.fineStatus || null,
                             lostAt: resolvedLostAt,
                             createdBy: a.createdBy,
-                            accessories: toolsOnly
-                                ? accList
-                                : await Promise.all(
+                            accessories: await Promise.all(
                                     accList.map(async (accObj) => ({
                                         ...accObj,
                                         attachment: accObj.attachment

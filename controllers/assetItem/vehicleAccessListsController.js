@@ -2,6 +2,7 @@ import mongoose from 'mongoose';
 import AssetItem from '../../models/AssetItem.js';
 import AssetHistory from '../../models/AssetHistory.js';
 import { buildFleetVehicleMongoScope } from '../../utils/fleetVehicleAssetId.js';
+import { isPendingVehicleService } from '../../utils/vehicleServicePendingStatus.js';
 
 const SERVICE_TYPES = [
     'Oil Service',
@@ -32,15 +33,18 @@ function draftVisibilityQuery(reqUser) {
     return { status: { $ne: 'Draft' } };
 }
 
+function parseServiceRemark(service) {
+    try {
+        return service?.remark ? JSON.parse(service.remark) : {};
+    } catch {
+        return {};
+    }
+}
+
 function serviceTypeKey(service) {
     const st = String(service?.serviceType || '').trim();
     if (st) return st;
-    try {
-        const remark = service?.remark ? JSON.parse(service.remark) : null;
-        return String(remark?.serviceType || '').trim();
-    } catch {
-        return '';
-    }
+    return String(parseServiceRemark(service)?.serviceType || '').trim();
 }
 
 async function loadFleetVehicles(req, select, populate = []) {
@@ -75,10 +79,13 @@ export const getVehicleAccessServices = async (req, res) => {
             for (const v of vehicles) {
                 for (const s of v.services || []) {
                     const key = serviceTypeKey(s);
-                    if (counts[key] != null) counts[key] += 1;
+                    if (counts[key] == null) continue;
+                    if (!isPendingVehicleService(v, s)) continue;
+                    counts[key] += 1;
                 }
             }
-            return res.json({ counts });
+            const total = Object.values(counts).reduce((sum, n) => sum + Number(n || 0), 0);
+            return res.json({ counts, total });
         }
 
         const items = vehicles

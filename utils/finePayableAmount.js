@@ -39,6 +39,28 @@ export function resolvePartyServiceShare(fine, entry, isCompanyPartyFlag = false
     return totalSc / n;
 }
 
+/** Net payable = employee + company bases + service charge − discount. */
+export function resolveFineNetTotal(fine) {
+    if (!fine) return 0;
+
+    const emp = parseFloat(fine.employeeAmount || 0) || 0;
+    const comp = parseFloat(fine.companyAmount || 0) || 0;
+    const sc = parseFloat(fine.serviceCharge || 0) || 0;
+    const discount = parseFloat(fine.discount || 0) || 0;
+    const gross = emp + comp + sc;
+    const computed = Math.max(0, Number((gross - discount).toFixed(2)));
+    const stored = parseFloat(fine.totalFineAmount ?? fine.fineAmount ?? 0) || 0;
+
+    if (computed <= 0 && stored > 0) return stored;
+    if (stored <= 0) return computed;
+
+    // Stored matches pre-discount gross while a discount exists → use net total
+    if (discount > 0 && Math.abs(stored - gross) < 0.02) return computed;
+    if (discount > 0 && stored > computed + 0.01) return computed;
+
+    return stored;
+}
+
 function resolveRowBaseAmount(fine, entry, isCompanyPartyFlag) {
     let base = parseFloat(entry?.employeeAmount) || 0;
     if (base <= 0) {
@@ -74,37 +96,63 @@ export function resolveEmployeeFinePayableAmount(fine, employeeId) {
     if (entry.individualAmount != null && entry.individualAmount !== '') {
         const stored = parseFloat(entry.individualAmount) || 0;
         if (stored > 0) {
-            // Stored total missing service charge → top up
-            if (sc > 0 && rowBase > 0 && stored < expected - 0.01) return expected;
-            return Math.max(stored, expected > 0 ? expected : 0);
+            if (sc > 0 && rowBase > 0 && stored < expected - 0.01) {
+                return applyEmployeeDiscountShare(fine, expected);
+            }
+            const netTotal = resolveFineNetTotal(fine);
+            if (netTotal > 0 && stored > netTotal + 0.01) {
+                return applyEmployeeDiscountShare(fine, expected);
+            }
+            return applyEmployeeDiscountShare(fine, Math.max(stored, expected > 0 ? expected : 0));
         }
     }
     if (entry.fineAmount != null && entry.fineAmount !== '') {
         const stored = parseFloat(entry.fineAmount) || 0;
         if (stored > 0) {
-            if (sc > 0 && rowBase > 0 && stored < expected - 0.01) return expected;
-            if (sc > 0 && Math.abs(stored - rowBase) < 0.01) return expected;
-            return Math.max(stored, expected > 0 ? expected : 0);
+            if (sc > 0 && rowBase > 0 && stored < expected - 0.01) {
+                return applyEmployeeDiscountShare(fine, expected);
+            }
+            if (sc > 0 && Math.abs(stored - rowBase) < 0.01) {
+                return applyEmployeeDiscountShare(fine, expected);
+            }
+            const netTotal = resolveFineNetTotal(fine);
+            if (netTotal > 0 && stored > netTotal + 0.01) {
+                return applyEmployeeDiscountShare(fine, expected);
+            }
+            return applyEmployeeDiscountShare(fine, Math.max(stored, expected > 0 ? expected : 0));
         }
     }
 
-    if (expected > 0) return expected;
+    if (expected > 0) {
+        return applyEmployeeDiscountShare(fine, expected);
+    }
 
     const companyAmount = parseFloat(fine.companyAmount || 0) || 0;
-    const fineAmount = parseFloat(fine.fineAmount || fine.totalFineAmount || 0) || 0;
+    const fineAmount = resolveFineNetTotal(fine);
     const humanAssignees = (fine.assignedEmployees || []).filter(
         (ae) => ae.employeeId && ae.employeeId !== 'VEGA-HR-0000' && ae.employeeId !== 'PENDING',
     );
 
     if (humanAssignees.length <= 1 && companyAmount === 0 && fineAmount > 0) {
-        const totalSc = parseFloat(fine.serviceCharge || 0) || 0;
-        if (totalSc > 0 && fineAmount < rowBase + totalSc - 0.01 && rowBase > 0) {
-            return Number((rowBase + totalSc).toFixed(2));
-        }
         return fineAmount;
     }
 
     return 0;
+}
+
+function applyEmployeeDiscountShare(fine, partyGross) {
+    const netTotal = resolveFineNetTotal(fine);
+    const rf = String(fine?.responsibleFor || 'Employee').trim();
+    const emp = parseFloat(fine?.employeeAmount || 0) || 0;
+    const comp = parseFloat(fine?.companyAmount || 0) || 0;
+    const sc = parseFloat(fine?.serviceCharge || 0) || 0;
+    const gross = emp + comp + sc;
+
+    if (rf === 'Employee') return netTotal > 0 ? netTotal : partyGross;
+    if (rf === 'Employee & Company' && gross > 0 && netTotal >= 0) {
+        return Number((netTotal * (partyGross / gross)).toFixed(2));
+    }
+    return partyGross;
 }
 
 export function resolveCompanyFinePayableAmount(fine, companyEntry = null) {
@@ -122,29 +170,59 @@ export function resolveCompanyFinePayableAmount(fine, companyEntry = null) {
     if (entry?.individualAmount != null && entry.individualAmount !== '') {
         const stored = parseFloat(entry.individualAmount) || 0;
         if (stored > 0) {
-            if (sc > 0 && rowBase > 0 && stored < expected - 0.01) return expected;
-            // Prefer base+SC when stored understates (e.g. old Zoho under-bill amounts)
-            return Math.max(stored, expected > 0 ? expected : 0);
+            if (sc > 0 && rowBase > 0 && stored < expected - 0.01) {
+                return applyCompanyDiscountShare(fine, expected);
+            }
+            const netTotal = resolveFineNetTotal(fine);
+            if (netTotal > 0 && stored > netTotal + 0.01) {
+                return applyCompanyDiscountShare(fine, expected);
+            }
+            return applyCompanyDiscountShare(fine, Math.max(stored, expected > 0 ? expected : 0));
         }
     }
     if (entry?.fineAmount != null && entry.fineAmount !== '') {
         const stored = parseFloat(entry.fineAmount) || 0;
         if (stored > 0) {
-            if (sc > 0 && rowBase > 0 && stored < expected - 0.01) return expected;
-            if (sc > 0 && Math.abs(stored - rowBase) < 0.01) return expected;
-            return Math.max(stored, expected > 0 ? expected : 0);
+            if (sc > 0 && rowBase > 0 && stored < expected - 0.01) {
+                return applyCompanyDiscountShare(fine, expected);
+            }
+            if (sc > 0 && Math.abs(stored - rowBase) < 0.01) {
+                return applyCompanyDiscountShare(fine, expected);
+            }
+            const netTotal = resolveFineNetTotal(fine);
+            if (netTotal > 0 && stored > netTotal + 0.01) {
+                return applyCompanyDiscountShare(fine, expected);
+            }
+            return applyCompanyDiscountShare(fine, Math.max(stored, expected > 0 ? expected : 0));
         }
     }
 
-    if (expected > 0) return expected;
+    if (expected > 0) {
+        return applyCompanyDiscountShare(fine, expected);
+    }
 
     const rf = (fine.responsibleFor || '').trim();
     if (rf === 'Company') {
-        const fineAmount = parseFloat(fine.fineAmount || fine.totalFineAmount || 0) || 0;
+        const fineAmount = resolveFineNetTotal(fine);
         if (fineAmount > 0) return fineAmount;
     }
 
     return 0;
+}
+
+function applyCompanyDiscountShare(fine, partyGross) {
+    const netTotal = resolveFineNetTotal(fine);
+    const rf = String(fine?.responsibleFor || 'Employee').trim();
+    const emp = parseFloat(fine?.employeeAmount || 0) || 0;
+    const comp = parseFloat(fine?.companyAmount || 0) || 0;
+    const sc = parseFloat(fine?.serviceCharge || 0) || 0;
+    const gross = emp + comp + sc;
+
+    if (rf === 'Company') return netTotal > 0 ? netTotal : partyGross;
+    if (rf === 'Employee & Company' && gross > 0 && netTotal >= 0) {
+        return Number((netTotal * (partyGross / gross)).toFixed(2));
+    }
+    return partyGross;
 }
 
 /** Resolve employee id from fine when only one human assignee exists. */
@@ -169,11 +247,12 @@ export function syncFinePartyPayableAmounts(fine) {
     const empAmt = parseFloat(fine.employeeAmount || 0) || 0;
     const compAmt = parseFloat(fine.companyAmount || 0) || 0;
     const servCharge = parseFloat(fine.serviceCharge || 0) || 0;
-    const combined = empAmt + compAmt + servCharge;
+    const discountAmt = parseFloat(fine.discount || 0) || 0;
+    const combined = empAmt + compAmt + servCharge - discountAmt;
 
-    if (combined > 0) {
-        fine.totalFineAmount = combined;
-        fine.fineAmount = combined;
+    if (combined > 0 || discountAmt > 0) {
+        fine.totalFineAmount = Math.max(0, combined);
+        fine.fineAmount = fine.totalFineAmount;
     }
 
     (fine.assignedEmployees || []).forEach((entry) => {

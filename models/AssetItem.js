@@ -766,6 +766,8 @@ assetItemSchema.pre('save', async function (next) {
     next();
 });
 
+assetItemSchema.index({ assignedTo: 1, status: 1 });
+
 const AssetItem = mongoose.model('AssetItem', assetItemSchema);
 
 export default AssetItem;

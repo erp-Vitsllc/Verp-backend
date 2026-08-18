@@ -2,7 +2,7 @@ import ZohoVendor from '../models/ZohoVendor.js';
 import UtilityEntry from '../models/UtilityEntry.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
 import {
-    createBill,
+    createBillWithZohoSerial,
     markBillAsOpen,
     fetchBillById,
     fetchZohoCurrencies,
@@ -12,6 +12,7 @@ import {
 import { upsertZohoBillFromApi } from '../services/zohoPurchaseSyncService.js';
 import { withZohoOrganization } from './zohoOrgContext.js';
 import { resolveZohoOrganizationIdForCompany } from './resolveZohoOrganization.js';
+import { resolveZohoBillSerialNumber } from './zohoPurchaseMappers.js';
 import { buildUtilityBillZohoLineItems, collectUtilityZohoBillIds } from './upsertUtilityBalancePartyExpense.js';
 
 function utilityZohoBillExtras(billDoc, line, lineIndex, parentBillNumber) {
@@ -452,11 +453,6 @@ async function syncApprovedUtilityBillToZohoInner(billDoc, { markAsOpen = true }
         utilityBillDateFromMonth(billDoc.billMonth, billDoc.paymentDay);
     const provider = String(billDoc.provider || '').trim();
 
-    if (!billNumber) {
-        billDoc.zohoSyncError = 'Bill number is required for Zoho.';
-        await billDoc.save();
-        return { ok: false, message: billDoc.zohoSyncError };
-    }
     if (!billDate) {
         billDoc.zohoSyncError = 'Bill date is required for Zoho (use bill month).';
         await billDoc.save();
@@ -541,11 +537,9 @@ async function syncApprovedUtilityBillToZohoInner(billDoc, { markAsOpen = true }
               )
             : [];
 
-        const zohoBill = await createBill({
+        const zohoBill = await createBillWithZohoSerial({
             vendor_id: vendorId,
-            bill_number: billNumber,
             date: billDate,
-            reference_number: String(billDoc.accountNo || '').trim() || undefined,
             notes:
                 String(billDoc.notes || '').trim() ||
                 `Utility Actual ${Number(actual).toFixed(2)}${
@@ -590,9 +584,7 @@ async function syncApprovedUtilityBillToZohoInner(billDoc, { markAsOpen = true }
                 billDoc.billDate = billDate;
                 billDoc.zohoVendorId = vendorId;
                 billDoc.zohoBillId = zohoBillId;
-                billDoc.zohoBillNumber = String(
-                    zohoBill?.bill_number || zohoBill?.billNumber || billNumber || '',
-                ).trim();
+                billDoc.zohoBillNumber = resolveZohoBillSerialNumber(zohoBill);
                 billDoc.zohoBillIds = [zohoBillId];
                 if (lineDocs.length) billDoc.zohoLineItems = lineDocs;
                 try {
@@ -646,13 +638,7 @@ async function syncApprovedUtilityBillToZohoInner(billDoc, { markAsOpen = true }
         billDoc.billDate = billDate;
         billDoc.zohoVendorId = vendorId;
         billDoc.zohoBillId = zohoBillId;
-        billDoc.zohoBillNumber = String(
-            zohoBillForUpsert?.bill_number ||
-                zohoBill?.bill_number ||
-                zohoBill?.billNumber ||
-                billNumber ||
-                '',
-        ).trim();
+        billDoc.zohoBillNumber = resolveZohoBillSerialNumber(zohoBillForUpsert || zohoBill);
         billDoc.zohoBillIds = [zohoBillId];
         if (lineDocs.length) {
             billDoc.zohoLineItems = lineDocs;

@@ -44,6 +44,8 @@ export async function isUserHrForApprovedFineEdit(req, fine) {
 }
 
 export function restrictApprovedFineUpdates(updates = {}, fine) {
+    // Kept for callers that still want schedule-only patches. HR approved edits
+    // now persist all allowed fields via updateFine (amounts, discount, etc.).
     const allowed = {};
 
     if (updates.monthStart !== undefined) {

@@ -8,6 +8,7 @@ import {
 import { upsertZohoBillFromApi } from '../services/zohoPurchaseSyncService.js';
 import { withZohoOrganization } from './zohoOrgContext.js';
 import { resolveZohoVendorIdByProvider } from './syncUtilityBillToZoho.js';
+import { resolveZohoBillSerialNumber } from './zohoPurchaseMappers.js';
 import { downloadS3ObjectBytes } from './s3Upload.js';
 
 function parseRemark(service) {
@@ -360,13 +361,7 @@ async function createOneGarageZohoBill({
     return {
         billId,
         vendorId,
-        billNumber: String(
-            billForUpsert?.bill_number ||
-                billForUpsert?.billNumber ||
-                bill?.bill_number ||
-                bill?.billNumber ||
-                '',
-        ).trim(),
+        billNumber: resolveZohoBillSerialNumber(billForUpsert || bill),
     };
 }
 

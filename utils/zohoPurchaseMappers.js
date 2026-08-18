@@ -3,6 +3,35 @@ function cleanText(value, fallback = '') {
     return text || fallback;
 }
 
+/** Zoho Books custom field "Serial No." (e.g. VITS-Bills-012507), not Bill#. */
+export function resolveZohoCustomFieldSerial(zohoRecord) {
+    if (!zohoRecord || typeof zohoRecord !== 'object') return '';
+    let serialNo = '';
+    if (Array.isArray(zohoRecord.custom_fields)) {
+        const sf = zohoRecord.custom_fields.find((cf) =>
+            /serial/i.test(String(cf?.label || cf?.api_name || '')),
+        );
+        if (sf?.value) serialNo = cleanText(sf.value);
+    }
+    if (!serialNo && zohoRecord.custom_field_hash && typeof zohoRecord.custom_field_hash === 'object') {
+        for (const [k, v] of Object.entries(zohoRecord.custom_field_hash)) {
+            if (/serial/i.test(k) && v) {
+                serialNo = cleanText(v);
+                break;
+            }
+        }
+    }
+    return serialNo;
+}
+
+export function resolveZohoBillSerialNumber(bill) {
+    return resolveZohoCustomFieldSerial(bill);
+}
+
+export function resolveZohoExpenseSerialNumber(expense) {
+    return resolveZohoCustomFieldSerial(expense);
+}
+
 function numberValue(value) {
     const number = Number(value);
     return Number.isFinite(number) ? number : 0;
@@ -38,7 +67,9 @@ export function mapZohoExpenseToDoc(expense, organizationId, syncedAt = new Date
     return {
         zohoExpenseId,
         organizationId,
-        expenseNumber: cleanText(expense.expense_number || expense.expenseNumber),
+        expenseNumber:
+            resolveZohoExpenseSerialNumber(expense) ||
+            cleanText(expense.expense_number || expense.expenseNumber),
         date: cleanText(expense.date),
         accountName: cleanText(expense.account_name),
         vendorId: cleanText(expense.vendor_id),
@@ -60,11 +91,14 @@ export function mapZohoBillToDoc(bill, organizationId, syncedAt = new Date()) {
     const zohoBillId = cleanText(bill?.bill_id || bill?.id);
     if (!zohoBillId) return null;
 
+    const serialNo = resolveZohoBillSerialNumber(bill);
+    const billNumber = serialNo || cleanText(bill.bill_number || bill.reference_number || zohoBillId);
+
     return {
         zohoBillId,
         organizationId,
         date: cleanText(bill.date),
-        billNumber: cleanText(bill.bill_number || bill.reference_number || zohoBillId),
+        billNumber,
         referenceNumber: cleanText(bill.reference_number),
         vendorId: cleanText(bill.vendor_id),
         vendorName: cleanText(bill.vendor_name),

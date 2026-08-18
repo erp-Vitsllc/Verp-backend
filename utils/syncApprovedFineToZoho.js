@@ -1,19 +1,22 @@
 import axios from 'axios';
 import {
-    createBill,
+    createBillWithZohoSerial,
     getZohoOrganizationId,
     markBillAsOpen,
     fetchBillById,
     uploadBillAttachment,
+    updateBill,
 } from '../services/zohoService.js';
 import { upsertZohoBillFromApi } from '../services/zohoPurchaseSyncService.js';
 import { withZohoOrganization } from './zohoOrgContext.js';
 import { resolveZohoOrganizationIdForCompany } from './resolveZohoOrganization.js';
+import { resolveZohoBillSerialNumber } from './zohoPurchaseMappers.js';
 import { downloadS3ObjectBytes } from './s3Upload.js';
 import {
     resolveCompanyFinePayableAmount,
     resolveEmployeeFinePayableAmount,
     resolvePrimaryEmployeeId,
+    resolveFineNetTotal,
 } from './finePayableAmount.js';
 
 function sanitizeBillNumber(fineId) {
@@ -39,18 +42,18 @@ async function resolveOrganizationIdForFine(fineDoc) {
     return getZohoOrganizationId();
 }
 
-/** Bill line rate = party base + service charge (never base alone). */
+/** Bill line rate = party net payable (base + service charge − discount share). */
 function resolveFineBillLineAmount(fineDoc) {
     const party = fineDoc.assignedEmployees?.[0];
     const isCompany =
         party?.employeeId === 'VEGA-HR-0000' ||
         party?.employeeId === 'VEGA_INTERNAL';
 
-    // Authoritative on split siblings: employeeAmount (party base) + this record's serviceCharge
     const empAmt = Number(fineDoc.employeeAmount || 0) || 0;
     const compAmt = Number(fineDoc.companyAmount || 0) || 0;
     const servCharge = Number(fineDoc.serviceCharge || 0) || 0;
-    const fromParts = empAmt + compAmt + servCharge;
+    const discount = Number(fineDoc.discount || 0) || 0;
+    const fromParts = Math.max(0, empAmt + compAmt + servCharge - discount);
 
     let payable = 0;
     if (isCompany) {
@@ -60,11 +63,8 @@ function resolveFineBillLineAmount(fineDoc) {
         payable = empId ? resolveEmployeeFinePayableAmount(fineDoc, empId) : 0;
     }
 
-    const individual = Number(party?.individualAmount || 0) || 0;
-    const storedTotal = Number(fineDoc.totalFineAmount || fineDoc.fineAmount || 0) || 0;
-
-    // Never under-bill vs base + SC (fixes company lines stuck at old understated individualAmount)
-    const amount = Math.max(fromParts, payable, individual, storedTotal, 0);
+    const netStored = resolveFineNetTotal(fineDoc);
+    const amount = Math.max(0, fromParts, payable, netStored);
     return Number(amount.toFixed(2));
 }
 
@@ -318,14 +318,6 @@ async function syncApprovedFineToZohoInner(fineDoc, group) {
         }
         return { ok: false, message };
     }
-    if (!billNumber) {
-        const message = 'Bill number is required for Zoho.';
-        for (const f of group) {
-            f.zohoSyncError = message;
-            await f.save();
-        }
-        return { ok: false, message };
-    }
 
     const lineItems = group.map(buildLineItemFromFine).filter(Boolean);
     if (!lineItems.length) {
@@ -347,11 +339,9 @@ async function syncApprovedFineToZohoInner(fineDoc, group) {
     ].filter(Boolean);
 
     try {
-        const zohoBill = await createBill({
+        const zohoBill = await createBillWithZohoSerial({
             vendor_id: vendorId,
-            bill_number: billNumber,
             date: billDate,
-            reference_number: String(baseId || '').trim() || undefined,
             notes: notesParts.join('\n') || undefined,
             line_items: lineItems,
         });
@@ -388,9 +378,7 @@ async function syncApprovedFineToZohoInner(fineDoc, group) {
             /* ignore */
         }
 
-        const zohoBillNumber = String(
-            zohoBillForUpsert?.bill_number || zohoBill?.bill_number || billNumber || '',
-        ).trim();
+        const zohoBillNumber = resolveZohoBillSerialNumber(zohoBillForUpsert || zohoBill);
 
         for (const f of group) {
             f.billDate = billDate;
@@ -431,6 +419,139 @@ async function syncApprovedFineToZohoInner(fineDoc, group) {
     } catch (err) {
         const message = err?.message || 'Failed to create Zoho bill for fine';
         console.error('[FineZoho] Failed:', message);
+        for (const f of group) {
+            f.zohoSyncError = message;
+            await f.save();
+        }
+        return { ok: false, message };
+    }
+}
+
+function matchExistingLineItem(existingLines, newLine, index) {
+    const lines = Array.isArray(existingLines) ? existingLines : [];
+    const accountId = String(newLine?.account_id || '').trim();
+    const byAccount = lines.find((row) => String(row?.account_id || '').trim() === accountId);
+    const byIndex = lines[index];
+    const existing = byAccount || byIndex || null;
+    const lineItemId = String(existing?.line_item_id || existing?.lineItemId || '').trim();
+    return lineItemId || '';
+}
+
+/**
+ * Update an existing Zoho Books bill when an approved fine is edited (amount/discount/vendor).
+ * Triggered when the client sends updateZoho: true on PUT /Fine/:id.
+ */
+export async function updateApprovedFineInZoho(fineDoc, siblingFines = null) {
+    if (!fineDoc) return { ok: false, message: 'Fine missing' };
+
+    const group = Array.isArray(siblingFines) && siblingFines.length > 0
+        ? siblingFines
+        : [fineDoc];
+
+    const zohoBillId = String(group.find((f) => f?.zohoBillId)?.zohoBillId || fineDoc.zohoBillId || '').trim();
+    if (!zohoBillId) {
+        return { ok: false, message: 'No Zoho bill is linked to this fine.' };
+    }
+
+    const organizationId = await resolveOrganizationIdForFine(fineDoc);
+    return withZohoOrganization(organizationId, () =>
+        updateApprovedFineInZohoInner(fineDoc, group, zohoBillId),
+    );
+}
+
+async function updateApprovedFineInZohoInner(fineDoc, group, zohoBillId) {
+    const existingBill = await fetchBillById(zohoBillId);
+    if (!existingBill) {
+        const message = 'Linked Zoho bill could not be loaded.';
+        for (const f of group) {
+            f.zohoSyncError = message;
+            await f.save();
+        }
+        return { ok: false, message };
+    }
+
+    const newLineItems = group.map(buildLineItemFromFine).filter(Boolean);
+    if (!newLineItems.length) {
+        const message =
+            'Each party needs a Payable (Chart of Accounts) and amount greater than zero for the Zoho bill update.';
+        for (const f of group) {
+            f.zohoSyncError = message;
+            await f.save();
+        }
+        return { ok: false, message };
+    }
+
+    const existingLines = existingBill.line_items || existingBill.lineItems || [];
+    const line_items = newLineItems.map((line, index) => {
+        const lineItemId = matchExistingLineItem(existingLines, line, index);
+        const row = {
+            account_id: line.account_id,
+            name: line.name,
+            quantity: line.quantity,
+            rate: line.rate,
+            description: line.description,
+        };
+        if (lineItemId) row.line_item_id = lineItemId;
+        return row;
+    });
+
+    const primary = group[0] || fineDoc;
+    const vendorId = String(
+        primary.zohoVendorId ||
+            fineDoc.zohoVendorId ||
+            existingBill.vendor_id ||
+            existingBill.vendorId ||
+            '',
+    ).trim();
+
+    try {
+        const payload = {
+            vendor_id: vendorId || existingBill.vendor_id || existingBill.vendorId,
+            bill_number: existingBill.bill_number || existingBill.billNumber,
+            date: existingBill.date,
+            line_items,
+        };
+        if (existingBill.due_date || existingBill.dueDate) {
+            payload.due_date = existingBill.due_date || existingBill.dueDate;
+        }
+
+        const zohoBill = await updateBill(zohoBillId, payload);
+        const zohoBillForUpsert = (await fetchBillById(zohoBillId)) || zohoBill;
+
+        try {
+            await upsertZohoBillFromApi(zohoBillForUpsert);
+        } catch (upsertErr) {
+            console.warn(
+                '[FineZoho] Bill update ok; ERP ZohoBill upsert failed:',
+                upsertErr?.message || upsertErr,
+            );
+        }
+
+        const zohoBillNumber = String(
+            zohoBillForUpsert?.bill_number || zohoBill?.bill_number || zohoBill?.billNumber || '',
+        ).trim();
+
+        for (const f of group) {
+            f.zohoBillNumber = zohoBillNumber || f.zohoBillNumber;
+            f.zohoSyncedAt = new Date();
+            f.zohoSyncError = '';
+            if (vendorId && !f.zohoVendorId) f.zohoVendorId = vendorId;
+            await f.save();
+        }
+
+        const attachResult = await syncFineAttachmentToZoho(group, zohoBillId);
+
+        return {
+            ok: true,
+            zohoBillId,
+            lineItemCount: line_items.length,
+            attachment: attachResult,
+            warning:
+                attachResult?.ok === false ? attachResult.message : undefined,
+        };
+    } catch (err) {
+        const message = err?.message || 'Failed to update Zoho bill for fine';
+        console.error('[FineZoho] Update failed:', message);
         for (const f of group) {
             f.zohoSyncError = message;
             await f.save();

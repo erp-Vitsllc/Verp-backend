@@ -157,6 +157,11 @@ const fineSchema = new mongoose.Schema(
             type: Number,
             default: 0
         },
+        discount: {
+            type: Number,
+            default: 0,
+            min: 0,
+        },
         sourceOfIncome: {
             type: String,
             enum: ['Salary', 'End of Service', null],
@@ -364,5 +369,7 @@ fineSchema.index({ "assignedEmployees.employeeId": 1 });
 fineSchema.index({ fineStatus: 1 });
 fineSchema.index({ fineType: 1 });
 fineSchema.index({ createdAt: -1 });
+fineSchema.index({ assetObjectId: 1 });
+fineSchema.index({ assetId: 1 });
 
 export default mongoose.model("Fine", fineSchema);
