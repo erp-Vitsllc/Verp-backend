@@ -431,6 +431,8 @@ const assetItemSchema = new mongoose.Schema({
     locatorSyncedAt: { type: Date, default: null },
     modelYear: { type: String, trim: true },
     currentKilometer: { type: Number, default: 0 },
+    /** Monthly petrol / fuel spend cap (AED) for this vehicle. */
+    fuelMonthlyLimit: { type: Number, default: 0 },
     /** Lifecycle for fleet reporting — separate from operational `status` (Assigned, etc.). */
     vehicleDispositionStatus: {
         type: String,

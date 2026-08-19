@@ -128,7 +128,7 @@ const attendanceSchema = new mongoose.Schema(
          *  future_* = planned request on an upcoming working day */
         leaveRequestKind: {
             type: String,
-            enum: ['', 'leave', 'yellow', 'future_leave', 'future_late', 'future_early'],
+            enum: ['', 'leave', 'yellow', 'future_leave', 'future_late', 'future_early', 'future_annual'],
             default: '',
             trim: true,
         },

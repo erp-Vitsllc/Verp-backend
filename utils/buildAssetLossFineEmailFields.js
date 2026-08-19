@@ -1,5 +1,6 @@
 import { isMultiPartyFine } from './fineGroupClassification.js';
 import { resolveEmployeeFinePayableAmount } from './finePayableAmount.js';
+import { formatFineCalendarDate } from './fineCalendarDate.js';
 
 function formatMoney(value) {
     return Number(value || 0).toLocaleString(undefined, {
@@ -28,7 +29,7 @@ function computeAssetAging(purchaseDate) {
 
 function mapPayableType(responsibleFor) {
     const rf = String(responsibleFor || 'Employee').trim();
-    if (rf === 'Employee & Company') return 'Employee/Company';
+    if (rf === 'Employee & Company') return 'Employee and Company';
     if (rf === 'Company') return 'Company';
     return 'Employee';
 }
@@ -87,6 +88,29 @@ export function isLossDamageFineType(fine) {
     return Boolean(fine.assetId || fine.assetObjectId);
 }
 
+/** VEHICLE FINE REPORT, SAFETY FINE REPORT, LOSS & DAMAGE REPORT, … */
+export function reportTitleForFine(fine) {
+    const type = String(fine?.fineType || '').trim();
+    if (!type) return 'FINE REPORT';
+    return `${type.toUpperCase()} REPORT`;
+}
+
+export function reportPdfFileSlug(fine) {
+    return String(fine?.fineType || 'Fine')
+        .replace(/[^a-zA-Z0-9]+/g, '')
+        .replace(/^$/, 'Fine');
+}
+
+export function reportPdfFileName(fine, suffix = '') {
+    const id = fine?.fineId || fine?._id || 'fine';
+    return `${reportPdfFileSlug(fine)}Report-${id}${suffix ? `-${suffix}` : ''}.pdf`;
+}
+
+export function reportPdfLabel(fine) {
+    const type = String(fine?.fineType || '').trim();
+    return type ? `${type} Report` : 'Fine Report';
+}
+
 export function buildAssetLossFineEmailFields(
     fine,
     {
@@ -98,8 +122,9 @@ export function buildAssetLossFineEmailFields(
     },
 ) {
     const serviceCharge = parseFloat(fine.serviceCharge || 0) || 0;
+    const discount = parseFloat(fine.discount || 0) || 0;
     const totalFine = resolveTotalFine(fine);
-    const actualFineAmount = Math.max(0, totalFine - serviceCharge);
+    const actualFineAmount = Math.max(0, totalFine - serviceCharge + discount);
 
     const isGroupFine = isMultiPartyFine(fine);
 
@@ -112,7 +137,7 @@ export function buildAssetLossFineEmailFields(
     const depreciation = parseFloat(fine.assetDepreciationAmount || 0) || 0;
     const purchaseCost = Math.max(0, actualFineAmount + depreciation) || parseFloat(fine.assetPurchaseCost || 0) || 0;
 
-    const fmt = formatDate || ((d) => (d ? new Date(d).toLocaleDateString('en-US') : '—'));
+    const fmt = formatDate || formatFineCalendarDate;
 
     return {
         fineId: fine.fineId || '—',
@@ -120,12 +145,15 @@ export function buildAssetLossFineEmailFields(
         employeeName: employeeName || '—',
         hodName: hodName || '—',
         description: fine.description || '—',
+        reportTitle: reportTitleForFine(fine),
+        fineType: fine.fineType || 'Fine',
         assetPurchaseDate: purchaseDate ? fmt(purchaseDate) : '—',
         assetPurchaseCost: purchaseCost,
         assetAging: computeAssetAging(purchaseDate),
         fineCategory: isGroupFine ? 'Group Fine' : 'Single Fine',
         actualFineAmount,
         serviceCharge,
+        discount,
         totalFine,
         payableTypeLabel: mapPayableType(fine.responsibleFor),
         yourFinePayment: yourPayable,
@@ -192,10 +220,11 @@ export function amountToWords(n) {
 export function buildAssetLossFineAcknowledgementText(employeeName, payableAmount) {
     const name = String(employeeName || '—').trim() || '—';
     const amountWords = amountToWords(payableAmount);
+    const aed = formatMoney(payableAmount);
     return (
-        `I, Mr./Ms. ${name}, acknowledge that the fine mentioned above has been committed due to my responsibility. ` +
-        `I understand and accept that I am accountable for the amount of (${amountWords} DIRHAMS). ` +
-        `I hereby authorize the deduction of the specified amount as mentioned from the source of income.`
+        `I, Mr./Ms. ${name}, acknowledge that the fine stated above was incurred under my responsibility. ` +
+        `I understand and accept accountability for ${amountWords} DIRHAMS (AED ${aed}) and ` +
+        `authorize deduction of the specified amount from the source of income shown above.`
     );
 }
 
@@ -205,11 +234,12 @@ export function buildAssetLossFineAcknowledgementText(employeeName, payableAmoun
 export function buildAssetLossFineAcknowledgementHtml(employeeName, payableAmount, { valueColor = '#cc0000' } = {}) {
     const name = String(employeeName || '—').trim() || '—';
     const amountWords = amountToWords(payableAmount);
+    const aed = formatMoney(payableAmount);
     return (
-        `I, Mr./Ms. <strong>${escapeHtml(name)}</strong> acknowledge that the fine mentioned above has been committed due to my responsibility. ` +
-        `I understand and accept that I am accountable for the amount of ` +
-        `<strong style="color:${valueColor};">(${escapeHtml(amountWords)} DIRHAMS)</strong>. ` +
-        `I hereby authorize the deduction of the specified amount as mentioned from the source of income.`
+        `I, Mr./Ms. <strong>${escapeHtml(name)}</strong>, acknowledge that the fine stated above was incurred under my responsibility. ` +
+        `I understand and accept accountability for ` +
+        `<strong style="color:${valueColor};">${escapeHtml(amountWords)} DIRHAMS (AED ${escapeHtml(aed)})</strong> and ` +
+        `authorize deduction of the specified amount from the source of income shown above.`
     );
 }
 

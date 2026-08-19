@@ -40,6 +40,7 @@ import {
     isFleetHandoverDashboardMeta,
     isFleetHandoverTrackingViewerRole,
     closeFleetHandoverDashboardActions,
+    healNoChangeHandoverHrSkip,
     markHandoverLifecycleOnHistory,
     HANDOVER_LIFECYCLE,
     buildFleetHandoverDisplayLabels,
@@ -264,6 +265,7 @@ import {
     ASSET_TOOLS_INBOX_TYPES,
     VEHICLE_DASHBOARD_INBOX_TYPES,
 } from '../utils/cleanupAssetDashboardActions.js';
+import { isAcceptedAssignmentOutcomeNotification } from '../utils/isAcceptedAssignmentOutcomeNotification.js';
 import { listPendingHubInboxItems } from '../utils/employeeHubRequestInbox.js';
 import { notifyAdminOfficerOnVehicleServiceCreated } from '../utils/vehicleServiceAdminOfficerNotification.js';
 import {
@@ -1252,6 +1254,36 @@ export const healMisroutedAssignmentInboxTasks = async () => {
     }
 };
 
+/** Close leftover "assignment accepted" FYI bells. Accept is email-only. */
+const closeAcceptedAssignmentOutcomeInboxRows = async (assignedToIds = null) => {
+    const match = {
+        requestType: 'Asset Assignment',
+        status: 'Pending',
+        $or: [
+            { extra1: { $regex: 'assignment accepted', $options: 'i' } },
+            { extra2: { $regex: '^Assignment Accepted$', $options: 'i' } },
+            { extra3: { $regex: '"assignmentOutcome"\\s*:\\s*true', $options: 'i' } },
+        ],
+    };
+    if (Array.isArray(assignedToIds) && assignedToIds.length) {
+        match.assignedTo = { $in: assignedToIds };
+    }
+    const rows = await DashboardAction.find(match).select('_id extra1 extra2 extra3 requestType').lean();
+    const ids = rows.filter(isAcceptedAssignmentOutcomeNotification).map((row) => row._id);
+    if (!ids.length) return 0;
+    await DashboardAction.updateMany(
+        { _id: { $in: ids }, status: 'Pending' },
+        {
+            $set: {
+                status: 'Approved',
+                actionedDate: new Date(),
+                comment: 'Auto-closed: assignment-accepted notifications are not shown.',
+            },
+        },
+    );
+    return ids.length;
+};
+
 /** Bell/inbox rows for assigner (+ counterpart) when assignment is rejected.
  *  Accept is email-only — no outcome notification. */
 const notifyAssignmentOutcomeDashboard = async ({
@@ -2115,7 +2147,7 @@ export const getVehicleFleetDashboard = async (req, res) => {
                 fineStatus: { $nin: ['Draft', 'Cancelled', 'Rejected'] },
             })
                 .select(
-                    'fineId fineType fineAmount totalFineAmount awardedDate fineStatus assignedEmployees vehicleId assetId assetName assetObjectId',
+                    'fineId fineType fineAmount totalFineAmount awardedDate fineStatus assignedEmployees vehicleId assetId assetName assetObjectId responsibleFor employeeAmount companyAmount serviceCharge discount paidAmount zohoBillId zohoBillNumber zohoSyncStatus vendorBillStatus',
                 )
                 .lean()
                 .catch(() => []),
@@ -2327,6 +2359,19 @@ export const getVehicleFleetDashboard = async (req, res) => {
                 vehicleId: vehicle ? String(vehicle._id) : '',
                 plate: group.plate,
                 modalKind: 'vehicleFine',
+                responsibleFor: fine.responsibleFor || '',
+                employeeAmount: fine.employeeAmount,
+                companyAmount: fine.companyAmount,
+                serviceCharge: fine.serviceCharge,
+                discount: fine.discount,
+                paidAmount: fine.paidAmount,
+                totalFineAmount: fine.totalFineAmount,
+                fineAmount: fine.fineAmount,
+                assignedEmployees: Array.isArray(fine.assignedEmployees) ? fine.assignedEmployees : [],
+                zohoBillId: fine.zohoBillId || '',
+                zohoBillNumber: fine.zohoBillNumber || '',
+                zohoSyncStatus: fine.zohoSyncStatus || '',
+                vendorBillStatus: fine.vendorBillStatus || '',
             });
         }
         const finesByVehicle = [...finesGrouped.values()]
@@ -4301,6 +4346,17 @@ async function runPostAssetCreationApprovalWork(req, work) {
             }
         } catch (emailErr) {
         }
+        try {
+            const { notifyAdminOfficerNewVehicleFirstInspection } = await import(
+                '../utils/notifyAdminOfficerNewVehicleFirstInspection.js'
+            );
+            await notifyAdminOfficerNewVehicleFirstInspection(item, {
+                req,
+                requestedByName: work.reviewerDisplayName,
+            });
+        } catch {
+            /* inspection notify is best-effort */
+        }
     }
 }
 
@@ -5312,6 +5368,12 @@ export const getAssetItemDetail = async (req, res) => {
             try {
                 currentCreationApprover = await syncStaleAssetCreationApprover(item);
             } catch (syncErr) {
+            }
+
+            try {
+                await healNoChangeHandoverHrSkip(item);
+            } catch {
+                /* non-fatal */
             }
 
             // Heal assignment Accept routing: user account → assignee; else → primary reportee.
@@ -9860,12 +9922,22 @@ const healDuplicatePendingAssignmentDashboardRows = async (requestId) => {
         status: 'Pending',
     })
         .sort({ requestedDate: -1 })
-        .select('_id assignedTo extra3 requestedDate')
+        .select('_id assignedTo extra3 extra1 extra2 requestedDate')
         .lean();
-    if (rows.length <= 1) return;
+    const acceptedOutcomeIds = rows
+        .filter(isAcceptedAssignmentOutcomeNotification)
+        .map((row) => row._id);
+    for (const id of acceptedOutcomeIds) {
+        await closeStaleAssignmentDashboardAction(
+            id,
+            'Auto-closed: assignment-accepted notifications are not shown.',
+        );
+    }
+    const liveRows = rows.filter((row) => !isAcceptedAssignmentOutcomeNotification(row));
+    if (liveRows.length <= 1) return;
 
     const groups = new Map();
-    for (const row of rows) {
+    for (const row of liveRows) {
         const assigneeKey = String(row.assignedTo || '');
         if (!groups.has(assigneeKey)) groups.set(assigneeKey, []);
         groups.get(assigneeKey).push(row);
@@ -9914,6 +9986,7 @@ const dedupeAssignmentDashboardInboxRows = (items, parseExtra3Fn) => {
             kept.push(it);
             continue;
         }
+        if (isAcceptedAssignmentOutcomeNotification(it)) continue;
         const key = String(it.requestId);
         if (seen.has(key)) continue;
         seen.add(key);
@@ -11921,6 +11994,27 @@ export const getHistoryRecord = async (req, res) => {
                             select: 'firstName lastName employeeId signature',
                         },
                     });
+            }
+        } catch {
+            /* non-fatal */
+        }
+
+        try {
+            const assetForHeal = await AssetItem.findById(record.assetId);
+            if (assetForHeal) {
+                const healResult = await healNoChangeHandoverHrSkip(assetForHeal);
+                if (healResult?.healed) {
+                    recordForResponse = await AssetHistory.findById(historyId)
+                        .populate('performedBy', 'firstName lastName employeeId signature')
+                        .populate({
+                            path: 'assignedTo',
+                            select: 'firstName lastName employeeId primaryReportee enablePortalAccess companyEmail signature',
+                            populate: {
+                                path: 'primaryReportee',
+                                select: 'firstName lastName employeeId signature',
+                            },
+                        });
+                }
             }
         } catch {
             /* non-fatal */
@@ -18849,6 +18943,21 @@ export const submitDraftForCreationApproval = async (req, res) => {
                 date: new Date(),
             });
 
+            void (async () => {
+                try {
+                    const { notifyAdminOfficerNewVehicleFirstInspection } = await import(
+                        '../utils/notifyAdminOfficerNewVehicleFirstInspection.js'
+                    );
+                    const requesterDisplayName = await getAssetRequesterDisplayName(req);
+                    await notifyAdminOfficerNewVehicleFirstInspection(item, {
+                        req,
+                        requestedByName: requesterDisplayName,
+                    });
+                } catch {
+                    /* inspection notify is best-effort */
+                }
+            })();
+
             return res.status(200).json(item);
         }
 
@@ -19193,6 +19302,10 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
                 extra3: { $regex: '"activationViewerRole"\\s*:\\s*"inspection_assignee"', $options: 'i' },
             });
             assigneeClauses.push({
+                requestType: 'Vehicle Inspection',
+                extra3: { $regex: '"newVehicleFirstInspection"\\s*:\\s*true', $options: 'i' },
+            });
+            assigneeClauses.push({
                 requestType: 'Asset Assignment',
                 extra3: { $regex: '"handoverViewerRole"\\s*:\\s*"adminOfficer"', $options: 'i' },
             });
@@ -19254,7 +19367,23 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
             ];
         }
 
+        const hideAcceptedOutcomeNor = {
+            $nor: [
+                {
+                    requestType: { $in: ['Asset Assignment', 'Asset'] },
+                    extra1: { $regex: 'assignment accepted', $options: 'i' },
+                },
+                {
+                    requestType: { $in: ['Asset Assignment', 'Asset'] },
+                    extra2: { $regex: '^Assignment Accepted$', $options: 'i' },
+                },
+            ],
+        };
+        if (Array.isArray(match.$and)) match.$and.push(hideAcceptedOutcomeNor);
+        else match.$and = [hideAcceptedOutcomeNor];
+
         // Default: skip expensive sync/heal on read. Pass sync=1 only when a background job wants it.
+        await closeAcceptedAssignmentOutcomeInboxRows(relevantIds).catch(() => 0);
         const wantSync = ['1', 'true', 'yes'].includes(String(req.query.sync || '').trim().toLowerCase());
         const skipSync =
             !wantSync &&
@@ -19304,6 +19433,7 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
         const seen = new Set();
         const unique = [];
         for (const it of [...dashboardPendingItems, ...creatorOutcomeItems]) {
+            if (isAcceptedAssignmentOutcomeNotification(it)) continue;
             const k = `${it._id?.toString()}-${it.requestId?.toString()}-${it.requestType}-${it.status}-${it.extra1 || ''}`;
             if (seen.has(k)) continue;
             seen.add(k);
@@ -19701,7 +19831,13 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
                     itemsAfterCompletedFilter.push(row);
                     continue;
                 }
-                // FYI after Accept/Reject — keep visible for assigner / parties (not an Accept task).
+                // Reject FYI stays visible. Accepted outcome bells are email-only — close and hide.
+                if (isAcceptedAssignmentOutcomeNotification(row)) {
+                    if (row.dashboardActionId) {
+                        staleAssignmentDashboardIds.add(String(row.dashboardActionId));
+                    }
+                    continue;
+                }
                 if (meta?.assignmentOutcome === true) {
                     itemsAfterCompletedFilter.push(row);
                     continue;

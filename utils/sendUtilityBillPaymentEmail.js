@@ -2,7 +2,12 @@ import nodemailer from 'nodemailer';
 import mongoose from 'mongoose';
 import { emailFrontendUrl } from './resolveFrontendBaseUrl.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
-import { resolveEmployeeEmail } from './resolveEmployeeEmail.js';
+import {
+    resolveEmployeeEmail,
+    getFallbackEmailNote,
+    employeeDisplayName,
+} from './resolveEmployeeEmail.js';
+import { isEmployeeActiveForNotifications } from './applyEmployeeLeftUserStatus.js';
 import { getDepartmentHOD } from './getDepartmentHOD.js';
 
 function createTransport() {
@@ -22,11 +27,11 @@ async function resolveRecipient(person) {
     if (person._id) {
         const fresh = await EmployeeBasic.findById(person._id)
             .select(
-                'firstName lastName companyEmail workEmail personalEmail email employeeId profileStatus status primaryReportee',
+                'firstName lastName companyEmail employeeId profileStatus status primaryReportee',
             )
             .populate(
                 'primaryReportee',
-                'firstName lastName companyEmail workEmail personalEmail email employeeId',
+                'firstName lastName companyEmail employeeId status profileStatus',
             )
             .lean();
         if (fresh) return fresh;
@@ -48,6 +53,34 @@ function uniqueEmails(list = []) {
     return out;
 }
 
+function formatAed(amount) {
+    return `AED ${Number(amount || 0).toLocaleString(undefined, {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+    })}`;
+}
+
+function companyEmailOf(emp) {
+    const v = String(emp?.companyEmail || '').trim();
+    return v || null;
+}
+
+/**
+ * Company mailbox only. Never personal / login / workEmail.
+ * If the employee has no companyEmail, use their primary reportee's companyEmail.
+ */
+function resolveCompanyAccountEmail(emp) {
+    if (!emp) return { email: null, isFallbackToReportee: false };
+    if (!isEmployeeActiveForNotifications(emp)) {
+        return { email: null, isFallbackToReportee: false };
+    }
+    const own = companyEmailOf(emp);
+    if (own) return { email: own, isFallbackToReportee: false };
+    const reporteeMail = companyEmailOf(emp.primaryReportee);
+    if (reporteeMail) return { email: reporteeMail, isFallbackToReportee: true };
+    return { email: null, isFallbackToReportee: false };
+}
+
 /**
  * Utility bill workflow emails (Accounts / HR / Pay / requester updates).
  * kind: pending_accounts | pending_hr | pending_pay | approved | rejected |
@@ -63,9 +96,14 @@ export async function sendUtilityBillPaymentEmail({
     try {
         const transporter = createTransport();
         const to = await resolveRecipient(recipient);
-        const { email: recipientEmail } = resolveEmployeeEmail(to || {});
+        const useCompanyOnly = kind === 'zoho_payable';
+        const resolved = useCompanyOnly
+            ? resolveCompanyAccountEmail(to || {})
+            : resolveEmployeeEmail(to || {});
+        const recipientEmail = resolved.email;
+        const isFallbackToReportee = Boolean(resolved.isFallbackToReportee);
         if (!transporter || !to || !recipientEmail) {
-            console.warn('[UtilityBillPaymentEmail] Missing SMTP or recipient email.');
+            console.warn('[UtilityBillPaymentEmail] Missing SMTP or recipient company email.');
             return;
         }
 
@@ -76,10 +114,8 @@ export async function sendUtilityBillPaymentEmail({
                 ? `/HRM/Asset/UtilityBills?batchId=${encodeURIComponent(String(bill.batchId))}&review=1`
                 : `/HRM/Asset/UtilityBills/details/${encodeURIComponent(bill.entryId)}?billId=${encodeURIComponent(String(bill._id))}`);
         const buttonUrl = `${frontendUrl}${path}`;
-        const amountTxt = `AED ${Number(bill.amount || 0).toLocaleString(undefined, {
-            minimumFractionDigits: 2,
-            maximumFractionDigits: 2,
-        })}`;
+        const hideGroupTotal = useCompanyOnly || Boolean(batchMeta?.hideGroupTotal);
+        const amountTxt = formatAed(bill.amount);
         const countTxt = batchMeta?.billCount ? `${batchMeta.billCount} account(s)` : '1 account';
         const remainingTxt =
             batchMeta?.remaining != null ? ` (${batchMeta.remaining} still pending pay)` : '';
@@ -127,8 +163,9 @@ export async function sendUtilityBillPaymentEmail({
                 'Accounts rejected this utility bill batch. It was returned to you (the creator) for correction.',
             paid: 'Your utility bill batch has been marked Paid by Accounts.',
             partially_paid: `Accounts paid some bills in this batch${remainingTxt}. Remaining bills are still awaiting payment.`,
-            zoho_payable:
-                'A utility bill has been created in Zoho Books. You are listed as Payable to on one or more lines.',
+            zoho_payable: isFallbackToReportee
+                ? `A utility bill has been created in Zoho Books. ${employeeDisplayName(to)} is listed as Payable to on one or more lines.`
+                : 'A utility bill has been created in Zoho Books. You are listed as Payable to on one or more lines.',
             pending: 'A utility bill requires your approval.',
         };
 
@@ -139,12 +176,7 @@ export async function sendUtilityBillPaymentEmail({
                         .map(
                             (line) =>
                                 `<p style="margin:0 0 4px;"><strong>${line.name || '—'}</strong>${
-                                    line.amount != null
-                                        ? ` — AED ${Number(line.amount || 0).toLocaleString(undefined, {
-                                              minimumFractionDigits: 2,
-                                              maximumFractionDigits: 2,
-                                          })}`
-                                        : ''
+                                    line.amount != null ? ` — ${formatAed(line.amount)}` : ''
                                 }${line.item ? ` · ${line.item}` : ''}</p>`,
                         )
                         .join('')}
@@ -157,13 +189,29 @@ export async function sendUtilityBillPaymentEmail({
                     <h1 style="margin:0; font-size:22px;">${titles[kind] || titles.pending}</h1>
                 </div>
                 <div style="padding:28px;">
-                    <p>Hello <strong>${to.firstName || ''} ${to.lastName || ''}</strong>,</p>
+                    <p>Hello <strong>${
+                        isFallbackToReportee && to.primaryReportee
+                            ? employeeDisplayName(to.primaryReportee)
+                            : employeeDisplayName(to)
+                    }</strong>,</p>
+                    ${
+                        isFallbackToReportee && to.primaryReportee
+                            ? getFallbackEmailNote(
+                                  employeeDisplayName(to),
+                                  employeeDisplayName(to.primaryReportee),
+                              )
+                            : ''
+                    }
                     <p style="margin:12px 0 20px;">${bodies[kind] || bodies.pending}</p>
                     <div style="background:#f8fafc; border:1px solid #f1f5f9; border-radius:10px; padding:18px;">
                         <p style="margin:0 0 8px;"><strong>Type:</strong> ${bill.utilityType || '—'}</p>
                         <p style="margin:0 0 8px;"><strong>Month:</strong> ${bill.billMonth || '—'}</p>
-                        <p style="margin:0 0 8px;"><strong>Accounts:</strong> ${countTxt}</p>
-                        <p style="margin:0;"><strong>Total amount:</strong> ${amountTxt}</p>
+                        <p style="margin:0${hideGroupTotal ? '' : ' 0 8px'};"><strong>Accounts:</strong> ${countTxt}</p>
+                        ${
+                            hideGroupTotal
+                                ? ''
+                                : `<p style="margin:0;"><strong>Total amount:</strong> ${amountTxt}</p>`
+                        }
                     </div>
                     ${payableHtml}
                     ${
@@ -199,6 +247,34 @@ export async function sendUtilityBillPaymentEmail({
     }
 }
 
+function employeeMatchKeys(emp) {
+    return [String(emp?._id || '').trim(), String(emp?.employeeId || '').trim()].filter(Boolean);
+}
+
+function idsMatchEmployee(id, emp) {
+    const value = String(id || '').trim();
+    if (!value) return false;
+    return employeeMatchKeys(emp).includes(value);
+}
+
+function payableLineLabel(bill, line = {}) {
+    const parts = [
+        line.item || line.description || bill.utilityType || '',
+        bill.provider || '',
+        bill.accountNo ? `Acc ${bill.accountNo}` : '',
+    ]
+        .map((p) => String(p || '').trim())
+        .filter(Boolean);
+    return parts.join(' · ');
+}
+
+function payablePartyName(emp, fallbackName = '') {
+    const name = employeeDisplayName(emp);
+    const code = String(emp?.employeeId || '').trim();
+    if (name && code && !String(name).includes(code)) return `${name} (${code})`;
+    return name || String(fallbackName || '').trim() || '—';
+}
+
 function collectPayableEmployeeIds(bills = []) {
     const ids = new Set();
     (bills || []).forEach((bill) => {
@@ -212,27 +288,26 @@ function collectPayableEmployeeIds(bills = []) {
     return [...ids];
 }
 
-function payableLinesForEmployee(bills = [], employeeId) {
+function payableLinesForEmployee(bills = [], employee) {
     const lines = [];
-    const eid = String(employeeId || '');
     (bills || []).forEach((bill) => {
         const rowItems = Array.isArray(bill?.zohoLineItems) ? bill.zohoLineItems : [];
         if (rowItems.length) {
             rowItems.forEach((line) => {
-                if (String(line?.payByEmployeeId || '') !== eid) return;
+                if (!idsMatchEmployee(line?.payByEmployeeId, employee)) return;
                 lines.push({
-                    name: String(line.payByEmployeeName || '').trim(),
+                    name: payablePartyName(employee, line.payByEmployeeName),
                     amount: Number(line.amount) || 0,
-                    item: String(line.item || line.description || '').trim(),
+                    item: payableLineLabel(bill, line),
                 });
             });
             return;
         }
-        if (String(bill?.payByEmployeeId || '') === eid) {
+        if (idsMatchEmployee(bill?.payByEmployeeId, employee)) {
             lines.push({
-                name: String(bill.payByEmployeeName || '').trim(),
+                name: payablePartyName(employee, bill.payByEmployeeName),
                 amount: Number(bill.employeePayAmount) || Number(bill.amount) || 0,
-                item: String(bill.utilityType || '').trim(),
+                item: payableLineLabel(bill),
             });
         }
     });
@@ -269,59 +344,63 @@ export async function notifyUtilityBillZohoPayableParties({
             ],
         })
             .select(
-                'firstName lastName companyEmail workEmail personalEmail email employeeId primaryReportee',
+                'firstName lastName companyEmail employeeId primaryReportee status profileStatus',
             )
             .populate(
                 'primaryReportee',
-                'firstName lastName companyEmail workEmail personalEmail email employeeId',
+                'firstName lastName companyEmail employeeId status profileStatus',
             )
             .lean();
 
         if (!employees.length) return;
 
         const hr = await getDepartmentHOD('hr');
-        const { email: hrEmail } = resolveEmployeeEmail(hr || {});
+        const { email: hrEmail } = resolveCompanyAccountEmail(hr || {});
 
         const first = list[0] || {};
-        const totalAmount = list.reduce((s, b) => s + (Number(b.amount) || 0), 0);
 
         for (const emp of employees) {
-            const empKey = String(emp._id);
-            const payableLines = payableLinesForEmployee(list, empKey);
+            const { email: toEmail, isFallbackToReportee } = resolveCompanyAccountEmail(emp);
+            if (!toEmail) {
+                console.warn(
+                    `[notifyUtilityBillZohoPayableParties] No company email (or reportee company email) for ${employeeDisplayName(emp)}.`,
+                );
+                continue;
+            }
+
+            const payableLines = payableLinesForEmployee(list, emp);
+            const individualAmount = payableLines.reduce(
+                (sum, line) => sum + (Number(line.amount) || 0),
+                0,
+            );
             const cc = [];
             const hod = emp.primaryReportee;
-            if (hod) {
-                const { email: hodEmail } = resolveEmployeeEmail(hod);
+            if (hod && !isFallbackToReportee) {
+                const hodEmail = companyEmailOf(hod);
                 if (hodEmail) cc.push(hodEmail);
             }
             if (hrEmail) cc.push(hrEmail);
-
-            // Also CC other Payable-to employees on the same batch
-            employees.forEach((other) => {
-                if (String(other._id) === empKey) return;
-                const { email: otherEmail } = resolveEmployeeEmail(other);
-                if (otherEmail) cc.push(otherEmail);
-            });
 
             await sendUtilityBillPaymentEmail({
                 recipient: emp,
                 bill: {
                     ...first,
-                    amount: totalAmount,
+                    amount: individualAmount,
                 },
                 kind: 'zoho_payable',
                 cc,
                 batchMeta: {
                     ...(batchMeta || {}),
                     billCount: list.length,
+                    hideGroupTotal: true,
                     payableLines:
                         payableLines.length > 0
                             ? payableLines
                             : [
                                   {
-                                      name: `${emp.firstName || ''} ${emp.lastName || ''}`.trim(),
-                                      amount: null,
-                                      item: '',
+                                      name: payablePartyName(emp),
+                                      amount: individualAmount,
+                                      item: String(first.utilityType || '').trim(),
                                   },
                               ],
                 },

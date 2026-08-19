@@ -21,6 +21,7 @@ import {
 import { normalizeFineSourceSchedule } from "../../utils/normalizeFineSourceSchedule.js";
 import { ensureAttachmentPersistedToS3 } from "../../utils/s3Upload.js";
 import { runAfterResponse } from "../../utils/runAfterResponse.js";
+import { parseFineCalendarDate } from "../../utils/fineCalendarDate.js";
 
 export const updateFine = async (req, res) => {
     try {
@@ -168,6 +169,11 @@ export const updateFine = async (req, res) => {
             const prev = existingVal !== undefined && existingVal !== null ? String(existingVal).trim() : '';
             return prev || next;
         };
+
+        if (updates.awardedDate !== undefined && updates.awardedDate !== null && updates.awardedDate !== '') {
+            const parsedAwardedDate = parseFineCalendarDate(updates.awardedDate);
+            if (parsedAwardedDate) updates.awardedDate = parsedAwardedDate;
+        }
 
         // Don't wipe existing description / companyDescription with blank strings from edit forms
         if (updates.description !== undefined && !String(updates.description || '').trim()) {

@@ -10,6 +10,7 @@ import {
 import {
     applyWeeklyOffForDate,
     isWeekOffForStaff,
+    holidayAppliesToStaff,
     loadWorkingTimeDoc,
     normalizeStaffType,
 } from './workingTimeHelpers.js';
@@ -112,7 +113,7 @@ export async function processAttendanceDailyRoutine() {
     try {
         const [workingTime, holidayDoc, activeEmployees, yesterdayRecords] = await Promise.all([
             loadWorkingTimeDoc(),
-            Holiday.findOne({ date: yesterdayKey }).select('_id date name').lean(),
+            Holiday.findOne({ date: yesterdayKey }).select('_id date name appliesTo').lean(),
             EmployeeBasic.find({
                 profileStatus: 'active',
                 status: { $ne: 'Left User' },
@@ -135,7 +136,7 @@ export async function processAttendanceDailyRoutine() {
             const staffType = normalizeStaffType(emp.staffType);
             const week = staffType === 'site' ? workingTime.site : workingTime.office;
 
-            if (isHoliday || isWeekOffForStaff(week, yesterdayKey)) {
+            if ((isHoliday && holidayAppliesToStaff(holidayDoc, staffType)) || isWeekOffForStaff(week, yesterdayKey)) {
                 continue;
             }
 

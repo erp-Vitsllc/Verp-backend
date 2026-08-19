@@ -1146,6 +1146,18 @@ async function createVehicleInspectionHandover(req, res, asset, { isReinspection
         isReinspection,
     });
 
+    try {
+        const { closeNewVehicleFirstInspectionNotifications } = await import(
+            '../utils/notifyAdminOfficerNewVehicleFirstInspection.js'
+        );
+        await closeNewVehicleFirstInspectionNotifications(id, {
+            comment: isReinspection ? 'Reinspection handover created.' : 'First inspection handover created.',
+            actionedBy: submitterId,
+        });
+    } catch {
+        /* reminder close is best-effort */
+    }
+
     await AssetItem.updateOne(
         { _id: id },
         {

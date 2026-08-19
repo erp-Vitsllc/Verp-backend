@@ -1097,6 +1097,60 @@ export async function closeFleetHandoverDashboardActions(requestId, status, acti
     );
 }
 
+/**
+ * If target already accepted and accessories/body match the previous report,
+ * skip a leftover HR stage and finalize as Approved.
+ */
+export async function healNoChangeHandoverHrSkip(item) {
+    if (!item?._id) return { healed: false };
+
+    const flow = getVehicleHandoverFlow(item);
+    const stage = String(flow?.stage || '').toLowerCase();
+    if (!flow || !['hr', 'management', 'hod'].includes(stage)) {
+        return { healed: false };
+    }
+
+    const historyId = flow.historyId;
+    if (!historyId) return { healed: false };
+
+    const historyRecord = await AssetHistory.findById(historyId).lean();
+    if (!historyRecord) return { healed: false };
+
+    const handoverKind = String(historyRecord?.details?.handoverKind || '').trim();
+    if (
+        handoverKind === 'vehicle_inspection' ||
+        historyRecord?.details?.firstInspection === true ||
+        historyRecord?.details?.reinspection === true
+    ) {
+        return { healed: false };
+    }
+
+    const requiresHr = await handoverRequiresHrApproval(historyRecord, item);
+    if (requiresHr) return { healed: false };
+
+    await markHandoverLifecycleOnHistory(historyId, HANDOVER_LIFECYCLE.APPROVED, {
+        'details.hrApprovalSkipped': true,
+    });
+
+    if (item.pendingActionDetails?.vehicleHandoverFlow) {
+        delete item.pendingActionDetails.vehicleHandoverFlow;
+        item.markModified?.('pendingActionDetails');
+    }
+    item.actionRequiredBy = null;
+    if (String(item.acceptanceStatus || '').trim() === 'Pending') {
+        item.acceptanceStatus = 'Accepted';
+        item.status = 'Assigned';
+    }
+    await item.save();
+    await closeFleetHandoverDashboardActions(
+        item._id,
+        'Approved',
+        null,
+        'HR skipped — no accessory or body photo edits.',
+    );
+    return { healed: true };
+}
+
 export async function notifyHandoverStageEmail({
     asset,
     employee,
@@ -1318,10 +1372,10 @@ export async function advanceFleetHandoverOnAccept({
             : historyRecord;
         const requiresHr = await handoverRequiresHrApproval(latestHistory || historyRecord, item);
 
-        // No accessory/body differences vs previous → skip HR and finalize as approved.
+        // No accessory/body photo differences vs previous → skip HR and finalize as approved.
         if (!requiresHr) {
             if (historyId) {
-                await markHandoverLifecycleOnHistory(historyId, HANDOVER_LIFECYCLE.ACCEPTED, {
+                await markHandoverLifecycleOnHistory(historyId, HANDOVER_LIFECYCLE.APPROVED, {
                     'details.hrApprovalSkipped': true,
                 });
             }

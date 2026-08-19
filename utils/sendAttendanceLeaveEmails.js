@@ -52,6 +52,7 @@ export async function sendAttendanceLeaveRequestEmail({
         const kindKey = String(kind || '');
         const isYellow = kindKey === 'yellow';
         const isFutureLeave = kindKey === 'future_leave';
+        const isFutureAnnual = kindKey === 'future_annual';
         const isFutureLate = kindKey === 'future_late';
         const isFutureEarly = kindKey === 'future_early';
         const empName = personName(employee);
@@ -66,6 +67,8 @@ export async function sendAttendanceLeaveRequestEmail({
             ? 'Late Arrival Request'
             : isFutureEarly
               ? 'Early Go Request'
+              : isFutureAnnual
+                ? 'Annual Leave Request'
               : isFutureLeave
                 ? 'Future Leave Request'
                 : isYellow
@@ -75,12 +78,14 @@ export async function sendAttendanceLeaveRequestEmail({
         const headerColor = isYellow ? '#1e293b' : '#fff';
         const subjectLine = `${title}: ${empName} — ${shownDate}`;
         const intro =
-            isFutureLate || isFutureEarly || isFutureLeave
+            isFutureLate || isFutureEarly || isFutureLeave || isFutureAnnual
                 ? `has sent a request for a future working day:`
                 : isYellow
                   ? `has asked you to confirm their attendance day as <strong>Present</strong>:`
                   : `has asked you to change their leave status:`;
-        const confirmLine = isFutureLeave
+        const confirmLine = isFutureAnnual
+            ? 'If you <strong>Approve</strong>, the day is marked as Annual Leave. If you <strong>Reject</strong>, it stays upcoming.'
+            : isFutureLeave
             ? 'If you <strong>Approve</strong>, choose Paid or Unpaid Authorized Leave. If you <strong>Reject</strong>, it stays upcoming.'
             : isFutureLate
               ? 'If you <strong>Approve</strong>, the day shows green as Late arrival approved. If you <strong>Reject</strong>, it stays upcoming.'

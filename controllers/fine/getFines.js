@@ -1,4 +1,5 @@
 import Fine from "../../models/Fine.js";
+import AssetItem from "../../models/AssetItem.js";
 import mongoose from "mongoose";
 import { isUserAdministrator } from "../../services/permissionService.js";
 
@@ -34,6 +35,7 @@ const FINE_LIST_SELECT = [
     'createdBy',
     'vehicleId',
     'assetId',
+    'assetObjectId',
     'assetName',
     'projectId',
     'projectName',
@@ -44,6 +46,68 @@ function fillCompanyNameFromPopulate(fine) {
     const populatedName = fine.company?.name;
     if (populatedName && (!fine.companyName || fine.companyName === 'N/A')) {
         fine.companyName = populatedName;
+    }
+}
+
+function formatVehiclePlate(asset) {
+    if (!asset) return '';
+    return [asset.plateEmirate, asset.plateNumber].filter(Boolean).join(' ').trim();
+}
+
+async function attachVehiclePlateToFines(fines) {
+    if (!Array.isArray(fines) || !fines.length) return;
+
+    const objectIds = new Set();
+    const assetCodes = new Set();
+
+    for (const fine of fines) {
+        for (const rawId of [fine.assetObjectId, fine.vehicleId]) {
+            const id = String(rawId || '').trim();
+            if (id && mongoose.Types.ObjectId.isValid(id)) {
+                objectIds.add(id);
+            }
+        }
+        const assetCode = String(fine.assetId || '').trim();
+        if (assetCode) assetCodes.add(assetCode);
+    }
+
+    const assets = [];
+    if (objectIds.size) {
+        assets.push(
+            ...(await AssetItem.find({ _id: { $in: [...objectIds] } })
+                .select('_id assetId plateEmirate plateNumber')
+                .lean()
+                .maxTimeMS(8000)),
+        );
+    }
+    if (assetCodes.size) {
+        assets.push(
+            ...(await AssetItem.find({ assetId: { $in: [...assetCodes] } })
+                .select('_id assetId plateEmirate plateNumber')
+                .lean()
+                .maxTimeMS(8000)),
+        );
+    }
+
+    const byObjectId = new Map(assets.map((asset) => [String(asset._id), asset]));
+    const byAssetCode = new Map(assets.map((asset) => [String(asset.assetId || ''), asset]));
+
+    for (const fine of fines) {
+        const linkedAsset =
+            byObjectId.get(String(fine.assetObjectId || '')) ||
+            byObjectId.get(String(fine.vehicleId || '')) ||
+            byAssetCode.get(String(fine.assetId || '')) ||
+            null;
+
+        const plateEmirate = linkedAsset?.plateEmirate || '';
+        const plateNumber = linkedAsset?.plateNumber || '';
+        fine.plateEmirate = plateEmirate;
+        fine.plateNumber = plateNumber;
+        fine.vehiclePlateNo = formatVehiclePlate(linkedAsset);
+        if (linkedAsset?._id) {
+            fine.vehicleObjectId = linkedAsset._id;
+            if (!fine.assetObjectId) fine.assetObjectId = linkedAsset._id;
+        }
     }
 }
 
@@ -165,6 +229,20 @@ export const getFines = async (req, res) => {
         ]);
 
         fines.forEach(fillCompanyNameFromPopulate);
+
+        const isVehicleLinked =
+            String(vehicleLinked || '') === '1' ||
+            String(vehicleLinked || '').toLowerCase() === 'true';
+        if (isVehicleLinked) {
+            try {
+                await attachVehiclePlateToFines(fines);
+            } catch (plateErr) {
+                console.warn(
+                    '[getFines] Vehicle plate backfill skipped:',
+                    plateErr?.message || plateErr,
+                );
+            }
+        }
 
         const missingCompany = fines.filter(
             (fine) =>

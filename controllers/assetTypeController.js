@@ -15,6 +15,7 @@ import {
     buildAssignmentHandoverEmailAttachments,
 } from '../utils/buildAssignmentHandoverEmailAttachments.js';
 import { sendAssetCreatedByAdminInfoEmail } from '../utils/sendAssetCreationDecisionEmail.js';
+import { notifyAdminOfficerNewVehicleFirstInspection } from '../utils/notifyAdminOfficerNewVehicleFirstInspection.js';
 import { sendAssetActionApprovalEmail } from '../utils/sendAssetActionApprovalEmail.js';
 import { sendAssignedEmployeeActionEmail } from '../utils/sendAssignedEmployeeActionEmail.js';
 import EmployeeBasic from '../models/EmployeeBasic.js';
@@ -237,7 +238,7 @@ export const createAssetType = async (req, res) => {
     try {
         let {
             mode, category, type, name, assetValue, purchaseDate, quantity, warranty, warrantyYears, warrantyAttachment, invoiceNumber, imagePreview, description, invoiceFile, accessories,
-            vehicleCode, plateNumber, plateEmirate, modelYear, currentKilometer, registrationExpiryDate,
+            vehicleCode, plateNumber, plateEmirate, modelYear, currentKilometer, fuelMonthlyLimit, registrationExpiryDate,
             insuranceExpiryDate, oilChangeDate, gearOilDueDate, lastServiceDate, nextServiceDate,
             warrantyEnabled, warrantyKm, warrantyExpiryDate, vehicleBrand,
             creationIntent
@@ -493,6 +494,7 @@ export const createAssetType = async (req, res) => {
                     plateNumber,
                     modelYear,
                     currentKilometer,
+                    fuelMonthlyLimit: Number(fuelMonthlyLimit) || 0,
                     registrationExpiryDate,
                     insuranceExpiryDate,
                     oilChangeDate,
@@ -545,6 +547,13 @@ export const createAssetType = async (req, res) => {
                         recipient: assetController,
                         creatorName: requesterDisplayName
                     });
+                }
+
+                if (fleetVehicle && initialStatus === 'Unassigned') {
+                    void notifyAdminOfficerNewVehicleFirstInspection(newAsset, {
+                        req,
+                        requestedByName: requesterDisplayName,
+                    }).catch(() => null);
                 }
             }
 
@@ -2158,6 +2167,8 @@ export const updateAssetItem = async (req, res) => {
                         asset.quantity = Math.max(1, Number(updates[key]) || 1);
                     } else if (key === 'warrantyYears') {
                         asset.warrantyYears = Math.max(0, Number(updates[key]) || 0);
+                    } else if (key === 'fuelMonthlyLimit') {
+                        asset.fuelMonthlyLimit = Math.max(0, Number(updates[key]) || 0);
                     } else if (
                         key !== 'type' &&
                         key !== 'category' &&

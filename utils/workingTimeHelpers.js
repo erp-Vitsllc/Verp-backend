@@ -17,6 +17,41 @@ export function normalizeStaffType(value) {
     return String(value || '').trim().toLowerCase() === 'site' ? 'site' : 'office';
 }
 
+/** Legacy holidays with no appliesTo count as both Office and Site. */
+export function holidayAppliesToList(holiday) {
+    const raw = holiday?.appliesTo;
+    if (!Array.isArray(raw) || raw.length === 0) return ['office', 'site'];
+    const set = new Set(
+        raw.map((v) => (String(v).trim().toLowerCase() === 'site' ? 'site' : 'office')),
+    );
+    return ['office', 'site'].filter((key) => set.has(key));
+}
+
+export function holidayAppliesToStaff(holiday, staffType) {
+    if (!holiday) return false;
+    return holidayAppliesToList(holiday).includes(normalizeStaffType(staffType));
+}
+
+/** Body/query: both | office | site | staff | string[] */
+export function normalizeAppliesToInput(value) {
+    if (Array.isArray(value)) {
+        const set = new Set(
+            value.map((v) => {
+                const key = String(v || '').trim().toLowerCase();
+                if (key === 'site' || key === 'staff') return 'site';
+                if (key === 'office') return 'office';
+                return '';
+            }).filter(Boolean),
+        );
+        const list = ['office', 'site'].filter((key) => set.has(key));
+        return list.length ? list : ['office', 'site'];
+    }
+    const key = String(value || '').trim().toLowerCase();
+    if (key === 'office') return ['office'];
+    if (key === 'site' || key === 'staff') return ['site'];
+    return ['office', 'site'];
+}
+
 export function weekdayKeyFromDateKey(dateKey) {
     const date = String(dateKey || '').trim();
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return null;
@@ -228,7 +263,7 @@ export async function loadWorkingTimeDoc() {
     };
 }
 
-async function getActiveEmployeesByStaffType(staffType) {
+export async function getActiveEmployeesByStaffType(staffType) {
     const wanted = normalizeStaffType(staffType);
     const filter = { profileStatus: 'active' };
     if (wanted === 'site') {
@@ -280,15 +315,18 @@ export async function syncWeeklyOffAttendanceMarks({
         return { upserted: 0, cleared: 0 };
     }
 
-    const holidayDates = new Set(
-        (
-            await Holiday.find({
-                date: { $gte: fromKey, $lte: toKey },
-            })
-                .select('date')
-                .lean()
-        ).map((h) => h.date),
-    );
+    const holidayRows = await Holiday.find({
+        date: { $gte: fromKey, $lte: toKey },
+    })
+        .select('date appliesTo')
+        .lean();
+
+    const holidayDatesFor = (staffType) =>
+        new Set(
+            (holidayRows || [])
+                .filter((h) => holidayAppliesToStaff(h, staffType))
+                .map((h) => h.date),
+        );
 
     const [siteEmployees, officeEmployees] = await Promise.all([
         getActiveEmployeesByStaffType('site'),
@@ -308,6 +346,7 @@ export async function syncWeeklyOffAttendanceMarks({
         const offWeekdays = new Set(getOffWeekdayKeys(group.week));
         if (!group.employees.length) continue;
 
+        const holidayDates = holidayDatesFor(group.staffType);
         const employeeIds = group.employees.map((e) => String(e._id));
         const offDates = dateKeys.filter((dateKey) => {
             const dayKey = weekdayKeyFromDateKey(dateKey);

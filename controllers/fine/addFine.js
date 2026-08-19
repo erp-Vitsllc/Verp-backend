@@ -6,6 +6,7 @@ import { ensureAttachmentPersistedToS3 } from "../../utils/s3Upload.js";
 import { sendFineApprovalEmail } from "../../utils/sendFineApprovalEmail.js";
 import { isVehicleFinePayload, validateVehicleFinePayload } from "../../utils/validateVehicleFinePayload.js";
 import { normalizeFineSourceSchedule } from "../../utils/normalizeFineSourceSchedule.js";
+import { parseFineCalendarDate } from "../../utils/fineCalendarDate.js";
 
 async function persistFineAttachmentsList(attachments, folder) {
     if (!Array.isArray(attachments) || attachments.length === 0) return [];
@@ -383,7 +384,7 @@ export const addFine = async (req, res) => {
 
                     description: commonData.description || '',
                     companyDescription: commonData.companyDescription || '',
-                    awardedDate: commonData.awardedDate ? new Date(commonData.awardedDate) : new Date(),
+                    awardedDate: parseFineCalendarDate(commonData.awardedDate) || new Date(),
                     remarks: commonData.remarks || '',
                     attachment: attachmentData,
                     attachments: attachmentsData.length > 0 ? attachmentsData : undefined,
@@ -606,7 +607,7 @@ export const addFine = async (req, res) => {
             totalFineAmount: totalFineAmount, // Store total fine amount (employeeAmount + companyAmount + serviceCharge)
             description: description || '',
             companyDescription: companyDescription || '',
-            awardedDate: awardedDate ? new Date(awardedDate) : new Date(),
+            awardedDate: parseFineCalendarDate(awardedDate) || new Date(),
             remarks: remarks || '',
             attachment: attachmentData,
             category: category || 'Other',

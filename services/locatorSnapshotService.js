@@ -1215,6 +1215,62 @@ async function buildLocatorFleetDashboardUncached() {
     return payload;
 }
 
+function monthBoundsForKey(monthKey, now = new Date()) {
+    const [year, month] = String(monthKey || '').split('-').map(Number);
+    const start = new Date(year, month - 1, 1);
+    const isCurrentMonth = now.getFullYear() === year && now.getMonth() === month - 1;
+    const end = isCurrentMonth
+        ? endOfDay(now)
+        : endOfDay(new Date(year, month, 0));
+    return { start, end };
+}
+
+/**
+ * Monthly running km + idle for one GPS device — same math as the fleet dashboard charts.
+ * Idle is engine-on idling only; km is the odometer/distance delta for that calendar month.
+ */
+export async function getLocatorMonthStatsMap(deviceId, monthKeys = []) {
+    const keys = [...new Set((monthKeys || []).map((key) => String(key || '').trim()))].filter((key) =>
+        /^\d{4}-(0[1-9]|1[0-2])$/.test(key),
+    );
+    const empty = { kmRun: 0, idleTimeMinutes: 0 };
+    const result = Object.fromEntries(keys.map((key) => [key, { ...empty }]));
+    const id = Number(deviceId);
+    if (!Number.isFinite(id) || id <= 0 || keys.length === 0) return result;
+
+    const now = new Date();
+    const bounds = keys.map((key) => ({ key, ...monthBoundsForKey(key, now) }));
+    const minStart = new Date(Math.min(...bounds.map((b) => b.start.getTime())));
+    const maxEnd = new Date(Math.max(...bounds.map((b) => b.end.getTime())));
+    const lookback = new Date(minStart);
+    lookback.setDate(lookback.getDate() - 3);
+
+    const rows = await LocatorGpsSnapshot.find({
+        deviceId: id,
+        capturedAt: { $gte: lookback, $lte: maxEnd },
+    })
+        .select('totalDistanceM state capturedAt')
+        .sort({ capturedAt: 1 })
+        .lean();
+
+    for (const { key, start, end } of bounds) {
+        const inMonth = rows.filter((row) => {
+            const at = new Date(row.capturedAt);
+            return at >= start && at <= end;
+        });
+        result[key] = {
+            kmRun: Number(runningKmForDeviceInRange(rows, start, end, null)) || 0,
+            idleTimeMinutes: Number(idleMinutesBetweenSnapshots(inMonth, null)) || 0,
+        };
+    }
+    return result;
+}
+
+export async function getLocatorMonthStatsForDevice(deviceId, monthKey) {
+    const map = await getLocatorMonthStatsMap(deviceId, [monthKey]);
+    return map[String(monthKey)] || { kmRun: 0, idleTimeMinutes: 0 };
+}
+
 export async function buildLocatorFleetDashboard() {
     if (!isLocatorConfigured()) {
         return {

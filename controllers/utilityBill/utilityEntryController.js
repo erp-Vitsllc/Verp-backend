@@ -7,6 +7,7 @@ import {
     cascadeDeleteUtilityEntry,
     isUtilityAdminSuperUser,
 } from '../../utils/utilityBillAdminDelete.js';
+import { isJwtSystemSuperUser } from '../../utils/systemSuperUser.js';
 import { sendUtilityAssignmentEmail } from '../../utils/sendUtilityAssignmentEmail.js';
 import {
     clearUtilityContractExpiryNotifications,
@@ -51,6 +52,17 @@ async function resolveActorName(req) {
 
 function normalizePaymentDay(values = {}) {
     const next = { ...(values || {}) };
+    const rental = Number(next.monthlyRental);
+    if (
+        next.monthlyRental !== '' &&
+        next.monthlyRental != null &&
+        Number.isFinite(rental) &&
+        rental === 0
+    ) {
+        delete next.paymentDay;
+        delete next.paymentDate;
+        return next;
+    }
     let day = Number(next.paymentDay);
     if (!Number.isInteger(day) || day < 1 || day > 31) {
         const legacy = String(next.paymentDate || '').trim();
@@ -149,13 +161,49 @@ async function recordAssignmentHistory({
 
 async function syncPaymentDay(entry) {
     const mapped = mapEntry(entry);
+    const entryId = mapped.id;
+    const monthlyRental = Number(mapped?.values?.monthlyRental);
+    const rawRental = mapped?.values?.monthlyRental;
+    const hasBillableRental =
+        rawRental === '' ||
+        rawRental == null ||
+        rawRental === undefined ||
+        (Number.isFinite(monthlyRental) && monthlyRental > 0);
     const paymentDay = Number(mapped?.values?.paymentDay);
-    if (!Number.isInteger(paymentDay) || paymentDay < 1 || paymentDay > 31) return null;
+
+    if (!hasBillableRental) {
+        await UtilityBillPaymentDay.findOneAndUpdate(
+            { entryId },
+            { $set: { status: 'Inactive' } },
+            { upsert: false },
+        );
+        try {
+            const { clearUtilityBillPaymentDayRemindersForEntry } = await import(
+                '../../utils/processUtilityBillPaymentDayReminders.js'
+            );
+            await clearUtilityBillPaymentDayRemindersForEntry(
+                entryId,
+                'No monthly bill — payment day reminder cleared',
+            );
+        } catch (err) {
+            console.error('[syncPaymentDay] clear reminders', err?.message || err);
+        }
+        return null;
+    }
+
+    if (!Number.isInteger(paymentDay) || paymentDay < 1 || paymentDay > 31) {
+        await UtilityBillPaymentDay.findOneAndUpdate(
+            { entryId },
+            { $set: { status: 'Inactive' } },
+            { upsert: false },
+        );
+        return null;
+    }
 
     return UtilityBillPaymentDay.findOneAndUpdate(
-        { entryId: mapped.id },
+        { entryId },
         {
-            entryId: mapped.id,
+            entryId,
             paymentDay,
             utilityType: mapped.type || '',
             accountNo: mapped.values?.accountNumber || '',
@@ -282,6 +330,14 @@ export async function updateUtilityEntry(req, res) {
         const prevAssignedTo = String(doc.assignedTo || '').trim();
         const prevAssignedToId = String(doc.assignedToId || '').trim();
         const prevAssignedToType = String(doc.assignedToType || '').trim();
+
+        const isDetailEdit =
+            (body.values != null && typeof body.values === 'object') || body.type != null;
+        if (isDetailEdit && !isJwtSystemSuperUser(req.user)) {
+            return res.status(403).json({
+                message: 'Only admin can edit utility record details.',
+            });
+        }
 
         if (body.type != null) doc.type = String(body.type).trim() || doc.type;
         if (body.values != null && typeof body.values === 'object') {

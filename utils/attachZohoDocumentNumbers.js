@@ -138,8 +138,7 @@ export async function attachZohoBillNumbers(records = [], options = {}) {
             .lean();
         for (const row of rows) {
             const id = clean(row.zohoBillId);
-            const number =
-                resolveZohoBillSerialNumber(row.zohoRaw) || clean(row.billNumber);
+            const number = resolveZohoBillSerialNumber(row.zohoRaw);
             if (id && number) map.set(id, number);
         }
     }
@@ -153,9 +152,7 @@ export async function attachZohoBillNumbers(records = [], options = {}) {
         if (fetchLive && id) {
             const liveSerial = await liveBillSerialNumber(rec);
             if (liveSerial) zohoBillNumber = liveSerial;
-        }
-
-        if (!zohoBillNumber) {
+        } else if (!zohoBillNumber) {
             zohoBillNumber = clean(rec?.zohoBillNumber);
         }
 

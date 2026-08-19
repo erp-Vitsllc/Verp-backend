@@ -133,7 +133,6 @@ async function resolveEmployeeCode(req) {
 
 /**
  * Logged-in employee's own loan / advance / reward / fine records for the home dashboard.
- * Auth-only — does not require module View permission.
  * @route GET /api/Employee/dashboard/my-hr-cards
  */
 export const getMyHrDashboardCards = async (req, res) => {
@@ -153,10 +152,7 @@ export const getMyHrDashboardCards = async (req, res) => {
 
         const loanQuery = { employeeId, status: { $ne: "Draft" } };
         if (req.user?.employeeObjectId) {
-            loanQuery.$or = [
-                { employeeId },
-                { employeeObjectId: req.user.employeeObjectId },
-            ];
+            loanQuery.$or = [{ employeeId }, { employeeObjectId: req.user.employeeObjectId }];
             delete loanQuery.employeeId;
         }
 

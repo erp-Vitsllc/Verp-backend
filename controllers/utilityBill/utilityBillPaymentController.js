@@ -400,10 +400,40 @@ export async function listUtilityBillPayments(req, res) {
             return { ...decorated, canApproveReject, canPay };
         };
 
+        const syncBillsVendorPaymentFromZoho = async (bills, { entryId: syncEntryId = null } = {}) => {
+            const linked = (bills || []).filter(
+                (b) =>
+                    (b.status === 'Approved' || b.status === 'Paid') &&
+                    utilityBillHasZohoLink(b),
+            );
+            if (!syncEntryId && !linked.length) return bills;
+            try {
+                await syncApprovedUtilityBillsPaidFromZoho({
+                    entryId: syncEntryId,
+                    billIds: syncEntryId ? null : linked.map((b) => b._id),
+                    userId: actor?._id || req.user?._id || null,
+                    fetchLive: true,
+                });
+            } catch (syncErr) {
+                console.warn(
+                    '[listUtilityBillPayments] Zoho paid sync failed:',
+                    syncErr?.message || syncErr,
+                );
+                return bills;
+            }
+            return null;
+        };
+
         if (batchId) {
-            const bills = await UtilityBillPayment.find({ batchId: String(batchId) })
+            let bills = await UtilityBillPayment.find({ batchId: String(batchId) })
                 .sort({ createdAt: 1 })
                 .lean();
+            const synced = await syncBillsVendorPaymentFromZoho(bills);
+            if (synced === null) {
+                bills = await UtilityBillPayment.find({ batchId: String(batchId) })
+                    .sort({ createdAt: 1 })
+                    .lean();
+            }
             const numbered = await attachZohoBillNumbers(bills, {
                 persistModel: UtilityBillPayment,
                 fetchLive: true,
@@ -455,50 +485,27 @@ export async function listUtilityBillPayments(req, res) {
             });
         }
 
-        const bills = await UtilityBillPayment.find(filter)
+        let bills = await UtilityBillPayment.find(filter)
             .populate('accountsApprovedBy', 'firstName lastName employeeId')
             .populate('hrApprovedBy', 'firstName lastName employeeId')
             .populate('actionedBy', 'firstName lastName employeeId')
             .sort({ createdAt: -1 })
             .lean();
 
-        // If Zoho already shows paid (payment made outside ERP mark-paid), flip Vendor Payment → Paid.
-        if (entryId || (Array.isArray(bills) && bills.some((b) => b.status === 'Approved'))) {
-            try {
-                const syncFilterEntry = entryId ? String(entryId) : null;
-                const approvedLinkedIds = bills
-                    .filter((b) => b.status === 'Approved' && utilityBillHasZohoLink(b))
-                    .map((b) => b._id);
-                // With entryId, sync the whole entry (any Zoho-linked Approved/Paid bill).
-                // Otherwise only sync the Approved bills that are Zoho-linked.
-                if (syncFilterEntry || approvedLinkedIds.length) {
-                    await syncApprovedUtilityBillsPaidFromZoho({
-                        entryId: syncFilterEntry,
-                        billIds: syncFilterEntry ? null : approvedLinkedIds,
-                        userId: actor?._id || req.user?._id || null,
-                        fetchLive: true,
-                    });
-                    const refreshed = await UtilityBillPayment.find(filter)
-                        .populate('accountsApprovedBy', 'firstName lastName employeeId')
-                        .populate('hrApprovedBy', 'firstName lastName employeeId')
-                        .populate('actionedBy', 'firstName lastName employeeId')
-                        .sort({ createdAt: -1 })
-                        .lean();
-                    const numbered = await attachZohoBillNumbers(refreshed, {
-                        persistModel: UtilityBillPayment,
-                    });
-                    return res.status(200).json({ bills: numbered.map(withPermissions) });
-                }
-            } catch (syncErr) {
-                console.warn(
-                    '[listUtilityBillPayments] Zoho paid sync failed:',
-                    syncErr?.message || syncErr,
-                );
-            }
+        const syncEntryId = entryId ? String(entryId) : null;
+        const synced = await syncBillsVendorPaymentFromZoho(bills, { entryId: syncEntryId });
+        if (synced === null) {
+            bills = await UtilityBillPayment.find(filter)
+                .populate('accountsApprovedBy', 'firstName lastName employeeId')
+                .populate('hrApprovedBy', 'firstName lastName employeeId')
+                .populate('actionedBy', 'firstName lastName employeeId')
+                .sort({ createdAt: -1 })
+                .lean();
         }
 
         const numbered = await attachZohoBillNumbers(bills, {
             persistModel: UtilityBillPayment,
+            fetchLive: true,
         });
         return res.status(200).json({ bills: numbered.map(withPermissions) });
     } catch (err) {
@@ -624,7 +631,10 @@ export async function getUtilityBillBatch(req, res) {
             actorIsAccounts: Boolean(accountsGate.isAccounts || accountsGate.isAdminUser),
             actorIsHr: Boolean(hrGate.isHr || hrGate.isAdminUser),
             bills: (
-                await attachZohoBillNumbers(bills, { persistModel: UtilityBillPayment })
+                await attachZohoBillNumbers(bills, {
+                    persistModel: UtilityBillPayment,
+                    fetchLive: true,
+                })
             ).map(decorateBill),
             reviewPath: reviewPath(resolvedBatchId, focus.utilityType, focus.billMonth),
         });
@@ -2087,8 +2097,28 @@ export async function payUtilityBillBatch(req, res) {
 
 export async function getUtilityBillPayment(req, res) {
     try {
-        const bill = await UtilityBillPayment.findById(req.params.id).lean();
+        let bill = await UtilityBillPayment.findById(req.params.id).lean();
         if (!bill) return res.status(404).json({ message: 'Bill not found' });
+
+        if (
+            (bill.status === 'Approved' || bill.status === 'Paid') &&
+            utilityBillHasZohoLink(bill)
+        ) {
+            try {
+                await syncApprovedUtilityBillsPaidFromZoho({
+                    billIds: [bill._id],
+                    userId: req.user?._id || null,
+                    fetchLive: true,
+                });
+                bill = await UtilityBillPayment.findById(req.params.id).lean();
+            } catch (syncErr) {
+                console.warn(
+                    '[getUtilityBillPayment] Zoho paid sync failed:',
+                    syncErr?.message || syncErr,
+                );
+            }
+        }
+
         const [numbered] = await attachZohoBillNumbers([bill], {
             persistModel: UtilityBillPayment,
             fetchLive: true,

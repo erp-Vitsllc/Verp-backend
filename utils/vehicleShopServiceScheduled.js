@@ -89,11 +89,13 @@ function buildShopScheduleEmailDetailRows(remark = {}, serviceTypeLabel = 'Vehic
         remark.serviceIssue || remark.description || remark.notes || '',
     ).trim();
     const amount =
-        Number(remark.hrReviewApprovedAmount) ||
-        Number(remark.approvedAmount) ||
-        Number(remark.estimatedCost) ||
-        Number(remark.garageBillAmount) ||
-        0;
+        String(remark.accidentOwnerType || '').trim().toLowerCase() === 'thirdparty'
+            ? 0
+            : Number(remark.hrReviewApprovedAmount) ||
+              Number(remark.approvedAmount) ||
+              Number(remark.estimatedCost) ||
+              Number(remark.garageBillAmount) ||
+              0;
 
     const rows = [];
     rows.push({

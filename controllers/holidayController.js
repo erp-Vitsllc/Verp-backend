@@ -1,15 +1,180 @@
 import Holiday from '../models/Holiday.js';
 import Attendance from '../models/Attendance.js';
-import EmployeeBasic from '../models/EmployeeBasic.js';
-import { applyWeeklyOffForDate } from '../utils/workingTimeHelpers.js';
+import {
+    applyWeeklyOffForDate,
+    getActiveEmployeesByStaffType,
+    holidayAppliesToList,
+    holidayAppliesToStaff,
+    normalizeAppliesToInput,
+    normalizeStaffType,
+} from '../utils/workingTimeHelpers.js';
 
 function isValidDateKey(value) {
     return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value);
 }
 
+const PROTECT_FROM_HOLIDAY_OVERWRITE = new Set([
+    'on_leave',
+    'sick_leave',
+    'authorized_leave',
+    'unauthorized_leave',
+]);
+
+async function markHolidayAttendance(date, name, staffTypes, markedBy) {
+    const types = Array.isArray(staffTypes) && staffTypes.length ? staffTypes : ['office', 'site'];
+    let markedCount = 0;
+
+    for (const staffType of types) {
+        const employees = await getActiveEmployeesByStaffType(staffType);
+        if (!employees.length) continue;
+
+        const ids = employees.map((e) => String(e._id));
+        const existing = await Attendance.find({
+            date,
+            employeeMongoId: { $in: ids },
+        })
+            .select('employeeMongoId statusKey')
+            .lean();
+        const skip = new Set(
+            existing
+                .filter((row) => PROTECT_FROM_HOLIDAY_OVERWRITE.has(String(row.statusKey || '')))
+                .map((row) => String(row.employeeMongoId)),
+        );
+
+        const bulk = [];
+        for (const emp of employees) {
+            const employeeMongoId = String(emp._id);
+            if (skip.has(employeeMongoId)) continue;
+            const employeeName = [emp.firstName, emp.lastName].filter(Boolean).join(' ').trim();
+            bulk.push({
+                updateOne: {
+                    filter: { date, employeeMongoId },
+                    update: {
+                        $set: {
+                            date,
+                            employeeMongoId,
+                            employeeId: String(emp.employeeId || ''),
+                            employeeName,
+                            statusKey: 'holiday',
+                            statusLabel: 'Holiday',
+                            reason: name,
+                            markedBy: markedBy || null,
+                        },
+                    },
+                    upsert: true,
+                },
+            });
+        }
+
+        if (bulk.length) {
+            const result = await Attendance.bulkWrite(bulk, { ordered: false });
+            markedCount += (result.upsertedCount || 0) + (result.modifiedCount || 0);
+        }
+    }
+
+    return markedCount;
+}
+
+async function clearHolidayAttendance(date, staffTypes) {
+    const types = Array.isArray(staffTypes) && staffTypes.length ? staffTypes : ['office', 'site'];
+    let cleared = 0;
+
+    for (const staffType of types) {
+        const employees = await getActiveEmployeesByStaffType(staffType);
+        if (!employees.length) continue;
+        const result = await Attendance.deleteMany({
+            date,
+            employeeMongoId: { $in: employees.map((e) => String(e._id)) },
+            statusKey: 'holiday',
+        });
+        cleared += result.deletedCount || 0;
+    }
+
+    return cleared;
+}
+
+function serializeHoliday(holiday) {
+    if (!holiday) return holiday;
+    const appliesTo = holidayAppliesToList(holiday);
+    return {
+        ...holiday,
+        appliesTo,
+        sourceDate: holiday.sourceDate || holiday.date || '',
+        isCustomDate: Boolean(holiday.isCustomDate),
+    };
+}
+
+function nextDateKey(dateKey) {
+    const cursor = new Date(`${dateKey}T12:00:00.000Z`);
+    cursor.setUTCDate(cursor.getUTCDate() + 1);
+    return cursor.toISOString().slice(0, 10);
+}
+
+function eachDateKeyInclusive(from, to) {
+    const keys = [];
+    for (let cursor = from; cursor <= to; cursor = nextDateKey(cursor)) {
+        keys.push(cursor);
+        if (keys.length > 31) break;
+    }
+    return keys;
+}
+
+function scopeLabel(types) {
+    if (!types?.length || types.length === 2) return 'Office and Site';
+    return types[0] === 'site' ? 'Site' : 'Office';
+}
+
+async function upsertHolidayOnDate({
+    date,
+    name,
+    appliesTo,
+    sourceDate,
+    isCustomDate,
+    note,
+    markedBy,
+}) {
+    const year = Number(date.slice(0, 4));
+    const existing = await Holiday.findOne({ date }).lean();
+
+    if (existing) {
+        const current = holidayAppliesToList(existing);
+        const toAdd = appliesTo.filter((t) => !current.includes(t));
+        if (!toAdd.length) {
+            return { status: 'exists', holiday: existing, markedCount: 0 };
+        }
+        const merged = ['office', 'site'].filter(
+            (key) => current.includes(key) || toAdd.includes(key),
+        );
+        const holiday = await Holiday.findOneAndUpdate(
+            { date },
+            { $set: { appliesTo: merged } },
+            { new: true },
+        ).lean();
+        const markedCount = await markHolidayAttendance(
+            date,
+            holiday.name,
+            toAdd,
+            markedBy,
+        );
+        return { status: 'merged', holiday, markedCount };
+    }
+
+    const holiday = await Holiday.create({
+        date,
+        name,
+        year,
+        appliesTo,
+        sourceDate,
+        isCustomDate,
+        addedBy: markedBy || null,
+        note,
+    });
+    const markedCount = await markHolidayAttendance(date, name, appliesTo, markedBy);
+    return { status: 'created', holiday: holiday.toObject(), markedCount };
+}
+
 /**
- * GET /api/Holiday?year=2026
- * List holidays (optionally filtered by year).
+ * GET /api/Holiday?year=2026&staffType=office|site
  */
 export async function listHolidays(req, res) {
     try {
@@ -23,11 +188,18 @@ export async function listHolidays(req, res) {
             filter.year = year;
         }
 
-        const holidays = await Holiday.find(filter).sort({ date: 1 }).lean();
+        let holidays = await Holiday.find(filter).sort({ date: 1 }).lean();
+        const staffRaw = String(req.query.staffType || '').trim().toLowerCase();
+        if (staffRaw === 'office' || staffRaw === 'site' || staffRaw === 'staff') {
+            const staffType = normalizeStaffType(staffRaw === 'staff' ? 'site' : staffRaw);
+            holidays = holidays.filter((h) => holidayAppliesToStaff(h, staffType));
+        }
+
+        const list = holidays.map(serializeHoliday);
         return res.status(200).json({
             message: 'Holidays fetched successfully',
-            holidays,
-            dates: holidays.map((h) => h.date),
+            holidays: list,
+            dates: list.map((h) => h.date),
         });
     } catch (error) {
         console.error('[listHolidays]', error);
@@ -37,70 +209,76 @@ export async function listHolidays(req, res) {
 
 /**
  * POST /api/Holiday
- * Body: { date: yyyy-MM-dd, name: string }
- * Saves holiday and marks that date as Holiday on all active employees' attendance.
+ * Body: { date | fromDate, toDate?, name, appliesTo: 'both'|'office'|'site', sourceDate?, custom? }
  */
 export async function createHoliday(req, res) {
     try {
-        const date = String(req.body?.date || '').trim();
+        const fromDate = String(req.body?.fromDate || req.body?.date || '').trim();
+        const toRaw = String(req.body?.toDate || '').trim();
+        const toDate = isValidDateKey(toRaw) ? toRaw : fromDate;
         const name = String(req.body?.name || '').trim();
+        const appliesTo = normalizeAppliesToInput(req.body?.appliesTo);
+        const sourceRaw = String(req.body?.sourceDate || '').trim();
+        const sourceDate = isValidDateKey(sourceRaw) ? sourceRaw : fromDate;
+        const note = String(req.body?.note || '').trim();
+        const markedBy = req.user?.id || null;
 
-        if (!isValidDateKey(date)) {
-            return res.status(400).json({ message: 'Valid date (yyyy-MM-dd) is required.' });
+        if (!isValidDateKey(fromDate) || !isValidDateKey(toDate)) {
+            return res.status(400).json({ message: 'Valid from and to dates (yyyy-MM-dd) are required.' });
+        }
+        if (toDate < fromDate) {
+            return res.status(400).json({ message: 'To date must be on or after from date.' });
         }
         if (!name) {
             return res.status(400).json({ message: 'Holiday name is required.' });
         }
 
-        const year = Number(date.slice(0, 4));
-        const existing = await Holiday.findOne({ date }).lean();
-        if (existing) {
+        const dates = eachDateKeyInclusive(fromDate, toDate);
+        if (dates.length > 31) {
+            return res.status(400).json({ message: 'A holiday range can be at most 31 days.' });
+        }
+
+        const created = [];
+        const merged = [];
+        const already = [];
+        let markedCount = 0;
+
+        for (const date of dates) {
+            const isCustomDate =
+                date !== sourceDate || dates.length > 1 || Boolean(req.body?.custom);
+            const result = await upsertHolidayOnDate({
+                date,
+                name,
+                appliesTo,
+                sourceDate,
+                isCustomDate,
+                note,
+                markedBy,
+            });
+            markedCount += result.markedCount || 0;
+            if (result.status === 'created') created.push(result.holiday);
+            else if (result.status === 'merged') merged.push(result.holiday);
+            else already.push(result.holiday);
+        }
+
+        if (!created.length && !merged.length) {
             return res.status(400).json({
-                message: 'This holiday date is already added.',
-                holiday: existing,
+                message:
+                    dates.length === 1
+                        ? `This holiday date is already added for ${scopeLabel(appliesTo)}.`
+                        : `These dates are already added for ${scopeLabel(appliesTo)}.`,
+                holidays: already.map(serializeHoliday),
             });
         }
 
-        const holiday = await Holiday.create({
-            date,
-            name,
-            year,
-            addedBy: req.user?.id || null,
-            note: String(req.body?.note || '').trim(),
-        });
-
-        // Mark attendance calendar for all active employees on this date
-        const activeEmployees = await EmployeeBasic.find({ profileStatus: 'active' })
-            .select('_id employeeId firstName lastName')
-            .lean();
-
-        let markedCount = 0;
-        for (const emp of activeEmployees) {
-            const employeeMongoId = String(emp._id);
-            const employeeName = [emp.firstName, emp.lastName].filter(Boolean).join(' ').trim();
-            await Attendance.findOneAndUpdate(
-                { date, employeeMongoId },
-                {
-                    $set: {
-                        date,
-                        employeeMongoId,
-                        employeeId: String(emp.employeeId || ''),
-                        employeeName,
-                        statusKey: 'holiday',
-                        statusLabel: 'Holiday',
-                        reason: name,
-                        markedBy: req.user?.id || null,
-                    },
-                },
-                { upsert: true, new: true, setDefaultsOnInsert: true },
-            );
-            markedCount += 1;
-        }
-
-        return res.status(201).json({
-            message: 'Holiday added and marked on attendance calendar.',
-            holiday,
+        const dayLabel = dates.length === 1 ? dates[0] : `${fromDate} to ${toDate}`;
+        const status = created.length ? 201 : 200;
+        return res.status(status).json({
+            message: `Holiday added for ${scopeLabel(appliesTo)} (${dayLabel}).`,
+            holiday: serializeHoliday(created[0] || merged[0]),
+            holidays: [...created, ...merged].map(serializeHoliday),
             markedCount,
+            dayCount: dates.length,
         });
     } catch (error) {
         if (error?.code === 11000) {
@@ -112,8 +290,8 @@ export async function createHoliday(req, res) {
 }
 
 /**
- * DELETE /api/Holiday/:date
- * Remove holiday definition (does not wipe historical attendance marks).
+ * DELETE /api/Holiday/:date?appliesTo=office|site|both
+ * Remove the holiday for the given group. The other group keeps the day as holiday.
  */
 export async function deleteHoliday(req, res) {
     try {
@@ -122,21 +300,48 @@ export async function deleteHoliday(req, res) {
             return res.status(400).json({ message: 'Valid date (yyyy-MM-dd) is required.' });
         }
 
-        const deleted = await Holiday.findOneAndDelete({ date });
-        if (!deleted) {
+        const scope = normalizeAppliesToInput(req.query.appliesTo || req.body?.appliesTo);
+        const existing = await Holiday.findOne({ date }).lean();
+        if (!existing) {
             return res.status(404).json({ message: 'Holiday not found.' });
         }
 
-        // Restore Site/Office weekly offs on that date if the schedule says so.
+        const current = holidayAppliesToList(existing);
+        const removing = scope.filter((t) => current.includes(t));
+        if (!removing.length) {
+            return res.status(400).json({
+                message: 'This holiday is not assigned to that group.',
+                holiday: serializeHoliday(existing),
+            });
+        }
+
+        const remaining = current.filter((t) => !removing.includes(t));
+        await clearHolidayAttendance(date, removing);
+
+        let holiday = existing;
+        if (!remaining.length) {
+            await Holiday.findOneAndDelete({ date });
+            holiday = null;
+        } else {
+            holiday = await Holiday.findOneAndUpdate(
+                { date },
+                { $set: { appliesTo: remaining } },
+                { new: true },
+            ).lean();
+        }
+
         try {
             await applyWeeklyOffForDate(date, req.user?.id || null);
         } catch (syncErr) {
             console.error('[deleteHoliday] weekly-off restore failed:', syncErr);
         }
 
+        const removedLabel = removing.map((t) => (t === 'site' ? 'Site' : 'Office')).join(' & ');
         return res.status(200).json({
-            message: 'Holiday removed.',
-            holiday: deleted,
+            message: remaining.length
+                ? `Holiday removed from ${removedLabel}.`
+                : 'Holiday removed.',
+            holiday: holiday ? serializeHoliday(holiday) : null,
         });
     } catch (error) {
         console.error('[deleteHoliday]', error);

@@ -445,9 +445,9 @@ function bodyConditionHasHandoverChanges(historyRecord, previousBodyEntry = null
         const hasPreviousBaseline = Boolean(previous.photo) || Boolean(previous.comment);
         if (!hasPreviousBaseline) continue;
 
-        if (current.photoSource === 'new') return true;
+        // Explicit "previous image" is not an HR change. Comments alone do not require HR.
+        if (current.photoSource === 'previous') continue;
         if (photosDiffer(previous.photo, current.photo)) return true;
-        if (previous.comment !== current.comment) return true;
     }
     return false;
 }

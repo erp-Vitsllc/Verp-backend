@@ -1,6 +1,7 @@
 import Fine from '../../models/Fine.js';
 import { downloadS3ObjectBytes } from '../../utils/s3Upload.js';
 import { generateFineApprovedReportPdfBuffer } from '../../utils/generateFineApprovedReportPdfBuffer.js';
+import { reportPdfFileName } from '../../utils/buildAssetLossFineEmailFields.js';
 import { downloadFinePdf } from './downloadFinePdf.js';
 
 function getFineBaseId(fineId) {
@@ -69,13 +70,18 @@ export const downloadFineApprovedReportPdf = async (req, res) => {
             (fine.approvalAttachments || []).find((a) => a.source === 'approved-form') ||
             (fine.approvalAttachments || []).find((a) => a.source === 'asset-loss-report');
 
-        if (stored?.publicId) {
+        const storedAt = stored?.addedAt ? new Date(stored.addedAt).getTime() : 0;
+        const fineUpdated = fine.updatedAt ? new Date(fine.updatedAt).getTime() : 0;
+        const wantFresh = String(req.query?.fresh || '') === '1';
+        const storedIsStale = !storedAt || storedAt + 1500 < fineUpdated;
+
+        if (stored?.publicId && !wantFresh && !storedIsStale) {
             const bytes = await downloadS3ObjectBytes(stored.publicId);
             if (bytes?.length > 500) {
                 res.setHeader('Content-Type', 'application/pdf');
                 res.setHeader(
                     'Content-Disposition',
-                    `inline; filename="${stored.name || `FineApproval-${fine.fineId}.pdf`}"`,
+                    `inline; filename="${stored.name || reportPdfFileName(fine)}"`,
                 );
                 return res.send(bytes);
             }
@@ -86,7 +92,7 @@ export const downloadFineApprovedReportPdf = async (req, res) => {
             res.setHeader('Content-Type', 'application/pdf');
             res.setHeader(
                 'Content-Disposition',
-                `inline; filename="AssetLossFineReport-${fine.fineId}.pdf"`,
+                `inline; filename="${reportPdfFileName(fine)}"`,
             );
             return res.send(generated);
         }

@@ -3,8 +3,7 @@ import { buildFineApprovedPdfHtml, FINE_APPROVED_PDF_SELECTOR } from './buildFin
 import { resolveFineFormSignatureUrls } from './resolveFineFormSignatureUrls.js';
 
 /**
- * Server-generated fine report PDF (VITS Abudhabi letterhead + form + digital signatures).
- * Content uses safe insets so header/footer artwork is not overridden.
+ * Builds the approved fine report as generated HTML tables on VITS letterhead.
  */
 export async function generateFineApprovedPdf({
     fine,

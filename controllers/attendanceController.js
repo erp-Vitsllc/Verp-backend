@@ -8,6 +8,7 @@ import {
     getScheduledPunchMinutes,
     clockTimeToMinutes,
     isWeekOffForStaff,
+    holidayAppliesToStaff,
     loadWorkingTimeDoc,
     normalizeStaffType,
     resolveStatusFromPunches,
@@ -148,13 +149,18 @@ function firstEligibleAdvanceRequestDate(todayKey, holidaySet, offWeekdays) {
     return null;
 }
 
-async function loadHolidaySet(fromKey, toKey) {
+async function loadHolidaySet(fromKey, toKey, staffType = null) {
     const rows = await Holiday.find({
         date: { $gte: fromKey, $lte: toKey },
     })
-        .select('date')
+        .select('date appliesTo')
         .lean();
-    return new Set((rows || []).map((row) => String(row.date || '').trim()).filter(Boolean));
+    return new Set(
+        (rows || [])
+            .filter((row) => !staffType || holidayAppliesToStaff(row, staffType))
+            .map((row) => String(row.date || '').trim())
+            .filter(Boolean),
+    );
 }
 
 /** Exact local clock time HH:mm:ss in company TZ */
@@ -962,7 +968,7 @@ export async function getMyAttendanceYearSummary(req, res) {
         counts.not_marked = 0;
         counts.absent = 0;
 
-        const [grouped, holidaySet, employee, workingTime, lastAnnualLeave] = await Promise.all([
+        const [grouped, holidayRows, employee, workingTime, lastAnnualLeave] = await Promise.all([
             Attendance.aggregate([
                 {
                     $match: {
@@ -977,7 +983,7 @@ export async function getMyAttendanceYearSummary(req, res) {
                     },
                 },
             ]),
-            loadHolidaySet(from, to),
+            Holiday.find({ date: { $gte: from, $lte: to } }).select('date appliesTo').lean(),
             EmployeeBasic.findById(self._id).select('staffType').lean(),
             loadWorkingTimeDoc(),
             Attendance.findOne({
@@ -1005,6 +1011,12 @@ export async function getMyAttendanceYearSummary(req, res) {
         const staffType = normalizeStaffType(employee?.staffType || self.staffType);
         const scheduleWeek = staffType === 'site' ? workingTime.site : workingTime.office;
         const offWeekdays = new Set(getOffWeekdayKeys(scheduleWeek));
+        const holidaySet = new Set(
+            (holidayRows || [])
+                .filter((row) => holidayAppliesToStaff(row, staffType))
+                .map((row) => String(row.date || '').trim())
+                .filter(Boolean),
+        );
         const schedule = countScheduleDays(from, to, holidaySet, offWeekdays);
 
         const presentDays =
@@ -1927,6 +1939,12 @@ const FUTURE_REQUEST_KINDS = {
         requestedStatusLabel: 'Authorized Leave',
         extra2Prefix: 'Future leave',
     },
+    annual_leave: {
+        leaveRequestKind: 'future_annual',
+        requestedStatusKey: 'on_leave',
+        requestedStatusLabel: 'Annual Leave',
+        extra2Prefix: 'Future annual leave',
+    },
     late_arrived: {
         leaveRequestKind: 'future_late',
         requestedStatusKey: 'late_arrived',
@@ -1982,12 +2000,20 @@ export async function requestAttendanceFuture(req, res) {
         const kind = String(req.body?.kind || 'leave').trim() || 'leave';
         const reason = String(req.body?.reason || '').trim();
         const attachmentName = String(req.body?.attachmentName || '').trim();
-        const dayPart = String(req.body?.dayPart || 'full').trim() === 'half' ? 'half' : 'full';
+        const isMultiDay = fromDate !== toDate;
+        const isAnnualLeave = kind === 'annual_leave';
+        let dayPart =
+            !isMultiDay &&
+            !isAnnualLeave &&
+            String(req.body?.dayPart || 'full').trim() === 'half'
+                ? 'half'
+                : 'full';
         const halfTimeIn = dayPart === 'half' ? normalizeClockHHmm(req.body?.timeIn) : '';
         const halfTimeOut = dayPart === 'half' ? normalizeClockHHmm(req.body?.timeOut) : '';
-        // A half day is time off inside a working day, so it is a late arrival.
-        // Only a full day off is authorized leave.
-        const spec = FUTURE_REQUEST_KINDS[dayPart === 'half' && kind === 'leave' ? 'late_arrived' : kind];
+        const spec =
+            FUTURE_REQUEST_KINDS[
+                kind === 'annual_leave' ? 'annual_leave' : kind === 'leave' ? 'leave' : kind
+            ];
 
         if (!isValidDateKey(fromDate) || !isValidDateKey(toDate)) {
             return res.status(400).json({ message: 'Valid from and to dates (yyyy-MM-dd) are required.' });
@@ -1997,12 +2023,6 @@ export async function requestAttendanceFuture(req, res) {
         }
         if (!spec) {
             return res.status(400).json({ message: 'Choose Leave, Late arrival, or Early go.' });
-        }
-        if (!reason) {
-            return res.status(400).json({ message: 'Description is required.' });
-        }
-        if (!attachmentName) {
-            return res.status(400).json({ message: 'Attachment is required.' });
         }
         if (dayPart === 'half' && (!halfTimeIn || !halfTimeOut)) {
             return res.status(400).json({ message: 'Choose a time in and time out for the half day.' });
@@ -2036,7 +2056,7 @@ export async function requestAttendanceFuture(req, res) {
         const workingTime = await loadWorkingTimeDoc();
         const scheduleWeek = staffType === 'site' ? workingTime.site : workingTime.office;
         const offWeekdays = new Set(getOffWeekdayKeys(scheduleWeek));
-        const holidaySet = await loadHolidaySet(todayKey, toDate);
+        const holidaySet = await loadHolidaySet(todayKey, toDate, staffType);
         const firstEligible = firstEligibleAdvanceRequestDate(todayKey, holidaySet, offWeekdays);
 
         if (!firstEligible || fromDate < firstEligible) {
@@ -2092,7 +2112,7 @@ export async function requestAttendanceFuture(req, res) {
             }
             if (
                 (row.leaveRequestStatus === 'approved' || row.approvalStatus === 'approved') &&
-                ['authorized_leave', 'late_arrived', 'early_go'].includes(String(row.statusKey || ''))
+                ['authorized_leave', 'late_arrived', 'early_go', 'on_leave'].includes(String(row.statusKey || ''))
             ) {
                 return res.status(400).json({
                     message: `${dateKey} already has an approved request.`,
@@ -2107,6 +2127,15 @@ export async function requestAttendanceFuture(req, res) {
         const rangeLabel = futureRequestRangeLabel(fromDate, toDate);
         const dayPartLabel =
             dayPart === 'half' ? halfDayWindowLabel(halfTimeIn, halfTimeOut) : 'Full day';
+        const requestedStatusLabel =
+            dayPart === 'half' && kind === 'leave'
+                ? 'Half day leave'
+                : spec.requestedStatusLabel;
+        const extra2Prefix =
+            dayPart === 'half' && kind === 'leave'
+                ? 'Future half day leave'
+                : spec.extra2Prefix;
+        const durationLabel = `${requestDates.length} day${requestDates.length === 1 ? '' : 's'}`;
         const savedRecords = [];
 
         for (const dateKey of requestDates) {
@@ -2124,7 +2153,7 @@ export async function requestAttendanceFuture(req, res) {
             record.previousStatusKey = record.statusKey || 'not_marked';
             record.previousStatusLabel = record.statusLabel || 'Upcoming';
             record.requestedStatusKey = spec.requestedStatusKey;
-            record.requestedStatusLabel = spec.requestedStatusLabel;
+            record.requestedStatusLabel = requestedStatusLabel;
             record.leaveRequestReason = reason;
             record.leaveRequestKind = spec.leaveRequestKind;
             record.attachmentName = attachmentName;
@@ -2151,7 +2180,7 @@ export async function requestAttendanceFuture(req, res) {
                 subjectEmployee: employee,
                 requestedByName: empName,
                 extra1: dateKey,
-                extra2: `${spec.extra2Prefix}: ${rangeLabel} · ${dayPartLabel}`,
+                extra2: `${extra2Prefix}: ${rangeLabel} · ${dayPartLabel} · ${durationLabel}`,
                 extra3: JSON.stringify({
                     attendanceId: String(record._id),
                     employeeMongoId: String(employee._id),
@@ -2169,7 +2198,7 @@ export async function requestAttendanceFuture(req, res) {
             employee,
             date: requestDates[0],
             dateLabel: rangeLabel,
-            requestedLabel: `${spec.requestedStatusLabel} · ${dayPartLabel}`,
+            requestedLabel: `${requestedStatusLabel} · ${dayPartLabel}`,
             currentLabel: 'Upcoming',
             reason,
             kind: spec.leaveRequestKind,
@@ -2383,6 +2412,12 @@ async function applyLeaveDecisionToRecord({
         } else if (kind === 'future_leave') {
             const payError = applyAuthorized();
             if (payError) return payError;
+        } else if (kind === 'future_annual') {
+            record.statusKey = 'on_leave';
+            record.statusLabel = 'Annual Leave';
+            record.leavePayType = '';
+            record.approvalStatus = 'approved';
+            if (record.leaveRequestReason) record.reason = record.leaveRequestReason;
         } else if (kind === 'future_late') {
             record.statusKey = 'late_arrived';
             record.statusLabel = `Late arrival approved${halfDaySuffix}`;

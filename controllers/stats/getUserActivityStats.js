@@ -20,6 +20,7 @@ import {
     LEFT_USER_REQUEST_TYPE,
 } from "../../utils/employeeLeftUserWorkflow.js";
 import { closeStaleProbationChangeTasksFromPendingRows } from "../../utils/sendProbationWorkflowEmail.js";
+import { isAcceptedAssignmentOutcomeNotification } from "../../utils/isAcceptedAssignmentOutcomeNotification.js";
 import {
     buildProfileActivationApprovedMessage,
     buildProfileActivationEntityLine,
@@ -787,6 +788,7 @@ export const getUserActivityStats = async (req, res) => {
             await filterStaleExpiryDashboardRows(
                 dedupeOwnerLinkedDocumentExpiryReminders(
                 dashboardPendingItemsRaw.filter((item) => {
+                    if (isAcceptedAssignmentOutcomeNotification(item)) return false;
                     if (!dispositionRowVisibleToViewer(item)) return false;
                     if (!ASSIGNMENT_STRICT_TYPES.has(item.requestType)) return true;
                     if (

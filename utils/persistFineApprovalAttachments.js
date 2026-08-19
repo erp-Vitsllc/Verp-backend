@@ -1,6 +1,7 @@
 import { uploadDocumentToS3, ensureAttachmentPersistedToS3, s3ObjectExists } from './s3Upload.js';
 import { generateFineApprovedReportPdfBuffer } from './generateFineApprovedReportPdfBuffer.js';
 import { isAssetLossFineReportApplicable } from './sendAssetLossFineReportEmail.js';
+import { reportPdfFileName, reportPdfLabel } from './buildAssetLossFineEmailFields.js';
 import { appendApprovalAttachmentHistory } from './approvalAttachmentHistory.js';
 
 /**
@@ -22,21 +23,34 @@ export async function persistFineApprovalAttachments(
     const addedAt = new Date();
     const att = fineDoc.attachment;
 
-    const hasSupporting = entries.some(e => e.source === 'supporting');
-    if (!hasSupporting && att && (att.url || att.publicId || att.data || att.name)) {
+    const supportingCandidates = [
+        att,
+        ...(Array.isArray(fineDoc.attachments) ? fineDoc.attachments : []),
+    ].filter(Boolean);
+
+    for (const item of supportingCandidates) {
+        if (!(item.url || item.publicId || item.data || item.name || item.base64)) continue;
+        const alreadyStored = entries.some(
+            (e) =>
+                e.source === 'supporting' &&
+                ((item.publicId && e.publicId === item.publicId) ||
+                    (item.name && e.name === item.name) ||
+                    (item.url && e.url === item.url)),
+        );
+        if (alreadyStored) continue;
         try {
-            const persisted = await ensureAttachmentPersistedToS3(att, {
+            const persisted = await ensureAttachmentPersistedToS3(item, {
                 folder: `fines/${fineDoc.fineId || fineDoc._id}`,
-                fileName: att.name || `Supporting-${fineDoc.fineId || fineDoc._id}.pdf`,
+                fileName: item.name || `Supporting-${fineDoc.fineId || fineDoc._id}.pdf`,
                 resourceType: 'raw',
             });
             if (persisted?.publicId) {
                 entries.push({
-                    label: 'Supporting Document',
+                    label: item.name || 'Supporting Document',
                     name: persisted.name,
                     url: persisted.url || '',
                     publicId: persisted.publicId,
-                    mimeType: persisted.mimeType || 'application/pdf',
+                    mimeType: persisted.mimeType || item.mimeType || 'application/pdf',
                     source: 'supporting',
                     addedAt,
                 });
@@ -65,12 +79,10 @@ export async function persistFineApprovalAttachments(
                 base64 = base64.split(',')[1];
             }
             const isAssetLoss = isAssetLossFineReportApplicable(fineDoc);
-            const filename = isAssetLoss
-                ? `AssetLossFineReport-${fineDoc.fineId || fineDoc._id}.pdf`
-                : `FineApproval-${fineDoc.fineId || fineDoc._id}.pdf`;
+            const filename = reportPdfFileName(fineDoc);
             const uploaded = await uploadDocumentToS3(base64, 'fines', filename);
             entries.push({
-                label: isAssetLoss ? 'Asset Loss Fine Report' : 'Fine Approval Form',
+                label: reportPdfLabel(fineDoc),
                 name: filename,
                 url: uploaded.url || '',
                 publicId: uploaded.publicId || '',

@@ -6,14 +6,50 @@ import { resolveEmployeeEmail, addEmployeeEmailToSet, getFallbackEmailNote } fro
 import { buildFineFormSummary } from './buildFineFormSummary.js';
 import { buildFineConfirmedEmailHtml } from './buildFineConfirmedEmailHtml.js';
 import { generateFineApprovedReportPdfBuffer } from './generateFineApprovedReportPdfBuffer.js';
-import { isLossDamageFineType } from './buildAssetLossFineEmailFields.js';
+import { buildAssetLossFineEmailFields, reportPdfFileName, reportTitleForFine } from './buildAssetLossFineEmailFields.js';
 import { isCompanyFineParty } from './fineGroupClassification.js';
 import { resolveCompanyFineAdminRecipient } from './resolveCompanyFineAdminRecipient.js';
 
 /**
  * Sends a confirmation email to assigned employees when a fine is fully approved.
  * TO: each assigned employee; CC: all other assigned employees + HR + Admin (+ stakeholders).
- * Email body is a short message; the fine report PDF is attached when available.
+ * Email body is the fine report (type title, deduction details, discount as amount).
+ *
+ * @param {object} [options]
+ * @param {Array} [options.ccAssignedEmployees] Extra assignees to CC (e.g. garage bill group parties).
+ */
+async function pushStoredFileAttachment(sharedAttachments, seen, stored) {
+    if (!stored || !(stored.url || stored.data || stored.base64)) return;
+    const key = String(stored.publicId || stored.url || stored.name || '').trim();
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+
+    try {
+        let buffer = null;
+        const filename = stored.name || `Attachment-${key}`;
+        const contentType = stored.mimeType || 'application/octet-stream';
+
+        if (stored.url) {
+            const response = await axios.get(stored.url, { responseType: 'arraybuffer' });
+            buffer = Buffer.from(response.data);
+        } else {
+            let base64Data = stored.data || stored.base64 || '';
+            if (base64Data.includes(',')) base64Data = base64Data.split(',')[1];
+            if (base64Data) buffer = Buffer.from(base64Data, 'base64');
+        }
+
+        if (buffer?.length > 0) {
+            sharedAttachments.push({ filename, content: buffer, contentType });
+        }
+    } catch (attachErr) {
+        console.warn('[FineConfirmedEmail] Could not attach file:', attachErr.message);
+    }
+}
+
+/**
+ * Sends a confirmation email to assigned employees when a fine is fully approved.
+ * TO: each assigned employee; CC: all other assigned employees + HR + Admin (+ stakeholders).
+ * Email body is the fine report (type title, deduction details, discount as amount).
  *
  * @param {object} [options]
  * @param {Array} [options.ccAssignedEmployees] Extra assignees to CC (e.g. garage bill group parties).
@@ -120,28 +156,16 @@ export const sendFineConfirmedEmail = async (fine, assignedEmployees, req = null
         });
 
         const sharedAttachments = [];
-
-        if (fine.attachment && (fine.attachment.url || fine.attachment.data)) {
-            try {
-                let buffer = null;
-                const filename = fine.attachment.name || `Attachment-${fine.fineId || fine._id}`;
-                const contentType = fine.attachment.mimeType || 'application/octet-stream';
-
-                if (fine.attachment.url) {
-                    const response = await axios.get(fine.attachment.url, { responseType: 'arraybuffer' });
-                    buffer = Buffer.from(response.data);
-                } else if (fine.attachment.data) {
-                    let base64Data = fine.attachment.data;
-                    if (base64Data.includes(',')) base64Data = base64Data.split(',')[1];
-                    buffer = Buffer.from(base64Data, 'base64');
-                }
-
-                if (buffer?.length > 0) {
-                    sharedAttachments.push({ filename, content: buffer, contentType });
-                }
-            } catch (attachErr) {
-                console.warn('[FineConfirmedEmail] Could not attach external file:', attachErr.message);
-            }
+        const seenSupporting = new Set();
+        const supportingFiles = [
+            fine.attachment,
+            ...(Array.isArray(fine.attachments) ? fine.attachments : []),
+            ...(Array.isArray(fine.approvalAttachments)
+                ? fine.approvalAttachments.filter((item) => item?.source === 'supporting')
+                : []),
+        ];
+        for (const stored of supportingFiles) {
+            await pushStoredFileAttachment(sharedAttachments, seenSupporting, stored);
         }
 
         async function buildFallbackPrintPdf() {
@@ -191,25 +215,30 @@ export const sendFineConfirmedEmail = async (fine, assignedEmployees, req = null
                     ceoName,
                 });
 
+                const fields = buildAssetLossFineEmailFields(fine, {
+                    employeeName: companyName,
+                    hodName: hrHODName || 'HR',
+                    assignedEmployeeId: 'VEGA-HR-0000',
+                    fineSummaries: formSummary || {},
+                });
+
                 const html = buildFineConfirmedEmailHtml({
                     greetingName: adminRecipient.name,
                     fineId: fine.fineId,
                     fallbackNote: '',
+                    fields,
                 });
 
                 const emailAttachments = [...sharedAttachments];
-                let pdfBuffer = null;
-                if (isLossDamageFineType(fine)) {
-                    pdfBuffer = await generateFineApprovedReportPdfBuffer(fine, {
-                        employeeId: 'VEGA-HR-0000',
-                    });
-                }
+                let pdfBuffer = await generateFineApprovedReportPdfBuffer(fine, {
+                    employeeId: 'VEGA-HR-0000',
+                });
                 if (!pdfBuffer) {
                     pdfBuffer = await buildFallbackPrintPdf();
                 }
                 if (pdfBuffer?.length > 500) {
                     emailAttachments.push({
-                        filename: `FineReport-Company-${fine.fineId || fine._id}.pdf`,
+                        filename: reportPdfFileName(fine, 'Company'),
                         content: pdfBuffer,
                         contentType: 'application/pdf',
                     });
@@ -219,7 +248,7 @@ export const sendFineConfirmedEmail = async (fine, assignedEmployees, req = null
                     fromName: req?.user ? `${req.user.firstName || ''} ${req.user.lastName || ''}`.trim() : 'VERP System',
                     to: adminRecipient.email,
                     cc: buildCcForRecipient(adminRecipient.email),
-                    subject: `Company Fine Notification: #${fine.fineId} Approved`,
+                    subject: `${reportTitleForFine(fine)}: #${fine.fineId} Approved`,
                     html,
                     attachments: emailAttachments,
                 });
@@ -254,26 +283,31 @@ export const sendFineConfirmedEmail = async (fine, assignedEmployees, req = null
                     ? `${empDetails.primaryReportee.firstName || ''} ${empDetails.primaryReportee.lastName || ''}`.trim()
                     : 'Manager');
 
+            const fields = buildAssetLossFineEmailFields(fine, {
+                employeeName: displayEmployeeName,
+                hodName,
+                assignedEmployeeId: assigned.employeeId,
+                fineSummaries: formSummary || {},
+            });
+
             const html = buildFineConfirmedEmailHtml({
                 greetingName,
                 fineId: fine.fineId,
                 fallbackNote,
+                fields,
             });
 
             const emailAttachments = [...sharedAttachments];
 
-            let pdfBuffer = null;
-            if (isLossDamageFineType(fine)) {
-                pdfBuffer = await generateFineApprovedReportPdfBuffer(fine, {
-                    employeeId: assigned.employeeId,
-                });
-            }
+            let pdfBuffer = await generateFineApprovedReportPdfBuffer(fine, {
+                employeeId: assigned.employeeId,
+            });
             if (!pdfBuffer) {
                 pdfBuffer = await buildFallbackPrintPdf();
             }
             if (pdfBuffer?.length > 500) {
                 emailAttachments.push({
-                    filename: `AssetLossFineReport-${fine.fineId || fine._id}.pdf`,
+                    filename: reportPdfFileName(fine, assigned.employeeId),
                     content: pdfBuffer,
                     contentType: 'application/pdf',
                 });
@@ -283,7 +317,7 @@ export const sendFineConfirmedEmail = async (fine, assignedEmployees, req = null
                 fromName: req?.user ? `${req.user.firstName || ''} ${req.user.lastName || ''}`.trim() : 'VERP System',
                 to: toMail,
                 cc: buildCcForRecipient(toMail),
-                subject: `Fine Notification: #${fine.fineId} Approved`,
+                subject: `${reportTitleForFine(fine)}: #${fine.fineId} Approved`,
                 html,
                 attachments: emailAttachments,
             });

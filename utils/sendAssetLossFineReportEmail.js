@@ -4,7 +4,8 @@ import AssetItem from '../models/AssetItem.js';
 import { buildFineFormSummary } from './buildFineFormSummary.js';
 import { generateAssetLossFineReportPdf } from './generateAssetLossFineReportPdf.js';
 import { loadFineRecordForAssetLossPdf } from './loadFineRecordForAssetLossPdf.js';
-import { buildAssetLossFineReportEmailHtml } from './buildAssetLossFineReportEmailHtml.js';
+import { buildFineConfirmedEmailHtml } from './buildFineConfirmedEmailHtml.js';
+import { buildAssetLossFineEmailFields, reportPdfFileName, reportTitleForFine } from './buildAssetLossFineEmailFields.js';
 import {
     resolveEmployeeEmail,
     addEmployeeEmailToSet,
@@ -216,11 +217,16 @@ export async function sendAssetLossFineReportEmail(fine, assignedEmployees, req 
                 ? getFallbackEmailNote(employeeName, reporteeName)
                 : '';
 
-            const html = buildAssetLossFineReportEmailHtml({
+            const html = buildFineConfirmedEmailHtml({
                 greetingName,
                 fineId: fineForPdf.fineId,
-                employeeName: displayEmployeeName,
                 fallbackNote,
+                fields: buildAssetLossFineEmailFields(fineForPdf, {
+                    employeeName: displayEmployeeName,
+                    hodName,
+                    assignedEmployeeId: assigned.employeeId,
+                    fineSummaries: formSummary || {},
+                }),
             });
 
             const ccRecipients = buildCcEmails(stakeholders, assetOwner, toMail, fullEmployees);
@@ -229,11 +235,11 @@ export async function sendAssetLossFineReportEmail(fine, assignedEmployees, req 
                 fromName,
                 to: toMail,
                 cc: ccRecipients,
-                subject: `Asset Loss Fine Report — #${fineForPdf.fineId} Approved`,
+                subject: `${reportTitleForFine(fineForPdf)} — #${fineForPdf.fineId} Approved`,
                 html,
                 attachments: [
                     {
-                        filename: `AssetLossFineReport-${fineForPdf.fineId}-${assigned.employeeId}.pdf`,
+                        filename: reportPdfFileName(fineForPdf, assigned.employeeId),
                         content: pdfBuffer,
                         contentType: 'application/pdf',
                     },
@@ -296,16 +302,22 @@ export async function sendAssetLossFineReportEmail(fine, assignedEmployees, req 
                 fromName,
                 to: adminRecipient.email,
                 cc: ccRecipients,
-                subject: `Company Asset Loss Fine Report — #${fineForPdf.fineId} Approved`,
-                html: buildAssetLossFineReportEmailHtml({
+                subject: `Company ${reportTitleForFine(fineForPdf)} — #${fineForPdf.fineId} Approved`,
+                html: buildFineConfirmedEmailHtml({
                     greetingName: adminRecipient.name,
                     fineId: fineForPdf.fineId,
                     employeeName: companyName,
                     fallbackNote: '',
+                    fields: buildAssetLossFineEmailFields(fineForPdf, {
+                        employeeName: companyName,
+                        hodName: stakeholders.hrHODName || 'HR',
+                        assignedEmployeeId: 'VEGA-HR-0000',
+                        fineSummaries: formSummary || {},
+                    }),
                 }),
                 attachments: [
                     {
-                        filename: `AssetLossFineReport-Company-${fineForPdf.fineId}.pdf`,
+                        filename: reportPdfFileName(fineForPdf, 'Company'),
                         content: pdfBuffer,
                         contentType: 'application/pdf',
                     },
@@ -372,16 +384,21 @@ export async function sendAssetLossFineReportEmail(fine, assignedEmployees, req 
                         fromName,
                         to: ownerResolved.email,
                         cc: Array.from(stakeholderCc),
-                        subject: `Asset Loss Fine Report — #${ownerFineForPdf.fineId} Approved`,
-                        html: buildAssetLossFineReportEmailHtml({
+                        subject: `${reportTitleForFine(ownerFineForPdf)} — #${ownerFineForPdf.fineId} Approved`,
+                        html: buildFineConfirmedEmailHtml({
                             greetingName,
                             fineId: ownerFineForPdf.fineId,
-                            employeeName: displayEmployeeName,
                             fallbackNote,
+                            fields: buildAssetLossFineEmailFields(ownerFineForPdf, {
+                                employeeName: displayEmployeeName,
+                                hodName,
+                                assignedEmployeeId: firstAssigned.employeeId,
+                                fineSummaries: formSummary || {},
+                            }),
                         }),
                         attachments: [
                             {
-                                filename: `AssetLossFineReport-${ownerFineForPdf.fineId}.pdf`,
+                                filename: reportPdfFileName(ownerFineForPdf),
                                 content: pdfBuffer,
                                 contentType: 'application/pdf',
                             },

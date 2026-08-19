@@ -316,7 +316,20 @@ export async function submitAccidentRepairGarage(asset, serviceId, serviceUpdate
 
     await mergeService(asset, serviceId, serviceUpdates);
 
-    const remark = parseRemark(asset.services.id(serviceId));
+    const serviceRow = asset.services.id(serviceId);
+    const remark = parseRemark(serviceRow);
+    if (isAccidentOtherParty(remark) && serviceRow) {
+        serviceRow.value = 0;
+        remark.hrReviewApprovedAmount = 0;
+        remark.approvedAmount = 0;
+        remark.estimatedCost = 0;
+        remark.garageBillAmount = 0;
+        remark.companyPayAmount = 0;
+        remark.employeePayAmount = 0;
+        serviceRow.remark = JSON.stringify(remark);
+        asset.markModified('services');
+    }
+
     const startRaw = remark.serviceStartDate || remark.scheduledServiceDate;
     const endRaw = remark.serviceEndDate || remark.serviceWindowEndDate;
     const { assertServiceScheduleDates } = await import('./vehicleServiceScheduleDates.js');

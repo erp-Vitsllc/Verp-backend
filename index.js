@@ -26,6 +26,7 @@ import activityLogRoute from "./routes/activityLogRoutes.js";
 import storageRoute from "./routes/storageRoutes.js";
 import zohoRoute from "./routes/zohoRoutes.js";
 import locatorRoute from "./routes/locatorRoutes.js";
+import vehicleFuelRoute from "./routes/vehicleFuelRoutes.js";
 import attendanceRoute from "./routes/attendanceRoutes.js";
 import leaveRoute from "./routes/leaveRoutes.js";
 import holidayRoute from "./routes/holidayRoutes.js";
@@ -119,7 +120,7 @@ scheduleDailyAtMidnight(
     { name: "DocumentExpiryReminders" },
 );
 
-// Utility bill monthly payment-day reminders (only when payment day == today → HR email + bell).
+// Utility bill payment-day reminders (current + previous month; bell when overdue, email on payment day).
 setTimeout(() => {
     processUtilityBillPaymentDayReminders().catch((e) =>
         console.error("[UtilityBillPaymentDayReminders] startup failed:", e?.message || e),
@@ -333,6 +334,7 @@ app.use("/api/ActivityLog", activityLogRoute);
 app.use("/api/storage", storageRoute);
 app.use("/api/zoho", zohoRoute);
 app.use("/api/locator", locatorRoute);
+app.use("/api/VehicleFuel", vehicleFuelRoute);
 app.use("/api/Attendance", attendanceRoute);
 app.use("/api/Leave", leaveRoute);
 app.use("/api/Holiday", holidayRoute);

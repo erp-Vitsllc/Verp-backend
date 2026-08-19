@@ -288,7 +288,7 @@ export async function createLocatorErpVehicle({
     const assetId = await generateNextAssetId();
     const name = String(deviceName || `Locator ${deviceId || ''}`).trim() || assetId;
 
-    return AssetItem.create({
+    const asset = await AssetItem.create({
         typeId,
         categoryId,
         assetId,
@@ -302,6 +302,19 @@ export async function createLocatorErpVehicle({
         vehicleProfileActivationStatus: 'inactive',
         ...(createdBy ? { createdBy } : {}),
     });
+
+    try {
+        const { notifyAdminOfficerNewVehicleFirstInspection } = await import(
+            '../utils/notifyAdminOfficerNewVehicleFirstInspection.js'
+        );
+        await notifyAdminOfficerNewVehicleFirstInspection(asset, {
+            requestedByName: 'Locator',
+        });
+    } catch {
+        /* inspection notify is best-effort */
+    }
+
+    return asset;
 }
 
 export async function findErpVehicleForLocatorLink({ deviceId, deviceName, plateNumber, erpVehicleId }) {

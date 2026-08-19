@@ -10,7 +10,6 @@ const holidaySchema = new mongoose.Schema(
             required: true,
             trim: true,
             match: /^\d{4}-\d{2}-\d{2}$/,
-            index: true,
         },
         name: {
             type: String,
@@ -21,6 +20,21 @@ const holidaySchema = new mongoose.Schema(
             type: Number,
             required: true,
             index: true,
+        },
+        /** Who this holiday marks on the attendance calendar. Missing/empty = both (legacy). */
+        appliesTo: {
+            type: [{ type: String, enum: ['office', 'site'] }],
+            default: () => ['office', 'site'],
+        },
+        /** Original catalog date when this was added from UAE holidays (may differ if custom). */
+        sourceDate: {
+            type: String,
+            default: '',
+            trim: true,
+        },
+        isCustomDate: {
+            type: Boolean,
+            default: false,
         },
         addedBy: {
             type: mongoose.Schema.Types.ObjectId,

@@ -56,7 +56,8 @@ function buildFormTable(fields, signatureUrls, rawPayableAmount) {
     <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;background:transparent;border:2px solid #000000;">
         <tr>
             <td colspan="4" style="padding:12px;border:${BORDER};text-align:center;font-size:16px;font-weight:bold;background:rgba(255,255,255,0.3);">
-                Asset Loss Fine Report
+                <div style="font-size:16px;font-weight:bold;">${esc(fields.reportTitle || 'FINE REPORT')}</div>
+                <div style="font-size:11px;margin-top:4px;">Employee payroll deduction authorization · ${esc(fields.fineCategory || '')}</div>
             </td>
         </tr>
         <tr>
@@ -94,10 +95,14 @@ function buildFormTable(fields, signatureUrls, rawPayableAmount) {
             <td style="${TD_VAL}">${esc(fields.serviceCharge)} AED</td>
         </tr>
         <tr>
+            <td style="${TD_LABEL}">Discount</td>
+            <td style="${TD_VAL}">${esc(fields.discount)} AED</td>
             <td style="${TD_LABEL}">Total Payable Fine</td>
             <td style="${TD_VAL}">${esc(fields.totalPayableFine)} AED</td>
+        </tr>
+        <tr>
             <td style="${TD_LABEL}">Payable Type</td>
-            <td style="${TD_VAL}">${esc(fields.payableTypeLabel)}</td>
+            <td colspan="3" style="${TD_VAL}">${esc(fields.payableTypeLabel)}</td>
         </tr>
         <tr>
             <td style="${TD_LABEL}">Your Fine payment</td>
@@ -154,6 +159,7 @@ export function buildAssetLossFineReportPdfHtml({
         assetPurchaseCost: formatMoney(rawFields.assetPurchaseCost),
         actualFine: formatMoney(rawFields.actualFineAmount),
         serviceCharge: formatMoney(rawFields.serviceCharge),
+        discount: formatMoney(rawFields.discount),
         totalPayableFine: formatMoney(rawFields.totalFine),
         yourFinePayment: formatMoney(rawFields.yourFinePayment),
         othersPayment: formatMoney(rawFields.othersPayment),

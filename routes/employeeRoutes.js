@@ -87,6 +87,7 @@ import {
     getEmployeeHubRequest,
     decideEmployeeHubRequest,
 } from "../controllers/employee/employeeHubRequest.js";
+import { getMyDashboardRequests } from "../controllers/employee/getMyDashboardRequests.js";
 import { getLoanPdf } from "../controllers/employee/getLoanPdf.js";
 import { downloadLoanAcknowledgmentPdf } from "../controllers/employee/downloadLoanAcknowledgmentPdf.js";
 import { downloadEmployeeAssetListPdf } from "../controllers/employee/downloadEmployeeAssetListPdf.js";
@@ -139,6 +140,7 @@ router.get("/me", async (req, res) => {
 
 // Logged-in employee's own loan / advance / reward / fine totals (home dashboard)
 router.get("/dashboard/my-hr-cards", getMyHrDashboardCards);
+router.get("/dashboard/my-requests", getMyDashboardRequests);
 router.get("/dashboard/my-asset-cards", getMyAssetDashboardCards);
 router.get("/dashboard/my-loan-profile", getMyLoanProfile);
 router.post("/dashboard/self-loan-request", createSelfLoanDraft);
