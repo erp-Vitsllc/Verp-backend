@@ -2,6 +2,10 @@ import DashboardAction from '../models/DashboardAction.js';
 import AssetItem from '../models/AssetItem.js';
 import { getDepartmentHOD } from './getDepartmentHOD.js';
 import { sendVehicleServiceWorkflowEmail } from './sendVehicleServiceWorkflowEmail.js';
+import {
+    vehicleServicePendingCopy,
+    vehicleServiceActorName,
+} from './vehicleServiceNotificationCopy.js';
 
 function parseDashboardMeta(extra3) {
     if (!extra3) return null;
@@ -11,6 +15,46 @@ function parseDashboardMeta(extra3) {
     } catch {
         return null;
     }
+}
+
+/**
+ * If Admin Officer already has the create-to-complete bell for this service,
+ * update that row instead of opening a second Pending notification.
+ * @returns {Promise<boolean>} true when the stage row was folded into the track
+ */
+export async function foldIntoAdminOfficerServiceTrackIfOpen({
+    requestId,
+    assignedTo,
+    extra1,
+    extra2,
+    extra3,
+}) {
+    const meta = parseDashboardMeta(extra3);
+    if (meta?.adminOfficerServiceTrack) return false;
+    const serviceRecordId = String(meta?.serviceRecordId || '').trim();
+    if (!requestId || !assignedTo || !serviceRecordId) return false;
+
+    const pendingRows = await DashboardAction.find({
+        requestId,
+        assignedTo,
+        requestType: 'Vehicle Service Request',
+        status: 'Pending',
+        extra3: { $regex: '"adminOfficerServiceTrack"\\s*:\\s*true', $options: 'i' },
+    })
+        .select('_id extra3')
+        .lean();
+
+    const track = pendingRows.find((row) => {
+        const rowMeta = parseDashboardMeta(row.extra3);
+        return String(rowMeta?.serviceRecordId || '') === serviceRecordId;
+    });
+    if (!track?._id) return false;
+
+    const patch = { requestedDate: new Date() };
+    if (extra1 != null) patch.extra1 = extra1;
+    if (extra2 != null) patch.extra2 = extra2;
+    await DashboardAction.updateOne({ _id: track._id }, { $set: patch });
+    return true;
 }
 
 export function vehicleServiceDetailsPath(assetId, serviceRecordId, serviceType) {
@@ -75,22 +119,15 @@ export async function notifyAdminOfficerOnVehicleServiceCreated({
     const extra3 = buildAdminOfficerServiceTrackMeta(populated || asset, serviceRecordId, serviceTypeLabel);
     const linkPath = vehicleServiceDetailsPath(asset._id, serviceRecordId, serviceTypeLabel);
     const subjectEmp = populated?.assignedTo || null;
-    const plate = [populated?.plateEmirate, populated?.plateNumber].filter(Boolean).join(' ').trim();
     const isInitiated = String(event || '').toLowerCase() === 'initiated';
     const actorName = String(requestedByName || 'A user').trim() || 'A user';
-    const stageLabel = isInitiated
-        ? `${serviceTypeLabel} initiated — please complete`
-        : `${serviceTypeLabel} created — please complete`;
-    const actionLabel = isInitiated
-        ? `Please complete ${serviceTypeLabel}`
-        : `Please complete ${serviceTypeLabel}`;
-    const assetLabel = `${asset.assetId || ''}${plate ? ` (${plate})` : ''}`;
-    const adminDetailLine = isInitiated
-        ? `A ${serviceTypeLabel} was initiated by ${actorName} for ${assetLabel}. Please open the request and complete this ${serviceTypeLabel}.`
-        : `A ${serviceTypeLabel} was created by ${actorName} for ${assetLabel}. Please open the request and complete this ${serviceTypeLabel}.`;
-    const inboxExtra2 = isInitiated
-        ? `Initiated by ${actorName} — please complete ${serviceTypeLabel}`
-        : `Created by ${actorName} — please complete ${serviceTypeLabel}`;
+    const currentStage = isInitiated ? 'Schedule' : 'Created';
+    const adminCopy = vehicleServicePendingCopy(
+        serviceTypeLabel,
+        vehicleServiceActorName(adminOfficer),
+        currentStage,
+        { completeTrack: true },
+    );
     const vsr =
         String(serviceReqNo || '').trim() ||
         (() => {
@@ -98,8 +135,8 @@ export async function notifyAdminOfficerOnVehicleServiceCreated({
                 const services = Array.isArray(populated?.services)
                     ? populated.services
                     : Array.isArray(asset?.services)
-                      ? asset.services
-                      : [];
+                        ? asset.services
+                        : [];
                 const match = services.find((s) => String(s?._id) === String(serviceRecordId));
                 return String(match?.serviceReqNo || '').trim();
             } catch {
@@ -128,8 +165,8 @@ export async function notifyAdminOfficerOnVehicleServiceCreated({
                     : '',
                 requestedByName: actorName,
                 requestedDate: new Date(),
-                extra1: `${asset.assetId || asset.name || ''} — ${serviceTypeLabel}`,
-                extra2: inboxExtra2,
+                extra1: adminCopy.extra1,
+                extra2: adminCopy.extra2,
                 extra3,
             },
         },
@@ -140,9 +177,9 @@ export async function notifyAdminOfficerOnVehicleServiceCreated({
         await sendVehicleServiceWorkflowEmail({
             recipient: adminOfficer,
             asset: populated || asset,
-            stageLabel,
-            actionLabel,
-            detailLine: adminDetailLine,
+            stageLabel: adminCopy.stageLabel,
+            actionLabel: adminCopy.actionLabel,
+            detailLine: adminCopy.detailLine,
             linkPath,
             serviceReqNo: vsr,
         });
@@ -155,16 +192,17 @@ export async function notifyAdminOfficerOnVehicleServiceCreated({
         String(subjectEmp._id) !== String(adminOfficer._id)
     ) {
         try {
+            const assigneeCopy = vehicleServicePendingCopy(
+                serviceTypeLabel,
+                vehicleServiceActorName(subjectEmp),
+                currentStage,
+            );
             await sendVehicleServiceWorkflowEmail({
                 recipient: subjectEmp,
                 asset: populated || asset,
-                stageLabel: isInitiated
-                    ? `${serviceTypeLabel} initiated`
-                    : `${serviceTypeLabel} created`,
-                actionLabel: serviceTypeLabel,
-                detailLine: isInitiated
-                    ? `${actorName} initiated a ${serviceTypeLabel} request for your assigned vehicle ${assetLabel}.`
-                    : `A ${serviceTypeLabel} request was created for your assigned vehicle ${assetLabel}.`,
+                stageLabel: assigneeCopy.stageLabel,
+                actionLabel: assigneeCopy.actionLabel,
+                detailLine: assigneeCopy.detailLine,
                 linkPath,
                 serviceReqNo: vsr,
             });

@@ -95,7 +95,7 @@ const employeeDocumentsChildren = [
     { id: 'hrm_employees_view_documents_old', label: 'Old Documents', parent: 'hrm_employees_view_documents', hasDownload: true },
 ];
 
-/** Vehicle Asset — Active Fleet, Sold Fleet, Add Vehicle, Create Service only. */
+/** Vehicle Asset — Active Fleet, Sold Fleet, Add Vehicle, Create Service, Add Fuel. */
 export const VEHICLE_ASSET_MODULE = {
     id: 'hrm_asset_vehicle',
     label: 'Vehicle',
@@ -113,6 +113,12 @@ export const VEHICLE_ASSET_MODULE = {
         {
             id: 'hrm_asset_vehicle_create_service',
             label: 'Create Service',
+            parent: 'hrm_asset_vehicle',
+            hasDownload: true,
+        },
+        {
+            id: 'hrm_asset_vehicle_add_fuel',
+            label: 'Access Fuel',
             parent: 'hrm_asset_vehicle',
             hasDownload: true,
         },
@@ -282,7 +288,6 @@ export const HRM_MODULE = {
         { id: 'hrm_attendance', label: 'Attendance', parent: 'hrm', hasDownload: true },
         { id: 'hrm_leave', label: 'Leave', parent: 'hrm', hasDownload: true },
         { id: 'hrm_salary', label: 'Salary', parent: 'hrm', hasDownload: true },
-        { id: 'hrm_leave_salary', label: 'Leave Salary', parent: 'hrm', hasDownload: true },
         { id: 'hrm_ncr', label: 'NCR', parent: 'hrm', hasDownload: true },
         {
             id: 'hrm_fine',

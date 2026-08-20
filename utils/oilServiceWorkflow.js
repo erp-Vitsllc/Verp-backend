@@ -14,6 +14,10 @@ import { sendVehicleServiceScheduledNotificationEmail } from './sendVehicleServi
 import { sendVehicleServiceCompletedNotificationEmail } from './sendVehicleServiceCompletedNotificationEmail.js';
 import { resolveEmployeeEmail } from './resolveEmployeeEmail.js';
 import {
+    vehicleServicePendingCopy,
+    vehicleServiceActorName,
+} from './vehicleServiceNotificationCopy.js';
+import {
     applyServiceActiveState,
     applyPostServiceOperationalState,
 } from './assetOperationalFlags.js';
@@ -1328,6 +1332,19 @@ async function notifyOilServiceDetailsCompleted({
     });
 }
 
+function oilPendingStageForRecipient(oilStage, isAdmin) {
+    const s = String(oilStage || '').toLowerCase();
+    if (s === 'schedule_hr_open') return isAdmin ? 'Schedule' : 'HR Approval';
+    if (s === 'ready_to_service') return 'Ready to Service';
+    if (s === 'on_service') return 'On Service';
+    if (s === 'accounts_quote') return 'Accounts Approve';
+    if (s === 'accounts_payment') return 'Make Payment';
+    if (s === 'hr_approval') return 'HR Approval';
+    if (s === 'service_due') return 'Created';
+    if (s === 'complete_due' || s === 'overdue') return 'Complete Service';
+    return isAdmin ? 'Created' : 'Created';
+}
+
 async function notifyStakeholders({
     asset,
     serviceRecordId,
@@ -1341,18 +1358,29 @@ async function notifyStakeholders({
 }) {
     const linkPath = oilServiceDetailsPath(asset._id, serviceRecordId);
     const list = uniqRecipients(recipients);
+    const adminOfficer = await getDepartmentHOD('admincontroller');
     for (const recipient of list) {
+        const isAdmin = Boolean(
+            adminOfficer?._id && recipient?._id && String(recipient._id) === String(adminOfficer._id),
+        );
+        const pendingStage = oilPendingStageForRecipient(oilStage, isAdmin);
+        const copy = vehicleServicePendingCopy(
+            'Oil Service',
+            vehicleServiceActorName(recipient),
+            pendingStage,
+            { completeTrack: isAdmin },
+        );
         // When formal scheduled/completed letter already went out, keep inbox tasks only.
         if (!skipEmail) {
             await sendOilEmail({
                 recipient,
                 asset,
-                actionLabel,
-                detailLine,
+                actionLabel: copy.actionLabel,
+                detailLine: copy.detailLine,
                 detailRows,
                 serviceRecordId,
                 linkPath,
-                stageLabel,
+                stageLabel: copy.stageLabel,
             });
         }
         if (recipient?._id) {
@@ -1362,9 +1390,9 @@ async function notifyStakeholders({
                 status: 'Pending',
                 assignedTo: recipient._id,
                 subjectEmployee: asset.assignedTo,
-                requestedByName: actionLabel,
-                extra1: `${asset.assetId} — Oil Service`,
-                extra2: detailLine,
+                requestedByName: copy.actionLabel,
+                extra1: copy.extra1,
+                extra2: copy.extra2,
                 extra3: oilServiceDashboardMeta(asset, serviceRecordId, oilStage),
             });
         }
@@ -2424,14 +2452,21 @@ export async function advanceOilCashAfterHrApprove(asset, wf, actorName) {
     // Admin: full-details email when HR approves (no extra dashboard spam).
     if (adminOfficer?._id && String(adminOfficer._id) !== String(accounts._id)) {
         const linkPath = oilServiceDetailsPath(populated._id, serviceId);
+        const adminHrCopy = vehicleServicePendingCopy(
+            'Oil Service',
+            vehicleServiceActorName(adminOfficer),
+            'Schedule',
+            { completeTrack: true },
+        );
         await sendOilEmail({
             recipient: adminOfficer,
             asset: populated,
-            actionLabel: 'Oil service — HR approved',
-            detailLine: `HR approved the oil service schedule for ${populated?.assetId || ''}${plate ? ` (${plate})` : ''}. Full garage and date details are below. Accounts will review next.`,
+            actionLabel: adminHrCopy.actionLabel,
+            detailLine: adminHrCopy.detailLine,
             detailRows: scheduleRows,
             serviceRecordId: serviceId,
             linkPath,
+            stageLabel: adminHrCopy.stageLabel,
         });
     }
 
@@ -3212,17 +3247,6 @@ export async function maybeAutoCreateOilServiceDue(assetDoc) {
         { label: 'Action required', value: 'Open the new oil service request and complete further procedures' },
     ];
 
-    await notifyStakeholders({
-        asset: populated,
-        serviceRecordId: serviceId,
-        recipients: [adminOfficer, populated.assignedTo, management, hr],
-        actionLabel: 'Oil service due — please complete further procedures',
-        detailLine,
-        detailRows,
-        oilStage: 'service_due',
-        stageLabel: 'Oil service due',
-    });
-
     try {
         const { notifyAdminOfficerOnVehicleServiceCreated } = await import(
             './vehicleServiceAdminOfficerNotification.js'
@@ -3237,6 +3261,17 @@ export async function maybeAutoCreateOilServiceDue(assetDoc) {
     } catch (notifyErr) {
         console.error('[OilService] Admin officer track notify on auto-create failed:', notifyErr);
     }
+
+    await notifyStakeholders({
+        asset: populated,
+        serviceRecordId: serviceId,
+        recipients: [adminOfficer, populated.assignedTo, management, hr],
+        actionLabel: 'Oil service due — please complete further procedures',
+        detailLine,
+        detailRows,
+        oilStage: 'service_due',
+        stageLabel: 'Oil service due',
+    });
 
     return true;
 }
@@ -3316,6 +3351,7 @@ export async function processOilServiceOverdue() {
                 recipients: [adminOfficer, asset.assignedTo],
                 actionLabel: 'Oil service duration overdue',
                 detailLine,
+                oilStage: 'overdue',
             });
         }
     } catch (e) {

@@ -6,6 +6,7 @@ import { getDepartmentHOD } from './getDepartmentHOD.js';
 import { syncDashboardAction } from './syncDashboard.js';
 import { sendVehicleServiceWorkflowEmail } from './sendVehicleServiceWorkflowEmail.js';
 import { applyPostServiceOperationalState } from './assetOperationalFlags.js';
+import { applyVehicleServiceNotificationCopy } from './vehicleServiceNotificationCopy.js';
 import { actorMayManageTireChangeRequest, getRequesterName, actorMayAdminScheduleShopService } from './oilServiceWorkflow.js';
 import { generateFineIdInternal } from '../controllers/fine/addFine.js';
 import {
@@ -106,6 +107,13 @@ export async function notifyAccidentRepairStakeholder({
 }) {
     if (!recipient?._id) return;
     const linkPath = accidentRepairDetailsPath(asset._id, serviceRecordId);
+    const copy = await applyVehicleServiceNotificationCopy({
+        recipient,
+        serviceType: 'Accident Repair',
+        extra2,
+        actionLabel,
+        stageLabel,
+    });
     await syncDashboardAction({
         requestId: asset._id,
         requestType: 'Vehicle Service Request',
@@ -113,16 +121,16 @@ export async function notifyAccidentRepairStakeholder({
         assignedTo: recipient._id,
         subjectEmployee: asset.assignedTo,
         requestedByName,
-        extra1: `${asset.assetId} — Accident Repair`,
-        extra2,
+        extra1: copy.extra1,
+        extra2: copy.extra2,
         extra3: accidentRepairDashboardMeta(asset, serviceRecordId),
     });
     await sendTireEmail({
         recipient,
         asset,
-        stageLabel,
-        actionLabel,
-        detailLine,
+        stageLabel: copy.stageLabel,
+        actionLabel: copy.actionLabel,
+        detailLine: copy.detailLine,
         linkPath,
     });
 }

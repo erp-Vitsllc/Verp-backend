@@ -8,6 +8,7 @@ import { closeAdminOfficerServiceTrackNotification } from '../utils/vehicleServi
 import { getDepartmentHOD, isUserInFlowchart } from '../utils/getDepartmentHOD.js';
 import { getManagementHOD } from '../utils/getManagementHOD.js';
 import { sendVehicleServiceWorkflowEmail } from '../utils/sendVehicleServiceWorkflowEmail.js';
+import { applyVehicleServiceNotificationCopy } from '../utils/vehicleServiceNotificationCopy.js';
 import { resolveEmployeeEmail } from '../utils/resolveEmployeeEmail.js';
 import { isUserAdministrator } from '../services/permissionService.js';
 import { isJwtSystemSuperUser } from '../utils/systemSuperUser.js';
@@ -1102,31 +1103,20 @@ export async function maybeStartVehicleServiceWorkflow(asset, { serviceRecordId,
             serviceRecordId
         });
 
-        const isTireChange = String(serviceType || '').trim() === 'Tire Change';
-        // Oil-style: Schedule + HR open together after Initiate (not Car Wash).
         const isShopQuoteService = [
             'Tire Change',
             'Mechanical Work',
             'Body Work',
             'Accident Repair',
         ].includes(String(serviceType || '').trim());
-        const plate = [asset.plateEmirate, asset.plateNumber].filter(Boolean).join(' ').trim();
-        const assetLabel = `${asset.assetId || ''}${plate ? ` (${plate})` : ''}`.trim();
         const detailsPath = vehicleServiceDetailsPath(asset._id, serviceRecordId, serviceType);
 
-        // Oil-style: Schedule (Admin) + HR open together after Initiate (Tire / Mech / Body).
-        const scheduleHrExtra2 = accidentOtherParty
-            ? 'Other party damage — complete Schedule / Reschedule'
-            : isTireChange
-              ? 'Tire change submitted — Schedule & HR Approval open'
-              : 'Schedule and HR Approval open together';
-        const scheduleHrDetail = accidentOtherParty
-            ? `${requesterName} logged accident repair (other party) for ${assetLabel}. Complete Schedule/Reschedule — HR and Accounts approval are not required.`
-            : isTireChange
-              ? `${requesterName} submitted a tire change request for ${assetLabel}. Schedule/Reschedule (Admin) and HR Approval are open together — Admin may complete garage/dates; HR reviews quotations.`
-              : `${requesterName} logged a service (${serviceType}) for ${assetLabel}. Schedule/Reschedule (Admin) and HR Approval are open together.`;
-
         if (hr?._id) {
+            const hrCopy = await applyVehicleServiceNotificationCopy({
+                recipient: hr,
+                serviceType: serviceType || 'Service',
+                pendingStage: 'HR Approval',
+            });
             await syncDashboardAction({
                 requestId: asset._id,
                 requestType: 'Vehicle Service Request',
@@ -1135,21 +1125,17 @@ export async function maybeStartVehicleServiceWorkflow(asset, { serviceRecordId,
                 subjectEmployee: subjectEmp,
                 subjectName: asset.name || asset.assetId || 'Vehicle',
                 requestedByName: requesterName,
-                extra1: `${asset.assetId} — ${serviceType || 'Service'}`,
-                extra2: isShopQuoteService ? scheduleHrExtra2 : 'Awaiting HR approval',
+                extra1: hrCopy.extra1,
+                extra2: hrCopy.extra2,
                 extra3: vehicleServiceDashboardMeta(asset, serviceRecordId, serviceType),
             });
 
             await sendWorkflowEmailWithConsole({
                 recipient: hr,
                 asset,
-                stageLabel: isShopQuoteService ? 'Schedule & HR Approval open' : 'HR approval required',
-                actionLabel: isShopQuoteService
-                    ? `${serviceType} — Schedule & HR Approval`
-                    : 'New vehicle service request',
-                detailLine: isShopQuoteService
-                    ? scheduleHrDetail
-                    : `${requesterName} logged a service (${serviceType}). Please approve or reject in your dashboard.`,
+                stageLabel: hrCopy.stageLabel,
+                actionLabel: hrCopy.actionLabel,
+                detailLine: hrCopy.detailLine,
                 linkPath: detailsPath,
             });
         }
@@ -1159,6 +1145,11 @@ export async function maybeStartVehicleServiceWorkflow(asset, { serviceRecordId,
             adminOfficer?._id &&
             (!hr?._id || String(adminOfficer._id) !== String(hr._id))
         ) {
+            const adminCopy = await applyVehicleServiceNotificationCopy({
+                recipient: adminOfficer,
+                serviceType: serviceType || 'Service',
+                pendingStage: accidentOtherParty ? 'Schedule' : 'Schedule',
+            });
             await syncDashboardAction({
                 requestId: asset._id,
                 requestType: 'Vehicle Service Request',
@@ -1167,18 +1158,16 @@ export async function maybeStartVehicleServiceWorkflow(asset, { serviceRecordId,
                 subjectEmployee: subjectEmp,
                 subjectName: asset.name || asset.assetId || 'Vehicle',
                 requestedByName: requesterName,
-                extra1: `${asset.assetId} — ${serviceType || 'Service'}`,
-                extra2: 'Complete garage / Schedule and Reschedule',
+                extra1: adminCopy.extra1,
+                extra2: adminCopy.extra2,
                 extra3: vehicleServiceDashboardMeta(asset, serviceRecordId, serviceType),
             });
             await sendWorkflowEmailWithConsole({
                 recipient: adminOfficer,
                 asset,
-                stageLabel: accidentOtherParty ? 'Schedule open' : 'Schedule & HR Approval open',
-                actionLabel: accidentOtherParty
-                    ? `${serviceType} — Schedule`
-                    : `${serviceType} — Schedule & HR Approval`,
-                detailLine: scheduleHrDetail,
+                stageLabel: adminCopy.stageLabel,
+                actionLabel: adminCopy.actionLabel,
+                detailLine: adminCopy.detailLine,
                 linkPath: detailsPath,
             });
         }
@@ -1252,6 +1241,12 @@ export async function maybeStartCarWashWorkflow(asset, { serviceRecordId, req })
             serviceRecordId,
         });
 
+        const washCopy = await applyVehicleServiceNotificationCopy({
+            recipient: accounts,
+            serviceType: 'Car Wash',
+            pendingStage: 'Zoho Expense',
+        });
+
         await syncDashboardAction({
             requestId: asset._id,
             requestType: 'Vehicle Service Request',
@@ -1259,17 +1254,17 @@ export async function maybeStartCarWashWorkflow(asset, { serviceRecordId, req })
             assignedTo: accounts._id,
             subjectEmployee: asset.assignedTo,
             requestedByName: requesterName,
-            extra1: `${asset.assetId} — Car Wash`,
-            extra2: 'Store Zoho Expense (Car Wash)',
+            extra1: washCopy.extra1,
+            extra2: washCopy.extra2,
             extra3: carWashDashboardMeta(asset, serviceRecordId),
         });
 
         await sendWorkflowEmailWithConsole({
             recipient: accounts,
             asset,
-            stageLabel: 'Accounts Zoho Expense required',
-            actionLabel: 'Car wash — store Zoho Expense',
-            detailLine: `${requesterName} submitted a car wash request for ${asset.assetId || 'vehicle'} (Completed). Open VeRP, enter Expense Account / Amount / Paid Through, then Store to Zoho Expense.`,
+            stageLabel: washCopy.stageLabel,
+            actionLabel: washCopy.actionLabel,
+            detailLine: washCopy.detailLine,
             linkPath: carWashDetailsPath(asset._id, serviceRecordId),
         });
 
@@ -2184,6 +2179,11 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
             const nextAssignee = await resolveAssigneeForStage(STAGE.SCHEDULED);
             if (nextAssignee?._id) {
                 const requesterName = actorName;
+                const schedCopy = await applyVehicleServiceNotificationCopy({
+                    recipient: nextAssignee,
+                    serviceType: wf.serviceTypeLabel || 'Service',
+                    pendingStage: 'On Service',
+                });
                 await syncDashboardAction({
                     requestId: asset._id,
                     requestType: 'Vehicle Service Request',
@@ -2191,16 +2191,16 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
                     assignedTo: nextAssignee._id,
                     subjectEmployee: asset.assignedTo,
                     requestedByName: requesterName,
-                    extra1: `${asset.assetId} — ${wf.serviceTypeLabel || 'Service'}`,
-                    extra2: 'Service scheduled — use Extend or Mark live during the service window',
+                    extra1: schedCopy.extra1,
+                    extra2: schedCopy.extra2,
                     extra3: vehicleServiceDashboardMetaForWorkflow(asset, wf),
                 });
                 await sendWorkflowEmailWithConsole({
                     recipient: nextAssignee,
                     asset,
-                    stageLabel: 'Service scheduled (asset controller)',
-                    actionLabel: 'Vehicle service window is scheduled',
-                    detailLine: `A service date and duration are set. The vehicle is waiting for service until the first service day, then you can use Extend or Mark live during the window.`,
+                    stageLabel: schedCopy.stageLabel,
+                    actionLabel: schedCopy.actionLabel,
+                    detailLine: schedCopy.detailLine,
                     linkPath: vehicleServiceDetailsPathForWorkflow(asset, wf),
                 });
             }
@@ -2265,11 +2265,16 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
         const nextAssignee = await resolveAssigneeForStage(nextStage);
         if (nextAssignee?._id) {
             const requesterName = actorName;
-            let extra2 = 'Action required';
-            if (nextStage === STAGE.ACCOUNTS) extra2 = 'Awaiting Accounts approval';
-            if (nextStage === STAGE.ADMIN) {
-                extra2 = 'Admin must set the service date and duration to schedule the in-shop window';
-            }
+            const nextCopy = await applyVehicleServiceNotificationCopy({
+                recipient: nextAssignee,
+                serviceType: wf.serviceTypeLabel || 'Service',
+                pendingStage:
+                    nextStage === STAGE.ACCOUNTS
+                        ? 'Accounts Approve'
+                        : nextStage === STAGE.ADMIN
+                          ? 'Schedule'
+                          : 'Created',
+            });
 
             await syncDashboardAction({
                 requestId: asset._id,
@@ -2278,17 +2283,17 @@ export const respondVehicleServiceWorkflow = async (req, res) => {
                 assignedTo: nextAssignee._id,
                 subjectEmployee: asset.assignedTo,
                 requestedByName: requesterName,
-                extra1: `${asset.assetId} — ${wf.serviceTypeLabel || 'Service'}`,
-                extra2,
+                extra1: nextCopy.extra1,
+                extra2: nextCopy.extra2,
                 extra3: vehicleServiceDashboardMetaForWorkflow(asset, wf),
             });
 
             await sendWorkflowEmailWithConsole({
                 recipient: nextAssignee,
                 asset,
-                stageLabel: extra2,
-                actionLabel: 'Vehicle service workflow',
-                detailLine: `The request moved to the next step. Please review in VeRP.`,
+                stageLabel: nextCopy.stageLabel,
+                actionLabel: nextCopy.actionLabel,
+                detailLine: nextCopy.detailLine,
                 linkPath: vehicleServiceDetailsPathForWorkflow(asset, wf),
             });
         }

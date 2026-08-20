@@ -43,8 +43,9 @@ function getLetterheadDataUrl() {
 }
 
 /**
- * Approved fine report PDF — redesigned Vehicle Fine Report layout on VITS letterhead.
- * Title follows the fine type. Discount is an AED amount.
+ * Approved fine report PDF — the fine form on VITS letterhead.
+ * Header/footer artwork is the page background on every A4 sheet.
+ * @page margins keep form content out of that artwork, including page 2+.
  */
 export function buildFineApprovedPdfHtml({
     fine,
@@ -83,7 +84,10 @@ export function buildFineApprovedPdfHtml({
 <meta charset="utf-8"/>
 <title>${esc(fields.reportTitle || 'Fine Report')} — ${esc(fine.fineId)}</title>
 <style>
-  @page { size: A4 portrait; margin: 0; }
+  @page {
+    size: A4 portrait;
+    margin: ${SAFE_TOP} ${SAFE_X} ${SAFE_BOTTOM};
+  }
   html, body {
     margin: 0;
     padding: 0;
@@ -97,31 +101,29 @@ export function buildFineApprovedPdfHtml({
   }
   #fine-approved-pdf {
     position: relative;
-    width: 210mm;
-    min-height: 297mm;
+    width: 100%;
     margin: 0 auto;
-    padding: ${SAFE_TOP} ${SAFE_X} ${SAFE_BOTTOM};
     font-family: Arial, Helvetica, sans-serif;
     color: #1e293b;
     line-height: 1.35;
     background: #ffffff;
-    overflow: hidden;
     -webkit-print-color-adjust: exact;
     print-color-adjust: exact;
   }
   .vits-fine-letterhead {
-    position: absolute;
-    inset: 0;
-    width: 100%;
-    height: 100%;
+    position: fixed;
+    top: -${SAFE_TOP};
+    left: -${SAFE_X};
+    width: 210mm;
+    height: 297mm;
     z-index: 0;
     pointer-events: none;
     overflow: hidden;
   }
   .vits-fine-letterhead img {
     display: block;
-    width: 100%;
-    height: 100%;
+    width: 210mm;
+    height: 297mm;
     object-fit: fill;
     object-position: center top;
   }

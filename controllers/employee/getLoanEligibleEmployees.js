@@ -2,15 +2,20 @@ import EmployeeBasic from "../../models/EmployeeBasic.js";
 import EmployeeSalary from "../../models/EmployeeSalary.js";
 import EmployeeVisa from "../../models/EmployeeVisa.js";
 
+function hasVisaSlot(slot) {
+    if (!slot) return false;
+    return Boolean(slot.expiryDate || slot.number || slot.issueDate);
+}
+
 function visaFromRecord(visa) {
-    if (visa?.employment?.expiryDate) {
-        return { type: 'Employment', expiry: visa.employment.expiryDate };
+    if (hasVisaSlot(visa?.employment)) {
+        return { type: 'Employment', expiry: visa.employment.expiryDate || null };
     }
-    if (visa?.spouse?.expiryDate) {
-        return { type: 'Spouse', expiry: visa.spouse.expiryDate };
+    if (hasVisaSlot(visa?.spouse)) {
+        return { type: 'Spouse', expiry: visa.spouse.expiryDate || null };
     }
-    if (visa?.visit?.expiryDate) {
-        return { type: 'Visit', expiry: visa.visit.expiryDate };
+    if (hasVisaSlot(visa?.visit)) {
+        return { type: 'Visit', expiry: visa.visit.expiryDate || null };
     }
     return { type: null, expiry: null };
 }

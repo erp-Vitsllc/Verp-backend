@@ -1,6 +1,10 @@
+import mongoose from 'mongoose';
 import VehicleFuelBill from '../models/VehicleFuelBill.js';
 import AssetItem from '../models/AssetItem.js';
+import AssetType from '../models/AssetType.js';
 import Company from '../models/Company.js';
+import { buildFleetVehicleMongoScope } from '../utils/fleetVehicleAssetId.js';
+import { isFleetVehicleAsset } from '../utils/assetApprovalHelpers.js';
 import {
     getLocatorMonthStatsForDevice,
     getLocatorMonthStatsMap,
@@ -15,11 +19,19 @@ import {
     pickEffectiveEmail,
     resolveEmployeeEmailWithReporteeLoaded,
     employeeDisplayName,
-    getFallbackEmailNote,
 } from '../utils/resolveEmployeeEmail.js';
 import { sendVehicleFuelBillEmail } from '../utils/sendVehicleFuelBillEmail.js';
+import { getUserPermissions, isUserAdministrator } from '../services/permissionService.js';
+import { isJwtSystemSuperUser } from '../utils/systemSuperUser.js';
 
 const MONTH_KEY_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
+const ADD_FUEL_PERMISSION = 'hrm_asset_vehicle_add_fuel';
+const ADD_FUEL_FLAGS = ['isView', 'isActive', 'isCreate', 'isEdit', 'isDelete', 'isDownload'];
+
+function currentMonthKey() {
+    const now = new Date();
+    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+}
 
 function monthLabelFromKey(monthKey) {
     const [year, month] = String(monthKey || '').split('-').map(Number);
@@ -73,10 +85,52 @@ async function loadFleetVehicle(vehicleId) {
         .lean();
 }
 
-function isLimitExceeded(amount, limit) {
+function draftVisibilityQuery(reqUser) {
+    const uid = reqUser?._id || reqUser?.id;
+    if (uid && mongoose.Types.ObjectId.isValid(String(uid))) {
+        return {
+            $or: [{ status: { $ne: 'Draft' } }, { createdBy: new mongoose.Types.ObjectId(String(uid)) }],
+        };
+    }
+    return { status: { $ne: 'Draft' } };
+}
+
+const FUEL_FLEET_SELECT =
+    'assetId name vehicleBrand vehicleCode plateEmirate plateNumber assignedTo assignedToType assignedCompany status fuelMonthlyLimit locatorDeviceId vehicleProfileActivationStatus vehicleInspectionStatus vehicleDispositionStatus documents.type documents.description';
+
+async function loadFuelFleetVehicles(req) {
+    const vehicleTypeDocs = await AssetType.find({
+        isActive: true,
+        name: { $regex: /vehicle|car|fleet|truck/i },
+    })
+        .select('_id')
+        .lean();
+    const vehicleTypeIds = vehicleTypeDocs.map((t) => t._id);
+    const items = await AssetItem.find({
+        $and: [draftVisibilityQuery(req.user), buildFleetVehicleMongoScope({ vehicleTypeIds })],
+    })
+        .select(FUEL_FLEET_SELECT)
+        .populate('assignedTo', 'firstName lastName employeeId')
+        .populate('assignedCompany', 'name nickName')
+        .populate('typeId', 'name')
+        .sort({ plateNumber: 1, assetId: 1 })
+        .lean();
+    return items.filter(isFleetVehicleAsset);
+}
+
+function fuelUsageRatio(amount, limit) {
     const used = Number(amount);
     const cap = Number(limit);
-    return Number.isFinite(used) && Number.isFinite(cap) && cap > 0 && used >= cap;
+    if (!Number.isFinite(used) || !Number.isFinite(cap) || cap <= 0) return 0;
+    return used / cap;
+}
+
+function isLimitWarning80(amount, limit) {
+    return fuelUsageRatio(amount, limit) >= 0.8;
+}
+
+function isLimitExceeded(amount, limit) {
+    return fuelUsageRatio(amount, limit) >= 1;
 }
 
 function serializeBill(bill, asset, gpsStats = null) {
@@ -103,11 +157,16 @@ function serializeBill(bill, asset, gpsStats = null) {
         status: bill.status,
         amountUsed,
         monthlyLimit,
+        limitPercent: Math.round(fuelUsageRatio(amountUsed, monthlyLimit) * 100),
+        limitWarning80: isLimitWarning80(amountUsed, monthlyLimit) && !isLimitExceeded(amountUsed, monthlyLimit),
         limitExceeded: isLimitExceeded(amountUsed, monthlyLimit),
         kmRun,
         idleTimeMinutes,
         idleTimeLabel: formatIdleTime(idleTimeMinutes),
         vehicleNumber: plateOf(asset) || asset?.assetId || '—',
+        vehicleName: asset?.name || '—',
+        vehicleAssetNo: asset?.assetId || '—',
+        plateNo: plateOf(asset) || '—',
         vehicleOwner: ownerOf(asset),
         closedAt: bill.closedAt || null,
         entries,
@@ -122,6 +181,40 @@ function parseAmount(value) {
     return Number(n.toFixed(2));
 }
 
+function petrolCardMonthlyLimit(asset) {
+    const docs = Array.isArray(asset?.documents) ? asset.documents : [];
+    const petrol = docs.find((d) => String(d.type || '').toLowerCase() === 'petrol');
+    if (!petrol?.description) return null;
+    try {
+        const parsed = JSON.parse(petrol.description);
+        const n = parseAmount(parsed?.limit);
+        if (n != null && n > 0) return n;
+        const cleaned = Number(String(parsed?.limit ?? '').replace(/[^\d.]/g, ''));
+        return Number.isFinite(cleaned) && cleaned > 0 ? Number(cleaned.toFixed(2)) : null;
+    } catch {
+        return null;
+    }
+}
+
+/** Prefer Basic Details, then petrol-card monthly limit. Treat 0 as unset. */
+function resolveVehicleMonthlyLimit(asset, fromBody = null) {
+    if (fromBody != null && fromBody > 0) return fromBody;
+    const fromAsset = parseAmount(asset?.fuelMonthlyLimit);
+    if (fromAsset != null && fromAsset > 0) return fromAsset;
+    return petrolCardMonthlyLimit(asset);
+}
+
+function serializeFuelVehicle(v) {
+    return {
+        _id: v._id,
+        assetId: v.assetId,
+        name: v.name,
+        plate: plateOf(v) || v.assetId,
+        owner: ownerOf(v),
+        fuelMonthlyLimit: resolveVehicleMonthlyLimit(v) || 0,
+    };
+}
+
 function parseAttachment(raw) {
     if (!raw || typeof raw !== 'object') return null;
     const data = String(raw.data || '').trim();
@@ -133,7 +226,14 @@ function parseAttachment(raw) {
     };
 }
 
-async function collectFuelEmailTargets(asset) {
+function noUserAccountFallbackNote(employeeName, reporteeName) {
+    return `
+    <div style="background-color: #fff3cd; border: 1px solid #ffc107; padding: 12px; border-radius: 6px; margin-bottom: 20px; font-size: 13px;">
+        <strong>Note:</strong> This notification was sent to you (${reporteeName}) because <strong>${employeeName}</strong> does not have a user account. Please ensure they are informed.
+    </div>`;
+}
+
+async function collectAssigneeAndAdminFuelEmails(asset, { includeHr = false } = {}) {
     const emails = [];
     const seen = new Set();
     let greetingName = '';
@@ -159,10 +259,7 @@ async function collectFuelEmailTargets(asset) {
 
     const assignee = asset?.assignedTo;
     if (assignee) {
-        const emp =
-            typeof assignee === 'object' && assignee.employeeId
-                ? assignee
-                : null;
+        const emp = typeof assignee === 'object' && assignee.employeeId ? assignee : null;
         if (emp) {
             const hasUser = await employeeHasActivePortalUser(emp);
             if (hasUser) {
@@ -175,7 +272,7 @@ async function collectFuelEmailTargets(asset) {
                 const reporteeEmail = pickEffectiveEmail(reportee);
                 add(reporteeEmail);
                 if (reportee) {
-                    fallbackNoteHtml = getFallbackEmailNote(
+                    fallbackNoteHtml = noUserAccountFallbackNote(
                         employeeDisplayName(employee || emp),
                         employeeDisplayName(reportee),
                     );
@@ -187,10 +284,15 @@ async function collectFuelEmailTargets(asset) {
 
     const adminOfficer = await resolveAdminOfficerEmployee().catch(() => null);
     add(pickEffectiveEmail(adminOfficer));
+    if (!greetingName && adminOfficer) {
+        greetingName = adminOfficer.firstName || employeeDisplayName(adminOfficer);
+    }
 
-    const hr = await resolveHrEmployee().catch(() => null);
-    add(pickEffectiveEmail(hr));
-    if (!greetingName && hr) greetingName = hr.firstName || employeeDisplayName(hr);
+    if (includeHr) {
+        const hr = await resolveHrEmployee().catch(() => null);
+        add(pickEffectiveEmail(hr));
+        if (!greetingName && hr) greetingName = hr.firstName || employeeDisplayName(hr);
+    }
 
     return {
         to: emails[0] || null,
@@ -198,6 +300,14 @@ async function collectFuelEmailTargets(asset) {
         greetingName: greetingName || 'there',
         fallbackNoteHtml,
     };
+}
+
+async function collectFuelEmailTargets(asset) {
+    return collectAssigneeAndAdminFuelEmails(asset, { includeHr: true });
+}
+
+async function collectFuelLimitEmailTargets(asset) {
+    return collectAssigneeAndAdminFuelEmails(asset, { includeHr: false });
 }
 
 async function actorIsFlowchartHr(user) {
@@ -211,33 +321,27 @@ async function actorIsFlowchartHr(user) {
     return false;
 }
 
-async function notifyFuelLimitExceeded(asset, bill) {
-    const hr = await resolveHrEmployee().catch(() => null);
-    const adminOfficer = await resolveAdminOfficerEmployee().catch(() => null);
-    const emails = [];
-    const add = (addr) => {
-        const mail = String(addr || '').trim();
-        if (mail && !emails.some((e) => e.toLowerCase() === mail.toLowerCase())) emails.push(mail);
-    };
-    add(pickEffectiveEmail(hr));
-    add(pickEffectiveEmail(adminOfficer));
-    if (!emails.length) return;
-    await sendVehicleFuelBillEmail({
-        to: emails[0],
-        cc: emails.slice(1),
-        asset,
-        monthLabel: monthLabelFromKey(bill.monthKey),
-        amountUsed: bill.amountUsed,
-        monthlyLimit: bill.monthlyLimit,
-        kmRun: bill.kmRun,
-        idleTimeLabel: formatIdleTime(bill.idleTimeMinutes),
-        action: 'limitExceeded',
-        greetingName: hr?.firstName || adminOfficer?.firstName || 'there',
-    });
+async function actorHasAddFuelPermission(user) {
+    const uid = user?.id || user?._id;
+    if (!uid) return false;
+    if (await isUserAdministrator(uid)) return true;
+    const packed = await getUserPermissions(uid);
+    if (packed?.isAdministrator) return true;
+    const row = packed?.permissions?.[ADD_FUEL_PERMISSION];
+    if (!row) return false;
+    return ADD_FUEL_FLAGS.some((flag) => row[flag] === true);
 }
 
-async function notifyFuelBill(asset, bill, action) {
-    const targets = await collectFuelEmailTargets(asset);
+async function actorCanManageFuel(user) {
+    if (!user) return false;
+    if (isJwtSystemSuperUser(user)) return true;
+    if (user.isAdministrator || user.role === 'admin') return true;
+    if (await actorHasAddFuelPermission(user)) return true;
+    return actorIsFlowchartHr(user);
+}
+
+async function notifyFuelLimitThreshold(asset, bill, action) {
+    const targets = await collectFuelLimitEmailTargets(asset);
     if (!targets.to) return;
     await sendVehicleFuelBillEmail({
         to: targets.to,
@@ -254,42 +358,136 @@ async function notifyFuelBill(asset, bill, action) {
     });
 }
 
-export async function requireFlowchartHr(req, res, next) {
+async function maybeNotifyFuelLimitThresholds(asset, bill) {
+    const ratio = fuelUsageRatio(bill.amountUsed, bill.monthlyLimit);
+    if (ratio < 0.8) return;
+
+    const sent80 = Boolean(bill.limitAlert80SentAt);
+    const sent100 = Boolean(bill.limitAlert100SentAt);
+    const reached100 = ratio >= 1;
+    const need100 = reached100 && !sent100;
+    const need80 = ratio >= 0.8 && !sent80 && !reached100;
+
+    if (!need80 && !need100) return;
+
+    await notifyFuelLimitThreshold(asset, bill, need100 ? 'limitExceeded' : 'limitWarning80');
+
+    const patch = {};
+    if (need80 || need100) patch.limitAlert80SentAt = new Date();
+    if (need100) patch.limitAlert100SentAt = new Date();
+    if (Object.keys(patch).length) {
+        await VehicleFuelBill.updateOne({ _id: bill._id }, { $set: patch });
+    }
+}
+
+async function notifyFuelBill(asset, bill, action) {
+    const targets =
+        action === 'added'
+            ? await collectAssigneeAndAdminFuelEmails(asset, { includeHr: false })
+            : await collectFuelEmailTargets(asset);
+    if (!targets.to) return;
+    await sendVehicleFuelBillEmail({
+        to: targets.to,
+        cc: targets.cc,
+        asset,
+        monthLabel: monthLabelFromKey(bill.monthKey),
+        amountUsed: bill.amountUsed,
+        monthlyLimit: bill.monthlyLimit,
+        kmRun: bill.kmRun,
+        idleTimeLabel: formatIdleTime(bill.idleTimeMinutes),
+        action,
+        fallbackNoteHtml: targets.fallbackNoteHtml,
+        greetingName: targets.greetingName,
+    });
+}
+
+export async function requireCanManageFuel(req, res, next) {
     try {
-        const ok = await actorIsFlowchartHr(req.user);
+        const ok = await actorCanManageFuel(req.user);
         if (!ok) {
-            return res.status(403).json({ message: 'Only flowchart HR can manage vehicle fuel bills.' });
+            return res.status(403).json({ message: 'You do not have permission to manage vehicle fuel bills.' });
         }
         return next();
     } catch (error) {
-        return res.status(500).json({ message: error.message || 'Failed to verify HR access.' });
+        return res.status(500).json({ message: error.message || 'Failed to verify fuel access.' });
     }
 }
 
 export async function listFuelVehicles(req, res) {
     try {
-        const vehicles = await AssetItem.find({
-            plateNumber: { $exists: true, $nin: [null, ''] },
-        })
-            .select('assetId name plateEmirate plateNumber assignedTo assignedToType assignedCompany status fuelMonthlyLimit')
-            .populate('assignedTo', 'firstName lastName employeeId')
-            .populate('assignedCompany', 'name nickName')
-            .sort({ plateNumber: 1 })
-            .lean();
-
+        const vehicles = await loadFuelFleetVehicles(req);
         return res.json({
-            data: vehicles.map((v) => ({
-                _id: v._id,
-                assetId: v.assetId,
-                name: v.name,
-                plate: plateOf(v) || v.assetId,
-                owner: ownerOf(v),
-                fuelMonthlyLimit: Number(v.fuelMonthlyLimit) || 0,
-            })),
-            canManage: await actorIsFlowchartHr(req.user),
+            data: vehicles.map(serializeFuelVehicle),
+            canManage: await actorCanManageFuel(req.user),
         });
     } catch (error) {
         return res.status(500).json({ message: error.message || 'Failed to load vehicles.' });
+    }
+}
+
+export async function listAccessFuel(req, res) {
+    try {
+        const monthKey = MONTH_KEY_RE.test(String(req.query.monthKey || '').trim())
+            ? String(req.query.monthKey).trim()
+            : currentMonthKey();
+
+        const vehicles = await loadFuelFleetVehicles(req);
+
+        const bills = await VehicleFuelBill.find({ monthKey }).lean();
+        const billsByVehicle = new Map(bills.map((bill) => [String(bill.vehicleId), bill]));
+
+        const added = [];
+        const notAdded = [];
+        let totalAmount = 0;
+        let exceedCount = 0;
+
+        for (const vehicle of vehicles) {
+            const bill = billsByVehicle.get(String(vehicle._id));
+            if (bill) {
+                const row = serializeBill(bill, vehicle);
+                added.push(row);
+                totalAmount += Number(row.amountUsed) || 0;
+                if (row.limitExceeded) exceedCount += 1;
+                continue;
+            }
+            notAdded.push({
+                _id: `missing-${vehicle._id}`,
+                vehicleId: vehicle._id,
+                noFuel: true,
+                monthKey,
+                monthLabel: monthLabelFromKey(monthKey),
+                vehicleName: vehicle.name || '—',
+                vehicleAssetNo: vehicle.assetId || '—',
+                plateNo: plateOf(vehicle) || '—',
+                vehicleNumber: plateOf(vehicle) || vehicle.assetId || '—',
+                vehicleOwner: ownerOf(vehicle),
+                monthlyLimit: resolveVehicleMonthlyLimit(vehicle) || 0,
+                amountUsed: null,
+                kmRun: null,
+                idleTimeLabel: '—',
+                status: '',
+                limitExceeded: false,
+                limitWarning80: false,
+                entries: [],
+            });
+        }
+
+        return res.json({
+            monthKey,
+            monthLabel: monthLabelFromKey(monthKey),
+            vehicles: vehicles.map(serializeFuelVehicle),
+            added,
+            notAdded,
+            summary: {
+                addedCount: added.length,
+                notAddedCount: notAdded.length,
+                totalAmount,
+                exceedCount,
+            },
+            canManage: await actorCanManageFuel(req.user),
+        });
+    } catch (error) {
+        return res.status(500).json({ message: error.message || 'Failed to load access fuel.' });
     }
 }
 
@@ -315,7 +513,7 @@ export async function listVehicleFuelBills(req, res) {
         return res.json({
             data: rows,
             totalAmount,
-            canManage: await actorIsFlowchartHr(req.user),
+            canManage: await actorCanManageFuel(req.user),
         });
     } catch (error) {
         return res.status(500).json({ message: error.message || 'Failed to load fuel bills.' });
@@ -335,7 +533,7 @@ export async function lookupVehicleFuel(req, res) {
         const gpsStats = await locatorStatsForVehicle(asset, monthKey);
         return res.json({
             data: bill ? serializeBill(bill, asset, gpsStats) : null,
-            canManage: await actorIsFlowchartHr(req.user),
+            canManage: await actorCanManageFuel(req.user),
         });
     } catch (error) {
         return res.status(500).json({ message: error.message || 'Failed to look up fuel bill.' });
@@ -356,9 +554,7 @@ export async function addVehicleFuel(req, res) {
         const asset = await loadFleetVehicle(vehicleId);
         if (!asset) return res.status(404).json({ message: 'Vehicle not found.' });
 
-        const fromBody = parseAmount(req.body?.monthlyLimit);
-        const monthlyLimit =
-            fromBody != null && fromBody > 0 ? fromBody : parseAmount(asset.fuelMonthlyLimit);
+        const monthlyLimit = resolveVehicleMonthlyLimit(asset, parseAmount(req.body?.monthlyLimit));
         if (monthlyLimit == null || monthlyLimit <= 0) {
             return res.status(400).json({
                 message: 'Set a monthly limit on the vehicle first, or enter one here.',
@@ -400,11 +596,9 @@ export async function addVehicleFuel(req, res) {
         notifyFuelBill(asset, lean, 'added').catch((err) => {
             console.error('[VehicleFuel] add email failed:', err?.message || err);
         });
-        if (isLimitExceeded(lean.amountUsed, lean.monthlyLimit)) {
-            notifyFuelLimitExceeded(asset, lean).catch((err) => {
-                console.error('[VehicleFuel] limit email failed:', err?.message || err);
-            });
-        }
+        maybeNotifyFuelLimitThresholds(asset, lean).catch((err) => {
+            console.error('[VehicleFuel] limit email failed:', err?.message || err);
+        });
 
         return res.status(201).json({
             message: `Fuel created for ${monthLabelFromKey(monthKey)}.`,
@@ -448,14 +642,9 @@ export async function updateVehicleFuel(req, res) {
 
         await bill.save();
         const lean = bill.toObject();
-        notifyFuelBill(asset, lean, 'added').catch((err) => {
-            console.error('[VehicleFuel] edit email failed:', err?.message || err);
+        maybeNotifyFuelLimitThresholds(asset, lean).catch((err) => {
+            console.error('[VehicleFuel] limit email failed:', err?.message || err);
         });
-        if (isLimitExceeded(lean.amountUsed, lean.monthlyLimit)) {
-            notifyFuelLimitExceeded(asset, lean).catch((err) => {
-                console.error('[VehicleFuel] limit email failed:', err?.message || err);
-            });
-        }
 
         return res.json({
             message: 'Fuel bill updated.',

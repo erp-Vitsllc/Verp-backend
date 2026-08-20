@@ -7,6 +7,7 @@ import User from "../../models/User.js";
 import { getCompleteEmployee } from "../../services/employeeService.js";
 import { getDepartmentHOD } from "../../utils/getDepartmentHOD.js";
 import { getManagementHOD } from "../../utils/getManagementHOD.js";
+import { assertLoanEmployeeEligibility } from "../../utils/loanEligibilityValidation.js";
 
 
 /**
@@ -111,12 +112,14 @@ export const requestLoan = async (req, res) => {
             });
         }
 
-        // --- VALIDATION: Probation & Salary Checks ---
-        const salaryRecord = await EmployeeSalary.findOne({ employeeId: employeeBasic.employeeId });
-
-        if (type && type.includes('Loan') && employeeBasic.status === 'Probation') {
-            return res.status(400).json({ message: "Employees on probation cannot apply for personal loans." });
+        // --- VALIDATION: Visa / status eligibility (flowchart HR may override after confirm) ---
+        const eligibility = await assertLoanEmployeeEligibility(req, employeeBasic, type);
+        if (!eligibility.ok) {
+            return res.status(eligibility.status || 400).json({ message: eligibility.message });
         }
+
+        // --- VALIDATION: Salary Checks ---
+        const salaryRecord = await EmployeeSalary.findOne({ employeeId: employeeBasic.employeeId });
 
         if (type && type.includes('Advance')) {
             // Rule: Advance Amount <= Monthly Salary
@@ -373,6 +376,7 @@ export const createSelfLoanDraft = async (req, res) => {
         req.body.status = 'Draft';
         req.body.type = isAdvance ? 'Advance' : 'Loan';
         req.body.resubmit = false;
+        delete req.body.hrEligibilityOverride;
         return requestLoan(req, res);
     } catch (error) {
         console.error('Error creating self loan draft:', error);

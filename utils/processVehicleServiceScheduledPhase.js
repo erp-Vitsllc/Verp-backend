@@ -1,6 +1,7 @@
 import AssetItem from '../models/AssetItem.js';
 import { getDepartmentHOD } from './getDepartmentHOD.js';
 import { sendVehicleServiceWorkflowEmail } from './sendVehicleServiceWorkflowEmail.js';
+import { applyVehicleServiceNotificationCopy } from './vehicleServiceNotificationCopy.js';
 import { applyServiceActiveState } from './assetOperationalFlags.js';
 
 const STAGE_SCHEDULED = 'scheduled_service';
@@ -52,12 +53,17 @@ export async function processVehicleServiceScheduledPhase() {
                 changed = true;
                 const ac = await getDepartmentHOD('assetcontroller');
                 if (ac) {
+                    const copy = await applyVehicleServiceNotificationCopy({
+                        recipient: ac,
+                        serviceType: liveWf.serviceTypeLabel || 'Service',
+                        pendingStage: 'Complete Service',
+                    });
                     await sendVehicleServiceWorkflowEmail({
                         recipient: ac,
                         asset,
-                        stageLabel: 'Service window complete',
-                        actionLabel: 'Scheduled service duration has ended',
-                        detailLine: `The in-shop service window for ${asset.assetId} has passed its end date. Please use Mark live to close (with invoice) or Extend if work continues.`,
+                        stageLabel: copy.stageLabel,
+                        actionLabel: copy.actionLabel,
+                        detailLine: copy.detailLine,
                         linkPath: `/HRM/Asset/Vehicle/details/${asset._id}`,
                     });
                 }

@@ -3,6 +3,7 @@ import { syncDashboardAction } from "./syncDashboard.js";
 import { sendVehicleServiceWorkflowEmail } from "./sendVehicleServiceWorkflowEmail.js";
 import { getDepartmentHOD } from "./getDepartmentHOD.js";
 import { isTireChangeWorkflow, tireChangeDetailsPath, notifyTireChangeStakeholder } from "./tireChangeWorkflow.js";
+import { applyVehicleServiceNotificationCopy } from "./vehicleServiceNotificationCopy.js";
 
 const TWO_DAYS_MS = 2 * 24 * 60 * 60 * 1000;
 
@@ -81,6 +82,12 @@ export async function processVehicleServiceHoldReminders() {
 
             const legacyPath = `/HRM/Asset/Vehicle/service-requests/details/${asset._id}/${wf.serviceRecordId}`;
 
+            const holdCopy = await applyVehicleServiceNotificationCopy({
+                recipient: asset.assignedTo,
+                serviceType: wf.serviceTypeLabel || "Service",
+                pendingStage: "Schedule",
+            });
+
             await syncDashboardAction({
                 requestId: asset._id,
                 requestType: "Vehicle Service Request",
@@ -88,8 +95,8 @@ export async function processVehicleServiceHoldReminders() {
                 assignedTo: asset.assignedTo._id,
                 subjectEmployee: asset.assignedTo,
                 requestedByName: "Accounts",
-                extra1: `${asset.assetId} — ${wf.serviceTypeLabel || "Service"}`,
-                extra2: `Hold reminder: ${hold.reason || "No reason"} (until ${holdUntil.toLocaleDateString()})`,
+                extra1: holdCopy.extra1,
+                extra2: holdCopy.extra2,
                 extra3: JSON.stringify({
                     vehicleId: String(asset._id),
                     serviceRecordId: wf.serviceRecordId ? String(wf.serviceRecordId) : "",
@@ -100,9 +107,9 @@ export async function processVehicleServiceHoldReminders() {
             await sendVehicleServiceWorkflowEmail({
                 recipient: asset.assignedTo,
                 asset,
-                stageLabel: "Service hold reminder",
-                actionLabel: "Vehicle service — hold follow-up",
-                detailLine: `Hold follow-up is due on ${holdUntil.toLocaleDateString()}. Reason: ${hold.reason || "No reason provided"}.`,
+                stageLabel: holdCopy.stageLabel,
+                actionLabel: holdCopy.actionLabel,
+                detailLine: holdCopy.detailLine,
                 linkPath: legacyPath,
             });
 

@@ -4,6 +4,7 @@ import {
     buildProfileActivationHoldMessage,
     buildProfileActivationRejectedMessage,
 } from "./employeeProfileNotificationMessages.js";
+import { foldIntoAdminOfficerServiceTrackIfOpen } from "./vehicleServiceAdminOfficerNotification.js";
 
 /**
  * Synchronize a request with the DashboardAction collection.
@@ -324,6 +325,17 @@ export const syncDashboardAction = async (data) => {
             return;
         }
 
+        if (requestType === 'Vehicle Service Request' && status === 'Pending') {
+            const folded = await foldIntoAdminOfficerServiceTrackIfOpen({
+                requestId,
+                assignedTo: actualAssignedTo,
+                extra1,
+                extra2,
+                extra3,
+            });
+            if (folded) return;
+        }
+
         // Upsert the pending action
         const pendingExtra3 =
             extra3 !== undefined && extra3 !== null
@@ -340,8 +352,8 @@ export const syncDashboardAction = async (data) => {
             status: 'Pending',
             ...(requestType ? { requestType } : {}),
         };
-        // Parallel disposition + inspection handover: separate bell rows per viewer role / task type.
-        // Oil service: keep Admin Officer track row separate from stage tasks (HR / Accounts / On Service).
+        // Parallel disposition + inspection: separate bell rows per extra3.
+        // Vehicle service: Admin create-track folds stage updates above; HR/Accounts keep extra3 rows.
         if (
             (requestType === 'Vehicle Disposition Request' || requestType === 'Vehicle Inspection') &&
             pendingExtra3

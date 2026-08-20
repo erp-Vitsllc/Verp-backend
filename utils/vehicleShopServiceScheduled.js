@@ -5,6 +5,7 @@ import { sendVehicleServiceWorkflowEmail } from './sendVehicleServiceWorkflowEma
 import { sendVehicleServiceScheduledNotificationEmail } from './sendVehicleServiceScheduledNotificationEmail.js';
 import { sendVehicleServiceCompletedNotificationEmail } from './sendVehicleServiceCompletedNotificationEmail.js';
 import { syncDashboardAction } from './syncDashboard.js';
+import { applyVehicleServiceNotificationCopy } from './vehicleServiceNotificationCopy.js';
 import { applyServiceActiveState } from './assetOperationalFlags.js';
 import { getWorkflowContextForService } from './vehicleServiceWorkflowResolve.js';
 
@@ -140,6 +141,7 @@ async function notifyShopServiceRecipients({
     linkPath,
     dashboardMeta,
     cc = [],
+    pendingStage = '',
 }) {
     const serviceReqNo = resolveServiceReqNo(
         (Array.isArray(asset?.services) ? asset.services : []).find(
@@ -153,12 +155,19 @@ async function notifyShopServiceRecipients({
     );
     for (const recipient of uniqRecipients(recipients)) {
         if (!recipient) continue;
+        const copy = await applyVehicleServiceNotificationCopy({
+            recipient,
+            serviceType: serviceTypeLabel,
+            pendingStage: pendingStage || inferFromAction(actionLabel),
+            actionLabel,
+            extra2: detailLine,
+        });
         await sendVehicleServiceWorkflowEmail({
             recipient,
             asset,
-            stageLabel: actionLabel,
-            actionLabel,
-            detailLine,
+            stageLabel: copy.stageLabel,
+            actionLabel: copy.actionLabel,
+            detailLine: copy.detailLine,
             detailRows,
             serviceReqNo,
             linkPath,
@@ -171,13 +180,23 @@ async function notifyShopServiceRecipients({
                 status: 'Pending',
                 assignedTo: recipient._id,
                 subjectEmployee: asset.assignedTo,
-                requestedByName: actionLabel,
-                extra1: `${asset.assetId} — ${serviceTypeLabel}`,
-                extra2: detailLine,
+                requestedByName: copy.actionLabel,
+                extra1: copy.extra1,
+                extra2: copy.extra2,
                 extra3: dashboardMeta,
             });
         }
     }
+}
+
+function inferFromAction(actionLabel) {
+    const t = String(actionLabel || '').toLowerCase();
+    if (t.includes('on service')) return 'On Service';
+    if (t.includes('ready to service')) return 'Ready to Service';
+    if (t.includes('make payment')) return 'Make Payment';
+    if (t.includes('accounts approve')) return 'Accounts Approve';
+    if (t.includes('schedule')) return 'Schedule';
+    return '';
 }
 
 async function notifyShopServiceScheduled({
@@ -214,8 +233,6 @@ async function notifyShopServiceScheduled({
     // Schedule/Reschedule (see sendFormalVehicleServiceScheduledAfterAdminSchedule) — not here after Accounts.
 
     const adminOfficer = await getDepartmentHOD('admincontroller');
-    const plate = [populated.plateEmirate, populated.plateNumber].filter(Boolean).join(' ').trim();
-    const startLabel = startD ? startD.toISOString().slice(0, 10) : 'the scheduled date';
     const scheduleRows = buildShopScheduleEmailDetailRows(
         remark,
         serviceTypeLabel || service?.serviceType || 'Vehicle Service',
@@ -226,12 +243,17 @@ async function notifyShopServiceScheduled({
 
     // Oil parity: if start is in the future, Admin gets Ready-to-Service email with schedule rows.
     if (adminOfficer?._id && !isLiveAlready) {
+        const copy = await applyVehicleServiceNotificationCopy({
+            recipient: adminOfficer,
+            serviceType: serviceTypeLabel,
+            pendingStage: 'Ready to Service',
+        });
         await sendVehicleServiceWorkflowEmail({
             recipient: adminOfficer,
             asset: populated,
-            stageLabel: `${serviceTypeLabel} — Ready to Service`,
-            actionLabel: `${serviceTypeLabel} — Ready to Service`,
-            detailLine: `${actorName || 'Accounts'} approved garage details for ${populated.assetId || ''}${plate ? ` (${plate})` : ''}. Status is Ready to Service until ${startLabel}, then On Service. Full service details below.`,
+            stageLabel: copy.stageLabel,
+            actionLabel: copy.actionLabel,
+            detailLine: copy.detailLine,
             detailRows: scheduleRows,
             serviceReqNo: resolveServiceReqNo(service, remark),
             linkPath,
@@ -240,15 +262,20 @@ async function notifyShopServiceScheduled({
 
     // Keep Admin Officer dashboard task for the scheduled window.
     if (adminOfficer?._id) {
+        const copy = await applyVehicleServiceNotificationCopy({
+            recipient: adminOfficer,
+            serviceType: serviceTypeLabel,
+            pendingStage: isLiveAlready ? 'On Service' : 'Ready to Service',
+        });
         await syncDashboardAction({
             requestId: asset._id,
             requestType: 'Vehicle Service Request',
             status: 'Pending',
             assignedTo: adminOfficer._id,
             subjectEmployee: asset.assignedTo,
-            requestedByName: `${serviceTypeLabel} scheduled`,
-            extra1: `${populated.assetId} — ${serviceTypeLabel}`,
-            extra2: `${actorName || 'Accounts'} approved garage details. Service scheduled — start ${startLabel}${plate ? ` (${plate})` : ''}.`,
+            requestedByName: copy.actionLabel,
+            extra1: copy.extra1,
+            extra2: copy.extra2,
             extra3: dashboardMeta,
         });
     }
@@ -312,6 +339,7 @@ async function notifyShopServiceWentLiveIfNeeded({
             detailRows: scheduleRows,
             linkPath,
             dashboardMeta,
+            pendingStage: 'On Service',
         });
     }
 
@@ -434,6 +462,11 @@ export async function routeShopServiceToAccountsApproveAfterGarage(
             ? `HR approved ${serviceTypeLabel || 'service'} for ${populated?.assetId || ''}${plate ? ` (${plate})` : ''}. Review amount/quotation and approve${startLabel ? ` (start ${startLabel})` : ''}. Schedule/Reschedule may still be completed in parallel by Admin.`
             : `${actorName || 'Admin'} submitted schedule/garage details for ${populated?.assetId || ''}${plate ? ` (${plate})` : ''}. Review amount/quotation and approve${startLabel ? ` (start ${startLabel})` : ''}.`;
     const scheduleRows = buildShopScheduleEmailDetailRows(remark, serviceTypeLabel || 'Vehicle Service');
+    const accountsCopy = await applyVehicleServiceNotificationCopy({
+        recipient: accounts,
+        serviceType: serviceTypeLabel || 'Service',
+        pendingStage: 'Accounts Approve',
+    });
 
     await syncDashboardAction({
         requestId: asset._id,
@@ -442,17 +475,17 @@ export async function routeShopServiceToAccountsApproveAfterGarage(
         assignedTo: accounts._id,
         subjectEmployee: populated?.assignedTo,
         requestedByName: actorName || '',
-        extra1: `${populated?.assetId || ''} — ${serviceTypeLabel || 'Service'}`,
-        extra2: 'Awaiting Accounts Approve',
+        extra1: accountsCopy.extra1,
+        extra2: accountsCopy.extra2,
         extra3: dashboardMeta || '',
     });
 
     await sendVehicleServiceWorkflowEmail({
         recipient: accounts,
         asset: populated || asset,
-        stageLabel: `${serviceTypeLabel || 'Service'} — Accounts Approve`,
-        actionLabel: `${serviceTypeLabel || 'Service'} — Accounts Approve`,
-        detailLine,
+        stageLabel: accountsCopy.stageLabel,
+        actionLabel: accountsCopy.actionLabel,
+        detailLine: accountsCopy.detailLine,
         detailRows: scheduleRows,
         serviceReqNo: resolveServiceReqNo(service, remark),
         linkPath: linkPath || undefined,
@@ -463,18 +496,17 @@ export async function routeShopServiceToAccountsApproveAfterGarage(
     // Oil parity: Admin FYI when Accounts is next (no extra dashboard spam).
     const adminOfficer = await getDepartmentHOD('admincontroller');
     if (adminOfficer?._id && String(adminOfficer._id) !== String(accounts._id)) {
+        const adminCopy = await applyVehicleServiceNotificationCopy({
+            recipient: adminOfficer,
+            serviceType: serviceTypeLabel || 'Service',
+            pendingStage: 'Schedule',
+        });
         await sendVehicleServiceWorkflowEmail({
             recipient: adminOfficer,
             asset: populated || asset,
-            stageLabel: `${serviceTypeLabel || 'Service'} — sent to Accounts`,
-            actionLabel:
-                openedBy === 'hr'
-                    ? `${serviceTypeLabel || 'Service'} — HR approved`
-                    : `${serviceTypeLabel || 'Service'} — Schedule submitted`,
-            detailLine:
-                openedBy === 'hr'
-                    ? `HR approved ${serviceTypeLabel || 'service'} for ${populated?.assetId || ''}${plate ? ` (${plate})` : ''}. Accounts will review next. Complete Schedule/Reschedule if not done yet — Ready/On Service needs both.`
-                    : `Schedule/garage details for ${populated?.assetId || ''}${plate ? ` (${plate})` : ''} were submitted. Accounts will review next.`,
+            stageLabel: adminCopy.stageLabel,
+            actionLabel: adminCopy.actionLabel,
+            detailLine: adminCopy.detailLine,
             detailRows: scheduleRows,
             serviceReqNo: resolveServiceReqNo(service, remark),
             linkPath: linkPath || undefined,
@@ -714,23 +746,28 @@ export async function advanceShopServiceToScheduledAfterAccountsApprove(
             .lean();
         const plate = [populated?.plateEmirate, populated?.plateNumber].filter(Boolean).join(' ').trim();
         if (adminOfficer?._id) {
+            const adminCopy = await applyVehicleServiceNotificationCopy({
+                recipient: adminOfficer,
+                serviceType: serviceTypeLabel || 'Service',
+                pendingStage: 'Schedule',
+            });
             await syncDashboardAction({
                 requestId: asset._id,
                 requestType: 'Vehicle Service Request',
                 status: 'Pending',
                 assignedTo: adminOfficer._id,
                 subjectEmployee: populated?.assignedTo,
-                requestedByName: actorName || '',
-                extra1: `${populated?.assetId || ''} — ${serviceTypeLabel || 'Service'}`,
-                extra2: 'Complete Schedule/Reschedule (Accounts already approved)',
+                requestedByName: adminCopy.actionLabel,
+                extra1: adminCopy.extra1,
+                extra2: adminCopy.extra2,
                 extra3: dashboardMeta || '',
             });
             await sendVehicleServiceWorkflowEmail({
                 recipient: adminOfficer,
                 asset: populated || asset,
-                stageLabel: `${serviceTypeLabel || 'Service'} — Schedule required`,
-                actionLabel: `${serviceTypeLabel || 'Service'} — Schedule required`,
-                detailLine: `Accounts approved ${serviceTypeLabel || 'service'} for ${populated?.assetId || ''}${plate ? ` (${plate})` : ''}. Complete Schedule/Reschedule so the vehicle can go Ready / On Service.`,
+                stageLabel: adminCopy.stageLabel,
+                actionLabel: adminCopy.actionLabel,
+                detailLine: adminCopy.detailLine,
                 detailRows: buildShopScheduleEmailDetailRows(remark, serviceTypeLabel || 'Vehicle Service'),
                 serviceReqNo: resolveServiceReqNo(service, remark),
                 linkPath: linkPath || undefined,
@@ -992,6 +1029,12 @@ export async function routeShopServiceToBillingAfterComplete(
         service,
     });
 
+    const accountsCopy = await applyVehicleServiceNotificationCopy({
+        recipient: accounts,
+        serviceType: serviceTypeLabel || 'Service',
+        pendingStage: 'Make Payment',
+    });
+
     await syncDashboardAction({
         requestId: asset._id,
         requestType: 'Vehicle Service Request',
@@ -1001,8 +1044,8 @@ export async function routeShopServiceToBillingAfterComplete(
         comment: detailLine,
         subjectEmployee: populated?.assignedTo,
         requestedByName: actorName || '',
-        extra1: `${populated?.assetId || ''} — ${serviceTypeLabel || 'Service'}`,
-        extra2: 'Awaiting Accounts billing (Zoho)',
+        extra1: accountsCopy.extra1,
+        extra2: accountsCopy.extra2,
         extra3: dashboardMeta || '',
     });
 
@@ -1011,9 +1054,9 @@ export async function routeShopServiceToBillingAfterComplete(
     await sendVehicleServiceWorkflowEmail({
         recipient: accounts,
         asset: populated || asset,
-        stageLabel: `${serviceTypeLabel || 'Service'} — Make Payment`,
-        actionLabel: `${serviceTypeLabel || 'Service'} — Make Payment`,
-        detailLine,
+        stageLabel: accountsCopy.stageLabel,
+        actionLabel: accountsCopy.actionLabel,
+        detailLine: accountsCopy.detailLine,
         detailRows: scheduleRows,
         serviceReqNo: resolveServiceReqNo(service, remark),
         linkPath: linkPath || undefined,

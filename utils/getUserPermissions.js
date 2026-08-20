@@ -92,7 +92,6 @@ const getAllPermissionsEnabled = () => {
         'hrm_attendance',
         'hrm_leave',
         'hrm_salary',
-        'hrm_leave_salary',
         'hrm_ncr',
         'crm',
         'purchases',

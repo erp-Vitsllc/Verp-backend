@@ -8,6 +8,7 @@ import {
     isUserHrForApprovedLoanEdit,
     restrictApprovedLoanUpdates,
 } from "../../utils/loanApprovedEditAuth.js";
+import { assertLoanEmployeeEligibility } from "../../utils/loanEligibilityValidation.js";
 
 export const updateLoanDetails = async (req, res) => {
     const { id } = req.params;
@@ -185,6 +186,18 @@ export const updateLoanDetails = async (req, res) => {
         // Prevent editing if not Draft or rejected? For now, allow edit if user is authorized.
         const oldStatus = loan.status;
         const newStatus = status || loan.status;
+
+        const employeeForEligibility = await getCompleteEmployee(loan.employeeObjectId);
+        if (employeeForEligibility) {
+            const eligibility = await assertLoanEmployeeEligibility(
+                req,
+                employeeForEligibility,
+                type || loan.type,
+            );
+            if (!eligibility.ok) {
+                return res.status(eligibility.status || 400).json({ message: eligibility.message });
+            }
+        }
 
         // Update basic fields
         loan.type = type || loan.type;

@@ -6,6 +6,7 @@ import { getDepartmentHOD } from './getDepartmentHOD.js';
 import { syncDashboardAction } from './syncDashboard.js';
 import { sendVehicleServiceWorkflowEmail } from './sendVehicleServiceWorkflowEmail.js';
 import { resolveEmployeeEmail } from './resolveEmployeeEmail.js';
+import { applyVehicleServiceNotificationCopy } from './vehicleServiceNotificationCopy.js';
 import { applyPostServiceOperationalState } from './assetOperationalFlags.js';
 import { actorMayManageTireChangeRequest, getRequesterName, actorMayAdminScheduleShopService } from './oilServiceWorkflow.js';
 import { generateFineIdInternal } from '../controllers/fine/addFine.js';
@@ -102,6 +103,13 @@ export async function notifyBodyWorkStakeholder({
 }) {
     if (!recipient?._id) return;
     const linkPath = bodyWorkDetailsPath(asset._id, serviceRecordId);
+    const copy = await applyVehicleServiceNotificationCopy({
+        recipient,
+        serviceType: 'Body Work',
+        extra2,
+        actionLabel,
+        stageLabel,
+    });
     await syncDashboardAction({
         requestId: asset._id,
         requestType: 'Vehicle Service Request',
@@ -109,16 +117,16 @@ export async function notifyBodyWorkStakeholder({
         assignedTo: recipient._id,
         subjectEmployee: asset.assignedTo,
         requestedByName,
-        extra1: `${asset.assetId} — Body Work`,
-        extra2,
+        extra1: copy.extra1,
+        extra2: copy.extra2,
         extra3: bodyWorkDashboardMeta(asset, serviceRecordId),
     });
     await sendTireEmail({
         recipient,
         asset,
-        stageLabel,
-        actionLabel,
-        detailLine,
+        stageLabel: copy.stageLabel,
+        actionLabel: copy.actionLabel,
+        detailLine: copy.detailLine,
         linkPath,
     });
 }

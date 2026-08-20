@@ -31,6 +31,8 @@ const vehicleFuelBillSchema = new mongoose.Schema(
         status: { type: String, enum: ['open', 'closed'], default: 'open', index: true },
         amountUsed: { type: Number, default: 0 },
         monthlyLimit: { type: Number, default: 0 },
+        limitAlert80SentAt: { type: Date, default: null },
+        limitAlert100SentAt: { type: Date, default: null },
         kmRun: { type: Number, default: 0 },
         idleTimeMinutes: { type: Number, default: 0 },
         entries: { type: [fuelEntrySchema], default: [] },

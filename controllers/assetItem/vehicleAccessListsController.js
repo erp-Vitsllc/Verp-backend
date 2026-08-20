@@ -24,20 +24,29 @@ const HANDOVER_ACTIONS = [
 ];
 
 const HANDOVER_ACCESS_STATUS_KEYS = [
-    'pending-hr',
     'pending-inspection',
-    'completed-inspection',
-    'pending-assignee',
-    'completed-handover',
+    'all-handover',
+    'pending-handover',
+    'assigned-vehicle',
     'unassigned-vehicle',
+    'list-vehicle',
 ];
 
-const HANDOVER_PENDING_COUNT_KEYS = [
-    'pending-inspection',
-    'pending-hr',
-    'pending-assignee',
-    'unassigned-vehicle',
-];
+const HANDOVER_PENDING_COUNT_KEYS = ['pending-inspection', 'pending-handover'];
+
+const HANDOVER_STATUS_ALIASES = {
+    all: 'all-handover',
+    'pending-hr': 'pending-handover',
+    'pending-assignee': 'pending-handover',
+    'completed-inspection': 'all-handover',
+    'completed-handover': 'all-handover',
+};
+
+function normalizeHandoverStatusKey(raw) {
+    const key = String(raw || '').trim().toLowerCase();
+    if (!key) return '';
+    return HANDOVER_STATUS_ALIASES[key] || key;
+}
 
 function vehicleStatusKey(vehicle) {
     return String(vehicle?.status || '').trim().toLowerCase();
@@ -50,6 +59,22 @@ function inspectionStatusKey(vehicle) {
 function isUnassignedVehicle(vehicle) {
     const status = vehicleStatusKey(vehicle);
     return status === 'unassigned' || status === 'available' || status === 'returned';
+}
+
+function isAssignedVehicle(vehicle) {
+    if (isUnassignedVehicle(vehicle)) return false;
+    return Boolean(vehicle?.assignedTo || vehicle?.assignedCompany);
+}
+
+function neverCompletedFirstInspection(vehicle) {
+    if (inspectionStatusKey(vehicle) === 'active') return false;
+    if (vehicle?.vehicleInspectionApprovedAt) return false;
+    return true;
+}
+
+function isInspectionWorkflowOpen(vehicle) {
+    const insp = inspectionStatusKey(vehicle);
+    return insp === 'draft' || insp === 'pending_hr';
 }
 
 function isInspectionHandoverHistory(history, vehicle) {
@@ -74,6 +99,7 @@ function isHandoverWaitingHr(vehicle, history) {
         return isInspectionHandoverHistory(history, vehicle);
     }
     if (isInspectionHandoverHistory(history, vehicle)) return false;
+    if (history?.details?.hrApprovalSkipped === true) return false;
 
     const lifecycle = String(history?.details?.handoverLifecycleStatus || '').trim().toLowerCase();
     if (lifecycle === 'approved') return false;
@@ -91,17 +117,11 @@ function isHandoverWaitingHr(vehicle, history) {
         // Finished return/unassign history must not appear under Pending HR.
         if (!isLinkedReturn) return false;
         const stage = String(flow?.stage || '').toLowerCase();
-        return stage === 'hr' || stage === 'management' || stage === 'hod' || lifecycle === 'accepted';
+        return stage === 'hr' || stage === 'management' || stage === 'hod';
     }
 
     const stage = handoverFlowStage(vehicle, history);
-    if (stage === 'hr' || stage === 'management' || stage === 'hod') return true;
-    if (lifecycle === 'accepted') return true;
-    return (
-        String(vehicle?.acceptanceStatus || '').trim() === 'Accepted' &&
-        Boolean(vehicle?.pendingActionDetails?.vehicleHandoverFlow?.stage) &&
-        lifecycle !== 'approved'
-    );
+    return stage === 'hr' || stage === 'management' || stage === 'hod';
 }
 
 function isHandoverWaitingAssignee(vehicle, history) {
@@ -117,138 +137,30 @@ function isHandoverWaitingAssignee(vehicle, history) {
     if (stage === 'hr' || stage === 'management' || stage === 'hod') return false;
 
     if (String(vehicle?.acceptanceStatus || '').trim() === 'Pending') return true;
+    if (String(vehicle?.acceptanceStatus || '').trim() === 'Accepted') return false;
 
     const lifecycle = String(history?.details?.handoverLifecycleStatus || '').trim().toLowerCase();
     return lifecycle === 'pending' && (stage === 'target' || !stage);
 }
 
-function isFleetHandoverHrApproved(history) {
-    const lifecycle = String(history?.details?.handoverLifecycleStatus || '').trim().toLowerCase();
-    if (lifecycle === 'approved') return true;
-    if (lifecycle === 'pending' || lifecycle === 'accepted') return false;
-    if (history?.details?.handoverHrApprovedAt) return true;
-    const hrStage = history?.details?.vehicleHandoverWorkflow?.stages?.hr;
-    return Boolean(hrStage?.date);
-}
-
-function resolveFleetHandoverLifecycle(vehicle, history) {
-    const action = String(history?.action || '').trim();
-    const lifecycle = String(history?.details?.handoverLifecycleStatus || '').trim().toLowerCase();
-
-    const flow = vehicle?.pendingActionDetails?.vehicleHandoverFlow;
-    const isLinked =
-        flow?.historyId && history?._id && String(flow.historyId) === String(history._id);
-    const vehicleStatus = String(vehicle?.acceptanceStatus || '').trim();
-
-    if (isLinked && lifecycle !== 'rejected') {
-        const stage = String(flow.stage || '').toLowerCase();
-        if (stage === 'hr' || stage === 'management' || stage === 'hod') return 'accepted';
-        if (stage === 'target' || !stage) return 'pending';
-        if (lifecycle === 'approved') return 'approved';
-        return 'pending';
-    }
-
-    if (lifecycle !== 'rejected' && isFleetHandoverHrApproved(history)) {
-        return 'approved';
-    }
-
-    if (action === 'Returned' || action === 'Unassigned') {
-        const isLinkedReturn =
-            action === 'Returned' &&
-            flow?.isReturn &&
-            flow?.historyId &&
-            history?._id &&
-            String(flow.historyId) === String(history._id);
-        if (isLinkedReturn) {
-            if (lifecycle === 'approved') return 'approved';
-            const stage = String(flow.stage || '').toLowerCase();
-            if (stage === 'hr' || stage === 'management' || stage === 'hod') return 'accepted';
-            return 'pending';
-        }
-        if (lifecycle === 'rejected') return 'rejected';
-        if (
-            lifecycle === 'approved' ||
-            lifecycle === 'accepted' ||
-            String(history?.details?.status || '').trim() === 'ApprovedAndFinalized'
-        ) {
-            return lifecycle === 'accepted' ? 'accepted' : 'approved';
-        }
-        return 'approved';
-    }
-
-    if (
-        vehicleStatus === 'Accepted' &&
-        !isLinked &&
-        (action === 'Assigned' || action === 'Accepted') &&
-        (lifecycle === 'accepted' ||
-            lifecycle === 'approved' ||
-            Boolean(history?.details?.vehicleHandoverWorkflow?.stages?.target?.date))
-    ) {
-        return 'approved';
-    }
-
-    if (isLinked && lifecycle !== 'rejected') {
-        if (lifecycle === 'approved') return 'approved';
-        const stage = String(flow.stage || '').toLowerCase();
-        if (stage === 'hr' || stage === 'management' || stage === 'hod') return 'accepted';
-        return 'pending';
-    }
-
-    if (lifecycle === 'approved' || lifecycle === 'accepted' || lifecycle === 'pending' || lifecycle === 'rejected') {
-        return lifecycle;
-    }
-
-    if (action === 'Accepted') {
-        if (lifecycle === 'approved') return 'approved';
-        return 'accepted';
-    }
-
-    if (action === 'Assigned') {
-        if (String(history?.details?.acceptanceStatus || '').trim() === 'Accepted') {
-            return 'accepted';
-        }
-        return 'pending';
-    }
-
-    return 'pending';
-}
-
-function isCompletedAssignmentHandover(vehicle, history) {
-    if (!history || isInspectionHandoverHistory(history, vehicle)) return false;
-    if (isHandoverWaitingHr(vehicle, history) || isHandoverWaitingAssignee(vehicle, history)) return false;
-
-    const resolvedLifecycle = resolveFleetHandoverLifecycle(vehicle, history);
-    if (resolvedLifecycle === 'approved') return true;
-
-    if (resolvedLifecycle === 'rejected' || resolvedLifecycle === 'pending' || resolvedLifecycle === 'accepted') {
-        return false;
-    }
-
-    const action = String(history?.action || '').trim();
-    if (action === 'Returned' || action === 'Unassigned') return true;
-    if (
-        String(vehicle?.acceptanceStatus || '').trim() === 'Accepted' &&
-        ['Assigned', 'Accepted', 'Transfer', 'ControllerHandover'].includes(action)
-    ) {
-        return true;
-    }
-    return String(history?.details?.status || '').trim() === 'ApprovedAndFinalized';
-}
-
 function matchesHandoverAccessStatus(statusKey, vehicle, history) {
     switch (statusKey) {
         case 'pending-inspection':
-            return inspectionStatusKey(vehicle) === 'draft';
-        case 'completed-inspection':
-            return inspectionStatusKey(vehicle) === 'active';
-        case 'pending-hr':
-            return isHandoverWaitingHr(vehicle, history);
-        case 'pending-assignee':
-            return isHandoverWaitingAssignee(vehicle, history);
-        case 'completed-handover':
-            return isCompletedAssignmentHandover(vehicle, history);
+            return neverCompletedFirstInspection(vehicle);
+        case 'all-handover':
+            return Boolean(history);
+        case 'pending-handover':
+            if (neverCompletedFirstInspection(vehicle)) return false;
+            if (isHandoverWaitingHr(vehicle, history) || isHandoverWaitingAssignee(vehicle, history)) {
+                return true;
+            }
+            return isInspectionWorkflowOpen(vehicle);
+        case 'assigned-vehicle':
+            return isAssignedVehicle(vehicle);
         case 'unassigned-vehicle':
             return isUnassignedVehicle(vehicle);
+        case 'list-vehicle':
+            return true;
         default:
             return false;
     }
@@ -346,22 +258,23 @@ export const getVehicleAccessServices = async (req, res) => {
 /**
  * GET /api/AssetItem/vehicle-access-handovers?status=pending-inspection
  * Hub (no status): counts per handover access box.
- * List (status): latest handover row for vehicles in that box.
+ * List (status): one row per matching vehicle (latest handover / inspection when present).
  */
 export const getVehicleAccessHandovers = async (req, res) => {
     try {
-        const statusKey = String(req.query.status || '').trim().toLowerCase();
+        const statusKey = normalizeHandoverStatusKey(req.query.status);
         if (statusKey && !HANDOVER_ACCESS_STATUS_KEYS.includes(statusKey)) {
             return res.status(400).json({ message: 'Unknown handover status.' });
         }
 
         const vehicles = await loadFleetVehicles(
             req,
-            'assetId name plateEmirate plateNumber status acceptanceStatus pendingAction pendingActionDetails assignmentType assignedDays assignedTo assignedCompany assignedToType assignedDate assignedBy vehicleInspectionStatus vehicleInspectionHandoverHistoryId',
+            'assetId name plateEmirate plateNumber status acceptanceStatus pendingAction pendingActionDetails assignmentType assignedDays assignedTo assignedCompany assignedToType assignedDate assignedBy actionRequiredBy vehicleInspectionStatus vehicleInspectionApprovedAt vehicleInspectionHandoverHistoryId',
             [
                 { path: 'assignedTo', select: 'firstName lastName employeeId' },
-                { path: 'assignedCompany', select: 'name companyId' },
+                { path: 'assignedCompany', select: 'name nickName companyId' },
                 { path: 'assignedBy', select: 'firstName lastName employeeId' },
+                { path: 'actionRequiredBy', select: 'firstName lastName employeeId' },
             ],
         );
         const vehicleIds = vehicles.map((v) => v._id);

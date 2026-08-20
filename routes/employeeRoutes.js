@@ -62,6 +62,7 @@ import {
     checkLoanOrAdvanceCreatePermission,
     checkLoanMutatePermission,
     checkLoanViewPermission,
+    checkAnyModulePermission,
 } from "../middleware/permissionMiddleware.js";
 import { deleteOldDocument } from "../controllers/employee/deleteOldDocument.js";
 import { getEmployeeDocument } from "../controllers/employee/getEmployeeDocument.js";
@@ -162,6 +163,8 @@ router.get("/request-loan", (req, res) => {
 });
 
 import { getDashboardStats } from "../controllers/stats/getDashboardStats.js";
+import { getPayrollDashboard } from "../controllers/employee/getPayrollDashboard.js";
+import { getPayrollSettings, savePayrollSettings } from "../controllers/employee/payrollSettingsController.js";
 import { getUserActivityStats } from "../controllers/stats/getUserActivityStats.js";
 import { deleteDashboardAction } from "../controllers/stats/deleteDashboardAction.js";
 import { deleteProfileActivationDashboardByRequest } from "../controllers/stats/deleteProfileActivationDashboardByRequest.js";
@@ -189,6 +192,34 @@ router.get("/dashboard/hierarchy", getHierarchy);
 
 // Team Stats - basic access
 router.get("/dashboard/team-stats", getTeamStats);
+
+// Payroll dashboard - salary module (or salary card view)
+router.get(
+    "/payroll-dashboard",
+    checkAnyModulePermission([
+        ['hrm_salary', 'view'],
+        ['hrm_employees_view_salary', 'view'],
+    ]),
+    getPayrollDashboard,
+);
+router.get(
+    "/payroll-settings",
+    checkAnyModulePermission([
+        ['hrm_salary', 'view'],
+        ['hrm_employees_view_salary', 'view'],
+    ]),
+    getPayrollSettings,
+);
+router.put(
+    "/payroll-settings",
+    checkAnyModulePermission([
+        ['hrm_salary', 'edit'],
+        ['hrm_salary', 'view'],
+        ['hrm_employees_view_salary', 'edit'],
+        ['hrm_employees_view_salary', 'view'],
+    ]),
+    savePayrollSettings,
+);
 
 // Dashboard Stats - requires view permission (General HR view)
 router.get("/dashboard/stats", checkPermission('hrm_employees_list', 'view'), getDashboardStats);
