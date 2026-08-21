@@ -99,7 +99,11 @@ export function daysUntilPaymentDay(paymentDay, today = new Date()) {
     };
 }
 
-/** Payable date for a specific bill month YYYY-MM (not "next upcoming" cycle). */
+/**
+ * Payable date for a bill month YYYY-MM.
+ * Policy: that month's bill is paid on the payment day of the *next* month
+ * (June bill → July payment day).
+ */
 export function dueDateForBillMonth(paymentDay, billMonth) {
     const ym = normalizeUtilityBillMonth(billMonth);
     if (!ym) return null;
@@ -107,13 +111,16 @@ export function dueDateForBillMonth(paymentDay, billMonth) {
     const year = Number(yearStr);
     const month = Number(monthStr);
     if (!Number.isFinite(year) || month < 1 || month > 12) return null;
+    const payYear = month === 12 ? year + 1 : year;
+    const payMonth = month === 12 ? 1 : month + 1;
     const refDate = zonedWallTimeToUtc(
-        { year, month, day: 15, hour: 12, minute: 0, second: 0 },
+        { year: payYear, month: payMonth, day: 15, hour: 12, minute: 0, second: 0 },
         reminderTz(),
     );
     return dueDateForPaymentDay(paymentDay, refDate);
 }
 
+/** Current calendar month + previous (previous = the bill payable this month). */
 function calendarMonthKeysToCheck(refDate = new Date()) {
     const { year, month } = getCalendarPartsInTz(refDate, reminderTz());
     const current = yearMonthKeyFromParts(year, month);
@@ -146,16 +153,38 @@ function formatBillMonthLabel(billMonth) {
     return probe.toLocaleDateString('en-GB', { month: 'long', year: 'numeric', timeZone: reminderTz() });
 }
 
-function overdueReminderMessage(billMonth, dueLabel, refDate = new Date()) {
-    const ym = normalizeUtilityBillMonth(billMonth);
-    const currentYm = yearMonthKey(refDate);
-    if (ym === currentYm) {
-        return `Bill overdue — please clear this month's bill (${dueLabel})`;
+function monthNameFromBillMonth(billMonth) {
+    const label = formatBillMonthLabel(billMonth);
+    if (!label) return '';
+    return label.replace(/\s+\d{4}$/, '');
+}
+
+/** "June bill payment day on Electricity on the 12345678, please pay the bill" */
+export function paymentDayReminderMessage(record = {}, billMonth = '') {
+    const monthName = monthNameFromBillMonth(billMonth) || 'This';
+    const utilityType = String(record.utilityType || 'utility').trim() || 'utility';
+    const accountNo = String(record.accountNo || '').trim() || 'account';
+    return `${monthName} bill payment day on ${utilityType} on the ${accountNo}, please pay the bill`;
+}
+
+function entryAvailableFromMonth(entry) {
+    const created = entry?.createdAt || null;
+    if (created) {
+        const ym = yearMonthKey(new Date(created));
+        if (/^\d{4}-\d{2}$/.test(ym)) return ym;
     }
-    const monthLabel = formatBillMonthLabel(ym);
-    return monthLabel
-        ? `Bill overdue — please clear ${monthLabel} bill (${dueLabel})`
-        : `Bill overdue — please clear bill (${dueLabel})`;
+    const contractStart = String(entry?.values?.contractStart || '').trim();
+    if (/^\d{4}-\d{2}/.test(contractStart)) return contractStart.slice(0, 7);
+    return '';
+}
+
+function entryEligibleForBillMonth(entry, billMonth) {
+    const ym = normalizeUtilityBillMonth(billMonth);
+    if (!entry || !ym) return false;
+    if (String(entry.status || '') === 'Inactive') return false;
+    const from = entryAvailableFromMonth(entry);
+    if (from && from > ym) return false;
+    return true;
 }
 
 /**
@@ -392,11 +421,15 @@ async function markSent(entryId, yearMonth, daysBefore, dueDate) {
     }
 }
 
-async function createAccountsBell({ record, dueDate, accounts, yearMonth, refDate = new Date() }) {
+async function createAccountsBell({ record, dueDate, accounts, yearMonth }) {
     if (!accounts?._id) return;
-    const dueLabel = dueDate.toLocaleDateString('en-GB', { timeZone: reminderTz() });
     const ym = yearMonth || yearMonthKey(dueDate);
     const requestId = utilityBillPaymentDayRequestId(record.entryId, ym, DUE_TODAY_STAGE);
+    const monthLabel = formatBillMonthLabel(ym) || ym;
+    const utilityType = String(record.utilityType || 'Utility').trim() || 'Utility';
+    const accountNo = String(record.accountNo || '').trim() || '—';
+    const dueParts = getCalendarPartsInTz(dueDate, reminderTz());
+    const dueDateKey = `${dueParts.year}-${String(dueParts.month).padStart(2, '0')}-${String(dueParts.day).padStart(2, '0')}`;
 
     await DashboardAction.findOneAndUpdate(
         { requestId, requestType: REQUEST_TYPE },
@@ -411,15 +444,17 @@ async function createAccountsBell({ record, dueDate, accounts, yearMonth, refDat
                 `${accounts.firstName || ''} ${accounts.lastName || ''}`.trim() || 'Accounts',
             requestedByName: 'System',
             requestedDate: new Date(),
-            extra1: `${record.utilityType || 'Utility'} · Day ${record.paymentDay} · ${ym}`,
-            extra2: overdueReminderMessage(ym, dueLabel, refDate),
+            extra1: `${utilityType} · ${accountNo} · ${monthLabel}`,
+            extra2: paymentDayReminderMessage(record, ym),
             extra3: JSON.stringify({
                 entryId: record.entryId,
                 paymentDay: record.paymentDay,
                 daysBefore: DUE_TODAY_STAGE,
                 yearMonth: ym,
                 billMonth: ym,
-                dueDateKey: `${ym}-${String(record.paymentDay).padStart(2, '0')}`,
+                accountNo,
+                utilityType,
+                dueDateKey,
                 stickyUntilSettled: true,
                 detailsPath: `/HRM/Asset/UtilityBills/details/${encodeURIComponent(String(record.entryId))}?addBill=1&billMonth=${encodeURIComponent(ym)}`,
             }),
@@ -431,8 +466,9 @@ async function createAccountsBell({ record, dueDate, accounts, yearMonth, refDat
 /**
  * Daily:
  * 1) Clear reminders when that month's bill is Paid or sent to Zoho
- * 2) For current + previous bill month: if payment date passed and bill unsettled → Accounts bell
- * 3) On that month's payment day == today → urgent email (once per month)
+ * 2) Current month's bill is payable next month on the payment day
+ *    (June bill → July payment day). Scan current + previous bill months.
+ * 3) On that payable day == today → Accounts email (once per bill month)
  */
 export async function processUtilityBillPaymentDayReminders() {
     try {
@@ -460,14 +496,33 @@ export async function processUtilityBillPaymentDayReminders() {
         }
 
         const monthsToCheck = calendarMonthKeysToCheck(now);
+        const entryIds = [
+            ...new Set(records.map((row) => String(row.entryId || '').trim()).filter(Boolean)),
+        ];
+        const entries = entryIds.length
+            ? await UtilityEntry.find({ _id: { $in: entryIds } })
+                  .select('createdAt status values.contractStart')
+                  .lean()
+            : [];
+        const entryById = new Map(entries.map((row) => [String(row._id), row]));
 
         console.log(
             `[UtilityBillPaymentDayReminders] scanning ${records.length} Active row(s) for ${dubaiParts.year}-${String(dubaiParts.month).padStart(2, '0')}-${String(dubaiParts.day).padStart(2, '0')} (${reminderTz()}); months ${monthsToCheck.join(', ')}`,
         );
 
         for (const record of records) {
+            const entry = entryById.get(String(record.entryId || ''));
             for (const billMonth of monthsToCheck) {
                 try {
+                    if (!entryEligibleForBillMonth(entry, billMonth)) {
+                        await clearUtilityBillPaymentDayReminderForMonth(
+                            record.entryId,
+                            billMonth,
+                            'Account was not active for this bill month',
+                        );
+                        continue;
+                    }
+
                     if (await isUtilityMonthBillSettled(record.entryId, billMonth)) {
                         await clearUtilityBillPaymentDayReminderForMonth(
                             record.entryId,
@@ -478,11 +533,20 @@ export async function processUtilityBillPaymentDayReminders() {
                     }
 
                     const dueDate = dueDateForBillMonth(record.paymentDay, billMonth);
-                    if (!dueDate || !isDueOnOrBeforeToday(dueDate, now)) continue;
+                    if (!dueDate) continue;
+                    if (!isDueOnOrBeforeToday(dueDate, now)) {
+                        await clearUtilityBillPaymentDayReminderForMonth(
+                            record.entryId,
+                            billMonth,
+                            'Bill is payable next month — reminder cleared until payment day',
+                        );
+                        continue;
+                    }
 
                     const dueDateLabel = dueDate.toLocaleDateString('en-GB', {
                         timeZone: reminderTz(),
                     });
+                    const message = paymentDayReminderMessage(record, billMonth);
 
                     if (accounts) {
                         await createAccountsBell({
@@ -490,7 +554,6 @@ export async function processUtilityBillPaymentDayReminders() {
                             dueDate,
                             accounts,
                             yearMonth: billMonth,
-                            refDate: now,
                         });
                     }
 
@@ -505,6 +568,7 @@ export async function processUtilityBillPaymentDayReminders() {
                             record,
                             dueDateLabel,
                             yearMonth: billMonth,
+                            message,
                         });
                     }
 

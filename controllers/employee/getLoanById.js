@@ -48,7 +48,7 @@ export const getLoanById = async (req, res) => {
             })
             .populate({
                 path: 'createdBy',
-                select: 'name'
+                select: 'name username email'
             })
             .lean();
 

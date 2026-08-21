@@ -1,10 +1,15 @@
+import mongoose from 'mongoose';
 import PartyExpense from '../../models/PartyExpense.js';
 import UtilityBillPayment from '../../models/UtilityBillPayment.js';
 import Company from '../../models/Company.js';
+import Fine from '../../models/Fine.js';
+import ZohoBill from '../../models/ZohoBill.js';
+import AssetItem from '../../models/AssetItem.js';
 import {
     recordPartyExpensePaidFromZoho,
 } from '../../utils/recordPartyExpenseFromZohoPayment.js';
 import { employeeIdQueryVariants } from '../../utils/upsertUtilityBalancePartyExpense.js';
+import { isZohoBillFullyPaid } from '../../utils/markUtilityVendorBillsPaidFromZoho.js';
 
 function clean(value, fallback = '') {
     const text = String(value ?? '').trim();
@@ -31,6 +36,54 @@ function partyRowStatus({ paid, zohoBillId, forEmployee }) {
     if (paid) return 'Paid';
     if (!forEmployee && clean(zohoBillId)) return 'Zoho billed';
     return 'Not Paid';
+}
+
+function parseJsonRemark(raw) {
+    if (!raw) return {};
+    if (typeof raw === 'object') return raw;
+    try {
+        const parsed = JSON.parse(raw);
+        return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch {
+        return {};
+    }
+}
+
+function collectRemarkZohoBillIds(remark = {}) {
+    const ids = [];
+    const push = (value) => {
+        const id = clean(value);
+        if (id) ids.push(id);
+    };
+    push(remark.zohoBillId);
+    for (const row of Array.isArray(remark.zohoBills) ? remark.zohoBills : []) {
+        push(row?.zohoBillId || row?.bill_id || row?.billId);
+    }
+    return ids;
+}
+
+function remarkServiceIsPaid(remark = {}, paidZohoIds = new Set()) {
+    const zohoPaymentStatus = clean(remark.zohoPaymentStatus).toLowerCase();
+    const zohoBillStatus = clean(remark.zohoBillStatus).toLowerCase();
+    const carWashPay = clean(remark.carWashPaymentStatus).toLowerCase();
+    const billingStatus = clean(remark.billingStatus).toLowerCase();
+    if (
+        zohoPaymentStatus === 'paid' ||
+        zohoBillStatus === 'paid' ||
+        carWashPay === 'paid' ||
+        billingStatus === 'paid'
+    ) {
+        return true;
+    }
+    const ids = collectRemarkZohoBillIds(remark);
+    if (ids.some((id) => paidZohoIds.has(id))) return true;
+    const multi = Array.isArray(remark.zohoBills) ? remark.zohoBills.filter(Boolean) : [];
+    if (multi.length > 0) {
+        return multi.every(
+            (row) => clean(row?.zohoBillStatus || row?.status).toLowerCase() === 'paid',
+        );
+    }
+    return false;
 }
 
 /**
@@ -76,72 +129,162 @@ function resolveBalanceShare(bill, { forEmployee = false } = {}) {
     return 0;
 }
 
-/** Party's Payable-to share from zoho line items (or bill-level totals). */
-function resolvePayableShare(bill, { forEmployee = false, partyVariants = [] } = {}) {
+function lineIsEmployeePayable(line = {}) {
+    const payBy = clean(line?.payBy).toLowerCase();
+    const empId = clean(line?.payByEmployeeId);
+    return payBy === 'employee' || Boolean(empId && payBy !== 'company');
+}
+
+function lineIsCompanyPayable(line = {}) {
+    if (lineIsEmployeePayable(line)) return false;
+    const payBy = clean(line?.payBy).toLowerCase();
+    const coId = clean(line?.payByCompanyId);
+    const coName = clean(line?.payByCompanyName);
+    return payBy === 'company' || Boolean(coId || coName);
+}
+
+function partyNameSet(names = []) {
+    return new Set(
+        (names || [])
+            .map((v) =>
+                String(v || '')
+                    .trim()
+                    .toLowerCase()
+                    .replace(/\s*\([^)]*\)\s*$/g, '')
+                    .trim(),
+            )
+            .filter(Boolean),
+    );
+}
+
+function namesMatch(value, nameSet) {
+    if (!nameSet.size) return false;
+    const n = String(value || '')
+        .trim()
+        .toLowerCase()
+        .replace(/\s*\([^)]*\)\s*$/g, '')
+        .trim();
+    if (!n) return false;
+    if (nameSet.has(n)) return true;
+    for (const name of nameSet) {
+        if (name && (n.includes(name) || name.includes(n))) return true;
+    }
+    return false;
+}
+
+/**
+ * Party's Payable-to share from zoho line items.
+ * Same company (or employee) on two lines of one bill → one amount (those
+ * payable lines added together). Never the full bill total.
+ */
+function resolvePayableShare(
+    bill,
+    { forEmployee = false, partyVariants = [], partyNames = [] } = {},
+) {
     const variants = new Set((partyVariants || []).map((v) => String(v).trim()).filter(Boolean));
+    const names = partyNameSet(partyNames);
     const lines = Array.isArray(bill?.zohoLineItems) ? bill.zohoLineItems : [];
-    let fromLines = 0;
-    let matchedLine = false;
+    const grouped = new Map();
+
+    const matchesParty = (id, name) => {
+        if (id && variants.size && variants.has(id)) return true;
+        if (name && namesMatch(name, names)) return true;
+        if (!variants.size && !names.size) return Boolean(id || name);
+        return false;
+    };
 
     lines.forEach((line) => {
         const amt = money(line?.amount);
         if (amt <= 0) return;
-        const empId = clean(line?.payByEmployeeId);
-        const coId = clean(line?.payByCompanyId);
-        const payBy = clean(line?.payBy).toLowerCase();
-        const isEmployeeLine =
-            payBy === 'employee' || Boolean(empId && payBy !== 'company');
-        const isCompanyLine =
-            !isEmployeeLine && (payBy === 'company' || Boolean(coId));
-
         if (forEmployee) {
-            if (!isEmployeeLine) return;
-            if (variants.size && empId && !variants.has(empId)) return;
-            if (!empId && variants.size) return;
-            matchedLine = true;
-            fromLines += amt;
+            if (!lineIsEmployeePayable(line)) return;
+            const empId = clean(line?.payByEmployeeId);
+            const empName = clean(line?.payByEmployeeName);
+            if (!matchesParty(empId, empName)) return;
+            const key = `employee:${empId || empName.toLowerCase()}`;
+            grouped.set(key, (grouped.get(key) || 0) + amt);
             return;
         }
-        if (!isCompanyLine) return;
-        if (variants.size && coId && !variants.has(coId)) return;
-        if (!coId && variants.size) return;
-        matchedLine = true;
-        fromLines += amt;
+        if (!lineIsCompanyPayable(line)) return;
+        const coId = clean(line?.payByCompanyId);
+        const coName = clean(line?.payByCompanyName);
+        if (!matchesParty(coId, coName)) return;
+        const key = `company:${coId || coName.toLowerCase()}`;
+        grouped.set(key, (grouped.get(key) || 0) + amt);
     });
 
-    if (matchedLine) return fromLines;
+    if (grouped.size) {
+        return money([...grouped.values()].reduce((sum, n) => sum + n, 0));
+    }
+
+    // Lines exist but none belong to this party — do not fall back to bill total.
+    if (lines.length) return 0;
 
     if (forEmployee) {
         const empId = clean(bill?.payByEmployeeId);
-        if (variants.size && empId && !variants.has(empId)) return 0;
+        const empName = clean(bill?.payByEmployeeName);
+        if (variants.size || names.size) {
+            if (!matchesParty(empId, empName)) return 0;
+        }
         return money(bill?.employeePayAmount);
     }
     const coId = clean(bill?.payByCompanyId);
-    if (variants.size && coId && !variants.has(coId)) return 0;
+    const coName = clean(bill?.payByCompanyName);
+    if (variants.size || names.size) {
+        if (!matchesParty(coId, coName)) return 0;
+    }
     return money(bill?.companyPayAmount);
 }
 
-function billMatchesParty(bill, { employeeVariants = [], companyVariants = [] } = {}) {
+function billMatchesParty(bill, { employeeVariants = [], companyVariants = [], companyNames = [] } = {}) {
     const empSet = new Set(employeeVariants.map(String));
     const coSet = new Set(companyVariants.map(String));
+    const nameSet = partyNameSet(companyNames);
     if (empSet.size) {
         if (empSet.has(clean(bill?.payByEmployeeId))) return true;
         return (Array.isArray(bill?.zohoLineItems) ? bill.zohoLineItems : []).some((line) =>
             empSet.has(clean(line?.payByEmployeeId)),
         );
     }
-    if (coSet.size) {
-        if (coSet.has(clean(bill?.payByCompanyId))) return true;
+    if (coSet.size || nameSet.size) {
+        const billCoId = clean(bill?.payByCompanyId);
+        const billCoName = clean(bill?.payByCompanyName);
+        if (billCoId && coSet.has(billCoId)) return true;
+        if (namesMatch(billCoName, nameSet)) return true;
         return (Array.isArray(bill?.zohoLineItems) ? bill.zohoLineItems : []).some((line) => {
-            const payBy = clean(line?.payBy).toLowerCase();
-            const empId = clean(line?.payByEmployeeId);
-            const isEmployeeLine =
-                payBy === 'employee' || Boolean(empId && payBy !== 'company');
-            if (isEmployeeLine) return false;
-            return coSet.has(clean(line?.payByCompanyId));
+            if (lineIsEmployeePayable(line)) return false;
+            const coId = clean(line?.payByCompanyId);
+            const coName = clean(line?.payByCompanyName);
+            if (coId && coSet.has(coId)) return true;
+            return namesMatch(coName, nameSet);
         });
     }
     return false;
+}
+
+function collapseSameBillPayableRows(rows = []) {
+    const out = [];
+    const shareIndex = new Map();
+    for (const row of rows) {
+        const kind = clean(row?.kind);
+        const billId = clean(row?.utilityBillId);
+        const month = clean(row?.billMonth);
+        if (kind !== 'utility_share' || !billId) {
+            out.push(row);
+            continue;
+        }
+        const party = clean(row?.companyId || row?.employeeId);
+        const key = `${billId}|${month}|${party}|${clean(row?.partyType)}`;
+        const existing = shareIndex.get(key);
+        if (existing == null) {
+            shareIndex.set(key, out.length);
+            out.push({ ...row });
+            continue;
+        }
+        const prev = out[existing];
+        prev.amount = money((Number(prev.amount) || 0) + (Number(row.amount) || 0));
+    }
+    return out;
 }
 
 function paymentHref(expense) {
@@ -177,15 +320,20 @@ export async function listPartyExpenses(req, res) {
         const employeeVariants = employeeId
             ? await employeeIdQueryVariants(employeeId)
             : [];
+        const companyNames = [];
         const companyVariants = companyId
             ? await (async () => {
                   const ids = new Set([companyId]);
                   const query = /^[0-9a-fA-F]{24}$/.test(companyId)
                       ? { _id: companyId }
                       : { companyId };
-                  const company = await Company.findOne(query).select('_id companyId').lean();
+                  const company = await Company.findOne(query)
+                      .select('_id companyId name nickName')
+                      .lean();
                   if (company?._id) ids.add(String(company._id));
                   if (company?.companyId) ids.add(String(company.companyId));
+                  if (company?.name) companyNames.push(String(company.name).trim());
+                  if (company?.nickName) companyNames.push(String(company.nickName).trim());
                   return [...ids];
               })()
             : [];
@@ -246,8 +394,51 @@ export async function listPartyExpenses(req, res) {
             billMatchesParty(bill, {
                 employeeVariants: employeeId ? employeeVariants : [],
                 companyVariants: companyId ? companyVariants : [],
+                companyNames: companyId ? companyNames : [],
             }),
         );
+
+        const isCompanyList = Boolean(companyId) && !employeeId;
+        const paidZohoIds = new Set();
+        const paidFineMongoIds = new Set();
+        if (isCompanyList) {
+            const zohoIds = new Set();
+            for (const bill of bills) {
+                const id = clean(bill.zohoBillId);
+                if (id) zohoIds.add(id);
+            }
+            for (const expense of stored) {
+                const id = clean(expense.zohoBillId);
+                if (id) zohoIds.add(id);
+            }
+            if (zohoIds.size) {
+                const cached = await ZohoBill.find({ zohoBillId: { $in: [...zohoIds] } })
+                    .select('zohoBillId status balance total')
+                    .lean();
+                for (const zb of cached) {
+                    if (isZohoBillFullyPaid(zb)) paidZohoIds.add(clean(zb.zohoBillId));
+                }
+            }
+            const fineMongoIds = stored
+                .filter((e) => clean(e.kind) === 'fine' && clean(e.fineMongoId))
+                .map((e) => clean(e.fineMongoId));
+            if (fineMongoIds.length) {
+                const oids = fineMongoIds.filter((id) => mongoose.Types.ObjectId.isValid(id));
+                if (oids.length) {
+                    const fines = await Fine.find({ _id: { $in: oids } })
+                        .select('_id vendorBillStatus zohoBillId')
+                        .lean();
+                    for (const f of fines) {
+                        if (clean(f.vendorBillStatus).toLowerCase() === 'paid') {
+                            paidFineMongoIds.add(String(f._id));
+                        }
+                        if (paidZohoIds.has(clean(f.zohoBillId))) {
+                            paidFineMongoIds.add(String(f._id));
+                        }
+                    }
+                }
+            }
+        }
 
         const byBillId = new Map(
             stored
@@ -264,6 +455,7 @@ export async function listPartyExpenses(req, res) {
             : companyVariants.length
               ? companyVariants
               : [companyId];
+        const partyNames = employeeId ? [] : companyNames;
 
         for (const bill of bills) {
             const billId = clean(bill._id);
@@ -272,18 +464,22 @@ export async function listPartyExpenses(req, res) {
             const payableShare = resolvePayableShare(bill, {
                 forEmployee: Boolean(employeeId),
                 partyVariants,
+                partyNames,
             });
             const balanceShare = employeeId
                 ? resolveBalanceShare(bill, { forEmployee: true })
                 : resolveBalanceShare(bill, { forEmployee: false });
 
             const expense = byBillId.get(billId);
-            const vendorPaid = clean(bill.status).toLowerCase() === 'paid';
+            const zohoBillId = clean(bill.zohoBillId || expense?.zohoBillId);
+            const vendorPaid =
+                clean(bill.status).toLowerCase() === 'paid' ||
+                (isCompanyList && paidZohoIds.has(zohoBillId));
             const balancePaid = expense?.status === 'Paid';
             const forEmployee = Boolean(employeeId);
-            const zohoBillId = clean(bill.zohoBillId || expense?.zohoBillId);
 
             if (payableShare > 0) {
+                seenBills.add(billId);
                 rows.push({
                     id: `share:${billId}`,
                     partyType: forEmployee ? 'employee' : 'company',
@@ -377,7 +573,12 @@ export async function listPartyExpenses(req, res) {
             if (billId && seenBills.has(billId)) continue;
             const kind = clean(expense.kind || 'balance');
             if (kind === 'fine') {
-                const isPaid = expense.status === 'Paid';
+                const isPaid =
+                    expense.status === 'Paid' ||
+                    (isCompanyList &&
+                        (Boolean(clean(expense.zohoPaymentId)) ||
+                            paidFineMongoIds.has(clean(expense.fineMongoId)) ||
+                            paidZohoIds.has(clean(expense.zohoBillId))));
                 rows.push({
                     id: String(expense._id),
                     partyType: expense.partyType,
@@ -504,12 +705,110 @@ export async function listPartyExpenses(req, res) {
             });
         }
 
+        if (isCompanyList) {
+            const companyOids = partyVariants
+                .filter((id) => mongoose.Types.ObjectId.isValid(id) && String(id).length === 24)
+                .map((id) => new mongoose.Types.ObjectId(id));
+            if (companyOids.length) {
+                const assets = await AssetItem.find({
+                    assignedCompany: { $in: companyOids },
+                })
+                    .select('assetId name services assignedCompany')
+                    .lean();
+                const extraZohoIds = new Set();
+                for (const asset of assets) {
+                    for (const service of asset.services || []) {
+                        const remark = parseJsonRemark(service.remark);
+                        collectRemarkZohoBillIds(remark).forEach((id) => extraZohoIds.add(id));
+                    }
+                }
+                const missingZoho = [...extraZohoIds].filter((id) => !paidZohoIds.has(id));
+                if (missingZoho.length) {
+                    const extraBills = await ZohoBill.find({ zohoBillId: { $in: missingZoho } })
+                        .select('zohoBillId status balance total')
+                        .lean();
+                    for (const zb of extraBills) {
+                        if (isZohoBillFullyPaid(zb)) paidZohoIds.add(clean(zb.zohoBillId));
+                    }
+                }
+                const variantSet = new Set(partyVariants.map((v) => String(v)));
+                for (const asset of assets) {
+                    for (const service of asset.services || []) {
+                        const remark = parseJsonRemark(service.remark);
+                        const amountMode = clean(remark.amountMode).toLowerCase();
+                        if (amountMode === 'warranty') continue;
+                        const partyId = clean(remark.companyPayPartyId);
+                        if (partyId && !variantSet.has(partyId) && !mongoose.Types.ObjectId.isValid(partyId)) {
+                            continue;
+                        }
+                        if (partyId && mongoose.Types.ObjectId.isValid(partyId) && String(partyId).length === 24) {
+                            if (!variantSet.has(partyId) && !companyOids.some((oid) => String(oid) === partyId)) {
+                                continue;
+                            }
+                        }
+                        const amount = money(
+                            remark.hrReviewCompanyPay ?? remark.companyPayAmount ?? 0,
+                        );
+                        const employeeAmt = money(
+                            remark.hrReviewEmployeePay ?? remark.employeePayAmount ?? 0,
+                        );
+                        const zohoIds = collectRemarkZohoBillIds(remark);
+                        const hasBill = zohoIds.length > 0;
+                        if (amount <= 0 && employeeAmt > 0) continue;
+                        if (amount <= 0 && !hasBill) continue;
+                        const paid = remarkServiceIsPaid(remark, paidZohoIds);
+                        const serviceType = clean(service.serviceType, 'Service');
+                        const assetRef = clean(asset.assetId || asset._id);
+                        rows.push({
+                            id: `service:${asset._id}:${service._id || zohoIds[0] || serviceType}`,
+                            partyType: 'company',
+                            kind: 'service',
+                            status: paid ? 'Paid' : hasBill ? 'Not Paid' : 'Not Paid',
+                            amount: amount > 0 ? amount : money(service.value),
+                            description: `${serviceType} · ${clean(asset.name || asset.assetId)}`,
+                            utilityBillId: '',
+                            utilityBatchId: '',
+                            accountNo: clean(asset.assetId),
+                            utilityType: serviceType,
+                            billMonth: service.date
+                                ? String(service.date).slice(0, 7)
+                                : '',
+                            entryId: '',
+                            zohoBillId: zohoIds[0] || '',
+                            zohoPaymentId: clean(remark.zohoPaymentId),
+                            zohoPaymentNumber: clean(remark.zohoPaymentNumber),
+                            zohoOrganizationId: clean(remark.zohoOrganizationId),
+                            zohoJournalId: '',
+                            paidThroughAccountId: '',
+                            paidThroughAccountName: '',
+                            paymentMode: '',
+                            paidAt: paid ? remark.zohoPaidAt || service.date || null : null,
+                            ledger: [],
+                            billLink: assetRef
+                                ? `/HRM/Asset/Vehicle/details/${encodeURIComponent(assetRef)}`
+                                : '',
+                            paymentLink: '',
+                            canPay: false,
+                            employeeId: '',
+                            employeeName: '',
+                            companyId: clean(companyId),
+                            companyName: clean(companyNames[0]),
+                            serviceId: clean(service._id),
+                        });
+                    }
+                }
+            }
+        }
+
         rows.sort((a, b) => {
             if (a.status !== b.status) return a.status === 'Not Paid' ? -1 : 1;
             return String(b.billMonth || '').localeCompare(String(a.billMonth || ''));
         });
 
-        return res.status(200).json({ success: true, rows });
+        return res.status(200).json({
+            success: true,
+            rows: collapseSameBillPayableRows(rows),
+        });
     } catch (err) {
         console.error('[listPartyExpenses]', err);
         return res.status(500).json({ message: err.message || 'Failed to load expenses.' });

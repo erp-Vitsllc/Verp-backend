@@ -9,6 +9,7 @@ import {
     addVehicleFuel,
     updateVehicleFuel,
     closeVehicleFuel,
+    deleteVehicleFuel,
     getVehicleFuelAttachment,
 } from '../controllers/vehicleFuelController.js';
 
@@ -22,6 +23,7 @@ router.post('/', protect, requireCanManageFuel, addVehicleFuel);
 router.post('/close', protect, requireCanManageFuel, closeVehicleFuel);
 router.put('/:id', protect, requireCanManageFuel, updateVehicleFuel);
 router.post('/:id/close', protect, requireCanManageFuel, closeVehicleFuel);
+router.delete('/:id', protect, deleteVehicleFuel);
 router.get('/:id/attachment', protect, getVehicleFuelAttachment);
 
 export default router;

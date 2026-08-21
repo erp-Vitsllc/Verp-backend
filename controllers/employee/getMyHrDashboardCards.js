@@ -8,6 +8,21 @@ function roundMoney(value) {
     return Math.round((Number(value) || 0) * 100) / 100;
 }
 
+const MONTH_NAMES = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+];
+
 /** Dashboard lists: Approved or Paid (and equivalent settled statuses) only. */
 function isApprovedOrPaidStatus(raw) {
     const s = String(raw || "").trim().toLowerCase();
@@ -39,20 +54,65 @@ function displayLoanStatus(item) {
     return raw;
 }
 
+function displayRepaymentPayment(outstanding) {
+    return outstanding <= 0.01 ? "Paid" : "Not Paid";
+}
+
+function buildMonthSchedule(startRaw, durationRaw, total, paid, fallbackDate) {
+    const duration = Math.max(1, Number(durationRaw) || 1);
+    const start = String(startRaw || "").trim();
+    let startIndex = -1;
+    if (/^\d{4}-\d{2}$/.test(start)) {
+        startIndex = parseInt(start.split("-")[1], 10) - 1;
+    } else if (start) {
+        startIndex = MONTH_NAMES.findIndex((m) => m.toLowerCase() === start.toLowerCase());
+    }
+    if (startIndex < 0) {
+        const d = fallbackDate ? new Date(fallbackDate) : new Date();
+        startIndex = Number.isNaN(d.getTime()) ? new Date().getMonth() : (d.getMonth() + 1) % 12;
+    }
+
+    const monthly = total > 0 ? total / duration : 0;
+    let remainingPaid = paid;
+    const boxes = [];
+    for (let i = 0; i < duration; i++) {
+        const monthIndex = (startIndex + i) % 12;
+        const thisPaid = Math.min(remainingPaid, monthly);
+        remainingPaid = Math.max(0, remainingPaid - monthly);
+        boxes.push({
+            label: MONTH_NAMES[monthIndex].slice(0, 3),
+            paid: monthly <= 0.01 || thisPaid >= monthly - 0.5,
+        });
+    }
+    return boxes;
+}
+
 function mapLoanItem(item) {
     const amount = roundMoney(item.amount);
-    const paid = roundMoney(item.paidAmount);
+    const repaid = roundMoney(item.repaidAmount);
     const status = displayLoanStatus(item);
     const type = item.type === "Advance" ? "Advance" : "Loan";
+    const duration = Math.max(1, Number(item.duration || item.originalDuration) || 1);
+    const outstanding = Math.max(0, roundMoney(amount - repaid));
     return {
         id: String(item._id),
         code: item.loanId || type,
         type,
         amount,
-        paid,
-        outstanding: Math.max(0, roundMoney(amount - paid)),
+        paid: roundMoney(item.paidAmount),
+        repaid,
+        outstanding,
+        deduction: roundMoney(amount / duration),
         status,
-        date: item.createdAt || null,
+        payment: displayRepaymentPayment(outstanding),
+        schedule: buildMonthSchedule(
+            item.monthStart || item.originalMonthStart,
+            duration,
+            amount,
+            repaid,
+            item.createdAt || item.appliedDate,
+        ),
+        date: item.createdAt || item.appliedDate || null,
         href: `/HRM/LoanAndAdvance/${type.replace(/\s+/g, "-")}-${item._id}`,
     };
 }
@@ -98,6 +158,10 @@ function displayFineStatus(status, share, paid) {
     return raw;
 }
 
+function displayFinePayment(outstanding) {
+    return outstanding <= 0.01 ? "Paid" : "Not Paid";
+}
+
 function mapFineItem(item, employeeId) {
     const rawStatus = String(item?.fineStatus || "").trim();
     if (!rawStatus || rawStatus === "Draft") return null;
@@ -110,6 +174,7 @@ function mapFineItem(item, employeeId) {
     const status = displayFineStatus(rawStatus, share, paid);
     if (!status) return null;
 
+    const outstanding = roundMoney(Math.max(0, share - paid));
     const code = item.fineId || String(item._id);
     return {
         id: String(item._id),
@@ -117,8 +182,16 @@ function mapFineItem(item, employeeId) {
         type: item.fineType || "Fine",
         amount: roundMoney(share),
         paid: roundMoney(paid),
-        outstanding: roundMoney(Math.max(0, share - paid)),
+        outstanding,
         status,
+        payment: displayFinePayment(outstanding),
+        schedule: buildMonthSchedule(
+            item.monthStart || item.originalMonthStart,
+            item.payableDuration || item.originalPayableDuration,
+            share,
+            paid,
+            item.awardedDate || item.createdAt,
+        ),
         date: item.awardedDate || item.createdAt || null,
         href: `/HRM/Fine/${encodeURIComponent(code)}`,
     };
@@ -158,7 +231,9 @@ export const getMyHrDashboardCards = async (req, res) => {
 
         const [loans, rewards, fines] = await Promise.all([
             Loan.find(loanQuery)
-                .select("type loanId amount paidAmount status approvalStatus createdAt")
+                .select(
+                    "type loanId amount paidAmount repaidAmount duration monthStart originalMonthStart originalDuration status approvalStatus createdAt appliedDate",
+                )
                 .sort({ createdAt: -1 })
                 .lean(),
             Reward.find({ employeeId, rewardStatus: { $ne: "Draft" } })
@@ -167,7 +242,7 @@ export const getMyHrDashboardCards = async (req, res) => {
                 .lean(),
             Fine.find({ "assignedEmployees.employeeId": employeeId, fineStatus: { $ne: "Draft" } })
                 .select(
-                    "fineId fineType fineStatus responsibleFor fineAmount totalFineAmount employeeAmount companyAmount serviceCharge assignedEmployees paidAmount isGroupView awardedDate createdAt",
+                    "fineId fineType fineStatus responsibleFor fineAmount totalFineAmount employeeAmount companyAmount serviceCharge assignedEmployees paidAmount isGroupView awardedDate createdAt payableDuration monthStart originalMonthStart originalPayableDuration",
                 )
                 .sort({ createdAt: -1 })
                 .lean(),

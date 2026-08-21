@@ -110,9 +110,13 @@ export async function sendUtilityBillPaymentEmail({
         const frontendUrl = emailFrontendUrl();
         const path =
             batchMeta?.reviewPath ||
-            (bill.batchId
-                ? `/HRM/Asset/UtilityBills?batchId=${encodeURIComponent(String(bill.batchId))}&review=1`
-                : `/HRM/Asset/UtilityBills/details/${encodeURIComponent(bill.entryId)}?billId=${encodeURIComponent(String(bill._id))}`);
+            (bill.entryId
+                ? `/HRM/Asset/UtilityBills/details/${encodeURIComponent(String(bill.entryId))}${
+                      bill._id ? `?billId=${encodeURIComponent(String(bill._id))}` : ''
+                  }`
+                : bill.batchId
+                  ? `/HRM/Asset/UtilityBills?batchId=${encodeURIComponent(String(bill.batchId))}`
+                  : '/HRM/Asset/UtilityBills');
         const buttonUrl = `${frontendUrl}${path}`;
         const hideGroupTotal = useCompanyOnly || Boolean(batchMeta?.hideGroupTotal);
         const amountTxt = formatAed(bill.amount);
@@ -289,29 +293,43 @@ function collectPayableEmployeeIds(bills = []) {
 }
 
 function payableLinesForEmployee(bills = [], employee) {
-    const lines = [];
+    const byBill = new Map();
     (bills || []).forEach((bill) => {
+        const billKey = String(
+            bill?._id || `${bill?.entryId || ''}|${bill?.accountNo || ''}|${bill?.billMonth || ''}`,
+        );
         const rowItems = Array.isArray(bill?.zohoLineItems) ? bill.zohoLineItems : [];
+        const matched = [];
         if (rowItems.length) {
             rowItems.forEach((line) => {
                 if (!idsMatchEmployee(line?.payByEmployeeId, employee)) return;
-                lines.push({
+                matched.push({
                     name: payablePartyName(employee, line.payByEmployeeName),
                     amount: Number(line.amount) || 0,
                     item: payableLineLabel(bill, line),
                 });
             });
-            return;
-        }
-        if (idsMatchEmployee(bill?.payByEmployeeId, employee)) {
-            lines.push({
+        } else if (idsMatchEmployee(bill?.payByEmployeeId, employee)) {
+            matched.push({
                 name: payablePartyName(employee, bill.payByEmployeeName),
                 amount: Number(bill.employeePayAmount) || Number(bill.amount) || 0,
                 item: payableLineLabel(bill),
             });
         }
+        if (!matched.length) return;
+        const prev = byBill.get(billKey);
+        const amount = matched.reduce((sum, line) => sum + (Number(line.amount) || 0), 0);
+        if (!prev) {
+            byBill.set(billKey, {
+                name: matched[0].name,
+                amount,
+                item: payableLineLabel(bill),
+            });
+            return;
+        }
+        prev.amount += amount;
     });
-    return lines;
+    return [...byBill.values()];
 }
 
 /**

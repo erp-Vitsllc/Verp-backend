@@ -31,11 +31,14 @@ function isVehicleAsset(item) {
 }
 
 function mapToolItem(item) {
+    const typeName = item.typeId?.name || item.type || 'Tool';
     return {
         id: String(item._id),
         code: item.assetId || item.name || 'Tool',
-        type: 'Tool',
-        title: item.name || item.typeId?.name || '',
+        assetId: item.assetId || '',
+        name: item.name || typeName,
+        type: typeName,
+        title: item.name || typeName,
         status: item.status || 'Assigned',
         date: item.assignedDate || item.updatedAt || item.createdAt || null,
         href: `/HRM/Asset/details/${item._id}`,
@@ -44,10 +47,13 @@ function mapToolItem(item) {
 
 function mapVehicleItem(item) {
     const plate = String(item.plateNumber || '').trim();
+    const typeName = item.typeId?.name || 'Vehicle';
     return {
         id: String(item._id),
         code: plate || item.assetId || item.name || 'Vehicle',
-        type: 'Vehicle',
+        assetId: item.assetId || '',
+        name: plate || item.name || item.assetId || 'Vehicle',
+        type: typeName,
         title: [item.vehicleBrand, item.name].filter(Boolean).join(' · ') || item.assetId || '',
         status: item.status || 'Assigned',
         date: item.assignedDate || item.updatedAt || item.createdAt || null,
@@ -71,6 +77,7 @@ function mapUtilityItem(entry) {
     return {
         id: String(entry._id),
         code: account || entry.type || 'Utility',
+        number: account,
         type: entry.type || 'Utility',
         title: entry.type || '',
         group: provider,

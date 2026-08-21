@@ -1,7 +1,6 @@
 import nodemailer from 'nodemailer';
 import mongoose from 'mongoose';
 import EmployeeBasic from '../models/EmployeeBasic.js';
-import Company from '../models/Company.js';
 import { getDepartmentHOD } from './getDepartmentHOD.js';
 import {
     resolveEmployeeEmail,
@@ -11,8 +10,10 @@ import {
 } from './resolveEmployeeEmail.js';
 import {
     buildVehicleServiceCompletedEmailHtml,
-    VEHICLE_SERVICE_COMPLETED_SUBJECT,
+    vehicleServiceCompletedSubject,
 } from './buildVehicleServiceCompletedEmailHtml.js';
+import { withFrontendPath, resolveFrontendBaseUrl } from './resolveFrontendBaseUrl.js';
+import { vehicleServiceDetailsPath } from './vehicleServiceAdminOfficerNotification.js';
 
 const EMP_SELECT =
     'firstName lastName employeeId companyEmail workEmail personalEmail email company mobileNumber phoneNumber contactNumber phone mobile';
@@ -35,20 +36,6 @@ function formatMoney(value) {
     const n = Number(value);
     if (!Number.isFinite(n)) return String(value);
     return `AED ${n.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`;
-}
-
-function pickContactNumber(emp) {
-    if (!emp) return '';
-    return (
-        String(
-            emp.mobileNumber ||
-                emp.phoneNumber ||
-                emp.contactNumber ||
-                emp.mobile ||
-                emp.phone ||
-                '',
-        ).trim() || ''
-    );
 }
 
 function dayLabel(value) {
@@ -127,15 +114,32 @@ async function loadEmployeeFull(emp) {
     return EmployeeBasic.findById(id).select(EMP_SELECT).populate('company', 'name').lean();
 }
 
-async function resolveCompanyName(assignee, remark = {}) {
-    const fromRemark = String(remark.carDrivenByCompanyName || remark.companyName || '').trim();
-    if (fromRemark) return fromRemark;
-    if (assignee?.company?.name) return String(assignee.company.name).trim();
-    if (assignee?.company && mongoose.Types.ObjectId.isValid(String(assignee.company))) {
-        const company = await Company.findById(assignee.company).select('name').lean();
-        if (company?.name) return String(company.name).trim();
+function plateOf(asset) {
+    return [asset?.plateEmirate, asset?.plateNumber].filter(Boolean).join(' ').trim();
+}
+
+function assignedUserOf(asset, assignee) {
+    if (asset?.assignedToType === 'Company' && asset?.assignedCompany) {
+        const company = asset.assignedCompany;
+        if (company && typeof company === 'object') {
+            return String(company.name || company.nickName || 'Company').trim();
+        }
+        return 'Company';
     }
-    return process.env.DEFAULT_COMPANY_NAME?.trim() || 'VITS LLC';
+    return employeeDisplayName(assignee) || 'Unassigned';
+}
+
+function vehicleNameOf(asset) {
+    return String(asset?.name || '').trim() || plateOf(asset) || String(asset?.assetId || '').trim() || 'vehicle';
+}
+
+function serviceDetailsUrl(asset, service, serviceType) {
+    const assetId = asset?._id;
+    const serviceId = service?._id || service?.id;
+    const path = vehicleServiceDetailsPath(assetId, serviceId, serviceType);
+    if (path) return withFrontendPath(path);
+    if (assetId) return withFrontendPath(`/HRM/Asset/Vehicle/details/${assetId}?tab=service`);
+    return resolveFrontendBaseUrl();
 }
 
 /**
@@ -147,6 +151,7 @@ export async function sendVehicleServiceCompletedNotificationEmail({
     asset,
     remark = {},
     service = null,
+    serviceTypeLabel = '',
     toOverride = null,
     ccExtra = [],
 } = {}) {
@@ -166,8 +171,19 @@ export async function sendVehicleServiceCompletedNotificationEmail({
             resolveEmployeeByIdOrCode(remark.carDrivenByEmployeeId),
         ]);
 
-        const companyName = await resolveCompanyName(assignee, remark);
         const paid = resolvePaidAmounts(remark, service);
+        const serviceType =
+            String(
+                serviceTypeLabel ||
+                    service?.serviceType ||
+                    remark.serviceTypeLabel ||
+                    remark.serviceType ||
+                    'Service',
+            ).trim() || 'Service';
+        const vehicleName = vehicleNameOf(asset);
+        const subject = vehicleServiceCompletedSubject(vehicleName);
+        const detailsUrl = serviceDetailsUrl(asset, service, serviceType);
+        const assignedUser = assignedUserOf(asset, assignee);
 
         const completedDate =
             dayLabel(remark.vehicleServiceCompletedAt) ||
@@ -191,7 +207,22 @@ export async function sendVehicleServiceCompletedNotificationEmail({
             ),
         );
 
-        const adminCc = pickEmpEmail(adminOfficer);
+        const mailFields = {
+            serviceType,
+            vehicleNumber: plateOf(asset),
+            vehicleAssetNumber: asset?.assetId || '',
+            assignedUser,
+            serviceCompletedDate: completedDate,
+            vehicleReturnedDate: returnedDate,
+            currentKm,
+            companyPaidAmount: paid.companyPaid,
+            employeePaidAmount: paid.employeePaid,
+            serviceStatus: 'Completed - Vehicle Returned',
+            adminOfficerName: employeeDisplayName(adminOfficer),
+            adminOfficerEmail: pickEmpEmail(adminOfficer) || '',
+            detailsUrl,
+        };
+
         const stakeholderCc = [];
         for (const emp of [adminOfficer, hr, accounts, driver]) {
             const addr = pickEmpEmail(emp);
@@ -228,24 +259,13 @@ export async function sendVehicleServiceCompletedNotificationEmail({
 
         if (toOverride) {
             // Preview / force path: single TO override, still CC stakeholders.
-            const html = buildVehicleServiceCompletedEmailHtml({
-                employeeName: employeeDisplayName(assignee) || 'Employee',
-                serviceCompletedDate: completedDate,
-                vehicleReturnedDate: returnedDate,
-                currentKm,
-                companyPaidAmount: paid.companyPaid,
-                employeePaidAmount: paid.employeePaid,
-                adminOfficerName: employeeDisplayName(adminOfficer),
-                adminOfficerContact: pickContactNumber(adminOfficer),
-                adminOfficerEmail: adminCc || '',
-                companyName,
-            });
+            const html = buildVehicleServiceCompletedEmailHtml(mailFields);
             const cc = buildCcForTo(toOverride);
             await transporter.sendMail({
                 from: `"VeRP Portal" <${emailUser}>`,
                 to: toOverride,
                 ...(cc.length ? { cc } : {}),
-                subject: VEHICLE_SERVICE_COMPLETED_SUBJECT,
+                subject,
                 html,
             });
             console.log(
@@ -275,11 +295,6 @@ export async function sendVehicleServiceCompletedNotificationEmail({
                 continue;
             }
 
-            const greetingName =
-                isFallbackToReportee && full?.primaryReportee
-                    ? full.primaryReportee.firstName || employeeDisplayName(full.primaryReportee)
-                    : employeeDisplayName(recipient);
-
             const fallbackNote =
                 isFallbackToReportee && full?.primaryReportee
                     ? getFallbackEmailNote(
@@ -289,16 +304,7 @@ export async function sendVehicleServiceCompletedNotificationEmail({
                     : '';
 
             const html = buildVehicleServiceCompletedEmailHtml({
-                employeeName: greetingName,
-                serviceCompletedDate: completedDate,
-                vehicleReturnedDate: returnedDate,
-                currentKm,
-                companyPaidAmount: paid.companyPaid,
-                employeePaidAmount: paid.employeePaid,
-                adminOfficerName: employeeDisplayName(adminOfficer),
-                adminOfficerContact: pickContactNumber(adminOfficer),
-                adminOfficerEmail: adminCc || '',
-                companyName,
+                ...mailFields,
                 fallbackNoteHtml: fallbackNote,
             });
 
@@ -309,7 +315,7 @@ export async function sendVehicleServiceCompletedNotificationEmail({
                 from: `"VeRP Portal" <${emailUser}>`,
                 to,
                 ...(cc.length ? { cc } : {}),
-                subject: VEHICLE_SERVICE_COMPLETED_SUBJECT,
+                subject,
                 html,
             });
             sentTo.push(to);

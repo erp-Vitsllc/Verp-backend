@@ -1,7 +1,6 @@
 import nodemailer from 'nodemailer';
 import mongoose from 'mongoose';
 import EmployeeBasic from '../models/EmployeeBasic.js';
-import Company from '../models/Company.js';
 import { getDepartmentHOD } from './getDepartmentHOD.js';
 import {
     resolveEmployeeEmail,
@@ -11,8 +10,10 @@ import {
 } from './resolveEmployeeEmail.js';
 import {
     buildVehicleServiceScheduledEmailHtml,
-    VEHICLE_SERVICE_SCHEDULED_SUBJECT,
+    vehicleServiceScheduledSubject,
 } from './buildVehicleServiceScheduledEmailHtml.js';
+import { withFrontendPath, resolveFrontendBaseUrl } from './resolveFrontendBaseUrl.js';
+import { vehicleServiceDetailsPath } from './vehicleServiceAdminOfficerNotification.js';
 
 const EMP_SELECT =
     'firstName lastName employeeId companyEmail workEmail personalEmail email company mobileNumber phoneNumber contactNumber phone mobile';
@@ -51,20 +52,6 @@ function formatPaymentMethod(remark = {}) {
     return '';
 }
 
-function pickContactNumber(emp) {
-    if (!emp) return '';
-    return (
-        String(
-            emp.mobileNumber ||
-                emp.phoneNumber ||
-                emp.contactNumber ||
-                emp.mobile ||
-                emp.phone ||
-                '',
-        ).trim() || ''
-    );
-}
-
 async function resolveEmployeeByIdOrCode(raw) {
     const id = String(raw || '').trim();
     if (!id) return null;
@@ -74,23 +61,36 @@ async function resolveEmployeeByIdOrCode(raw) {
     return EmployeeBasic.findOne({ employeeId: id }).select(EMP_SELECT).populate('company', 'name').lean();
 }
 
-async function resolveCompanyName(assignee, remark = {}) {
-    const fromRemark = String(remark.carDrivenByCompanyName || remark.companyName || '').trim();
-    if (fromRemark) return fromRemark;
-    if (assignee?.company?.name) return String(assignee.company.name).trim();
-    if (assignee?.company && mongoose.Types.ObjectId.isValid(String(assignee.company))) {
-        const company = await Company.findById(assignee.company).select('name').lean();
-        if (company?.name) return String(company.name).trim();
-    }
-    return process.env.DEFAULT_COMPANY_NAME?.trim() || 'VITS LLC';
-}
-
 function dayLabel(value) {
     if (!value) return '';
     if (value instanceof Date && !Number.isNaN(value.getTime())) {
         return value.toISOString().slice(0, 10);
     }
     return String(value).trim().slice(0, 10);
+}
+
+function plateOf(asset) {
+    return [asset?.plateEmirate, asset?.plateNumber].filter(Boolean).join(' ').trim();
+}
+
+function assignedUserOf(asset, assignee) {
+    if (asset?.assignedToType === 'Company' && asset?.assignedCompany) {
+        const company = asset.assignedCompany;
+        if (company && typeof company === 'object') {
+            return String(company.name || company.nickName || 'Company').trim();
+        }
+        return 'Company';
+    }
+    return employeeDisplayName(assignee) || 'Unassigned';
+}
+
+function serviceDetailsUrl(asset, service, serviceType) {
+    const assetId = asset?._id;
+    const serviceId = service?._id || service?.id;
+    const path = vehicleServiceDetailsPath(assetId, serviceId, serviceType);
+    if (path) return withFrontendPath(path);
+    if (assetId) return withFrontendPath(`/HRM/Asset/Vehicle/details/${assetId}?tab=service`);
+    return resolveFrontendBaseUrl();
 }
 
 /**
@@ -163,7 +163,6 @@ export async function sendVehicleServiceScheduledNotificationEmail({
                   )
                 : '';
 
-        const companyName = await resolveCompanyName(assignee || fullAssignee, remark);
         const serviceType =
             String(serviceTypeLabel || service?.serviceType || remark.serviceType || 'service').trim() ||
             'service';
@@ -194,12 +193,16 @@ export async function sendVehicleServiceScheduledNotificationEmail({
             amountToPay:
                 String(remark.amountMode || '').toLowerCase() === 'warranty'
                     ? 'Warranty (N/A)'
-                    : formatMoney(amountRaw),
+                    : formatMoney(amountRaw) || 'AED 0',
+            vehicleNumber: plateOf(asset),
+            vehicleModelYear: asset?.modelYear || '',
+            vehicleAssetNumber: asset?.assetId || '',
+            assignedUser: assignedUserOf(asset, assignee || fullAssignee),
             currentKm: formatKm(asset?.currentKilometer),
             adminOfficerName: employeeDisplayName(adminOfficer),
-            adminOfficerContact: pickContactNumber(adminOfficer),
             adminOfficerEmail: pickEmpEmail(adminOfficer) || '',
-            companyName,
+            detailsUrl: serviceDetailsUrl(asset, service, serviceType),
+            portalUrl: resolveFrontendBaseUrl(),
             fallbackNoteHtml: fallbackNote,
         });
 
@@ -226,7 +229,7 @@ export async function sendVehicleServiceScheduledNotificationEmail({
             from: `"VeRP Portal" <${emailUser}>`,
             to,
             ...(cc.length ? { cc } : {}),
-            subject: VEHICLE_SERVICE_SCHEDULED_SUBJECT,
+            subject: vehicleServiceScheduledSubject(serviceType),
             html,
         });
 

@@ -1,6 +1,8 @@
 import mongoose from 'mongoose';
 import Attendance from '../../models/Attendance.js';
 import EmployeeBasic from '../../models/EmployeeBasic.js';
+import EmployeeHubRequest from '../../models/EmployeeHubRequest.js';
+import EmployeePersonal from '../../models/EmployeePersonal.js';
 import EmployeeSalary from '../../models/EmployeeSalary.js';
 import Fine from '../../models/Fine.js';
 import Loan from '../../models/Loan.js';
@@ -28,6 +30,9 @@ const MONTH_NAMES = [
 const APPROVED_LOAN_STATUSES = ['Approved', 'Pending Payment to Employee', 'Paid'];
 const APPROVED_FINE_STATUSES = ['Approved', 'Active', 'Paid', 'Completed'];
 const LEAVE_STATUS_KEYS = ['authorized_leave', 'unauthorized_leave', 'sick_leave'];
+const UPCOMING_LEAVE_STATUS_KEYS = [...LEAVE_STATUS_KEYS, 'on_leave'];
+const AVATAR_COLORS = ['#7C3AED', '#0B8A80', '#1D5FDB', '#C98A0A', '#D13E38', '#4F6B82'];
+const PENDING_ADVANCE_STATUSES = ['Pending', 'Pending HR', 'Pending Accounts', 'Pending Authorization'];
 
 function money(value) {
     const n = Number(value);
@@ -432,6 +437,311 @@ async function buildEmployeePayrollView({
     };
 }
 
+function isLeapYear(year) {
+    return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+}
+
+function dateKeyFromParts(year, month, day) {
+    return `${year}-${pad2(month)}-${pad2(day)}`;
+}
+
+function addDaysToKey(key, days) {
+    const match = String(key || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!match) return null;
+    const date = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]) + days));
+    return dateKeyFromParts(date.getUTCFullYear(), date.getUTCMonth() + 1, date.getUTCDate());
+}
+
+function daysBetweenKeys(fromKey, toKey) {
+    const from = String(fromKey || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    const to = String(toKey || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!from || !to) return null;
+    const a = Date.UTC(Number(from[1]), Number(from[2]) - 1, Number(from[3]));
+    const b = Date.UTC(Number(to[1]), Number(to[2]) - 1, Number(to[3]));
+    return Math.round((b - a) / 86400000);
+}
+
+function formatDayMon(isoDate) {
+    const match = String(isoDate || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!match) return String(isoDate || '');
+    return `${Number(match[3])} ${MONTH_LABELS[Number(match[2]) - 1]}`;
+}
+
+function formatLeaveRange(from, to) {
+    if (!from) return '';
+    if (!to || from === to) return formatDayMon(from);
+    const fromMatch = from.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    const toMatch = to.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (fromMatch && toMatch && fromMatch[2] === toMatch[2]) {
+        return `${Number(fromMatch[3])}–${Number(toMatch[3])} ${MONTH_LABELS[Number(fromMatch[2]) - 1]}`;
+    }
+    return `${formatDayMon(from)} – ${formatDayMon(to)}`;
+}
+
+function nameInitials(name) {
+    const parts = String(name || '')
+        .split(/\s+/)
+        .filter(Boolean)
+        .slice(0, 2);
+    const letters = parts.map((part) => part[0]).join('').toUpperCase();
+    return letters || '?';
+}
+
+function avatarColor(seed) {
+    const text = String(seed || '');
+    let hash = 0;
+    for (let i = 0; i < text.length; i += 1) hash = (hash * 31 + text.charCodeAt(i)) >>> 0;
+    return AVATAR_COLORS[hash % AVATAR_COLORS.length];
+}
+
+function nextBirthdayKey(dateOfBirth, dubai) {
+    if (!dateOfBirth) return null;
+    const dob = dateOfBirth instanceof Date ? dateOfBirth : new Date(dateOfBirth);
+    if (Number.isNaN(dob.getTime())) return null;
+    const month = dob.getUTCMonth() + 1;
+    const rawDay = dob.getUTCDate();
+    const dayForYear = (year) => (month === 2 && rawDay === 29 && !isLeapYear(year) ? 28 : rawDay);
+    const todayKey = dateKeyFromParts(dubai.year, dubai.month, dubai.day);
+    let year = dubai.year;
+    let key = dateKeyFromParts(year, month, dayForYear(year));
+    if (key < todayKey) {
+        year += 1;
+        key = dateKeyFromParts(year, month, dayForYear(year));
+    }
+    return key;
+}
+
+function leaveTypeLabel(row) {
+    const kind = String(row?.leaveRequestKind || '').trim();
+    if (kind === 'future_annual') return 'Annual Leave';
+    const requested = String(row?.requestedStatusLabel || row?.statusLabel || '').trim();
+    if (/annual/i.test(requested)) return 'Annual Leave';
+    if (row?.statusKey === 'sick_leave' || /sick/i.test(requested)) return 'Sick Leave';
+    if (row?.statusKey === 'unauthorized_leave' || /unauthor/i.test(requested)) return 'Unauthorized';
+    if (row?.statusKey === 'authorized_leave' || /authoriz/i.test(requested)) return 'Authorized Leave';
+    return requested || 'Leave';
+}
+
+function leaveStatusLabel(row) {
+    const requestStatus = String(row?.leaveRequestStatus || '').trim().toLowerCase();
+    if (requestStatus === 'pending') return 'Scheduled';
+    return 'Approved';
+}
+
+function isPendingStatusValue(value) {
+    const raw = String(value || '').trim().toLowerCase();
+    return raw.includes('pending');
+}
+
+async function buildPayrollInsightLists({ scopedEmployees, scopedMongoIds, scopedCodes, dubai }) {
+    const emptyPending = {
+        total: 0,
+        categories: [
+            { name: 'Leave Requests', count: 0 },
+            { name: 'Attendance Corrections', count: 0 },
+            { name: 'Expense Claims', count: 0 },
+            { name: 'Advance Requests', count: 0 },
+        ],
+        priority: { high: 0, medium: 0, low: 0 },
+    };
+    if (!scopedEmployees.length) {
+        return { upcomingBirthdays: [], upcomingLeave: [], pendingRequests: emptyPending };
+    }
+
+    const todayKey = dateKeyFromParts(dubai.year, dubai.month, dubai.day);
+    const untilKey = addDaysToKey(todayKey, 30);
+    const activeEmployees = scopedEmployees.filter((emp) => {
+        if (String(emp.status || '') === 'Left User') return false;
+        const profile = String(emp.profileStatus || '').toLowerCase();
+        return profile === 'active' || profile === '';
+    });
+    const activeCodes = activeEmployees.map((emp) => emp.employeeId).filter(Boolean);
+    const empByCode = new Map(activeEmployees.map((emp) => [String(emp.employeeId || '').trim(), emp]));
+    const empByMongo = new Map(scopedEmployees.map((emp) => [String(emp._id), emp]));
+
+    const [personalRows, leaveRows, pendingAttendance, hubRows, advanceRows] = await Promise.all([
+        activeCodes.length
+            ? EmployeePersonal.find({
+                  employeeId: { $in: activeCodes },
+                  dateOfBirth: { $exists: true, $ne: null },
+              })
+                  .select('employeeId dateOfBirth')
+                  .lean()
+                  .maxTimeMS(12000)
+            : [],
+        scopedMongoIds.length
+            ? Attendance.find({
+                  employeeMongoId: { $in: scopedMongoIds },
+                  date: { $gte: todayKey, $lte: untilKey },
+                  $or: [
+                      { statusKey: { $in: UPCOMING_LEAVE_STATUS_KEYS } },
+                      {
+                          leaveRequestStatus: { $in: ['pending', 'approved'] },
+                          leaveRequestKind: { $in: ['leave', 'future_leave', 'future_annual'] },
+                      },
+                  ],
+              })
+                  .select(
+                      'employeeMongoId employeeId employeeName date statusKey statusLabel leaveRequestStatus requestedStatusLabel leaveRequestKind leaveRequestFromDate leaveRequestToDate leaveRequestGroupId',
+                  )
+                  .sort({ date: 1 })
+                  .lean()
+                  .maxTimeMS(12000)
+            : [],
+        scopedMongoIds.length
+            ? Attendance.find({
+                  leaveRequestStatus: 'pending',
+                  employeeMongoId: { $in: scopedMongoIds },
+              })
+                  .select('_id leaveRequestKind leaveRequestGroupId')
+                  .lean()
+                  .maxTimeMS(12000)
+            : [],
+        EmployeeHubRequest.find({
+            status: 'Pending',
+            kind: { $in: ['leave', 'advance'] },
+        })
+            .select('kind')
+            .lean()
+            .maxTimeMS(8000)
+            .catch(() => []),
+        scopedCodes.length
+            ? Loan.find({
+                  type: 'Advance',
+                  employeeId: { $in: scopedCodes },
+                  $or: [
+                      { status: { $in: PENDING_ADVANCE_STATUSES } },
+                      { approvalStatus: { $in: PENDING_ADVANCE_STATUSES } },
+                  ],
+              })
+                  .select('_id status approvalStatus')
+                  .lean()
+                  .maxTimeMS(8000)
+            : [],
+    ]);
+
+    const upcomingBirthdays = (personalRows || [])
+        .map((row) => {
+            const emp = empByCode.get(String(row.employeeId || '').trim());
+            if (!emp) return null;
+            const nextDate = nextBirthdayKey(row.dateOfBirth, dubai);
+            if (!nextDate) return null;
+            const inDays = daysBetweenKeys(todayKey, nextDate);
+            if (inDays == null || inDays < 0 || inDays > 30) return null;
+            const name = employeeDisplayName(emp) || emp.employeeId;
+            return {
+                employeeId: emp.employeeId,
+                name,
+                department: String(emp.department || emp.designation || '').trim() || '—',
+                date: formatDayMon(nextDate),
+                dateKey: nextDate,
+                initials: nameInitials(name),
+                color: avatarColor(emp.employeeId || name),
+            };
+        })
+        .filter(Boolean)
+        .sort((a, b) => String(a.dateKey).localeCompare(String(b.dateKey)))
+        .slice(0, 4)
+        .map(({ dateKey, ...rest }) => rest);
+
+    const sortedLeave = [...(leaveRows || [])].sort((a, b) => {
+        const empCmp = String(a.employeeMongoId || a.employeeId || '').localeCompare(
+            String(b.employeeMongoId || b.employeeId || ''),
+        );
+        if (empCmp) return empCmp;
+        return String(a.date || '').localeCompare(String(b.date || ''));
+    });
+    const groupedLeave = [];
+    for (const row of sortedLeave) {
+        const emp = empByMongo.get(String(row.employeeMongoId || '')) || empByCode.get(String(row.employeeId || '').trim());
+        const name = (emp ? employeeDisplayName(emp) : '') || row.employeeName || row.employeeId || 'Employee';
+        const groupId = String(row.leaveRequestGroupId || '').trim();
+        const leaveType = leaveTypeLabel(row);
+        const status = leaveStatusLabel(row);
+        const date = String(row.date || '');
+        const last = groupedLeave[groupedLeave.length - 1];
+        const sameGroup = last && groupId && last.groupId === groupId;
+        const consecutive =
+            last &&
+            !groupId &&
+            !last.groupId &&
+            last.employeeId === ((emp && emp.employeeId) || row.employeeId || '') &&
+            last.leaveType === leaveType &&
+            last.to &&
+            date &&
+            daysBetweenKeys(last.to, date) === 1;
+        if (sameGroup || consecutive) {
+            if (date && (!last.from || date < last.from)) last.from = date;
+            if (date && (!last.to || date > last.to)) last.to = date;
+            if (last.status !== 'Approved' && status === 'Approved') last.status = 'Approved';
+            continue;
+        }
+        groupedLeave.push({
+            groupId,
+            employeeId: (emp && emp.employeeId) || row.employeeId || '',
+            name,
+            leaveType,
+            from: date,
+            to: date,
+            status,
+        });
+    }
+
+    const upcomingLeave = groupedLeave
+        .filter((row) => row.from && row.from <= untilKey)
+        .sort((a, b) => String(a.from).localeCompare(String(b.from)))
+        .slice(0, 4)
+        .map((row) => ({
+            employeeId: row.employeeId,
+            name: row.name,
+            leaveType: row.leaveType,
+            dates: formatLeaveRange(row.from, row.to),
+            status: row.status,
+        }));
+
+    const leaveRequestKeys = new Set();
+    let attendanceCorrections = 0;
+    for (const row of pendingAttendance || []) {
+        const kind = String(row.leaveRequestKind || '').trim();
+        if (kind === 'yellow' || kind === 'future_late' || kind === 'future_early') {
+            attendanceCorrections += 1;
+            continue;
+        }
+        leaveRequestKeys.add(String(row.leaveRequestGroupId || row._id));
+    }
+
+    let hubLeave = 0;
+    let hubAdvance = 0;
+    for (const row of hubRows || []) {
+        if (row.kind === 'advance') hubAdvance += 1;
+        else if (row.kind === 'leave') hubLeave += 1;
+    }
+
+    const leaveRequests = leaveRequestKeys.size + hubLeave;
+    const advanceRequests =
+        (advanceRows || []).filter(
+            (row) => isPendingStatusValue(row.status) || isPendingStatusValue(row.approvalStatus),
+        ).length + hubAdvance;
+    const expenseClaims = 0;
+    const categories = [
+        { name: 'Leave Requests', count: leaveRequests },
+        { name: 'Attendance Corrections', count: attendanceCorrections },
+        { name: 'Expense Claims', count: expenseClaims },
+        { name: 'Advance Requests', count: advanceRequests },
+    ];
+    const pendingRequests = {
+        total: leaveRequests + attendanceCorrections + expenseClaims + advanceRequests,
+        categories,
+        priority: {
+            high: leaveRequests,
+            medium: attendanceCorrections + expenseClaims,
+            low: advanceRequests,
+        },
+    };
+
+    return { upcomingBirthdays, upcomingLeave, pendingRequests };
+}
+
 /**
  * GET /api/Employee/payroll-dashboard?year=2026&employeeId=all|VEGA-xxx
  */
@@ -464,7 +774,7 @@ export const getPayrollDashboard = async (req, res) => {
             employeeId: { $ne: 'VEGA-HR-0000' },
             ...REAL_EMPLOYEE_MONGO_FILTER,
         })
-            .select('_id employeeId firstName lastName staffType status dateOfJoining overtime noticeRequest.exitDate profileStatus')
+            .select('_id employeeId firstName lastName staffType status dateOfJoining overtime noticeRequest.exitDate profileStatus department designation')
             .sort({ firstName: 1, lastName: 1 })
             .lean()
             .maxTimeMS(15000);
@@ -711,6 +1021,13 @@ export const getPayrollDashboard = async (req, res) => {
             ot: toK(overtimeMonthlyAmounts[i]),
         }));
 
+        const insightLists = await buildPayrollInsightLists({
+            scopedEmployees,
+            scopedMongoIds,
+            scopedCodes,
+            dubai,
+        });
+
         return res.status(200).json({
             view: filterEmployeeId ? 'employee' : 'org',
             year,
@@ -755,6 +1072,9 @@ export const getPayrollDashboard = async (req, res) => {
                 { name: 'Advance', value: toK(advanceAmount) },
                 { name: 'Fine', value: toK(fineAmount) },
             ],
+            upcomingBirthdays: insightLists.upcomingBirthdays,
+            upcomingLeave: insightLists.upcomingLeave,
+            pendingRequests: insightLists.pendingRequests,
         });
     } catch (error) {
         console.error('[getPayrollDashboard]', error);

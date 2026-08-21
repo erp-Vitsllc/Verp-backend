@@ -5,10 +5,12 @@ import Attendance from '../../models/Attendance.js';
 import Loan from '../../models/Loan.js';
 import { hubRequestDisplayLabel } from '../../utils/employeeHubRequestTypes.js';
 
-const LOAN_REQUEST_STATUSES = new Set([
-    'Draft', 'Pending', 'Pending HR', 'Pending Accounts', 'Pending Authorization',
-    'Approved', 'Pending Payment to Employee', 'Rejected', 'Cancelled',
-]);
+function isPendingStatus(raw) {
+    const s = String(raw || "").trim().toLowerCase();
+    if (!s) return false;
+    if (s.includes("reject") || s.includes("cancel") || s === "draft") return false;
+    return s.includes("pending");
+}
 
 async function resolveSelf(req) {
     if (req.user?.employeeObjectId) {
@@ -51,34 +53,49 @@ export async function getMyDashboardRequests(req, res) {
 
         const employeeMongoId = String(self._id);
         const employeeId = String(self.employeeId || '').trim();
-        const loanQuery = { $or: [{ employeeObjectId: self._id }] };
-        if (employeeId) loanQuery.$or.push({ employeeId });
+        const employeeMatch = [{ employeeObjectId: self._id }];
+        if (employeeId) employeeMatch.push({ employeeId });
 
         const [hubRows, attendanceRows, loanRows] = await Promise.all([
-            EmployeeHubRequest.find({ requester: self._id }).sort({ createdAt: -1 }).limit(40).lean(),
-            Attendance.find({ employeeMongoId, leaveRequestStatus: { $in: ['pending', 'approved', 'rejected'] } }).sort({ leaveRequestedAt: -1, updatedAt: -1 }).limit(120).lean(),
-            Loan.find(loanQuery).select('type loanId reason status approvalStatus appliedDate createdAt').sort({ createdAt: -1 }).limit(40).lean(),
+            EmployeeHubRequest.find({ requester: self._id, status: { $regex: /pending/i } }).sort({ createdAt: -1 }).limit(40).lean(),
+            Attendance.find({ employeeMongoId, leaveRequestStatus: 'pending' }).sort({ leaveRequestedAt: -1, updatedAt: -1 }).limit(120).lean(),
+            Loan.find({
+                $and: [
+                    { $or: employeeMatch },
+                    {
+                        $or: [
+                            { approvalStatus: { $regex: /pending/i } },
+                            { status: { $regex: /pending/i } },
+                        ],
+                    },
+                ],
+            }).select('type loanId reason status approvalStatus appliedDate createdAt').sort({ createdAt: -1 }).limit(40).lean(),
         ]);
 
         const leaveSeen = new Set();
         const requests = [];
 
         for (const row of hubRows || []) {
+            const status = normalizeStatus(row.status);
+            if (!isPendingStatus(status)) continue;
             const label = hubRequestDisplayLabel(row.kind, row.assetType);
-            requests.push({ id: String(row._id), source: 'hub', label: `${label} request`, detail: String(row.description || '').slice(0, 120), status: normalizeStatus(row.status), date: row.createdAt || null, href: `/dashboard?hubRequestId=${encodeURIComponent(String(row._id))}` });
+            requests.push({ id: String(row._id), source: 'hub', label: `${label} request`, detail: String(row.description || '').slice(0, 120), status, date: row.createdAt || null, href: `/dashboard?hubRequestId=${encodeURIComponent(String(row._id))}` });
         }
         for (const row of attendanceRows || []) {
             const key = String(row.leaveRequestGroupId || row._id);
             if (leaveSeen.has(key)) continue;
             leaveSeen.add(key);
+            const status = normalizeStatus(row.leaveRequestStatus);
+            if (!isPendingStatus(status)) continue;
             const { type, detail } = leaveRequestLabel(row);
-            requests.push({ id: key, source: 'leave', label: type, detail, status: normalizeStatus(row.leaveRequestStatus), date: row.leaveRequestedAt || row.createdAt || null, href: '/dashboard?focusAttendance=1' });
+            requests.push({ id: key, source: 'leave', label: type, detail, status, date: row.leaveRequestedAt || row.createdAt || null, href: '/dashboard?focusAttendance=1' });
         }
         for (const row of loanRows || []) {
             const statusRaw = String(row.approvalStatus || row.status || '').trim();
-            if (!LOAN_REQUEST_STATUSES.has(statusRaw)) continue;
+            const status = normalizeStatus(statusRaw);
+            if (!isPendingStatus(status)) continue;
             const type = row.type === 'Advance' ? 'Advance' : 'Loan';
-            requests.push({ id: String(row._id), source: 'loan', label: `${type} request`, detail: row.loanId || row.reason || type, status: normalizeStatus(statusRaw), date: row.appliedDate || row.createdAt || null, href: `/HRM/LoanAndAdvance/${type.replace(/\s+/g, '-')}-${row._id}` });
+            requests.push({ id: String(row._id), source: 'loan', label: `${type} request`, detail: row.loanId || row.reason || type, status, date: row.appliedDate || row.createdAt || null, href: `/HRM/LoanAndAdvance/${type.replace(/\s+/g, '-')}-${row._id}` });
         }
 
         requests.sort((a, b) => new Date(b.date || 0).getTime() - new Date(a.date || 0).getTime());

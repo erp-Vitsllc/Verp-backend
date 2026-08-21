@@ -1027,6 +1027,7 @@ export async function routeShopServiceToBillingAfterComplete(
         asset: populated || asset,
         remark,
         service,
+        serviceTypeLabel,
     });
 
     const accountsCopy = await applyVehicleServiceNotificationCopy({

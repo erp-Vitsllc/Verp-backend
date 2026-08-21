@@ -6,11 +6,35 @@ import { reconcileLocatorPositionsToErp } from './locatorVehicleListService.js';
 const SNAPSHOT_MIN_INTERVAL_MS = 30 * 60 * 1000;
 const lastSnapshotAtByDevice = new Map();
 
-/** Dashboard charts only need recent windows — full 400-day TTL was loading/precomputing every day. */
-const DASHBOARD_SNAPSHOT_LOOKBACK_DAYS = 45;
-const DASHBOARD_DAY_OPTIONS_MAX = 45;
+/** Hourly samples for idle + recent day buckets. Daily first/last covers month/year running KM. */
+const DASHBOARD_SNAPSHOT_LOOKBACK_DAYS = 93;
+const DASHBOARD_DISTANCE_LOOKBACK_DAYS = 400;
+const DASHBOARD_DAY_OPTIONS_MAX = 93;
 const DASHBOARD_WEEK_OPTIONS_MAX = 12;
 const DASHBOARD_MONTH_OPTIONS_MAX = 12;
+/** Reject lifetime-odometer mistaken as period km (UAE fleet will not average this). */
+const MAX_RUNNING_KM_PER_DAY = 600;
+/** Previous-day odometer may anchor midnight km only if the last ping is recent. */
+const MAX_RUNNING_KM_ANCHOR_GAP_MS = 18 * 60 * 60 * 1000;
+const MAX_LIVE_TRIP_KM = 1500;
+/** Locator Idling Report: only count idle events that stay idling between GPS samples. */
+const MAX_IDLE_SAMPLE_GAP_MS = 90 * 60 * 1000;
+/** Locator Idling Report Total Time ignores idle events shorter than 2 minutes. */
+const MIN_IDLE_EVENT_MS = 2 * 60 * 1000;
+const EMIRATE_ONLY_LABELS = new Set([
+    'dubai',
+    'abu dhabi',
+    'abudhabi',
+    'sharjah',
+    'ajman',
+    'uaq',
+    'umm al quwain',
+    'umm al-quwain',
+    'ras al khaimah',
+    'ras al-khaimah',
+    'rak',
+    'fujairah',
+]);
 const RECONCILE_MIN_INTERVAL_MS = 30 * 60 * 1000;
 /** Avoid re-scanning tens of thousands of GPS rows on every dashboard tab focus. */
 const FLEET_DASHBOARD_CACHE_TTL_MS = 5 * 60 * 1000;
@@ -18,8 +42,9 @@ const FLEET_DASHBOARD_CACHE_TTL_MS = 5 * 60 * 1000;
 let lastReconcileAt = 0;
 let lastReconcileSummary = null;
 let reconcileInFlight = null;
-let fleetDashboardCache = { at: 0, payload: null };
+let fleetDashboardCache = { at: 0, year: null, payload: null };
 let fleetDashboardInFlight = null;
+let fleetDashboardInFlightYear = null;
 
 const MONTH_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
@@ -89,6 +114,7 @@ function normalizeRestSnapshot(position) {
         expenseAed: toSalikPriceAed(position),
         state: String(attrs.state || '').toLowerCase(),
         speedKmh: Number(position?.speedKmh) || 0,
+        statusDurationSec: statusDurationSecFromPosition(position),
         capturedAt: position?.deviceTime ? new Date(position.deviceTime) : new Date(),
     };
 }
@@ -108,6 +134,7 @@ function normalizeWsSnapshot(position) {
         expenseAed: toSalikPriceAed(position),
         state: String(position?.state || '').toLowerCase(),
         speedKmh: Number(position?.speedKmh) || 0,
+        statusDurationSec: statusDurationSecFromPosition(position),
         capturedAt: position?.deviceTime ? new Date(position.deviceTime) : new Date(),
     };
 }
@@ -184,6 +211,31 @@ function endOfDay(date) {
     const d = new Date(date);
     d.setHours(23, 59, 59, 999);
     return d;
+}
+
+/**
+ * Fuel / GPS month window:
+ * - always starts on the 1st 00:00
+ * - past months end on the last day of that month
+ * - current (or future) months end today — never after today
+ */
+function periodNowForYear(year, now = new Date()) {
+    const y = Number(year);
+    if (!Number.isFinite(y) || y === now.getFullYear()) return now;
+    if (y > now.getFullYear()) return now;
+    return endOfDay(new Date(y, 11, 31));
+}
+
+function monthBoundsForKey(monthKey, now = new Date()) {
+    const [year, month] = String(monthKey || '').split('-').map(Number);
+    const start = new Date(year, month - 1, 1, 0, 0, 0, 0);
+    const monthLast = endOfDay(new Date(year, month, 0));
+    const todayEnd = endOfDay(now);
+    const end = monthLast.getTime() >= startOfDay(now).getTime() ? todayEnd : monthLast;
+    if (start.getTime() > todayEnd.getTime()) {
+        return { start, end: todayEnd };
+    }
+    return { start, end };
 }
 
 function formatDayLabel(date) {
@@ -268,12 +320,10 @@ function getMonthOptionsFromSnapshots(snapshots, now = new Date()) {
     const current = new Date(now.getFullYear(), now.getMonth(), 1);
 
     while (cursor <= current) {
-        const isCurrentMonth =
-            cursor.getFullYear() === now.getFullYear() && cursor.getMonth() === now.getMonth();
-        const start = new Date(cursor.getFullYear(), cursor.getMonth(), 1);
-        const end = isCurrentMonth
-            ? endOfDay(now)
-            : endOfDay(new Date(cursor.getFullYear(), cursor.getMonth() + 1, 0));
+        const { start, end } = monthBoundsForKey(
+            `${cursor.getFullYear()}-${String(cursor.getMonth() + 1).padStart(2, '0')}`,
+            now,
+        );
         labels.push({
             key: `${cursor.getFullYear()}-${String(cursor.getMonth() + 1).padStart(2, '0')}`,
             label: start.toLocaleDateString('en-US', { month: 'long' }),
@@ -289,7 +339,14 @@ function getMonthOptionsFromSnapshots(snapshots, now = new Date()) {
 }
 
 function getMonthLabelsTillNow(now = new Date()) {
-    return Array.from({ length: now.getMonth() + 1 }, (_, i) => MONTH_SHORT[i]);
+    const labels = [];
+    const cursor = new Date(now.getFullYear(), 0, 1);
+    const end = new Date(now.getFullYear(), now.getMonth(), 1);
+    while (cursor <= end) {
+        labels.push({ label: MONTH_SHORT[cursor.getMonth()], monthIndex: cursor.getMonth() });
+        cursor.setMonth(cursor.getMonth() + 1);
+    }
+    return labels.length ? labels : [{ label: MONTH_SHORT[now.getMonth()], monthIndex: now.getMonth() }];
 }
 
 function getYearLabelsFromSnapshots(snapshots, now = new Date()) {
@@ -298,10 +355,12 @@ function getYearLabelsFromSnapshots(snapshots, now = new Date()) {
     return [...years].sort((a, b) => a - b).map(String);
 }
 
-function getDayLabelsForCurrentMonth(now = new Date()) {
-    const labels = [];
-    const cursor = startOfDay(new Date(now.getFullYear(), now.getMonth(), 1));
+function getDayLabelsForCurrentMonth(snapshots, now = new Date()) {
+    const monthStart = startOfDay(new Date(now.getFullYear(), now.getMonth(), 1));
+    const firstData = resolveSnapshotStartDay(snapshots, now);
+    const cursor = new Date(Math.max(monthStart.getTime(), firstData.getTime()));
     const end = startOfDay(now);
+    const labels = [];
 
     while (cursor <= end) {
         labels.push({
@@ -313,34 +372,129 @@ function getDayLabelsForCurrentMonth(now = new Date()) {
         cursor.setDate(cursor.getDate() + 1);
     }
 
-    return labels;
+    return labels.length
+        ? labels
+        : [
+              {
+                  key: localDateKey(now),
+                  label: formatDayLabel(now),
+                  start: startOfDay(now),
+                  end: endOfDay(now),
+              },
+          ];
+}
+
+function parseStatusDurationToMs(text) {
+    if (text == null || text === '') return 0;
+    const raw = String(text).trim();
+    const hms = raw.match(/^(\d+):([0-5]?\d):([0-5]?\d)(?:\s*hrs?)?$/i);
+    if (hms) {
+        return (Number(hms[1]) * 3600 + Number(hms[2]) * 60 + Number(hms[3])) * 1000;
+    }
+
+    const normalized = raw.toLowerCase();
+    let ms = 0;
+    const days = normalized.match(/(\d+(?:\.\d+)?)\s*d(?:ays?)?/);
+    const hours = normalized.match(/(\d+(?:\.\d+)?)\s*h(?:ours?)?/);
+    const mins = normalized.match(/(\d+(?:\.\d+)?)\s*m(?:in(?:utes?)?)?/);
+    const secs = normalized.match(/(\d+(?:\.\d+)?)\s*s(?:ec(?:onds?)?)?/);
+    if (days) ms += Number(days[1]) * 24 * 60 * 60 * 1000;
+    if (hours) ms += Number(hours[1]) * 60 * 60 * 1000;
+    if (mins) ms += Number(mins[1]) * 60 * 1000;
+    if (secs) ms += Number(secs[1]) * 1000;
+    if (ms > 0) return ms;
+
+    const value = Number.parseFloat(normalized);
+    if (!Number.isFinite(value) || value <= 0) return 0;
+    if (normalized.includes('day')) return value * 24 * 60 * 60 * 1000;
+    if (normalized.includes('hour')) return value * 60 * 60 * 1000;
+    if (normalized.includes('minute')) return value * 60 * 1000;
+    if (normalized.includes('second')) return value * 1000;
+    return 0;
 }
 
 function parseStatusDurationToMinutes(text) {
-    if (!text) return 0;
-    const normalized = String(text).toLowerCase().trim();
-    const value = Number.parseFloat(normalized);
-    if (!Number.isFinite(value)) return 0;
+    return Math.round(parseStatusDurationToMs(text) / 60000);
+}
 
-    if (normalized.includes('day')) return Math.round(value * 24 * 60);
-    if (normalized.includes('hour')) return Math.round(value * 60);
-    if (normalized.includes('minute')) return Math.round(value);
-    if (normalized.includes('second')) return Math.round(value / 60);
+function statusDurationSecFromPosition(position) {
+    const fromText = parseStatusDurationToMs(position?.status_duration);
+    if (fromText > 0) return Math.round(fromText / 1000);
+    const stopped = Number(position?.attributes?.ifstopped ?? position?.ifstopped);
+    if (Number.isFinite(stopped) && stopped > 0) return Math.round(stopped);
     return 0;
+}
+
+export function formatLocatorIdleLabel(msOrMinutes, { fromMinutes = false } = {}) {
+    const ms = fromMinutes ? (Number(msOrMinutes) || 0) * 60000 : Number(msOrMinutes) || 0;
+    const totalSec = Math.max(0, Math.round(ms / 1000));
+    const hours = Math.floor(totalSec / 3600);
+    const mins = Math.floor((totalSec % 3600) / 60);
+    const secs = totalSec % 60;
+    return `${String(hours).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')} Hrs`;
+}
+
+function isEmirateOnlyLabel(value) {
+    return EMIRATE_ONLY_LABELS.has(String(value || '').trim().toLowerCase());
+}
+
+function snapshotDistanceM(row) {
+    const total = Number(row?.totalDistanceM);
+    if (Number.isFinite(total) && total > 0) return total;
+    const odo = Number(row?.odometer);
+    if (!Number.isFinite(odo) || odo <= 0) return 0;
+    return odo >= 10_000 ? odo : odo * 1000;
+}
+
+function capTripKm(km) {
+    const n = Number(km) || 0;
+    if (n <= 0 || n > MAX_LIVE_TRIP_KM) return 0;
+    return Number(n.toFixed(2));
+}
+
+function runningKmFromPair(first, last) {
+    const firstM = snapshotDistanceM(first);
+    const lastM = snapshotDistanceM(last);
+    if (firstM <= 0 || lastM <= 0 || lastM <= firstM) return 0;
+    const firstAt = new Date(first?.capturedAt);
+    const lastAt = new Date(last?.capturedAt);
+    const spanDays = Math.max(
+        1,
+        Number.isFinite(firstAt.getTime()) && Number.isFinite(lastAt.getTime())
+            ? (lastAt.getTime() - firstAt.getTime()) / 86_400_000
+            : 1,
+    );
+    const km = (lastM - firstM) / 1000;
+    if (km / spanDays > MAX_RUNNING_KM_PER_DAY) return 0;
+    return Number(km.toFixed(2));
 }
 
 function liveDistanceKm(position) {
     const attrs = position?.attributes || {};
+    const lifetimeKm = toOdometerKm(attrs);
+
     const distanceKm = Number(String(attrs.distanceKm ?? '').replace(/,/g, ''));
-    if (Number.isFinite(distanceKm) && distanceKm > 0) return distanceKm;
+    if (
+        Number.isFinite(distanceKm) &&
+        distanceKm > 0 &&
+        distanceKm <= MAX_LIVE_TRIP_KM &&
+        Math.abs(distanceKm - lifetimeKm) > 1
+    ) {
+        return Number(distanceKm.toFixed(2));
+    }
 
     const distanceM = Number(attrs.distance);
-    if (Number.isFinite(distanceM) && distanceM > 0) return Number((distanceM / 1000).toFixed(2));
+    if (Number.isFinite(distanceM) && distanceM > 0) {
+        const km = distanceM / 1000;
+        if (km <= MAX_LIVE_TRIP_KM && Math.abs(km - lifetimeKm) > 1) {
+            return Number(km.toFixed(2));
+        }
+    }
 
     return 0;
 }
 
-function idleMinutesFromLivePosition(position) {
+function idleMinutesFromLivePosition(position, { capMinutes = null } = {}) {
     const attrs = position?.attributes || {};
     const state = String(attrs.state || '').toLowerCase();
 
@@ -348,9 +502,15 @@ function idleMinutesFromLivePosition(position) {
     if (state !== 'idling') return 0;
 
     const fromDuration = parseStatusDurationToMinutes(position?.status_duration);
-    if (fromDuration > 0) return fromDuration;
-    if (Number(attrs.ifstopped) > 0) return Math.round(Number(attrs.ifstopped) / 60);
-    return 0;
+    let minutes = fromDuration;
+    if (minutes <= 0 && Number(attrs.ifstopped) > 0) {
+        minutes = Math.round(Number(attrs.ifstopped) / 60);
+    }
+    if (minutes <= 0) return 0;
+    if (capMinutes != null && Number.isFinite(Number(capMinutes))) {
+        minutes = Math.min(minutes, Math.max(0, Number(capMinutes)));
+    }
+    return minutes;
 }
 
 function buildLivePositionMap(positions) {
@@ -371,21 +531,17 @@ function isSameDay(a, b) {
     );
 }
 function runningKmBetweenSnapshots(rows, livePosition = null) {
-    if (!rows?.length) {
-        return livePosition ? liveDistanceKm(livePosition) : 0;
+    const sorted = [...(rows || [])].sort((a, b) => new Date(a.capturedAt) - new Date(b.capturedAt));
+    const valid = sorted.filter((row) => snapshotDistanceM(row) > 0);
+    if (valid.length >= 2) {
+        const km = runningKmFromPair(valid[0], valid[valid.length - 1]);
+        if (km > 0) return km;
     }
-
-    const sorted = [...rows].sort((a, b) => new Date(a.capturedAt) - new Date(b.capturedAt));
-    const first = sorted[0];
-    const last = sorted[sorted.length - 1];
-    const deltaM = (Number(last.totalDistanceM) || 0) - (Number(first.totalDistanceM) || 0);
-    if (deltaM > 0) return Number((deltaM / 1000).toFixed(2));
-
-    return livePosition ? liveDistanceKm(livePosition) : 0;
+    return livePosition ? capTripKm(liveDistanceKm(livePosition)) : 0;
 }
 
 /** Running km for a date range — anchor odometer from last reading before the range start. */
-function runningKmForDeviceInRange(deviceRows, start, end, livePosition = null) {
+function runningKmForDeviceInRange(deviceRows, start, end, livePosition = null, { calendarMonth = false } = {}) {
     const sorted = [...(deviceRows || [])].sort(
         (a, b) => new Date(a.capturedAt) - new Date(b.capturedAt),
     );
@@ -395,23 +551,31 @@ function runningKmForDeviceInRange(deviceRows, start, end, livePosition = null) 
     });
     const today = startOfDay(new Date());
     const rangeIncludesToday = start <= endOfDay(today) && end >= today;
+    const liveTrip = rangeIncludesToday && livePosition ? capTripKm(liveDistanceKm(livePosition)) : 0;
 
-    if (!inBucket.length) {
-        return rangeIncludesToday && livePosition ? liveDistanceKm(livePosition) : 0;
+    if (!inBucket.length) return liveTrip;
+
+    const beforeRange = sorted.filter(
+        (row) => new Date(row.capturedAt) < start && snapshotDistanceM(row) > 0,
+    );
+    const firstInRange = inBucket.find((row) => snapshotDistanceM(row) > 0);
+    const closing = [...inBucket].reverse().find((row) => snapshotDistanceM(row) > 0);
+    if (!firstInRange || !closing) return liveTrip;
+
+    // Daily charts: do not pull a missing previous day into the next day.
+    // Calendar months: last odometer before the 1st is the month-start reading.
+    const prev = beforeRange[beforeRange.length - 1];
+    let anchor = firstInRange;
+    if (prev) {
+        const gapToStart = start.getTime() - new Date(prev.capturedAt).getTime();
+        if (calendarMonth || (gapToStart >= 0 && gapToStart <= MAX_RUNNING_KM_ANCHOR_GAP_MS)) {
+            anchor = prev;
+        }
     }
 
-    const beforeRange = sorted.filter((row) => new Date(row.capturedAt) < start);
-    const anchor = beforeRange.length ? beforeRange[beforeRange.length - 1] : inBucket[0];
-    const closing = inBucket[inBucket.length - 1];
-    const deltaM =
-        (Number(closing.totalDistanceM) || 0) - (Number(anchor.totalDistanceM) || 0);
-
-    if (deltaM > 0) return Number((deltaM / 1000).toFixed(2));
-
-    return runningKmBetweenSnapshots(
-        inBucket,
-        rangeIncludesToday ? livePosition : null,
-    );
+    const km = runningKmFromPair(anchor, closing);
+    if (km > 0) return km;
+    return liveTrip;
 }
 
 /** Period Salik spend (AED): cumulative expense counter delta, not distance. */
@@ -440,39 +604,72 @@ function salikPriceBetweenSnapshots(rows, livePosition = null) {
     return livePrice > 0 ? livePrice : 0;
 }
 
-function idleMinutesBetweenSnapshots(rows, livePosition = null) {
-    if (!rows?.length) {
-        return livePosition ? idleMinutesFromLivePosition(livePosition) : 0;
-    }
+function isIdlingSnapshot(row) {
+    if (String(row?.state || '').toLowerCase() !== 'idling') return false;
+    const speed = Number(row?.speedKmh);
+    if (Number.isFinite(speed) && speed > 5) return false;
+    return true;
+}
 
-    if (rows.length < 2) {
-        const only = rows[0];
-        if (String(only?.state || '').toLowerCase() === 'idling') {
-            // Single sample while idling: credit at least the snapshot spacing (2 min) when known.
-            return livePosition ? idleMinutesFromLivePosition(livePosition) || 2 : 2;
-        }
-        return livePosition ? idleMinutesFromLivePosition(livePosition) : 0;
-    }
+function snapshotIdleDurationMs(row) {
+    const sec = Number(row?.statusDurationSec);
+    if (Number.isFinite(sec) && sec > 0) return sec * 1000;
+    return 0;
+}
 
-    const sorted = [...rows].sort((a, b) => new Date(a.capturedAt) - new Date(b.capturedAt));
-    let idleMs = 0;
+function idleMsBetweenSnapshots(rows, livePosition = null, { includeLiveSession = false } = {}) {
+    const sorted = [...(rows || [])].sort((a, b) => new Date(a.capturedAt) - new Date(b.capturedAt));
+    let totalMs = 0;
+    let streakMs = 0;
+    let streakGpsMs = 0;
+
+    const flushStreak = () => {
+        const duration = streakGpsMs > 0 ? streakGpsMs : streakMs;
+        if (duration >= MIN_IDLE_EVENT_MS) totalMs += duration;
+        streakMs = 0;
+        streakGpsMs = 0;
+    };
 
     for (let i = 1; i < sorted.length; i += 1) {
         const prev = sorted[i - 1];
         const next = sorted[i];
-        // Only engine-on idling — parking is ignition-off and is not Locator "Excessive Idling".
-        if (String(prev.state || '').toLowerCase() !== 'idling') continue;
-
+        if (!isIdlingSnapshot(prev) || !isIdlingSnapshot(next)) {
+            if (isIdlingSnapshot(prev)) {
+                streakGpsMs = Math.max(streakGpsMs, snapshotIdleDurationMs(prev));
+            }
+            flushStreak();
+            continue;
+        }
         const gap = new Date(next.capturedAt) - new Date(prev.capturedAt);
-        if (gap > 0 && gap < 6 * 60 * 60 * 1000) {
-            idleMs += gap;
+        if (gap <= 0 || gap > MAX_IDLE_SAMPLE_GAP_MS) {
+            flushStreak();
+            continue;
+        }
+        streakMs += gap;
+        streakGpsMs = Math.max(streakGpsMs, snapshotIdleDurationMs(prev), snapshotIdleDurationMs(next));
+    }
+    if (sorted.length && isIdlingSnapshot(sorted[sorted.length - 1])) {
+        streakGpsMs = Math.max(streakGpsMs, snapshotIdleDurationMs(sorted[sorted.length - 1]));
+    }
+
+    if (includeLiveSession && livePosition) {
+        const last = sorted[sorted.length - 1];
+        const lastIdling = isIdlingSnapshot(last);
+        const minutesToday = Math.max(0, (Date.now() - startOfDay(new Date()).getTime()) / 60000);
+        if (lastIdling) {
+            const sinceLast = Date.now() - new Date(last.capturedAt).getTime();
+            if (sinceLast > 0 && sinceLast <= MAX_IDLE_SAMPLE_GAP_MS) streakMs += sinceLast;
+        } else if (totalMs <= 0 && streakMs <= 0) {
+            totalMs += idleMinutesFromLivePosition(livePosition, { capMinutes: minutesToday }) * 60000;
         }
     }
 
-    const snapshotIdle = Math.round(idleMs / 60000);
-    if (snapshotIdle > 0) return snapshotIdle;
+    flushStreak();
+    return totalMs;
+}
 
-    return livePosition ? idleMinutesFromLivePosition(livePosition) : 0;
+function idleMinutesBetweenSnapshots(rows, livePosition = null, options = {}) {
+    return Math.round(idleMsBetweenSnapshots(rows, livePosition, options) / 60000);
 }
 
 function groupSnapshotsByDevice(snapshots) {
@@ -543,28 +740,22 @@ function matchFleetVehicleByGpsName(gpsName, fleetVehicles) {
 }
 
 function formatVehiclePlateLabel(vehicle) {
-    const plate = [vehicle?.plateEmirate, vehicle?.plateNumber]
-        .map((part) => String(part || '').trim())
-        .filter(Boolean)
-        .join(' ')
-        .trim();
-    if (plate) return plate;
-    if (String(vehicle?.plateNumber || '').trim()) return String(vehicle.plateNumber).trim();
-    return '';
+    const number = String(vehicle?.plateNumber || '').trim();
+    if (!number) return '';
+    const emirate = String(vehicle?.plateEmirate || '').trim();
+    return emirate ? `${emirate} ${number}` : number;
 }
 
-/** Chart axis label: Assigned → assignee first name; otherwise plate (or “no plate not added”). */
-function resolveLocatorChartVehicleLabel(vehicle, fallbackGpsName = '') {
-    const status = String(vehicle?.status || '').trim().toLowerCase();
-    if (status === 'assigned') {
-        const firstName = String(vehicle?.assignedTo?.firstName || '').trim();
-        if (firstName) return firstName;
-    }
+/** Unique GPS chart label — plate number, else Locator device name, never emirate-only. */
+function resolveLocatorChartVehicleLabel(vehicle, fallbackGpsName = '', deviceId = '') {
     const plate = formatVehiclePlateLabel(vehicle);
     if (plate) return plate;
-    if (vehicle) return 'no plate not added';
-    const fallback = String(fallbackGpsName || '').trim();
-    return fallback || 'no plate not added';
+    const gps = String(fallbackGpsName || '').trim();
+    if (gps && !isEmirateOnlyLabel(gps)) return gps;
+    const assetId = String(vehicle?.assetId || '').trim();
+    if (assetId) return assetId;
+    if (deviceId) return `GPS ${deviceId}`;
+    return gps || 'Vehicle';
 }
 
 async function createLocatorChartLabelResolver(positions) {
@@ -605,7 +796,7 @@ async function createLocatorChartLabelResolver(positions) {
         const erp =
             (id ? byDeviceId.get(id) : null) ||
             matchFleetVehicleByGpsName(gps, fleetVehicles);
-        return resolveLocatorChartVehicleLabel(erp, gps || `Device ${id || ''}`.trim());
+        return resolveLocatorChartVehicleLabel(erp, gps || `Device ${id || ''}`.trim(), id);
     };
 }
 
@@ -636,6 +827,7 @@ function mapLocatorPeriodDashboardLabels(dashboard, resolveLabel) {
         day: mapLocatorDashboardBucketLabels(dashboard.day, resolveLabel),
         week: mapLocatorDashboardBucketLabels(dashboard.week, resolveLabel),
         month: mapLocatorDashboardBucketLabels(dashboard.month, resolveLabel),
+        year: mapLocatorDashboardBucketLabels(dashboard.year, resolveLabel),
     };
 }
 
@@ -683,7 +875,7 @@ async function buildGpsTrackedVehicles(positions) {
 }
 
 function buildRunningKmDaySeries(snapshots, positions, now = new Date()) {
-    const labels = getDayLabelsForCurrentMonth(now);
+    const labels = getDayLabelsForCurrentMonth(snapshots, now);
     const byDevice = groupSnapshotsByDevice(snapshots);
     const liveMap = buildLivePositionMap(positions);
     const today = startOfDay(now);
@@ -693,18 +885,8 @@ function buildRunningKmDaySeries(snapshots, positions, now = new Date()) {
         const isToday = isSameDay(bucket.start, today);
 
         for (const [deviceId, deviceRows] of byDevice.entries()) {
-            const inBucket = deviceRows.filter((row) => {
-                const at = new Date(row.capturedAt);
-                return at >= bucket.start && at <= bucket.end;
-            });
             const livePosition = isToday ? liveMap.get(deviceId) || null : null;
-            total += runningKmBetweenSnapshots(inBucket, livePosition);
-        }
-
-        if (isToday && total === 0) {
-            for (const position of positions || []) {
-                total += liveDistanceKm(position);
-            }
+            total += runningKmForDeviceInRange(deviceRows, bucket.start, bucket.end, livePosition);
         }
 
         return {
@@ -718,26 +900,18 @@ function buildRunningKmMonthSeries(snapshots, positions, now = new Date()) {
     const monthLabels = getMonthLabelsTillNow(now);
     const liveMap = buildLivePositionMap(positions);
     const currentMonth = now.getMonth();
+    const byDevice = groupSnapshotsByDevice(snapshots);
 
-    return monthLabels.map((label, monthIndex) => {
-        const start = new Date(now.getFullYear(), monthIndex, 1);
-        const end = endOfDay(new Date(now.getFullYear(), monthIndex + 1, 0));
-        const byDevice = groupSnapshotsByDevice(snapshots);
+    return monthLabels.map(({ label, monthIndex }) => {
+        const { start, end } = monthBoundsForKey(
+            `${now.getFullYear()}-${String(monthIndex + 1).padStart(2, '0')}`,
+            now,
+        );
         let total = 0;
 
         for (const [deviceId, deviceRows] of byDevice.entries()) {
-            const inBucket = deviceRows.filter((row) => {
-                const at = new Date(row.capturedAt);
-                return at >= start && at <= end;
-            });
             const livePosition = monthIndex === currentMonth ? liveMap.get(deviceId) || null : null;
-            total += runningKmBetweenSnapshots(inBucket, livePosition);
-        }
-
-        if (monthIndex === currentMonth && total === 0) {
-            for (const position of positions || []) {
-                total += liveDistanceKm(position);
-            }
+            total += runningKmForDeviceInRange(deviceRows, start, end, livePosition, { calendarMonth: true });
         }
 
         return { label, value: Number(total.toFixed(2)) };
@@ -748,27 +922,17 @@ function buildRunningKmYearSeries(snapshots, positions, now = new Date()) {
     const years = getYearLabelsFromSnapshots(snapshots, now);
     const liveMap = buildLivePositionMap(positions);
     const currentYear = now.getFullYear();
+    const byDevice = groupSnapshotsByDevice(snapshots);
 
     return years.map((yearLabel) => {
         const year = Number(yearLabel);
         const start = new Date(year, 0, 1);
-        const end = endOfDay(new Date(year, 11, 31));
-        const byDevice = groupSnapshotsByDevice(snapshots);
+        const end = year === now.getFullYear() ? endOfDay(now) : endOfDay(new Date(year, 11, 31));
         let total = 0;
 
         for (const [deviceId, deviceRows] of byDevice.entries()) {
-            const inBucket = deviceRows.filter((row) => {
-                const at = new Date(row.capturedAt);
-                return at >= start && at <= end;
-            });
             const livePosition = year === currentYear ? liveMap.get(deviceId) || null : null;
-            total += runningKmBetweenSnapshots(inBucket, livePosition);
-        }
-
-        if (year === currentYear && total === 0) {
-            for (const position of positions || []) {
-                total += liveDistanceKm(position);
-            }
+            total += runningKmForDeviceInRange(deviceRows, start, end, livePosition);
         }
 
         return { label: yearLabel, value: Number(total.toFixed(2)) };
@@ -781,35 +945,35 @@ function buildIdleByVehicle(snapshots, positions, start, end) {
     const rows = [];
     const seen = new Set();
     const today = startOfDay(new Date());
-    const rangeIncludesToday = start <= endOfDay(today) && end >= today;
+    const todayOnly = isSameDay(start, today) && isSameDay(end, today);
 
     for (const [deviceId, deviceRows] of byDevice.entries()) {
         const inBucket = deviceRows.filter((row) => {
             const at = new Date(row.capturedAt);
             return at >= start && at <= end;
         });
-        if (!inBucket.length) continue;
+        if (!inBucket.length && !todayOnly) continue;
 
         const name =
             inBucket[inBucket.length - 1]?.deviceName ||
             liveMap.get(deviceId)?.deviceName ||
             `Device ${deviceId}`;
         seen.add(String(deviceId));
-        // Never mix today's live idle into a past day/week/month bucket.
-        const liveForRange = rangeIncludesToday ? liveMap.get(deviceId) || null : null;
+        const liveForRange = todayOnly ? liveMap.get(deviceId) || null : null;
         rows.push({
             name,
-            value: idleMinutesBetweenSnapshots(inBucket, liveForRange),
+            value: idleMinutesBetweenSnapshots(inBucket, liveForRange, { includeLiveSession: todayOnly }),
             deviceId,
         });
     }
 
-    // Live-only vehicles only belong on charts that include today.
-    if (rangeIncludesToday) {
+    // Live-only vehicles (no snapshots yet) belong on today's idle chart only.
+    if (todayOnly) {
+        const minutesToday = Math.max(0, (Date.now() - today.getTime()) / 60000);
         for (const position of positions || []) {
             const deviceId = String(position?.deviceId || '');
             if (!deviceId || seen.has(deviceId)) continue;
-            const value = idleMinutesFromLivePosition(position);
+            const value = idleMinutesFromLivePosition(position, { capMinutes: minutesToday });
             if (value <= 0) continue;
             rows.push({
                 name: position?.deviceName || `Device ${deviceId}`,
@@ -819,7 +983,7 @@ function buildIdleByVehicle(snapshots, positions, start, end) {
         }
     }
 
-    return sortVehicleBars(rows);
+    return sortVehicleBars(rows.filter((row) => Number(row.value) > 0));
 }
 
 function getWeekRange(now = new Date()) {
@@ -946,6 +1110,19 @@ function buildRunningKmByVehicleDashboard(snapshots, positions, now = new Date()
         day: buildLocatorPeriodBucket(dayOptions, buildRows),
         week: buildLocatorPeriodBucket(weekOptions, buildRows),
         month: buildLocatorPeriodBucket(monthOptions, buildRows),
+        year: buildLocatorPeriodBucket(
+            [
+                {
+                    key: String(now.getFullYear()),
+                    label: String(now.getFullYear()),
+                    sublabel: String(now.getFullYear()),
+                    start: new Date(now.getFullYear(), 0, 1),
+                    end: endOfDay(now),
+                    hasSnapshots: rangeHasSnapshots(snapshots, new Date(now.getFullYear(), 0, 1), endOfDay(now)),
+                },
+            ],
+            buildRows,
+        ),
     };
 }
 
@@ -1028,6 +1205,19 @@ function buildIdleTimeByVehicleDashboard(snapshots, positions, now = new Date())
         day: buildLocatorPeriodBucket(dayOptions, buildRows),
         week: buildLocatorPeriodBucket(weekOptions, buildRows),
         month: buildLocatorPeriodBucket(monthOptions, buildRows),
+        year: buildLocatorPeriodBucket(
+            [
+                {
+                    key: String(now.getFullYear()),
+                    label: String(now.getFullYear()),
+                    sublabel: String(now.getFullYear()),
+                    start: new Date(now.getFullYear(), 0, 1),
+                    end: endOfDay(now),
+                    hasSnapshots: rangeHasSnapshots(snapshots, new Date(now.getFullYear(), 0, 1), endOfDay(now)),
+                },
+            ],
+            buildRows,
+        ),
     };
 }
 
@@ -1119,12 +1309,70 @@ async function loadDashboardChartSnapshots(lookbackStart) {
         .exec();
 }
 
-async function buildLocatorFleetDashboardUncached() {
+async function loadDailyDistanceSnapshots(lookbackStart) {
+    const grouped = await LocatorGpsSnapshot.aggregate([
+        { $match: { capturedAt: { $gte: lookbackStart } } },
+        { $sort: { capturedAt: 1 } },
+        {
+            $group: {
+                _id: {
+                    deviceId: '$deviceId',
+                    y: { $year: { date: '$capturedAt', timezone: 'Asia/Dubai' } },
+                    m: { $month: { date: '$capturedAt', timezone: 'Asia/Dubai' } },
+                    d: { $dayOfMonth: { date: '$capturedAt', timezone: 'Asia/Dubai' } },
+                },
+                deviceId: { $first: '$deviceId' },
+                deviceName: { $last: '$deviceName' },
+                firstDistanceM: { $first: '$totalDistanceM' },
+                lastDistanceM: { $last: '$totalDistanceM' },
+                firstOdometer: { $first: '$odometer' },
+                lastOdometer: { $last: '$odometer' },
+                firstAt: { $first: '$capturedAt' },
+                lastAt: { $last: '$capturedAt' },
+            },
+        },
+    ])
+        .option({ allowDiskUse: true, maxTimeMS: 20000 })
+        .exec();
+
+    const rows = [];
+    for (const group of grouped || []) {
+        rows.push({
+            deviceId: group.deviceId,
+            deviceName: group.deviceName || '',
+            totalDistanceM: group.firstDistanceM,
+            odometer: group.firstOdometer,
+            capturedAt: group.firstAt,
+            state: '',
+        });
+        if (new Date(group.lastAt).getTime() !== new Date(group.firstAt).getTime()) {
+            rows.push({
+                deviceId: group.deviceId,
+                deviceName: group.deviceName || '',
+                totalDistanceM: group.lastDistanceM,
+                odometer: group.lastOdometer,
+                capturedAt: group.lastAt,
+                state: '',
+            });
+        }
+    }
+    rows.sort((a, b) => new Date(a.capturedAt) - new Date(b.capturedAt));
+    return rows;
+}
+
+async function buildLocatorFleetDashboardUncached(selectedYear) {
     const startedAt = Date.now();
-    const now = new Date();
-    // Match day-picker window — loading 92 days of raw rows was saturating Mongo (~60k docs).
-    const lookbackStart = new Date(now);
+    const clockNow = new Date();
+    const periodNow = periodNowForYear(selectedYear, clockNow);
+    const yearStart = new Date(periodNow.getFullYear(), 0, 1, 0, 0, 0, 0);
+    const lookbackStart = new Date(clockNow);
     lookbackStart.setDate(lookbackStart.getDate() - DASHBOARD_SNAPSHOT_LOOKBACK_DAYS);
+    if (yearStart.getTime() < lookbackStart.getTime()) lookbackStart.setTime(yearStart.getTime());
+    const distanceLookbackStart = new Date(clockNow);
+    distanceLookbackStart.setDate(distanceLookbackStart.getDate() - DASHBOARD_DISTANCE_LOOKBACK_DAYS);
+    if (yearStart.getTime() < distanceLookbackStart.getTime()) {
+        distanceLookbackStart.setTime(yearStart.getTime());
+    }
 
     let positions = [];
     let snapshotWarning = null;
@@ -1158,20 +1406,24 @@ async function buildLocatorFleetDashboardUncached() {
         },
     );
 
-    const [snapshots, resolveLabel, gpsTrackedVehicles] = await Promise.all([
+    const [hourlySnapshots, dailySnapshots, resolveLabel, gpsTrackedVehicles] = await Promise.all([
         loadDashboardChartSnapshots(lookbackStart),
+        loadDailyDistanceSnapshots(distanceLookbackStart),
         createLocatorChartLabelResolver(positions),
         buildGpsTrackedVehicles(positions),
     ]);
+    const snapshots = hourlySnapshots;
+    const distanceSnapshots = dailySnapshots?.length ? dailySnapshots : hourlySnapshots;
 
-    const trackingFrom = snapshots[0]?.capturedAt || null;
-    const trackingDaysWithData = collectSnapshotDayKeys(snapshots, now).length;
+    const trackingFrom = distanceSnapshots[0]?.capturedAt || snapshots[0]?.capturedAt || null;
+    const trackingDaysWithData = collectSnapshotDayKeys(distanceSnapshots, periodNow).length;
     const odometerByVehicle = applyLocatorChartLabels(buildOdometerChart(positions), resolveLabel);
 
     const payload = {
         configured: true,
         connected: true,
-        generatedAt: now.toISOString(),
+        generatedAt: clockNow.toISOString(),
+        periodYear: periodNow.getFullYear(),
         positionsSource: positionsStale ? 'cached' : 'live',
         positionsStale,
         snapshotWarning,
@@ -1186,92 +1438,171 @@ async function buildLocatorFleetDashboardUncached() {
         currentKmByVehicle: odometerByVehicle,
         gpsTrackedVehicles,
         runningKmByVehicle: mapLocatorPeriodDashboardLabels(
-            buildRunningKmByVehicleDashboard(snapshots, positions, now),
+            buildRunningKmByVehicleDashboard(distanceSnapshots, positions, periodNow),
             resolveLabel,
         ),
         runningKm: {
-            day: buildRunningKmDaySeries(snapshots, positions, now),
-            month: buildRunningKmMonthSeries(snapshots, positions, now),
-            year: buildRunningKmYearSeries(snapshots, positions, now),
+            day: buildRunningKmDaySeries(distanceSnapshots, positions, periodNow),
+            month: buildRunningKmMonthSeries(distanceSnapshots, positions, periodNow),
+            year: buildRunningKmYearSeries(distanceSnapshots, positions, periodNow),
         },
         idleTimeByVehicle: mapLocatorPeriodDashboardLabels(
-            buildIdleTimeByVehicleDashboard(snapshots, positions, now),
+            buildIdleTimeByVehicleDashboard(snapshots, positions, periodNow),
             resolveLabel,
         ),
         salikWise: mapLocatorPeriodDashboardLabels(
-            buildSalikWiseByVehicleDashboard(snapshots, positions, now),
+            buildSalikWiseByVehicleDashboard(snapshots, positions, periodNow),
             resolveLabel,
         ),
         snapshotCount: snapshots.length,
+        distanceSnapshotCount: distanceSnapshots.length,
         // Locator client API (per docs) only exposes latest + live WS — daily history is from our snapshots
         historySource: 'local_snapshots',
         locatorApiSupportsHistory: false,
     };
 
     console.log(
-        `[LocatorFleetDashboard] positions=${positions.length} snapshots=${snapshots.length} total=${Date.now() - startedAt}ms`,
+        `[LocatorFleetDashboard] positions=${positions.length} hourly=${snapshots.length} daily=${distanceSnapshots.length} total=${Date.now() - startedAt}ms`,
     );
 
     return payload;
 }
 
-function monthBoundsForKey(monthKey, now = new Date()) {
-    const [year, month] = String(monthKey || '').split('-').map(Number);
-    const start = new Date(year, month - 1, 1);
-    const isCurrentMonth = now.getFullYear() === year && now.getMonth() === month - 1;
-    const end = isCurrentMonth
-        ? endOfDay(now)
-        : endOfDay(new Date(year, month, 0));
-    return { start, end };
+function monthIdleKmPayload(allRows, inMonth, start, end) {
+    const idleMs = idleMsBetweenSnapshots(inMonth, null);
+    return {
+        kmRun: Number(runningKmForDeviceInRange(allRows, start, end, null, { calendarMonth: true })) || 0,
+        idleTimeMinutes: Math.round(idleMs / 60000),
+        idleTimeSeconds: Math.round(idleMs / 1000),
+        idleTimeLabel: formatLocatorIdleLabel(idleMs),
+        rangeStart: start.toISOString(),
+        rangeEnd: end.toISOString(),
+    };
+}
+
+function emptyMonthStats(start = null, end = null) {
+    return {
+        kmRun: 0,
+        idleTimeMinutes: 0,
+        idleTimeSeconds: 0,
+        idleTimeLabel: '00:00:00 Hrs',
+        rangeStart: start ? start.toISOString() : null,
+        rangeEnd: end ? end.toISOString() : null,
+    };
+}
+
+async function lastOdometerRowsBefore(deviceIds, before) {
+    const ids = (deviceIds || []).map((id) => Number(id)).filter((n) => Number.isFinite(n) && n > 0);
+    if (!ids.length || !before) return [];
+    return LocatorGpsSnapshot.aggregate([
+        { $match: { deviceId: { $in: ids }, capturedAt: { $lt: before } } },
+        { $sort: { capturedAt: -1 } },
+        {
+            $group: {
+                _id: '$deviceId',
+                deviceId: { $first: '$deviceId' },
+                totalDistanceM: { $first: '$totalDistanceM' },
+                odometer: { $first: '$odometer' },
+                state: { $first: '$state' },
+                speedKmh: { $first: '$speedKmh' },
+                statusDurationSec: { $first: '$statusDurationSec' },
+                capturedAt: { $first: '$capturedAt' },
+            },
+        },
+    ]);
 }
 
 /**
- * Monthly running km + idle for one GPS device — same math as the fleet dashboard charts.
- * Idle is engine-on idling only; km is the odometer/distance delta for that calendar month.
+ * Monthly running km + idle for one GPS device — snapshots in that calendar month only.
+ * KM is first-to-last odometer in the month; idle is engine-on idling in the month.
  */
 export async function getLocatorMonthStatsMap(deviceId, monthKeys = []) {
     const keys = [...new Set((monthKeys || []).map((key) => String(key || '').trim()))].filter((key) =>
         /^\d{4}-(0[1-9]|1[0-2])$/.test(key),
     );
-    const empty = { kmRun: 0, idleTimeMinutes: 0 };
-    const result = Object.fromEntries(keys.map((key) => [key, { ...empty }]));
+    const now = new Date();
+    const bounds = keys.map((key) => ({ key, ...monthBoundsForKey(key, now) }));
+    const result = Object.fromEntries(
+        bounds.map(({ key, start, end }) => [key, emptyMonthStats(start, end)]),
+    );
     const id = Number(deviceId);
     if (!Number.isFinite(id) || id <= 0 || keys.length === 0) return result;
 
-    const now = new Date();
-    const bounds = keys.map((key) => ({ key, ...monthBoundsForKey(key, now) }));
     const minStart = new Date(Math.min(...bounds.map((b) => b.start.getTime())));
     const maxEnd = new Date(Math.max(...bounds.map((b) => b.end.getTime())));
-    const lookback = new Date(minStart);
-    lookback.setDate(lookback.getDate() - 3);
-
-    const rows = await LocatorGpsSnapshot.find({
-        deviceId: id,
-        capturedAt: { $gte: lookback, $lte: maxEnd },
-    })
-        .select('totalDistanceM state capturedAt')
-        .sort({ capturedAt: 1 })
-        .lean();
+    const [priorRows, rows] = await Promise.all([
+        lastOdometerRowsBefore([id], minStart),
+        LocatorGpsSnapshot.find({
+            deviceId: id,
+            capturedAt: { $gte: minStart, $lte: maxEnd },
+        })
+            .select('deviceId totalDistanceM odometer state speedKmh statusDurationSec capturedAt')
+            .sort({ capturedAt: 1 })
+            .lean(),
+    ]);
+    const allRows = [...priorRows, ...rows].sort(
+        (a, b) => new Date(a.capturedAt) - new Date(b.capturedAt),
+    );
 
     for (const { key, start, end } of bounds) {
-        const inMonth = rows.filter((row) => {
+        const inMonth = allRows.filter((row) => {
             const at = new Date(row.capturedAt);
             return at >= start && at <= end;
         });
-        result[key] = {
-            kmRun: Number(runningKmForDeviceInRange(rows, start, end, null)) || 0,
-            idleTimeMinutes: Number(idleMinutesBetweenSnapshots(inMonth, null)) || 0,
-        };
+        result[key] = monthIdleKmPayload(allRows, inMonth, start, end);
     }
     return result;
 }
 
 export async function getLocatorMonthStatsForDevice(deviceId, monthKey) {
     const map = await getLocatorMonthStatsMap(deviceId, [monthKey]);
-    return map[String(monthKey)] || { kmRun: 0, idleTimeMinutes: 0 };
+    const now = new Date();
+    const { start, end } = monthBoundsForKey(monthKey, now);
+    return map[String(monthKey)] || emptyMonthStats(start, end);
 }
 
-export async function buildLocatorFleetDashboard() {
+/** One month of running KM + idle for many GPS devices (fuel list). */
+export async function getLocatorMonthStatsByDevices(deviceIds = [], monthKey) {
+    const key = String(monthKey || '').trim();
+    const now = new Date();
+    const { start, end } = monthBoundsForKey(key, now);
+    const ids = [...new Set((deviceIds || []).map((id) => Number(id)).filter((n) => Number.isFinite(n) && n > 0))];
+    const result = Object.fromEntries(ids.map((id) => [String(id), emptyMonthStats(start, end)]));
+    if (!ids.length || !/^\d{4}-(0[1-9]|1[0-2])$/.test(key)) return result;
+
+    const [priorRows, rows] = await Promise.all([
+        lastOdometerRowsBefore(ids, start),
+        LocatorGpsSnapshot.find({
+            deviceId: { $in: ids },
+            capturedAt: { $gte: start, $lte: end },
+        })
+            .select('deviceId totalDistanceM odometer state speedKmh statusDurationSec capturedAt')
+            .sort({ capturedAt: 1 })
+            .lean(),
+    ]);
+
+    const byDevice = new Map();
+    for (const row of [...priorRows, ...rows]) {
+        const id = String(row.deviceId);
+        if (!byDevice.has(id)) byDevice.set(id, []);
+        byDevice.get(id).push(row);
+    }
+
+    for (const id of ids) {
+        const deviceRows = (byDevice.get(String(id)) || []).sort(
+            (a, b) => new Date(a.capturedAt) - new Date(b.capturedAt),
+        );
+        const inMonth = deviceRows.filter((row) => {
+            const at = new Date(row.capturedAt);
+            return at >= start && at <= end;
+        });
+        result[String(id)] = monthIdleKmPayload(deviceRows, inMonth, start, end);
+    }
+
+    return result;
+}
+
+export async function buildLocatorFleetDashboard({ year } = {}) {
     if (!isLocatorConfigured()) {
         return {
             configured: false,
@@ -1279,24 +1610,31 @@ export async function buildLocatorFleetDashboard() {
         };
     }
 
+    const selectedYear = Number(year) || new Date().getFullYear();
     const cached = fleetDashboardCache.payload;
-    if (cached && Date.now() - fleetDashboardCache.at < FLEET_DASHBOARD_CACHE_TTL_MS) {
+    if (
+        cached &&
+        fleetDashboardCache.year === selectedYear &&
+        Date.now() - fleetDashboardCache.at < FLEET_DASHBOARD_CACHE_TTL_MS
+    ) {
         return cached;
     }
 
-    if (fleetDashboardInFlight) {
+    if (fleetDashboardInFlight && fleetDashboardInFlightYear === selectedYear) {
         return fleetDashboardInFlight;
     }
 
-    fleetDashboardInFlight = buildLocatorFleetDashboardUncached()
+    fleetDashboardInFlightYear = selectedYear;
+    fleetDashboardInFlight = buildLocatorFleetDashboardUncached(selectedYear)
         .then((payload) => {
             if (payload?.connected) {
-                fleetDashboardCache = { at: Date.now(), payload };
+                fleetDashboardCache = { at: Date.now(), year: selectedYear, payload };
             }
             return payload;
         })
         .finally(() => {
             fleetDashboardInFlight = null;
+            fleetDashboardInFlightYear = null;
         });
 
     return fleetDashboardInFlight;

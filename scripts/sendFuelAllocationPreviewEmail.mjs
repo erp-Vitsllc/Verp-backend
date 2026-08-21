@@ -1,5 +1,5 @@
 /**
- * Send a preview of the fuel-create allocation email to razan.docs@gmail.com.
+ * Send 80% / 100% / exceed fuel-update previews to razan.docs@gmail.com.
  * Run from VERP_backend: node scripts/sendFuelAllocationPreviewEmail.mjs
  */
 import 'dotenv/config';
@@ -18,25 +18,41 @@ if (!emailUser || !emailPass) {
     process.exit(1);
 }
 
-const result = await sendVehicleFuelBillEmail({
+const sampleAsset = {
+    assetId: 'VH-001',
+    name: 'Toyota Camry',
+    plateEmirate: 'DXB',
+    plateNumber: 'A 12345',
+    assignedToType: 'Employee',
+    assignedTo: { firstName: 'Ahmad', lastName: 'Ali', employeeId: 'EMP-001' },
+};
+
+const base = {
     to: TO,
     cc: [],
-    asset: {
-        assetId: 'VH-001',
-        name: 'Toyota Camry',
-        plateEmirate: 'DXB',
-        plateNumber: 'A 12345',
-        assignedToType: 'Employee',
-        assignedTo: { firstName: 'Ahmad', lastName: 'Ali', employeeId: 'EMP-001' },
-    },
+    asset: sampleAsset,
     monthLabel: 'August 2026',
     monthlyLimit: 1000,
-    action: 'added',
-});
+    kmRun: 1840.5,
+    idleTimeLabel: '3 hrs / 20 min',
+    lastFuelUpdateAt: new Date(2026, 7, 18),
+};
 
-if (!result) {
-    console.error('Fuel allocation preview failed to send.');
-    process.exit(1);
+const previews = [
+    { label: '80%', action: 'limitWarning80', amountUsed: 820 },
+    { label: '100%', action: 'limitExceeded', amountUsed: 1000 },
+    { label: 'exceed', action: 'limitExceeded', amountUsed: 1250 },
+];
+
+for (const preview of previews) {
+    const result = await sendVehicleFuelBillEmail({
+        ...base,
+        action: preview.action,
+        amountUsed: preview.amountUsed,
+    });
+    if (!result) {
+        console.error(`Fuel ${preview.label} preview failed to send.`);
+        process.exit(1);
+    }
+    console.log(`Fuel ${preview.label} mail sent (${result.messageId || 'n/a'})`);
 }
-
-console.log(`Fuel allocation preview sent to ${TO} (messageId: ${result.messageId || 'n/a'})`);

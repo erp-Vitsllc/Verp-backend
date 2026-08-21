@@ -8,6 +8,8 @@ import { isFleetVehicleAsset } from '../utils/assetApprovalHelpers.js';
 import {
     getLocatorMonthStatsForDevice,
     getLocatorMonthStatsMap,
+    getLocatorMonthStatsByDevices,
+    formatLocatorIdleLabel,
 } from '../services/locatorSnapshotService.js';
 import { getDepartmentHOD, isUserInFlowchart } from '../utils/getDepartmentHOD.js';
 import {
@@ -23,6 +25,8 @@ import {
 import { sendVehicleFuelBillEmail } from '../utils/sendVehicleFuelBillEmail.js';
 import { getUserPermissions, isUserAdministrator } from '../services/permissionService.js';
 import { isJwtSystemSuperUser } from '../utils/systemSuperUser.js';
+import { isReqUserAdmin } from '../utils/sendAdminDeletionNotificationEmails.js';
+import { awaitAdminDeletionArchive } from '../utils/adminDeletionArchiveRun.js';
 
 const MONTH_KEY_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
 const ADD_FUEL_PERMISSION = 'hrm_asset_vehicle_add_fuel';
@@ -40,13 +44,24 @@ function monthLabelFromKey(monthKey) {
 }
 
 function formatIdleTime(minutes) {
-    const n = Number(minutes) || 0;
-    if (n <= 0) return '0 min';
-    const hours = Math.floor(n / 60);
-    const mins = n % 60;
-    if (hours <= 0) return `${mins} min`;
-    if (mins === 0) return `${hours}h`;
-    return `${hours}h ${mins}m`;
+    return formatLocatorIdleLabel(minutes, { fromMinutes: true });
+}
+
+function formatIdleTimeHoursMinutes(minutes, seconds) {
+    if (seconds != null && Number.isFinite(Number(seconds))) {
+        return formatLocatorIdleLabel(Number(seconds) * 1000);
+    }
+    return formatLocatorIdleLabel(minutes, { fromMinutes: true });
+}
+
+function lastFuelUpdateAtFromBill(bill) {
+    const dates = (bill?.entries || [])
+        .map((entry) => (entry?.createdAt ? new Date(entry.createdAt) : null))
+        .filter((d) => d && !Number.isNaN(d.getTime()));
+    if (dates.length) return new Date(Math.max(...dates.map((d) => d.getTime())));
+    if (bill?.updatedAt) return new Date(bill.updatedAt);
+    if (bill?.createdAt) return new Date(bill.createdAt);
+    return null;
 }
 
 function plateOf(asset) {
@@ -162,7 +177,11 @@ function serializeBill(bill, asset, gpsStats = null) {
         limitExceeded: isLimitExceeded(amountUsed, monthlyLimit),
         kmRun,
         idleTimeMinutes,
-        idleTimeLabel: formatIdleTime(idleTimeMinutes),
+        idleTimeLabel: gpsStats?.idleTimeLabel || formatIdleTimeHoursMinutes(idleTimeMinutes, gpsStats?.idleTimeSeconds),
+        coverageStart: gpsStats?.rangeStart || gpsStats?.coverageStart || null,
+        coverageEnd: gpsStats?.rangeEnd || gpsStats?.coverageEnd || null,
+        rangeStart: gpsStats?.rangeStart || null,
+        rangeEnd: gpsStats?.rangeEnd || null,
         vehicleNumber: plateOf(asset) || asset?.assetId || '—',
         vehicleName: asset?.name || '—',
         vehicleAssetNo: asset?.assetId || '—',
@@ -340,9 +359,16 @@ async function actorCanManageFuel(user) {
     return actorIsFlowchartHr(user);
 }
 
+async function actorCanDeleteFuel(user) {
+    if (!user) return false;
+    if (isJwtSystemSuperUser(user)) return true;
+    return isReqUserAdmin(user);
+}
+
 async function notifyFuelLimitThreshold(asset, bill, action) {
     const targets = await collectFuelLimitEmailTargets(asset);
     if (!targets.to) return;
+    const stats = await locatorStatsForVehicle(asset, bill.monthKey);
     await sendVehicleFuelBillEmail({
         to: targets.to,
         cc: targets.cc,
@@ -350,8 +376,9 @@ async function notifyFuelLimitThreshold(asset, bill, action) {
         monthLabel: monthLabelFromKey(bill.monthKey),
         amountUsed: bill.amountUsed,
         monthlyLimit: bill.monthlyLimit,
-        kmRun: bill.kmRun,
-        idleTimeLabel: formatIdleTime(bill.idleTimeMinutes),
+        kmRun: stats.kmRun,
+        idleTimeLabel: formatIdleTimeHoursMinutes(stats.idleTimeMinutes, stats.idleTimeSeconds),
+        lastFuelUpdateAt: lastFuelUpdateAtFromBill(bill),
         action,
         fallbackNoteHtml: targets.fallbackNoteHtml,
         greetingName: targets.greetingName,
@@ -386,6 +413,8 @@ async function notifyFuelBill(asset, bill, action) {
             ? await collectAssigneeAndAdminFuelEmails(asset, { includeHr: false })
             : await collectFuelEmailTargets(asset);
     if (!targets.to) return;
+    const stats =
+        action === 'closed' ? await locatorStatsForVehicle(asset, bill.monthKey) : null;
     await sendVehicleFuelBillEmail({
         to: targets.to,
         cc: targets.cc,
@@ -393,8 +422,12 @@ async function notifyFuelBill(asset, bill, action) {
         monthLabel: monthLabelFromKey(bill.monthKey),
         amountUsed: bill.amountUsed,
         monthlyLimit: bill.monthlyLimit,
-        kmRun: bill.kmRun,
-        idleTimeLabel: formatIdleTime(bill.idleTimeMinutes),
+        kmRun: stats?.kmRun ?? bill.kmRun,
+        idleTimeLabel:
+            action === 'closed'
+                ? formatIdleTimeHoursMinutes(stats?.idleTimeMinutes ?? bill.idleTimeMinutes, stats?.idleTimeSeconds)
+                : formatIdleTime(bill.idleTimeMinutes),
+        lastFuelUpdateAt: lastFuelUpdateAtFromBill(bill),
         action,
         fallbackNoteHtml: targets.fallbackNoteHtml,
         greetingName: targets.greetingName,
@@ -441,10 +474,19 @@ export async function listAccessFuel(req, res) {
         let totalAmount = 0;
         let exceedCount = 0;
 
+        const gpsByDevice = await getLocatorMonthStatsByDevices(
+            vehicles.map((vehicle) => vehicle.locatorDeviceId),
+            monthKey,
+        );
+
         for (const vehicle of vehicles) {
             const bill = billsByVehicle.get(String(vehicle._id));
+            const gpsStats = gpsByDevice[String(vehicle.locatorDeviceId || '')] || {
+                kmRun: 0,
+                idleTimeMinutes: 0,
+            };
             if (bill) {
-                const row = serializeBill(bill, vehicle);
+                const row = serializeBill(bill, vehicle, gpsStats);
                 added.push(row);
                 totalAmount += Number(row.amountUsed) || 0;
                 if (row.limitExceeded) exceedCount += 1;
@@ -463,8 +505,13 @@ export async function listAccessFuel(req, res) {
                 vehicleOwner: ownerOf(vehicle),
                 monthlyLimit: resolveVehicleMonthlyLimit(vehicle) || 0,
                 amountUsed: null,
-                kmRun: null,
-                idleTimeLabel: '—',
+                kmRun: gpsStats.kmRun,
+                idleTimeMinutes: gpsStats.idleTimeMinutes,
+                idleTimeLabel: gpsStats.idleTimeLabel || formatIdleTimeHoursMinutes(gpsStats.idleTimeMinutes, gpsStats.idleTimeSeconds),
+                coverageStart: gpsStats.rangeStart || gpsStats.coverageStart || null,
+                coverageEnd: gpsStats.rangeEnd || gpsStats.coverageEnd || null,
+                rangeStart: gpsStats.rangeStart || null,
+                rangeEnd: gpsStats.rangeEnd || null,
                 status: '',
                 limitExceeded: false,
                 limitWarning80: false,
@@ -485,6 +532,7 @@ export async function listAccessFuel(req, res) {
                 exceedCount,
             },
             canManage: await actorCanManageFuel(req.user),
+            canDelete: await actorCanDeleteFuel(req.user),
         });
     } catch (error) {
         return res.status(500).json({ message: error.message || 'Failed to load access fuel.' });
@@ -514,6 +562,7 @@ export async function listVehicleFuelBills(req, res) {
             data: rows,
             totalAmount,
             canManage: await actorCanManageFuel(req.user),
+            canDelete: await actorCanDeleteFuel(req.user),
         });
     } catch (error) {
         return res.status(500).json({ message: error.message || 'Failed to load fuel bills.' });
@@ -533,6 +582,17 @@ export async function lookupVehicleFuel(req, res) {
         const gpsStats = await locatorStatsForVehicle(asset, monthKey);
         return res.json({
             data: bill ? serializeBill(bill, asset, gpsStats) : null,
+            gps: {
+                kmRun: Number(gpsStats?.kmRun) || 0,
+                idleTimeMinutes: Number(gpsStats?.idleTimeMinutes) || 0,
+                idleTimeLabel:
+                    gpsStats?.idleTimeLabel ||
+                    formatIdleTimeHoursMinutes(gpsStats?.idleTimeMinutes, gpsStats?.idleTimeSeconds),
+                coverageStart: gpsStats?.rangeStart || gpsStats?.coverageStart || null,
+                coverageEnd: gpsStats?.rangeEnd || gpsStats?.coverageEnd || null,
+                rangeStart: gpsStats?.rangeStart || null,
+                rangeEnd: gpsStats?.rangeEnd || null,
+            },
             canManage: await actorCanManageFuel(req.user),
         });
     } catch (error) {
@@ -602,7 +662,7 @@ export async function addVehicleFuel(req, res) {
 
         return res.status(201).json({
             message: `Fuel created for ${monthLabelFromKey(monthKey)}.`,
-            data: serializeBill(lean, asset),
+            data: serializeBill(lean, asset, stats),
         });
     } catch (error) {
         if (error?.code === 11000) {
@@ -626,19 +686,16 @@ export async function updateVehicleFuel(req, res) {
         const stats = await locatorStatsForVehicle(asset, bill.monthKey);
         const attachment = parseAttachment(req.body?.attachment);
 
-        const previousAttachment = [...(bill.entries || [])].reverse().find((row) => row.attachment?.data)?.attachment || null;
         bill.amountUsed = amount;
         bill.kmRun = stats.kmRun;
         bill.idleTimeMinutes = stats.idleTimeMinutes;
         bill.updatedBy = req.user?._id || null;
-        bill.entries = [
-            {
-                amount,
-                attachment: attachment || previousAttachment,
-                createdBy: req.user?._id || null,
-                createdAt: new Date(),
-            },
-        ];
+        bill.entries.push({
+            amount,
+            attachment: attachment || null,
+            createdBy: req.user?._id || null,
+            createdAt: new Date(),
+        });
 
         await bill.save();
         const lean = bill.toObject();
@@ -648,7 +705,7 @@ export async function updateVehicleFuel(req, res) {
 
         return res.json({
             message: 'Fuel bill updated.',
-            data: serializeBill(lean, asset),
+            data: serializeBill(lean, asset, stats),
         });
     } catch (error) {
         return res.status(500).json({ message: error.message || 'Failed to update fuel.' });
@@ -692,10 +749,50 @@ export async function closeVehicleFuel(req, res) {
 
         return res.json({
             message: `Fuel bill closed for ${monthLabelFromKey(bill.monthKey)}.`,
-            data: serializeBill(lean, asset),
+            data: serializeBill(lean, asset, stats),
         });
     } catch (error) {
         return res.status(500).json({ message: error.message || 'Failed to close fuel bill.' });
+    }
+}
+
+export async function deleteVehicleFuel(req, res) {
+    try {
+        const allowed = await actorCanDeleteFuel(req.user);
+        if (!allowed) {
+            return res.status(403).json({ message: 'Delete allowed only for Super User (Admin).' });
+        }
+
+        const bill = await VehicleFuelBill.findById(req.params.id);
+        if (!bill) return res.status(404).json({ message: 'Fuel bill not found.' });
+
+        const asset = await loadFleetVehicle(bill.vehicleId);
+        const snapshot = typeof bill.toObject === 'function' ? bill.toObject() : { ...bill };
+        const plate = plateOf(asset) || asset?.assetId || '—';
+        const monthLabel = monthLabelFromKey(bill.monthKey);
+        const amountLabel = `AED ${Number(bill.amountUsed || 0).toLocaleString('en-US', {
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2,
+        })}`;
+
+        await awaitAdminDeletionArchive(req, {
+            moduleName: 'Vehicle Fuel',
+            recordId: String(bill._id),
+            details: `${plate} — ${monthLabel} (${amountLabel})`,
+            deletedPayload: {
+                ...snapshot,
+                vehicleNumber: plate,
+                vehicleName: asset?.name || '',
+                vehicleAssetNo: asset?.assetId || '',
+                monthLabel,
+                name: `${plate} ${monthLabel}`.trim(),
+            },
+        });
+
+        await VehicleFuelBill.deleteOne({ _id: bill._id });
+        return res.json({ message: `Fuel bill deleted for ${monthLabel}. Management has been notified.` });
+    } catch (error) {
+        return res.status(500).json({ message: error.message || 'Failed to delete fuel bill.' });
     }
 }
 

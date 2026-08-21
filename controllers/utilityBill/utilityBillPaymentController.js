@@ -75,11 +75,21 @@ function requesterDisplayName(emp, user) {
     return user?.name || 'User';
 }
 
-function reviewPath(batchId, utilityType = '', billMonth = '') {
-    const q = new URLSearchParams({
-        batchId: String(batchId),
-        review: '1',
-    });
+function billDetailsPath(bill) {
+    const entryId = String(bill?.entryId || '').trim();
+    if (!entryId) return '';
+    const q = new URLSearchParams();
+    const billId = bill?._id || bill?.id;
+    if (billId) q.set('billId', String(billId));
+    const qs = q.toString();
+    return `/HRM/Asset/UtilityBills/details/${encodeURIComponent(entryId)}${qs ? `?${qs}` : ''}`;
+}
+
+function reviewPath(batchId, utilityType = '', billMonth = '', bill = null) {
+    const fromBill = billDetailsPath(bill);
+    if (fromBill) return fromBill;
+    const q = new URLSearchParams();
+    if (batchId) q.set('batchId', String(batchId));
     if (utilityType) q.set('type', String(utilityType));
     if (billMonth) q.set('billMonth', String(billMonth));
     return `/HRM/Asset/UtilityBills?${q.toString()}`;
@@ -118,9 +128,8 @@ function decorateBill(bill) {
     o.actionedByName = actionedByName;
     o.approvedByName = hrApprovedByName || accountsApprovedByName || actionedByName;
     o.statusLabel = statusLabel(o.status, o.pendingWithName);
-    o.reviewPath = o.batchId
-        ? reviewPath(o.batchId, o.utilityType, o.billMonth)
-        : `/HRM/Asset/UtilityBills/details/${encodeURIComponent(o.entryId)}?billId=${encodeURIComponent(String(o._id))}`;
+    o.reviewPath = billDetailsPath(o) || reviewPath(o.batchId, o.utilityType, o.billMonth, o);
+    o.detailsPath = o.reviewPath;
     o.zohoBillNumber = String(o.zohoBillNumber || '').trim();
     return o;
 }
@@ -323,7 +332,7 @@ async function syncBatchDashboard({
     const total = bills.reduce((s, b) => s + (Number(b.amount) || 0), 0);
     const utilityType = first?.utilityType || 'Utility';
     const billMonth = first?.billMonth || '';
-    const path = reviewPath(batchId, utilityType, billMonth);
+    const path = reviewPath(batchId, utilityType, billMonth, first);
 
     // Complete any existing pending inbox rows for this batch so the previous
     // Accounts/HR actor's notification/task goes away after they act.
@@ -355,9 +364,12 @@ async function syncBatchDashboard({
         extra2: extra2 || statusLabel(first?.status, first?.pendingWithName),
         extra3: JSON.stringify({
             batchId: String(batchId),
+            entryId: String(first?.entryId || ''),
+            billId: String(first?._id || ''),
             utilityType,
             billMonth,
             billCount: bills.length,
+            stage: String(first?.status || ''),
             detailsPath: path,
             reviewPath: path,
         }),
@@ -384,8 +396,56 @@ export async function checkUtilityBillDuplicates(req, res) {
 
 export async function listUtilityBillPayments(req, res) {
     try {
-        const { entryId, batchId, utilityType, entryIds, payByEmployeeId, payByCompanyId, employeeId, companyId } =
-            req.query;
+        const {
+            entryId,
+            batchId,
+            utilityType,
+            entryIds,
+            payByEmployeeId,
+            payByCompanyId,
+            employeeId,
+            companyId,
+            occupancy,
+            billMonth,
+            overview,
+        } = req.query;
+
+        // Dashboard / pending cards: one lean list, no Zoho live sync or attachment payloads.
+        if (String(overview || '') === '1' && !batchId) {
+            const overviewFilter = {};
+            if (entryId) overviewFilter.entryId = String(entryId);
+            else if (utilityType) overviewFilter.utilityType = String(utilityType).trim();
+            const occupancyMonth = String(billMonth || '').trim();
+            if (/^\d{4}-\d{2}$/.test(occupancyMonth)) {
+                overviewFilter.billMonth = occupancyMonth;
+            }
+            const overviewBills = await UtilityBillPayment.find(overviewFilter)
+                .select(
+                    '_id entryId batchId utilityType provider accountNo billMonth amount status paymentDay payByCompanyName payByEmployeeName',
+                )
+                .lean();
+            return res.status(200).json({ bills: overviewBills });
+        }
+
+        if (String(occupancy || '') === '1' && !batchId) {
+            const occupancyFilter = {};
+            if (entryId) occupancyFilter.entryId = String(entryId);
+            else if (utilityType) occupancyFilter.utilityType = String(utilityType).trim();
+            else {
+                return res.status(400).json({
+                    message: 'occupancy list needs utilityType or entryId',
+                });
+            }
+            const occupancyMonth = String(billMonth || '').trim();
+            if (/^\d{4}-\d{2}$/.test(occupancyMonth)) {
+                occupancyFilter.billMonth = occupancyMonth;
+            }
+            const occupancyBills = await UtilityBillPayment.find(occupancyFilter)
+                .select('_id entryId billMonth status')
+                .lean();
+            return res.status(200).json({ bills: occupancyBills });
+        }
+
         const actor = await resolveRequesterEmployee(req.user);
         const accountsGate = await isActorAccountsOrAdmin(actor, req.user);
         const hrGate = await isActorHrOrAdmin(actor, req.user);
@@ -483,6 +543,19 @@ export async function listUtilityBillPayments(req, res) {
                 message:
                     'entryId, entryIds, utilityType, batchId, payByEmployeeId, or payByCompanyId is required',
             });
+        }
+
+        const occupancyOnly = String(occupancy || '') === '1';
+        const monthKey = String(billMonth || '').trim();
+        if (/^\d{4}-\d{2}$/.test(monthKey)) {
+            filter.billMonth = monthKey;
+        }
+
+        if (occupancyOnly) {
+            const occupancyBills = await UtilityBillPayment.find(filter)
+                .select('_id entryId billMonth status')
+                .lean();
+            return res.status(200).json({ bills: occupancyBills });
         }
 
         let bills = await UtilityBillPayment.find(filter)
@@ -636,7 +709,7 @@ export async function getUtilityBillBatch(req, res) {
                     fetchLive: true,
                 })
             ).map(decorateBill),
-            reviewPath: reviewPath(resolvedBatchId, focus.utilityType, focus.billMonth),
+            reviewPath: reviewPath(resolvedBatchId, focus.utilityType, focus.billMonth, focus),
         });
     } catch (err) {
         console.error('[getUtilityBillBatch]', err);
@@ -946,7 +1019,7 @@ export async function createUtilityBillBatch(req, res) {
                     batchMeta: {
                         batchId: String(batchId),
                         billCount: bills.length,
-                        reviewPath: reviewPath(batchId, utilityType, billMonth),
+                        reviewPath: reviewPath(batchId, utilityType, billMonth, bills[0]),
                     },
                 }).catch((err) =>
                     console.warn(
@@ -957,7 +1030,7 @@ export async function createUtilityBillBatch(req, res) {
             }
         }
         const leanBills = bills.map((b) => b.toObject());
-        const path = reviewPath(batchId, utilityType, billMonth);
+        const path = reviewPath(batchId, utilityType, billMonth, leanBills[0]);
         const totalAmount = leanBills.reduce((s, b) => s + Number(b.amount || 0), 0);
 
         if (stage.status === 'Pending Accounts') {
@@ -1526,7 +1599,7 @@ export async function respondUtilityBillBatch(req, res) {
                 hrAlreadyDone: bills.every((b) => Boolean(b.hrApprovedBy)),
             });
             const now = new Date();
-            const path = reviewPath(batchId, bills[0].utilityType, bills[0].billMonth);
+            const path = reviewPath(batchId, bills[0].utilityType, bills[0].billMonth, bills[0]);
             const totalAmount = bills.reduce((s, b) => s + Number(b.amount || 0), 0);
             const accountsName = empDisplayName(gate.accounts);
 
@@ -1596,12 +1669,12 @@ export async function respondUtilityBillBatch(req, res) {
                     status: 'Pending Accounts',
                 });
 
+                const approvalFinished = remainingAccounts === 0;
                 await syncBatchDashboard({
                     batchId,
                     bills: bills.map((b) => b.toObject()),
-                    assignedTo:
-                        remainingAccounts > 0 ? gate.accounts._id : gate.accounts._id,
-                    status: 'Pending',
+                    assignedTo: gate.accounts._id,
+                    status: approvalFinished ? 'Approved' : 'Pending',
                     actionedBy: actor?._id || req.user?._id,
                     comment:
                         comment ||
@@ -1610,22 +1683,24 @@ export async function respondUtilityBillBatch(req, res) {
                             : 'Approved by Accounts after HR — Zoho Open — ready to pay'),
                     subjectEmployee: requester,
                     requestedByName: allBills[0].requestedByName,
-                    extra2:
-                        remainingAccounts > 0
-                            ? statusLabel('Pending Accounts', accountsName)
-                            : 'not paid — awaiting Accounts payment',
+                    extra2: approvalFinished
+                        ? 'not paid — awaiting Accounts payment'
+                        : statusLabel('Pending Accounts', accountsName),
                 });
 
-                await sendUtilityBillPaymentEmail({
-                    recipient: gate.accounts,
-                    bill: { ...bills[0].toObject(), amount: totalAmount },
-                    kind: 'pending_pay',
-                    batchMeta: {
-                        batchId: String(batchId),
-                        billCount: bills.length,
-                        reviewPath: path,
-                    },
-                });
+                // Do not send another inbox/email notification after approval is done.
+                if (!approvalFinished) {
+                    await sendUtilityBillPaymentEmail({
+                        recipient: gate.accounts,
+                        bill: { ...bills[0].toObject(), amount: totalAmount },
+                        kind: 'pending_accounts',
+                        batchMeta: {
+                            batchId: String(batchId),
+                            billCount: bills.length,
+                            reviewPath: path,
+                        },
+                    });
+                }
 
                 notifyUtilityBillZohoPayableParties({
                     bills,
@@ -1784,7 +1859,7 @@ export async function respondUtilityBillBatch(req, res) {
                 batchId,
                 status: 'Pending HR',
             });
-            const path = reviewPath(batchId, bills[0].utilityType, bills[0].billMonth);
+            const path = reviewPath(batchId, bills[0].utilityType, bills[0].billMonth, bills[0]);
             await syncBatchDashboard({
                 batchId,
                 bills: bills.map((b) => b.toObject()),
@@ -1841,7 +1916,7 @@ export async function respondUtilityBillBatch(req, res) {
         }
         const accountsNameHr = empDisplayName(accounts);
         const nowHr = new Date();
-        const pathHr = reviewPath(batchId, bills[0].utilityType, bills[0].billMonth);
+        const pathHr = reviewPath(batchId, bills[0].utilityType, bills[0].billMonth, bills[0]);
 
         for (const bill of bills) {
             bill.status = 'Pending Accounts';
@@ -2181,55 +2256,7 @@ export async function syncUtilityBillBatchToZoho(req, res) {
             );
         }
 
-        // If Zoho is now Open and ERP was stuck Approved+Draft, notify Accounts to pay.
-        const newlyOpenApproved = bills.filter(
-            (b) =>
-                String(b.status) === 'Approved' &&
-                String(b.zohoBillStatus || '').toLowerCase() === 'open',
-        );
-        if (opened.length > 0 && newlyOpenApproved.length > 0) {
-            try {
-                const accounts = await getDepartmentHOD('accounts');
-                if (accounts?._id) {
-                    await syncBatchDashboard({
-                        batchId,
-                        bills: newlyOpenApproved.map((b) => b.toObject()),
-                        assignedTo: accounts._id,
-                        status: 'Pending',
-                        actionedBy: req.user?._id,
-                        comment: 'Zoho bill Open — awaiting Accounts payment',
-                        subjectEmployee: null,
-                        requestedByName: newlyOpenApproved[0].requestedByName || '',
-                        extra2: 'not paid — awaiting Accounts payment',
-                    });
-                    await sendUtilityBillPaymentEmail({
-                        recipient: accounts,
-                        bill: {
-                            ...newlyOpenApproved[0].toObject(),
-                            amount: newlyOpenApproved.reduce(
-                                (s, b) => s + Number(b.amount || 0),
-                                0,
-                            ),
-                        },
-                        kind: 'pending_pay',
-                        batchMeta: {
-                            batchId: String(batchId),
-                            billCount: newlyOpenApproved.length,
-                            reviewPath: reviewPath(
-                                batchId,
-                                newlyOpenApproved[0].utilityType,
-                                newlyOpenApproved[0].billMonth,
-                            ),
-                        },
-                    });
-                }
-            } catch (notifyErr) {
-                console.warn(
-                    '[syncUtilityBillBatchToZoho] Accounts notify failed:',
-                    notifyErr?.message || notifyErr,
-                );
-            }
-        }
+        // If Zoho is now Open, do not recreate a pending inbox row — approval is already done.
 
         const refreshed = await UtilityBillPayment.find({ batchId }).lean();
 

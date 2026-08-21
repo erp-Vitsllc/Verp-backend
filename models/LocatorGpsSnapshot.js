@@ -10,6 +10,7 @@ const locatorGpsSnapshotSchema = new mongoose.Schema(
         expenseAed: { type: Number, default: 0 },
         state: { type: String, default: '' },
         speedKmh: { type: Number, default: 0 },
+        statusDurationSec: { type: Number, default: 0 },
         capturedAt: { type: Date, default: Date.now },
     },
     { timestamps: true },

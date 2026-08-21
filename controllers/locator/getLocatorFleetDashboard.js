@@ -1,8 +1,9 @@
 import { buildLocatorFleetDashboard } from '../../services/locatorSnapshotService.js';
 
-export const getLocatorFleetDashboard = async (_req, res) => {
+export const getLocatorFleetDashboard = async (req, res) => {
     try {
-        const data = await buildLocatorFleetDashboard();
+        const year = Number(req.query?.year) || new Date().getFullYear();
+        const data = await buildLocatorFleetDashboard({ year });
 
         return res.status(200).json({
             success: true,

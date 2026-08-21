@@ -61,6 +61,7 @@ import DashboardAction from '../models/DashboardAction.js';
 import { sendAssetActionApprovalEmail } from '../utils/sendAssetActionApprovalEmail.js';
 import { sendAssetActionFinalAcknowledgeEmail } from '../utils/sendAssetActionFinalAcknowledgeEmail.js';
 import Fine from '../models/Fine.js';
+import VehicleFuelBill from '../models/VehicleFuelBill.js';
 import { clearDashboardActionsForRequest } from '../utils/clearDashboardActionsForRequest.js';
 import AssetCategory from '../models/AssetCategory.js';
 import Flowchart from '../models/Flowchart.js';
@@ -1685,6 +1686,8 @@ export const getVehicleFleetDashboard = async (req, res) => {
                 'createdBy',
                 'vehicleProfileActivationStatus',
                 'vehicleDispositionStatus',
+                'vehicleInspectionStatus',
+                'vehicleInspectionApprovedAt',
                 'assignmentType',
                 'temporaryEndDate',
                 'warrantyEnabled',
@@ -1708,6 +1711,7 @@ export const getVehicleFleetDashboard = async (req, res) => {
                 'documents.type',
                 'documents.expiryDate',
                 'documents.description',
+                'documents.issueDate',
                 'documents.status',
                 'documents.documentStatus',
             ].join(' ');
@@ -1868,7 +1872,38 @@ export const getVehicleFleetDashboard = async (req, res) => {
                 nextServiceDate: v.nextServiceDate || null,
                 gearOilDueDate: v.gearOilDueDate || null,
                 oilChangeDate: v.oilChangeDate || null,
-                currentKilometer: v.currentKilometer
+                currentKilometer: v.currentKilometer,
+                ...(listOnly
+                    ? {}
+                    : {
+                        vehicleInspectionStatus: v.vehicleInspectionStatus || 'none',
+                        vehicleInspectionApprovedAt: v.vehicleInspectionApprovedAt || null,
+                        customerId: v.assignedCompany?._id ? String(v.assignedCompany._id) : '',
+                        customerName: String(
+                            v.assignedCompany?.nickName ||
+                            v.assignedCompany?.companyShortName ||
+                            v.assignedCompany?.companyName ||
+                            v.assignedCompany?.name ||
+                            '',
+                        ).trim(),
+                        serviceEvents: (v.services || []).map((s) => {
+                            let serviceType = String(s.serviceType || '').trim();
+                            if (!serviceType && s.remark) {
+                                try {
+                                    const remark = typeof s.remark === 'string' ? JSON.parse(s.remark) : s.remark;
+                                    serviceType = String(remark?.serviceType || remark?.serviceTypeLabel || '').trim();
+                                } catch {
+                                    serviceType = '';
+                                }
+                            }
+                            return {
+                                date: s.date || null,
+                                value: Number(s.value || 0),
+                                serviceType: serviceType || 'Other',
+                                pending: isPendingVehicleService(v, s),
+                            };
+                        }),
+                    }),
             };
         });
 
@@ -2043,6 +2078,51 @@ export const getVehicleFleetDashboard = async (req, res) => {
             { name: 'More', value: docExpiryBuckets.More.length, docs: sortExpiryRows(docExpiryBuckets.More) },
         ];
 
+        const expiryStatusBuckets = {
+            alreadyExpired: [],
+            within10Days: [],
+            within30Days: [],
+            above30Days: [],
+        };
+        for (const row of [
+            ...docExpiryBuckets.Expired,
+            ...docExpiryBuckets['10-30 Days'],
+            ...docExpiryBuckets.More,
+        ]) {
+            const diff = Number(row.daysRemaining);
+            if (!Number.isFinite(diff)) continue;
+            if (diff < 0) expiryStatusBuckets.alreadyExpired.push(row);
+            else if (diff <= 10) expiryStatusBuckets.within10Days.push(row);
+            else if (diff <= 30) expiryStatusBuckets.within30Days.push(row);
+            else expiryStatusBuckets.above30Days.push(row);
+        }
+        const documentExpiryStatus = [
+            {
+                key: 'alreadyExpired',
+                name: 'Already Expired',
+                value: expiryStatusBuckets.alreadyExpired.length,
+                docs: sortExpiryRows(expiryStatusBuckets.alreadyExpired),
+            },
+            {
+                key: 'within10Days',
+                name: 'Within 10 Days',
+                value: expiryStatusBuckets.within10Days.length,
+                docs: sortExpiryRows(expiryStatusBuckets.within10Days),
+            },
+            {
+                key: 'within30Days',
+                name: 'Within 30 Days',
+                value: expiryStatusBuckets.within30Days.length,
+                docs: sortExpiryRows(expiryStatusBuckets.within30Days),
+            },
+            {
+                key: 'above30Days',
+                name: 'Above 30 Days',
+                value: expiryStatusBuckets.above30Days.length,
+                docs: sortExpiryRows(expiryStatusBuckets.above30Days),
+            },
+        ];
+
         const stNorm = (s) => String(s || '').toLowerCase().trim();
         const empDisplayName = (emp) => formatEmployeeDisplayName(emp) || '';
         const companyDisplayName = (c) =>
@@ -2099,7 +2179,7 @@ export const getVehicleFleetDashboard = async (req, res) => {
 
         // Parallel secondary reads — previously serial and contended with Locator dashboard.
         const secondaryStartedAt = Date.now();
-        const [historyStarts, pendingServiceActions, daPending, daApproved, vehicleFineDocs] = await Promise.all([
+        const [historyStarts, pendingServiceActions, daPending, daApproved, vehicleFineDocs, vehicleFuelBills] = await Promise.all([
             assignedMissingDateIds.length
                 ? AssetHistory.aggregate([
                     {
@@ -2151,6 +2231,12 @@ export const getVehicleFleetDashboard = async (req, res) => {
                 )
                 .lean()
                 .catch(() => []),
+            vehicleIds.length
+                ? VehicleFuelBill.find({ vehicleId: { $in: vehicleIds } })
+                    .select('vehicleId monthKey amountUsed')
+                    .lean()
+                    .catch(() => [])
+                : Promise.resolve([]),
         ]);
         const secondaryMs = Date.now() - secondaryStartedAt;
 
@@ -2166,10 +2252,12 @@ export const getVehicleFleetDashboard = async (req, res) => {
         let assigned = 0;
         let unassigned = 0;
         let inService = 0;
+        let pendingInspection = 0;
         const assignedRows = [];
         const unassignedRows = [];
         const inServiceRows = [];
         const totalServiceRows = [];
+        const pendingInspectionRows = [];
 
         const pendingForByServiceKey = new Map();
         for (const row of pendingServiceActions) {
@@ -2280,6 +2368,23 @@ export const getVehicleFleetDashboard = async (req, res) => {
                     tab: 'service',
                 });
             }
+
+            const inspectionStatus = String(v.vehicleInspectionStatus || '').trim().toLowerCase();
+            const neverCompletedInspection =
+                inspectionStatus !== 'active' && !v.vehicleInspectionApprovedAt;
+            if (neverCompletedInspection) {
+                pendingInspection++;
+                pendingInspectionRows.push({
+                    ...base,
+                    modalKind: 'unassigned',
+                    cardName: 'Pending Inspection',
+                    vehicleName: base.vehicleName || '—',
+                    daysRemaining: calendarDaysSince(v.updatedAt),
+                    expiryDate: null,
+                    focusCard: '',
+                    tab: 'basic',
+                });
+            }
         }
 
         const totalServices = totalServiceRows.length;
@@ -2341,6 +2446,8 @@ export const getVehicleFleetDashboard = async (req, res) => {
                     assetId: vehicle?.assetId || fine.assetId || '',
                     label,
                     plate: vehicle ? plateOf(vehicle) : (fine.assetName || label || '—'),
+                    customerId: vehicle?.assignedCompany?._id ? String(vehicle.assignedCompany._id) : '',
+                    customerName: companyDisplayName(vehicle?.assignedCompany) || '',
                     total: 0,
                     fines: [],
                 });
@@ -2358,6 +2465,8 @@ export const getVehicleFleetDashboard = async (req, res) => {
                 offender: fine?.assignedEmployees?.[0]?.employeeName || '—',
                 vehicleId: vehicle ? String(vehicle._id) : '',
                 plate: group.plate,
+                customerId: group.customerId || '',
+                customerName: group.customerName || '',
                 modalKind: 'vehicleFine',
                 responsibleFor: fine.responsibleFor || '',
                 employeeAmount: fine.employeeAmount,
@@ -2453,6 +2562,84 @@ export const getVehicleFleetDashboard = async (req, res) => {
 
         const fleetAnalytics = buildVehicleFleetAnalytics(vehicles);
 
+        const parseDocMeta = (doc) => {
+            if (!doc?.description) return {};
+            if (typeof doc.description === 'object' && doc.description) return doc.description;
+            try {
+                const parsed = JSON.parse(String(doc.description));
+                return parsed && typeof parsed === 'object' ? parsed : {};
+            } catch {
+                return {};
+            }
+        };
+        const isLiveDoc = (doc) => {
+            const status = String(doc?.status || doc?.documentStatus || '').toLowerCase();
+            if (['old', 'renewed', 'archived', 'inactive'].includes(status)) return false;
+            const meta = parseDocMeta(doc);
+            return !(meta.isRenewed || meta.notRenewed);
+        };
+        const costFuelRows = (vehicleFuelBills || []).map((bill) => ({
+            vehicleId: bill?.vehicleId ? String(bill.vehicleId) : '',
+            monthKey: String(bill?.monthKey || ''),
+            amount: Number(bill?.amountUsed || 0) || 0,
+        }));
+        const costInsuranceRows = [];
+        const costRegistrationRows = [];
+        for (const v of vehicles) {
+            const vehicleId = String(v._id);
+            for (const doc of v.documents || []) {
+                if (!isLiveDoc(doc)) continue;
+                const type = String(doc.type || '').toLowerCase().trim();
+                if (type.includes('attachment')) continue;
+                const meta = parseDocMeta(doc);
+                if (type === 'insurance') {
+                    const amount = Number(meta.premiumAmount ?? meta.value ?? 0) || 0;
+                    if (amount > 0) {
+                        costInsuranceRows.push({
+                            vehicleId,
+                            amount,
+                            issueDate: doc.issueDate || null,
+                        });
+                    }
+                }
+                if (type === 'registration') {
+                    const amount = Number(meta.fee ?? meta.value ?? 0) || 0;
+                    if (amount > 0) {
+                        costRegistrationRows.push({
+                            vehicleId,
+                            amount,
+                            issueDate: doc.issueDate || null,
+                        });
+                    }
+                }
+            }
+        }
+        const customerMap = new Map();
+        const periodYearSet = new Set([now.getFullYear()]);
+        for (const v of vehicles) {
+            const id = v.assignedCompany?._id ? String(v.assignedCompany._id) : '';
+            const name = companyDisplayName(v.assignedCompany);
+            if (id && name && !customerMap.has(id)) customerMap.set(id, { id, name });
+            const modelY = parseInt(v.modelYear, 10);
+            if (Number.isFinite(modelY) && modelY >= 1990) periodYearSet.add(modelY);
+            for (const s of v.services || []) {
+                if (!s?.date) continue;
+                const y = new Date(s.date).getFullYear();
+                if (Number.isFinite(y)) periodYearSet.add(y);
+            }
+        }
+        for (const fine of vehicleFineDocs || []) {
+            if (!fine?.awardedDate) continue;
+            const y = new Date(fine.awardedDate).getFullYear();
+            if (Number.isFinite(y) && y >= 1990) periodYearSet.add(y);
+        }
+        for (const row of costFuelRows) {
+            const y = parseInt(String(row.monthKey || '').slice(0, 4), 10);
+            if (Number.isFinite(y) && y >= 1990) periodYearSet.add(y);
+        }
+        const customers = [...customerMap.values()].sort((a, b) => a.name.localeCompare(b.name));
+        const periodYears = [...periodYearSet].filter((y) => Number.isFinite(y)).sort((a, b) => b - a);
+
         console.log(
             `[vehicle-fleet-dashboard] vehicles=${vehicles.length} find=${findMs}ms secondary=${secondaryMs}ms total=${Date.now() - startedAt}ms`,
         );
@@ -2472,12 +2659,22 @@ export const getVehicleFleetDashboard = async (req, res) => {
                 unassigned,
                 inService,
                 totalServices,
+                pendingInspection,
                 assignedRows,
                 unassignedRows,
                 inServiceRows,
                 totalServiceRows,
+                pendingInspectionRows,
             },
             documentExpiryChartData,
+            documentExpiryStatus,
+            customers,
+            periodYears,
+            costBreakdown: {
+                fuel: costFuelRows,
+                insurance: costInsuranceRows,
+                registration: costRegistrationRows,
+            },
             serviceRequest: { pending: daPending, confirmed: daApproved },
             handoverRequest: { pending: handoverPending, confirmed: handoverConfirmed },
             serviceCostByMonth,
@@ -19290,7 +19487,10 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
             }
             // Utility Bills (tools-scope feed) — HR stages only. Payment-day reminders are Accounts-only.
             assigneeClauses.push({ requestType: 'Utility Entry Status Change' });
-            assigneeClauses.push({ requestType: 'Utility Bill Payment' });
+            assigneeClauses.push({
+                requestType: 'Utility Bill Payment',
+                extra2: { $regex: '(^|\\s)hr(\\b)|zoho draft', $options: 'i' },
+            });
         }
         if (isAdminOfficerHolder) {
             assigneeClauses.push({
@@ -19337,8 +19537,11 @@ export const getPendingAssetDashboardInbox = async (req, res) => {
                     $options: 'i',
                 },
             });
-            // Utility Bills — Accounts payment + payment-day reminders (not HR / other roles).
-            assigneeClauses.push({ requestType: 'Utility Bill Payment' });
+            // Utility Bills — Accounts review + pay (not HR-only stages).
+            assigneeClauses.push({
+                requestType: 'Utility Bill Payment',
+                extra2: { $regex: 'accounts|not paid|awaiting', $options: 'i' },
+            });
             assigneeClauses.push({ requestType: 'Utility Bill Payment Reminder' });
         }
         if (isAcRoleHolder) {
